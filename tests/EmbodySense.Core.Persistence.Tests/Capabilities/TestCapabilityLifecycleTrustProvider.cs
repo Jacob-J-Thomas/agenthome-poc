@@ -9,10 +9,12 @@ internal sealed class TestCapabilityLifecycleTrustProvider : ICapabilityCatalogT
 {
     private readonly Dictionary<string, CapabilityCatalogTrustState> _states = new(StringComparer.Ordinal);
 
+    internal Action<CancellationToken>? BeforeRead { get; set; }
     public int MaximumAuthenticationTagUtf8Bytes => 69;
 
     public Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default)
     {
+        BeforeRead?.Invoke(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(_states.GetValueOrDefault(workspaceIdentity));
     }

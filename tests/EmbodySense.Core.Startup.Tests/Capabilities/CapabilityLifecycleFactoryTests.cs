@@ -19,8 +19,10 @@ public sealed class CapabilityLifecycleFactoryTests
         using var verifier = new ConfiguredCapabilityArtifactTrustVerifier(new Dictionary<string, string>());
 
         var service = CapabilityLifecycleFactory.Create(paths, catalogTrust, artifactTrust, verifier, new AuditLog(paths));
+        var selection = CapabilityLifecycleFactory.CreateSelection(paths, catalogTrust, artifactTrust, verifier, new AuditLog(paths));
 
         Assert.NotNull(service);
+        Assert.NotNull(selection);
         Assert.False(Directory.Exists(paths.CapabilityCatalogPath));
         Assert.False(Directory.Exists(workspace.ServerStatePath));
     }

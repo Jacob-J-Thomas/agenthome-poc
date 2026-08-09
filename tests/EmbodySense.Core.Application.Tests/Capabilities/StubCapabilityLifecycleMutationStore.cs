@@ -9,9 +9,11 @@ internal sealed class StubCapabilityLifecycleMutationStore : ICapabilityLifecycl
     internal CapabilityLifecycleReadResult ReadResult { get; set; } = new(CapabilityLifecycleReadStatus.NotFound, null, [], [], null, "not found");
     internal Exception? ReadException { get; set; }
     internal CapabilityLifecyclePreview PreviewResult { get; set; } = null!;
+    internal CapabilityLifecyclePreview? SelectionReplayResult { get; set; }
     internal CapabilityLifecycleMutationResult MutationResult { get; set; } = null!;
     internal CapabilityLifecycleAuditMarkStatus AuditMarkResult { get; set; } = CapabilityLifecycleAuditMarkStatus.Applied;
     internal CapabilityLifecyclePreviewRequest? PreviewRequest { get; private set; }
+    internal CapabilityLifecycleSelectionRequest? SelectionReplayRequest { get; private set; }
     internal CapabilityLifecycleBaseline? Baseline { get; private set; }
     internal CapabilityLifecycleBaseline? MutatedBaseline { get; private set; }
     internal CapabilityLifecyclePreview? MutatedPreview { get; private set; }
@@ -19,6 +21,7 @@ internal sealed class StubCapabilityLifecycleMutationStore : ICapabilityLifecycl
     internal CapabilityDependentIndexSnapshot? MutatedDependents { get; private set; }
     internal int AuditMarks { get; private set; }
     internal int ReadCount { get; private set; }
+    internal int PreviewCount { get; private set; }
 
     public Task<CapabilityLifecycleReadResult> ReadAsync(CapabilityId capabilityId, CancellationToken cancellationToken = default)
     {
@@ -33,10 +36,19 @@ internal sealed class StubCapabilityLifecycleMutationStore : ICapabilityLifecycl
 
     public Task<CapabilityLifecyclePreview> PreviewAsync(CapabilityLifecyclePreviewRequest request, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        PreviewCount++;
         PreviewRequest = request;
         Baseline = baseline;
         PreviewDependents = dependents;
         return Task.FromResult(PreviewResult);
+    }
+
+    public Task<CapabilityLifecyclePreview> TryReplaySelectionAsync(CapabilityLifecycleSelectionRequest request, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        SelectionReplayRequest = request;
+        return Task.FromResult(SelectionReplayResult ?? new CapabilityLifecyclePreview(CapabilityLifecyclePreviewStatus.NotFound, "sha256:workspace", request.OperationId, request.Kind, request.CapabilityId, 0, 0, string.Empty, string.Empty, [], "not persisted"));
     }
 
     public Task<CapabilityLifecycleMutationResult> MutateAsync(CapabilityLifecyclePreview preview, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken = default)

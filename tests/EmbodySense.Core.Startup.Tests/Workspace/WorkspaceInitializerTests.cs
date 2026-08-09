@@ -74,6 +74,26 @@ public sealed class WorkspaceInitializerTests
     }
 
     [Fact]
+    public async Task InitializeAsync_reuses_one_populated_server_trust_root_across_distinct_workspaces()
+    {
+        using var trustRoot = new TestWorkspace();
+        using var firstWorkspace = new TestWorkspace();
+        using var secondWorkspace = new TestWorkspace();
+        var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
+
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(trustRoot.RootPath).InitializeAsync(firstWorkspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(trustRoot.RootPath).InitializeAsync(secondWorkspace.RootPath);
+
+        var first = await new CapabilityCatalogStore(new WorkspacePaths(firstWorkspace.RootPath), provider).ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
+        var second = await new CapabilityCatalogStore(new WorkspacePaths(secondWorkspace.RootPath), provider).ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
+        Assert.Equal(CapabilityCatalogReadStatus.Available, first.Status);
+        Assert.Equal(CapabilityCatalogReadStatus.Available, second.Status);
+        Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, first.Page!.Entries.Count);
+        Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, second.Page!.Entries.Count);
+        Assert.Equal(2, Directory.EnumerateFiles(provider.AnchorsPath, "*.json", SearchOption.TopDirectoryOnly).Count());
+    }
+
+    [Fact]
     public async Task InitializeAsync_fails_closed_when_built_in_catalog_primary_and_proof_are_corrupt()
     {
         using var workspace = new TestWorkspace();

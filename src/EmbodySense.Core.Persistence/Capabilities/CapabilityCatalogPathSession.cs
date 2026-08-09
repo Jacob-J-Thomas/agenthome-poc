@@ -12,15 +12,17 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
     private readonly Dictionary<string, SafeFileHandle> _directories;
     private readonly List<SafeFileHandle> _ownedDirectories;
     private readonly ICapabilityCatalogDurabilityBarrier _durabilityBarrier;
+    private readonly ICapabilityCatalogPathObserver? _pathObserver;
     private FileStream? _lock;
 
-    private CapabilityCatalogPathSession(string root, StringComparison comparison, Dictionary<string, SafeFileHandle> directories, List<SafeFileHandle> ownedDirectories, ICapabilityCatalogDurabilityBarrier durabilityBarrier)
+    private CapabilityCatalogPathSession(string root, StringComparison comparison, Dictionary<string, SafeFileHandle> directories, List<SafeFileHandle> ownedDirectories, ICapabilityCatalogDurabilityBarrier durabilityBarrier, ICapabilityCatalogPathObserver? pathObserver)
     {
         _root = root;
         _comparison = comparison;
         _directories = directories;
         _ownedDirectories = ownedDirectories;
         _durabilityBarrier = durabilityBarrier;
+        _pathObserver = pathObserver;
         PhysicalIdentityMaterial = CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(directories[string.Empty]);
     }
 
@@ -28,7 +30,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
 
     public string Root => _root;
 
-    public static CapabilityCatalogPathSession? Open(string root, StringComparison comparison, bool createRoot, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null)
+    public static CapabilityCatalogPathSession? Open(string root, StringComparison comparison, bool createRoot, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityCatalogPathObserver? pathObserver = null)
     {
         durabilityBarrier ??= NativeCapabilityCatalogDurabilityBarrier.Instance;
         var directories = new Dictionary<string, SafeFileHandle>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
@@ -45,6 +47,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             {
                 currentPath = Path.Combine(currentPath, segment);
                 var parent = current;
+                pathObserver?.BeforeDirectoryChildOpen(Path.GetDirectoryName(currentPath)!, segment);
                 var next = CapabilityCatalogNativeFileSystem.OpenDirectory(currentPath, parent, segment, createRoot, durabilityBarrier, out var created);
                 if (next is null)
                 {
@@ -65,7 +68,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             }
 
             directories[string.Empty] = current;
-            return new CapabilityCatalogPathSession(root, comparison, directories, owned, durabilityBarrier);
+            return new CapabilityCatalogPathSession(root, comparison, directories, owned, durabilityBarrier, pathObserver);
         }
         catch
         {
@@ -121,7 +124,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             return false;
         }
 
-        using var handle = CapabilityCatalogNativeFileSystem.OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, writeThrough: false);
+        using var handle = OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, writeThrough: false);
         return handle is not null;
     }
 
@@ -142,7 +145,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
 
         var directories = new List<string>();
         var entryCount = 0;
-        var entries = OperatingSystem.IsMacOS() ? CapabilityCatalogNativeFileSystem.EnumerateMacDirectory(directory) : Directory.EnumerateFileSystemEntries(OperatingSystem.IsWindows() ? safePath : CapabilityCatalogNativeFileSystem.GetDirectoryEnumerationPath(directory), "*", SearchOption.TopDirectoryOnly).Select(entry => new CapabilityCatalogDirectoryEntry(Path.GetFileName(entry), (File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0 ? CapabilityCatalogDirectoryEntryKind.Unsafe : (File.GetAttributes(entry) & FileAttributes.Directory) != 0 ? CapabilityCatalogDirectoryEntryKind.Directory : CapabilityCatalogDirectoryEntryKind.RegularFile));
+        var entries = EnumerateEntries(safePath, directory, ProbeLimit(maximumEntries));
         foreach (var entry in entries)
         {
             if (entryCount >= maximumEntries)
@@ -171,6 +174,75 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
 
         names = directories.OrderBy(name => name, StringComparer.Ordinal).ToArray();
         return true;
+    }
+
+    public bool TryEnumerateStrictDirectories(string path, int maximumEntries, out IReadOnlyList<string> names)
+    {
+        if (maximumEntries < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumEntries));
+        }
+
+        var safePath = RequireContained(path);
+        var directory = GetDirectory(safePath, create: false);
+        if (directory is null)
+        {
+            names = [];
+            return true;
+        }
+
+        var directories = new List<string>();
+        var entries = EnumerateEntries(safePath, directory, ProbeLimit(maximumEntries));
+        foreach (var entry in entries)
+        {
+            if (directories.Count >= maximumEntries)
+            {
+                names = [];
+                return false;
+            }
+            if (entry.Kind != CapabilityCatalogDirectoryEntryKind.Directory || string.IsNullOrEmpty(entry.Name) || GetDirectory(Path.Combine(safePath, entry.Name), create: false) is null)
+            {
+                throw new IOException("The staged artifact root contains an unexpected, linked, special, or disappearing entry.");
+            }
+            directories.Add(entry.Name);
+        }
+
+        names = directories.OrderBy(name => name, StringComparer.Ordinal).ToArray();
+        return true;
+    }
+
+    public IReadOnlyList<CapabilityCatalogDirectoryEntry> EnumerateBoundEntries(string path, int maximumEntries)
+    {
+        if (maximumEntries < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumEntries));
+        }
+
+        var safePath = RequireContained(path);
+        var directory = GetDirectory(safePath, create: false) ?? throw new DirectoryNotFoundException("The staged artifact directory is unavailable.");
+        var results = new List<CapabilityCatalogDirectoryEntry>();
+        foreach (var entry in EnumerateEntries(safePath, directory, ProbeLimit(maximumEntries)))
+        {
+            if (results.Count >= maximumEntries)
+            {
+                throw new IOException("The bounded staged artifact directory entry quota is exhausted.");
+            }
+            if (entry.Kind is CapabilityCatalogDirectoryEntryKind.Unsafe or CapabilityCatalogDirectoryEntryKind.Unknown || string.IsNullOrEmpty(entry.Name))
+            {
+                throw new IOException("The staged artifact directory contains a linked, special, or malformed entry.");
+            }
+            if (entry.Kind == CapabilityCatalogDirectoryEntryKind.Directory)
+            {
+                _ = GetDirectory(Path.Combine(safePath, entry.Name), create: false) ?? throw new IOException("A staged artifact directory disappeared during bound enumeration.");
+            }
+            else
+            {
+                using var file = OpenRegularFile(Path.Combine(safePath, entry.Name), directory, entry.Name, FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new IOException("A staged artifact file disappeared during bound enumeration.");
+                CapabilityCatalogNativeFileSystem.RequireSingleLink(file, entry.Name);
+            }
+            results.Add(entry);
+        }
+        return results.OrderBy(entry => entry.Name, StringComparer.Ordinal).ToArray();
     }
 
     public void PrepareDirectory(string path)
@@ -214,7 +286,8 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         var parentPath = Path.GetDirectoryName(safePath)!;
         var parent = GetDirectory(parentPath, create: false) ?? throw new DirectoryNotFoundException("Capability catalog artifact parent is unavailable.");
         EnsurePhysicalDirectoryBinding(parentPath);
-        var handle = CapabilityCatalogNativeFileSystem.OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new FileNotFoundException("Capability catalog artifact is missing.", safePath);
+        var handle = OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new FileNotFoundException("Capability catalog artifact is missing.", safePath);
+        CapabilityCatalogNativeFileSystem.RequireSingleLink(handle, Path.GetFileName(safePath));
         FileStream? stream = null;
         try
         {
@@ -225,7 +298,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             }
             var physicalIdentity = CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(stream.SafeFileHandle);
             EnsurePhysicalDirectoryBinding(parentPath);
-            using var revalidated = CapabilityCatalogNativeFileSystem.OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new IOException("Capability catalog artifact disappeared while opening an execution lease.");
+            using var revalidated = OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new IOException("Capability catalog artifact disappeared while opening an execution lease.");
             if (!string.Equals(physicalIdentity, CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(revalidated), StringComparison.Ordinal))
             {
                 throw new IOException("Capability catalog artifact was substituted while opening an execution lease.");
@@ -249,7 +322,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         {
             EnsurePhysicalDirectoryBinding(parentPath);
         }
-        var handle = CapabilityCatalogNativeFileSystem.OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false);
+        var handle = OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false);
         if (handle is null)
         {
             if (missingIsNull)
@@ -260,6 +333,10 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             throw new FileNotFoundException("Capability catalog artifact is missing.", safePath);
         }
         await using var stream = new FileStream(handle, FileAccess.Read, 4096, isAsync: false);
+        if (requireStableBinding)
+        {
+            CapabilityCatalogNativeFileSystem.RequireSingleLink(stream.SafeFileHandle, Path.GetFileName(safePath));
+        }
         var physicalIdentity = requireStableBinding ? CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(stream.SafeFileHandle) : null;
         if (stream.Length > int.MaxValue || stream.Length > maximumBytes || !allowEmpty && stream.Length <= 0)
         {
@@ -271,7 +348,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         if (requireStableBinding)
         {
             EnsurePhysicalDirectoryBinding(parentPath);
-            using var revalidated = CapabilityCatalogNativeFileSystem.OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new IOException("Capability catalog artifact disappeared during bound read.");
+            using var revalidated = OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new IOException("Capability catalog artifact disappeared during bound read.");
             if (!string.Equals(physicalIdentity, CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(revalidated), StringComparison.Ordinal))
             {
                 throw new IOException("Capability catalog artifact was substituted during bound read.");
@@ -290,7 +367,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
     {
         var safePath = RequireContained(path);
         var parent = GetDirectory(Path.GetDirectoryName(safePath)!, create: false) ?? throw new DirectoryNotFoundException("Capability catalog file parent is unavailable.");
-        using var handle = CapabilityCatalogNativeFileSystem.OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.ReadWrite, FileShare.Read, writeThrough: false) ?? throw new FileNotFoundException("Capability catalog file is missing.", safePath);
+        using var handle = OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.ReadWrite, FileShare.Read, writeThrough: false) ?? throw new FileNotFoundException("Capability catalog file is missing.", safePath);
         CapabilityCatalogNativeFileSystem.SetUserOnlyPermissions(handle);
     }
 
@@ -304,7 +381,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         var temporaryPath = Path.Combine(parentPath, temporaryName);
         try
         {
-            var handle = CapabilityCatalogNativeFileSystem.OpenRegularFile(temporaryPath, parent, temporaryName, FileMode.CreateNew, FileAccess.Write, FileShare.None, writeThrough: true) ?? throw new IOException("Capability catalog temporary artifact could not be created safely.");
+            var handle = OpenRegularFile(temporaryPath, parent, temporaryName, FileMode.CreateNew, FileAccess.Write, FileShare.None, writeThrough: true) ?? throw new IOException("Capability catalog temporary artifact could not be created safely.");
             await using (var stream = new FileStream(handle, FileAccess.Write, 16 * 1024, isAsync: false))
             {
                 await stream.WriteAsync(content, cancellationToken);
@@ -337,7 +414,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
 
         var entries = new List<(string Name, long Length)>();
         var totalBytes = 0L;
-        var directoryEntries = OperatingSystem.IsMacOS() ? CapabilityCatalogNativeFileSystem.EnumerateMacDirectory(directory) : Directory.EnumerateFileSystemEntries(OperatingSystem.IsWindows() ? safePath : CapabilityCatalogNativeFileSystem.GetDirectoryEnumerationPath(directory)).Select(entry => new CapabilityCatalogDirectoryEntry(Path.GetFileName(entry), (File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0 ? CapabilityCatalogDirectoryEntryKind.Unsafe : (File.GetAttributes(entry) & FileAttributes.Directory) != 0 ? CapabilityCatalogDirectoryEntryKind.Directory : CapabilityCatalogDirectoryEntryKind.RegularFile));
+        var directoryEntries = EnumerateEntries(safePath, directory, ProbeLimit(maximumEntries));
         foreach (var entry in directoryEntries)
         {
             if (entries.Count >= maximumEntries)
@@ -351,7 +428,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             }
             var name = entry.Name;
             var fullPath = Path.Combine(safePath, name);
-            var handle = CapabilityCatalogNativeFileSystem.OpenRegularFile(fullPath, directory, name, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, writeThrough: false) ?? throw new IOException("A capability catalog trust-root entry disappeared during bounded enumeration.");
+            var handle = OpenRegularFile(fullPath, directory, name, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, writeThrough: false) ?? throw new IOException("A capability catalog trust-root entry disappeared during bounded enumeration.");
             using var stream = new FileStream(handle, FileAccess.Read, 1, isAsync: false);
             if (stream.Length > maximumBytes - totalBytes)
             {
@@ -402,6 +479,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
                 continue;
             }
 
+            _pathObserver?.BeforeDirectoryChildOpen(Path.GetDirectoryName(currentPath)!, segment);
             var opened = CapabilityCatalogNativeFileSystem.OpenDirectory(currentPath, parent, segment, create, _durabilityBarrier, out var created);
             if (opened is null)
             {
@@ -418,6 +496,41 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         }
 
         return parent;
+    }
+
+    private static IEnumerable<CapabilityCatalogDirectoryEntry> EnumerateEntries(string safePath, SafeFileHandle directory, int maximumEntries)
+    {
+        return OperatingSystem.IsWindows()
+            ? CapabilityCatalogNativeFileSystem.EnumerateWindowsDirectory(directory, maximumEntries)
+            : OperatingSystem.IsMacOS()
+                ? CapabilityCatalogNativeFileSystem.EnumerateMacDirectory(directory, maximumEntries)
+                : Directory.EnumerateFileSystemEntries(CapabilityCatalogNativeFileSystem.GetDirectoryEnumerationPath(directory), "*", SearchOption.TopDirectoryOnly).Take(maximumEntries).Select(entry => new CapabilityCatalogDirectoryEntry(Path.GetFileName(entry), (File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0 ? CapabilityCatalogDirectoryEntryKind.Unsafe : (File.GetAttributes(entry) & FileAttributes.Directory) != 0 ? CapabilityCatalogDirectoryEntryKind.Directory : CapabilityCatalogDirectoryEntryKind.RegularFile));
+    }
+
+    private static int ProbeLimit(int maximumEntries) => maximumEntries == int.MaxValue ? int.MaxValue : maximumEntries + 1;
+
+    private SafeFileHandle? OpenRegularFile(string fullPath, SafeFileHandle parent, string name, FileMode mode, FileAccess access, FileShare share, bool writeThrough)
+    {
+        var parentPath = Path.GetDirectoryName(fullPath)!;
+        _pathObserver?.BeforeFileChildOpen(parentPath, name);
+        SafeFileHandle? handle = null;
+        try
+        {
+            handle = CapabilityCatalogNativeFileSystem.OpenRegularFile(fullPath, parent, name, mode, access, share, writeThrough);
+        }
+        finally
+        {
+            try
+            {
+                _pathObserver?.AfterFileChildOpen(parentPath, name);
+            }
+            catch
+            {
+                handle?.Dispose();
+                throw;
+            }
+        }
+        return handle;
     }
 
     private void EnsurePhysicalDirectoryBinding(string path)
