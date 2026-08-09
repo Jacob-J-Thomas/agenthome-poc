@@ -32,7 +32,7 @@ test("catalog boot uses authenticated same-origin reads and renders hostile post
       (call) => call.options.credentials === "same-origin",
     ),
   );
-  assert.match(app.elements.capabilityTitle.textContent, /<script>/);
+  assert.ok(app.elements.capabilityTitle.textContent.includes("<SCRIPT>"));
   assert.match(app.elements.capabilityPurpose.textContent, /<img/);
   assert.equal(findByTag(app.elements.capabilityContent, "script").length, 0);
   assert.equal(findByTag(app.elements.capabilityContent, "img").length, 0);
@@ -406,7 +406,7 @@ test("retained browser state is reconstructed without forged trusted fields", as
       selection: {
         operationId: "web-capability-retained",
         operation: "disable",
-        capabilityId: "org.example/<script>alert(1)</script>",
+        capabilityId: "org.example/<SCRIPT>alert(1)</SCRIPT>",
         targetVersion: null,
         targetDescriptor: { privateConfiguration: "forged" },
         artifactDigest: "sha256:forged",
@@ -601,7 +601,7 @@ class FakeCapabilityServer {
         isCommitted: true,
         replayedOutcome: null,
         state: {
-          capabilityId: "org.example/<script>alert(1)</script>",
+          capabilityId: "org.example/<SCRIPT>alert(1)</SCRIPT>",
           version: "1.0.0",
           isEnabled: false,
           isRemoved: false,
@@ -655,7 +655,7 @@ function createCatalogResponse() {
     catalogRevision: 8,
     capabilities: [
       {
-        id: "org.example/<script>alert(1)</script>",
+        id: "org.example/<SCRIPT>alert(1)</SCRIPT>",
         version: "1.0.0",
         descriptorHash: "sha256:descriptor",
         kind: "skill",
@@ -711,7 +711,7 @@ function createPreviewResponse() {
     preview: {
       operationId: "replaced-by-server-call",
       operation: "disable",
-      capabilityId: "org.example/<script>alert(1)</script>",
+      capabilityId: "org.example/<SCRIPT>alert(1)</SCRIPT>",
       targetVersion: null,
       baselineCatalogRevision: 8,
       baselineActivationRevision: 3,
