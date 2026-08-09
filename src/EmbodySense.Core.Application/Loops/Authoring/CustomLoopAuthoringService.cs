@@ -214,6 +214,7 @@ public sealed class CustomLoopAuthoringService
                 TriggerPolicy = input.TriggerPolicy,
                 InferenceSteps = stepResult.Steps,
                 ToolAssignments = input.ToolAssignments!,
+                CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(definition.Id, input.ToolAssignments!),
                 ExitPolicy = input.ExitPolicy
             };
             definition = CustomLoopDefinitionContentHash.Apply(definition);
