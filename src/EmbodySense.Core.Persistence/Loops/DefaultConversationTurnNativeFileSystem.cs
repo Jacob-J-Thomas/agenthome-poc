@@ -21,43 +21,110 @@ internal static class DefaultConversationTurnNativeFileSystem
     private const int ErrorPathNotFound = 3;
     private const int ErrorSharingViolation = 32;
     private const int ErrorLockViolation = 33;
+    private const int UnixPermissionDenied = 13;
+    private const int MaximumLeaseInitializationOpenAttempts = 8;
     private const int AtEmptyPath = 0x1000;
     private const int LockExclusive = 2;
     private const int LockNonBlocking = 4;
     private const int PermissionUserReadWrite = 0x180;
+    private const ushort UnixPostureMask = 0x0FFF;
     private const ushort UnixFileTypeMask = 0xF000;
     private const ushort UnixRegularFile = 0x8000;
     private const uint StatxMode = 0x2;
+    private const uint StatxLinkCount = 0x4;
+    private const uint StatxUserId = 0x8;
     private const uint StatxInode = 0x100;
 
-    public static FileStream? TryAcquireExclusiveLease(string path)
+    public static async Task<FileStream?> TryAcquireExclusiveLeaseAsync(
+        string path,
+        Func<DefaultConversationTurnLeasePhase, CancellationToken, Task>? observeUnixLeasePhase,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (OperatingSystem.IsWindows())
         {
             var handle = OpenWindowsRegularFile(path, readWrite: true, exclusive: true, create: true, returnNullWhenContended: true);
             return handle is null ? null : new FileStream(handle, FileAccess.ReadWrite, 1, isAsync: false);
         }
 
-        return TryAcquireUnixExclusiveLease(path);
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            throw new PlatformNotSupportedException("Default-conversation active-set leases support Windows, Linux, and macOS.");
+        }
+
+        return await TryAcquireUnixExclusiveLeaseAsync(path, observeUnixLeasePhase, cancellationToken);
     }
 
     [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public cross-process store behavior; its alternate platform is unreachable in any one coverage run.")]
-    private static FileStream? TryAcquireUnixExclusiveLease(string path)
+    private static async Task<FileStream?> TryAcquireUnixExclusiveLeaseAsync(
+        string path,
+        Func<DefaultConversationTurnLeasePhase, CancellationToken, Task>? observeLeasePhase,
+        CancellationToken cancellationToken)
     {
-        var unixHandle = OpenUnixRegularFile(path, readWrite: true, create: true);
-        if (flock(unixHandle, LockExclusive | LockNonBlocking) == 0)
+        FileStream unixStream;
+        for (var attempt = 1; ; attempt++)
         {
-            return new FileStream(unixHandle, FileAccess.ReadWrite, 1, isAsync: false);
+            try
+            {
+                unixStream = OpenUnixRegularFile(path, readWrite: true, create: true);
+                break;
+            }
+            catch (IOException exception) when (
+                (IsNativeError(exception, UnixPermissionDenied)
+                    || exception is UnixLeasePostureException)
+                && attempt < MaximumLeaseInitializationOpenAttempts)
+            {
+                // A peer creating this lease under a restrictive umask can publish the pathname
+                // immediately before it restores exact owner-only mode on its own new handle.
+                // Retry that one bounded native failure without ever changing a pre-existing inode.
+                await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken);
+            }
+            catch (UnixLeasePostureException exception)
+            {
+                throw new IOException(exception.Message, exception);
+            }
         }
 
-        var error = Marshal.GetLastPInvokeError();
-        unixHandle.Dispose();
-        if (error is 11 or 35)
+        var ownsStream = true;
+        try
         {
-            return null;
-        }
+            if (observeLeasePhase is not null)
+            {
+                await observeLeasePhase(DefaultConversationTurnLeasePhase.AfterValidatedOpenBeforeExclusiveLock, cancellationToken);
+            }
 
-        throw NativeIOException("The default-conversation active-set lease could not be acquired", error);
+            cancellationToken.ThrowIfCancellationRequested();
+            RequireUnixRegularFile(unixStream.SafeFileHandle, path, requireLeasePosture: true);
+            RequireUnixLeasePathMatchesHandle(unixStream, path);
+            if (flock(unixStream.SafeFileHandle, LockExclusive | LockNonBlocking) == 0)
+            {
+                if (observeLeasePhase is not null)
+                {
+                    await observeLeasePhase(DefaultConversationTurnLeasePhase.AfterExclusiveLockBeforeFinalValidation, cancellationToken);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                RequireUnixRegularFile(unixStream.SafeFileHandle, path, requireLeasePosture: true);
+                RequireUnixLeasePathMatchesHandle(unixStream, path);
+                ownsStream = false;
+                return unixStream;
+            }
+
+            var error = Marshal.GetLastPInvokeError();
+            if (error is 11 or 35)
+            {
+                return null;
+            }
+
+            throw NativeIOException("The default-conversation active-set lease could not be acquired", error);
+        }
+        finally
+        {
+            if (ownsStream)
+            {
+                unixStream.Dispose();
+            }
+        }
     }
 
     public static FileStream OpenRegularRead(string path)
@@ -68,8 +135,12 @@ internal static class DefaultConversationTurnNativeFileSystem
             return new FileStream(handle ?? throw new FileNotFoundException("The default-conversation turn artifact was not found.", path), FileAccess.Read, 4_096, isAsync: false);
         }
 
-        var unixHandle = OpenUnixRegularFile(path, readWrite: false, create: false);
-        return new FileStream(unixHandle, FileAccess.Read, 4_096, isAsync: false);
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            throw new PlatformNotSupportedException("Default-conversation persistence reads support Windows, Linux, and macOS.");
+        }
+
+        return OpenUnixRegularFile(path, readWrite: false, create: false);
     }
 
     public static DefaultConversationTurnFileIdentity GetIdentity(FileStream stream)
@@ -168,16 +239,54 @@ internal static class DefaultConversationTurnNativeFileSystem
     }
 
     [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public store behavior on Unix; Unix is unreachable in Windows coverage runs.")]
-    private static SafeFileHandle OpenUnixRegularFile(string path, bool readWrite, bool create)
+    private static FileStream OpenUnixRegularFile(string path, bool readWrite, bool create)
     {
         var flags = readWrite ? UnixOpenReadWrite : UnixOpenReadOnly;
         flags |= UnixOpenNoFollow | UnixOpenCloseOnExec | UnixOpenNonBlocking;
         if (create)
         {
-            flags |= UnixOpenCreate;
+            FileStream? createdStream = null;
+            try
+            {
+#pragma warning disable CA1416 // This method is reached only through the explicit Linux/macOS guards above.
+                createdStream = new FileStream(path, new FileStreamOptions
+                {
+                    Mode = FileMode.CreateNew,
+                    Access = FileAccess.ReadWrite,
+                    Share = FileShare.ReadWrite | FileShare.Delete,
+                    Options = FileOptions.WriteThrough,
+                    BufferSize = 1,
+                    UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite
+                });
+#pragma warning restore CA1416
+            }
+            catch (IOException)
+            {
+                // A concurrent or pre-existing entry is reopened below through the no-follow path.
+            }
+
+            if (createdStream is not null)
+            {
+                try
+                {
+                    if (fchmod(createdStream.SafeFileHandle, PermissionUserReadWrite) != 0)
+                    {
+                        throw NativeIOException($"Default-conversation persistence file permissions for `{path}` could not be restricted", Marshal.GetLastPInvokeError());
+                    }
+
+                    RequireUnixRegularFile(createdStream.SafeFileHandle, path, requireLeasePosture: true);
+                    return createdStream;
+                }
+                catch
+                {
+                    createdStream.Dispose();
+                    throw;
+                }
+            }
         }
 
-        var descriptor = open(path, flags, PermissionUserReadWrite);
+        var descriptor = open(path, flags);
+
         if (descriptor < 0)
         {
             var error = Marshal.GetLastPInvokeError();
@@ -192,13 +301,12 @@ internal static class DefaultConversationTurnNativeFileSystem
         var handle = new SafeFileHandle(new IntPtr(descriptor), ownsHandle: true);
         try
         {
-            RequireUnixRegularFile(handle, path);
-            if (create && fchmod(handle, PermissionUserReadWrite) != 0)
-            {
-                throw NativeIOException($"Default-conversation persistence file permissions for `{path}` could not be restricted", Marshal.GetLastPInvokeError());
-            }
-
-            return handle;
+            RequireUnixRegularFile(
+                handle,
+                path,
+                requireLeasePosture: create,
+                identifyLeaseInitializationPosture: create);
+            return new FileStream(handle, readWrite ? FileAccess.ReadWrite : FileAccess.Read, readWrite ? 1 : 4_096, isAsync: false);
         }
         catch
         {
@@ -208,22 +316,31 @@ internal static class DefaultConversationTurnNativeFileSystem
     }
 
     [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public FIFO and symbolic-link store behavior; its alternate Unix ABI is unreachable in any one coverage run.")]
-    private static void RequireUnixRegularFile(SafeFileHandle handle, string path)
+    private static void RequireUnixRegularFile(
+        SafeFileHandle handle,
+        string path,
+        bool requireLeasePosture = false,
+        bool identifyLeaseInitializationPosture = false)
     {
         ushort mode;
+        ulong linkCount = 0;
+        uint userId = 0;
         if (OperatingSystem.IsLinux())
         {
-            if (statx(handle, string.Empty, AtEmptyPath, StatxMode, out LinuxStatx information) != 0)
+            var mask = requireLeasePosture ? StatxMode | StatxLinkCount | StatxUserId : StatxMode;
+            if (statx(handle, string.Empty, AtEmptyPath, mask, out LinuxStatx information) != 0)
             {
                 throw NativeIOException($"Default-conversation persistence file metadata for `{path}` could not be read", Marshal.GetLastPInvokeError());
             }
 
-            if ((information.Mask & StatxMode) == 0)
+            if ((information.Mask & mask) != mask)
             {
-                throw new IOException($"Default-conversation persistence file metadata for `{path}` omitted its filesystem entry type.");
+                throw new IOException($"Default-conversation persistence file metadata for `{path}` omitted required file posture.");
             }
 
             mode = information.Mode;
+            linkCount = information.LinkCount;
+            userId = information.UserId;
         }
         else if (OperatingSystem.IsMacOS())
         {
@@ -233,6 +350,8 @@ internal static class DefaultConversationTurnNativeFileSystem
             }
 
             mode = information.Mode;
+            linkCount = information.LinkCount;
+            userId = information.UserId;
         }
         else
         {
@@ -243,6 +362,31 @@ internal static class DefaultConversationTurnNativeFileSystem
         {
             throw new IOException($"Default-conversation persistence file `{path}` is not a regular file.");
         }
+
+        if (requireLeasePosture
+            && (linkCount != 1
+                || (mode & UnixPostureMask) != PermissionUserReadWrite
+                || userId != geteuid()))
+        {
+            var message = $"Default-conversation active-set lease `{path}` does not have exclusive owner-only file posture.";
+            if (identifyLeaseInitializationPosture)
+            {
+                throw new UnixLeasePostureException(message);
+            }
+
+            throw new IOException(message);
+        }
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public lease pathname-replacement behavior; its alternate Unix ABI is unreachable in any one coverage run.")]
+    private static void RequireUnixLeasePathMatchesHandle(FileStream leaseStream, string path)
+    {
+        using var pathStream = OpenUnixRegularFile(path, readWrite: true, create: false);
+        RequireUnixRegularFile(pathStream.SafeFileHandle, path, requireLeasePosture: true);
+        if (GetUnixIdentity(leaseStream.SafeFileHandle) != GetUnixIdentity(pathStream.SafeFileHandle))
+        {
+            throw new IOException($"Default-conversation active-set lease `{path}` no longer names the validated file.");
+        }
     }
 
     [ExcludeFromCodeCoverage(Justification = "Native error translation is exercised only through the host-specific shims excluded above.")]
@@ -251,9 +395,13 @@ internal static class DefaultConversationTurnNativeFileSystem
         return new IOException($"{message}: {new Win32Exception(error).Message}", unchecked((int)(0x80070000U | (uint)error)));
     }
 
+    private static bool IsNativeError(IOException exception, int error)
+    {
+        return (exception.HResult & 0xFFFF) == error;
+    }
+
     private static int UnixOpenReadOnly => 0;
     private static int UnixOpenReadWrite => 2;
-    private static int UnixOpenCreate => OperatingSystem.IsMacOS() ? 0x200 : 0x40;
     private static int UnixOpenNoFollow => OperatingSystem.IsMacOS() ? 0x100 : 0x20000;
     private static int UnixOpenCloseOnExec => OperatingSystem.IsMacOS() ? 0x1000000 : 0x80000;
     private static int UnixOpenNonBlocking => OperatingSystem.IsMacOS() ? 0x4 : 0x800;
@@ -370,7 +518,7 @@ internal static class DefaultConversationTurnNativeFileSystem
     private static extern bool GetFileInformationByHandle(SafeFileHandle file, out WindowsByHandleFileInformation fileInformation);
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
-    private static extern int open(string path, int flags, int mode);
+    private static extern int open(string path, int flags);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int flock(SafeFileHandle file, int operation);
@@ -383,4 +531,7 @@ internal static class DefaultConversationTurnNativeFileSystem
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fstat(SafeFileHandle file, out MacStat information);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern uint geteuid();
 }

@@ -6,11 +6,24 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// Coordinates deterministic observation of an active default-conversation turn-set operation.
 /// </summary>
 /// <remarks>
-/// Implementations are invoked only after the workspace active-set lease is acquired and before the operation reads or mutates artifacts.
-/// They must not call back into the same store instance because the active-set lease is intentionally non-reentrant.
+/// Lease-acquisition observation is invoked both after a safe handle is validated but before its exclusive OS lock and after that lock
+/// but before final validation. Active-set and archival observations are invoked after the lease is acquired. Implementations must not
+/// call back into the same store instance because the process gate and active-set lease are intentionally non-reentrant.
 /// </remarks>
 public interface IDefaultConversationTurnStoreCoordination
 {
+    /// <summary>
+    /// Observes a validated active-set lease file at a bounded phase around the OS-exclusive lock.
+    /// </summary>
+    /// <param name="operation">The operation preparing to acquire the lease.</param>
+    /// <param name="phase">The lease acquisition phase.</param>
+    /// <param name="cancellationToken">Cancels the coordination wait.</param>
+    /// <returns>A task that completes when lease acquisition may continue.</returns>
+    Task ObserveActiveSetLeasePhaseAsync(
+        DefaultConversationTurnStoreOperation operation,
+        DefaultConversationTurnLeasePhase phase,
+        CancellationToken cancellationToken = default) => Task.CompletedTask;
+
     /// <summary>
     /// Observes an operation while it exclusively owns the active-turn-set coordination lease.
     /// </summary>
