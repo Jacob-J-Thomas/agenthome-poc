@@ -10,6 +10,178 @@ namespace EmbodySense.Core.Persistence.Tests.Capabilities;
 public sealed class CapabilityLifecycleMutationStoreTests
 {
     [Fact]
+    public async Task Selection_replay_is_stable_across_target_evidence_drift_and_conflicting_reuse()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = Prepare(workspace);
+        var evidence = new StubCapabilityLifecycleArtifactEvidenceSource();
+        var baselineSource = new StubCapabilityLifecycleBaselineSource();
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var store = new CapabilityLifecycleMutationStore(paths, trust, baselineSource, evidence);
+        var baseline = CapabilityLifecycleTestData.Baseline();
+        var descriptor = CapabilityLifecycleTestData.Descriptor("2.0.0");
+        var selection = new CapabilityLifecycleSelectionRequest("selection-replay", CapabilityLifecycleOperationKind.Upgrade, descriptor.Id, descriptor.Version);
+        var request = new CapabilityLifecyclePreviewRequest(selection.OperationId, selection.Kind, selection.CapabilityId, descriptor, CapabilityLifecycleTestData.Digest("artifact-v2"), selection);
+        var dependents = await new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]).CaptureAsync();
+        var preview = await store.PreviewAsync(request, baseline, dependents);
+        var verifications = evidence.Verifications;
+        evidence.Evidence = new CapabilityLifecycleArtifactEvidence(CapabilityLifecycleArtifactEvidenceStatus.NotFound, "removed");
+        var restarted = new CapabilityLifecycleMutationStore(paths, trust, baselineSource, evidence);
+
+        var replayed = await restarted.TryReplaySelectionAsync(selection);
+        var replayedAfterResolvedDigestDrift = await restarted.PreviewAsync(request with { TargetArtifactDigest = CapabilityLifecycleTestData.Digest("changed-artifact-v2") }, baseline, dependents);
+        var conflictingDirectRequest = await restarted.PreviewAsync(request with { Selection = null }, baseline, dependents);
+        var conflictingVersion = await restarted.TryReplaySelectionAsync(selection with { TargetVersion = CapabilityLifecycleTestData.Descriptor("3.0.0").Version });
+        var conflictingKind = await restarted.TryReplaySelectionAsync(selection with { Kind = CapabilityLifecycleOperationKind.Disable, TargetVersion = null });
+        var missing = await restarted.TryReplaySelectionAsync(selection with { OperationId = "selection-missing" });
+        var persisted = JsonNode.Parse(await File.ReadAllTextAsync(paths.CapabilityLifecycleDocumentPath))!.AsObject();
+
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Ready, preview.Status);
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Replayed, replayed.Status);
+        Assert.Equal(preview.PreviewHash, replayed.PreviewHash);
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Replayed, replayedAfterResolvedDigestDrift.Status);
+        Assert.Equal(preview.PreviewHash, replayedAfterResolvedDigestDrift.PreviewHash);
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Conflict, conflictingDirectRequest.Status);
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Conflict, conflictingVersion.Status);
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Conflict, conflictingKind.Status);
+        Assert.Equal(CapabilityLifecyclePreviewStatus.NotFound, missing.Status);
+        Assert.Equal(verifications, evidence.Verifications);
+        Assert.StartsWith("sha256:", persisted["operations"]!.AsArray().Single()!["selectionRequestHash"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Enable_reproves_current_artifact_preserves_identity_and_enforces_required_optional_dependents()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = Prepare(workspace);
+        var baseline = CapabilityLifecycleTestData.Baseline() with { State = CapabilityLifecycleTestData.Baseline().State with { IsEnabled = false } };
+        var baselineSource = new StubCapabilityLifecycleBaselineSource { Baseline = baseline };
+        var evidence = new StubCapabilityLifecycleArtifactEvidenceSource();
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var store = new CapabilityLifecycleMutationStore(paths, trust, baselineSource, evidence);
+        var source = new StubCapabilityDependentIndexSource { Dependents = [CapabilityLifecycleTestData.Dependent("required-loop", CapabilityRequirementKind.Required, "[1.0.0]"), CapabilityLifecycleTestData.Dependent("optional-skill", CapabilityRequirementKind.Optional, "[2.0.0]", CapabilityDependentKind.Skill)] };
+        var index = new CapabilityDependentIndex([source]);
+        var request = new CapabilityLifecyclePreviewRequest("enable-current", CapabilityLifecycleOperationKind.Enable, baseline.State.Descriptor.Id, baseline.State.Descriptor, baseline.State.ArtifactDigest);
+
+        var preview = await store.PreviewAsync(request, baseline, await index.CaptureAsync());
+        var applied = await store.MutateAsync(preview, baseline, await index.CaptureAsync());
+        var replayed = await store.MutateAsync(preview, baseline, await index.CaptureAsync());
+        var read = await store.ReadAsync(request.CapabilityId);
+
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Ready, preview.Status);
+        Assert.Equal([CapabilityLifecycleImpactOutcome.Preserved, CapabilityLifecycleImpactOutcome.Degraded], preview.Impacts.Select(impact => impact.Outcome));
+        Assert.Equal(baseline.State.Descriptor.Id, preview.TargetDescriptor!.Id);
+        Assert.Equal(baseline.State.Descriptor.Version, preview.TargetDescriptor.Version);
+        Assert.Equal(baseline.State.ArtifactDigest, preview.TargetArtifactDigest);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, applied.Status);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Replayed, replayed.Status);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, replayed.ReplayedOutcome);
+        Assert.True(read.State!.IsEnabled);
+        Assert.False(read.State.IsRemoved);
+        Assert.Equal(baseline.State.Descriptor.Id, read.State.Descriptor.Id);
+        Assert.Equal(baseline.State.Descriptor.Version, read.State.Descriptor.Version);
+        Assert.Equal(baseline.State.ArtifactDigest, read.State.ArtifactDigest);
+        Assert.False(Assert.Single(read.History).WasEnabled);
+        Assert.Equal("optional-skill", Assert.Single(read.Degradations).DependentIdentity);
+        Assert.Equal(2, evidence.Verifications);
+        var persisted = JsonNode.Parse(await File.ReadAllTextAsync(paths.CapabilityLifecycleDocumentPath))!.AsObject();
+        Assert.Equal(1, persisted["schemaVersion"]!.GetValue<int>());
+        Assert.Equal("enable", persisted["operations"]!.AsArray().Single()!["kind"]!.GetValue<string>());
+        var restarted = new CapabilityLifecycleMutationStore(paths, trust, baselineSource, evidence);
+        Assert.True((await restarted.ReadAsync(request.CapabilityId)).State!.IsEnabled);
+    }
+
+    [Fact]
+    public async Task Enable_preview_maps_indeterminate_artifact_evidence_to_unavailable()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = Prepare(workspace);
+        var baseline = CapabilityLifecycleTestData.Baseline() with { State = CapabilityLifecycleTestData.Baseline().State with { IsEnabled = false } };
+        var evidence = new StubCapabilityLifecycleArtifactEvidenceSource { Evidence = new CapabilityLifecycleArtifactEvidence(CapabilityLifecycleArtifactEvidenceStatus.Unavailable, "indeterminate") };
+        var store = Store(paths, new StubCapabilityLifecycleBaselineSource { Baseline = baseline }, evidence);
+        var request = new CapabilityLifecyclePreviewRequest("enable-unavailable", CapabilityLifecycleOperationKind.Enable, baseline.State.Descriptor.Id, baseline.State.Descriptor, baseline.State.ArtifactDigest);
+
+        var preview = await store.PreviewAsync(request, baseline, await new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]).CaptureAsync());
+
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Unavailable, preview.Status);
+    }
+
+    [Fact]
+    public async Task Enable_blocks_incompatible_required_dependent_without_changing_disabled_state()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = Prepare(workspace);
+        var baseline = CapabilityLifecycleTestData.Baseline() with { State = CapabilityLifecycleTestData.Baseline().State with { IsEnabled = false } };
+        var baselineSource = new StubCapabilityLifecycleBaselineSource { Baseline = baseline };
+        var store = Store(paths, baselineSource);
+        var source = new StubCapabilityDependentIndexSource { Dependents = [CapabilityLifecycleTestData.Dependent("required-loop", CapabilityRequirementKind.Required, "[2.0.0]")] };
+        var index = new CapabilityDependentIndex([source]);
+        var request = new CapabilityLifecyclePreviewRequest("enable-blocked", CapabilityLifecycleOperationKind.Enable, baseline.State.Descriptor.Id, baseline.State.Descriptor, baseline.State.ArtifactDigest);
+
+        var preview = await store.PreviewAsync(request, baseline, await index.CaptureAsync());
+        var blocked = await store.MutateAsync(preview, baseline, await index.CaptureAsync());
+
+        Assert.Equal(CapabilityLifecycleImpactOutcome.Blocked, Assert.Single(preview.Impacts).Outcome);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Blocked, blocked.Status);
+        Assert.False((await store.ReadAsync(request.CapabilityId)).State!.IsEnabled);
+    }
+
+    [Fact]
+    public async Task Enable_rejects_tombstone_wrong_target_and_fresh_already_enabled_without_new_receipt_or_revision()
+    {
+        using var alreadyEnabledWorkspace = new TestWorkspace();
+        var enabledPaths = Prepare(alreadyEnabledWorkspace);
+        var enabledStore = Store(enabledPaths);
+        var baseline = CapabilityLifecycleTestData.Baseline();
+        var index = new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]);
+        var registration = await enabledStore.PreviewAsync(new CapabilityLifecyclePreviewRequest("register-enabled", CapabilityLifecycleOperationKind.Upgrade, baseline.State.Descriptor.Id, baseline.State.Descriptor, baseline.State.ArtifactDigest), baseline, await index.CaptureAsync());
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, (await enabledStore.MutateAsync(registration, baseline, await index.CaptureAsync())).Status);
+        var before = await File.ReadAllTextAsync(enabledPaths.CapabilityLifecycleDocumentPath);
+        var beforeRead = await enabledStore.ReadAsync(baseline.State.Descriptor.Id);
+
+        var alreadyEnabled = await enabledStore.PreviewAsync(new CapabilityLifecyclePreviewRequest("fresh-enable-noop", CapabilityLifecycleOperationKind.Enable, baseline.State.Descriptor.Id, baseline.State.Descriptor, baseline.State.ArtifactDigest), baseline, await index.CaptureAsync());
+
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Invalid, alreadyEnabled.Status);
+        Assert.Equal(before, await File.ReadAllTextAsync(enabledPaths.CapabilityLifecycleDocumentPath));
+        Assert.Equal(beforeRead.LifecycleRevision, (await enabledStore.ReadAsync(baseline.State.Descriptor.Id)).LifecycleRevision);
+
+        using var disabledWorkspace = new TestWorkspace();
+        var disabledPaths = Prepare(disabledWorkspace);
+        var disabledBaseline = baseline with { State = baseline.State with { IsEnabled = false } };
+        var disabledStore = Store(disabledPaths, new StubCapabilityLifecycleBaselineSource { Baseline = disabledBaseline });
+        var wrong = await disabledStore.PreviewAsync(new CapabilityLifecyclePreviewRequest("wrong-enable-target", CapabilityLifecycleOperationKind.Enable, disabledBaseline.State.Descriptor.Id, CapabilityLifecycleTestData.Descriptor("2.0.0"), CapabilityLifecycleTestData.Digest("artifact-v2")), disabledBaseline, await index.CaptureAsync());
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Invalid, wrong.Status);
+
+        using var removedWorkspace = new TestWorkspace();
+        var removedPaths = Prepare(removedWorkspace);
+        var removedStore = Store(removedPaths);
+        var remove = await removedStore.PreviewAsync(new CapabilityLifecyclePreviewRequest("remove-before-enable", CapabilityLifecycleOperationKind.Remove, baseline.State.Descriptor.Id), baseline, await index.CaptureAsync());
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, (await removedStore.MutateAsync(remove, baseline, await index.CaptureAsync())).Status);
+        var tombstoned = await removedStore.PreviewAsync(new CapabilityLifecyclePreviewRequest("enable-tombstone", CapabilityLifecycleOperationKind.Enable, baseline.State.Descriptor.Id, baseline.State.Descriptor, baseline.State.ArtifactDigest), baseline, await index.CaptureAsync());
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Invalid, tombstoned.Status);
+    }
+
+    [Fact]
+    public async Task Enable_revalidates_exact_artifact_at_confirmation_and_can_resume_when_restored()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = Prepare(workspace);
+        var baseline = CapabilityLifecycleTestData.Baseline() with { State = CapabilityLifecycleTestData.Baseline().State with { IsEnabled = false } };
+        var evidence = new StubCapabilityLifecycleArtifactEvidenceSource();
+        var store = Store(paths, new StubCapabilityLifecycleBaselineSource { Baseline = baseline }, evidence);
+        var index = new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]);
+        var request = new CapabilityLifecyclePreviewRequest("enable-revalidate", CapabilityLifecycleOperationKind.Enable, baseline.State.Descriptor.Id, baseline.State.Descriptor, baseline.State.ArtifactDigest);
+        var preview = await store.PreviewAsync(request, baseline, await index.CaptureAsync());
+        var generation = (await store.ReadAsync(request.CapabilityId)).LifecycleRevision;
+        evidence.Evidence = new CapabilityLifecycleArtifactEvidence(CapabilityLifecycleArtifactEvidenceStatus.NotFound, "deleted");
+
+        Assert.Equal(CapabilityLifecycleMutationStatus.NotFound, (await store.MutateAsync(preview, baseline, await index.CaptureAsync())).Status);
+        Assert.Equal(generation, (await store.ReadAsync(request.CapabilityId)).LifecycleRevision);
+        evidence.Evidence = new CapabilityLifecycleArtifactEvidence(CapabilityLifecycleArtifactEvidenceStatus.Proved, "restored");
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, (await store.MutateAsync(preview, baseline, await index.CaptureAsync())).Status);
+    }
+
+    [Fact]
     public async Task Read_only_composition_refuses_mutation_and_mutable_composition_requires_authority_ports()
     {
         using var workspace = new TestWorkspace();
@@ -432,12 +604,17 @@ public sealed class CapabilityLifecycleMutationStoreTests
         var invalidIdentity = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest(string.Empty, CapabilityLifecycleOperationKind.Disable, id), null, snapshot);
         var missingUpgradeTarget = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest("missing-upgrade-target", CapabilityLifecycleOperationKind.Upgrade, id), null, snapshot);
         var unexpectedDisableTarget = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest("unexpected-disable-target", CapabilityLifecycleOperationKind.Disable, id, CapabilityLifecycleTestData.Descriptor(), CapabilityLifecycleTestData.Digest("unexpected")), null, snapshot);
+        var mismatchedSelection = new CapabilityLifecycleSelectionRequest("mismatched-selection", CapabilityLifecycleOperationKind.Upgrade, id, CapabilityLifecycleTestData.Descriptor("3.0.0").Version);
+        var mismatchedSelectionTarget = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest(mismatchedSelection.OperationId, mismatchedSelection.Kind, mismatchedSelection.CapabilityId, CapabilityLifecycleTestData.Descriptor("2.0.0"), CapabilityLifecycleTestData.Digest("artifact-v2"), mismatchedSelection), null, snapshot);
+        var invalidSelectionReplay = await store.TryReplaySelectionAsync(new CapabilityLifecycleSelectionRequest(string.Empty, CapabilityLifecycleOperationKind.Disable, id));
         var unknown = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest("unknown-capability", CapabilityLifecycleOperationKind.Disable, id), null, snapshot);
         var rollback = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest("rollback-without-history", CapabilityLifecycleOperationKind.Rollback, id), CapabilityLifecycleTestData.Baseline(), snapshot);
 
         Assert.Equal(CapabilityLifecyclePreviewStatus.Invalid, invalidIdentity.Status);
         Assert.Equal(CapabilityLifecyclePreviewStatus.Invalid, missingUpgradeTarget.Status);
         Assert.Equal(CapabilityLifecyclePreviewStatus.Invalid, unexpectedDisableTarget.Status);
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Invalid, mismatchedSelectionTarget.Status);
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Invalid, invalidSelectionReplay.Status);
         Assert.Equal(CapabilityLifecyclePreviewStatus.NotFound, unknown.Status);
         Assert.Equal(CapabilityLifecyclePreviewStatus.NotFound, rollback.Status);
         Assert.Equal(CapabilityLifecycleMutationStatus.Invalid, (await store.MutateAsync(invalidIdentity, CapabilityLifecycleTestData.Baseline(), snapshot)).Status);
@@ -450,20 +627,34 @@ public sealed class CapabilityLifecycleMutationStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = Prepare(workspace);
-        var store = Store(paths);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var store = new CapabilityLifecycleMutationStore(paths, trust, new StubCapabilityLifecycleBaselineSource(), new StubCapabilityLifecycleArtifactEvidenceSource());
         var index = new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]);
         var snapshot = await index.CaptureAsync();
         var request = new CapabilityLifecyclePreviewRequest("cancel-lifecycle-io", CapabilityLifecycleOperationKind.Disable, CapabilityLifecycleTestData.Descriptor().Id);
         var preview = await store.PreviewAsync(request, CapabilityLifecycleTestData.Baseline(), snapshot);
         var terminal = await store.MutateAsync(preview, CapabilityLifecycleTestData.Baseline(), snapshot);
         Assert.Equal(CapabilityLifecycleMutationStatus.Applied, terminal.Status);
-        using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
 
-        await Assert.ThrowsAsync<OperationCanceledException>(() => store.ReadAsync(request.CapabilityId, cancellation.Token));
-        await Assert.ThrowsAsync<OperationCanceledException>(() => store.PreviewAsync(new CapabilityLifecyclePreviewRequest("cancel-preview-io", CapabilityLifecycleOperationKind.Disable, request.CapabilityId), null, snapshot, cancellation.Token));
-        await Assert.ThrowsAsync<OperationCanceledException>(() => store.MutateAsync(preview, CapabilityLifecycleTestData.Baseline(), snapshot, cancellation.Token));
-        await Assert.ThrowsAsync<OperationCanceledException>(() => store.MarkOutcomeAuditedAsync(request.OperationId, cancellation.Token));
+        await AssertCanceledAsync(async token => _ = await store.ReadAsync(request.CapabilityId, token));
+        await AssertCanceledAsync(async token => _ = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest("cancel-preview-io", CapabilityLifecycleOperationKind.Disable, request.CapabilityId), null, snapshot, token));
+        await AssertCanceledAsync(async token => _ = await store.TryReplaySelectionAsync(new CapabilityLifecycleSelectionRequest(request.OperationId, request.Kind, request.CapabilityId), token));
+        await AssertCanceledAsync(async token => _ = await store.MutateAsync(preview, CapabilityLifecycleTestData.Baseline(), snapshot, token));
+        await AssertCanceledAsync(async token => _ = await store.MarkOutcomeAuditedAsync(request.OperationId, token));
+
+        async Task AssertCanceledAsync(Func<CancellationToken, Task> operation)
+        {
+            using var cancellation = new CancellationTokenSource();
+            trust.BeforeRead = _ => cancellation.Cancel();
+            try
+            {
+                await Assert.ThrowsAsync<OperationCanceledException>(() => operation(cancellation.Token));
+            }
+            finally
+            {
+                trust.BeforeRead = null;
+            }
+        }
     }
 
     [Fact]
@@ -477,6 +668,7 @@ public sealed class CapabilityLifecycleMutationStoreTests
 
         Assert.Equal(CapabilityLifecycleReadStatus.Unavailable, (await missing.ReadAsync(request.CapabilityId)).Status);
         Assert.Equal(CapabilityLifecyclePreviewStatus.Unavailable, (await missing.PreviewAsync(request, CapabilityLifecycleTestData.Baseline(), snapshot)).Status);
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Unavailable, (await missing.TryReplaySelectionAsync(new CapabilityLifecycleSelectionRequest(request.OperationId, request.Kind, request.CapabilityId))).Status);
         Assert.Equal(CapabilityLifecycleAuditMarkStatus.Unavailable, await missing.MarkOutcomeAuditedAsync(request.OperationId));
 
         using var preparedWorkspace = new TestWorkspace();

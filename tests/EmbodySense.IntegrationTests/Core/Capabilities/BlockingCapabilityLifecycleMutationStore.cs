@@ -31,6 +31,11 @@ internal sealed class BlockingCapabilityLifecycleMutationStore : ICapabilityLife
         throw new InvalidOperationException("Lifecycle previews are outside this ordering test.");
     }
 
+    public Task<CapabilityLifecyclePreview> TryReplaySelectionAsync(CapabilityLifecycleSelectionRequest request, CancellationToken cancellationToken = default)
+    {
+        throw new InvalidOperationException("Lifecycle selection replay is outside this ordering test.");
+    }
+
     public async Task<CapabilityLifecycleMutationResult> MutateAsync(CapabilityLifecyclePreview preview, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken = default)
     {
         _mutationEntered.TrySetResult();

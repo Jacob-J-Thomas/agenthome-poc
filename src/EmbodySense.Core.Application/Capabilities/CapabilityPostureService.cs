@@ -179,8 +179,13 @@ public sealed class CapabilityPostureService
             {
                 return new CapabilityPosturePreviewResult(CapabilityPostureReadStatus.Invalid, null, _invalidError);
             }
+            var currentlyEnabled = lifecycle.State?.IsEnabled ?? catalog.Entry.Lifecycle.Enablement == CapabilityEnablementState.Enabled;
+            if (query.Operation == CapabilityLifecycleOperationKind.Enable && currentlyEnabled)
+            {
+                return new CapabilityPosturePreviewResult(CapabilityPostureReadStatus.Invalid, null, _invalidError);
+            }
 
-            var targetVersion = ResolveTargetVersion(query, lifecycle);
+            var targetVersion = ResolveTargetVersion(query, lifecycle, current.Version);
             if (query.Operation is CapabilityLifecycleOperationKind.Upgrade or CapabilityLifecycleOperationKind.Rollback && targetVersion is null)
             {
                 return new CapabilityPosturePreviewResult(CapabilityPostureReadStatus.NotFound, null, _unavailableError);
@@ -432,10 +437,11 @@ public sealed class CapabilityPostureService
         return impacts;
     }
 
-    private static CapabilityVersion? ResolveTargetVersion(CapabilityPosturePreviewQuery query, CapabilityLifecycleReadResult lifecycle)
+    private static CapabilityVersion? ResolveTargetVersion(CapabilityPosturePreviewQuery query, CapabilityLifecycleReadResult lifecycle, CapabilityVersion currentVersion)
     {
         return query.Operation switch
         {
+            CapabilityLifecycleOperationKind.Enable => currentVersion,
             CapabilityLifecycleOperationKind.Upgrade => query.TargetVersion,
             CapabilityLifecycleOperationKind.Rollback => lifecycle.History.LastOrDefault()?.Descriptor.Version,
             _ => null
@@ -446,6 +452,7 @@ public sealed class CapabilityPostureService
     {
         return query.Operation switch
         {
+            CapabilityLifecycleOperationKind.Enable => true,
             CapabilityLifecycleOperationKind.Upgrade => true,
             CapabilityLifecycleOperationKind.Rollback => lifecycle.History.LastOrDefault() is { WasEnabled: true, WasRemoved: false },
             _ => false

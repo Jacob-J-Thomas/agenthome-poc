@@ -10,5 +10,7 @@ public enum CapabilityLifecycleOperationKind
     /// <summary>Disables use without deleting identity or provenance.</summary>
     Disable = 3,
     /// <summary>Tombstones the capability while preserving history and provenance.</summary>
-    Remove = 4
+    Remove = 4,
+    /// <summary>Enables the current proved descriptor and immutable artifact without changing authority.</summary>
+    Enable = 5
 }

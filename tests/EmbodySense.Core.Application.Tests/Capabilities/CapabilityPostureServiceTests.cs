@@ -241,6 +241,60 @@ public sealed class CapabilityPostureServiceTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task Enable_preview_projects_the_current_proved_version_and_preserves_compatible_dependents(bool hasLifecycleState)
+    {
+        var entry = CapabilityPostureTestData.Entry(enablement: hasLifecycleState ? CapabilityEnablementState.Enabled : CapabilityEnablementState.Disabled);
+        var lifecycle = new StubCapabilityLifecycleMutationStore();
+        if (hasLifecycleState)
+        {
+            lifecycle.ReadResult = CapabilityPostureTestData.Lifecycle(entry) with
+            {
+                State = CapabilityPostureTestData.Lifecycle(entry).State! with { IsEnabled = false }
+            };
+        }
+        var required = CapabilityPostureTestData.Dependent(entry.Descriptor.Id, CapabilityRequirementKind.Required, "[1.0.0]");
+        var index = new StubCapabilityDependentIndex { Snapshot = new CapabilityDependentIndexSnapshot(CapabilityDependentIndexStatus.Available, "sha256:enable-deps", [required], "available") };
+
+        var result = await Service(new StubCapabilityPostureCatalogStore { Entries = [entry] }, lifecycle, index)
+            .PreviewAsync(new CapabilityPosturePreviewQuery(entry.Descriptor.Id, CapabilityLifecycleOperationKind.Enable));
+
+        Assert.Equal(CapabilityPostureReadStatus.Available, result.Status);
+        Assert.Equal(entry.Descriptor.Version.Value, result.Preview?.TargetVersion);
+        Assert.False(result.Preview?.IsBlocked);
+        var impact = Assert.Single(result.Preview!.Impacts);
+        Assert.True(impact.IsCompatible);
+        Assert.Equal(CapabilityLifecycleImpactOutcome.Preserved, impact.Outcome);
+        Assert.Null(lifecycle.PreviewRequest);
+        Assert.Null(lifecycle.MutatedPreview);
+        Assert.Equal(0, lifecycle.AuditMarks);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Enable_preview_rejects_an_already_effectively_enabled_capability(bool hasLifecycleState)
+    {
+        var entry = CapabilityPostureTestData.Entry();
+        var lifecycle = new StubCapabilityLifecycleMutationStore();
+        if (hasLifecycleState)
+        {
+            lifecycle.ReadResult = CapabilityPostureTestData.Lifecycle(entry);
+        }
+
+        var result = await Service(new StubCapabilityPostureCatalogStore { Entries = [entry] }, lifecycle)
+            .PreviewAsync(new CapabilityPosturePreviewQuery(entry.Descriptor.Id, CapabilityLifecycleOperationKind.Enable));
+
+        Assert.Equal(CapabilityPostureReadStatus.Invalid, result.Status);
+        Assert.Null(result.Preview);
+        Assert.Equal("invalid_capability_posture_request", result.Error?.Code);
+        Assert.Null(lifecycle.PreviewRequest);
+        Assert.Null(lifecycle.MutatedPreview);
+        Assert.Equal(0, lifecycle.AuditMarks);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task Rollback_preview_blocks_required_dependents_when_the_immediately_prior_state_was_not_admitted(bool wasRemoved)
     {
         var entry = CapabilityPostureTestData.Entry();
