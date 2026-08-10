@@ -384,7 +384,12 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
             identity,
             shape.ArtifactIdentities,
             cancellationToken);
-        await ReconcilePendingTrustAsync(session, identity, shape.IntentIds, cancellationToken);
+        await ReconcilePendingTrustAsync(
+            session,
+            identity,
+            shape.IntentIds,
+            markDurableWorkStarted,
+            cancellationToken);
         var lifecycleMutation = mutation.LifecycleMutation;
         var operationId = lifecycleMutation.Operation.OperationId;
         var proposedPayloadHash = proposedGraph is null
@@ -485,7 +490,7 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
                     cancellationToken);
             }
 
-            var trust = await ReadOrInitializeTrustAsync(identity, cancellationToken);
+            var trust = await ReadOrInitializeTrustAsync(identity, markDurableWorkStarted, cancellationToken);
             var trustGeneration = checked(trust.CurrentGeneration + 1);
             GovernedLoopGraphRevisionArtifactDocument? artifactDocument = null;
             byte[]? artifactBytes = null;
@@ -551,7 +556,7 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
                 _paths.OperationPath(operationId),
                 GovernedLoopGraphRevisionStoreJson.Serialize(existingIntent),
                 cancellationToken);
-            await ReconcileIntentTrustAsync(existingIntent, cancellationToken);
+            await ReconcileIntentTrustAsync(existingIntent, markDurableWorkStarted, cancellationToken);
         }
 
         await ObserveAsync(GovernedLoopGraphRevisionPersistenceBoundary.LifecycleCommitStarting, cancellationToken);
@@ -567,15 +572,20 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
             committedOperation = TerminalOperation(existingIntent, committed.Operation);
         }
 
-        var permitsMissingSnapshot = committedOperation?.LifecycleOperation?.Evidence is
-        {
-            Outcome: GovernedLoopRevisionOperationOutcome.NotFound,
-            FailureCode: GovernedLoopRevisionOperationFailureCode.LifecycleNotFound,
-            PreviousHead: null,
-            ResultHead: null,
-        };
+        var terminalOperation = committedOperation?.LifecycleOperation;
+        var exactTerminalOperation = terminalOperation is not null
+            && string.Equals(terminalOperation.GraphId, lifecycleMutation.GraphId, StringComparison.Ordinal)
+            && Equals(terminalOperation.Evidence, lifecycleMutation.Operation);
+        var permitsMissingSnapshot = exactTerminalOperation
+            && terminalOperation!.Evidence is
+            {
+                Outcome: GovernedLoopRevisionOperationOutcome.NotFound,
+                FailureCode: GovernedLoopRevisionOperationFailureCode.LifecycleNotFound,
+                PreviousHead: null,
+                ResultHead: null,
+            };
         if (committed.Status is GovernedLoopRevisionStoreCommitStatus.Committed or GovernedLoopRevisionStoreCommitStatus.Replayed
-            && (committedOperation is null || (committedSnapshot is null && !permitsMissingSnapshot)))
+            && (!exactTerminalOperation || (committedSnapshot is null && !permitsMissingSnapshot)))
         {
             return Commit(GovernedLoopRevisionStoreCommitStatus.Ambiguous);
         }
@@ -711,9 +721,12 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
         GovernedLoopRevisionStoredOperation operation)
     {
         if (intent is null
+            || operation.Evidence is null
             || !string.Equals(intent.GraphId, operation.GraphId, StringComparison.Ordinal)
             || !string.Equals(intent.OperationId, operation.Evidence.OperationId, StringComparison.Ordinal)
-            || !string.Equals(intent.LifecycleRequestHash, operation.Evidence.RequestHash, StringComparison.Ordinal))
+            || !string.Equals(intent.LifecycleRequestHash, operation.Evidence.RequestHash, StringComparison.Ordinal)
+            || !GovernedLoopRevisionContractValidator.Validate(operation.Evidence).IsValid
+            || !EvidenceBelongsToGraph(operation.Evidence, operation.GraphId))
         {
             throw new FormatException("The visible lifecycle operation has no exact authenticated graph-authoring intent.");
         }
@@ -726,6 +739,24 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
             intent.AuthoringRequestHash,
             operation,
             intent.GraphValidationEvidenceHash);
+    }
+
+    private static bool EvidenceBelongsToGraph(
+        GovernedLoopRevisionOperationEvidence evidence,
+        string graphId)
+    {
+        var references = new[]
+        {
+            evidence.PreviousHead?.GraphId,
+            evidence.ResultHead?.GraphId,
+            evidence.CandidateRevision?.GraphId,
+            evidence.TargetRevision?.GraphId,
+            evidence.RollbackSourcePublication?.Revision.GraphId,
+        };
+        return references.Any(value => value is not null)
+            && references
+                .Where(value => value is not null)
+                .All(value => string.Equals(value, graphId, StringComparison.Ordinal));
     }
 
     private static GovernedLoopGraphRevisionStoredOperation PendingOperation(
@@ -831,21 +862,32 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
 
     private async Task<CapabilityCatalogTrustState> ReadOrInitializeTrustAsync(
         string workspaceIdentity,
+        Action markDurableWorkStarted,
         CancellationToken cancellationToken)
     {
-        return await _trustProvider.ReadAsync(workspaceIdentity, cancellationToken)
-            ?? await _trustProvider.InitializeAsync(
-                workspaceIdentity,
-                0,
-                _emptyTrustDigest,
-                cancellationToken);
+        var current = await _trustProvider.ReadAsync(workspaceIdentity, cancellationToken);
+        if (current is not null)
+        {
+            return current;
+        }
+
+        markDurableWorkStarted();
+        return await _trustProvider.InitializeAsync(
+            workspaceIdentity,
+            0,
+            _emptyTrustDigest,
+            cancellationToken);
     }
 
     private async Task ReconcileIntentTrustAsync(
         GovernedLoopGraphRevisionIntentDocument intent,
+        Action markDurableWorkStarted,
         CancellationToken cancellationToken)
     {
-        var current = await ReadOrInitializeTrustAsync(intent.WorkspaceIdentity, cancellationToken);
+        var current = await ReadOrInitializeTrustAsync(
+            intent.WorkspaceIdentity,
+            markDurableWorkStarted,
+            cancellationToken);
         if (current.CurrentGeneration == intent.TrustGeneration)
         {
             if (!string.Equals(current.CurrentContentDigest, intent.ContentDigest, StringComparison.Ordinal))
@@ -857,6 +899,7 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
 
         if (current.CurrentGeneration == intent.TrustGeneration - 1)
         {
+            markDurableWorkStarted();
             var advanced = await _trustProvider.AdvanceAsync(
                 intent.WorkspaceIdentity,
                 current.CurrentGeneration,
@@ -879,6 +922,7 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
         CapabilityCatalogPathSession session,
         string workspaceIdentity,
         IReadOnlyList<string> intentIds,
+        Action markDurableWorkStarted,
         CancellationToken cancellationToken)
     {
         var intents = new List<GovernedLoopGraphRevisionIntentDocument>(intentIds.Count);
@@ -888,7 +932,10 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
                 ?? throw new FormatException("A discovered graph-authoring intent disappeared during trust reconciliation."));
         }
 
-        var current = await ReadOrInitializeTrustAsync(workspaceIdentity, cancellationToken);
+        var current = await ReadOrInitializeTrustAsync(
+            workspaceIdentity,
+            markDurableWorkStarted,
+            cancellationToken);
         var currentDigests = intents
             .Where(intent => intent.TrustGeneration == current.CurrentGeneration)
             .Select(intent => intent.ContentDigest)
@@ -918,10 +965,12 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
             }
 
             var next = direct[0];
+            markDurableWorkStarted();
             await session.WriteBytesImmutablyAsync(
                 _paths.OperationPath(next.OperationId),
                 GovernedLoopGraphRevisionStoreJson.Serialize(next),
                 cancellationToken);
+            markDurableWorkStarted();
             var advanced = await _trustProvider.AdvanceAsync(
                 workspaceIdentity,
                 current.CurrentGeneration,

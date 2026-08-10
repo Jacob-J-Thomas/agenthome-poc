@@ -464,9 +464,9 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                 new GovernedLoopGraphRevisionStoreOptions { MaxStagingEntries = 1 })
             .CommitAsync(CreateDraft(graph, "create-two", HashA, HashB, 0, _time));
 
-        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Unavailable, bytesResult.Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, bytesResult.Status);
         Assert.False(File.Exists(ArtifactPath(bytesPaths, graph)));
-        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Unavailable, stagingResult.Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, stagingResult.Status);
         Assert.False(File.Exists(Path.Combine(operations, "create-two.json")));
     }
 
@@ -521,7 +521,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         var trust = new TestCapabilityLifecycleTrustProvider();
         var graph = Graph();
         var mutation = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
-        var barrier = new FailOnceDestinationDurabilityBarrier(ArtifactPath(paths, graph));
+        var barrier = new FailingDestinationDurabilityBarrier(ArtifactPath(paths, graph));
         var options = new GovernedLoopGraphRevisionStoreOptions
         {
             DurableBoundaryObserver = (boundary, _) =>
@@ -553,7 +553,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         var graph = Graph();
         var mutation = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
         var intentPath = Path.Combine(GraphRoot(paths), "operations", "create-one.json");
-        var barrier = new FailOnceDestinationDurabilityBarrier(intentPath);
+        var barrier = new FailingDestinationDurabilityBarrier(intentPath);
         var options = new GovernedLoopGraphRevisionStoreOptions
         {
             DurableBoundaryObserver = (boundary, _) =>
@@ -574,6 +574,62 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, recovered.Status);
         Assert.True(barrier.TargetFlushCount >= 2);
         Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, visible.Status);
+    }
+
+    [Fact]
+    public async Task Pending_intent_reflush_failure_remains_ambiguous_and_later_recovery_commits()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var mutation = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
+        var intentPath = Path.Combine(GraphRoot(paths), "operations", "create-one.json");
+        var barrier = new FailingDestinationDurabilityBarrier(intentPath, failureCount: 2);
+
+        var interrupted = await Store(paths, trust, durabilityBarrier: barrier).CommitAsync(mutation);
+        var reconciliationInterrupted = await Store(paths, trust, durabilityBarrier: barrier).CommitAsync(mutation);
+        var reconciliationFlushCount = barrier.TargetFlushCount;
+        var pending = await Store(paths, trust).ReadForMutationAsync(graph.GraphId, "create-one", HashA, HashB);
+        var recovered = await Store(paths, trust, durabilityBarrier: barrier).CommitAsync(mutation);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, interrupted.Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, reconciliationInterrupted.Status);
+        Assert.Equal(2, reconciliationFlushCount);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.NotFound, pending.Status);
+        Assert.Equal(GovernedLoopGraphRevisionOperationState.Pending, pending.ExistingOperation!.State);
+        Assert.Equal(HashA, pending.ExistingOperation.LifecycleRequestHash);
+        Assert.Equal(HashB, pending.ExistingOperation.AuthoringRequestHash);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, recovered.Status);
+        Assert.True(barrier.TargetFlushCount >= 4);
+        Assert.Equal(
+            GovernedLoopRevisionStoreReadStatus.Ready,
+            (await Store(paths, trust).ReadGraphAsync(graph.GraphId)).Status);
+    }
+
+    [Fact]
+    public async Task Trust_initialization_failure_after_possible_publication_is_ambiguous_and_recoverable()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider
+        {
+            AfterInitialize = _ => throw new IOException("Injected post-initialization availability failure."),
+        };
+        var graph = Graph();
+        var mutation = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
+
+        var interrupted = await Store(paths, trust).CommitAsync(mutation);
+        trust.AfterInitialize = null;
+        var recovered = await Store(paths, trust).CommitAsync(mutation);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, interrupted.Status);
+        Assert.Null(interrupted.Operation);
+        Assert.Null(interrupted.Snapshot);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, recovered.Status);
+        Assert.Equal(
+            GovernedLoopRevisionStoreReadStatus.Ready,
+            (await Store(paths, trust).ReadGraphAsync(graph.GraphId)).Status);
     }
 
     [Fact]
@@ -709,6 +765,64 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         Assert.Equal(GovernedLoopRevisionOperationOutcome.NotFound, result.Operation!.LifecycleOperation!.Evidence.Outcome);
         Assert.Equal(HashC, result.Operation.GraphValidationEvidenceHash);
         Assert.True(File.Exists(Path.Combine(GraphRoot(paths), "operations", "replace-one.json")));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Snapshotless_terminal_commit_with_malformed_or_missing_lifecycle_evidence_fails_closed(
+        bool missingEvidence)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var mutation = MissingReplace(Graph(), "replace-one", HashA, HashB, 0, _time);
+        var malformed = mutation.LifecycleMutation.Operation with
+        {
+            Kind = (GovernedLoopRevisionOperationKind)int.MaxValue,
+        };
+        var hostileEvidence = missingEvidence ? null! : malformed;
+        Assert.False(GovernedLoopRevisionContractValidator.Validate(hostileEvidence).IsValid);
+        var lifecycle = new InjectedGovernedLoopRevisionLifecycleStore(
+            mutation => SnapshotlessCommit(mutation, hostileEvidence, GovernedLoopRevisionStoreCommitStatus.Committed));
+        var store = new GovernedLoopGraphRevisionStore(paths, lifecycle, trust);
+
+        var result = await store.CommitAsync(mutation);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, result.Status);
+        Assert.Null(result.Operation);
+        Assert.Null(result.Snapshot);
+    }
+
+    [Theory]
+    [InlineData(GovernedLoopRevisionStoreCommitStatus.Committed)]
+    [InlineData(GovernedLoopRevisionStoreCommitStatus.Replayed)]
+    public async Task Snapshotless_terminal_commit_with_different_valid_lifecycle_evidence_fails_closed(
+        GovernedLoopRevisionStoreCommitStatus status)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var mutation = MissingReplace(graph, "replace-one", HashA, HashB, 0, _time);
+        var different = mutation.LifecycleMutation.Operation with
+        {
+            ActorId = "actor-two",
+            Kind = GovernedLoopRevisionOperationKind.CreateDraft,
+            CandidateRevision = Graph(revisionId: "other-candidate").RevisionReference,
+            TargetRevision = null,
+        };
+        Assert.True(GovernedLoopRevisionContractValidator.Validate(different).IsValid);
+        Assert.NotEqual(mutation.LifecycleMutation.Operation, different);
+        var lifecycle = new InjectedGovernedLoopRevisionLifecycleStore(
+            mutation => SnapshotlessCommit(mutation, different, status));
+        var store = new GovernedLoopGraphRevisionStore(paths, lifecycle, trust);
+
+        var result = await store.CommitAsync(mutation);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, result.Status);
+        Assert.Null(result.Operation);
+        Assert.Null(result.Snapshot);
     }
 
     [Fact]
@@ -916,6 +1030,46 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                 ? ValueTask.FromException(new IOException("Injected durable-boundary interruption."))
                 : ValueTask.CompletedTask,
         };
+
+    private static GovernedLoopRevisionStoreCommitResult SnapshotlessCommit(
+        GovernedLoopRevisionStoreMutation mutation,
+        GovernedLoopRevisionOperationEvidence evidence,
+        GovernedLoopRevisionStoreCommitStatus status)
+        => new(
+            status,
+            mutation.ExpectedStoreGeneration + 1,
+            new GovernedLoopRevisionStoredOperation(mutation.GraphId, evidence),
+            null);
+
+    private static GovernedLoopGraphRevisionStoreMutation MissingReplace(
+        GovernedLoopGraphDefinition graph,
+        string operationId,
+        string lifecycleRequestHash,
+        string authoringRequestHash,
+        long generation,
+        DateTimeOffset time)
+    {
+        var committedShape = CreateDraft(
+            graph,
+            operationId,
+            lifecycleRequestHash,
+            authoringRequestHash,
+            generation,
+            time);
+        var operation = committedShape.LifecycleMutation.Operation with
+        {
+            Kind = GovernedLoopRevisionOperationKind.ReplaceDraft,
+            Outcome = GovernedLoopRevisionOperationOutcome.NotFound,
+            FailureCode = GovernedLoopRevisionOperationFailureCode.LifecycleNotFound,
+            ResultHead = null,
+            TargetRevision = Graph(graph.GraphId, "missing-revision").RevisionReference,
+        };
+        return new GovernedLoopGraphRevisionStoreMutation(
+            new GovernedLoopRevisionStoreMutation(graph.GraphId, generation, operation, null, null),
+            null,
+            authoringRequestHash,
+            HashC);
+    }
 
     private static GovernedLoopGraphRevisionStoreMutation CreateDraft(
         GovernedLoopGraphDefinition graph,
@@ -1462,7 +1616,9 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         public override DateTimeOffset GetUtcNow() => now;
     }
 
-    private sealed class FailOnceDestinationDurabilityBarrier(string destination) : ICapabilityCatalogDurabilityBarrier
+    private sealed class FailingDestinationDurabilityBarrier(
+        string destination,
+        int failureCount = 1) : ICapabilityCatalogDurabilityBarrier
     {
         public int TargetFlushCount { get; private set; }
 
@@ -1493,8 +1649,8 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             }
 
             TargetFlushCount++;
-            return TargetFlushCount == 1
-                ? ValueTask.FromException(new IOException("Injected first final-destination durability failure."))
+            return TargetFlushCount <= failureCount
+                ? ValueTask.FromException(new IOException("Injected final-destination durability failure."))
                 : ValueTask.CompletedTask;
         }
     }
