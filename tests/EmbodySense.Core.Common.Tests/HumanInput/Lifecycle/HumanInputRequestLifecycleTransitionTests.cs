@@ -80,7 +80,7 @@ public sealed class HumanInputRequestLifecycleTransitionTests
         {
             RequestVersionId = "version-two",
             Prompt = "Changed prompt.",
-            EligibleRespondents = [new HumanInputEligibleRespondent("user-two", "route-two")]
+            EligibleRespondents = [new HumanInputEligibleRespondent("user-two", "role-two", "route-two")]
         });
         AssertInvalid(Amend(previous, rerouted), HumanInputRequestLifecycleValidationErrorCode.RequestMutationOutsideOperation);
 

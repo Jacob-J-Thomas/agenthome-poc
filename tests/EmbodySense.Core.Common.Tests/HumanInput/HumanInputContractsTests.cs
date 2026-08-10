@@ -40,11 +40,11 @@ public sealed class HumanInputContractsTests
             request with { Prompt = "different prompt" },
             request with { ResponseSchema = TextSchema(65) },
             request with { PrivacyClass = HumanInputPrivacyClass.Sensitive },
-            request with { EligibleRespondents = [new HumanInputEligibleRespondent("user-other", "route-one")] },
-            request with { EligibleRespondents = [new HumanInputEligibleRespondent("user-one", "route-other")] },
+            request with { EligibleRespondents = [new HumanInputEligibleRespondent("user-other", "role-one", "route-one")] },
+            request with { EligibleRespondents = [new HumanInputEligibleRespondent("user-one", "role-one", "route-other")] },
             request with { Timing = request.Timing with { RequestedAtUtc = request.Timing.RequestedAtUtc.AddSeconds(1) } },
             request with { Timing = request.Timing with { ExpiresAtUtc = request.Timing.ExpiresAtUtc.AddMinutes(-1) } },
-            request with { ResponsePolicy = new HumanInputResponsePolicy(HumanInputResponsePolicyKind.Unknown) },
+            request with { ResponsePolicy = new HumanInputResponsePolicy(HumanInputResponsePolicyKind.Unknown, null, null) },
             request with { ContinuationBinding = request.ContinuationBinding with { Kind = HumanInputContinuationPolicyKind.Unknown } },
             request with { ContinuationBinding = request.ContinuationBinding with { NodeId = "node-other" } },
             request with { ContinuationBinding = request.ContinuationBinding with { CheckpointId = "checkpoint-other" } }
@@ -153,7 +153,7 @@ public sealed class HumanInputContractsTests
         {
             PrivacyClass = (HumanInputPrivacyClass)99,
             ResponseSchema = new HumanInputResponseSchema((HumanInputResponseKind)99, null, null, null, null),
-            EligibleRespondents = [new HumanInputEligibleRespondent("user-one", "route-one"), new HumanInputEligibleRespondent("user-one", "route-one")],
+            EligibleRespondents = [new HumanInputEligibleRespondent("user-one", "role-one", "route-one"), new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
             Timing = new HumanInputTiming(_at, _at.Add(HumanInputLimits.MaxResponseWindow).AddTicks(1)),
             ContinuationBinding = new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, "node-other", "checkpoint-one")
         };
@@ -373,11 +373,11 @@ public sealed class HumanInputContractsTests
         var maximumRoute = new string('r', HumanInputLimits.MaxRoutingReferenceCharacters);
         var routed = HumanInputRequestHash.Apply(Request(HumanInputResponseKind.Text) with
         {
-            EligibleRespondents = [new HumanInputEligibleRespondent("user-one", maximumRoute)]
+            EligibleRespondents = [new HumanInputEligibleRespondent("user-one", "role-one", maximumRoute)]
         });
         var oversizedRoute = routed with
         {
-            EligibleRespondents = [new HumanInputEligibleRespondent("user-one", maximumRoute + "r")]
+            EligibleRespondents = [new HumanInputEligibleRespondent("user-one", "role-one", maximumRoute + "r")]
         };
         Assert.True(HumanInputValidator.ValidateRequest(routed).IsValid);
         Assert.Throws<ArgumentException>(() => HumanInputRequestHash.Compute(oversizedRoute));
@@ -405,8 +405,8 @@ public sealed class HumanInputContractsTests
         {
             EligibleRespondents =
             [
-                new HumanInputEligibleRespondent(oversizedId, oversizedRoute),
-                new HumanInputEligibleRespondent(oversizedId, oversizedRoute)
+                new HumanInputEligibleRespondent(oversizedId, oversizedId, oversizedRoute),
+                new HumanInputEligibleRespondent(oversizedId, oversizedId, oversizedRoute)
             ]
         };
 
@@ -637,7 +637,7 @@ public sealed class HumanInputContractsTests
 
     private static HumanInputEligibleRespondent[] Respondents(int count)
     {
-        return Enumerable.Range(0, count).Select(index => new HumanInputEligibleRespondent($"user-{index}", $"route-{index}")).ToArray();
+        return Enumerable.Range(0, count).Select(index => new HumanInputEligibleRespondent($"user-{index}", $"role-{index}", $"route-{index}")).ToArray();
     }
 
     private static HumanInputRequest Request(HumanInputResponseKind kind)
@@ -655,7 +655,7 @@ public sealed class HumanInputContractsTests
             HumanInputResponseKind.Reference => new HumanInputResponseSchema(kind, null, null, null, new HumanInputReferencePolicy(HumanInputReferenceKind.Reference, 64)),
             _ => throw new ArgumentOutOfRangeException(nameof(kind))
         };
-        var request = new HumanInputRequest(1, "request-one", "request-version-one", new HumanInputRequestBinding("workspace-one", "governed-loop", "revision-one", "node-one", "run-one", "checkpoint-one"), "Collect data", "Provide data only.", schema, HumanInputPrivacyClass.Private, [new HumanInputEligibleRespondent("user-one", "route-one")], new HumanInputTiming(_at, _at.AddHours(1)), new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstEligibleResponse), new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, "node-one", "checkpoint-one"), string.Empty);
+        var request = new HumanInputRequest(1, "request-one", "request-version-one", new HumanInputRequestBinding("workspace-one", "governed-loop", "revision-one", "node-one", "run-one", "checkpoint-one"), "Collect data", "Provide data only.", schema, HumanInputPrivacyClass.Private, [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")], new HumanInputTiming(_at, _at.AddHours(1)), new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null), new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, "node-one", "checkpoint-one"), string.Empty);
         return HumanInputRequestHash.Apply(request);
     }
 
@@ -672,6 +672,6 @@ public sealed class HumanInputContractsTests
             HumanInputResponseKind.Reference => new HumanInputResponseValue(HumanInputResponseKind.Reference, null, null, null, null, new HumanInputReference(HumanInputReferenceKind.Reference, "artifact-one")),
             _ => throw new ArgumentOutOfRangeException()
         };
-        return new HumanInputResponse(request.RequestId, request.RequestVersionId, request.Binding, "user-one", _at.AddMinutes(1), value, null);
+        return new HumanInputResponse(request.RequestId, request.RequestVersionId, request.Binding, "user-one", "role-one", _at.AddMinutes(1), value, null);
     }
 }

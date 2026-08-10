@@ -379,7 +379,7 @@ public sealed class HumanInputRequestLifecycleEvidenceTests
     [Fact]
     public void Evidence_text_is_value_free_and_omits_actor_reason_grant_and_heads()
     {
-        var request = HumanInputLifecycleTestData.Request(prompt: "prompt-canary", respondents: [new("user-one", "route-canary")]);
+        var request = HumanInputLifecycleTestData.Request(prompt: "prompt-canary", respondents: [new("user-one", "role-one", "route-canary")]);
         var previous = HumanInputLifecycleTestData.Head(request);
         var result = previous with { LifecycleVersion = 2, LastOperationId = "operation-two", UpdatedAtUtc = HumanInputLifecycleTestData.Now.AddMinutes(1) };
         var evidence = HumanInputLifecycleTestData.Evidence(HumanInputRequestLifecycleOperationKind.Remind, previous, result);
