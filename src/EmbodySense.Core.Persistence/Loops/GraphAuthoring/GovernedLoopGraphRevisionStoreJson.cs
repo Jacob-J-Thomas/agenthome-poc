@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -33,14 +34,14 @@ internal static class GovernedLoopGraphRevisionStoreJson
     {
         ArgumentNullException.ThrowIfNull(document);
         var json = ToJson(document) with { ContentDigest = string.Empty, AuthenticationTag = string.Empty };
-        return Digest(JsonSerializer.SerializeToUtf8Bytes(json, _hashOptions));
+        return CapabilityIntegrityDigest.Compute(JsonSerializer.SerializeToUtf8Bytes(json, _hashOptions)).Value;
     }
 
     public static string ComputeContentDigest(GovernedLoopGraphRevisionIntentDocument document)
     {
         ArgumentNullException.ThrowIfNull(document);
         var json = ToJson(document) with { ContentDigest = string.Empty, AuthenticationTag = string.Empty };
-        return Digest(JsonSerializer.SerializeToUtf8Bytes(json, _hashOptions));
+        return CapabilityIntegrityDigest.Compute(JsonSerializer.SerializeToUtf8Bytes(json, _hashOptions)).Value;
     }
 
     public static string ComputePayloadHash(GovernedLoopGraphDefinition graph)
@@ -96,7 +97,7 @@ internal static class GovernedLoopGraphRevisionStoreJson
             || !IsHash(json.ExecutableHash)
             || !IsHash(json.LayoutHash)
             || !IsHash(json.PayloadHash)
-            || !IsHash(json.ContentDigest)
+            || !IsIntegrityDigest(json.ContentDigest)
             || string.IsNullOrEmpty(json.AuthenticationTag))
         {
             throw new FormatException("The governed-loop graph-revision artifact envelope is invalid.");
@@ -149,7 +150,7 @@ internal static class GovernedLoopGraphRevisionStoreJson
             || !IsHash(json.AuthoringRequestHash)
             || json.GraphPayloadHash is not null && !IsHash(json.GraphPayloadHash)
             || json.GraphValidationEvidenceHash is not null && !IsHash(json.GraphValidationEvidenceHash)
-            || !IsHash(json.ContentDigest)
+            || !IsIntegrityDigest(json.ContentDigest)
             || string.IsNullOrEmpty(json.AuthenticationTag))
         {
             throw new FormatException("The governed-loop graph-authoring intent is invalid.");
@@ -375,6 +376,9 @@ internal static class GovernedLoopGraphRevisionStoreJson
     private static bool IsHash(string? value)
         => value is { Length: GovernedLoopRevisionContractLimits.Sha256HexCharacters }
             && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool IsIntegrityDigest(string? value)
+        => CapabilityIntegrityDigest.TryParse(value, out _, out _);
 
     private static bool IsWorkspaceIdentity(string? value)
         => value is { Length: 71 }

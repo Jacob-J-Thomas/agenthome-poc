@@ -1,8 +1,15 @@
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Application.Loops.GraphValidation;
+using EmbodySense.Core.Application.Loops.GraphValidation.Models;
+using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models;
@@ -62,6 +69,51 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         Assert.DoesNotContain("createdAtUtc", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("createdByActorId", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("creationOperationId", payload, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task File_trust_provider_supports_create_restart_and_exact_replay_with_canonical_digests()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trustRoot = Path.Combine(workspace.ServerStatePath, "graph-revision-trust");
+        var graph = Graph();
+        var mutation = CreateDraft(graph, "create-file-trust", HashA, HashB, 0, _time);
+
+        var firstTrust = new FileCapabilityCatalogTrustProvider(trustRoot);
+        var firstAuthority = new CapabilityAuthorityTransaction(paths);
+        var firstLifecycle = new GovernedLoopRevisionLifecycleStore(
+            paths,
+            firstTrust,
+            authorityTransaction: firstAuthority);
+        var committed = await new GovernedLoopGraphRevisionStore(
+            paths,
+            firstLifecycle,
+            firstTrust,
+            authorityTransaction: firstAuthority).CommitAsync(mutation);
+
+        var restartedTrust = new FileCapabilityCatalogTrustProvider(trustRoot);
+        var restartedAuthority = new CapabilityAuthorityTransaction(paths);
+        var restartedLifecycle = new GovernedLoopRevisionLifecycleStore(
+            paths,
+            restartedTrust,
+            authorityTransaction: restartedAuthority);
+        var restarted = new GovernedLoopGraphRevisionStore(
+            paths,
+            restartedLifecycle,
+            restartedTrust,
+            authorityTransaction: restartedAuthority);
+        var replayed = await restarted.CommitAsync(mutation);
+        var read = await restarted.ReadArtifactAsync(graph.RevisionReference);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, committed.Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Replayed, replayed.Status);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, read.Status);
+        using var artifactJson = JsonDocument.Parse(await File.ReadAllBytesAsync(ArtifactPath(paths, graph)));
+        Assert.Matches("^sha256:[0-9a-f]{64}$", artifactJson.RootElement.GetProperty("contentDigest").GetString());
+        using var intentJson = JsonDocument.Parse(await File.ReadAllBytesAsync(
+            Path.Combine(GraphRoot(paths), "operations", "create-file-trust.json")));
+        Assert.Matches("^sha256:[0-9a-f]{64}$", intentJson.RootElement.GetProperty("contentDigest").GetString());
     }
 
     [Fact]
@@ -181,8 +233,8 @@ public sealed class GovernedLoopGraphRevisionStoreTests
 
         Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, interrupted.Status);
         Assert.Equal(GovernedLoopGraphRevisionOperationState.Pending, exact.ExistingOperation!.State);
-        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ambiguous, changedAuthoring.Status);
-        Assert.Null(changedAuthoring.ExistingOperation);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.NotFound, changedAuthoring.Status);
+        Assert.Equal(HashB, changedAuthoring.ExistingOperation!.AuthoringRequestHash);
         Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, recovered.Status);
     }
 
@@ -324,6 +376,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
     [InlineData("duplicate")]
     [InlineData("unknown")]
     [InlineData("noncanonical")]
+    [InlineData("raw-content-digest")]
     public async Task Malformed_or_noncanonical_payloads_are_never_projected(string corruption)
     {
         using var workspace = new TestWorkspace();
@@ -343,6 +396,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             "duplicate" => Encoding.UTF8.GetBytes(text.Replace("{\n", "{\n  \"schemaVersion\": 1,\n", StringComparison.Ordinal)),
             "unknown" => Encoding.UTF8.GetBytes(text.Replace("{\n", "{\n  \"unknown\": true,\n", StringComparison.Ordinal)),
             "noncanonical" => Encoding.UTF8.GetBytes(text.Replace("\n", "\r\n", StringComparison.Ordinal)),
+            "raw-content-digest" => Encoding.UTF8.GetBytes(text.Replace("\"contentDigest\": \"sha256:", "\"contentDigest\": \"", StringComparison.Ordinal)),
             _ => throw new ArgumentOutOfRangeException(nameof(corruption)),
         };
         await File.WriteAllBytesAsync(path, bytes);
@@ -413,6 +467,137 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         Assert.False(File.Exists(ArtifactPath(bytesPaths, graph)));
         Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Unavailable, stagingResult.Status);
         Assert.False(File.Exists(Path.Combine(operations, "create-two.json")));
+    }
+
+    [Fact]
+    public async Task Exact_ready_stage_recovers_at_one_entry_and_exact_workspace_byte_limits()
+    {
+        using var measurementWorkspace = new TestWorkspace();
+        var measurementPaths = new WorkspacePaths(measurementWorkspace.RootPath);
+        var graph = Graph();
+        var mutation = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
+        Assert.Equal(
+            GovernedLoopRevisionStoreCommitStatus.Committed,
+            (await Store(measurementPaths, new TestCapabilityLifecycleTrustProvider()).CommitAsync(mutation)).Status);
+        var intentLength = new FileInfo(Path.Combine(GraphRoot(measurementPaths), "operations", "create-one.json")).Length;
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var interrupted = await Store(paths, trust, FailAt(GovernedLoopGraphRevisionPersistenceBoundary.ArtifactPublished))
+            .CommitAsync(mutation);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, interrupted.Status);
+        var artifactPath = ArtifactPath(paths, graph);
+        var artifactBytes = await File.ReadAllBytesAsync(artifactPath);
+        var readyPath = ImmutableReadyPath(artifactPath, artifactBytes);
+        File.Move(artifactPath, readyPath);
+
+        var recovered = await Store(
+                paths,
+                trust,
+                new GovernedLoopGraphRevisionStoreOptions
+                {
+                    MaxStagingEntries = 1,
+                    MaxWorkspaceUtf8Bytes = artifactBytes.LongLength + intentLength,
+                })
+            .CommitAsync(mutation);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, recovered.Status);
+        Assert.True(File.Exists(artifactPath));
+        Assert.False(File.Exists(readyPath));
+        Assert.Equal(
+            artifactBytes.LongLength + intentLength,
+            Directory.EnumerateFiles(GraphRoot(paths), "*", SearchOption.AllDirectories)
+                .Where(path => !path.EndsWith(".mutations.lock", StringComparison.Ordinal))
+                .Sum(path => new FileInfo(path).Length));
+    }
+
+    [Fact]
+    public async Task Mutation_read_returns_authenticated_bound_operation_for_changed_request_identity()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var mutation = CreateDraft(graph, "shared-operation", HashA, HashB, 0, _time);
+        var store = Store(paths, trust);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, (await store.CommitAsync(mutation)).Status);
+
+        var changedAuthoring = await store.ReadForMutationAsync(graph.GraphId, "shared-operation", HashA, HashC);
+        var changedLifecycle = await store.ReadForMutationAsync(graph.GraphId, "shared-operation", HashC, HashB);
+        var changedGraph = await store.ReadForMutationAsync("other-graph", "shared-operation", HashA, HashB);
+
+        foreach (var read in new[] { changedAuthoring, changedLifecycle, changedGraph })
+        {
+            Assert.NotEqual(GovernedLoopRevisionStoreReadStatus.Ambiguous, read.Status);
+            Assert.Equal(GovernedLoopGraphRevisionOperationState.Terminal, read.ExistingOperation!.State);
+            Assert.Equal(graph.GraphId, read.ExistingOperation.GraphId);
+            Assert.Equal(HashA, read.ExistingOperation.LifecycleRequestHash);
+            Assert.Equal(HashB, read.ExistingOperation.AuthoringRequestHash);
+        }
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.NotFound, changedGraph.Status);
+    }
+
+    [Fact]
+    public async Task Post_publication_hard_link_substitution_is_removed_without_poisoning_the_destination()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var graph = Graph();
+        var destination = ArtifactPath(paths, graph);
+        var external = Path.Combine(workspace.RootPath, "external-substitute.json");
+        var retained = Path.Combine(workspace.RootPath, "retained-valid-artifact.json");
+        await File.WriteAllTextAsync(external, "attacker-controlled");
+        var observer = new HardLinkingPublicationObserver(destination, external, retained);
+
+        var result = await Store(
+                paths,
+                new TestCapabilityLifecycleTrustProvider(),
+                new GovernedLoopGraphRevisionStoreOptions { PathObserver = observer })
+            .CommitAsync(CreateDraft(graph, "create-one", HashA, HashB, 0, _time));
+
+        Assert.True(observer.Substituted);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, result.Status);
+        Assert.False(File.Exists(destination));
+        Assert.True(File.Exists(retained));
+        Assert.Equal("attacker-controlled", await File.ReadAllTextAsync(external));
+    }
+
+    [Fact]
+    public async Task Real_authoring_service_classifies_changed_reused_operation_as_conflict()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var authorityTransaction = new CapabilityAuthorityTransaction(paths);
+        var lifecycleStore = new GovernedLoopRevisionLifecycleStore(
+            paths,
+            trust,
+            authorityTransaction: authorityTransaction);
+        var graphStore = new GovernedLoopGraphRevisionStore(
+            paths,
+            lifecycleStore,
+            trust,
+            authorityTransaction: authorityTransaction);
+        var graph = Graph();
+        var candidate = Candidate(graph);
+        var service = AuthoringService(graphStore, graph, authorityTransaction);
+        var lifecycle = CreateRequest("shared-operation", graph);
+
+        var committed = await service.MutateAsync(new GovernedLoopGraphAuthoringRequest(1, lifecycle, candidate));
+        var changedGraph = Graph(display: Display("Changed layout", 700, 800));
+        var conflict = await service.MutateAsync(new GovernedLoopGraphAuthoringRequest(
+            1,
+            lifecycle,
+            Candidate(changedGraph)));
+        var persisted = await graphStore.ReadGraphAsync(graph.GraphId);
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, committed.Status);
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Conflict, conflict.Status);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, persisted.Status);
+        var persistedDisplay = Assert.Single(persisted.Snapshot!.Artifacts).Graph.DisplayMetadata;
+        Assert.Equal(graph.DisplayMetadata.DisplayName, persistedDisplay.DisplayName);
+        Assert.Equal(graph.DisplayMetadata.Nodes[0].CanvasX, persistedDisplay.Nodes[0].CanvasX);
     }
 
     [Fact]
@@ -673,6 +858,111 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             HashC);
     }
 
+    private static GovernedLoopGraphAuthoringService AuthoringService(
+        GovernedLoopGraphRevisionStore store,
+        GovernedLoopGraphDefinition graph,
+        ICapabilityAuthorityTransaction authorityTransaction)
+    {
+        var schemas = graph.ValueSchemas.ToDictionary(schema => schema.Id, schema => schema.Kind, StringComparer.Ordinal);
+        var terminals = graph.TerminalNodeIds.ToHashSet(StringComparer.Ordinal);
+        var descriptors = graph.Nodes.Select(node =>
+        {
+            var outcomes = graph.ControlEdges
+                .Where(edge => edge.FromNodeId == node.Id)
+                .Select(edge => edge.Condition)
+                .Distinct()
+                .Order()
+                .ToArray();
+            return new GovernedLoopNodeCatalogDescriptor(
+                node.Descriptor,
+                true,
+                true,
+                string.Equals(node.Id, graph.EntryNodeId, StringComparison.Ordinal),
+                terminals.Contains(node.Id),
+                outcomes,
+                outcomes,
+                GovernedLoopJoinPolicy.None,
+                0,
+                false,
+                null,
+                null,
+                node.Ports.Select(port => new GovernedLoopCatalogPortContract(
+                    port.Id,
+                    port.Direction,
+                    port.BindingKind,
+                    schemas[port.ValueSchemaId],
+                    port.Required)).ToArray(),
+                node.Parameters.Select(parameter => new GovernedLoopCatalogParameterContract(
+                    parameter.Key,
+                    GovernedLoopParameterValueKind.Text,
+                    true,
+                    1,
+                    CustomLoopLimits.MaxGraphParameterValueCharacters,
+                    null,
+                    null,
+                    [])).ToArray(),
+                node.AuthorityCeiling.CapabilityIds,
+                new GovernedLoopNodeResourceBudget(0, 0, 0, 0));
+        }).ToArray();
+        var validation = new GovernedLoopGraphValidationService(
+            new FixedNodeCatalog(new GovernedLoopNodeCatalogSnapshot(true, "catalog-one", descriptors)),
+            new FixedAuthorityProvider(new GovernedLoopAuthoritySnapshot(
+                true,
+                "authority-one",
+                graph.OwningRoleId,
+                graph.AuthorityCeiling.CapabilityIds,
+                CustomLoopLimits.MaxGraphNodeAttempts,
+                100_000,
+                CustomLoopLimits.MaxGraphNodeEvidenceItems,
+                100)));
+        return new GovernedLoopGraphAuthoringService(
+            store,
+            validation,
+            new AuthorizedActor(),
+            authorityTransaction,
+            new FixedTimeProvider(_time));
+    }
+
+    private static GovernedLoopGraphCandidate Candidate(GovernedLoopGraphDefinition graph)
+        => new(
+            graph.SchemaVersion,
+            graph.GraphId,
+            graph.RevisionId,
+            graph.Purpose,
+            graph.OwningRoleId,
+            graph.EntryNodeId,
+            graph.TerminalNodeIds,
+            graph.AuthorityCeiling,
+            graph.ValueSchemas,
+            graph.Nodes,
+            graph.ControlEdges,
+            graph.Bindings,
+            graph.OutputContract,
+            graph.DisplayMetadata);
+
+    private static GovernedLoopRevisionLifecycleRequest CreateRequest(
+        string operationId,
+        GovernedLoopGraphDefinition graph)
+        => new(
+            1,
+            operationId,
+            GovernedLoopRevisionOperationKind.CreateDraft,
+            graph.GraphId,
+            Actor(),
+            GovernedLoopRevisionLifecycleStatus.Unknown,
+            0,
+            null,
+            null,
+            graph.RevisionReference,
+            null,
+            null);
+
+    private static AuthorityActorId Actor()
+    {
+        Assert.True(AuthorityActorId.TryParse("actor-one", out var actor, out _));
+        return actor!;
+    }
+
     private static GovernedLoopGraphDefinition Graph(
         string graphId = "graph-one",
         string revisionId = "revision-one",
@@ -818,6 +1108,14 @@ public sealed class GovernedLoopGraphRevisionStoreTests
     private static string ArtifactPath(WorkspacePaths paths, GovernedLoopGraphDefinition graph)
         => Path.Combine(GraphRoot(paths), "artifacts", graph.GraphId, graph.RevisionId + ".json");
 
+    private static string ImmutableReadyPath(string destinationPath, byte[] content)
+    {
+        var digest = Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+        return Path.Combine(
+            Path.GetDirectoryName(destinationPath)!,
+            $".{Path.GetFileName(destinationPath)}.{digest}.ready");
+    }
+
     private static async Task<long> IntentTrustGenerationAsync(WorkspacePaths paths, string operationId)
     {
         var bytes = await File.ReadAllBytesAsync(
@@ -825,4 +1123,91 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         using var document = JsonDocument.Parse(bytes);
         return document.RootElement.GetProperty("trustGeneration").GetInt64();
     }
+
+    private sealed class FixedNodeCatalog(GovernedLoopNodeCatalogSnapshot snapshot) : IGovernedLoopNodeCatalog
+    {
+        public Task<GovernedLoopNodeCatalogSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(snapshot);
+    }
+
+    private sealed class FixedAuthorityProvider(GovernedLoopAuthoritySnapshot snapshot) : IGovernedLoopAuthoritySnapshotProvider
+    {
+        public Task<GovernedLoopAuthoritySnapshot> GetSnapshotAsync(string roleId, CancellationToken cancellationToken = default)
+        {
+            _ = roleId;
+            return Task.FromResult(snapshot);
+        }
+    }
+
+    private sealed class AuthorizedActor : IGovernedLoopRevisionActorAuthorizer
+    {
+        public Task<GovernedLoopRevisionActorAuthorization> AuthorizeAsync(
+            GovernedLoopRevisionActorAuthorizationRequest request,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(new GovernedLoopRevisionActorAuthorization(
+                GovernedLoopRevisionActorAuthorizationStatus.Authorized,
+                request.Request.OperationId,
+                request.RequestHash,
+                request.Request.ActorId,
+                HashA));
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private sealed class HardLinkingPublicationObserver(
+        string destination,
+        string external,
+        string retained) : ICapabilityCatalogPathObserver
+    {
+        public bool Substituted { get; private set; }
+
+        public void BeforeDirectoryChildOpen(string parentPath, string childName)
+        {
+            _ = parentPath;
+            _ = childName;
+        }
+
+        public void BeforeFileChildOpen(string parentPath, string childName)
+        {
+            if (Substituted
+                || !string.Equals(Path.Combine(parentPath, childName), destination, PathComparison())
+                || !File.Exists(destination))
+            {
+                return;
+            }
+
+            File.Move(destination, retained);
+            CreateHardLink(destination, external);
+            Substituted = true;
+        }
+
+        public void AfterFileChildOpen(string parentPath, string childName)
+        {
+            _ = parentPath;
+            _ = childName;
+        }
+    }
+
+    private static void CreateHardLink(string linkPath, string existingPath)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.True(WindowsCreateHardLink(linkPath, existingPath, IntPtr.Zero));
+            return;
+        }
+
+        Assert.Equal(0, UnixCreateHardLink(existingPath, linkPath));
+    }
+
+    private static StringComparison PathComparison()
+        => OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateHardLinkW")]
+    private static extern bool WindowsCreateHardLink(string fileName, string existingFileName, IntPtr securityAttributes);
+
+    [DllImport("libc", SetLastError = true, EntryPoint = "link")]
+    private static extern int UnixCreateHardLink(string existingPath, string newPath);
 }

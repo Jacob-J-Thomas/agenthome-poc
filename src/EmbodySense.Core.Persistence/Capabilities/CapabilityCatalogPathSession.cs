@@ -458,6 +458,11 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
                     ownsWriting = false;
                     mayCleanupReady = true;
                     await _durabilityBarrier.FlushAfterRenameAsync(readyPath, parent);
+                    ready = await ReadAllBytesAsync(readyPath, content.Length, allowEmpty: content.Length == 0, missingIsNull: false, cancellationToken, requireStableBinding: true);
+                    if (ready is null || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(ready, content))
+                    {
+                        throw new IOException("Capability catalog immutable-artifact ready stage changed after retained-handle publication.");
+                    }
                 }
                 else
                 {
@@ -481,10 +486,18 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             if (CapabilityCatalogNativeFileSystem.TryMoveFileNoReplace(readyPath, safePath, parent, readyName, destinationName))
             {
                 mayCleanupReady = false;
-                var published = await ReadAllBytesAsync(safePath, content.Length, allowEmpty: content.Length == 0, missingIsNull: false, cancellationToken, requireStableBinding: true);
-                if (published is null || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(published, content))
+                try
                 {
-                    throw new IOException("Capability catalog immutable artifact changed during retained-handle publication.");
+                    var published = await ReadAllBytesAsync(safePath, content.Length, allowEmpty: content.Length == 0, missingIsNull: false, cancellationToken, requireStableBinding: true);
+                    if (published is null || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(published, content))
+                    {
+                        throw new IOException("Capability catalog immutable artifact changed during retained-handle publication.");
+                    }
+                }
+                catch
+                {
+                    CapabilityCatalogNativeFileSystem.DeleteFileIfPresent(safePath, parent, destinationName);
+                    throw;
                 }
                 await _durabilityBarrier.FlushAfterRenameAsync(safePath, parent);
                 return true;

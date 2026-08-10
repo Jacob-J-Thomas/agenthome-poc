@@ -5,6 +5,7 @@ using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models;
@@ -27,7 +28,8 @@ namespace EmbodySense.Core.Persistence.Loops.GraphAuthoring;
 /// </remarks>
 public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionStore
 {
-    private static readonly string _emptyTrustDigest = Digest("embodysense-governed-loop-graph-authoring-empty-v1\n");
+    private static readonly string _emptyTrustDigest = CapabilityIntegrityDigest.Compute(
+        Encoding.UTF8.GetBytes("embodysense-governed-loop-graph-authoring-empty-v1\n")).Value;
     private readonly GovernedLoopGraphRevisionStorePaths _paths;
     private readonly CapabilityCatalogPathGuard _pathGuard;
     private readonly IGovernedLoopRevisionLifecycleStore _lifecycleStore;
@@ -338,18 +340,6 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
                 shape.IntentIds,
                 cancellationToken);
             var intent = await LoadIntentAsync(session, operationId, cancellationToken);
-            if (intent is not null
-                && (!string.Equals(intent.GraphId, graphId, StringComparison.Ordinal)
-                    || !string.Equals(intent.LifecycleRequestHash, lifecycleRequestHash, StringComparison.Ordinal)
-                    || !string.Equals(intent.AuthoringRequestHash, authoringRequestHash, StringComparison.Ordinal)))
-            {
-                return new GovernedLoopGraphRevisionMutationReadResult(
-                    GovernedLoopRevisionStoreReadStatus.Ambiguous,
-                    lifecycle.StoreGeneration,
-                    null,
-                    null);
-            }
-
             GovernedLoopGraphRevisionSnapshot? snapshot = null;
             if (lifecycle.Snapshot is not null)
             {
@@ -518,12 +508,20 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
                 cancellationToken);
             var intentBytes = GovernedLoopGraphRevisionStoreJson.Serialize(intentDocument);
             RequireIntentSize(intentBytes);
-            RequireCapacity(
+            var plannedWrites = new List<ImmutableWritePlan>(2);
+            if (artifactBytes is not null)
+            {
+                plannedWrites.Add(new ImmutableWritePlan(artifactPath!, artifactBytes));
+            }
+            plannedWrites.Add(new ImmutableWritePlan(_paths.OperationPath(operationId), intentBytes));
+            await RequireCapacityAsync(
+                session,
                 shape,
                 reservesArtifact,
                 reservesIntent,
                 reservesGraphDirectory,
-                (artifactBytes?.LongLength ?? 0) + intentBytes.LongLength);
+                plannedWrites,
+                cancellationToken);
             if (artifactDocument is not null)
             {
                 markDurableWorkStarted();
@@ -1007,6 +1005,7 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
 
         var artifactCount = 0;
         var artifactIdentities = new List<ArtifactIdentity>();
+        var stagingEntries = new List<StagingEntry>();
         var stagingCount = 0;
         var totalBytes = 0L;
         foreach (var graphId in graphDirectories)
@@ -1031,13 +1030,19 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
                     artifactCount = checked(artifactCount + 1);
                     artifactIdentities.Add(new ArtifactIdentity(graphId, revisionId));
                 }
-                else if (IsStagingName(file.Name))
+                else if (TryParseStagingName(file.Name, out var staging))
                 {
                     if (file.Length < 0 || file.Length > _options.MaxArtifactUtf8Bytes)
                     {
                         throw new FormatException("The graph-authoring artifact root contains an oversized staging entry.");
                     }
                     stagingCount = checked(stagingCount + 1);
+                    stagingEntries.Add(new StagingEntry(
+                        Path.Combine(_paths.ArtifactsPath, graphId, staging.DestinationName),
+                        Path.Combine(_paths.ArtifactsPath, graphId, file.Name),
+                        staging.Token,
+                        file.Length,
+                        staging.IsReady));
                 }
                 else
                 {
@@ -1064,13 +1069,19 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
                 intentCount = checked(intentCount + 1);
                 intentIds.Add(intentId);
             }
-            else if (IsStagingName(intent.Name))
+            else if (TryParseStagingName(intent.Name, out var staging))
             {
                 if (intent.Length < 0 || intent.Length > _options.MaxIntentUtf8Bytes)
                 {
                     throw new FormatException("The graph-authoring operation root contains an oversized staging entry.");
                 }
                 stagingCount = checked(stagingCount + 1);
+                stagingEntries.Add(new StagingEntry(
+                    Path.Combine(_paths.OperationsPath, staging.DestinationName),
+                    Path.Combine(_paths.OperationsPath, intent.Name),
+                    staging.Token,
+                    intent.Length,
+                    staging.IsReady));
             }
             else
             {
@@ -1096,22 +1107,57 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
                 .OrderBy(identity => identity.GraphId, StringComparer.Ordinal)
                 .ThenBy(identity => identity.RevisionId, StringComparer.Ordinal)
                 .ToArray()),
-            Array.AsReadOnly(intentIds.Order(StringComparer.Ordinal).ToArray()));
+            Array.AsReadOnly(intentIds.Order(StringComparer.Ordinal).ToArray()),
+            Array.AsReadOnly(stagingEntries
+                .OrderBy(entry => entry.StagingPath, StringComparer.Ordinal)
+                .ToArray()));
     }
 
-    private void RequireCapacity(
+    private async Task RequireCapacityAsync(
+        CapabilityCatalogPathSession session,
         StoreShape shape,
         bool reservesArtifact,
         bool reservesIntent,
         bool reservesGraphDirectory,
-        long additionalBytes)
+        IReadOnlyList<ImmutableWritePlan> plannedWrites,
+        CancellationToken cancellationToken)
     {
+        var stagingCount = shape.StagingCount;
+        var totalBytes = shape.TotalBytes;
+        foreach (var write in plannedWrites)
+        {
+            var digest = Convert.ToHexString(SHA256.HashData(write.Content)).ToLowerInvariant();
+            var ready = shape.StagingEntries.SingleOrDefault(entry =>
+                entry.IsReady
+                && PathEquals(entry.DestinationPath, write.DestinationPath)
+                && string.Equals(entry.Token, digest, StringComparison.Ordinal)
+                && entry.Length == write.Content.LongLength);
+            if (ready is not null)
+            {
+                var bytes = await session.TryReadAllBytesBoundAsync(
+                    ready.StagingPath,
+                    write.Content.Length,
+                    cancellationToken);
+                if (bytes is null || !CryptographicOperations.FixedTimeEquals(bytes, write.Content))
+                {
+                    throw new IOException("The exact immutable-write ready stage failed canonical byte verification.");
+                }
+
+                stagingCount = checked(stagingCount - 1);
+                continue;
+            }
+
+            if (stagingCount >= _options.MaxStagingEntries)
+            {
+                throw new IOException("The immutable graph-authoring staging-entry quota is exhausted.");
+            }
+            totalBytes = checked(totalBytes + write.Content.LongLength);
+        }
+
         if (shape.ArtifactCount + (reservesArtifact ? 1 : 0) > _options.MaxArtifacts
             || shape.IntentCount + (reservesIntent ? 1 : 0) > _options.MaxIntents
             || shape.GraphDirectoryCount + (reservesGraphDirectory ? 1 : 0) > _options.MaxGraphDirectories
-            || shape.StagingCount >= _options.MaxStagingEntries
-            || additionalBytes < 0
-            || additionalBytes > _options.MaxWorkspaceUtf8Bytes - shape.TotalBytes)
+            || totalBytes > _options.MaxWorkspaceUtf8Bytes)
         {
             throw new IOException("The immutable graph-authoring count or byte quota is exhausted.");
         }
@@ -1344,8 +1390,9 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
         return IsIdentifier(identifier);
     }
 
-    private static bool IsStagingName(string value)
+    private static bool TryParseStagingName(string value, out ParsedStagingName staging)
     {
+        staging = null!;
         if (value.Length == 0 || value[0] != '.')
         {
             return false;
@@ -1371,10 +1418,25 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
 
         var destination = body[..separator];
         var token = body[(separator + 1)..];
-        return IsJsonIdentifier(destination, out _)
-            && token.Length == tokenLength
-            && token.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+        if (!IsJsonIdentifier(destination, out _)
+            || token.Length != tokenLength
+            || !token.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'))
+        {
+            return false;
+        }
+
+        staging = new ParsedStagingName(
+            destination,
+            token,
+            suffixLength == ".ready".Length);
+        return true;
     }
+
+    private static bool PathEquals(string left, string right)
+        => string.Equals(
+            Path.GetFullPath(left),
+            Path.GetFullPath(right),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
     private static bool IsAvailabilityFailure(Exception exception)
         => exception is IOException
@@ -1385,9 +1447,6 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
             or OverflowException
             or ArgumentException;
 
-    private static string Digest(string value)
-        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
-
     private sealed record StoreShape(
         int ArtifactCount,
         int IntentCount,
@@ -1395,7 +1454,19 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
         int StagingCount,
         long TotalBytes,
         IReadOnlyList<ArtifactIdentity> ArtifactIdentities,
-        IReadOnlyList<string> IntentIds);
+        IReadOnlyList<string> IntentIds,
+        IReadOnlyList<StagingEntry> StagingEntries);
 
     private sealed record ArtifactIdentity(string GraphId, string RevisionId);
+
+    private sealed record ParsedStagingName(string DestinationName, string Token, bool IsReady);
+
+    private sealed record StagingEntry(
+        string DestinationPath,
+        string StagingPath,
+        string Token,
+        long Length,
+        bool IsReady);
+
+    private sealed record ImmutableWritePlan(string DestinationPath, byte[] Content);
 }
