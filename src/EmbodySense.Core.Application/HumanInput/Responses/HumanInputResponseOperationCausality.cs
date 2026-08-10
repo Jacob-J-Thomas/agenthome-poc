@@ -410,30 +410,6 @@ public static class HumanInputResponseOperationCausality
                 && left.SelectedAtUtc == right.SelectedAtUtc
                 && string.Equals(left.SelectionHash, right.SelectionHash, StringComparison.Ordinal);
 
-    private sealed class ChronologyContext
-    {
-        internal ChronologyContext(HumanInputResponseLifecycleStoreSnapshot snapshot)
-        {
-            Snapshot = snapshot;
-            OperationIndexes = snapshot.Operations
-                .Select((operation, index) => (operation.OperationId, Index: index))
-                .ToDictionary(entry => entry.OperationId, entry => entry.Index, StringComparer.Ordinal);
-            ResponsesById = snapshot.Responses.ToDictionary(response => response.ResponseId, StringComparer.Ordinal);
-        }
-
-        internal HumanInputResponseLifecycleStoreSnapshot Snapshot { get; }
-
-        internal IReadOnlyDictionary<string, int> OperationIndexes { get; }
-
-        internal IReadOnlyDictionary<string, HumanInputResponseArtifact> ResponsesById { get; }
-
-        internal List<HumanInputResponseArtifact> RetainedResponses { get; } = [];
-
-        internal List<HumanInputResponseArtifact> ActiveResponses { get; } = [];
-
-        internal int NextOperationIndex { get; set; }
-    }
-
     internal static (HumanInputResponseLifecycleMutationPlan Plan, HumanInputRequest? Request, string? ActorRoleId) Evaluate(
         HumanInputResponseLifecycleCommand command,
         HumanInputRequest? observedRequest,
