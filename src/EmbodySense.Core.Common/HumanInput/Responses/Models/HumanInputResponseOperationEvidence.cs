@@ -13,7 +13,8 @@ namespace EmbodySense.Core.Common.HumanInput.Responses.Models;
 /// <param name="Outcome">The immutable terminal operation disposition.</param>
 /// <param name="FailureCode">The value-free failure classification.</param>
 /// <param name="Request">The exact immutable request version.</param>
-/// <param name="Binding">The exact request workspace, graph, revision, node, run, and checkpoint binding.</param>
+/// <param name="ExpectedBinding">The exact request binding supplied by authenticated caller intent; it never establishes authority.</param>
+/// <param name="ObservedBinding">The trusted binding of the retained current request, or null only when the request was not found.</param>
 /// <param name="ExpectedLifecycleVersion">The authenticated optimistic pending lifecycle version.</param>
 /// <param name="ExpectedLifecycleStatus">The authenticated optimistic pending lifecycle status.</param>
 /// <param name="PreviousHead">The exact request head observed before the operation, when one existed.</param>
@@ -34,7 +35,8 @@ public sealed partial record HumanInputResponseOperationEvidence(
     HumanInputResponseOperationOutcome Outcome,
     HumanInputResponseOperationFailureCode FailureCode,
     HumanInputRequestReference Request,
-    HumanInputRequestBinding Binding,
+    HumanInputRequestBinding ExpectedBinding,
+    HumanInputRequestBinding? ObservedBinding,
     long ExpectedLifecycleVersion,
     HumanInputRequestLifecycleStatus ExpectedLifecycleStatus,
     HumanInputRequestLifecycleHead? PreviousHead,

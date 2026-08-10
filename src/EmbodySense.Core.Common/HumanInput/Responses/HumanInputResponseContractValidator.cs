@@ -205,7 +205,15 @@ public static class HumanInputResponseContractValidator
         ValidateSha256(evidence.CommandHash, "$.commandHash", HumanInputResponseValidationErrorCode.InvalidHash, errors);
         ValidateVocabulary(evidence, errors);
         ValidateRequestReference(evidence.Request, "$.request", errors);
-        ValidateBinding(evidence.Binding, "$.binding", errors);
+        ValidateBinding(evidence.ExpectedBinding, "$.expectedBinding", errors);
+        if (evidence.ObservedBinding is not null)
+        {
+            ValidateBinding(evidence.ObservedBinding, "$.observedBinding", errors);
+        }
+        if (evidence.FailureCode == HumanInputResponseOperationFailureCode.RequestNotFound != (evidence.ObservedBinding is null))
+        {
+            Add(errors, HumanInputResponseValidationErrorCode.InvalidBinding, "$.observedBinding", "Trusted observed binding is absent only when the request was not found.");
+        }
         if (evidence.ExpectedLifecycleVersion is < 1 or > HumanInputRequestLifecycleContractLimits.MaxLifecycleVersion
             || evidence.ExpectedLifecycleStatus != HumanInputRequestLifecycleStatus.Pending)
         {
@@ -220,6 +228,13 @@ public static class HumanInputResponseContractValidator
         if (evidence.Outcome == HumanInputResponseOperationOutcome.Committed || evidence.ActorRoleId is not null)
         {
             ValidateIdentifier(evidence.ActorRoleId, "$.actorRoleId", HumanInputResponseValidationErrorCode.InvalidRole, errors);
+        }
+        if (evidence.ActorRoleId is not null
+            && evidence.FailureCode is HumanInputResponseOperationFailureCode.RequestNotFound
+                or HumanInputResponseOperationFailureCode.IneligibleRespondent
+                or HumanInputResponseOperationFailureCode.IneligibleSelector)
+        {
+            Add(errors, HumanInputResponseValidationErrorCode.InvalidRole, "$.actorRoleId", "This failure cannot establish trusted role attribution.");
         }
         ValidateSha256(evidence.AuthenticationEvidenceHash, "$.authenticationEvidenceHash", HumanInputResponseValidationErrorCode.InvalidAuthenticationEvidence, errors);
         ValidateSha256(evidence.EligibilityEvidenceHash, "$.eligibilityEvidenceHash", HumanInputResponseValidationErrorCode.InvalidEligibilityEvidence, errors);
@@ -380,16 +395,20 @@ public static class HumanInputResponseContractValidator
         }
         if (evidence.PreviousHead is { } previous)
         {
-            var expectedMatches = Equals(previous.CurrentRequest, evidence.Request)
+            var requestMatches = Equals(previous.CurrentRequest, evidence.Request);
+            var bindingMatches = Equals(evidence.ObservedBinding, evidence.ExpectedBinding);
+            var expectedMatches = requestMatches
+                && bindingMatches
                 && previous.LifecycleVersion == evidence.ExpectedLifecycleVersion
                 && previous.Status == evidence.ExpectedLifecycleStatus;
             var observedShapeIsValid = evidence.FailureCode switch
             {
                 HumanInputResponseOperationFailureCode.OptimisticStateConflict => previous.Status == HumanInputRequestLifecycleStatus.Pending
-                    && Equals(previous.CurrentRequest, evidence.Request)
+                    && requestMatches
+                    && bindingMatches
                     && previous.LifecycleVersion != evidence.ExpectedLifecycleVersion,
                 HumanInputResponseOperationFailureCode.StaleResponse => previous.Status == HumanInputRequestLifecycleStatus.Pending
-                    && !Equals(previous.CurrentRequest, evidence.Request),
+                    && (!requestMatches || !bindingMatches),
                 HumanInputResponseOperationFailureCode.RequestTerminal => previous.Status != HumanInputRequestLifecycleStatus.Pending,
                 _ => expectedMatches
             };
@@ -544,8 +563,11 @@ public static class HumanInputResponseContractValidator
         HumanInputResponseOperationFailureCode.ResponseNotFound => kind is HumanInputResponseOperationKind.Withdraw or HumanInputResponseOperationKind.Select,
         HumanInputResponseOperationFailureCode.ResponseAlreadyWithdrawn => kind == HumanInputResponseOperationKind.Withdraw,
         HumanInputResponseOperationFailureCode.DuplicateResponse => kind == HumanInputResponseOperationKind.Submit,
-        HumanInputResponseOperationFailureCode.StaleResponse => kind == HumanInputResponseOperationKind.Submit,
-        HumanInputResponseOperationFailureCode.LateResponse => kind == HumanInputResponseOperationKind.Submit,
+        HumanInputResponseOperationFailureCode.StaleResponse => kind is HumanInputResponseOperationKind.Submit
+            or HumanInputResponseOperationKind.Withdraw
+            or HumanInputResponseOperationKind.Select,
+        HumanInputResponseOperationFailureCode.LateResponse => kind is HumanInputResponseOperationKind.Submit
+            or HumanInputResponseOperationKind.Select,
         HumanInputResponseOperationFailureCode.MalformedResponse => kind == HumanInputResponseOperationKind.Submit,
         HumanInputResponseOperationFailureCode.IneligibleRespondent => kind is HumanInputResponseOperationKind.Submit or HumanInputResponseOperationKind.Withdraw,
         HumanInputResponseOperationFailureCode.IneligibleSelector => kind == HumanInputResponseOperationKind.Select,
