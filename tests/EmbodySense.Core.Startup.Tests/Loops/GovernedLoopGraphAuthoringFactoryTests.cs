@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation;
@@ -6,46 +7,43 @@ using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
-using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops;
-using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Loops;
 
 public sealed class GovernedLoopGraphAuthoringFactoryTests
 {
     [Fact]
-    public void Factory_composes_public_authoring_service_without_mutating_workspace()
+    public async Task Factory_reuses_the_exact_supplied_authority_transaction()
     {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
+        var transaction = new RecordingAuthorityTransaction();
 
         var service = GovernedLoopGraphAuthoringFactory.Create(
-            paths,
             new UnusedRevisionStore(),
             new UnusedNodeCatalog(),
             new UnusedAuthorityProvider(),
-            new UnusedActorAuthorizer());
+            new UnusedActorAuthorizer(),
+            transaction);
+        var result = await service.MutateAsync(null);
 
-        Assert.NotNull(service);
-        Assert.False(Directory.Exists(paths.AgentPath));
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Invalid, result.Status);
+        Assert.Equal(1, transaction.ExecuteCount);
     }
 
     [Fact]
     public void Factory_rejects_missing_server_owned_dependencies()
     {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
         var store = new UnusedRevisionStore();
         var catalog = new UnusedNodeCatalog();
         var authority = new UnusedAuthorityProvider();
         var authorizer = new UnusedActorAuthorizer();
+        var transaction = new RecordingAuthorityTransaction();
 
-        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(null!, store, catalog, authority, authorizer));
-        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(paths, null!, catalog, authority, authorizer));
-        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(paths, store, null!, authority, authorizer));
-        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(paths, store, catalog, null!, authorizer));
-        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(paths, store, catalog, authority, null!));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(null!, catalog, authority, authorizer, transaction));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(store, null!, authority, authorizer, transaction));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(store, catalog, null!, authorizer, transaction));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(store, catalog, authority, null!, transaction));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(store, catalog, authority, authorizer, null!));
     }
 
     private sealed class UnusedRevisionStore : IGovernedLoopGraphRevisionStore
@@ -72,5 +70,18 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
     private sealed class UnusedActorAuthorizer : IGovernedLoopRevisionActorAuthorizer
     {
         public Task<GovernedLoopRevisionActorAuthorization> AuthorizeAsync(GovernedLoopRevisionActorAuthorizationRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingAuthorityTransaction : ICapabilityAuthorityTransaction
+    {
+        public int ExecuteCount { get; private set; }
+
+        public Task<TResult> ExecuteAsync<TResult>(Func<CancellationToken, Task<TResult>> operation, CancellationToken cancellationToken = default)
+        {
+            ExecuteCount++;
+            return operation(cancellationToken);
+        }
+
+        public Task<ICapabilityAuthorityLease?> AcquireValidatedLeaseAsync(Func<CancellationToken, Task<bool>> validator, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 }
