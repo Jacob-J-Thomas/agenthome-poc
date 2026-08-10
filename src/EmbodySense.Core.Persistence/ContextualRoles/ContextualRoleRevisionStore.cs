@@ -1,8 +1,10 @@
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.ContextualRoles.Models;
 
 namespace EmbodySense.Core.Persistence.ContextualRoles;
@@ -21,18 +23,25 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
     private readonly ContextualRoleArtifactPathGuard _guard;
     private readonly ContextualRoleRevisionStoreOptions _options;
     private readonly TimeProvider _timeProvider;
+    private readonly ICapabilityAuthorityTransaction _authorityTransaction;
 
     /// <summary>Initializes a contextual-role store rooted beneath the supplied workspace's <c>.agent</c> directory.</summary>
     /// <param name="workspacePaths">The canonical workspace paths.</param>
     /// <param name="workspaceId">The stable bounded workspace identity bound into every artifact.</param>
     /// <param name="options">Optional bounded persistence and recovery-evaluation settings.</param>
     /// <param name="timeProvider">The clock used for durable evidence timestamps.</param>
+    /// <param name="authorityTransaction">The optional shared reentrant workspace authority fence.</param>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="workspacePaths"/> is <see langword="null"/>.</exception>
     /// <exception cref="ArgumentException">Thrown when <paramref name="workspaceId"/> is not a valid bounded identifier.</exception>
     /// <exception cref="ArgumentOutOfRangeException">Thrown when a configured persistence limit is outside the schema-1 safety ceilings.</exception>
     /// <exception cref="DirectoryNotFoundException">Thrown when the canonical workspace root does not exist.</exception>
     /// <exception cref="InvalidOperationException">Thrown when the canonical workspace root is a symbolic link, reparse point, or junction.</exception>
-    public ContextualRoleRevisionStore(WorkspacePaths workspacePaths, string workspaceId, ContextualRoleRevisionStoreOptions? options = null, TimeProvider? timeProvider = null)
+    public ContextualRoleRevisionStore(
+        WorkspacePaths workspacePaths,
+        string workspaceId,
+        ContextualRoleRevisionStoreOptions? options = null,
+        TimeProvider? timeProvider = null,
+        ICapabilityAuthorityTransaction? authorityTransaction = null)
     {
         ArgumentNullException.ThrowIfNull(workspacePaths);
         if (!ContextualRoleId.IsValid(workspaceId))
@@ -46,6 +55,7 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
         _paths = new ContextualRoleStorePaths(workspacePaths);
         _guard = new ContextualRoleArtifactPathGuard(_paths, _options.PhysicalBoundaryObserver);
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _authorityTransaction = authorityTransaction ?? new CapabilityAuthorityTransaction(workspacePaths);
     }
 
     /// <summary>Releases the retained physical-directory handles owned by this store.</summary>
@@ -61,6 +71,34 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
             return new ContextualRoleRevisionMutationResult(ContextualRoleRevisionMutationStatus.Invalid, request?.OperationId ?? string.Empty, request?.RequestHash ?? string.Empty, request?.Kind ?? ContextualRoleRevisionMutationKind.Unknown, null, null, validationErrors.ToArray());
         }
 
+        ContextualRoleRevisionMutationResult? callbackResult = null;
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(
+                async token =>
+                {
+                    callbackResult = await MutateCoreAsync(request, token);
+                    return callbackResult;
+                },
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            if (callbackResult is not null)
+            {
+                return callbackResult;
+            }
+
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return callbackResult ?? Outcome(ContextualRoleRevisionMutationStatus.Unavailable, request, null, null, ContextualRoleArtifactPathGuard.GetMutationDiagnostic(exception));
+        }
+    }
+
+    private async Task<ContextualRoleRevisionMutationResult> MutateCoreAsync(ContextualRoleRevisionMutationRequest request, CancellationToken cancellationToken)
+    {
         var intentPublished = false;
         try
         {
@@ -145,6 +183,34 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
             return new ContextualRoleRevisionReadResult(ContextualRoleRevisionReadStatus.Invalid, null, ContextualRoleRevisionDisposition.Unknown, [new ContextualRoleValidationError("invalid_revision_identity", "identity", "Revision identity must contain a valid role id and positive revision.")]);
         }
 
+        ContextualRoleRevisionReadResult? callbackResult = null;
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(
+                async token =>
+                {
+                    callbackResult = await ReadCoreAsync(identity, token);
+                    return callbackResult;
+                },
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            if (callbackResult is not null)
+            {
+                return callbackResult;
+            }
+
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return callbackResult ?? new ContextualRoleRevisionReadResult(ContextualRoleRevisionReadStatus.Unavailable, null, ContextualRoleRevisionDisposition.Unknown, []);
+        }
+    }
+
+    private async Task<ContextualRoleRevisionReadResult> ReadCoreAsync(ContextualRoleRevisionIdentity identity, CancellationToken cancellationToken)
+    {
         try
         {
             if (!_guard.StoreExists())
@@ -201,6 +267,34 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
             return new ContextualRoleLifecycleReadResult(ContextualRoleLifecycleReadStatus.Invalid, null);
         }
 
+        ContextualRoleLifecycleReadResult? callbackResult = null;
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(
+                async token =>
+                {
+                    callbackResult = await ReadLifecycleCoreAsync(roleId!, token);
+                    return callbackResult;
+                },
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            if (callbackResult is not null)
+            {
+                return callbackResult;
+            }
+
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return callbackResult ?? new ContextualRoleLifecycleReadResult(ContextualRoleLifecycleReadStatus.Unavailable, null);
+        }
+    }
+
+    private async Task<ContextualRoleLifecycleReadResult> ReadLifecycleCoreAsync(string roleId, CancellationToken cancellationToken)
+    {
         try
         {
             if (!_guard.StoreExists())
@@ -216,7 +310,7 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
 
             var anchor = await ReadRequiredAnchorAsync(cancellationToken);
             await ValidateWorkspaceAsync(anchor, allowedPendingOperationId: null, cancellationToken);
-            var state = await ReadStateIfExistsAsync(roleId!, anchor.IntegrityHash, cancellationToken);
+            var state = await ReadStateIfExistsAsync(roleId, anchor.IntegrityHash, cancellationToken);
             return state is null
                 ? new ContextualRoleLifecycleReadResult(ContextualRoleLifecycleReadStatus.NotFound, null)
                 : new ContextualRoleLifecycleReadResult(ContextualRoleLifecycleReadStatus.Found, new ContextualRoleLifecycleSnapshot(SchemaVersion, state.RoleId, state.CurrentIdentity, state.State, state.LastOperationId, state.LastMutationKind, state.UpdatedAtUtc));
@@ -246,6 +340,34 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
             return new ContextualRoleCatalogReadResult(ContextualRoleCatalogReadStatus.Invalid, [], null);
         }
 
+        ContextualRoleCatalogReadResult? callbackResult = null;
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(
+                async token =>
+                {
+                    callbackResult = await ReadCatalogCoreAsync(request, token);
+                    return callbackResult;
+                },
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            if (callbackResult is not null)
+            {
+                return callbackResult;
+            }
+
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return callbackResult ?? new ContextualRoleCatalogReadResult(ContextualRoleCatalogReadStatus.Unavailable, [], null);
+        }
+    }
+
+    private async Task<ContextualRoleCatalogReadResult> ReadCatalogCoreAsync(ContextualRoleCatalogReadRequest request, CancellationToken cancellationToken)
+    {
         try
         {
             if (!_guard.StoreExists())

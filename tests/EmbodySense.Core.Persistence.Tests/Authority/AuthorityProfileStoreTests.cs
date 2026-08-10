@@ -128,6 +128,109 @@ public sealed class AuthorityProfileStoreTests : IDisposable
         Assert.Equal("create-once", persisted.Record.Operations[0].OperationId);
     }
 
+    [Theory]
+    [InlineData(".")]
+    [InlineData("-x")]
+    [InlineData("x-")]
+    public async Task Profile_mutations_reject_operation_ids_without_alphanumeric_boundaries(string operationId)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+
+        var result = await Store(paths).MutateAsync(Create(Profile(), operationId));
+
+        Assert.Equal(AuthorityProfileMutationStatus.Invalid, result.Status);
+        Assert.False(File.Exists(paths.AuthorityProfilesDocumentPath));
+        Assert.False(File.Exists(paths.AuthorityProfilesProofPath));
+    }
+
+    [Fact]
+    public async Task Profile_mutations_accept_canonical_operation_ids_with_internal_punctuation()
+    {
+        using var workspace = new TestWorkspace();
+        var store = Store(new WorkspacePaths(workspace.RootPath));
+
+        var result = await store.MutateAsync(Create(Profile(), "create.profile_revision-1"));
+
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, result.Status);
+        Assert.Equal("create.profile_revision-1", result.OperationId);
+    }
+
+    [Theory]
+    [InlineData("default")]
+    [InlineData("non-utc")]
+    [InlineData("throwing")]
+    public async Task Invalid_trusted_clocks_fail_before_profile_evidence_is_written(string scenario)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        TimeProvider timeProvider = scenario switch
+        {
+            "default" => new StubTimeProvider(default),
+            "non-utc" => new StubTimeProvider(new DateTimeOffset(2026, 8, 10, 12, 0, 0, TimeSpan.FromHours(1))),
+            _ => new ThrowingTimeProvider()
+        };
+        var store = new AuthorityProfileStore(paths, _trustProvider, timeProvider);
+
+        var result = await store.MutateAsync(Create(Profile(), "invalid-clock-create"));
+
+        Assert.Equal(AuthorityProfileMutationStatus.Unavailable, result.Status);
+        Assert.False(File.Exists(paths.AuthorityProfilesDocumentPath));
+        Assert.False(File.Exists(paths.AuthorityProfilesProofPath));
+    }
+
+    [Fact]
+    public async Task Each_profile_mutation_uses_one_coherent_trusted_operation_time()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var first = new DateTimeOffset(2026, 8, 10, 12, 0, 0, TimeSpan.Zero);
+        var second = first.AddMinutes(1);
+        var third = second.AddMinutes(1);
+        var timeProvider = new SequenceTimeProvider(first, second, third);
+        var store = new AuthorityProfileStore(paths, _trustProvider, timeProvider);
+        var profile = Profile();
+
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await store.MutateAsync(Create(profile, "coherent-create"))).Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await store.MutateAsync(Transition(profile.ProfileId, 1, AuthorityProfileStatus.Suspended, "coherent-suspend"))).Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await store.MutateAsync(Tombstone(profile.ProfileId, 2, "coherent-tombstone"))).Status);
+        var read = await Store(paths).ReadAsync(profile.ProfileId.Value);
+
+        Assert.Equal(3, timeProvider.CallCount);
+        Assert.Equal(first, read.Record!.Revisions[0].RecordedAtUtc);
+        Assert.Equal(first, read.Record.Operations.Single(operation => operation.OperationId == "coherent-create").RecordedAtUtc);
+        Assert.Equal(second, read.Record.Revisions[1].RecordedAtUtc);
+        Assert.Equal(second, read.Record.Operations.Single(operation => operation.OperationId == "coherent-suspend").RecordedAtUtc);
+        Assert.Equal(third, read.Record.Tombstone!.RecordedAtUtc);
+        Assert.Equal(third, read.Record.Operations.Single(operation => operation.OperationId == "coherent-tombstone").RecordedAtUtc);
+    }
+
+    [Theory]
+    [InlineData("default")]
+    [InlineData("throwing")]
+    public async Task Exact_profile_replay_is_clock_independent_and_writes_no_new_evidence(string failureMode)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var timeProvider = new FailAfterFirstTimeProvider(
+            new DateTimeOffset(2026, 8, 10, 12, 0, 0, TimeSpan.Zero),
+            failureMode);
+        var store = new AuthorityProfileStore(paths, _trustProvider, timeProvider);
+        var mutation = Create(Profile(), "clock-independent-replay");
+        var committed = await store.MutateAsync(mutation);
+        var beforeReplay = await File.ReadAllTextAsync(paths.AuthorityProfilesDocumentPath);
+
+        var replayed = await store.MutateAsync(mutation);
+        var afterReplay = await File.ReadAllTextAsync(paths.AuthorityProfilesDocumentPath);
+
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, committed.Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Replayed, replayed.Status);
+        Assert.Equal(committed.Record!.CurrentProfile, replayed.Record!.CurrentProfile);
+        Assert.Equal(committed.Record.Operations.Single(), replayed.Record.Operations.Single());
+        Assert.Equal(1, timeProvider.CallCount);
+        Assert.Equal(beforeReplay, afterReplay);
+    }
+
     [Fact]
     public async Task Cancellation_is_propagated_without_attempting_a_read_or_mutation()
     {
@@ -142,6 +245,42 @@ public sealed class AuthorityProfileStoreTests : IDisposable
 
         Assert.False(File.Exists(paths.AuthorityProfilesDocumentPath));
         Assert.False(File.Exists(paths.AuthorityProfilesProofPath));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(AuthorityProfileStoreLimits.MaximumArtifactUtf8Bytes / 6 + 1)]
+    public void Constructor_rejects_unbounded_trust_authentication_tags(int maximumTagBytes)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new MutableAuthenticatedTrustProvider { MaximumAuthenticationTagUtf8Bytes = maximumTagBytes };
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new AuthorityProfileStore(paths, trust));
+    }
+
+    [Fact]
+    public async Task Reads_and_mutations_execute_inside_the_shared_workspace_authority_fence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var authority = new CapabilityAuthorityTransaction(paths);
+        var retained = await authority.AcquireValidatedLeaseAsync(_ => Task.FromResult(true));
+        Assert.NotNull(retained);
+        var probe = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
+        var store = new AuthorityProfileStore(paths, _trustProvider, authorityTransaction: probe);
+
+        var mutation = Task.Run(() => store.MutateAsync(Create(Profile(), "fenced-profile-create")));
+        await probe.Attempted.Task;
+
+        Assert.False(mutation.IsCompleted);
+        await retained!.DisposeAsync();
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await mutation).Status);
+
+        var readProbe = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
+        var read = await new AuthorityProfileStore(paths, _trustProvider, authorityTransaction: readProbe).ReadAsync("workspace-observer");
+        Assert.True(readProbe.Attempted.Task.IsCompleted);
+        Assert.Equal(AuthorityProfileReadStatus.Available, read.Status);
     }
 
     [Fact]
@@ -274,6 +413,85 @@ public sealed class AuthorityProfileStoreTests : IDisposable
         Assert.Equal(AuthorityProfileReadStatus.RecoveredLastProved, recovered.Status);
         Assert.Equal(1, recovered.Record!.CurrentProfile.Revision.Value);
         Assert.Equal(AuthorityProfileReadStatus.Unavailable, unavailable.Status);
+    }
+
+    [Theory]
+    [InlineData("orphan-target")]
+    [InlineData("wrong-revision")]
+    [InlineData("wrong-kind")]
+    [InlineData("wrong-operation")]
+    [InlineData("wrong-time")]
+    [InlineData("transition-payload-splice")]
+    [InlineData("missing-receipt")]
+    [InlineData("extra-receipt")]
+    [InlineData("tombstone-splice")]
+    public async Task Authenticated_profile_operation_lineage_corruption_fails_closed(string scenario)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new MutableAuthenticatedTrustProvider();
+        var first = new DateTimeOffset(2026, 8, 10, 12, 0, 0, TimeSpan.Zero);
+        var store = new AuthorityProfileStore(paths, trust, new SequenceTimeProvider(first, first.AddMinutes(1), first.AddMinutes(2)));
+        var profile = Profile();
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await store.MutateAsync(Create(profile, "correlation-create"))).Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await store.MutateAsync(Transition(profile.ProfileId, 1, AuthorityProfileStatus.Suspended, "correlation-suspend"))).Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await store.MutateAsync(Tombstone(profile.ProfileId, 2, "correlation-tombstone"))).Status);
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(paths.AuthorityProfilesDocumentPath))!.AsObject();
+        var profileDocument = document["profiles"]![0]!.AsObject();
+        var revisions = profileDocument["revisions"]!.AsArray();
+        var operations = document["operations"]!.AsArray();
+        var transitionOperation = operations.Single(node => node!["operationId"]!.GetValue<string>() == "correlation-suspend")!.AsObject();
+
+        switch (scenario)
+        {
+            case "orphan-target":
+                transitionOperation["profileId"] = "orphan-profile";
+                break;
+            case "wrong-revision":
+                transitionOperation["resultingRevision"] = 99;
+                break;
+            case "wrong-kind":
+                transitionOperation["kind"] = "create";
+                break;
+            case "wrong-operation":
+                revisions[1]!["operationId"] = "missing-revision-operation";
+                break;
+            case "wrong-time":
+                revisions[1]!["recordedAtUtc"] = first.AddMinutes(1).AddSeconds(1);
+                break;
+            case "transition-payload-splice":
+                var forged = profile with
+                {
+                    Revision = Revision(2),
+                    Status = AuthorityProfileStatus.Suspended,
+                    Purpose = Purpose("Forged authority purpose hidden behind a status transition.")
+                };
+                Assert.True(AuthorityProfileJson.TrySerialize(forged, out var forgedJson, out _));
+                Assert.True(AuthorityProfileHash.TryCompute(forged, out var forgedHash, out _));
+                revisions[1]!["profileJson"] = forgedJson;
+                revisions[1]!["profileHash"] = forgedHash!.Value;
+                break;
+            case "missing-receipt":
+                operations.Remove(transitionOperation);
+                document["generation"] = 2L;
+                break;
+            case "extra-receipt":
+                var extra = transitionOperation.DeepClone().AsObject();
+                extra["operationId"] = "zz-extra-operation";
+                operations.Add(extra);
+                document["generation"] = 4L;
+                break;
+            default:
+                profileDocument["tombstone"]!["operationId"] = "correlation-suspend";
+                break;
+        }
+
+        await ReplaceWithAuthenticatedDocumentAsync(paths, trust, document);
+
+        var read = await new AuthorityProfileStore(paths, trust).ReadAsync(profile.ProfileId.Value);
+
+        Assert.Equal(AuthorityProfileReadStatus.Unavailable, read.Status);
+        Assert.Null(read.Record);
     }
 
     [Fact]
@@ -422,6 +640,24 @@ public sealed class AuthorityProfileStoreTests : IDisposable
         return document;
     }
 
+    private static async Task ReplaceWithAuthenticatedDocumentAsync(
+        WorkspacePaths paths,
+        MutableAuthenticatedTrustProvider trust,
+        JsonObject document)
+    {
+        document["contentDigest"] = string.Empty;
+        document["authenticationTag"] = string.Empty;
+        var digest = CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(document, _jsonOptions))).Value;
+        var identity = document["workspaceIdentity"]!.GetValue<string>();
+        var generation = document["generation"]!.GetValue<long>();
+        document["contentDigest"] = digest;
+        document["authenticationTag"] = MutableAuthenticatedTrustProvider.AuthenticationTag;
+        trust.SetCurrent(identity, generation, digest);
+        var json = JsonSerializer.Serialize(document, _jsonOptions) + Environment.NewLine;
+        await File.WriteAllTextAsync(paths.AuthorityProfilesDocumentPath, json);
+        await File.WriteAllTextAsync(paths.AuthorityProfilesProofPath, json);
+    }
+
     private static Task WriteDocumentAsync(string path, JsonObject document) => File.WriteAllTextAsync(path, JsonSerializer.Serialize(document, _jsonOptions) + Environment.NewLine);
 
     private static AuthorityProfileMutation Create(AuthorityProfile profile, string operationId) => new(AuthorityProfileMutationKind.Create, operationId, 0, profile, null, null, Actor(), Reason());
@@ -453,6 +689,110 @@ public sealed class AuthorityProfileStoreTests : IDisposable
     {
         Assert.True(AuthorityPurpose.TryParse(value, out var parsed, out _));
         return parsed!;
+    }
+
+    private sealed class StubTimeProvider(DateTimeOffset value) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => value;
+    }
+
+    private sealed class ThrowingTimeProvider : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => throw new InvalidOperationException("Injected clock failure.");
+    }
+
+    private sealed class SequenceTimeProvider(params DateTimeOffset[] values) : TimeProvider
+    {
+        private int _index;
+
+        internal int CallCount => _index;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            var index = Interlocked.Increment(ref _index) - 1;
+            if (index >= values.Length)
+            {
+                throw new InvalidOperationException("The trusted clock was read more than once per operation.");
+            }
+
+            return values[index];
+        }
+    }
+
+    private sealed class FailAfterFirstTimeProvider(DateTimeOffset first, string failureMode) : TimeProvider
+    {
+        private int _callCount;
+
+        internal int CallCount => _callCount;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            var call = Interlocked.Increment(ref _callCount);
+            if (call == 1)
+            {
+                return first;
+            }
+
+            return failureMode == "default"
+                ? default
+                : throw new InvalidOperationException("Injected replay clock failure.");
+        }
+    }
+
+    private sealed class MutableAuthenticatedTrustProvider : ICapabilityCatalogTrustProvider
+    {
+        internal const string AuthenticationTag = "authenticated-test-artifact";
+
+        private CapabilityCatalogTrustState? _state;
+
+        public int MaximumAuthenticationTagUtf8Bytes { get; init; } = 64;
+
+        public void RequireDisjointWorkspace(string workspaceRootPath)
+        {
+        }
+
+        public Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default)
+            => Task.FromResult(_state);
+
+        public Task<CapabilityCatalogTrustState> InitializeAsync(
+            string workspaceIdentity,
+            long generation,
+            string contentDigest,
+            CancellationToken cancellationToken = default)
+        {
+            _state = new CapabilityCatalogTrustState(workspaceIdentity, generation, contentDigest, null, null);
+            return Task.FromResult(_state);
+        }
+
+        public Task<string> AuthenticateArtifactAsync(
+            string workspaceIdentity,
+            long generation,
+            string contentDigest,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(AuthenticationTag);
+
+        public Task<bool> VerifyArtifactAsync(
+            string workspaceIdentity,
+            long generation,
+            string contentDigest,
+            string authenticationTag,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(string.Equals(authenticationTag, AuthenticationTag, StringComparison.Ordinal));
+
+        public Task<CapabilityCatalogTrustState> AdvanceAsync(
+            string workspaceIdentity,
+            long expectedGeneration,
+            string expectedContentDigest,
+            long newGeneration,
+            string newContentDigest,
+            CancellationToken cancellationToken = default)
+        {
+            _state = new CapabilityCatalogTrustState(workspaceIdentity, newGeneration, newContentDigest, expectedGeneration, expectedContentDigest);
+            return Task.FromResult(_state);
+        }
+
+        internal void SetCurrent(string workspaceIdentity, long generation, string contentDigest)
+            => _state = new CapabilityCatalogTrustState(workspaceIdentity, generation, contentDigest, null, null);
     }
 
     private sealed class FaultInjectingTrustProvider(ICapabilityCatalogTrustProvider inner) : ICapabilityCatalogTrustProvider

@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Capabilities;
 using System.Collections.Immutable;
 using System.Globalization;
 using System.Text;
@@ -157,7 +158,19 @@ public static class ContextualRoleRevisionValidator
             Add(errors, "capability_maximum_count_out_of_range", "policyMaxima.capabilityIds", $"Capability maximum count cannot exceed {ContextualRoleLimits.MaxCapabilityMaximums}.");
         }
 
-        ValidateIdentifiers(maxima.CapabilityIds, "policyMaxima.capabilityIds", "invalid_capability_maximum", "duplicate_capability_maximum", errors);
+        var unique = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < maxima.CapabilityIds.Length; index++)
+        {
+            var capabilityId = maxima.CapabilityIds[index];
+            if (!CapabilityId.TryParse(capabilityId, out _, out _))
+            {
+                Add(errors, "invalid_capability_maximum", $"policyMaxima.capabilityIds[{index}]", "Capability maximum must use the canonical provider/path capability identifier contract.");
+            }
+            else if (!unique.Add(capabilityId))
+            {
+                Add(errors, "duplicate_capability_maximum", $"policyMaxima.capabilityIds[{index}]", "Capability maximum identifiers must be unique using ordinal comparison.");
+            }
+        }
     }
 
     private static void ValidateIdentifiers(ImmutableArray<string> identifiers, string field, string invalidCode, string duplicateCode, List<ContextualRoleValidationError> errors)

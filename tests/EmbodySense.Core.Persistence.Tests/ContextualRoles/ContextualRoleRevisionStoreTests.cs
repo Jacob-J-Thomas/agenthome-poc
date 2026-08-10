@@ -1,10 +1,13 @@
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Core.Persistence.ContextualRoles.Models;
+using EmbodySense.Core.Persistence.Tests.Capabilities;
 using EmbodySense.Tests.Support;
 using System.Collections.Immutable;
 using System.Diagnostics;
@@ -55,6 +58,88 @@ public sealed class ContextualRoleRevisionStoreTests
         Assert.NotEmpty(invalid.ValidationErrors);
         Assert.Equal(ContextualRoleRevisionReadStatus.NotFound, missingRevision.Status);
         Assert.Equal(ContextualRoleLifecycleReadStatus.NotFound, missingLifecycle.Status);
+    }
+
+    [Fact]
+    public async Task Reads_catalog_and_mutations_execute_inside_the_shared_workspace_authority_fence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var authority = new CapabilityAuthorityTransaction(paths);
+        var retained = await authority.AcquireValidatedLeaseAsync(_ => Task.FromResult(true));
+        Assert.NotNull(retained);
+        var mutationProbe = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
+        var store = new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: mutationProbe);
+
+        var mutation = Task.Run(() => store.MutateAsync(CreateRequest("fenced-role-create", Revision("reviewer", 1))));
+        await mutationProbe.Attempted.Task;
+
+        Assert.False(mutation.IsCompleted);
+        await retained!.DisposeAsync();
+        Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await mutation).Status);
+
+        var revisionProbe = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
+        var revision = await new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: revisionProbe)
+            .ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1)));
+        var lifecycleProbe = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
+        var lifecycle = await new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: lifecycleProbe)
+            .ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var catalogProbe = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
+        var catalog = await new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: catalogProbe)
+            .ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 10));
+
+        Assert.True(revisionProbe.Attempted.Task.IsCompleted);
+        Assert.True(lifecycleProbe.Attempted.Task.IsCompleted);
+        Assert.True(catalogProbe.Attempted.Task.IsCompleted);
+        Assert.Equal(ContextualRoleRevisionReadStatus.Found, revision.Status);
+        Assert.Equal(ContextualRoleLifecycleReadStatus.Found, lifecycle.Status);
+        Assert.Equal(ContextualRoleCatalogReadStatus.Available, catalog.Status);
+    }
+
+    [Fact]
+    public async Task Completed_role_callbacks_survive_authority_cancellation_and_catalog_teardown_failure()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var cancellationTransaction = new FaultingCapabilityAuthorityTransaction(
+            new CapabilityAuthorityTransaction(paths),
+            CapabilityAuthorityTransactionFault.CancelAfterCallback);
+        using var store = new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: cancellationTransaction);
+
+        var mutation = await store.MutateAsync(CreateRequest("create-after-callback-cancellation", Revision("reviewer", 1)));
+        var revision = await store.ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1)));
+        var lifecycle = await store.ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var catalog = await store.ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 10));
+        var ioTransaction = new FaultingCapabilityAuthorityTransaction(
+            new CapabilityAuthorityTransaction(paths),
+            CapabilityAuthorityTransactionFault.IoAfterCallback);
+        using var ioStore = new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: ioTransaction);
+        var ioCatalog = await ioStore.ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 10));
+
+        Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, mutation.Status);
+        Assert.Equal(ContextualRoleRevisionReadStatus.Found, revision.Status);
+        Assert.Equal(ContextualRoleLifecycleReadStatus.Found, lifecycle.Status);
+        Assert.Equal(ContextualRoleCatalogReadStatus.Available, catalog.Status);
+        Assert.Equal(ContextualRoleCatalogReadStatus.Available, ioCatalog.Status);
+        Assert.Single(ioCatalog.Entries);
+    }
+
+    [Fact]
+    public async Task Authority_cancellation_before_role_callbacks_propagates_without_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var transaction = new FaultingCapabilityAuthorityTransaction(
+            new CapabilityAuthorityTransaction(paths),
+            CapabilityAuthorityTransactionFault.CancelBeforeCallback);
+        using var store = new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: transaction);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.MutateAsync(CreateRequest("never-started-role", Revision("reviewer", 1))));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1))));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer")));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 10)));
+
+        Assert.False(Directory.Exists(Path.Combine(workspace.RootPath, ".agent", "contextual-roles")));
     }
 
     [Fact]

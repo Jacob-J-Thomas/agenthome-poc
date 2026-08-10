@@ -53,7 +53,7 @@ public sealed class ContextualRoleCatalogFacadeTests
         const string RoleSecret = "role-secret-canary-271be1";
         await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, "AGENTS.md"), AgentsSecret);
         await File.WriteAllTextAsync(paths.RolePath, RoleSecret);
-        var reviewer = Revision("reviewer", ContextualRoleInstructionSourceKind.AgentsMarkdown, "nearest-agents", capabilityIds: ["workspace-write", "workspace-read"]);
+        var reviewer = Revision("reviewer", ContextualRoleInstructionSourceKind.AgentsMarkdown, "nearest-agents", capabilityIds: ["org.embodysense/workspace/write", "org.embodysense/workspace/read"]);
         var writer = Revision("writer", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
         await CreateAsync(paths, reviewer);
         await CreateAsync(paths, writer);
@@ -76,7 +76,7 @@ public sealed class ContextualRoleCatalogFacadeTests
         Assert.Equal("nearest-agents", firstRole.InstructionSourceId);
         Assert.Equal("ready", firstRole.SourceStatus);
         Assert.True(firstRole.IsAdmissionReady);
-        Assert.Equal(["workspace-read", "workspace-write"], firstRole.CapabilityMaximumIds);
+        Assert.Equal(["org.embodysense/workspace/read", "org.embodysense/workspace/write"], firstRole.CapabilityMaximumIds);
         Assert.Empty(firstRole.Dependents);
         Assert.False(firstRole.AreDependentsComplete);
         Assert.False(firstRole.DependentsTruncated);
@@ -240,7 +240,7 @@ public sealed class ContextualRoleCatalogFacadeTests
     public void Public_snapshots_defensively_capture_capabilities_dependents_and_null_collections()
     {
         var dependent = new ContextualRoleDependentSnapshot("loop", "loop-one", 3);
-        var capabilities = new List<string> { "workspace-read" };
+        var capabilities = new List<string> { "org.embodysense/workspace/read" };
         var dependents = new List<ContextualRoleDependentSnapshot> { dependent };
         var snapshot = new ContextualRoleSnapshot(
             "reviewer", 1, new string('a', 64), "Reviewer", "Review work.", "published", "active", "user-jake",
@@ -259,7 +259,7 @@ public sealed class ContextualRoleCatalogFacadeTests
         Assert.Equal("loop", dependent.Kind);
         Assert.Equal("loop-one", dependent.Identity);
         Assert.Equal(3, dependent.Revision);
-        Assert.Equal("workspace-read", Assert.Single(snapshot.CapabilityMaximumIds));
+        Assert.Equal("org.embodysense/workspace/read", Assert.Single(snapshot.CapabilityMaximumIds));
         Assert.Same(dependent, Assert.Single(snapshot.Dependents));
         Assert.Empty(nullSnapshot.CapabilityMaximumIds);
         Assert.Empty(nullSnapshot.Dependents);

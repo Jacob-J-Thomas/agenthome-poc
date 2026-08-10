@@ -393,7 +393,7 @@ public sealed class ContextualRoleInspectionServiceTests
             new ContextualRoleProvenance("user-jake", _now, _now),
             new ContextualRoleWorkspaceApplicability([workspaceId]),
             new ContextualRoleInstructionSourceReference(sourceKind, sourceId, ContextualRoleInstructionClassification.RoleInstruction),
-            new ContextualRolePolicyMaxima(["workspace-read"]));
+            new ContextualRolePolicyMaxima(["org.embodysense/workspace/read"]));
         return ContextualRoleRevisionContentHash.Apply(value);
     }
 
