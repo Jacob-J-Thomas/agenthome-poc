@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 
@@ -23,7 +24,7 @@ public static class GovernedLoopRevisionContractValidator
         ValidateOptionalReference(artifact.PredecessorRevision, "$.predecessorRevision", errors);
         ValidateOptionalPin(artifact.RollbackSourcePublication, "$.rollbackSourcePublication", errors);
         ValidateIdentifier(artifact.CreationOperationId, "$.creationOperationId", errors);
-        ValidateIdentifier(artifact.CreatedByActorId, "$.createdByActorId", errors);
+        ValidateActorId(artifact.CreatedByActorId, "$.createdByActorId", errors);
         ValidateTimestamp(artifact.CreatedAtUtc, "$.createdAtUtc", errors);
 
         if (artifact.PredecessorRevision is not null)
@@ -149,7 +150,7 @@ public static class GovernedLoopRevisionContractValidator
 
         ValidateSchema(evidence.SchemaVersion, errors);
         ValidateIdentifier(evidence.OperationId, "$.operationId", errors);
-        ValidateIdentifier(evidence.ActorId, "$.actorId", errors);
+        ValidateActorId(evidence.ActorId, "$.actorId", errors);
         ValidateHash(evidence.RequestHash, "$.requestHash", errors);
         ValidateEnumeration(evidence.Kind, "$.kind", errors);
         ValidateEnumeration(evidence.Outcome, "$.outcome", errors);
@@ -764,6 +765,14 @@ public static class GovernedLoopRevisionContractValidator
         if (!GovernedLoopRevisionContractGuard.IsIdentifier(value))
         {
             Add(errors, GovernedLoopRevisionValidationErrorCode.InvalidIdentifier, path, "Identifier must be a bounded canonical lowercase ASCII token.");
+        }
+    }
+
+    private static void ValidateActorId(string? value, string path, List<GovernedLoopRevisionValidationError> errors)
+    {
+        if (!AuthorityActorId.TryParse(value, out _, out _))
+        {
+            Add(errors, GovernedLoopRevisionValidationErrorCode.InvalidIdentifier, path, "Actor identifier must satisfy the bounded canonical authority actor contract.");
         }
     }
 

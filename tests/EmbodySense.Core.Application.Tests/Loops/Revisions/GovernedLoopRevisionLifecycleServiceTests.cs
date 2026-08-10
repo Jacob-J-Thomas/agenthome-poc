@@ -500,6 +500,32 @@ public sealed class GovernedLoopRevisionLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Create_draft_accepts_the_full_authority_actor_id_contract_without_ambiguous_evidence()
+    {
+        var actorIds = new[] { "con", new string('a', AuthorityContractLimits.MaxActorIdCharacters) };
+
+        foreach (var actorId in actorIds)
+        {
+            Assert.True(AuthorityActorId.TryParse(actorId, out var actor, out _));
+            var store = new InMemoryStore();
+            var request = Request(
+                GovernedLoopRevisionOperationKind.CreateDraft,
+                "create-authority-actor",
+                null,
+                candidate: Revision("graph-a", "revision-1", '1')) with
+            {
+                ActorId = actor!,
+            };
+
+            var result = await Service(store).MutateAsync(request);
+
+            Assert.Equal(GovernedLoopRevisionLifecycleMutationStatus.Committed, result.Status);
+            Assert.Equal(actorId, result.Evidence!.ActorId);
+            Assert.Equal(actorId, store.LastMutation!.ArtifactToAppend!.CreatedByActorId);
+        }
+    }
+
+    [Fact]
     public async Task Exact_operation_replays_and_changed_intent_conflicts_workspace_globally()
     {
         var store = new InMemoryStore();

@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -22,6 +23,39 @@ public sealed class GovernedLoopRevisionContractTests
         Assert.Equal(pin, head.PublishedRevision);
         Assert.Null(artifact.PredecessorRevision);
         Assert.Null(artifact.RollbackSourcePublication);
+    }
+
+    [Fact]
+    public void Artifact_and_operation_evidence_accept_the_full_authority_actor_id_contract()
+    {
+        var revision = GovernedLoopRevisionTestFixture.Revision(1);
+        var result = GovernedLoopRevisionTestFixture.DraftHead(revision);
+        var actorIds = new[] { "con", new string('a', AuthorityContractLimits.MaxActorIdCharacters) };
+
+        foreach (var actorId in actorIds)
+        {
+            Assert.True(AuthorityActorId.TryParse(actorId, out _, out _));
+            var artifact = GovernedLoopRevisionArtifactFactory.Create(1, revision, null, null, "create-1", actorId, GovernedLoopRevisionTestFixture.CreatedAtUtc);
+            var evidence = GovernedLoopRevisionOperationEvidenceFactory.Create(
+                1,
+                "create-1",
+                actorId,
+                GovernedLoopRevisionTestFixture.RequestHash,
+                GovernedLoopRevisionOperationKind.CreateDraft,
+                GovernedLoopRevisionOperationOutcome.Committed,
+                GovernedLoopRevisionOperationFailureCode.None,
+                null,
+                result,
+                revision,
+                null,
+                null,
+                GovernedLoopRevisionTestFixture.AuthorityHash,
+                null,
+                result.UpdatedAtUtc.AddSeconds(1));
+
+            Assert.True(GovernedLoopRevisionContractValidator.Validate(artifact).IsValid);
+            Assert.True(GovernedLoopRevisionContractValidator.Validate(evidence).IsValid);
+        }
     }
 
     [Fact]
