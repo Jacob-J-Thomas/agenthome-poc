@@ -180,6 +180,7 @@ public static class HumanInputRequestHash
     {
         return binding is null
             || IsWithin(binding.WorkspaceId, HumanInputLimits.MaxIdentifierCharacters)
+                && IsWithin(binding.LoopGraphId, HumanInputLimits.MaxIdentifierCharacters)
                 && IsWithin(binding.LoopRevisionId, HumanInputLimits.MaxIdentifierCharacters)
                 && IsWithin(binding.NodeId, HumanInputLimits.MaxIdentifierCharacters)
                 && IsWithin(binding.RunId, HumanInputLimits.MaxIdentifierCharacters)
@@ -207,6 +208,7 @@ public static class HumanInputRequestHash
 
         writer.WriteStartObject();
         WriteString(writer, "workspaceId", binding.WorkspaceId);
+        WriteString(writer, "loopGraphId", binding.LoopGraphId);
         WriteString(writer, "loopRevisionId", binding.LoopRevisionId);
         WriteString(writer, "nodeId", binding.NodeId);
         WriteString(writer, "runId", binding.RunId);
