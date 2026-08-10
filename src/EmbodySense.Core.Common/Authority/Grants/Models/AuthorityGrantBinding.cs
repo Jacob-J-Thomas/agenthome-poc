@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 
 namespace EmbodySense.Core.Common.Authority.Grants.Models;
@@ -6,4 +7,4 @@ namespace EmbodySense.Core.Common.Authority.Grants.Models;
 /// <param name="Profile">The exact authority-profile revision.</param>
 /// <param name="Role">The exact contextual-role revision.</param>
 /// <param name="Loop">The exact governed-loop publication pin.</param>
-public sealed record AuthorityGrantBinding(AuthorityGrantProfilePin Profile, AuthorityGrantRolePin Role, GovernedLoopRevisionPublicationPin Loop);
+public sealed record AuthorityGrantBinding(AuthorityGrantProfilePin Profile, ContextualRoleRevisionPin Role, GovernedLoopRevisionPublicationPin Loop);

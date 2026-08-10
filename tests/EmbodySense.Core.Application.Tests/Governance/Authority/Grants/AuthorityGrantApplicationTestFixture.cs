@@ -21,6 +21,7 @@ namespace EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
 internal static class AuthorityGrantApplicationTestFixture
 {
     internal static readonly DateTimeOffset Now = new(2026, 8, 10, 18, 0, 0, TimeSpan.Zero);
+    private static readonly string _workspaceId = "workspace-sha256:" + new string('a', ContextualRoleLimits.Sha256HexCharacters);
 
     internal static AuthorityGrantMutationRequest Request(
         AuthorityGrantOperationKind kind = AuthorityGrantOperationKind.Create,
@@ -121,7 +122,7 @@ internal static class AuthorityGrantApplicationTestFixture
         var loop = LoopPin();
         return new AuthorityGrantBinding(
             new AuthorityGrantProfilePin(new AuthorityProfileReference(profile.ProfileId, profile.Revision), profileHash),
-            new AuthorityGrantRolePin(role.Identity, role.ContentHash),
+            new ContextualRoleRevisionPin(role.Identity, role.ContentHash),
             loop);
     }
 
@@ -220,7 +221,7 @@ internal static class AuthorityGrantApplicationTestFixture
             "Performs bounded governed-loop work.",
             status,
             new ContextualRoleProvenance("user-owner", Now.AddHours(-2), Now.AddHours(-1)),
-            new ContextualRoleWorkspaceApplicability(["workspace-one"]),
+            new ContextualRoleWorkspaceApplicability([_workspaceId]),
             new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.RoleArtifact, "bounded-helper-source", ContextualRoleInstructionClassification.RoleInstruction),
             new ContextualRolePolicyMaxima((capabilityIds ?? [Capability().Id.Value]).ToImmutableArray()));
         return ContextualRoleRevisionContentHash.Apply(role);

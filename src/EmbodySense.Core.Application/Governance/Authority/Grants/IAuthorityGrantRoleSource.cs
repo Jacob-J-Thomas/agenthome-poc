@@ -1,5 +1,5 @@
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
-using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 
 namespace EmbodySense.Core.Application.Governance.Authority.Grants;
 
@@ -10,5 +10,5 @@ public interface IAuthorityGrantRoleSource
     /// <param name="pin">The exact role revision and canonical content hash.</param>
     /// <param name="cancellationToken">A token that cancels the source reads.</param>
     /// <returns>The exact current posture and value-free evidence digest.</returns>
-    Task<AuthorityGrantRoleResolution> ResolveAsync(AuthorityGrantRolePin? pin, CancellationToken cancellationToken = default);
+    Task<AuthorityGrantRoleResolution> ResolveAsync(ContextualRoleRevisionPin? pin, CancellationToken cancellationToken = default);
 }

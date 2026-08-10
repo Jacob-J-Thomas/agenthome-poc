@@ -7,6 +7,7 @@ using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Custom;
@@ -142,7 +143,7 @@ internal sealed class AuthorityGrantDependencyEvaluator
 
     private static bool IsExactActiveRole(
         AuthorityGrantRoleResolution? resolution,
-        AuthorityGrantRolePin pin,
+        ContextualRoleRevisionPin pin,
         DateTimeOffset evaluatedAtUtc)
         => resolution is
         {

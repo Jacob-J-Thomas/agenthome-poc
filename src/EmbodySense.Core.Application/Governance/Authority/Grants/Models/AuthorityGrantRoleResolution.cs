@@ -1,5 +1,4 @@
 using EmbodySense.Core.Application.ContextualRoles.Models;
-using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 
 namespace EmbodySense.Core.Application.Governance.Authority.Grants.Models;
@@ -12,7 +11,7 @@ namespace EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 /// <param name="EvidenceHash">The canonical current-state evidence digest when safely proved.</param>
 public sealed record AuthorityGrantRoleResolution(
     AuthorityGrantDependencyStatus Status,
-    AuthorityGrantRolePin? RequestedPin,
+    ContextualRoleRevisionPin? RequestedPin,
     ContextualRoleRevision? Revision,
     ContextualRoleLifecycleSnapshot? Lifecycle,
     string EvidenceHash);

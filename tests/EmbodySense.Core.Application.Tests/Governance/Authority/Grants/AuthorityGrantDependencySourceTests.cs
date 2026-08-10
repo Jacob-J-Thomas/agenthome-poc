@@ -243,7 +243,7 @@ public sealed class AuthorityGrantDependencySourceTests
     public async Task Role_source_resolves_exact_active_stale_and_disabled_postures()
     {
         var role = AuthorityGrantApplicationTestFixture.Role();
-        var pin = new AuthorityGrantRolePin(role.Identity, role.ContentHash);
+        var pin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
         var ports = new RolePorts
         {
             RevisionResult = new(ContextualRoleRevisionReadStatus.Found, role, ContextualRoleRevisionDisposition.Active, []),
@@ -268,7 +268,7 @@ public sealed class AuthorityGrantDependencySourceTests
     public async Task Role_source_requires_canonical_bounded_operation_evidence_and_exact_shapes()
     {
         var role = AuthorityGrantApplicationTestFixture.Role();
-        var pin = new AuthorityGrantRolePin(role.Identity, role.ContentHash);
+        var pin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
         var lifecycle = AuthorityGrantApplicationTestFixture.RoleLifecycle(role);
         var ports = new RolePorts
         {
@@ -292,7 +292,7 @@ public sealed class AuthorityGrantDependencySourceTests
     public async Task Role_source_maps_closed_read_failures_without_following_substitutions()
     {
         var role = AuthorityGrantApplicationTestFixture.Role();
-        var pin = new AuthorityGrantRolePin(role.Identity, role.ContentHash);
+        var pin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
         var ports = new RolePorts { RevisionResult = new(ContextualRoleRevisionReadStatus.NotFound, null, ContextualRoleRevisionDisposition.Unknown, []) };
         var source = new AuthorityGrantRoleSource(ports, ports);
 

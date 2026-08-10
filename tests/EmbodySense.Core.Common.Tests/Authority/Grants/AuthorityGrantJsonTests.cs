@@ -8,6 +8,18 @@ namespace EmbodySense.Core.Common.Tests.Authority.Grants;
 public sealed class AuthorityGrantJsonTests
 {
     [Fact]
+    public void Shared_contextual_role_pin_preserves_the_canonical_grant_json_and_hash_bytes()
+    {
+        const string ExpectedHash = "sha256:116cba50c68920f568f10ce5e761a61b19ffdd6e3cefd91b7b74220f0012439a";
+        const string ExpectedJson = """{"binding":{"loop":{"executableHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","graphId":"governed-loop","publicationOperationId":"publish-7","revisionId":"revision-7","schemaVersion":1,"validationEvidenceHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"profile":{"contentHash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","profileId":"default-profile","revision":3},"role":{"contentHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","revision":4,"roleId":"bounded-helper"}},"boundary":{"completionConstraint":"none","effectiveAtUtc":"2026-08-10T11:55:00.0000000\u002B00:00","expiresAtUtc":"2026-08-10T13:00:00.0000000\u002B00:00"},"changedByActorId":"user-owner","contentHash":"sha256:116cba50c68920f568f10ce5e761a61b19ffdd6e3cefd91b7b74220f0012439a","grantId":"workspace-helper","predecessorContentHash":null,"predecessorRevision":null,"reason":"Delegate bounded work for one governed loop revision.","recordedAtUtc":"2026-08-10T12:00:00.0000000\u002B00:00","requestedCeiling":{"allowsExternalPublication":false,"allowsIrreversibleAction":false,"allowsRecurrence":false,"capabilities":[],"dataClasses":["workspace-content"],"maxSideEffectClass":"read-only","maxTargetCount":5},"revision":1,"schemaVersion":1,"status":"active"}""";
+        var grant = AuthorityGrantTestFixture.Grant();
+        Assert.True(AuthorityGrantJson.TrySerialize(grant, out var json, out var validation), Describe(validation));
+
+        Assert.Equal(ExpectedHash, grant.ContentHash);
+        Assert.Equal(ExpectedJson, json);
+    }
+
+    [Fact]
     public void Canonical_json_round_trips_every_field_and_sorts_set_like_ceiling_collections()
     {
         var firstCapability = AuthorityGrantTestFixture.Capability("org.embodysense/workspace/write-file", "2.0.0", 'f');

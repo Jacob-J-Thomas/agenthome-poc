@@ -1,6 +1,5 @@
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Capabilities;
-using System.Collections.Immutable;
 using System.Globalization;
 using System.Text;
 
@@ -118,7 +117,19 @@ public static class ContextualRoleRevisionValidator
             Add(errors, "workspace_scope_count_out_of_range", "workspaceApplicability.workspaceIds", $"Workspace scope count must be between 1 and {ContextualRoleLimits.MaxWorkspaceScopes}.");
         }
 
-        ValidateIdentifiers(applicability.WorkspaceIds, "workspaceApplicability.workspaceIds", "invalid_workspace_id", "duplicate_workspace_id", errors);
+        var unique = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < applicability.WorkspaceIds.Length; index++)
+        {
+            var workspaceId = applicability.WorkspaceIds[index];
+            if (!ContextualRoleWorkspaceId.IsValid(workspaceId))
+            {
+                Add(errors, "invalid_workspace_id", $"workspaceApplicability.workspaceIds[{index}]", "Workspace identifier must use the canonical workspace-sha256 scope contract.");
+            }
+            else if (!unique.Add(workspaceId))
+            {
+                Add(errors, "duplicate_workspace_id", $"workspaceApplicability.workspaceIds[{index}]", "Workspace identifiers must be unique using ordinal comparison.");
+            }
+        }
     }
 
     private static void ValidateInstructionSource(ContextualRoleInstructionSourceReference? source, List<ContextualRoleValidationError> errors)
@@ -169,22 +180,6 @@ public static class ContextualRoleRevisionValidator
             else if (!unique.Add(capabilityId))
             {
                 Add(errors, "duplicate_capability_maximum", $"policyMaxima.capabilityIds[{index}]", "Capability maximum identifiers must be unique using ordinal comparison.");
-            }
-        }
-    }
-
-    private static void ValidateIdentifiers(ImmutableArray<string> identifiers, string field, string invalidCode, string duplicateCode, List<ContextualRoleValidationError> errors)
-    {
-        var unique = new HashSet<string>(StringComparer.Ordinal);
-        for (var index = 0; index < identifiers.Length; index++)
-        {
-            if (!ContextualRoleId.IsValid(identifiers[index]))
-            {
-                Add(errors, invalidCode, $"{field}[{index}]", "Identifier must be a bounded lowercase ASCII identifier.");
-            }
-            else if (!unique.Add(identifiers[index]))
-            {
-                Add(errors, duplicateCode, $"{field}[{index}]", "Identifiers must be unique using ordinal comparison.");
             }
         }
     }

@@ -7,6 +7,7 @@ using EmbodySense.Core.Application.Tests.Capabilities;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 
 namespace EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
@@ -127,7 +128,7 @@ public sealed class AuthorityGrantLifecycleServiceTests
         var binding = splice == "different-pin"
             ? request.CandidateBinding! with
             {
-                Role = new AuthorityGrantRolePin(new("other-role", 1), AuthorityGrantApplicationTestFixture.Hash64('9')),
+                Role = new ContextualRoleRevisionPin(new("other-role", 1), AuthorityGrantApplicationTestFixture.Hash64('9')),
             }
             : request.CandidateBinding;
         var ceiling = splice == "wider-ceiling"
@@ -463,7 +464,7 @@ public sealed class AuthorityGrantLifecycleServiceTests
             case "role":
                 var role = AuthorityGrantApplicationTestFixture.Role(capabilityIds: []);
                 harness.Role.Role = role;
-                binding = binding with { Role = new AuthorityGrantRolePin(role.Identity, role.ContentHash) };
+                binding = binding with { Role = new ContextualRoleRevisionPin(role.Identity, role.ContentHash) };
                 break;
             case "loop":
                 harness.LoopBinding.CapabilityIds = [];
@@ -1005,7 +1006,7 @@ public sealed class AuthorityGrantLifecycleServiceTests
         internal Common.ContextualRoles.Models.ContextualRoleRevision? Role { get; set; }
         internal Exception? Exception { get; set; }
 
-        public Task<AuthorityGrantRoleResolution> ResolveAsync(AuthorityGrantRolePin? pin, CancellationToken cancellationToken = default)
+        public Task<AuthorityGrantRoleResolution> ResolveAsync(ContextualRoleRevisionPin? pin, CancellationToken cancellationToken = default)
         {
             Calls++;
             if (Exception is not null)

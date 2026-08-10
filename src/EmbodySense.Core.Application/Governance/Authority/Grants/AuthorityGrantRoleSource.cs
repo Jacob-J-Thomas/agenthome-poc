@@ -1,7 +1,6 @@
 using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
-using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 
@@ -21,7 +20,7 @@ public sealed class AuthorityGrantRoleSource : IAuthorityGrantRoleSource
     }
 
     /// <inheritdoc />
-    public async Task<AuthorityGrantRoleResolution> ResolveAsync(AuthorityGrantRolePin? pin, CancellationToken cancellationToken = default)
+    public async Task<AuthorityGrantRoleResolution> ResolveAsync(ContextualRoleRevisionPin? pin, CancellationToken cancellationToken = default)
     {
         if (!IsValidPin(pin))
         {
@@ -150,16 +149,16 @@ public sealed class AuthorityGrantRoleSource : IAuthorityGrantRoleSource
             && Enum.IsDefined(value.LastMutationKind)
             && value.LastMutationKind != ContextualRoleRevisionMutationKind.Unknown;
 
-    private static AuthorityGrantRoleResolution Resolved(AuthorityGrantDependencyStatus status, AuthorityGrantRolePin pin, ContextualRoleRevision revision, ContextualRoleLifecycleSnapshot? lifecycle)
+    private static AuthorityGrantRoleResolution Resolved(AuthorityGrantDependencyStatus status, ContextualRoleRevisionPin pin, ContextualRoleRevision revision, ContextualRoleLifecycleSnapshot? lifecycle)
     {
         var evidence = AuthorityGrantEvidenceHash.Compute(pin.Identity.RoleId, pin.Identity.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture), pin.ContentHash, lifecycle?.LastOperationId ?? string.Empty, lifecycle?.UpdatedAtUtc.ToString("O", System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty);
         return new AuthorityGrantRoleResolution(status, pin, revision, lifecycle, evidence);
     }
 
-    private static AuthorityGrantRoleResolution Result(AuthorityGrantDependencyStatus status, AuthorityGrantRolePin? pin)
+    private static AuthorityGrantRoleResolution Result(AuthorityGrantDependencyStatus status, ContextualRoleRevisionPin? pin)
         => new(status, pin, null, null, string.Empty);
 
-    private static bool IsValidPin(AuthorityGrantRolePin? pin)
+    private static bool IsValidPin(ContextualRoleRevisionPin? pin)
         => pin?.Identity is not null
             && ContextualRoleId.IsValid(pin.Identity.RoleId)
             && pin.Identity.Revision > 0

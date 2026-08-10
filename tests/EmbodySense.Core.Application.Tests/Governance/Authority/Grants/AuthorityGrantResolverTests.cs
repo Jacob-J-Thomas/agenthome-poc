@@ -6,6 +6,7 @@ using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Application.Tests.Capabilities;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 
 namespace EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
@@ -407,7 +408,7 @@ public sealed class AuthorityGrantResolverTests
         internal AuthorityGrantDependencyStatus Status { get; set; } = AuthorityGrantDependencyStatus.Active;
         internal EmbodySense.Core.Application.ContextualRoles.Models.ContextualRoleLifecycleSnapshot? Lifecycle { get; set; }
 
-        public Task<AuthorityGrantRoleResolution> ResolveAsync(AuthorityGrantRolePin? pin, CancellationToken cancellationToken = default)
+        public Task<AuthorityGrantRoleResolution> ResolveAsync(ContextualRoleRevisionPin? pin, CancellationToken cancellationToken = default)
         {
             var role = AuthorityGrantApplicationTestFixture.Role();
             return Task.FromResult(new AuthorityGrantRoleResolution(Status, pin, role, Lifecycle ?? AuthorityGrantApplicationTestFixture.RoleLifecycle(role), AuthorityGrantApplicationTestFixture.Hash64('6')));
