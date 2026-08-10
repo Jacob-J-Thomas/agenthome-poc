@@ -353,7 +353,8 @@ internal static class HumanInputRequestLifecycleStoreSnapshotGuard
             && Equals(answer.ResultHead, head)
             && Equals(answer.Request, previous.CurrentRequest)
             && answer.Request.Matches(request)
-            && Equals(answer.Binding, request.Binding)
+            && Equals(answer.ExpectedBinding, request.Binding)
+            && Equals(answer.ObservedBinding, request.Binding)
             && answer.ExpectedLifecycleVersion == previous.LifecycleVersion
             && answer.ExpectedLifecycleStatus == previous.Status
             && Equals(head.AnswerSelection, answer.Selection)
