@@ -179,6 +179,9 @@ public static class HumanInputResponseOperationCausality
         }
 
         var actorRoleId = expectedRequest is null ? null : EligibleRole(expectedRequest, actorId);
+        var chronologyAllowsPersistence = recordedAtUtc >= head.UpdatedAtUtc
+            && recordedAtUtc >= observedRequest.Timing.RequestedAtUtc
+            && (previousOperationAtUtc is null || recordedAtUtc >= previousOperationAtUtc.Value);
         if (head.Status != HumanInputRequestLifecycleStatus.Pending)
         {
             return (HumanInputResponsePolicyEvaluator.Failure(
@@ -186,7 +189,8 @@ public static class HumanInputResponseOperationCausality
                 command.TargetResponses,
                 HumanInputResponseLifecycleMutationStatus.Conflict,
                 HumanInputResponseOperationOutcome.Rejected,
-                HumanInputResponseOperationFailureCode.RequestTerminal), observedRequest, actorRoleId);
+                HumanInputResponseOperationFailureCode.RequestTerminal,
+                canPersist: chronologyAllowsPersistence), observedRequest, actorRoleId);
         }
         if (!Equals(head.CurrentRequest, command.ExpectedRequest)
             || !Equals(observedRequest.Binding, command.ExpectedBinding))
@@ -196,7 +200,8 @@ public static class HumanInputResponseOperationCausality
                 command.TargetResponses,
                 HumanInputResponseLifecycleMutationStatus.Conflict,
                 HumanInputResponseOperationOutcome.Conflict,
-                HumanInputResponseOperationFailureCode.StaleResponse), observedRequest, actorRoleId);
+                HumanInputResponseOperationFailureCode.StaleResponse,
+                canPersist: chronologyAllowsPersistence), observedRequest, actorRoleId);
         }
         if (head.LifecycleVersion != command.ExpectedLifecycleVersion)
         {
@@ -205,7 +210,8 @@ public static class HumanInputResponseOperationCausality
                 command.TargetResponses,
                 HumanInputResponseLifecycleMutationStatus.Conflict,
                 HumanInputResponseOperationOutcome.Conflict,
-                HumanInputResponseOperationFailureCode.OptimisticStateConflict), observedRequest, actorRoleId);
+                HumanInputResponseOperationFailureCode.OptimisticStateConflict,
+                canPersist: chronologyAllowsPersistence), observedRequest, actorRoleId);
         }
         var selectorIsEligible = command.Kind != HumanInputResponseOperationKind.Select
             || observedRequest.ResponsePolicy.Kind == HumanInputResponsePolicyKind.ManualSelection
@@ -222,11 +228,10 @@ public static class HumanInputResponseOperationCausality
                 HumanInputResponseOperationOutcome.Rejected,
                 selector
                     ? HumanInputResponseOperationFailureCode.IneligibleSelector
-                    : HumanInputResponseOperationFailureCode.IneligibleRespondent), observedRequest, null);
+                    : HumanInputResponseOperationFailureCode.IneligibleRespondent,
+                canPersist: chronologyAllowsPersistence), observedRequest, null);
         }
-        if (recordedAtUtc < head.UpdatedAtUtc
-            || recordedAtUtc < observedRequest.Timing.RequestedAtUtc
-            || previousOperationAtUtc is { } previousTime && recordedAtUtc < previousTime)
+        if (!chronologyAllowsPersistence)
         {
             return (HumanInputResponsePolicyEvaluator.Failure(
                 head,
