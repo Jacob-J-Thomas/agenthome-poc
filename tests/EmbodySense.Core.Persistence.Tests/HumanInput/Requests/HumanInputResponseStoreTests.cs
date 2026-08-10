@@ -716,6 +716,35 @@ public sealed class HumanInputResponseStoreTests
     }
 
     [Fact]
+    public async Task Authenticated_current_primary_returns_without_reading_an_irrelevant_proof_artifact()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var request = ManualRequest();
+        var create = Create(request);
+        var store = Store(paths, trust);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(create)).Status);
+        var submit = Submit(
+            create.RequestToAppend!,
+            create.PrimaryHeadToWrite!,
+            1,
+            "submit-before-lazy-proof-read",
+            "response-before-lazy-proof-read",
+            answer: false);
+        Assert.Equal(
+            HumanInputResponseLifecycleStoreCommitStatus.Committed,
+            (await ((IHumanInputResponseLifecycleStore)store).CommitAsync(submit)).Status);
+        var failOnProof = new FailingSecondArtifactVerificationTrustProvider(trust);
+
+        var read = await ((IHumanInputResponseLifecycleStore)Store(paths, failOnProof)).ReadAsync(Reference(request));
+
+        Assert.Equal(HumanInputResponseLifecycleStoreReadStatus.Ready, read.Status);
+        Assert.Single(read.Snapshot!.Responses);
+        Assert.Equal(1, failOnProof.VerificationCount);
+    }
+
+    [Fact]
     public async Task Invalid_response_store_inputs_fail_closed_before_publication()
     {
         using var workspace = new TestWorkspace();
@@ -2874,6 +2903,62 @@ public sealed class HumanInputResponseStoreTests
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(false);
         }
+
+        public Task<CapabilityCatalogTrustState> AdvanceAsync(
+            string workspaceIdentity,
+            long expectedGeneration,
+            string expectedContentDigest,
+            long newGeneration,
+            string newContentDigest,
+            CancellationToken cancellationToken = default)
+            => inner.AdvanceAsync(
+                workspaceIdentity,
+                expectedGeneration,
+                expectedContentDigest,
+                newGeneration,
+                newContentDigest,
+                cancellationToken);
+    }
+
+    private sealed class FailingSecondArtifactVerificationTrustProvider(ICapabilityCatalogTrustProvider inner)
+        : ICapabilityCatalogTrustProvider
+    {
+        private int _verificationCount;
+
+        public int VerificationCount => Volatile.Read(ref _verificationCount);
+
+        public int MaximumAuthenticationTagUtf8Bytes => inner.MaximumAuthenticationTagUtf8Bytes;
+
+        public void RequireDisjointWorkspace(string workspaceRootPath) => inner.RequireDisjointWorkspace(workspaceRootPath);
+
+        public Task<CapabilityCatalogTrustState?> ReadAsync(
+            string workspaceIdentity,
+            CancellationToken cancellationToken = default)
+            => inner.ReadAsync(workspaceIdentity, cancellationToken);
+
+        public Task<CapabilityCatalogTrustState> InitializeAsync(
+            string workspaceIdentity,
+            long generation,
+            string contentDigest,
+            CancellationToken cancellationToken = default)
+            => inner.InitializeAsync(workspaceIdentity, generation, contentDigest, cancellationToken);
+
+        public Task<string> AuthenticateArtifactAsync(
+            string workspaceIdentity,
+            long generation,
+            string contentDigest,
+            CancellationToken cancellationToken = default)
+            => inner.AuthenticateArtifactAsync(workspaceIdentity, generation, contentDigest, cancellationToken);
+
+        public Task<bool> VerifyArtifactAsync(
+            string workspaceIdentity,
+            long generation,
+            string contentDigest,
+            string authenticationTag,
+            CancellationToken cancellationToken = default)
+            => Interlocked.Increment(ref _verificationCount) == 1
+                ? inner.VerifyArtifactAsync(workspaceIdentity, generation, contentDigest, authenticationTag, cancellationToken)
+                : Task.FromException<bool>(new IOException("The irrelevant proof artifact was read."));
 
         public Task<CapabilityCatalogTrustState> AdvanceAsync(
             string workspaceIdentity,

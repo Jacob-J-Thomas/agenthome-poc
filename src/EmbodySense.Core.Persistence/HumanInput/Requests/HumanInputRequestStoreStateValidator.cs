@@ -212,39 +212,29 @@ internal static class HumanInputRequestStoreStateValidator
 
     private static bool ValidateResponseCausality(HumanInputRequestStoreDocument document)
     {
-        var claimedRequests = new HashSet<string>(StringComparer.Ordinal);
         var exactSnapshots = new Dictionary<string, HumanInputResponseLifecycleStoreSnapshot?>(StringComparer.Ordinal);
         var currentSnapshots = new Dictionary<string, HumanInputResponseLifecycleStoreSnapshot?>(StringComparer.Ordinal);
+        var observations = new List<HumanInputResponseOperationCausalityObservation>(document.Operations.Count);
         foreach (var envelope in document.Operations)
         {
-            if (envelope.RequestLifecycle is
-                {
-                    Outcome: HumanInputRequestLifecycleOperationOutcome.Committed,
-                    CandidateRequest: { } candidate
-                })
-            {
-                claimedRequests.Add(RequestReferenceKey(candidate));
-                continue;
-            }
-
             if (envelope.ResponseLifecycle is not { } operation)
             {
                 continue;
             }
 
             HumanInputResponseLifecycleStoreSnapshot? snapshot = null;
-            var requestKey = RequestReferenceKey(operation.Request);
-            if (operation.FailureCode != HumanInputResponseOperationFailureCode.RequestNotFound
-                && claimedRequests.Contains(requestKey))
+            if (operation.FailureCode != HumanInputResponseOperationFailureCode.RequestNotFound)
             {
+                var requestKey = RequestReferenceKey(operation.Request);
                 if (!exactSnapshots.TryGetValue(requestKey, out snapshot))
                 {
                     snapshot = HumanInputRequestStore.ResponseSnapshot(document, operation.Request);
                     exactSnapshots.Add(requestKey, snapshot);
                 }
             }
-            else if (operation.FailureCode is HumanInputResponseOperationFailureCode.StaleResponse
-                         or HumanInputResponseOperationFailureCode.RequestTerminal)
+            if (snapshot is null
+                && operation.FailureCode is HumanInputResponseOperationFailureCode.StaleResponse
+                    or HumanInputResponseOperationFailureCode.RequestTerminal)
             {
                 if (!currentSnapshots.TryGetValue(operation.Request.RequestId, out snapshot))
                 {
@@ -253,12 +243,9 @@ internal static class HumanInputRequestStoreStateValidator
                 }
             }
 
-            if (!HumanInputResponseOperationCausality.Matches(operation, snapshot))
-            {
-                return false;
-            }
+            observations.Add(new HumanInputResponseOperationCausalityObservation(operation, snapshot));
         }
-        return true;
+        return HumanInputResponseOperationCausality.MatchesChronology(observations);
     }
 
     public static bool IsDirectSuccessor(

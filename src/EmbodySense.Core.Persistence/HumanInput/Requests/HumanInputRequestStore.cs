@@ -818,14 +818,14 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore, I
         var primary = primaryExists
             ? await TryReadAsync(session, workspaceIdentity, _paths.PrimaryPath, cancellationToken).ConfigureAwait(false)
             : null;
-        var proof = proofExists
-            ? await TryReadAsync(session, workspaceIdentity, _paths.ProofPath, cancellationToken).ConfigureAwait(false)
-            : null;
         if (primary is not null && MatchesCurrent(primary, trust))
         {
             return new HumanInputRequestLoadResult(primary, null, HumanInputRequestLoadDisposition.Current);
         }
 
+        var proof = proofExists
+            ? await TryReadAsync(session, workspaceIdentity, _paths.ProofPath, cancellationToken).ConfigureAwait(false)
+            : null;
         var currentBase = proof is not null && MatchesCurrent(proof, trust)
             ? proof
             : !primaryExists && !proofExists && MatchesCurrent(empty, trust)
