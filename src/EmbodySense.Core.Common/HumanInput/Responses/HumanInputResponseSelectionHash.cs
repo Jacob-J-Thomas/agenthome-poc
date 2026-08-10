@@ -85,6 +85,10 @@ public static class HumanInputResponseSelectionHash
             var response = selection.Responses[index];
             if (response is null
                 || response.ResponseId is null or { Length: > HumanInputLimits.MaxIdentifierCharacters }
+                || response.Request is null
+                || response.Request.RequestId is null or { Length: > HumanInputLimits.MaxIdentifierCharacters }
+                || response.Request.RequestVersionId is null or { Length: > HumanInputLimits.MaxIdentifierCharacters }
+                || response.Request.RequestHash is null or { Length: > HumanInputLimits.Sha256HexCharacters }
                 || response.ValueHash is null or { Length: > HumanInputLimits.Sha256HexCharacters }
                 || response.ResponseHash is null or { Length: > HumanInputLimits.Sha256HexCharacters })
             {

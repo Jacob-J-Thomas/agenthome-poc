@@ -97,7 +97,7 @@ public static class HumanInputResponseContractValidator
     /// <summary>Validates one immutable deterministic response selection against the exact request and bounded active response set.</summary>
     /// <param name="request">The exact immutable request version.</param>
     /// <param name="selection">The selection to inspect.</param>
-    /// <param name="activeResponses">All exact active, non-withdrawn response artifacts available to policy evaluation.</param>
+    /// <param name="activeResponses">All exact active, non-withdrawn response artifacts in durable response-operation order.</param>
     /// <returns>Every bounded deterministic value-free contract violation.</returns>
     public static HumanInputResponseValidationResult ValidateSelection(HumanInputRequest? request, HumanInputResponseSelection? selection, IReadOnlyList<HumanInputResponseArtifact>? activeResponses)
     {
@@ -176,7 +176,7 @@ public static class HumanInputResponseContractValidator
             }
         }
 
-        ValidateSelectionPolicy(request, selection, selected, activeById.Values, errors);
+        ValidateSelectionPolicy(request, selection, selected, activeResponses, errors);
         if (!HumanInputResponseSelectionHash.IsBounded(selection))
         {
             Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$", "The selection exceeds canonical schema-1 bounds.");
@@ -234,17 +234,17 @@ public static class HumanInputResponseContractValidator
         {
             case HumanInputResponsePolicyKind.FirstValid:
                 ValidateAutomaticSelector(selection, errors);
-                if (selected.Count != 1)
+                if (selected.Count != 1 || activeResponses.FirstOrDefault() is not { } first || !string.Equals(selected[0].ResponseId, first.ResponseId, StringComparison.Ordinal))
                 {
-                    Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$.responses", "First-valid policy selects exactly one response.");
+                    Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$.responses", "First-valid policy selects exactly the earliest active response in durable operation order.");
                 }
                 break;
             case HumanInputResponsePolicyKind.Quorum:
                 ValidateAutomaticSelector(selection, errors);
-                if (selected.Count != policy.RequiredResponseCount || selected.Select(response => response.ActorId.Value).Distinct(StringComparer.Ordinal).Count() != selected.Count
-                    || selected.Select(response => response.ValueHash).Distinct(StringComparer.Ordinal).Count() != 1)
+                var winning = FindFirstQuorum(activeResponses, policy.RequiredResponseCount ?? 0);
+                if (winning is null || selected.Count != winning.Count || !selected.Select(response => response.ResponseId).SequenceEqual(winning.Select(response => response.ResponseId), StringComparer.Ordinal))
                 {
-                    Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$.responses", "Quorum selects the configured number of distinct respondents with one exact canonical value hash.");
+                    Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$.responses", "Quorum selects the first configured number of distinct respondents for the earliest winning value hash in durable operation order.");
                 }
                 break;
             case HumanInputResponsePolicyKind.NamedRoles:
@@ -257,11 +257,45 @@ public static class HumanInputResponseContractValidator
                 break;
             case HumanInputResponsePolicyKind.ManualSelection:
                 ValidateManualSelector(request, selection, errors);
+                if (selected.Count != 1)
+                {
+                    Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$.responses", "Manual selection chooses exactly one exact active response.");
+                }
                 break;
             default:
                 Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$.policyKind", "A supported deterministic policy is required.");
                 break;
         }
+    }
+
+    private static IReadOnlyList<HumanInputResponseArtifact>? FindFirstQuorum(IEnumerable<HumanInputResponseArtifact> activeResponses, int requiredCount)
+    {
+        if (requiredCount < 2)
+        {
+            return null;
+        }
+
+        var byValueHash = new Dictionary<string, List<HumanInputResponseArtifact>>(StringComparer.Ordinal);
+        var actorsByValueHash = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        foreach (var response in activeResponses)
+        {
+            if (!byValueHash.TryGetValue(response.ValueHash, out var matching))
+            {
+                matching = [];
+                byValueHash.Add(response.ValueHash, matching);
+                actorsByValueHash.Add(response.ValueHash, new HashSet<string>(StringComparer.Ordinal));
+            }
+            if (!actorsByValueHash[response.ValueHash].Add(response.ActorId.Value))
+            {
+                continue;
+            }
+            matching.Add(response);
+            if (matching.Count == requiredCount)
+            {
+                return matching;
+            }
+        }
+        return null;
     }
 
     private static void ValidateAutomaticSelector(HumanInputResponseSelection selection, List<HumanInputResponseValidationError> errors)
@@ -441,10 +475,10 @@ public static class HumanInputResponseContractValidator
                 }
                 break;
             case HumanInputResponseOperationKind.Select:
-                if (evidence.SubmittedResponse is not null || evidence.TargetResponses.Length < 1
+                if (evidence.SubmittedResponse is not null || evidence.TargetResponses.Length != 1
                     || evidence.Outcome == HumanInputResponseOperationOutcome.Committed != (evidence.Selection is not null))
                 {
-                    Add(errors, HumanInputResponseValidationErrorCode.InvalidEvidenceShape, "$.selection", "Only a committed manual select retains one exact non-empty selected response set.");
+                    Add(errors, HumanInputResponseValidationErrorCode.InvalidEvidenceShape, "$.selection", "Only a committed manual select retains exactly one exact selected response.");
                 }
                 break;
         }
