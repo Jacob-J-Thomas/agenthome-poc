@@ -37,7 +37,18 @@ const capabilityState = {
   previewInFlight: false,
   selectedId: null,
   storageKey: null,
+  storageLockName: null,
+  storageReady: false,
+  tabId: null,
+  tabStorageKey: null,
 };
+
+const capabilityLifecycleRegistrySchemaVersion = 1;
+const maximumPendingCapabilityOperations = 16;
+const capabilityLifecycleStorageKeyPrefix =
+  "embodysense.pending-capability-lifecycle.v1";
+const capabilityLifecycleTabStorageKey =
+  "embodysense.capability-lifecycle-tab.v1";
 
 function capabilityNode(tag, className, text) {
   const element = document.createElement(tag);
@@ -98,7 +109,16 @@ async function capabilityBoot() {
       "ready",
       status.initialized,
     );
-    capabilityState.storageKey = `embodysense.pending-capability-lifecycle.v1.${workspaceScope}`;
+    try {
+      configureCapabilityLifecycleStorage(workspaceScope);
+    } catch (error) {
+      capabilityState.storageReady = false;
+      capabilityElements.previewLifecycleButton.disabled = true;
+      showLifecycleNotice(
+        `Lifecycle changes are disabled: ${error.message}`,
+        true,
+      );
+    }
     if (!status.initialized) {
       showCatalogNotice(
         "Initialize this workspace from Chat or Loops before inspecting capabilities.",
@@ -106,7 +126,7 @@ async function capabilityBoot() {
       );
       return;
     }
-    if (await loadCapabilityCatalog(false))
+    if ((await loadCapabilityCatalog(false)) && capabilityState.storageReady)
       await restorePendingCapabilityPreview();
   } catch (error) {
     showCatalogNotice(error.message, true);
@@ -328,6 +348,13 @@ function renderCapabilityDependents(dependents, available) {
 
 async function previewCapabilityLifecycle(event) {
   event.preventDefault();
+  if (!capabilityState.storageReady) {
+    showLifecycleNotice(
+      "Durable cross-tab browser coordination is unavailable, so no lifecycle preview was dispatched.",
+      true,
+    );
+    return;
+  }
   if (capabilityState.previewInFlight) {
     showLifecycleNotice(
       "The current lifecycle preview request is still being reconciled.",
@@ -360,14 +387,21 @@ async function previewCapabilityLifecycle(event) {
     capabilityId,
     targetVersion,
   };
-  capabilityState.pending = { selection, preview: null };
-  if (!persistPendingCapabilityPreview()) {
+  capabilityState.pending = {
+    selection,
+    preview: null,
+    disposition: "preview",
+    evidence: null,
+  };
+  capabilityState.previewInFlight = true;
+  try {
+    await reservePendingCapabilityPreview(selection);
+  } catch (error) {
     capabilityState.pending = null;
-    showLifecycleNotice(
-      "Browser reconciliation storage is unavailable, so no lifecycle preview was dispatched.",
-      true,
-    );
+    showLifecycleNotice(error.message, true);
     return;
+  } finally {
+    capabilityState.previewInFlight = false;
   }
   await requestCapabilityPreview(selection);
 }
@@ -387,8 +421,17 @@ async function requestCapabilityPreview(selection) {
         "The server response did not prove the exact requested lifecycle preview identity.",
       );
     }
-    capabilityState.pending = { selection, preview: response.preview };
-    const retained = persistPendingCapabilityPreview();
+    const disposition = capabilityState.pending?.disposition ?? "preview";
+    capabilityState.pending = {
+      selection,
+      preview: response.preview,
+      disposition,
+      evidence: capabilityPreviewEvidence(response.preview),
+    };
+    const retained = await persistPendingCapabilityPreview(
+      disposition,
+      response.preview,
+    );
     if (capabilityState.selectedId === selection.capabilityId)
       renderCapabilityPreview(response.preview);
     showLifecycleNotice(
@@ -402,7 +445,7 @@ async function requestCapabilityPreview(selection) {
       isDefinitiveCapabilityLifecycleRejection(error) &&
       capabilityState.pending?.selection.operationId === selection.operationId
     )
-      clearPendingCapabilityPreview();
+      await clearPendingCapabilityPreview(selection.operationId);
     return false;
   } finally {
     capabilityState.previewInFlight = false;
@@ -462,16 +505,7 @@ function renderCapabilityPreview(preview) {
     "Discard preview",
   );
   discard.type = "button";
-  discard.addEventListener("click", () => {
-    const cleared = clearPendingCapabilityPreview();
-    capabilityElements.lifecyclePreview.hidden = true;
-    showLifecycleNotice(
-      cleared
-        ? "Preview discarded without mutation."
-        : "Preview was not mutated, but browser reconciliation state could not be cleared and may be restored after reload.",
-      !cleared,
-    );
-  });
+  discard.addEventListener("click", () => discardCapabilityLifecycle(discard));
   const confirm = capabilityNode(
     "button",
     "primary-button",
@@ -486,13 +520,71 @@ function renderCapabilityPreview(preview) {
   capabilityElements.lifecyclePreview.hidden = false;
 }
 
-async function confirmCapabilityLifecycle(button) {
+async function discardCapabilityLifecycle(button = null) {
   const pending = capabilityState.pending;
-  if (!pending?.preview) return;
+  if (!pending || (!pending.preview && !pending.evidence)) return;
+  if (
+    !(await persistPendingCapabilityPreview(
+      "discard",
+      pending.preview ?? pending.evidence,
+    ))
+  ) {
+    showLifecycleNotice(
+      "The discard intent could not be retained durably, so the server-owned preview was not retired.",
+      true,
+    );
+    return;
+  }
+
+  if (button) button.disabled = true;
+  showLifecycleNotice("Retiring the exact server-owned preview…");
+  try {
+    const result = await capabilityFetchJson(
+      "/api/capabilities/lifecycle/discard",
+      {
+        method: "POST",
+        body: JSON.stringify(capabilityDispositionInput(pending)),
+      },
+    );
+    const cleared = await clearPendingCapabilityPreview(
+      pending.selection.operationId,
+    );
+    capabilityElements.lifecyclePreview.hidden = true;
+    showLifecycleNotice(
+      `${capabilityToken(result.status)}. Operation ${pending.selection.operationId}. ${result.detail}${result.outcomeAuditPending ? " Audit repair remains pending." : ""}${cleared ? "" : " Browser reconciliation state could not be retired; reload will replay this exact discard intent."}`,
+      result.outcomeAuditPending || !cleared,
+    );
+  } catch (error) {
+    if (isDefinitiveCapabilityLifecycleRejection(error)) {
+      const cleared = await clearPendingCapabilityPreview(
+        pending.selection.operationId,
+      );
+      capabilityElements.lifecyclePreview.hidden = true;
+      showLifecycleNotice(
+        `${error.message}${cleared ? "" : " Browser reconciliation state could not be cleared."}`,
+        true,
+      );
+    } else {
+      showLifecycleNotice(
+        `${error.message} The exact discard intent remains retained for replay.`,
+        true,
+      );
+    }
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function confirmCapabilityLifecycle(button = null, automatic = false) {
+  const pending = capabilityState.pending;
+  if (!pending || (!pending.preview && !pending.evidence)) return;
   const preview = pending.preview;
-  const confirmed = window.confirm(
-    `Confirm ${capabilityToken(preview.operation)} for ${preview.capabilityId}? This applies only the exact preview hash ${preview.previewHash} and does not assign capability authority.`,
-  );
+  if (!automatic && !preview) return;
+  const confirmed =
+    automatic ||
+    window.confirm(
+      `Confirm ${capabilityToken(preview.operation)} for ${preview.capabilityId}? This applies only the exact preview hash ${preview.previewHash} and does not assign capability authority.`,
+    );
   if (!confirmed) {
     showLifecycleNotice(
       "Confirmation declined; the durable preview remains available.",
@@ -500,24 +592,30 @@ async function confirmCapabilityLifecycle(button) {
     return;
   }
 
-  button.disabled = true;
+  if (
+    !(await persistPendingCapabilityPreview(
+      "confirm",
+      preview ?? pending.evidence,
+    ))
+  ) {
+    showLifecycleNotice(
+      "The confirmation intent could not be retained durably, so no lifecycle mutation was dispatched.",
+      true,
+    );
+    return;
+  }
+
+  if (button) button.disabled = true;
   showLifecycleNotice("Applying the exact confirmed preview…");
-  const input = {
-    ...pending.selection,
-    baselineCatalogRevision: preview.baselineCatalogRevision,
-    baselineActivationRevision: preview.baselineActivationRevision,
-    lifecycleRevision: preview.lifecycleRevision,
-    dependentSetRevision: preview.dependentSetRevision,
-    dependentSetHash: preview.dependentSetHash,
-    previewHash: preview.previewHash,
-    confirmed: true,
-  };
+  const input = { ...capabilityDispositionInput(pending), confirmed: true };
   try {
     const result = await capabilityFetchJson(
       "/api/capabilities/lifecycle/confirm",
       { method: "POST", body: JSON.stringify(input) },
     );
-    const cleared = clearPendingCapabilityPreview();
+    const cleared = await clearPendingCapabilityPreview(
+      pending.selection.operationId,
+    );
     capabilityElements.lifecyclePreview.hidden = true;
     await loadCapabilityCatalog(false);
     showLifecycleNotice(
@@ -526,7 +624,9 @@ async function confirmCapabilityLifecycle(button) {
     );
   } catch (error) {
     if (isDefinitiveCapabilityLifecycleRejection(error)) {
-      const cleared = clearPendingCapabilityPreview();
+      const cleared = await clearPendingCapabilityPreview(
+        pending.selection.operationId,
+      );
       capabilityElements.lifecyclePreview.hidden = true;
       showLifecycleNotice(
         `${error.message}${cleared ? "" : " Browser reconciliation state could not be cleared."}`,
@@ -536,24 +636,49 @@ async function confirmCapabilityLifecycle(button) {
       showLifecycleNotice(error.message, true);
     }
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
 async function restorePendingCapabilityPreview() {
   if (!capabilityState.storageKey) return;
-  let pending = null;
+  let retained = null;
   try {
-    pending = JSON.parse(localStorage.getItem(capabilityState.storageKey));
-  } catch {
-    clearPendingCapabilityPreview();
-  }
-  const selection = boundedRetainedCapabilitySelection(pending?.selection);
-  if (!selection) {
-    clearPendingCapabilityPreview();
+    retained = await withCapabilityLifecycleRegistry(
+      (registry) => ({
+        registry,
+        result:
+          registry.entries.find(
+            (entry) => entry.ownerId === capabilityState.tabId,
+          ) ?? null,
+      }),
+      false,
+    );
+  } catch (error) {
+    capabilityState.storageReady = false;
+    capabilityElements.previewLifecycleButton.disabled = true;
+    showLifecycleNotice(
+      `Lifecycle changes are disabled: ${error.message}`,
+      true,
+    );
     return;
   }
-  capabilityState.pending = { selection, preview: null };
+  if (!retained) return;
+  const selection = boundedRetainedCapabilitySelection(retained.selection);
+  capabilityState.pending = {
+    selection,
+    preview: null,
+    disposition: retained.disposition,
+    evidence: retained.evidence,
+  };
+  if (retained.disposition === "confirm") {
+    await confirmCapabilityLifecycle(null, true);
+    return;
+  }
+  if (retained.disposition === "discard") {
+    await discardCapabilityLifecycle();
+    return;
+  }
   await requestCapabilityPreview(selection);
   if (!capabilityState.pending?.preview) return;
 
@@ -584,6 +709,39 @@ async function restorePendingCapabilityPreview() {
   }
   selectCapability(capability, false);
   renderCapabilityPreview(capabilityState.pending.preview);
+}
+
+function configureCapabilityLifecycleStorage(scope) {
+  if (
+    !/^[0-9a-f]{64}$/.test(scope) ||
+    !globalThis.localStorage?.getItem ||
+    !globalThis.localStorage?.setItem ||
+    !globalThis.sessionStorage?.getItem ||
+    !globalThis.sessionStorage?.setItem ||
+    !globalThis.navigator?.locks?.request ||
+    !globalThis.crypto?.randomUUID
+  ) {
+    throw new Error("Durable cross-tab browser storage is unavailable.");
+  }
+
+  capabilityState.storageKey = `${capabilityLifecycleStorageKeyPrefix}.${scope}`;
+  capabilityState.storageLockName = capabilityState.storageKey;
+  capabilityState.tabStorageKey = capabilityLifecycleTabStorageKey;
+  let tabId = globalThis.sessionStorage.getItem(capabilityState.tabStorageKey);
+  if (tabId === null) {
+    tabId = `capability-tab-${globalThis.crypto.randomUUID()}`;
+    globalThis.sessionStorage.setItem(capabilityState.tabStorageKey, tabId);
+    if (
+      globalThis.sessionStorage.getItem(capabilityState.tabStorageKey) !== tabId
+    ) {
+      throw new Error("Browser tab identity was not retained exactly.");
+    }
+  }
+  if (!isCapabilityTabId(tabId)) {
+    throw new Error("The retained browser tab identity is invalid.");
+  }
+  capabilityState.tabId = tabId;
+  capabilityState.storageReady = true;
 }
 
 function boundedRetainedCapabilitySelection(value) {
@@ -625,28 +783,290 @@ function boundedRetainedCapabilitySelection(value) {
   };
 }
 
-function persistPendingCapabilityPreview() {
-  if (!capabilityState.storageKey || !capabilityState.pending) return false;
-  try {
-    localStorage.setItem(
-      capabilityState.storageKey,
-      JSON.stringify(capabilityState.pending),
+async function reservePendingCapabilityPreview(selection) {
+  if (!capabilityState.storageReady || !capabilityState.tabId) {
+    throw new Error(
+      "Browser reconciliation storage is unavailable, so no lifecycle preview was dispatched.",
     );
+  }
+  await withCapabilityLifecycleRegistry((registry) => {
+    if (
+      registry.entries.some((entry) => entry.ownerId === capabilityState.tabId)
+    ) {
+      throw new Error(
+        "This browser tab already owns a retained lifecycle operation.",
+      );
+    }
+    if (registry.entries.length >= maximumPendingCapabilityOperations) {
+      throw new Error(
+        `The workspace already has ${maximumPendingCapabilityOperations} retained browser lifecycle operations. Reconcile one before creating another.`,
+      );
+    }
+    return {
+      ...registry,
+      entries: [
+        ...registry.entries,
+        {
+          ownerId: capabilityState.tabId,
+          selection,
+          disposition: "preview",
+          evidence: null,
+        },
+      ],
+    };
+  });
+}
+
+async function persistPendingCapabilityPreview(disposition, preview) {
+  if (
+    !capabilityState.storageReady ||
+    !capabilityState.pending ||
+    !["preview", "confirm", "discard"].includes(disposition)
+  )
+    return false;
+  const evidence = capabilityPreviewEvidence(preview);
+  try {
+    await withCapabilityLifecycleRegistry((registry) => {
+      const index = registry.entries.findIndex(
+        (entry) =>
+          entry.ownerId === capabilityState.tabId &&
+          entry.selection.operationId ===
+            capabilityState.pending.selection.operationId,
+      );
+      if (index < 0) {
+        throw new Error(
+          "The exact pending lifecycle operation is no longer retained by this tab.",
+        );
+      }
+      const entries = [...registry.entries];
+      entries[index] = { ...entries[index], disposition, evidence };
+      return { ...registry, entries };
+    });
+    capabilityState.pending.disposition = disposition;
+    capabilityState.pending.evidence = evidence;
     return true;
   } catch {
     return false;
   }
 }
 
-function clearPendingCapabilityPreview() {
-  capabilityState.pending = null;
-  if (!capabilityState.storageKey) return true;
-  try {
-    localStorage.removeItem(capabilityState.storageKey);
-    return true;
-  } catch {
+async function clearPendingCapabilityPreview(operationId) {
+  if (!capabilityState.storageReady || !capabilityState.storageKey) {
+    capabilityState.pending = null;
     return false;
   }
+  try {
+    await withCapabilityLifecycleRegistry((registry) => ({
+      ...registry,
+      entries: registry.entries.filter(
+        (entry) =>
+          entry.ownerId !== capabilityState.tabId ||
+          entry.selection.operationId !== operationId,
+      ),
+    }));
+    capabilityState.pending = null;
+    return true;
+  } catch {
+    capabilityState.pending = null;
+    return false;
+  }
+}
+
+async function withCapabilityLifecycleRegistry(action, writeChanges = true) {
+  if (
+    !capabilityState.storageReady ||
+    !capabilityState.storageKey ||
+    !capabilityState.storageLockName
+  ) {
+    throw new Error("Durable cross-tab browser storage is unavailable.");
+  }
+  try {
+    return await globalThis.navigator.locks.request(
+      capabilityState.storageLockName,
+      { mode: "exclusive" },
+      async () => {
+        const raw = globalThis.localStorage.getItem(capabilityState.storageKey);
+        const registry =
+          raw === null
+            ? createEmptyCapabilityLifecycleRegistry()
+            : parseCapabilityLifecycleRegistry(raw);
+        const actionResult = await action(registry);
+        const nextRegistry = actionResult?.registry ?? actionResult;
+        const result = actionResult?.result;
+        validateCapabilityLifecycleRegistry(nextRegistry);
+        if (writeChanges) {
+          const serialized = JSON.stringify(nextRegistry);
+          globalThis.localStorage.setItem(
+            capabilityState.storageKey,
+            serialized,
+          );
+          if (
+            globalThis.localStorage.getItem(capabilityState.storageKey) !==
+            serialized
+          ) {
+            throw new Error(
+              "Browser storage did not preserve the pending capability registry exactly.",
+            );
+          }
+        }
+        return Object.prototype.hasOwnProperty.call(
+          actionResult ?? {},
+          "result",
+        )
+          ? result
+          : nextRegistry;
+      },
+    );
+  } catch (error) {
+    throw new Error(`Durable browser coordination failed. ${error.message}`);
+  }
+}
+
+function createEmptyCapabilityLifecycleRegistry() {
+  return {
+    schemaVersion: capabilityLifecycleRegistrySchemaVersion,
+    scope: capabilityState.storageKey.slice(
+      capabilityLifecycleStorageKeyPrefix.length + 1,
+    ),
+    entries: [],
+  };
+}
+
+function parseCapabilityLifecycleRegistry(raw) {
+  let registry;
+  try {
+    registry = JSON.parse(raw);
+  } catch {
+    throw new Error("Pending capability browser state is corrupt.");
+  }
+  validateCapabilityLifecycleRegistry(registry);
+  return registry;
+}
+
+function validateCapabilityLifecycleRegistry(registry) {
+  const expectedScope = capabilityState.storageKey.slice(
+    capabilityLifecycleStorageKeyPrefix.length + 1,
+  );
+  if (
+    !registry ||
+    typeof registry !== "object" ||
+    Array.isArray(registry) ||
+    !hasExactCapabilityKeys(registry, ["entries", "schemaVersion", "scope"]) ||
+    registry.schemaVersion !== capabilityLifecycleRegistrySchemaVersion ||
+    registry.scope !== expectedScope ||
+    !Array.isArray(registry.entries) ||
+    registry.entries.length > maximumPendingCapabilityOperations
+  ) {
+    throw new Error(
+      "Pending capability browser state is invalid or exceeds its bounded registry.",
+    );
+  }
+
+  const owners = new Set();
+  const operations = new Set();
+  for (const entry of registry.entries) {
+    const selection = boundedRetainedCapabilitySelection(entry?.selection);
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      Array.isArray(entry) ||
+      !hasExactCapabilityKeys(entry, [
+        "disposition",
+        "evidence",
+        "ownerId",
+        "selection",
+      ]) ||
+      !isCapabilityTabId(entry.ownerId) ||
+      owners.has(entry.ownerId) ||
+      !selection ||
+      !hasExactCapabilityKeys(entry.selection, [
+        "capabilityId",
+        "operation",
+        "operationId",
+        "targetVersion",
+      ]) ||
+      operations.has(selection.operationId) ||
+      !["preview", "confirm", "discard"].includes(entry.disposition) ||
+      !isCapabilityPreviewEvidence(entry.evidence, entry.disposition)
+    ) {
+      throw new Error(
+        "Pending capability browser state contains an invalid operation entry.",
+      );
+    }
+    owners.add(entry.ownerId);
+    operations.add(selection.operationId);
+  }
+}
+
+function isCapabilityPreviewEvidence(evidence, disposition) {
+  if (evidence === null) return disposition === "preview";
+  return (
+    evidence &&
+    typeof evidence === "object" &&
+    !Array.isArray(evidence) &&
+    hasExactCapabilityKeys(evidence, [
+      "baselineActivationRevision",
+      "baselineCatalogRevision",
+      "dependentSetHash",
+      "dependentSetRevision",
+      "lifecycleRevision",
+      "previewHash",
+    ]) &&
+    Number.isSafeInteger(evidence.baselineCatalogRevision) &&
+    evidence.baselineCatalogRevision >= 0 &&
+    Number.isSafeInteger(evidence.baselineActivationRevision) &&
+    evidence.baselineActivationRevision >= 0 &&
+    Number.isSafeInteger(evidence.lifecycleRevision) &&
+    evidence.lifecycleRevision >= 1 &&
+    Number.isSafeInteger(evidence.dependentSetRevision) &&
+    evidence.dependentSetRevision >= 0 &&
+    isCapabilityDigest(evidence.dependentSetHash) &&
+    isCapabilityDigest(evidence.previewHash)
+  );
+}
+
+function capabilityPreviewEvidence(preview) {
+  if (!preview) return null;
+  return {
+    baselineCatalogRevision: preview.baselineCatalogRevision,
+    baselineActivationRevision: preview.baselineActivationRevision,
+    lifecycleRevision: preview.lifecycleRevision,
+    dependentSetRevision: preview.dependentSetRevision,
+    dependentSetHash: preview.dependentSetHash,
+    previewHash: preview.previewHash,
+  };
+}
+
+function capabilityDispositionInput(pending) {
+  const evidence =
+    pending.evidence ?? capabilityPreviewEvidence(pending.preview);
+  return { ...pending.selection, ...evidence };
+}
+
+function isCapabilityTabId(value) {
+  return (
+    typeof value === "string" &&
+    /^capability-tab-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      value,
+    )
+  );
+}
+
+function isCapabilityDigest(value) {
+  return (
+    typeof value === "string" &&
+    value.length >= 8 &&
+    value.length <= 192 &&
+    /^sha256:[\x21-\x7e]+$/.test(value)
+  );
+}
+
+function hasExactCapabilityKeys(value, expected) {
+  const keys = Object.keys(value).sort();
+  return (
+    keys.length === expected.length &&
+    keys.every((key, index) => key === expected[index])
+  );
 }
 
 function createCapabilityOperationId() {

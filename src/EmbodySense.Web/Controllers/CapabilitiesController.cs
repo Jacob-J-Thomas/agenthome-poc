@@ -72,6 +72,21 @@ public sealed class CapabilitiesController : ControllerBase
         return Project(await _capabilities.PreviewAsync(input, cancellationToken));
     }
 
+    /// <summary>Explicitly retires one exact durable lifecycle preview without mutation.</summary>
+    /// <param name="input">The exact caller-observed preview identities.</param>
+    /// <param name="cancellationToken">The token used to cancel before the durable retirement boundary.</param>
+    /// <returns>The terminal safe disposition.</returns>
+    [HttpPost("lifecycle/discard")]
+    public async Task<ActionResult<CapabilityLifecycleMutationResponse>> Discard([FromBody] CapabilityLifecycleDiscardInput input, CancellationToken cancellationToken = default)
+    {
+        if (!IsWorkspaceInitialized())
+        {
+            return WorkspaceNotInitialized();
+        }
+
+        return Project(await _capabilities.DiscardAsync(input, cancellationToken));
+    }
+
     /// <summary>Explicitly confirms one exact durable lifecycle preview.</summary>
     /// <param name="input">The confirmation and exact caller-observed concurrency identities.</param>
     /// <param name="cancellationToken">The token used to cancel before the durable terminal boundary.</param>
@@ -124,7 +139,7 @@ public sealed class CapabilitiesController : ControllerBase
     {
         return response.Status switch
         {
-            "applied" or "replayed" => Ok(response),
+            "applied" or "discarded" or "replayed" => Ok(response),
             "invalid" => BadRequest(response),
             "not-found" => NotFound(response),
             "conflict" or "blocked" or "ambiguous" => Conflict(response),

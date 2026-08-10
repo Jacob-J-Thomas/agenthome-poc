@@ -17,6 +17,7 @@ internal sealed class StubCapabilityLifecycleMutationStore : ICapabilityLifecycl
     internal CapabilityLifecycleBaseline? Baseline { get; private set; }
     internal CapabilityLifecycleBaseline? MutatedBaseline { get; private set; }
     internal CapabilityLifecyclePreview? MutatedPreview { get; private set; }
+    internal CapabilityLifecyclePreview? DiscardedPreview { get; private set; }
     internal CapabilityDependentIndexSnapshot? PreviewDependents { get; private set; }
     internal CapabilityDependentIndexSnapshot? MutatedDependents { get; private set; }
     internal int AuditMarks { get; private set; }
@@ -56,6 +57,13 @@ internal sealed class StubCapabilityLifecycleMutationStore : ICapabilityLifecycl
         MutatedPreview = preview;
         MutatedBaseline = baseline;
         MutatedDependents = dependents;
+        return Task.FromResult(MutationResult);
+    }
+
+    public Task<CapabilityLifecycleMutationResult> DiscardAsync(CapabilityLifecyclePreview preview, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        DiscardedPreview = preview;
         return Task.FromResult(MutationResult);
     }
 

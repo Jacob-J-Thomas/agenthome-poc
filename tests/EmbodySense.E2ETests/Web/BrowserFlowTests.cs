@@ -469,17 +469,26 @@ public sealed class BrowserFlowTests
             var storageKey = await browser.EvaluateStringAsync("Object.keys(localStorage).find((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.'))");
             Assert.Matches("^embodysense\\.pending-capability-lifecycle\\.v1\\.[0-9a-f]{64}$", storageKey);
             Assert.DoesNotContain(workspace.RootPath, storageKey, StringComparison.Ordinal);
-            var pendingOperationId = await browser.EvaluateStringAsync("JSON.parse(localStorage.getItem(Object.keys(localStorage).find((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.')))).selection.operationId");
+            var discardedOperationId = await browser.EvaluateStringAsync("JSON.parse(localStorage.getItem(Object.keys(localStorage).find((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.')))).entries[0].selection.operationId");
+            Assert.StartsWith("web-capability-", discardedOperationId, StringComparison.Ordinal);
+            await ClickButtonByTextAsync(browser, "#lifecyclePreview button", "Discard preview");
+            await browser.WaitForExpressionAsync("document.getElementById('lifecycleNotice').textContent.includes('Discarded')");
+            Assert.True(await browser.EvaluateBooleanAsync("JSON.parse(localStorage.getItem(Object.keys(localStorage).find((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.')))).entries.length === 0"));
+
+            await ClickAsync(browser, "#previewLifecycleButton");
+            await browser.WaitForExpressionAsync("(() => { const confirm = [...document.querySelectorAll('#lifecyclePreview button')].find((button) => button.textContent.includes('Confirm Disable')); return !document.getElementById('lifecyclePreview').hidden && confirm && !confirm.disabled; })()");
+            var pendingOperationId = await browser.EvaluateStringAsync("JSON.parse(localStorage.getItem(Object.keys(localStorage).find((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.')))).entries[0].selection.operationId");
             Assert.StartsWith("web-capability-", pendingOperationId, StringComparison.Ordinal);
+            Assert.NotEqual(discardedOperationId, pendingOperationId);
 
             await browser.ReloadAsync();
             await browser.WaitForExpressionAsync("document.getElementById('lifecyclePreview').textContent.includes(" + JsonSerializer.Serialize(pendingOperationId) + ")");
-            Assert.Equal(pendingOperationId, await browser.EvaluateStringAsync("JSON.parse(localStorage.getItem(Object.keys(localStorage).find((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.')))).selection.operationId"));
+            Assert.Equal(pendingOperationId, await browser.EvaluateStringAsync("JSON.parse(localStorage.getItem(Object.keys(localStorage).find((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.')))).entries[0].selection.operationId"));
             await browser.EvaluateAsync("window.confirm = () => true");
             await ClickButtonByTextAsync(browser, "#lifecyclePreview button", "Confirm Disable");
 
             await browser.WaitForExpressionAsync("document.getElementById('capabilityBadges').textContent.includes('Disabled')");
-            Assert.True(await browser.EvaluateBooleanAsync("!Object.keys(localStorage).some((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.'))"));
+            Assert.True(await browser.EvaluateBooleanAsync("JSON.parse(localStorage.getItem(Object.keys(localStorage).find((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.')))).entries.length === 0"));
             Assert.Contains("Applied", await browser.EvaluateStringAsync("document.getElementById('lifecycleNotice').textContent"), StringComparison.Ordinal);
             app.AssertHealthy();
             await browser.AssertHealthyAsync();

@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Capabilities.Models;
+using EmbodySense.Core.Common.Capabilities;
 
 namespace EmbodySense.Core.Application.Capabilities;
 
@@ -58,6 +59,51 @@ public sealed class CapabilityLifecycleSelectionService
 
         var preview = await _lifecycle.PreviewAsync(previewRequest, cancellationToken);
         return Map(preview);
+    }
+
+    /// <summary>Retires the exact persisted preview only when every caller-observed identity still matches.</summary>
+    public async Task<CapabilityLifecycleMutationResult> DiscardAsync(CapabilityLifecycleDispositionRequest request, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var selection = request.Selection;
+        if (selection is null
+            || request.BaselineCatalogRevision < 0
+            || request.BaselineActivationRevision < 0
+            || request.LifecycleRevision < 1
+            || request.DependentSetRevision < 0
+            || !CapabilityIntegrityDigest.TryParse(request.DependentSetHash, out _, out _)
+            || !CapabilityIntegrityDigest.TryParse(request.PreviewHash, out _, out _))
+        {
+            return new CapabilityLifecycleMutationResult(CapabilityLifecycleMutationStatus.Invalid, null, null, false, "The lifecycle discard identity is outside the bounded contract.");
+        }
+
+        var replay = await _lifecycle.TryReplaySelectionAsync(selection, cancellationToken);
+        if (replay.Status == CapabilityLifecyclePreviewStatus.NotFound)
+        {
+            return new CapabilityLifecycleMutationResult(CapabilityLifecycleMutationStatus.Discarded, null, null, false, "No durable preview remains for this exact lifecycle selection.");
+        }
+        if (replay.Status != CapabilityLifecyclePreviewStatus.Replayed)
+        {
+            var status = replay.Status switch
+            {
+                CapabilityLifecyclePreviewStatus.Invalid => CapabilityLifecycleMutationStatus.Invalid,
+                CapabilityLifecyclePreviewStatus.Conflict => CapabilityLifecycleMutationStatus.Conflict,
+                CapabilityLifecyclePreviewStatus.NotFound => CapabilityLifecycleMutationStatus.NotFound,
+                _ => CapabilityLifecycleMutationStatus.Unavailable
+            };
+            return new CapabilityLifecycleMutationResult(status, null, replay.LifecycleRevision > 0 ? replay.LifecycleRevision : null, false, replay.Detail);
+        }
+        if (replay.BaselineCatalogRevision != request.BaselineCatalogRevision
+            || replay.BaselineActivationRevision != request.BaselineActivationRevision
+            || replay.LifecycleRevision != request.LifecycleRevision
+            || replay.DependentSetRevision != request.DependentSetRevision
+            || !string.Equals(replay.DependentSetHash, request.DependentSetHash, StringComparison.Ordinal)
+            || !string.Equals(replay.PreviewHash, request.PreviewHash, StringComparison.Ordinal))
+        {
+            return new CapabilityLifecycleMutationResult(CapabilityLifecycleMutationStatus.Conflict, null, replay.LifecycleRevision, false, "The lifecycle discard does not match the exact durable preview identity.");
+        }
+
+        return await _lifecycle.DiscardAsync(replay, cancellationToken);
     }
 
     private static CapabilityLifecycleSelectionResult Map(CapabilityLifecyclePreview preview)

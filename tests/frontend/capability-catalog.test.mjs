@@ -19,6 +19,7 @@ const catalogHtml = fs.readFileSync(
   "utf8",
 );
 const workspaceScope = "a".repeat(64);
+const defaultTabId = "capability-tab-00000000-0000-4000-8000-000000000001";
 
 test("catalog boot uses authenticated same-origin reads and renders hostile posture as text", async () => {
   const app = await loadCapabilityCatalog();
@@ -103,11 +104,216 @@ test("lifecycle confirmation sends only the exact durable preview identity", asy
     app.window.confirmations[0],
     /exact preview hash sha256:preview/,
   );
-  assert.equal(app.localStorage.getItem(app.storageKey), null);
+  assert.deepEqual(pendingCapabilityEntries(app), []);
   assert.match(
     app.elements.lifecycleNotice.textContent,
     new RegExp(`Applied.*Operation ${previewCall.body.operationId}`),
   );
+});
+
+test("discard durably retires the exact preview before clearing browser ownership", async () => {
+  const app = await loadCapabilityCatalog();
+  app.elements.lifecycleOperation.value = "disable";
+  await app.elements.lifecyclePreviewForm.submit();
+  const previewCall = app.server.calls.find(
+    (call) => call.url === "/api/capabilities/lifecycle/preview",
+  );
+  const discardButton = findByTag(app.elements.lifecyclePreview, "button").find(
+    (button) => /Discard preview/.test(button.textContent),
+  );
+
+  await discardButton.click();
+
+  const discard = app.server.calls.find(
+    (call) => call.url === "/api/capabilities/lifecycle/discard",
+  );
+  assert.equal(discard.body.operationId, previewCall.body.operationId);
+  assert.equal(discard.body.previewHash, "sha256:preview");
+  assert.equal(Object.hasOwn(discard.body, "confirmed"), false);
+  assert.deepEqual(pendingCapabilityEntries(app), []);
+  assert.equal(
+    app.server.calls.some(
+      (call) => call.url === "/api/capabilities/lifecycle/confirm",
+    ),
+    false,
+  );
+  assert.match(app.elements.lifecycleNotice.textContent, /Discarded.*retired/i);
+});
+
+test("an ambiguous discard response replays the exact retained disposition after reload", async () => {
+  const server = new FakeCapabilityServer();
+  const localStorage = new FakeStorage();
+  let discardAttempts = 0;
+  server.discardHandler = () => {
+    discardAttempts++;
+    return discardAttempts === 1
+      ? {
+          status: 500,
+          body: { detail: "The discard outcome is temporarily unavailable." },
+        }
+      : {
+          status: 200,
+          body: {
+            status: "replayed",
+            isCommitted: false,
+            replayedOutcome: "discarded",
+            state: null,
+            lifecycleRevision: 3,
+            outcomeAuditPending: false,
+            detail: "The exact discarded operation was replayed.",
+          },
+        };
+  };
+  const first = await loadCapabilityCatalog({ server, localStorage });
+  first.elements.lifecycleOperation.value = "disable";
+  await first.elements.lifecyclePreviewForm.submit();
+  const discardButton = findByTag(
+    first.elements.lifecyclePreview,
+    "button",
+  ).find((button) => /Discard preview/.test(button.textContent));
+
+  await discardButton.click();
+
+  const retained = pendingCapabilityEntries(first)[0];
+  assert.equal(retained.disposition, "discard");
+  assert.equal(retained.evidence.previewHash, "sha256:preview");
+
+  await loadCapabilityCatalog({
+    server,
+    localStorage,
+    sessionStorage: first.sessionStorage,
+  });
+
+  const discards = server.calls.filter(
+    (call) => call.url === "/api/capabilities/lifecycle/discard",
+  );
+  assert.equal(discards.length, 2);
+  assert.equal(discards[0].body.operationId, discards[1].body.operationId);
+  assert.equal(discards[0].body.previewHash, discards[1].body.previewHash);
+  assert.deepEqual(pendingCapabilityEntries(first), []);
+});
+
+test("same-workspace tabs retain and retire independent operation identities under one lock", async () => {
+  const server = new FakeCapabilityServer();
+  const localStorage = new FakeStorage();
+  const locks = new FakeLockManager();
+  const first = await loadCapabilityCatalog({
+    server,
+    localStorage,
+    locks,
+    randomUUID: uuidGenerator(1),
+  });
+  const second = await loadCapabilityCatalog({
+    server,
+    localStorage,
+    locks,
+    randomUUID: uuidGenerator(101),
+  });
+  first.elements.lifecycleOperation.value = "disable";
+  second.elements.lifecycleOperation.value = "rollback";
+
+  await Promise.all([
+    first.elements.lifecyclePreviewForm.submit(),
+    second.elements.lifecyclePreviewForm.submit(),
+  ]);
+
+  const previews = server.calls.filter(
+    (call) => call.url === "/api/capabilities/lifecycle/preview",
+  );
+  assert.equal(previews.length, 2);
+  assert.notEqual(previews[0].body.operationId, previews[1].body.operationId);
+  assert.equal(pendingCapabilityEntries(first).length, 2);
+
+  const firstConfirm = findByTag(
+    first.elements.lifecyclePreview,
+    "button",
+  ).find((button) => /Confirm Disable/.test(button.textContent));
+  await firstConfirm.click();
+  const retainedAfterFirst = pendingCapabilityEntries(first);
+  assert.equal(retainedAfterFirst.length, 1);
+  assert.equal(
+    retainedAfterFirst[0].selection.operationId,
+    previews[1].body.operationId,
+  );
+
+  server.confirmHandler = () => ({
+    status: 500,
+    body: { detail: "The exact outcome is temporarily unavailable." },
+  });
+  const secondConfirm = findByTag(
+    second.elements.lifecyclePreview,
+    "button",
+  ).find((button) => /Confirm Rollback/.test(button.textContent));
+  await secondConfirm.click();
+  assert.equal(pendingCapabilityEntries(second)[0].disposition, "confirm");
+
+  server.confirmHandler = () => ({
+    status: 200,
+    body: {
+      status: "replayed",
+      isCommitted: true,
+      replayedOutcome: "applied",
+      state: null,
+      lifecycleRevision: 4,
+      outcomeAuditPending: false,
+      detail: "The exact terminal operation was replayed.",
+    },
+  });
+  await loadCapabilityCatalog({
+    server,
+    localStorage,
+    locks,
+    sessionStorage: second.sessionStorage,
+    randomUUID: uuidGenerator(201),
+  });
+
+  const confirmations = server.calls.filter(
+    (call) => call.url === "/api/capabilities/lifecycle/confirm",
+  );
+  assert.equal(confirmations.length, 3);
+  assert.equal(
+    confirmations[1].body.operationId,
+    confirmations[2].body.operationId,
+  );
+  assert.deepEqual(pendingCapabilityEntries(second), []);
+});
+
+test("the bounded shared registry refuses a seventeenth operation before server admission", async () => {
+  const storageKey = `embodysense.pending-capability-lifecycle.v1.${workspaceScope}`;
+  const entries = Array.from({ length: 16 }, (_, index) => ({
+    ownerId: `capability-tab-00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    selection: {
+      operationId: `web-capability-retained-${index + 1}`,
+      operation: "disable",
+      capabilityId: "org.example/runtime",
+      targetVersion: null,
+    },
+    disposition: "preview",
+    evidence: null,
+  }));
+  const localStorage = new FakeStorage({
+    [storageKey]: JSON.stringify({
+      schemaVersion: 1,
+      scope: workspaceScope,
+      entries,
+    }),
+  });
+  const server = new FakeCapabilityServer();
+  const app = await loadCapabilityCatalog({
+    server,
+    localStorage,
+    randomUUID: uuidGenerator(101),
+  });
+  app.elements.lifecycleOperation.value = "disable";
+
+  await app.elements.lifecyclePreviewForm.submit();
+
+  assert.equal(
+    server.calls.some((call) => call.method === "POST"),
+    false,
+  );
+  assert.match(app.elements.lifecycleNotice.textContent, /16 retained/i);
+  assert.equal(pendingCapabilityEntries(app).length, 16);
 });
 
 test("a server-owned current version completes an enable selection that omitted its optional target", async () => {
@@ -143,11 +349,9 @@ test("rapid preview submissions admit one operation while its exact response is 
 
   const first = app.elements.lifecyclePreviewForm.submit();
   await app.elements.lifecyclePreviewForm.submit();
+  await flushAsyncWork();
 
-  assert.match(
-    app.elements.lifecycleNotice.textContent,
-    /still being reconciled/i,
-  );
+  assert.equal(app.elements.previewLifecycleButton.disabled, true);
   assert.equal(
     server.calls.filter(
       (call) =>
@@ -193,9 +397,13 @@ test("an ambiguous preview transport failure keeps one operation identity for re
   const first = await loadCapabilityCatalog({ server, localStorage });
   first.elements.lifecycleOperation.value = "disable";
   await first.elements.lifecyclePreviewForm.submit();
-  const retained = JSON.parse(localStorage.getItem(first.storageKey));
+  const retained = pendingCapabilityEntries(first)[0];
 
-  const second = await loadCapabilityCatalog({ server, localStorage });
+  const second = await loadCapabilityCatalog({
+    server,
+    localStorage,
+    sessionStorage: first.sessionStorage,
+  });
   const calls = server.calls.filter(
     (call) =>
       call.method === "POST" &&
@@ -220,7 +428,7 @@ test("same-tab retry reuses an indeterminate preview identity and a ready previe
   const app = await loadCapabilityCatalog({ server });
   app.elements.lifecycleOperation.value = "disable";
   await app.elements.lifecyclePreviewForm.submit();
-  const retained = JSON.parse(app.localStorage.getItem(app.storageKey));
+  const retained = pendingCapabilityEntries(app)[0];
 
   await app.elements.lifecyclePreviewForm.submit();
   app.elements.lifecycleOperation.value = "rollback";
@@ -268,14 +476,14 @@ test("a failed catalog read preserves pending operation identity without dispatc
   const storageKey = `embodysense.pending-capability-lifecycle.v1.${workspaceScope}`;
   localStorage.setItem(
     storageKey,
-    JSON.stringify({
-      selection: {
+    JSON.stringify(
+      capabilityLifecycleRegistry({
         operationId: "web-capability-catalog-retry",
         operation: "disable",
         capabilityId: "org.example/runtime",
         targetVersion: null,
-      },
-    }),
+      }),
+    ),
   );
   server.catalogHandler = () => ({
     status: 503,
@@ -302,14 +510,14 @@ test("reload restores an off-page pending capability through the exact detail en
   const capability = createCatalogResponse().capabilities[0];
   localStorage.setItem(
     storageKey,
-    JSON.stringify({
-      selection: {
+    JSON.stringify(
+      capabilityLifecycleRegistry({
         operationId: "web-capability-off-page",
         operation: "disable",
         capabilityId: capability.id,
         targetVersion: null,
-      },
-    }),
+      }),
+    ),
   );
   server.catalogHandler = () => ({
     status: 200,
@@ -352,7 +560,7 @@ test("a definitive stale preview conflict clears retained confirmation authority
 
   await confirmButton.click();
 
-  assert.equal(app.localStorage.getItem(app.storageKey), null);
+  assert.deepEqual(pendingCapabilityEntries(app), []);
   assert.equal(app.elements.lifecyclePreview.hidden, true);
   assert.match(app.elements.lifecycleNotice.textContent, /stale/i);
 });
@@ -366,19 +574,20 @@ test("an indeterminate server failure retains the exact confirmation for replay"
   const app = await loadCapabilityCatalog({ server });
   app.elements.lifecycleOperation.value = "disable";
   await app.elements.lifecyclePreviewForm.submit();
-  const retainedBefore = app.localStorage.getItem(app.storageKey);
   const confirmButton = findByTag(app.elements.lifecyclePreview, "button").find(
     (button) => /Confirm Disable/.test(button.textContent),
   );
 
   await confirmButton.click();
 
-  assert.equal(app.localStorage.getItem(app.storageKey), retainedBefore);
+  const retained = pendingCapabilityEntries(app)[0];
+  assert.equal(retained.disposition, "confirm");
+  assert.equal(retained.evidence.previewHash, "sha256:preview");
   assert.equal(app.elements.lifecyclePreview.hidden, false);
   assert.match(app.elements.lifecycleNotice.textContent, /durable boundary/i);
 });
 
-test("malformed retained browser state is discarded without automatic lifecycle dispatch", async () => {
+test("malformed shared browser state fails closed without deleting other-tab evidence", async () => {
   const server = new FakeCapabilityServer();
   const localStorage = new FakeStorage();
   const storageKey = `embodysense.pending-capability-lifecycle.v1.${workspaceScope}`;
@@ -389,45 +598,39 @@ test("malformed retained browser state is discarded without automatic lifecycle 
 
   await loadCapabilityCatalog({ server, localStorage });
 
-  assert.equal(localStorage.getItem(storageKey), null);
+  assert.equal(
+    localStorage.getItem(storageKey),
+    JSON.stringify({ selection: { operation: 17 } }),
+  );
   assert.equal(
     server.calls.some((call) => call.method === "POST"),
     false,
   );
 });
 
-test("retained browser state is reconstructed without forged trusted fields", async () => {
+test("retained browser state containing forged trusted fields fails closed", async () => {
   const server = new FakeCapabilityServer();
   const localStorage = new FakeStorage();
   const storageKey = `embodysense.pending-capability-lifecycle.v1.${workspaceScope}`;
   localStorage.setItem(
     storageKey,
     JSON.stringify({
-      selection: {
+      ...capabilityLifecycleRegistry({
         operationId: "web-capability-retained",
         operation: "disable",
         capabilityId: "org.example/<SCRIPT>alert(1)</SCRIPT>",
         targetVersion: null,
-        targetDescriptor: { privateConfiguration: "forged" },
-        artifactDigest: "sha256:forged",
-      },
+      }),
+      forgedAuthority: { privateConfiguration: "forged" },
     }),
   );
 
   await loadCapabilityCatalog({ server, localStorage });
 
-  const replay = server.calls.find(
-    (call) =>
-      call.method === "POST" &&
-      call.url === "/api/capabilities/lifecycle/preview",
+  assert.equal(
+    server.calls.some((call) => call.method === "POST"),
+    false,
   );
-  assert.deepEqual(Object.keys(replay.body).sort(), [
-    "capabilityId",
-    "operation",
-    "operationId",
-    "targetVersion",
-  ]);
-  assert.equal(replay.body.operationId, "web-capability-retained");
 });
 
 test("degraded catalog and required blocked impact remain explicit and fail closed", async () => {
@@ -491,7 +694,7 @@ test("unavailable browser storage prevents preview dispatch before durable admis
   );
   assert.match(
     app.elements.lifecycleNotice.textContent,
-    /no lifecycle preview/i,
+    /durable browser coordination failed/i,
   );
 });
 
@@ -499,7 +702,7 @@ test("an authoritative mutation outcome survives browser cleanup failure", async
   const app = await loadCapabilityCatalog();
   app.elements.lifecycleOperation.value = "disable";
   await app.elements.lifecyclePreviewForm.submit();
-  app.localStorage.failRemovals = true;
+  app.localStorage.writesBeforeFailure = 1;
   const confirmButton = findByTag(app.elements.lifecyclePreview, "button").find(
     (button) => /Confirm Disable/.test(button.textContent),
   );
@@ -522,6 +725,26 @@ test("an authoritative mutation outcome survives browser cleanup failure", async
   );
 });
 
+function pendingCapabilityEntries(app) {
+  return JSON.parse(app.localStorage.getItem(app.storageKey)).entries;
+}
+
+function capabilityLifecycleRegistry(
+  selection,
+  { ownerId = defaultTabId, disposition = "preview", evidence = null } = {},
+) {
+  return {
+    schemaVersion: 1,
+    scope: workspaceScope,
+    entries: [{ ownerId, selection, disposition, evidence }],
+  };
+}
+
+function uuidGenerator(start) {
+  let value = start - 1;
+  return () => `00000000-0000-4000-8000-${String(++value).padStart(12, "0")}`;
+}
+
 async function loadCapabilityCatalog(options = {}) {
   const document = new FakeDocument(catalogHtml);
   document.elementsObject.capabilityContent.hidden = true;
@@ -530,9 +753,12 @@ async function loadCapabilityCatalog(options = {}) {
   document.elementsObject.lifecycleOperation.value = "enable";
   const server = options.server ?? new FakeCapabilityServer();
   const localStorage = options.localStorage ?? new FakeStorage();
+  const sessionStorage = options.sessionStorage ?? new FakeStorage();
+  const locks = options.locks ?? new FakeLockManager();
   const window = {
     confirmations: [],
     localStorage,
+    sessionStorage,
     confirm(message) {
       this.confirmations.push(message);
       return true;
@@ -543,12 +769,16 @@ async function loadCapabilityCatalog(options = {}) {
     console,
     crypto: {
       subtle: webcrypto.subtle,
-      randomUUID: () =>
-        `00000000-0000-4000-8000-${String(++operation).padStart(12, "0")}`,
+      randomUUID:
+        options.randomUUID ??
+        (() =>
+          `00000000-0000-4000-8000-${String(++operation).padStart(12, "0")}`),
     },
     document,
     fetch: server.fetch.bind(server),
     localStorage,
+    navigator: { locks },
+    sessionStorage,
     setTimeout,
     clearTimeout,
     URLSearchParams,
@@ -566,9 +796,33 @@ async function loadCapabilityCatalog(options = {}) {
     elements: document.elementsObject,
     localStorage,
     server,
+    sessionStorage,
     storageKey,
     window,
   };
+}
+
+class FakeLockManager {
+  constructor() {
+    this.tails = new Map();
+  }
+
+  async request(name, _options, callback) {
+    const previous = this.tails.get(name) ?? Promise.resolve();
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    this.tails.set(name, tail);
+    await previous;
+    try {
+      return await callback();
+    } finally {
+      release();
+      if (this.tails.get(name) === tail) this.tails.delete(name);
+    }
+  }
 }
 
 class FakeCapabilityServer {
@@ -613,6 +867,18 @@ class FakeCapabilityServer {
         detail: "Applied.",
       },
     });
+    this.discardHandler = () => ({
+      status: 200,
+      body: {
+        status: "discarded",
+        isCommitted: false,
+        replayedOutcome: null,
+        state: null,
+        lifecycleRevision: 3,
+        outcomeAuditPending: false,
+        detail: "The exact preview was retired.",
+      },
+    });
   }
 
   async fetch(url, options = {}) {
@@ -642,6 +908,8 @@ class FakeCapabilityServer {
       return responseFrom(await this.previewHandler(call));
     if (method === "POST" && url === "/api/capabilities/lifecycle/confirm")
       return responseFrom(await this.confirmHandler(call));
+    if (method === "POST" && url === "/api/capabilities/lifecycle/discard")
+      return responseFrom(await this.discardHandler(call));
     return responseFrom({
       status: 500,
       body: { detail: `Unexpected request: ${method} ${url}` },
@@ -738,10 +1006,11 @@ function responseFrom({ status, body }) {
 }
 
 class FakeStorage {
-  constructor() {
-    this.values = new Map();
+  constructor(initial = {}) {
+    this.values = new Map(Object.entries(initial));
     this.failRemovals = false;
     this.failWrites = false;
+    this.writesBeforeFailure = null;
   }
 
   getItem(key) {
@@ -755,6 +1024,9 @@ class FakeStorage {
 
   setItem(key, value) {
     if (this.failWrites) throw new Error("Storage write failed.");
+    if (this.writesBeforeFailure === 0)
+      throw new Error("Storage write failed.");
+    if (Number.isInteger(this.writesBeforeFailure)) this.writesBeforeFailure--;
     this.values.set(key, String(value));
   }
 }

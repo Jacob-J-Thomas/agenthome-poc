@@ -75,6 +75,33 @@ public sealed class CapabilityCatalogFacade : ICapabilityCatalogFacade
     }
 
     /// <inheritdoc />
+    public async Task<CapabilityLifecycleMutationResponse> DiscardAsync(CapabilityLifecycleDiscardInput input, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        var selectionInput = new CapabilityLifecycleSelectionInput(input.OperationId, input.Operation, input.CapabilityId, input.TargetVersion);
+        if (!TryMap(selectionInput, out var selection)
+            || input.BaselineCatalogRevision < 0
+            || input.BaselineActivationRevision < 0
+            || input.LifecycleRevision < 1
+            || input.DependentSetRevision < 0
+            || !CapabilityIntegrityDigest.TryParse(input.DependentSetHash, out _, out _)
+            || !CapabilityIntegrityDigest.TryParse(input.PreviewHash, out _, out _))
+        {
+            return InvalidMutation("The lifecycle discard is outside the bounded contract.");
+        }
+
+        var result = await _lifecycle.DiscardAsync(new CapabilityLifecycleDispositionRequest(
+            selection!,
+            input.BaselineCatalogRevision,
+            input.BaselineActivationRevision,
+            input.LifecycleRevision,
+            input.DependentSetRevision,
+            input.DependentSetHash,
+            input.PreviewHash), cancellationToken);
+        return MapMutation(result);
+    }
+
+    /// <inheritdoc />
     public async Task<CapabilityLifecycleMutationResponse> ConfirmAsync(CapabilityLifecycleConfirmationInput input, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -108,16 +135,7 @@ public sealed class CapabilityCatalogFacade : ICapabilityCatalogFacade
             return new CapabilityLifecycleMutationResponse("conflict", false, null, null, preview.LifecycleRevision, false, "The confirmed lifecycle preview does not match the current durable preview identity.");
         }
 
-        var result = await _lifecycle.MutateAsync(preview, cancellationToken);
-        var effectiveOutcome = result.ReplayedOutcome ?? (result.Status == CapabilityLifecycleMutationStatus.Replayed ? CapabilityLifecycleMutationStatus.Applied : result.Status);
-        return new CapabilityLifecycleMutationResponse(
-            Token(result.Status),
-            effectiveOutcome == CapabilityLifecycleMutationStatus.Applied,
-            result.ReplayedOutcome is null ? null : Token(result.ReplayedOutcome.Value),
-            result.State is null ? null : new CapabilityLifecycleMutationStateSnapshot(result.State.Descriptor.Id.Value, result.State.Descriptor.Version.Value, result.State.IsEnabled, result.State.IsRemoved, result.State.Revision, result.State.UpdatedAtUtc),
-            result.LifecycleRevision,
-            result.OutcomeAuditPending,
-            result.Detail);
+        return MapMutation(await _lifecycle.MutateAsync(preview, cancellationToken));
     }
 
     private static (CapabilityPostureFacade Posture, CapabilityLifecycleSelectionService Lifecycle) CreateDefaultComposition(string workingDirectory)
@@ -199,6 +217,19 @@ public sealed class CapabilityCatalogFacade : ICapabilityCatalogFacade
             preview.Impacts.Any(impact => impact.Outcome == CapabilityLifecycleImpactOutcome.Degraded),
             impacts,
             preview.Detail);
+    }
+
+    private static CapabilityLifecycleMutationResponse MapMutation(CapabilityLifecycleMutationResult result)
+    {
+        var effectiveOutcome = result.ReplayedOutcome ?? (result.Status == CapabilityLifecycleMutationStatus.Replayed ? CapabilityLifecycleMutationStatus.Applied : result.Status);
+        return new CapabilityLifecycleMutationResponse(
+            Token(result.Status),
+            effectiveOutcome == CapabilityLifecycleMutationStatus.Applied,
+            result.ReplayedOutcome is null ? null : Token(result.ReplayedOutcome.Value),
+            result.State is null ? null : new CapabilityLifecycleMutationStateSnapshot(result.State.Descriptor.Id.Value, result.State.Descriptor.Version.Value, result.State.IsEnabled, result.State.IsRemoved, result.State.Revision, result.State.UpdatedAtUtc),
+            result.LifecycleRevision,
+            result.OutcomeAuditPending,
+            result.Detail);
     }
 
     private static CapabilityLifecyclePreviewResponse InvalidPreview() => new("invalid", null, new StartupCapabilityPostureError("invalid_capability_lifecycle_selection", "The lifecycle selection is outside the bounded contract."));

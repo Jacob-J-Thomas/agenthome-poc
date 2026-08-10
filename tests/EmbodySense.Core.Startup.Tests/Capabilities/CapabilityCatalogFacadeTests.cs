@@ -88,6 +88,30 @@ public sealed class CapabilityCatalogFacadeTests
     }
 
     [Fact]
+    public async Task Discard_retires_exact_preview_without_mutation_and_allows_a_new_operation()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var capabilityId = await InstallTestCapabilityAsync(workspace);
+        var facade = CapabilityCatalogFacade.ForFileCapabilityTrustRoot(workspace.RootPath, workspace.ServerStatePath);
+        var selection = new CapabilityLifecycleSelectionInput("web-capability-discard", "disable", capabilityId.Value, null);
+        var preview = Assert.IsType<CapabilityLifecyclePreviewSnapshot>((await facade.PreviewAsync(selection)).Preview);
+
+        var stale = await facade.DiscardAsync(Discard(selection, preview) with { PreviewHash = ChangeDigest(preview.PreviewHash) });
+        var discarded = await facade.DiscardAsync(Discard(selection, preview));
+        var replayed = await facade.DiscardAsync(Discard(selection, preview));
+        var replacement = await facade.PreviewAsync(selection with { OperationId = "web-capability-after-discard" });
+        var posture = await facade.ReadAsync(selection.CapabilityId);
+
+        Assert.Equal("conflict", stale.Status);
+        Assert.Equal("discarded", discarded.Status);
+        Assert.False(discarded.IsCommitted);
+        Assert.Equal("discarded", replayed.Status);
+        Assert.Equal("ready", replacement.Status);
+        Assert.True(posture.Capability!.IsLifecycleEnabled);
+    }
+
+    [Fact]
     public async Task Facade_rejects_malformed_selection_shapes_and_cancelled_reads()
     {
         using var workspace = new TestWorkspace();
@@ -99,12 +123,14 @@ public sealed class CapabilityCatalogFacadeTests
         Assert.Equal("invalid", (await facade.PreviewAsync(new CapabilityLifecycleSelectionInput(new string('a', CapabilityArtifactManifestValidator.MaximumOperationIdCharacters + 1), "disable", "org.embodysense/workspace-command", null))).Status);
         Assert.Equal("invalid", (await facade.PreviewAsync(new CapabilityLifecycleSelectionInput("oversized-capability", "disable", $"org.example/{new string('a', CapabilityContractLimits.MaxCapabilityIdCharacters)}", null))).Status);
         Assert.Equal("invalid", (await facade.PreviewAsync(new CapabilityLifecycleSelectionInput("oversized-version", "upgrade", "org.embodysense/workspace-command", new string('1', CapabilityContractLimits.MaxVersionCharacters + 1)))).Status);
+        Assert.Equal("invalid", (await facade.DiscardAsync(new CapabilityLifecycleDiscardInput("bad-discard", "disable", "org.embodysense/workspace-command", null, 0, 0, 0, 0, "bad", "bad"))).Status);
         foreach (var operation in new[] { "enable", "rollback", "remove" })
         {
             Assert.NotEqual("invalid", (await facade.PreviewAsync(new CapabilityLifecycleSelectionInput($"valid-{operation}", operation, "org.embodysense/workspace-command", null))).Status);
         }
         Assert.NotNull(new CapabilityCatalogFacade(workspace.RootPath));
         Assert.Throws<ArgumentException>(() => CapabilityCatalogFacade.ForFileCapabilityTrustRoot(workspace.RootPath, " "));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => facade.DiscardAsync(null!));
 
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
@@ -176,6 +202,20 @@ public sealed class CapabilityCatalogFacadeTests
             preview.DependentSetHash,
             preview.PreviewHash,
             true);
+
+    private static CapabilityLifecycleDiscardInput Discard(
+        CapabilityLifecycleSelectionInput selection,
+        CapabilityLifecyclePreviewSnapshot preview) => new(
+            selection.OperationId,
+            selection.Operation,
+            selection.CapabilityId,
+            selection.TargetVersion,
+            preview.BaselineCatalogRevision,
+            preview.BaselineActivationRevision,
+            preview.LifecycleRevision,
+            preview.DependentSetRevision,
+            preview.DependentSetHash,
+            preview.PreviewHash);
 
     private static string ChangeDigest(string digest)
     {

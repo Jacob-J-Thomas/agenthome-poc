@@ -41,6 +41,7 @@ public sealed class CapabilityApiControllerTests
                 capabilityId = "org.example/runtime",
                 targetVersion = (string?)null
             });
+            var uninitializedDiscard = await SendAsync(client, HttpMethod.Post, "/api/capabilities/lifecycle/discard", token, DiscardBody());
             var uninitializedConfirmation = await SendAsync(client, HttpMethod.Post, "/api/capabilities/lifecycle/confirm", token, ConfirmationBody());
             var initialize = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { });
             Assert.True(initialize.StatusCode == HttpStatusCode.OK, await initialize.Content.ReadAsStringAsync());
@@ -52,6 +53,7 @@ public sealed class CapabilityApiControllerTests
             Assert.Equal(HttpStatusCode.Conflict, uninitialized.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, uninitializedDetail.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, uninitializedPreview.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, uninitializedDiscard.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, uninitializedConfirmation.StatusCode);
             Assert.Contains("workspace_not_initialized", await uninitialized.Content.ReadAsStringAsync(), StringComparison.Ordinal);
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -89,6 +91,7 @@ public sealed class CapabilityApiControllerTests
                 targetVersion = (string?)null
             });
             var malformed = await SendRawJsonAsync(client, HttpMethod.Post, "/api/capabilities/lifecycle/preview", token, "{\"operationId\":\"forged\",\"operation\":\"disable\",\"capabilityId\":\"org.example/runtime-lifecycle\",\"targetDescriptor\":{}}");
+            var discard = await SendAsync(client, HttpMethod.Post, "/api/capabilities/lifecycle/discard", token, DiscardBody());
             var confirm = await SendAsync(client, HttpMethod.Post, "/api/capabilities/lifecycle/confirm", token, new
             {
                 operationId = "web-preview",
@@ -108,6 +111,8 @@ public sealed class CapabilityApiControllerTests
             Assert.True(preview.Headers.CacheControl?.NoStore == true);
             Assert.Equal("web-preview", facade.PreviewInput!.OperationId);
             Assert.Equal(HttpStatusCode.BadRequest, malformed.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, discard.StatusCode);
+            Assert.Equal("sha256:preview", facade.DiscardInput!.PreviewHash);
             Assert.Equal(HttpStatusCode.OK, confirm.StatusCode);
             Assert.True(confirm.Headers.CacheControl?.NoStore == true);
             Assert.True(facade.ConfirmationInput!.Confirmed);
@@ -212,6 +217,20 @@ public sealed class CapabilityApiControllerTests
         confirmed = true
     };
 
+    private static object DiscardBody() => new
+    {
+        operationId = "web-preview-status",
+        operation = "disable",
+        capabilityId = "org.example/runtime",
+        targetVersion = (string?)null,
+        baselineCatalogRevision = 8,
+        baselineActivationRevision = 3,
+        lifecycleRevision = 2,
+        dependentSetRevision = 5,
+        dependentSetHash = "sha256:dependents",
+        previewHash = "sha256:preview"
+    };
+
     private static WebApplication CreateApp(string rootPath, string trustRootPath, ICapabilityCatalogFacade facade, out WebRunOptions options)
     {
         var port = GetFreePort();
@@ -270,6 +289,8 @@ public sealed class CapabilityApiControllerTests
 
         public CapabilityLifecycleConfirmationInput? ConfirmationInput { get; private set; }
 
+        public CapabilityLifecycleDiscardInput? DiscardInput { get; private set; }
+
         public CapabilityPostureCatalogResponse CatalogResponse { get; set; } = new("available", 8, [], null, null);
 
         public CapabilityPostureResponse PostureResponse { get; set; } = new("not-found", null, new CapabilityPostureError("capability_posture_unavailable", "No matching capability."));
@@ -306,6 +327,12 @@ public sealed class CapabilityApiControllerTests
                 return Task.FromResult(MutationResponse);
             }
             return Task.FromResult(new CapabilityLifecycleMutationResponse("applied", true, null, new CapabilityLifecycleMutationStateSnapshot(input.CapabilityId, "1.0.0", false, false, 3, DateTimeOffset.Parse("2026-08-09T12:00:00Z")), 3, false, "Applied."));
+        }
+
+        public Task<CapabilityLifecycleMutationResponse> DiscardAsync(CapabilityLifecycleDiscardInput input, CancellationToken cancellationToken = default)
+        {
+            DiscardInput = input;
+            return Task.FromResult(new CapabilityLifecycleMutationResponse("discarded", false, null, null, 3, false, "Discarded."));
         }
     }
 }

@@ -16,5 +16,7 @@ internal sealed class StubCapabilityLifecycleMutationStore : ICapabilityLifecycl
 
     public Task<CapabilityLifecycleMutationResult> MutateAsync(CapabilityLifecyclePreview preview, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
+    public Task<CapabilityLifecycleMutationResult> DiscardAsync(CapabilityLifecyclePreview preview, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
     public Task<CapabilityLifecycleAuditMarkStatus> MarkOutcomeAuditedAsync(string operationId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 }

@@ -24,6 +24,12 @@ public interface ICapabilityCatalogFacade
     /// <returns>The safe preview projection.</returns>
     Task<CapabilityLifecyclePreviewResponse> PreviewAsync(CapabilityLifecycleSelectionInput input, CancellationToken cancellationToken = default);
 
+    /// <summary>Retires one exact preview without applying its transition.</summary>
+    /// <param name="input">The exact caller-observed preview identities.</param>
+    /// <param name="cancellationToken">The token used to cancel before the durable retirement boundary.</param>
+    /// <returns>The safe terminal disposition.</returns>
+    Task<CapabilityLifecycleMutationResponse> DiscardAsync(CapabilityLifecycleDiscardInput input, CancellationToken cancellationToken = default);
+
     /// <summary>Confirms one exact preview after checking every caller-observed concurrency identity.</summary>
     /// <param name="input">The explicit confirmation and exact expected preview identities.</param>
     /// <param name="cancellationToken">The token used to cancel before the durable terminal boundary.</param>

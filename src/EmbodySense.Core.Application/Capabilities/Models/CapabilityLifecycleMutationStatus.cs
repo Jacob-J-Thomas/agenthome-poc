@@ -16,5 +16,7 @@ public enum CapabilityLifecycleMutationStatus
     /// <summary>The request violates the closed lifecycle contract.</summary>
     Invalid = 6,
     /// <summary>No safe proved outcome could be established.</summary>
-    Unavailable = 7
+    Unavailable = 7,
+    /// <summary>The exact preview was durably retired without applying its transition.</summary>
+    Discarded = 8
 }

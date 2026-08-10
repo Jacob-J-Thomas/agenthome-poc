@@ -141,6 +141,33 @@ public sealed class CapabilityLifecycleService
         return result;
     }
 
+    /// <summary>Durably retires one exact preview and records its terminal no-mutation disposition.</summary>
+    public async Task<CapabilityLifecycleMutationResult> DiscardAsync(CapabilityLifecyclePreview preview, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(preview);
+        var auditTarget = preview.CapabilityId?.Value ?? "invalid";
+        var result = await _authorityTransaction.ExecuteAsync(
+            transactionCancellationToken => _store.DiscardAsync(preview, transactionCancellationToken),
+            cancellationToken);
+        var effectiveOutcome = result.ReplayedOutcome ?? result.Status;
+        var outcome = effectiveOutcome == CapabilityLifecycleMutationStatus.Discarded
+            ? AuditSchema.Outcomes.Succeeded
+            : effectiveOutcome == CapabilityLifecycleMutationStatus.Conflict
+                ? AuditSchema.Outcomes.Conflict
+                : AuditSchema.Outcomes.Failed;
+        await AppendAsync(AuditSchema.Actions.CapabilityLifecycleDiscard, auditTarget, outcome, preview.OperationId, preview.Kind, preview, result.Detail);
+        if (result.OutcomeAuditPending)
+        {
+            await AppendAsync(AuditSchema.Actions.CapabilityLifecycleFinal, auditTarget, outcome, preview.OperationId, preview.Kind, preview, result.Detail);
+            var auditMark = await _store.MarkOutcomeAuditedAsync(preview.OperationId, CancellationToken.None);
+            if (auditMark is CapabilityLifecycleAuditMarkStatus.Applied or CapabilityLifecycleAuditMarkStatus.NoChange)
+            {
+                result = result with { OutcomeAuditPending = false };
+            }
+        }
+        return result;
+    }
+
     private async Task<CapabilityDependentIndexSnapshot> FinalizeDependentsAsync(CapabilityDependentIndexSnapshot initial, CancellationToken cancellationToken)
     {
         if (initial.Status != CapabilityDependentIndexStatus.Available)
