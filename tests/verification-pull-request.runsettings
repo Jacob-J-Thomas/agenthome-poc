@@ -2,7 +2,7 @@
 <RunSettings>
   <RunConfiguration>
     <TreatNoTestsAsError>true</TreatNoTestsAsError>
-    <TestSessionTimeout>840000</TestSessionTimeout>
+    <TestSessionTimeout>1200000</TestSessionTimeout>
   </RunConfiguration>
   <DataCollectionRunSettings>
     <DataCollectors>

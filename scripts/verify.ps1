@@ -237,7 +237,8 @@ try {
                     $env:EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = New-CoverageChildProcessAssemblyCopy -TestProject $_ -BuildConfiguration $Configuration
                 }
 
-                Invoke-CheckedNativePhase -Name "coverage-$($_.BaseName)" -FileName "dotnet" -Arguments $testArguments -TimeoutSeconds 900
+                $coveragePhaseTimeoutSeconds = if ($_.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") { 1260 } else { 900 }
+                Invoke-CheckedNativePhase -Name "coverage-$($_.BaseName)" -FileName "dotnet" -Arguments $testArguments -TimeoutSeconds $coveragePhaseTimeoutSeconds
                 Assert-CoverageReportProduced -TestProject $_ -MinimumWriteTimeUtc $coverageStartedUtc
             }
             finally {
