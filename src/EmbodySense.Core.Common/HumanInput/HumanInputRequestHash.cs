@@ -18,7 +18,7 @@ public static class HumanInputRequestHash
     /// <param name="request">The request to serialize canonically.</param>
     /// <returns>A 64-character lowercase hexadecimal digest.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="request"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentException">Thrown before serialization when a request value or collection exceeds its declared maximum.</exception>
+    /// <exception cref="ArgumentException">Thrown before serialization when a request value is malformed or a collection exceeds its declared maximum.</exception>
     public static string Compute(HumanInputRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -70,7 +70,7 @@ public static class HumanInputRequestHash
     /// <param name="request">The request to hash.</param>
     /// <returns>A copy with <see cref="HumanInputRequest.RequestHash"/> set to <see cref="Compute"/>.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="request"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentException">Thrown before serialization when a request value or collection exceeds its declared maximum.</exception>
+    /// <exception cref="ArgumentException">Thrown before serialization when a request value is malformed or a collection exceeds its declared maximum.</exception>
     public static HumanInputRequest Apply(HumanInputRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -83,7 +83,7 @@ public static class HumanInputRequestHash
     /// <param name="request">The request to verify.</param>
     /// <returns><see langword="true"/> when the stored hash has equal length and fixed-time equality with the recomputed hash; otherwise, <see langword="false"/>.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="request"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentException">Thrown before serialization when a request value or collection exceeds its declared maximum.</exception>
+    /// <exception cref="ArgumentException">Thrown before serialization when a request value is malformed or a collection exceeds its declared maximum.</exception>
     public static bool Matches(HumanInputRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -346,7 +346,7 @@ public static class HumanInputRequestHash
 
         for (var index = 0; index < roleIds.Length; index++)
         {
-            if (!IsWithin(roleIds[index], HumanInputLimits.MaxIdentifierCharacters))
+            if (!HumanInputIdentifier.IsValid(roleIds[index]))
             {
                 return false;
             }

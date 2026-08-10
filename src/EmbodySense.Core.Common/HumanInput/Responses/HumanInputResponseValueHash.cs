@@ -12,13 +12,13 @@ public static class HumanInputResponseValueHash
     /// <param name="value">The untrusted typed response value.</param>
     /// <returns>The canonical 64-character lowercase digest.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="value"/> is null.</exception>
-    /// <exception cref="ArgumentException">Thrown before serialization when a value exceeds schema-1 bounds.</exception>
+    /// <exception cref="ArgumentException">Thrown before serialization when a value is malformed or exceeds schema-1 bounds.</exception>
     public static string Compute(HumanInputResponseValue value)
     {
         ArgumentNullException.ThrowIfNull(value);
         if (!IsBounded(value))
         {
-            throw new ArgumentException("Human Input response value exceeds canonical schema-1 bounds.", nameof(value));
+            throw new ArgumentException("Human Input response value is malformed or exceeds canonical schema-1 bounds.", nameof(value));
         }
 
         var buffer = new ArrayBufferWriter<byte>();
@@ -33,14 +33,28 @@ public static class HumanInputResponseValueHash
     /// <param name="value">The typed response value.</param>
     /// <param name="valueHash">The candidate lowercase SHA-256 digest.</param>
     /// <returns><see langword="true"/> when the canonical digest matches in fixed time; otherwise, <see langword="false"/>.</returns>
-    public static bool Matches(HumanInputResponseValue value, string? valueHash)
-        => HumanInputResponseHashRules.IsSha256(valueHash) && HumanInputResponseHashRules.FixedEquals(Compute(value), valueHash);
+    public static bool Matches(HumanInputResponseValue? value, string? valueHash)
+    {
+        if (value is null || !IsBounded(value) || !HumanInputResponseHashRules.IsSha256(valueHash))
+        {
+            return false;
+        }
+
+        try
+        {
+            return HumanInputResponseHashRules.FixedEquals(Compute(value), valueHash);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or IndexOutOfRangeException or NullReferenceException)
+        {
+            return false;
+        }
+    }
 
     internal static bool IsBounded(HumanInputResponseValue value)
     {
-        if (value.Text is { Length: > HumanInputLimits.MaxResponseTextCharacters }
-            || value.ChoiceId is { Length: > HumanInputLimits.MaxIdentifierCharacters }
-            || value.Reference?.Value is { Length: > HumanInputLimits.MaxReferenceCharacters }
+        if (value.Text is { } text && !HumanInputText.IsValid(text, HumanInputLimits.MaxResponseTextCharacters, required: false)
+            || value.ChoiceId is { } choiceId && !HumanInputIdentifier.IsValid(choiceId)
+            || value.Reference is { } reference && !HumanInputIdentifier.IsValid(reference.Value, HumanInputLimits.MaxReferenceCharacters)
             || value.StructuredFields is { IsDefault: true }
             || value.StructuredFields is { Length: > HumanInputLimits.MaxStructuredFields })
         {
@@ -55,9 +69,9 @@ public static class HumanInputResponseValueHash
         {
             var field = fields[index];
             if (field is not null
-                && (field.FieldId is { Length: > HumanInputLimits.MaxIdentifierCharacters }
-                    || field.Text is { Length: > HumanInputLimits.MaxResponseTextCharacters }
-                    || field.ChoiceId is { Length: > HumanInputLimits.MaxIdentifierCharacters }))
+                && (!HumanInputIdentifier.IsValid(field.FieldId)
+                    || field.Text is { } fieldText && !HumanInputText.IsValid(fieldText, HumanInputLimits.MaxResponseTextCharacters, required: false)
+                    || field.ChoiceId is { } fieldChoiceId && !HumanInputIdentifier.IsValid(fieldChoiceId)))
             {
                 return false;
             }

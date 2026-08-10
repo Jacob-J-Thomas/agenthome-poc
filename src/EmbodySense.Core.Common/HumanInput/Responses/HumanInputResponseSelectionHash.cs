@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Security.Cryptography;
 using System.Text.Json;
+using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
 
 namespace EmbodySense.Core.Common.HumanInput.Responses;
@@ -12,13 +13,13 @@ public static class HumanInputResponseSelectionHash
     /// <param name="selection">The selection to serialize canonically.</param>
     /// <returns>The canonical 64-character lowercase digest.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="selection"/> is null.</exception>
-    /// <exception cref="ArgumentException">Thrown before serialization when the selection exceeds schema-1 bounds.</exception>
+    /// <exception cref="ArgumentException">Thrown before serialization when the selection is malformed or exceeds schema-1 bounds.</exception>
     public static string Compute(HumanInputResponseSelection selection)
     {
         ArgumentNullException.ThrowIfNull(selection);
         if (!IsBounded(selection))
         {
-            throw new ArgumentException("Human Input response selection exceeds canonical schema-1 bounds.", nameof(selection));
+            throw new ArgumentException("Human Input response selection is malformed or exceeds canonical schema-1 bounds.", nameof(selection));
         }
 
         var buffer = new ArrayBufferWriter<byte>();
@@ -48,6 +49,8 @@ public static class HumanInputResponseSelectionHash
     /// <summary>Returns a selection copy with its canonical digest applied.</summary>
     /// <param name="selection">The selection candidate.</param>
     /// <returns>The selection with its canonical hash.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="selection"/> is null.</exception>
+    /// <exception cref="ArgumentException">Thrown before serialization when the selection is malformed or exceeds schema-1 bounds.</exception>
     public static HumanInputResponseSelection Apply(HumanInputResponseSelection selection)
     {
         ArgumentNullException.ThrowIfNull(selection);
@@ -58,24 +61,34 @@ public static class HumanInputResponseSelectionHash
     /// <summary>Determines whether the stored selection digest matches the exact ordered selection.</summary>
     /// <param name="selection">The selection to verify.</param>
     /// <returns><see langword="true"/> when the digest matches in fixed time; otherwise, <see langword="false"/>.</returns>
-    public static bool Matches(HumanInputResponseSelection selection)
+    public static bool Matches(HumanInputResponseSelection? selection)
     {
-        ArgumentNullException.ThrowIfNull(selection);
-        return HumanInputResponseHashRules.IsSha256(selection.SelectionHash)
-            && HumanInputResponseHashRules.FixedEquals(Compute(selection), selection.SelectionHash);
+        if (selection is null || !IsBounded(selection) || !HumanInputResponseHashRules.IsSha256(selection.SelectionHash))
+        {
+            return false;
+        }
+
+        try
+        {
+            return HumanInputResponseHashRules.FixedEquals(Compute(selection), selection.SelectionHash);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or IndexOutOfRangeException or NullReferenceException)
+        {
+            return false;
+        }
     }
 
     internal static bool IsBounded(HumanInputResponseSelection selection)
     {
-        if (selection.SelectionId is null or { Length: > HumanInputLimits.MaxIdentifierCharacters }
+        if (!HumanInputIdentifier.IsValid(selection.SelectionId)
             || selection.Request is null
-            || selection.Request.RequestId is null or { Length: > HumanInputLimits.MaxIdentifierCharacters }
-            || selection.Request.RequestVersionId is null or { Length: > HumanInputLimits.MaxIdentifierCharacters }
-            || selection.Request.RequestHash is null or { Length: > HumanInputLimits.Sha256HexCharacters }
+            || !HumanInputIdentifier.IsValid(selection.Request.RequestId)
+            || !HumanInputIdentifier.IsValid(selection.Request.RequestVersionId)
+            || !HumanInputResponseHashRules.IsSha256(selection.Request.RequestHash)
             || selection.Responses.IsDefault
             || selection.Responses.Length > HumanInputResponseContractLimits.MaxSelectedResponses
-            || selection.SelectorActorId?.Value.Length > HumanInputLimits.MaxIdentifierCharacters
-            || selection.SelectorRoleId is { Length: > HumanInputLimits.MaxIdentifierCharacters })
+            || selection.SelectorActorId is { } actorId && !AuthorityActorId.TryParse(actorId.Value, out _, out _)
+            || selection.SelectorRoleId is { } selectorRoleId && !HumanInputIdentifier.IsValid(selectorRoleId))
         {
             return false;
         }
@@ -84,13 +97,13 @@ public static class HumanInputResponseSelectionHash
         {
             var response = selection.Responses[index];
             if (response is null
-                || response.ResponseId is null or { Length: > HumanInputLimits.MaxIdentifierCharacters }
+                || !HumanInputIdentifier.IsValid(response.ResponseId)
                 || response.Request is null
-                || response.Request.RequestId is null or { Length: > HumanInputLimits.MaxIdentifierCharacters }
-                || response.Request.RequestVersionId is null or { Length: > HumanInputLimits.MaxIdentifierCharacters }
-                || response.Request.RequestHash is null or { Length: > HumanInputLimits.Sha256HexCharacters }
-                || response.ValueHash is null or { Length: > HumanInputLimits.Sha256HexCharacters }
-                || response.ResponseHash is null or { Length: > HumanInputLimits.Sha256HexCharacters })
+                || !HumanInputIdentifier.IsValid(response.Request.RequestId)
+                || !HumanInputIdentifier.IsValid(response.Request.RequestVersionId)
+                || !HumanInputResponseHashRules.IsSha256(response.Request.RequestHash)
+                || !HumanInputResponseHashRules.IsSha256(response.ValueHash)
+                || !HumanInputResponseHashRules.IsSha256(response.ResponseHash))
             {
                 return false;
             }
