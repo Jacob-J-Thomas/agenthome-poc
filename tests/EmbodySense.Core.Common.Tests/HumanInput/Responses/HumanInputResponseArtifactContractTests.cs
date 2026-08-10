@@ -184,6 +184,73 @@ public sealed class HumanInputResponseArtifactContractTests
     }
 
     [Fact]
+    public void Bounded_attempt_snapshot_deep_copies_request_invalid_structured_values_and_accepts_equivalent_arrays()
+    {
+        var request = HumanInputResponseTestData.Request();
+        var fields = ImmutableArray.Create(
+            new HumanInputStructuredFieldValue("field-two", null, "choice-one"),
+            new HumanInputStructuredFieldValue("field-one", "private-value", null));
+        var attempt = HumanInputResponseArtifactHash.Apply(HumanInputResponseTestData.Artifact(request) with
+        {
+            Value = new HumanInputResponseValue(HumanInputResponseKind.Structured, null, null, null, fields, null),
+            ValueHash = string.Empty,
+            ResponseHash = string.Empty
+        });
+
+        Assert.False(HumanInputResponseContractValidator.ValidateArtifact(request, attempt).IsValid);
+        Assert.True(HumanInputResponseArtifactSnapshot.TryCaptureBoundedAttempt(attempt, out var snapshot, out var validation));
+        Assert.True(validation.IsValid);
+        Assert.NotNull(snapshot);
+        Assert.NotSame(attempt, snapshot);
+        Assert.NotSame(attempt.Request, snapshot!.Request);
+        Assert.NotSame(attempt.Binding, snapshot.Binding);
+        Assert.NotSame(attempt.Value, snapshot.Value);
+        Assert.False(attempt.Value.StructuredFields!.Value.Equals(snapshot.Value.StructuredFields!.Value));
+        Assert.NotSame(attempt.Value.StructuredFields.Value[0], snapshot.Value.StructuredFields.Value[0]);
+
+        var equivalent = HumanInputResponseArtifactHash.Apply(attempt with
+        {
+            Value = attempt.Value with
+            {
+                StructuredFields = attempt.Value.StructuredFields.Value.Select(field => field with { }).ToImmutableArray()
+            },
+            ValueHash = string.Empty,
+            ResponseHash = string.Empty
+        });
+
+        Assert.False(attempt.Value.StructuredFields.Value.Equals(equivalent.Value.StructuredFields!.Value));
+        Assert.Equal(attempt.ValueHash, equivalent.ValueHash);
+        Assert.Equal(attempt.ResponseHash, equivalent.ResponseHash);
+        Assert.True(HumanInputResponseArtifactSnapshot.TryCaptureBoundedAttempt(equivalent, out _, out var equivalentValidation));
+        Assert.True(equivalentValidation.IsValid);
+    }
+
+    [Fact]
+    public void Bounded_attempt_snapshot_rejects_malformed_shape_time_privacy_and_hashes()
+    {
+        var request = HumanInputResponseTestData.Request();
+        var artifact = HumanInputResponseTestData.Artifact(request);
+        var variants = new HumanInputResponseArtifact?[]
+        {
+            null,
+            HumanInputResponseArtifactHash.Apply(artifact with { SchemaVersion = 2, ResponseHash = string.Empty }),
+            HumanInputResponseArtifactHash.Apply(artifact with { SubmittedAtUtc = default, ResponseHash = string.Empty }),
+            HumanInputResponseArtifactHash.Apply(artifact with { SubmittedAtUtc = artifact.SubmittedAtUtc.ToOffset(TimeSpan.FromHours(1)), ResponseHash = string.Empty }),
+            HumanInputResponseArtifactHash.Apply(artifact with { PrivacyClass = HumanInputPrivacyClass.Unknown, ResponseHash = string.Empty }),
+            artifact with { ValueHash = HumanInputResponseTestData.Hash('d') },
+            artifact with { ResponseHash = HumanInputResponseTestData.Hash('d') },
+            artifact with { Value = null! }
+        };
+
+        Assert.All(variants, variant =>
+        {
+            Assert.False(HumanInputResponseArtifactSnapshot.TryCaptureBoundedAttempt(variant, out var snapshot, out var validation));
+            Assert.Null(snapshot);
+            Assert.False(validation.IsValid);
+        });
+    }
+
+    [Fact]
     public void Artifact_validation_rejects_forged_scope_role_time_privacy_value_and_hash()
     {
         var request = HumanInputResponseTestData.Request();

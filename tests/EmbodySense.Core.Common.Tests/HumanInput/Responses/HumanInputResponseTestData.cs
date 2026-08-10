@@ -102,6 +102,7 @@ internal static class HumanInputResponseTestData
         HumanInputResponseOperationKind kind,
         HumanInputResponseOperationOutcome outcome = HumanInputResponseOperationOutcome.Committed,
         HumanInputResponseOperationFailureCode failureCode = HumanInputResponseOperationFailureCode.None,
+        HumanInputResponseArtifact? attempted = null,
         HumanInputResponseArtifact? submitted = null,
         IReadOnlyList<HumanInputResponseArtifact>? targets = null,
         HumanInputResponseSelection? selection = null,
@@ -117,28 +118,60 @@ internal static class HumanInputResponseTestData
     {
         Assert.True(AuthorityActorId.TryParse(actorId, out var actor, out _));
         var previous = previousHead ?? PendingHead(request);
-        return new HumanInputResponseOperationEvidence(
+        var binding = expectedBinding ?? request.Binding;
+        var requestReference = RequestReference(request);
+        var commandHash = Hash('a');
+        var authenticationEvidenceHash = Hash('b');
+        var evidenceTime = recordedAtUtc ?? selection?.SelectedAtUtc ?? (previous.UpdatedAtUtc > Now.AddMinutes(5) ? previous.UpdatedAtUtc : Now.AddMinutes(5));
+        var attemptRequired = kind == HumanInputResponseOperationKind.Submit
+            && outcome != HumanInputResponseOperationOutcome.Committed
+            && failureCode is HumanInputResponseOperationFailureCode.MalformedResponse
+                or HumanInputResponseOperationFailureCode.DuplicateResponse
+                or HumanInputResponseOperationFailureCode.ResponseLimitExceeded
+                or HumanInputResponseOperationFailureCode.LifecycleVersionLimitExceeded;
+        var attemptedResponse = attempted ?? (attemptRequired
+            ? Artifact(
+                request,
+                actorId: actorId,
+                roleId: actorRoleId!,
+                text: failureCode == HumanInputResponseOperationFailureCode.MalformedResponse ? new string('m', 129) : "same-value",
+                submittedAtUtc: evidenceTime)
+            : null);
+        var evidence = new HumanInputResponseOperationEvidence(
             HumanInputResponseOperationEvidence.CurrentSchemaVersion,
             operationId,
-            Hash('a'),
+            commandHash,
             kind,
             outcome,
             failureCode,
-            RequestReference(request),
-            expectedBinding ?? request.Binding,
+            requestReference,
+            binding,
             failureCode == HumanInputResponseOperationFailureCode.RequestNotFound ? null : observedBinding ?? request.Binding,
             expectedLifecycleVersion ?? previous.LifecycleVersion,
             HumanInputRequestLifecycleStatus.Pending,
             failureCode == HumanInputResponseOperationFailureCode.RequestNotFound ? null : previous,
             failureCode == HumanInputResponseOperationFailureCode.RequestNotFound ? null : resultHead ?? previous,
+            attemptedResponse,
             submitted is null ? null : Reference(request, submitted),
             (targets ?? []).Select(target => Reference(request, target)).ToImmutableArray(),
             selection is null ? null : HumanInputResponseSelectionReference.Create(selection),
             actor!,
             actorRoleId,
-            Hash('b'),
-            Hash('c'),
-            recordedAtUtc ?? selection?.SelectedAtUtc ?? (previous.UpdatedAtUtc > Now.AddMinutes(5) ? previous.UpdatedAtUtc : Now.AddMinutes(5)));
+            authenticationEvidenceHash,
+            string.Empty,
+            evidenceTime);
+        return evidence with
+        {
+            EligibilityEvidenceHash = HumanInputResponseEligibilityEvidenceHash.Compute(
+                binding.WorkspaceId,
+                operationId,
+                commandHash,
+                requestReference,
+                actor!,
+                actorRoleId,
+                authenticationEvidenceHash,
+                evidenceTime)
+        };
     }
 
     internal static HumanInputRequestReference RequestReference(HumanInputRequest request)

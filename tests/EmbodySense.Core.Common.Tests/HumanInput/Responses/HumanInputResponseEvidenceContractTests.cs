@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Runtime.InteropServices;
+using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
@@ -429,6 +430,243 @@ public sealed class HumanInputResponseEvidenceContractTests
         Assert.False(HumanInputResponseContractValidator.ValidateEvidence(withdraw).IsValid);
     }
 
+    [Theory]
+    [InlineData(HumanInputResponseOperationOutcome.Rejected, HumanInputResponseOperationFailureCode.MalformedResponse)]
+    [InlineData(HumanInputResponseOperationOutcome.Conflict, HumanInputResponseOperationFailureCode.DuplicateResponse)]
+    [InlineData(HumanInputResponseOperationOutcome.LimitExceeded, HumanInputResponseOperationFailureCode.ResponseLimitExceeded)]
+    [InlineData(HumanInputResponseOperationOutcome.LimitExceeded, HumanInputResponseOperationFailureCode.LifecycleVersionLimitExceeded)]
+    public void Inspected_submit_failures_require_the_exact_bounded_attempt(HumanInputResponseOperationOutcome outcome, HumanInputResponseOperationFailureCode failureCode)
+    {
+        var request = HumanInputResponseTestData.Request();
+        var evidence = HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Submit, outcome, failureCode);
+
+        Assert.NotNull(evidence.AttemptedResponse);
+        Assert.True(HumanInputResponseContractValidator.ValidateEvidence(evidence).IsValid);
+        var missing = HumanInputResponseContractValidator.ValidateEvidence(evidence with { AttemptedResponse = null });
+        Assert.Contains(missing.Errors, error => error is { Code: HumanInputResponseValidationErrorCode.InvalidEvidenceShape, Path: "$.attemptedResponse" });
+        if (failureCode == HumanInputResponseOperationFailureCode.MalformedResponse)
+        {
+            Assert.False(HumanInputResponseContractValidator.ValidateArtifact(request, evidence.AttemptedResponse).IsValid);
+        }
+    }
+
+    [Fact]
+    public void Preinspection_committed_withdraw_and_select_dispositions_forbid_attempted_response_content()
+    {
+        var request = HumanInputResponseTestData.Request(HumanInputResponsePolicyKind.ManualSelection, orderedRoleIds: ImmutableArray.Create("role-selector"));
+        var response = HumanInputResponseTestData.Artifact(request);
+        var optimisticHead = HumanInputResponseTestData.PendingHead(request) with
+        {
+            LifecycleVersion = 2,
+            LastOperationId = "other-operation",
+            UpdatedAtUtc = HumanInputResponseTestData.Now.AddMinutes(1)
+        };
+        var currentRequest = HumanInputRequestHash.Apply(request with { RequestVersionId = "request-version-two", Prompt = "Current prompt.", RequestHash = string.Empty });
+        var staleHead = HumanInputResponseTestData.PendingHead(currentRequest) with
+        {
+            LifecycleVersion = 2,
+            LastOperationId = "amend-one",
+            UpdatedAtUtc = HumanInputResponseTestData.Now.AddMinutes(1)
+        };
+        var selected = HumanInputResponseTestData.Selection(request, [response], selectorActorId: "selector-one", selectorRoleId: "role-selector");
+        var terminalHead = HumanInputResponseTestData.AnsweredHead(request, selected, "answer-one");
+        var dispositions = new[]
+        {
+            HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Submit, submitted: response),
+            HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Submit, HumanInputResponseOperationOutcome.NotFound, HumanInputResponseOperationFailureCode.RequestNotFound, actorRoleId: null),
+            HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Submit, HumanInputResponseOperationOutcome.Rejected, HumanInputResponseOperationFailureCode.RequestTerminal, previousHead: terminalHead, resultHead: terminalHead),
+            HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Submit, HumanInputResponseOperationOutcome.Conflict, HumanInputResponseOperationFailureCode.StaleResponse, previousHead: staleHead, resultHead: staleHead, observedBinding: currentRequest.Binding),
+            HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Submit, HumanInputResponseOperationOutcome.Conflict, HumanInputResponseOperationFailureCode.OptimisticStateConflict, previousHead: optimisticHead, resultHead: optimisticHead, expectedLifecycleVersion: 1),
+            HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Submit, HumanInputResponseOperationOutcome.Rejected, HumanInputResponseOperationFailureCode.IneligibleRespondent, actorRoleId: null),
+            HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Submit, HumanInputResponseOperationOutcome.Rejected, HumanInputResponseOperationFailureCode.LateResponse),
+            HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Submit, HumanInputResponseOperationOutcome.LimitExceeded, HumanInputResponseOperationFailureCode.OperationEvidenceLimitExceeded),
+            HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Submit, HumanInputResponseOperationOutcome.Conflict, HumanInputResponseOperationFailureCode.OperationIntentConflict),
+            HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Withdraw, targets: [response]),
+            HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Select, HumanInputResponseOperationOutcome.LimitExceeded, HumanInputResponseOperationFailureCode.LifecycleVersionLimitExceeded, targets: [response], actorId: "selector-one", actorRoleId: "role-selector")
+        };
+
+        Assert.All(dispositions, evidence =>
+        {
+            Assert.Null(evidence.AttemptedResponse);
+            Assert.True(HumanInputResponseContractValidator.ValidateEvidence(evidence).IsValid, evidence.FailureCode.ToString());
+            var attempt = HumanInputResponseTestData.Artifact(
+                request,
+                actorId: evidence.ActorId.Value,
+                roleId: evidence.ActorRoleId ?? "role-one",
+                submittedAtUtc: evidence.RecordedAtUtc);
+            var validation = HumanInputResponseContractValidator.ValidateEvidence(evidence with { AttemptedResponse = attempt });
+            Assert.Contains(validation.Errors, error => error.Path == "$.attemptedResponse");
+        });
+    }
+
+    [Fact]
+    public void Attempted_response_must_match_inspected_causality_but_not_request_relative_schema_or_privacy()
+    {
+        var request = HumanInputResponseTestData.Request();
+        var evidence = HumanInputResponseTestData.Evidence(
+            request,
+            HumanInputResponseOperationKind.Submit,
+            HumanInputResponseOperationOutcome.Conflict,
+            HumanInputResponseOperationFailureCode.DuplicateResponse);
+        var attempt = evidence.AttemptedResponse!;
+        Assert.True(AuthorityActorId.TryParse("user-two", out var otherActor, out _));
+        var variants = new[]
+        {
+            HumanInputResponseArtifactHash.Apply(attempt with { Request = attempt.Request with { RequestVersionId = "request-version-two" }, ResponseHash = string.Empty }),
+            HumanInputResponseArtifactHash.Apply(attempt with { Binding = attempt.Binding with { RunId = "run-two" }, ResponseHash = string.Empty }),
+            HumanInputResponseArtifactHash.Apply(attempt with { ActorId = otherActor!, ResponseHash = string.Empty }),
+            HumanInputResponseArtifactHash.Apply(attempt with { RespondentRoleId = "role-two", ResponseHash = string.Empty }),
+            HumanInputResponseArtifactHash.Apply(attempt with { SubmittedAtUtc = attempt.SubmittedAtUtc.AddTicks(1), ResponseHash = string.Empty }),
+            HumanInputResponseArtifactHash.Apply(attempt with { SchemaVersion = 2, ResponseHash = string.Empty }),
+            HumanInputResponseArtifactHash.Apply(attempt with { PrivacyClass = HumanInputPrivacyClass.Unknown, ResponseHash = string.Empty }),
+            attempt with { ValueHash = HumanInputResponseTestData.Hash('d') },
+            attempt with { ResponseHash = HumanInputResponseTestData.Hash('d') }
+        };
+
+        Assert.All(variants, variant => Assert.False(HumanInputResponseContractValidator.ValidateEvidence(evidence with { AttemptedResponse = variant }).IsValid));
+
+        var schemaInvalid = HumanInputResponseArtifactHash.Apply(attempt with
+        {
+            Value = new HumanInputResponseValue(
+                HumanInputResponseKind.Structured,
+                null,
+                null,
+                null,
+                ImmutableArray.Create(new HumanInputStructuredFieldValue("field-one", "private-value", null)),
+                null),
+            PrivacyClass = HumanInputPrivacyClass.Sensitive,
+            ValueHash = string.Empty,
+            ResponseHash = string.Empty
+        });
+        Assert.False(HumanInputResponseContractValidator.ValidateArtifact(request, schemaInvalid).IsValid);
+        Assert.True(HumanInputResponseContractValidator.ValidateEvidence(evidence with { AttemptedResponse = schemaInvalid }).IsValid);
+    }
+
+    [Fact]
+    public void Evidence_snapshot_deep_copies_structured_attempts_and_accepts_equivalent_arrays()
+    {
+        var request = HumanInputResponseTestData.Request();
+        var recordedAtUtc = HumanInputResponseTestData.Now.AddMinutes(5);
+        var attempt = HumanInputResponseArtifactHash.Apply(HumanInputResponseTestData.Artifact(request, submittedAtUtc: recordedAtUtc) with
+        {
+            Value = new HumanInputResponseValue(
+                HumanInputResponseKind.Structured,
+                null,
+                null,
+                null,
+                ImmutableArray.Create(new HumanInputStructuredFieldValue("field-one", "private-value", null)),
+                null),
+            ValueHash = string.Empty,
+            ResponseHash = string.Empty
+        });
+        var evidence = HumanInputResponseTestData.Evidence(
+            request,
+            HumanInputResponseOperationKind.Submit,
+            HumanInputResponseOperationOutcome.Rejected,
+            HumanInputResponseOperationFailureCode.MalformedResponse,
+            attempted: attempt,
+            recordedAtUtc: recordedAtUtc);
+
+        Assert.True(HumanInputResponseOperationEvidenceSnapshot.TryCapture(evidence, out var snapshot, out var validation));
+        Assert.True(validation.IsValid);
+        Assert.NotNull(snapshot?.AttemptedResponse);
+        Assert.NotSame(evidence.AttemptedResponse, snapshot!.AttemptedResponse);
+        Assert.NotSame(evidence.AttemptedResponse!.Value, snapshot.AttemptedResponse!.Value);
+        Assert.False(evidence.AttemptedResponse.Value.StructuredFields!.Value.Equals(snapshot.AttemptedResponse.Value.StructuredFields!.Value));
+        Assert.NotSame(evidence.AttemptedResponse.Value.StructuredFields.Value[0], snapshot.AttemptedResponse.Value.StructuredFields.Value[0]);
+
+        var equivalent = HumanInputResponseArtifactHash.Apply(attempt with
+        {
+            Value = attempt.Value with
+            {
+                StructuredFields = attempt.Value.StructuredFields!.Value.Select(field => field with { }).ToImmutableArray()
+            },
+            ValueHash = string.Empty,
+            ResponseHash = string.Empty
+        });
+        Assert.False(attempt.Value.StructuredFields!.Value.Equals(equivalent.Value.StructuredFields!.Value));
+        Assert.True(HumanInputResponseContractValidator.ValidateEvidence(evidence with { AttemptedResponse = equivalent }).IsValid);
+        Assert.True(HumanInputResponseOperationEvidenceSnapshot.TryCapture(evidence with { AttemptedResponse = equivalent }, out _, out _));
+    }
+
+    [Fact]
+    public void Eligibility_hash_rejects_hostile_answer_operation_substitutions_during_snapshot_capture()
+    {
+        var request = HumanInputResponseTestData.Request();
+        var artifact = HumanInputResponseTestData.Artifact(request);
+        var selection = HumanInputResponseTestData.Selection(request, [artifact]);
+        var previous = HumanInputResponseTestData.PendingHead(request);
+        var answered = HumanInputResponseTestData.AnsweredHead(request, selection);
+        var evidence = HumanInputResponseTestData.Evidence(
+            request,
+            HumanInputResponseOperationKind.Submit,
+            submitted: artifact,
+            selection: selection,
+            previousHead: previous,
+            resultHead: answered);
+        Assert.True(AuthorityActorId.TryParse("user-two", out var otherActor, out _));
+        var variants = new[]
+        {
+            evidence with { OperationId = "operation-two" },
+            evidence with { CommandHash = HumanInputResponseTestData.Hash('d') },
+            evidence with { Request = evidence.Request with { RequestVersionId = "request-version-two" } },
+            evidence with { ExpectedBinding = evidence.ExpectedBinding with { WorkspaceId = "workspace-two" } },
+            evidence with { ActorId = otherActor! },
+            evidence with { ActorRoleId = "role-two" },
+            evidence with { AuthenticationEvidenceHash = HumanInputResponseTestData.Hash('d') },
+            evidence with { RecordedAtUtc = evidence.RecordedAtUtc.AddTicks(1) }
+        };
+
+        Assert.True(HumanInputResponseEligibilityEvidenceHash.Matches(evidence));
+        Assert.True(HumanInputResponseOperationEvidenceSnapshot.TryCapture(evidence, out _, out _));
+        Assert.All(variants, variant =>
+        {
+            Assert.False(HumanInputResponseEligibilityEvidenceHash.Matches(variant));
+            Assert.False(HumanInputResponseOperationEvidenceSnapshot.TryCapture(variant, out _, out var validation));
+            Assert.Contains(validation.Errors, error => error.Code == HumanInputResponseValidationErrorCode.InvalidEligibilityEvidence);
+        });
+    }
+
+    [Fact]
+    public void Eligibility_hash_fails_closed_on_noncanonical_inputs_and_malformed_evidence_hashes()
+    {
+        var request = HumanInputResponseTestData.Request();
+        var reference = HumanInputResponseTestData.RequestReference(request);
+        Assert.True(AuthorityActorId.TryParse("user-one", out var actor, out _));
+        var commandHash = HumanInputResponseTestData.Hash('a');
+        var authenticationHash = HumanInputResponseTestData.Hash('b');
+        var hash = HumanInputResponseEligibilityEvidenceHash.Compute(
+            request.Binding.WorkspaceId,
+            "operation-one",
+            commandHash,
+            reference,
+            actor!,
+            "role-one",
+            authenticationHash,
+            HumanInputResponseTestData.Now);
+        var invalidComputations = new Action[]
+        {
+            () => HumanInputResponseEligibilityEvidenceHash.Compute("Invalid", "operation-one", commandHash, reference, actor!, "role-one", authenticationHash, HumanInputResponseTestData.Now),
+            () => HumanInputResponseEligibilityEvidenceHash.Compute(request.Binding.WorkspaceId, "Invalid", commandHash, reference, actor!, "role-one", authenticationHash, HumanInputResponseTestData.Now),
+            () => HumanInputResponseEligibilityEvidenceHash.Compute(request.Binding.WorkspaceId, "operation-one", "bad", reference, actor!, "role-one", authenticationHash, HumanInputResponseTestData.Now),
+            () => HumanInputResponseEligibilityEvidenceHash.Compute(request.Binding.WorkspaceId, "operation-one", commandHash, null!, actor!, "role-one", authenticationHash, HumanInputResponseTestData.Now),
+            () => HumanInputResponseEligibilityEvidenceHash.Compute(request.Binding.WorkspaceId, "operation-one", commandHash, reference with { RequestId = "Invalid" }, actor!, "role-one", authenticationHash, HumanInputResponseTestData.Now),
+            () => HumanInputResponseEligibilityEvidenceHash.Compute(request.Binding.WorkspaceId, "operation-one", commandHash, reference, null!, "role-one", authenticationHash, HumanInputResponseTestData.Now),
+            () => HumanInputResponseEligibilityEvidenceHash.Compute(request.Binding.WorkspaceId, "operation-one", commandHash, reference, actor!, "Invalid", authenticationHash, HumanInputResponseTestData.Now),
+            () => HumanInputResponseEligibilityEvidenceHash.Compute(request.Binding.WorkspaceId, "operation-one", commandHash, reference, actor!, "role-one", "bad", HumanInputResponseTestData.Now),
+            () => HumanInputResponseEligibilityEvidenceHash.Compute(request.Binding.WorkspaceId, "operation-one", commandHash, reference, actor!, "role-one", authenticationHash, default),
+            () => HumanInputResponseEligibilityEvidenceHash.Compute(request.Binding.WorkspaceId, "operation-one", commandHash, reference, actor!, "role-one", authenticationHash, HumanInputResponseTestData.Now.ToOffset(TimeSpan.FromHours(1)))
+        };
+
+        Assert.Equal(HumanInputLimits.Sha256HexCharacters, hash.Length);
+        Assert.Equal(hash, HumanInputResponseEligibilityEvidenceHash.Compute(request.Binding.WorkspaceId, "operation-one", commandHash, reference, actor!, "role-one", authenticationHash, HumanInputResponseTestData.Now));
+        Assert.All(invalidComputations, computation => Assert.Throws<ArgumentException>(computation));
+        var evidence = HumanInputResponseTestData.Evidence(request, HumanInputResponseOperationKind.Submit, submitted: HumanInputResponseTestData.Artifact(request));
+        Assert.False(HumanInputResponseEligibilityEvidenceHash.Matches(null));
+        Assert.False(HumanInputResponseEligibilityEvidenceHash.Matches(evidence with { EligibilityEvidenceHash = "bad" }));
+        Assert.False(HumanInputResponseEligibilityEvidenceHash.Matches(evidence with { EligibilityEvidenceHash = HumanInputResponseTestData.Hash('A') }));
+    }
+
     [Fact]
     public void Evidence_snapshot_deep_copies_binding_head_and_target_reference_graphs()
     {
@@ -584,5 +822,39 @@ public sealed class HumanInputResponseEvidenceContractTests
         Assert.DoesNotContain("user-one", text, StringComparison.Ordinal);
         Assert.DoesNotContain("role-one", text, StringComparison.Ordinal);
         Assert.DoesNotContain("workspace-one", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Evidence_default_formatting_redacts_attempted_content_attribution_and_authority_hashes()
+    {
+        var request = HumanInputResponseTestData.Request();
+        var recordedAtUtc = HumanInputResponseTestData.Now.AddMinutes(5);
+        var attempt = HumanInputResponseTestData.Artifact(
+            request,
+            actorId: "actor-canary",
+            roleId: "role-canary",
+            text: "attempt-value-canary",
+            submittedAtUtc: recordedAtUtc,
+            explanation: "attempt-explanation-canary");
+        var evidence = HumanInputResponseTestData.Evidence(
+            request,
+            HumanInputResponseOperationKind.Submit,
+            HumanInputResponseOperationOutcome.Conflict,
+            HumanInputResponseOperationFailureCode.DuplicateResponse,
+            attempted: attempt,
+            actorId: "actor-canary",
+            actorRoleId: "role-canary",
+            recordedAtUtc: recordedAtUtc);
+        var text = evidence.ToString();
+
+        Assert.Contains("[REDACTED]", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("attempt-value-canary", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("attempt-explanation-canary", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("actor-canary", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("role-canary", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(evidence.AuthenticationEvidenceHash, text, StringComparison.Ordinal);
+        Assert.DoesNotContain(evidence.EligibilityEvidenceHash, text, StringComparison.Ordinal);
+        Assert.DoesNotContain(evidence.AttemptedResponse!.ValueHash, text, StringComparison.Ordinal);
+        Assert.DoesNotContain(evidence.AttemptedResponse.ResponseHash, text, StringComparison.Ordinal);
     }
 }
