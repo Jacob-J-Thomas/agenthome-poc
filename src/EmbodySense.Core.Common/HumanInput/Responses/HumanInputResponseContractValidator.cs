@@ -385,11 +385,12 @@ public static class HumanInputResponseContractValidator
                 && previous.Status == evidence.ExpectedLifecycleStatus;
             var observedShapeIsValid = evidence.FailureCode switch
             {
-                HumanInputResponseOperationFailureCode.OptimisticStateConflict => Equals(previous.CurrentRequest, evidence.Request)
-                    && (previous.LifecycleVersion != evidence.ExpectedLifecycleVersion || previous.Status != evidence.ExpectedLifecycleStatus),
-                HumanInputResponseOperationFailureCode.StaleResponse => !Equals(previous.CurrentRequest, evidence.Request),
-                HumanInputResponseOperationFailureCode.RequestTerminal => Equals(previous.CurrentRequest, evidence.Request)
-                    && previous.Status != HumanInputRequestLifecycleStatus.Pending,
+                HumanInputResponseOperationFailureCode.OptimisticStateConflict => previous.Status == HumanInputRequestLifecycleStatus.Pending
+                    && Equals(previous.CurrentRequest, evidence.Request)
+                    && previous.LifecycleVersion != evidence.ExpectedLifecycleVersion,
+                HumanInputResponseOperationFailureCode.StaleResponse => previous.Status == HumanInputRequestLifecycleStatus.Pending
+                    && !Equals(previous.CurrentRequest, evidence.Request),
+                HumanInputResponseOperationFailureCode.RequestTerminal => previous.Status != HumanInputRequestLifecycleStatus.Pending,
                 _ => expectedMatches
             };
             if (!observedShapeIsValid)
