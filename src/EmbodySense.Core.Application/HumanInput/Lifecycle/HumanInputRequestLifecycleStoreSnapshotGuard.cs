@@ -3,6 +3,8 @@ using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanInput.Responses;
+using EmbodySense.Core.Common.HumanInput.Responses.Models;
 
 namespace EmbodySense.Core.Application.HumanInput.Lifecycle;
 
@@ -130,6 +132,8 @@ internal static class HumanInputRequestLifecycleStoreSnapshotGuard
             }
 
             if (!Equals(current, head)
+                && !TryValidateAnswerOperation(source.AnswerOperation, current, head, currentArtifact, operationIds)
+                || Equals(current, head) && source.AnswerOperation is not null
                 || claimedRequests.Count != requests.Count
                 || !claimedRequests.SequenceEqual(requests.Select(Key), StringComparer.Ordinal))
             {
@@ -139,7 +143,8 @@ internal static class HumanInputRequestLifecycleStoreSnapshotGuard
             snapshot = new HumanInputRequestLifecycleStoreSnapshot(
                 head,
                 Array.AsReadOnly(requests.ToArray()),
-                Array.AsReadOnly(operations.ToArray()));
+                Array.AsReadOnly(operations.ToArray()),
+                source.AnswerOperation);
             return true;
         }
         catch (Exception)
@@ -252,11 +257,17 @@ internal static class HumanInputRequestLifecycleStoreSnapshotGuard
             }
 
             var evidenceById = new Dictionary<string, HumanInputRequestLifecycleOperationEvidence>(StringComparer.Ordinal);
+            var answerIds = new HashSet<string>(StringComparer.Ordinal);
             var occurrencesById = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
             foreach (var pair in snapshots)
             {
                 foreach (var evidence in pair.Value.Operations)
                 {
+                    if (answerIds.Contains(evidence.OperationId))
+                    {
+                        return false;
+                    }
+
                     if (evidenceById.TryGetValue(evidence.OperationId, out var retained))
                     {
                         if (evidence.Kind != HumanInputRequestLifecycleOperationKind.Supersede
@@ -276,9 +287,15 @@ internal static class HumanInputRequestLifecycleStoreSnapshotGuard
                         return false;
                     }
                 }
+
+                if (pair.Value.AnswerOperation is { } answer
+                    && (!answerIds.Add(answer.OperationId) || evidenceById.ContainsKey(answer.OperationId)))
+                {
+                    return false;
+                }
             }
 
-            if (evidenceById.Count > storeGeneration)
+            if (evidenceById.Count + answerIds.Count > storeGeneration)
             {
                 return false;
             }
@@ -313,6 +330,35 @@ internal static class HumanInputRequestLifecycleStoreSnapshotGuard
         {
             return false;
         }
+    }
+
+    private static bool TryValidateAnswerOperation(
+        HumanInputResponseOperationEvidence? answer,
+        HumanInputRequestLifecycleHead? previous,
+        HumanInputRequestLifecycleHead head,
+        HumanInputRequest request,
+        ISet<string> requestOperationIds)
+    {
+        return previous is not null
+            && previous.Status == HumanInputRequestLifecycleStatus.Pending
+            && head.Status == HumanInputRequestLifecycleStatus.Answered
+            && answer is not null
+            && !requestOperationIds.Contains(answer.OperationId)
+            && HumanInputResponseContractValidator.ValidateEvidence(answer).IsValid
+            && answer.Kind is HumanInputResponseOperationKind.Submit or HumanInputResponseOperationKind.Select
+            && answer.Outcome == HumanInputResponseOperationOutcome.Committed
+            && answer.FailureCode == HumanInputResponseOperationFailureCode.None
+            && answer.Selection is not null
+            && Equals(answer.PreviousHead, previous)
+            && Equals(answer.ResultHead, head)
+            && Equals(answer.Request, previous.CurrentRequest)
+            && answer.Request.Matches(request)
+            && Equals(answer.Binding, request.Binding)
+            && answer.ExpectedLifecycleVersion == previous.LifecycleVersion
+            && answer.ExpectedLifecycleStatus == previous.Status
+            && Equals(head.AnswerSelection, answer.Selection)
+            && string.Equals(head.LastOperationId, answer.OperationId, StringComparison.Ordinal)
+            && head.UpdatedAtUtc == answer.RecordedAtUtc;
     }
 
     internal static bool ValidateRequestVersionIdentities(
