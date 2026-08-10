@@ -200,6 +200,79 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         return memory.ToArray();
     }
 
+    internal static Task<byte[]?> ReadExternalBoundedFileAsync(string directoryPath, string fileName, int maximumBytes, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directoryPath);
+        EnsureSimpleName(fileName);
+        if (maximumBytes < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+        }
+
+        var exactDirectoryPath = Path.GetFullPath(directoryPath);
+        using var directory = OpenAbsoluteDirectoryNoFollow(exactDirectoryPath, allowMissing: true);
+        if (directory is null)
+        {
+            return Task.FromResult<byte[]?>(null);
+        }
+
+        var directoryIdentity = ValidateDirectory(directory, "contextual-role instruction-source parent");
+        using var handle = OpenRelativeEntry(directory, fileName, allowMissing: true);
+        if (handle is null)
+        {
+            return Task.FromResult<byte[]?>(null);
+        }
+
+        var identity = ValidateRegularFile(handle, "contextual-role instruction source");
+        var length = RandomAccess.GetLength(handle);
+        if (length > maximumBytes)
+        {
+            throw new ContextualRoleInstructionSourceTooLargeException();
+        }
+
+        var first = ReadExact(handle, checked((int)length), cancellationToken);
+        ValidateIdentity(handle, identity, requireSingleLink: true, "contextual-role instruction source");
+        if (RandomAccess.GetLength(handle) != length)
+        {
+            throw new InvalidOperationException("The contextual-role instruction source changed length during guarded inspection.");
+        }
+
+        var second = ReadExact(handle, checked((int)length), cancellationToken);
+        if (!CryptographicOperations.FixedTimeEquals(first, second))
+        {
+            throw new InvalidOperationException("The contextual-role instruction source changed content during guarded inspection.");
+        }
+
+        ValidateIdentity(handle, identity, requireSingleLink: true, "contextual-role instruction source");
+        VerifyExternalDirectoryMapping(exactDirectoryPath, directory, directoryIdentity);
+        using var current = OpenRelativeEntry(directory, fileName, allowMissing: true);
+        if (current is null || !SameIdentity(ValidateRegularFile(current, "contextual-role instruction-source mapping"), identity))
+        {
+            throw new InvalidOperationException("The contextual-role instruction-source mapping changed during guarded inspection.");
+        }
+
+        return Task.FromResult<byte[]?>(first);
+    }
+
+    private static byte[] ReadExact(SafeFileHandle handle, int length, CancellationToken cancellationToken)
+    {
+        var bytes = GC.AllocateUninitializedArray<byte>(length);
+        var offset = 0;
+        while (offset < bytes.Length)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var read = RandomAccess.Read(handle, bytes.AsSpan(offset), offset);
+            if (read == 0)
+            {
+                throw new InvalidOperationException("The contextual-role instruction source ended during guarded inspection.");
+            }
+
+            offset += read;
+        }
+
+        return bytes;
+    }
+
     public async Task WriteImmutableAsync(string path, byte[] bytes, CancellationToken cancellationToken)
         => await WriteAsync(path, bytes, overwrite: false, cancellationToken);
 
@@ -568,14 +641,25 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
 
     private void VerifyWorkspaceMapping() => VerifyDirectoryMapping(_paths.WorkspaceRoot, _workspaceHandle, _workspaceIdentity);
 
-    private static void VerifyDirectoryMapping(string path, SafeFileHandle retained, NativeIdentity expected)
+    private static void VerifyDirectoryMapping(string path, SafeFileHandle retained, NativeIdentity expected, bool writeAccess = true)
     {
-        using var current = OpenAbsoluteDirectory(path, allowMissing: false) ?? throw new InvalidOperationException("A retained contextual-role directory is no longer reachable at its canonical path.");
+        using var current = OpenAbsoluteDirectory(path, allowMissing: false, writeAccess) ?? throw new InvalidOperationException("A retained contextual-role directory is no longer reachable at its canonical path.");
         var actual = ValidateDirectory(current, "contextual-role directory mapping");
         ValidateIdentity(retained, expected, requireSingleLink: false, "retained contextual-role directory");
         if (!SameIdentity(actual, expected))
         {
             throw new InvalidOperationException("A contextual-role directory path was replaced after its physical handle was retained.");
+        }
+    }
+
+    private static void VerifyExternalDirectoryMapping(string path, SafeFileHandle retained, NativeIdentity expected)
+    {
+        using var current = OpenAbsoluteDirectoryNoFollow(path, allowMissing: false) ?? throw new InvalidOperationException("A retained contextual-role instruction-source directory is no longer reachable at its canonical path.");
+        var actual = ValidateDirectory(current, "contextual-role instruction-source directory mapping");
+        ValidateIdentity(retained, expected, requireSingleLink: false, "retained contextual-role instruction-source directory");
+        if (!SameIdentity(actual, expected))
+        {
+            throw new InvalidOperationException("A contextual-role instruction-source directory path was replaced after its physical handle was retained.");
         }
     }
 
@@ -720,11 +804,13 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
 
     // Native adapters are exercised through public behavior on each supported host; per-host coverage cannot execute mutually exclusive Windows, Linux, and macOS branches.
     [ExcludeFromCodeCoverage]
-    private static SafeFileHandle? OpenAbsoluteDirectory(string path, bool allowMissing)
+    private static SafeFileHandle? OpenAbsoluteDirectory(string path, bool allowMissing, bool writeAccess = true)
     {
         if (OperatingSystem.IsWindows())
         {
-            var handle = CreateFile(path, GenericRead | GenericWrite, FileShareRead | FileShareWrite | FileShareDelete, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics | FileFlagOpenReparsePoint | FileFlagWriteThrough, IntPtr.Zero);
+            var access = writeAccess ? GenericRead | GenericWrite : GenericRead | SynchronizeAccess;
+            var flags = FileFlagBackupSemantics | FileFlagOpenReparsePoint | (writeAccess ? FileFlagWriteThrough : 0);
+            var handle = CreateFile(path, access, FileShareRead | FileShareWrite | FileShareDelete, IntPtr.Zero, OpenExisting, flags, IntPtr.Zero);
             if (!handle.IsInvalid)
             {
                 return handle;
@@ -758,6 +844,59 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         }
 
         throw NativeIOException("open directory", errno);
+    }
+
+    [ExcludeFromCodeCoverage]
+    private static SafeFileHandle? OpenAbsoluteDirectoryNoFollow(string path, bool allowMissing)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var rootPath = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrEmpty(rootPath))
+        {
+            throw new InvalidOperationException("A contextual-role instruction-source directory has no physical root.");
+        }
+
+        var current = OpenAbsoluteDirectory(rootPath, allowMissing, writeAccess: false);
+        if (current is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            _ = ValidateDirectory(current, "contextual-role instruction-source root");
+            var relativePath = fullPath[rootPath.Length..];
+            var segments = relativePath.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+            foreach (var segment in segments)
+            {
+                var next = OpenRelativeDirectory(current, segment, allowMissing, create: false, out _, writeAccess: false);
+                if (next is null)
+                {
+                    current.Dispose();
+                    return null;
+                }
+
+                try
+                {
+                    _ = ValidateDirectory(next, "contextual-role instruction-source path segment");
+                }
+                catch
+                {
+                    next.Dispose();
+                    throw;
+                }
+
+                current.Dispose();
+                current = next;
+            }
+
+            return current;
+        }
+        catch
+        {
+            current.Dispose();
+            throw;
+        }
     }
 
     [ExcludeFromCodeCoverage]
@@ -947,11 +1086,14 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
     }
 
     private static SafeFileHandle OpenRelativeEntry(SafeFileHandle parent, string name)
+        => OpenRelativeEntry(parent, name, allowMissing: false) ?? throw new FormatException("A contextual-role directory entry disappeared during guarded enumeration.");
+
+    private static SafeFileHandle? OpenRelativeEntry(SafeFileHandle parent, string name, bool allowMissing)
     {
         EnsureSimpleName(name);
         if (OperatingSystem.IsWindows())
         {
-            return NtCreateRelative(parent, name, GenericRead | SynchronizeAccess, NtOpen, NtSynchronousIoNonAlert | NtOpenReparsePoint, out _, allowMissing: false) ?? throw new FormatException("A contextual-role directory entry disappeared during guarded enumeration.");
+            return NtCreateRelative(parent, name, GenericRead | SynchronizeAccess, NtOpen, NtSynchronousIoNonAlert | NtOpenReparsePoint, out _, allowMissing);
         }
 
         var descriptor = UnixOpenAt(parent.DangerousGetHandle().ToInt32(), name, UnixReadOnly | UnixNonBlocking | UnixNoFollow | UnixCloseOnExec, 0);
@@ -961,6 +1103,11 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         }
 
         var error = Marshal.GetLastPInvokeError();
+        if (allowMissing && error == UnixNoEntry)
+        {
+            return null;
+        }
+
         if (error == UnixNoEntry)
         {
             throw new FormatException("A contextual-role directory entry disappeared during guarded enumeration.");
@@ -974,14 +1121,16 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         throw NativeIOException("openat enumerated entry", error);
     }
 
-    private static SafeFileHandle? OpenRelativeDirectory(SafeFileHandle parent, string name, bool allowMissing, bool create, out bool created)
+    private static SafeFileHandle? OpenRelativeDirectory(SafeFileHandle parent, string name, bool allowMissing, bool create, out bool created, bool writeAccess = true)
     {
         EnsureSimpleName(name);
         created = false;
         if (OperatingSystem.IsWindows())
         {
             var disposition = create ? NtOpenIf : NtOpen;
-            var handle = NtCreateRelative(parent, name, GenericRead | GenericWrite | DeleteAccess | SynchronizeAccess, disposition, NtDirectoryFile | NtSynchronousIoNonAlert | NtOpenReparsePoint | NtWriteThrough, out var information, allowMissing);
+            var access = writeAccess ? GenericRead | GenericWrite | DeleteAccess | SynchronizeAccess : GenericRead | SynchronizeAccess;
+            var options = NtDirectoryFile | NtSynchronousIoNonAlert | NtOpenReparsePoint | (writeAccess ? NtWriteThrough : 0);
+            var handle = NtCreateRelative(parent, name, access, disposition, options, out var information, allowMissing);
             created = handle is not null && information == NtCreated;
             return handle;
         }
