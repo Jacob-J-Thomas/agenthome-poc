@@ -78,7 +78,7 @@ public sealed class HumanInputRequestLifecycleLoserReplanTests
                 HumanInputRequestHash.Apply(original with
                 {
                     RequestVersionId = "reroute-loser-version",
-                    EligibleRespondents = [new HumanInputEligibleRespondent("user-three", "private-route-three")],
+                    EligibleRespondents = [new HumanInputEligibleRespondent("user-three", "respondent-three", "private-route-three")],
                     RequestHash = string.Empty,
                 })),
             HumanInputRequestLifecycleOperationKind.Supersede => (

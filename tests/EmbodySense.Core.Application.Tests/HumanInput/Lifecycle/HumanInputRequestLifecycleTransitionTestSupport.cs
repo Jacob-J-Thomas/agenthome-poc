@@ -51,7 +51,7 @@ internal static class HumanInputRequestLifecycleTransitionTestSupport
         => HumanInputRequestHash.Apply(previous with
         {
             RequestVersionId = versionId,
-            EligibleRespondents = [new HumanInputEligibleRespondent("user-two", "private-route-two")],
+            EligibleRespondents = [new HumanInputEligibleRespondent("user-two", "respondent-two", "private-route-two")],
             RequestHash = string.Empty,
         });
 
