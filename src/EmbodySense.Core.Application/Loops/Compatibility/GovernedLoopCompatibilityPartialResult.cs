@@ -1,4 +1,6 @@
-namespace EmbodySense.Core.Application.Loops.Compatibility.Models;
+using EmbodySense.Core.Application.Loops.Compatibility.Models;
+
+namespace EmbodySense.Core.Application.Loops.Compatibility;
 
 /// <summary>Returns validated unbound payloads together with every known gap that prevents canonical use.</summary>
 public sealed class GovernedLoopCompatibilityPartialResult : GovernedLoopCompatibilityProjectionResult

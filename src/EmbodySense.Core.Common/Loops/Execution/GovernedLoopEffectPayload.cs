@@ -1,4 +1,6 @@
-namespace EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Models;
+
+namespace EmbodySense.Core.Common.Loops.Execution;
 
 /// <summary>Contains reusable unbound, value-free evidence for one externally meaningful effect attempt.</summary>
 /// <remarks>Construction validates all orthogonal effect-state axes before returning the immutable payload.</remarks>
@@ -88,6 +90,8 @@ public sealed record GovernedLoopEffectPayload
     /// <param name="reconciliationEvidenceId">The retained reconciliation or human-disposition evidence identity, when required.</param>
     /// <param name="updatedAtUtc">The UTC timestamp of this committed effect version.</param>
     /// <returns>The validated effect payload.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="effectGeneration"/> is outside the supported positive range.</exception>
+    /// <exception cref="ArgumentException">Thrown when the schema, identities, hash, origin, effect-state axes, evidence references, or timestamp is invalid.</exception>
     public static GovernedLoopEffectPayload Create(
         int schemaVersion,
         string effectId,

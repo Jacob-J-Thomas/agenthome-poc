@@ -1,6 +1,7 @@
-using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Application.Loops.Compatibility.Models;
+using EmbodySense.Core.Common.Loops.Execution;
 
-namespace EmbodySense.Core.Application.Loops.Compatibility.Models;
+namespace EmbodySense.Core.Application.Loops.Compatibility;
 
 /// <summary>Returns one complete, revision-bound canonical execution evidence set.</summary>
 /// <remarks>Current legacy adapters never produce this result; it reserves the explicit successful discriminator for future exact adapters.</remarks>

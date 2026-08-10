@@ -1,6 +1,6 @@
-using EmbodySense.Core.Application.Loops.Compatibility;
+using EmbodySense.Core.Application.Loops.Compatibility.Models;
 
-namespace EmbodySense.Core.Application.Loops.Compatibility.Models;
+namespace EmbodySense.Core.Application.Loops.Compatibility;
 
 /// <summary>Represents one discriminated, read-only projection of legacy evidence toward canonical governed execution.</summary>
 public abstract class GovernedLoopCompatibilityProjectionResult

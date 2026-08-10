@@ -1,4 +1,6 @@
-namespace EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Models;
+
+namespace EmbodySense.Core.Common.Loops.Execution;
 
 /// <summary>Contains reusable unbound committed frontier evidence for one graph execution generation.</summary>
 /// <remarks>Construction validates the aggregate posture and preserves sorted, unique node evidence.</remarks>
@@ -35,6 +37,9 @@ public sealed record GovernedLoopFrontierPayload
     /// <param name="nodes">The node evidence sorted by node identity.</param>
     /// <param name="updatedAtUtc">The UTC timestamp of this version.</param>
     /// <returns>The validated frontier evidence.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="nodes"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when the frontier version or node count exceeds its supported bound.</exception>
+    /// <exception cref="ArgumentException">Thrown when the schema, status, timestamp, node collection, or aggregate frontier shape is invalid.</exception>
     public static GovernedLoopFrontierPayload Create(int schemaVersion, long frontierVersion, GovernedLoopFrontierStatus status, IEnumerable<GovernedLoopNodeExecutionEvidence> nodes, DateTimeOffset updatedAtUtc)
     {
         GovernedLoopExecutionContractGuard.RequireSchema(schemaVersion, nameof(schemaVersion));

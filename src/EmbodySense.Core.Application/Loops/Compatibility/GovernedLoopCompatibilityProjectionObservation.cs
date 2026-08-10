@@ -1,8 +1,7 @@
-using EmbodySense.Core.Application.Loops.Compatibility;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 
-namespace EmbodySense.Core.Application.Loops.Compatibility.Models;
+namespace EmbodySense.Core.Application.Loops.Compatibility;
 
 /// <summary>
 /// Describes typed legacy projection posture without claiming canonical optimistic versions or a revision-bound source fact.

@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Common.Loops.Execution.Models;
+namespace EmbodySense.Core.Common.Loops.Execution;
 
 /// <summary>Binds one effect payload to one exact governed-loop execution.</summary>
 /// <remarks>Construction preserves the distinction between reusable payloads and canonical bound evidence.</remarks>
@@ -20,6 +20,7 @@ public sealed record GovernedLoopEffectPosture
     /// <param name="binding">The exact execution binding.</param>
     /// <param name="payload">The validated effect payload.</param>
     /// <returns>The bound effect posture.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="binding"/> or <paramref name="payload"/> is <see langword="null"/>.</exception>
     public static GovernedLoopEffectPosture Create(GovernedLoopExecutionBinding binding, GovernedLoopEffectPayload payload)
     {
         ArgumentNullException.ThrowIfNull(binding);

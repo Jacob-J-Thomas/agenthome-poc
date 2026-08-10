@@ -1,6 +1,7 @@
 using System.Diagnostics;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 
-namespace EmbodySense.Core.Common.Loops.Execution.Models;
+namespace EmbodySense.Core.Common.Loops.Execution;
 
 /// <summary>Describes one bounded, value-free governed-loop execution contract rejection.</summary>
 /// <remarks>Error messages derive only from closed categories and never interpolate rejected evidence values.</remarks>

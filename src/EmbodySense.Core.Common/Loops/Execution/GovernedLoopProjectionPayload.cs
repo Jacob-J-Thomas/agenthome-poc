@@ -1,4 +1,6 @@
-namespace EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Models;
+
+namespace EmbodySense.Core.Common.Loops.Execution;
 
 /// <summary>Contains reusable unbound, value-free synchronization evidence for one derived projection.</summary>
 /// <remarks>Construction validates class-specific optimistic and committed version semantics.</remarks>
@@ -76,6 +78,7 @@ public sealed record GovernedLoopProjectionPayload
     /// <param name="reconciliationEvidenceId">The reconciliation or operator-disposition evidence identity for a reconciled projection.</param>
     /// <param name="updatedAtUtc">The UTC timestamp of this committed projection version.</param>
     /// <returns>The validated projection payload.</returns>
+    /// <exception cref="ArgumentException">Thrown when the schema, identities, projection-state axes, evidence references, or timestamp is invalid.</exception>
     public static GovernedLoopProjectionPayload Create(
         int schemaVersion,
         string projectionId,

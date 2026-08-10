@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Common.Loops.Execution.Models;
+namespace EmbodySense.Core.Common.Loops.Execution;
 
 /// <summary>Aggregates the four canonical execution planes after proving one exact binding and legal composition.</summary>
 /// <remarks>Construction fails closed before exposing a canonical aggregate.</remarks>
@@ -40,7 +40,9 @@ public sealed record GovernedLoopExecutionEvidenceSet
     /// <param name="effects">The effect postures sorted by effect identity.</param>
     /// <param name="projections">The projection postures sorted by projection identity.</param>
     /// <returns>The canonical aggregate.</returns>
-    /// <exception cref="ArgumentException">Thrown when the four planes do not compose legally.</exception>
+    /// <exception cref="ArgumentNullException">Thrown when a required plane or evidence collection is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when an evidence collection exceeds its supported bound.</exception>
+    /// <exception cref="ArgumentException">Thrown when the schema, an evidence collection, or the four-plane composition is invalid.</exception>
     public static GovernedLoopExecutionEvidenceSet Create(
         int schemaVersion,
         GovernedLoopRunLifecycle lifecycle,

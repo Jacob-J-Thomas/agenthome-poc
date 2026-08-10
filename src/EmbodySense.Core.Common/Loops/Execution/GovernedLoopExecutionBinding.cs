@@ -1,7 +1,7 @@
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
-namespace EmbodySense.Core.Common.Loops.Execution.Models;
+namespace EmbodySense.Core.Common.Loops.Execution;
 
 /// <summary>Binds every canonical execution plane to one run, exact immutable graph revision, and execution generation.</summary>
 /// <remarks>Construction revalidates the exact revision reference rather than accepting a partially populated identity.</remarks>
@@ -33,6 +33,9 @@ public sealed record GovernedLoopExecutionBinding
     /// <param name="revision">The exact immutable executable graph revision.</param>
     /// <param name="executionGeneration">The positive bounded execution generation.</param>
     /// <returns>The validated binding.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="revision"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="executionGeneration"/> is outside the supported positive range.</exception>
+    /// <exception cref="ArgumentException">Thrown when the schema, run identity, or exact revision reference is not canonical.</exception>
     public static GovernedLoopExecutionBinding Create(int schemaVersion, string runId, GovernedLoopRevisionReference revision, long executionGeneration)
     {
         GovernedLoopExecutionContractGuard.RequireSchema(schemaVersion, nameof(schemaVersion));

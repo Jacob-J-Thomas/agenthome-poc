@@ -293,13 +293,14 @@ public static class GovernedLoopExecutionStateMatrix
         };
     }
 
-    /// <summary>Determines whether an effect posture is eligible for its first irreversible dispatch.</summary>
+    /// <summary>Identifies an initial prepared intent that may be considered for first dispatch by separate authority and policy.</summary>
     /// <param name="effect">The effect payload.</param>
-    /// <returns><see langword="true"/> only while intent is retained, no outcome exists, and dispatch has not crossed its irreversible boundary.</returns>
+    /// <returns><see langword="true"/> only for the initial <see cref="GovernedLoopEffectPhase.IntentPrepared"/> posture with no outcome or reconciliation evidence.</returns>
+    /// <remarks>This value does not authorize dispatch and does not select retry or recovery policy. <see cref="GovernedLoopEffectPhase.DispatchNotStarted"/> is retained evidence of a prior dispatch decision and therefore returns <see langword="false"/>.</remarks>
     public static bool IsEffectDispatchEligible(GovernedLoopEffectPayload? effect)
     {
         return effect is not null
-            && effect.Phase is GovernedLoopEffectPhase.IntentPrepared or GovernedLoopEffectPhase.DispatchNotStarted
+            && effect.Phase == GovernedLoopEffectPhase.IntentPrepared
             && effect.Outcome == GovernedLoopEffectOutcome.None
             && effect.ReconciliationEvidenceId is null;
     }

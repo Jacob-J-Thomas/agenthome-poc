@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Common.Loops.Execution.Models;
+namespace EmbodySense.Core.Common.Loops.Execution;
 
 /// <summary>Represents one bounded deterministic governed-loop execution validation result.</summary>
 /// <remarks>Construction deduplicates and caps errors before exposing an immutable view.</remarks>

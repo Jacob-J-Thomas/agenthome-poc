@@ -1,4 +1,6 @@
-namespace EmbodySense.Core.Application.Loops.Compatibility.Models;
+using EmbodySense.Core.Application.Loops.Compatibility.Models;
+
+namespace EmbodySense.Core.Application.Loops.Compatibility;
 
 /// <summary>Reports that a legacy source could not be safely projected and therefore yielded no source fields.</summary>
 public sealed class GovernedLoopCompatibilityUnsupportedResult : GovernedLoopCompatibilityProjectionResult

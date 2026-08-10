@@ -1,7 +1,6 @@
-using EmbodySense.Core.Common.Loops.Execution.Models;
-using EmbodySense.Core.Application.Loops.Compatibility;
+using EmbodySense.Core.Common.Loops.Execution;
 
-namespace EmbodySense.Core.Application.Loops.Compatibility.Models;
+namespace EmbodySense.Core.Application.Loops.Compatibility;
 
 /// <summary>
 /// Carries validated unbound lifecycle/frontier payloads plus explicitly noncanonical effect and projection observations regenerated from one legacy source.

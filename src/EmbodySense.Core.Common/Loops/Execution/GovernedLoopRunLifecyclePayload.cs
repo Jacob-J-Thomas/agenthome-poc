@@ -1,4 +1,6 @@
-namespace EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Models;
+
+namespace EmbodySense.Core.Common.Loops.Execution;
 
 /// <summary>Contains reusable unbound lifecycle evidence for one governed run.</summary>
 /// <remarks>Construction validates lifecycle timestamps, terminality, and optimistic version bounds.</remarks>
@@ -40,6 +42,8 @@ public sealed record GovernedLoopRunLifecyclePayload
     /// <param name="updatedAtUtc">The UTC timestamp of this version.</param>
     /// <param name="terminalAtUtc">The terminal timestamp for a terminal version.</param>
     /// <returns>The validated lifecycle evidence.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="lifecycleVersion"/> is outside the supported positive range.</exception>
+    /// <exception cref="ArgumentException">Thrown when the schema, status, timestamps, or terminal-state shape is invalid.</exception>
     public static GovernedLoopRunLifecyclePayload Create(int schemaVersion, long lifecycleVersion, GovernedLoopRunStatus status, DateTimeOffset createdAtUtc, DateTimeOffset updatedAtUtc, DateTimeOffset? terminalAtUtc)
     {
         GovernedLoopExecutionContractGuard.RequireSchema(schemaVersion, nameof(schemaVersion));

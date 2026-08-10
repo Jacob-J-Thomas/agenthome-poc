@@ -1,8 +1,7 @@
-using EmbodySense.Core.Application.Loops.Compatibility;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 
-namespace EmbodySense.Core.Application.Loops.Compatibility.Models;
+namespace EmbodySense.Core.Application.Loops.Compatibility;
 
 /// <summary>
 /// Describes typed effect posture observed in legacy evidence without claiming a canonical intent hash, revision, or execution binding.

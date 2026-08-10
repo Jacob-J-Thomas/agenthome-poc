@@ -209,7 +209,7 @@ public sealed class GovernedLoopExecutionStateMatrixTests
     }
 
     [Fact]
-    public void Dispatch_eligibility_is_limited_to_pre_boundary_phases()
+    public void Dispatch_eligibility_identifies_only_initial_intent_preparation()
     {
         var effects = new Dictionary<GovernedLoopEffectPhase, GovernedLoopEffectPayload>
         {
@@ -226,10 +226,12 @@ public sealed class GovernedLoopExecutionStateMatrixTests
         foreach (var (phase, effect) in effects)
         {
             Assert.Equal(
-                phase is GovernedLoopEffectPhase.IntentPrepared or GovernedLoopEffectPhase.DispatchNotStarted,
+                phase == GovernedLoopEffectPhase.IntentPrepared,
                 GovernedLoopExecutionStateMatrix.IsEffectDispatchEligible(effect));
         }
 
+        Assert.True(GovernedLoopExecutionStateMatrix.IsEffectDispatchEligible(effects[GovernedLoopEffectPhase.IntentPrepared]));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsEffectDispatchEligible(effects[GovernedLoopEffectPhase.DispatchNotStarted]));
         Assert.False(GovernedLoopExecutionStateMatrix.IsEffectDispatchEligible(null));
     }
 

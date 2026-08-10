@@ -1,4 +1,6 @@
-namespace EmbodySense.Core.Application.Loops.Compatibility.Models;
+using EmbodySense.Core.Application.Loops.Compatibility.Models;
+
+namespace EmbodySense.Core.Application.Loops.Compatibility;
 
 /// <summary>Provides one bounded, server-authored compatibility gap without projecting source prose.</summary>
 public sealed record GovernedLoopCompatibilityGap

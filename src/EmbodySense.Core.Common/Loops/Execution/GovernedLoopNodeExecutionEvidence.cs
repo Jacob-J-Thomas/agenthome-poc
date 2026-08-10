@@ -1,4 +1,6 @@
-namespace EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Models;
+
+namespace EmbodySense.Core.Common.Loops.Execution;
 
 /// <summary>Records bounded value-free evidence for one exact graph-node posture.</summary>
 /// <remarks>Construction validates attempt and committed-outcome shape before retaining defensive incoming-edge evidence.</remarks>
@@ -35,6 +37,9 @@ public sealed record GovernedLoopNodeExecutionEvidence
     /// <param name="status">The supported node posture.</param>
     /// <param name="outcomeEvidenceId">The retained outcome evidence identity when required.</param>
     /// <returns>The validated node execution evidence.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="incomingEdgeIds"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when the attempt or incoming-edge count exceeds its supported bound.</exception>
+    /// <exception cref="ArgumentException">Thrown when an identity, status, collection order, or node-evidence shape is invalid.</exception>
     public static GovernedLoopNodeExecutionEvidence Create(string nodeId, IEnumerable<string> incomingEdgeIds, int? attempt, GovernedLoopNodeExecutionStatus status, string? outcomeEvidenceId)
     {
         if (!GovernedLoopExecutionStateMatrix.IsSupported(status))
