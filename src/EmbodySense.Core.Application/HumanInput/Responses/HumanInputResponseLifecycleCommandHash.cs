@@ -93,11 +93,10 @@ public static class HumanInputResponseLifecycleCommandHash
 
     private static void RequireBounded(HumanInputResponseLifecycleCommand command)
     {
-        if (!IsWithin(command.OperationId, HumanInputLimits.MaxIdentifierCharacters)
-            || !IsWithin(command.RequestId, HumanInputLimits.MaxIdentifierCharacters)
-            || !IsOptionalWithin(command.ResponseId, HumanInputLimits.MaxIdentifierCharacters)
-            || !IsOptionalWithin(command.Explanation, HumanInputLimits.MaxExplanationCharacters)
-            || !IsOptionalWithin(command.CommandHash, HumanInputLimits.Sha256HexCharacters)
+        if (!HumanInputIdentifier.IsValid(command.OperationId)
+            || !HumanInputIdentifier.IsValid(command.RequestId)
+            || command.ResponseId is not null && !HumanInputIdentifier.IsValid(command.ResponseId)
+            || command.Explanation is not null && !HumanInputText.IsValid(command.Explanation, HumanInputLimits.MaxExplanationCharacters, required: false)
             || !RequestReferenceIsWithin(command.ExpectedRequest)
             || !BindingIsWithin(command.ExpectedBinding)
             || command.TargetResponses.IsDefault
@@ -118,25 +117,27 @@ public static class HumanInputResponseLifecycleCommandHash
 
     private static bool RequestReferenceIsWithin(HumanInputRequestReference? reference)
         => reference is not null
-            && IsWithin(reference.RequestId, HumanInputLimits.MaxIdentifierCharacters)
-            && IsWithin(reference.RequestVersionId, HumanInputLimits.MaxIdentifierCharacters)
-            && IsWithin(reference.RequestHash, HumanInputLimits.Sha256HexCharacters);
+            && reference.SchemaVersion == HumanInputRequestReference.CurrentSchemaVersion
+            && HumanInputIdentifier.IsValid(reference.RequestId)
+            && HumanInputIdentifier.IsValid(reference.RequestVersionId)
+            && IsSha256(reference.RequestHash);
 
     private static bool ResponseReferenceIsWithin(HumanInputResponseReference? reference)
         => reference is not null
-            && IsWithin(reference.ResponseId, HumanInputLimits.MaxIdentifierCharacters)
+            && reference.SchemaVersion == HumanInputResponseReference.CurrentSchemaVersion
+            && HumanInputIdentifier.IsValid(reference.ResponseId)
             && RequestReferenceIsWithin(reference.Request)
-            && IsWithin(reference.ValueHash, HumanInputLimits.Sha256HexCharacters)
-            && IsWithin(reference.ResponseHash, HumanInputLimits.Sha256HexCharacters);
+            && IsSha256(reference.ValueHash)
+            && IsSha256(reference.ResponseHash);
 
     private static bool BindingIsWithin(HumanInputRequestBinding? binding)
         => binding is not null
-            && IsWithin(binding.WorkspaceId, HumanInputLimits.MaxIdentifierCharacters)
-            && IsWithin(binding.LoopGraphId, HumanInputLimits.MaxIdentifierCharacters)
-            && IsWithin(binding.LoopRevisionId, HumanInputLimits.MaxIdentifierCharacters)
-            && IsWithin(binding.NodeId, HumanInputLimits.MaxIdentifierCharacters)
-            && IsWithin(binding.RunId, HumanInputLimits.MaxIdentifierCharacters)
-            && IsWithin(binding.CheckpointId, HumanInputLimits.MaxIdentifierCharacters);
+            && HumanInputIdentifier.IsValid(binding.WorkspaceId)
+            && HumanInputIdentifier.IsValid(binding.LoopGraphId)
+            && HumanInputIdentifier.IsValid(binding.LoopRevisionId)
+            && HumanInputIdentifier.IsValid(binding.NodeId)
+            && HumanInputIdentifier.IsValid(binding.RunId)
+            && HumanInputIdentifier.IsValid(binding.CheckpointId);
 
     private static void WriteRequestReference(Utf8JsonWriter writer, HumanInputRequestReference reference)
     {
@@ -183,10 +184,6 @@ public static class HumanInputResponseLifecycleCommandHash
             writer.WriteString(name, value);
         }
     }
-
-    private static bool IsWithin(string? value, int maximum) => value is not null && value.Length <= maximum;
-
-    private static bool IsOptionalWithin(string? value, int maximum) => value is null || value.Length <= maximum;
 
     private static bool IsSha256(string? value)
         => value is { Length: HumanInputLimits.Sha256HexCharacters }

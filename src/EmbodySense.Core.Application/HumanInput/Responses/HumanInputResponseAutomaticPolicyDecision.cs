@@ -33,19 +33,26 @@ public static class HumanInputResponseAutomaticPolicyDecision
                 || selectedAtUtc.Offset != TimeSpan.Zero
                 || selectedAtUtc < request.Timing.RequestedAtUtc
                 || selectedAtUtc > request.Timing.ExpiresAtUtc
-                || activeResponses is null
-                || activeResponses.Count > HumanInputResponseContractLimits.MaxResponsesPerRequest
-                || activeResponses.Any(response => !HumanInputResponseContractValidator.ValidateArtifact(request, response).IsValid))
+                || activeResponses is null)
+            {
+                return false;
+            }
+
+            var active = activeResponses.Take(HumanInputResponseContractLimits.MaxResponsesPerRequest + 1).ToArray();
+            if (active.Length > HumanInputResponseContractLimits.MaxResponsesPerRequest
+                || active.Any(response => !HumanInputResponseContractValidator.ValidateArtifact(request, response).IsValid)
+                || active.Select(response => response.ResponseId).Distinct(StringComparer.Ordinal).Count() != active.Length
+                || active.Select(response => response.ActorId).Distinct().Count() != active.Length)
             {
                 return false;
             }
 
             var selected = request.ResponsePolicy.Kind switch
             {
-                HumanInputResponsePolicyKind.FirstValid => activeResponses.Take(1).ToArray(),
-                HumanInputResponsePolicyKind.Quorum => FirstQuorum(activeResponses, request.ResponsePolicy.RequiredResponseCount ?? 0),
-                HumanInputResponsePolicyKind.NamedRoles => ResponsesForEveryRole(activeResponses, request.ResponsePolicy.OrderedRoleIds),
-                HumanInputResponsePolicyKind.Merge => MergeContributors(activeResponses, request.ResponsePolicy.RequiredResponseCount ?? 0, request.ResponsePolicy.OrderedRoleIds),
+                HumanInputResponsePolicyKind.FirstValid => active.Take(1).ToArray(),
+                HumanInputResponsePolicyKind.Quorum => FirstQuorum(active, request.ResponsePolicy.RequiredResponseCount ?? 0),
+                HumanInputResponsePolicyKind.NamedRoles => ResponsesForEveryRole(active, request.ResponsePolicy.OrderedRoleIds),
+                HumanInputResponsePolicyKind.Merge => MergeContributors(active, request.ResponsePolicy.RequiredResponseCount ?? 0, request.ResponsePolicy.OrderedRoleIds),
                 HumanInputResponsePolicyKind.ManualSelection => null,
                 _ => null,
             };
@@ -75,7 +82,7 @@ public static class HumanInputResponseAutomaticPolicyDecision
                     null,
                     selectedAtUtc,
                     string.Empty));
-            if (!HumanInputResponseContractValidator.ValidateSelection(request, candidate, activeResponses).IsValid)
+            if (!HumanInputResponseContractValidator.ValidateSelection(request, candidate, active).IsValid)
             {
                 return false;
             }

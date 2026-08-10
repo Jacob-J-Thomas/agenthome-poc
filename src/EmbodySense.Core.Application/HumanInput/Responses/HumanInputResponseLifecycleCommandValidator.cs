@@ -83,9 +83,10 @@ public static class HumanInputResponseLifecycleCommandValidator
             }
         }
 
-        if (command.Explanation is { Length: > HumanInputLimits.MaxExplanationCharacters })
+        if (command.Explanation is not null
+            && !HumanInputText.IsValid(command.Explanation, HumanInputLimits.MaxExplanationCharacters, required: false))
         {
-            Add(errors, HumanInputResponseLifecycleMutationValidationErrorCode.UnboundedResponseValue, "explanation", "Response explanation exceeds the schema-1 command bound.");
+            Add(errors, HumanInputResponseLifecycleMutationValidationErrorCode.UnboundedResponseValue, "explanation", "Response explanation must be bounded canonical display-safe Unicode.");
         }
 
         switch (command.Kind)

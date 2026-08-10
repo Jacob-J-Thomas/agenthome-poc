@@ -49,6 +49,11 @@ internal static class HumanInputResponsePolicyEvaluator
         IReadOnlyList<HumanInputResponseArtifact> retainedResponses,
         IReadOnlyList<HumanInputResponseArtifact> activeResponses)
     {
+        if (!TryCreateAttempt(request, command, actorId, actorRoleId, recordedAtUtc, out var artifact)
+            || artifact is null)
+        {
+            return Failure(head, [], HumanInputResponseLifecycleMutationStatus.Ambiguous, HumanInputResponseOperationOutcome.Conflict, HumanInputResponseOperationFailureCode.OptimisticStateConflict, canPersist: false);
+        }
         if (retainedResponses.Any(response => string.Equals(response.ResponseId, command.ResponseId, StringComparison.Ordinal))
             || activeResponses.Any(response => response.ActorId.Equals(actorId)))
         {
@@ -59,22 +64,6 @@ internal static class HumanInputResponsePolicyEvaluator
             return Failure(head, [], HumanInputResponseLifecycleMutationStatus.LimitExceeded, HumanInputResponseOperationOutcome.LimitExceeded, HumanInputResponseOperationFailureCode.ResponseLimitExceeded);
         }
 
-        var requestReference = Reference(request);
-        var valueHash = HumanInputResponseValueHash.Compute(command.Value!);
-        var artifact = HumanInputResponseArtifactHash.Apply(
-            new HumanInputResponseArtifact(
-                HumanInputResponseContractLimits.CurrentSchemaVersion,
-                command.ResponseId!,
-                requestReference,
-                request.Binding,
-                actorId,
-                actorRoleId,
-                recordedAtUtc,
-                request.PrivacyClass,
-                command.Value!,
-                command.Explanation,
-                valueHash,
-                string.Empty));
         if (!HumanInputResponseReference.TryCreate(request, artifact, out var responseReference, out _)
             || responseReference is null)
         {
@@ -102,6 +91,47 @@ internal static class HumanInputResponsePolicyEvaluator
         return Selected(head, command.OperationId, recordedAtUtc, artifact, [], selection);
     }
 
+    internal static bool TryCreateAttempt(
+        HumanInputRequest request,
+        HumanInputResponseLifecycleCommand command,
+        AuthorityActorId actorId,
+        string actorRoleId,
+        DateTimeOffset recordedAtUtc,
+        out HumanInputResponseArtifact? artifact)
+    {
+        artifact = null;
+        try
+        {
+            if (command.Kind != HumanInputResponseOperationKind.Submit
+                || command.ResponseId is null
+                || command.Value is null)
+            {
+                return false;
+            }
+            var candidate = HumanInputResponseArtifactHash.Apply(
+                new HumanInputResponseArtifact(
+                    HumanInputResponseContractLimits.CurrentSchemaVersion,
+                    command.ResponseId,
+                    Reference(request),
+                    request.Binding,
+                    actorId,
+                    actorRoleId,
+                    recordedAtUtc,
+                    request.PrivacyClass,
+                    command.Value,
+                    command.Explanation,
+                    string.Empty,
+                    string.Empty));
+            return HumanInputResponseArtifactSnapshot.TryCaptureBoundedAttempt(candidate, out artifact, out _)
+                && artifact is not null;
+        }
+        catch (Exception)
+        {
+            artifact = null;
+            return false;
+        }
+    }
+
     private static HumanInputResponseLifecycleMutationPlan Withdraw(
         HumanInputRequest request,
         HumanInputRequestLifecycleHead head,
@@ -116,14 +146,14 @@ internal static class HumanInputResponsePolicyEvaluator
         {
             return Failure(head, command.TargetResponses, HumanInputResponseLifecycleMutationStatus.NotFound, HumanInputResponseOperationOutcome.NotFound, HumanInputResponseOperationFailureCode.ResponseNotFound);
         }
+        if (!retained.ActorId.Equals(actorId))
+        {
+            return Failure(head, command.TargetResponses, HumanInputResponseLifecycleMutationStatus.Ineligible, HumanInputResponseOperationOutcome.Rejected, HumanInputResponseOperationFailureCode.IneligibleRespondent);
+        }
         var active = activeResponses.SingleOrDefault(response => target.Matches(request, response));
         if (active is null)
         {
             return Failure(head, command.TargetResponses, HumanInputResponseLifecycleMutationStatus.Conflict, HumanInputResponseOperationOutcome.Conflict, HumanInputResponseOperationFailureCode.ResponseAlreadyWithdrawn);
-        }
-        if (!active.ActorId.Equals(actorId))
-        {
-            return Failure(head, command.TargetResponses, HumanInputResponseLifecycleMutationStatus.Ineligible, HumanInputResponseOperationOutcome.Rejected, HumanInputResponseOperationFailureCode.IneligibleRespondent);
         }
         return new HumanInputResponseLifecycleMutationPlan(
             HumanInputResponseLifecycleMutationStatus.Committed,

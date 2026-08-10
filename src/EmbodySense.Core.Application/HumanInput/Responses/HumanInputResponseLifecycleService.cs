@@ -408,15 +408,16 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
     {
         if (snapshot is null)
         {
-            return (
-                HumanInputResponsePolicyEvaluator.Failure(
-                    null,
-                    command.TargetResponses,
-                    HumanInputResponseLifecycleMutationStatus.NotFound,
-                    HumanInputResponseOperationOutcome.NotFound,
-                    HumanInputResponseOperationFailureCode.RequestNotFound),
+            return HumanInputResponseOperationCausality.Evaluate(
+                command,
                 null,
-                null);
+                null,
+                null,
+                actorId,
+                recordedAtUtc,
+                [],
+                [],
+                0);
         }
         var request = FindResponseRequest(snapshot);
         if (request is null || !Equals(snapshot.ResponseRequest, snapshot.Request.Head.CurrentRequest))
@@ -430,132 +431,28 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
                 canPersist: false), null, null);
         }
 
-        var head = snapshot.Request.Head;
         var expectedRequest = FindRequest(snapshot, command.ExpectedRequest);
-        var actorRoleId = expectedRequest is null ? null : EligibleRole(expectedRequest, actorId);
-        if (head.Status != HumanInputRequestLifecycleStatus.Pending)
-        {
-            return (HumanInputResponsePolicyEvaluator.Failure(
-                head,
-                command.TargetResponses,
-                HumanInputResponseLifecycleMutationStatus.Conflict,
-                HumanInputResponseOperationOutcome.Rejected,
-                HumanInputResponseOperationFailureCode.RequestTerminal), request, actorRoleId);
-        }
-        if (!Equals(head.CurrentRequest, command.ExpectedRequest)
-            || !Equals(request.Binding, command.ExpectedBinding))
-        {
-            return (HumanInputResponsePolicyEvaluator.Failure(
-                head,
-                command.TargetResponses,
-                HumanInputResponseLifecycleMutationStatus.Conflict,
-                HumanInputResponseOperationOutcome.Conflict,
-                HumanInputResponseOperationFailureCode.StaleResponse), request, actorRoleId);
-        }
-        if (head.LifecycleVersion != command.ExpectedLifecycleVersion)
-        {
-            return (HumanInputResponsePolicyEvaluator.Failure(
-                head,
-                command.TargetResponses,
-                HumanInputResponseLifecycleMutationStatus.Conflict,
-                HumanInputResponseOperationOutcome.Conflict,
-                HumanInputResponseOperationFailureCode.OptimisticStateConflict), request, actorRoleId);
-        }
-        var selectorIsEligible = command.Kind != HumanInputResponseOperationKind.Select
-            || request.ResponsePolicy.Kind == HumanInputResponsePolicyKind.ManualSelection
-                && request.ResponsePolicy.OrderedRoleIds is { } selectorRoles
-                && actorRoleId is not null
-                && selectorRoles.Contains(actorRoleId, StringComparer.Ordinal);
-        if (actorRoleId is null || !selectorIsEligible)
-        {
-            var selector = command.Kind == HumanInputResponseOperationKind.Select;
-            return (HumanInputResponsePolicyEvaluator.Failure(
-                head,
-                command.TargetResponses,
-                HumanInputResponseLifecycleMutationStatus.Ineligible,
-                HumanInputResponseOperationOutcome.Rejected,
-                selector
-                    ? HumanInputResponseOperationFailureCode.IneligibleSelector
-                    : HumanInputResponseOperationFailureCode.IneligibleRespondent), request, null);
-        }
-        if (recordedAtUtc < head.UpdatedAtUtc || recordedAtUtc < request.Timing.RequestedAtUtc)
-        {
-            return (HumanInputResponsePolicyEvaluator.Failure(
-                head,
-                command.TargetResponses,
-                HumanInputResponseLifecycleMutationStatus.Unavailable,
-                HumanInputResponseOperationOutcome.Conflict,
-                HumanInputResponseOperationFailureCode.OptimisticStateConflict,
-                canPersist: false), request, actorRoleId);
-        }
-        if (snapshot.Operations.Count >= HumanInputResponseContractLimits.MaxOperationsPerRequest)
-        {
-            return (HumanInputResponsePolicyEvaluator.Failure(
-                head,
-                command.TargetResponses,
-                HumanInputResponseLifecycleMutationStatus.LimitExceeded,
-                HumanInputResponseOperationOutcome.LimitExceeded,
-                HumanInputResponseOperationFailureCode.OperationEvidenceLimitExceeded,
-                canPersist: false), request, actorRoleId);
-        }
-        if (command.Kind is HumanInputResponseOperationKind.Submit or HumanInputResponseOperationKind.Select
-            && recordedAtUtc > request.Timing.ExpiresAtUtc)
-        {
-            return (HumanInputResponsePolicyEvaluator.Failure(
-                head,
-                command.TargetResponses,
-                HumanInputResponseLifecycleMutationStatus.Late,
-                HumanInputResponseOperationOutcome.Rejected,
-                HumanInputResponseOperationFailureCode.LateResponse), request, actorRoleId);
-        }
-        if (command.Kind == HumanInputResponseOperationKind.Submit
-            && !SubmittedValueIsValid(request, command, recordedAtUtc))
-        {
-            return (HumanInputResponsePolicyEvaluator.Failure(
-                head,
-                [],
-                HumanInputResponseLifecycleMutationStatus.Invalid,
-                HumanInputResponseOperationOutcome.Rejected,
-                HumanInputResponseOperationFailureCode.MalformedResponse), request, actorRoleId);
-        }
         if (!HumanInputResponseLifecycleStoreSnapshotGuard.TryGetActiveResponses(snapshot, out var active)
             || active is null)
         {
             return (HumanInputResponsePolicyEvaluator.Failure(
-                head,
+                snapshot.Request.Head,
                 command.TargetResponses,
                 HumanInputResponseLifecycleMutationStatus.Ambiguous,
                 HumanInputResponseOperationOutcome.Conflict,
                 HumanInputResponseOperationFailureCode.OptimisticStateConflict,
-                canPersist: false), request, actorRoleId);
+                canPersist: false), request, null);
         }
-
-        var plan = HumanInputResponsePolicyEvaluator.Evaluate(
-            request,
-            head,
+        return HumanInputResponseOperationCausality.Evaluate(
             command,
+            request,
+            expectedRequest,
+            snapshot.Request.Head,
             actorId,
-            actorRoleId,
             recordedAtUtc,
             snapshot.Responses,
-            active);
-        if (plan.ResponseToAppend is not null
-            && !HumanInputResponseContractValidator.ValidateArtifact(request, plan.ResponseToAppend).IsValid
-            || plan.SelectionToAppend is not null
-                && !HumanInputResponseContractValidator.ValidateSelection(
-                    request,
-                    plan.SelectionToAppend,
-                    active.Append(plan.ResponseToAppend).Where(response => response is not null).Select(response => response!).ToArray()).IsValid)
-        {
-            return (HumanInputResponsePolicyEvaluator.Failure(
-                head,
-                command.TargetResponses,
-                HumanInputResponseLifecycleMutationStatus.Ambiguous,
-                HumanInputResponseOperationOutcome.Conflict,
-                HumanInputResponseOperationFailureCode.OptimisticStateConflict,
-                canPersist: false), request, actorRoleId);
-        }
-        return (plan, request, actorRoleId);
+            active,
+            snapshot.Operations.Count);
     }
 
     private HumanInputResponseOperationEvidence? BuildEvidence(
@@ -578,6 +475,21 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
         var selection = plan.SelectionToAppend is null
             ? null
             : HumanInputResponseSelectionReference.Create(plan.SelectionToAppend);
+        HumanInputResponseArtifact? attempted = null;
+        if (RequiresAttemptedResponse(plan)
+            && (observedRequest is null
+                || actorRoleId is null
+                || !HumanInputResponsePolicyEvaluator.TryCreateAttempt(
+                    observedRequest,
+                    command,
+                    actorId,
+                    actorRoleId,
+                    recordedAtUtc,
+                    out attempted)
+                || attempted is null))
+        {
+            return null;
+        }
         var eligibilityHash = HumanInputResponseEligibilityEvidenceHash.Compute(
             _workspaceId,
             command.OperationId,
@@ -601,6 +513,7 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
             command.ExpectedLifecycleStatus,
             plan.PreviousHead,
             plan.ResultHead,
+            attempted,
             submitted,
             plan.TargetResponses,
             selection,
@@ -613,6 +526,13 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
             ? evidence
             : null;
     }
+
+    private static bool RequiresAttemptedResponse(HumanInputResponseLifecycleMutationPlan plan)
+        => plan.Outcome != HumanInputResponseOperationOutcome.Committed
+            && plan.FailureCode is HumanInputResponseOperationFailureCode.MalformedResponse
+                or HumanInputResponseOperationFailureCode.DuplicateResponse
+                or HumanInputResponseOperationFailureCode.ResponseLimitExceeded
+                or HumanInputResponseOperationFailureCode.LifecycleVersionLimitExceeded;
 
     private async Task<(bool Retry, HumanInputResponseLifecycleMutationResult? Result)> MapCommitAsync(
         HumanInputResponseLifecycleStoreCommitResult? commit,
@@ -651,6 +571,24 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
         }
         if (exactCommit.Status == HumanInputResponseLifecycleStoreCommitStatus.OperationConflict)
         {
+            if (exactCommit.StoredOperation is { } competing
+                && string.Equals(competing.RequestId, command.RequestId, StringComparison.Ordinal)
+                && OperationMatchesCommand(competing.Evidence, command)
+                && StoredEvidenceFitsSnapshot(competing.Evidence, exactCommit.Snapshot))
+            {
+                if (!competing.Evidence.ActorId.Equals(actorId))
+                {
+                    return (false, Result(HumanInputResponseLifecycleMutationStatus.Denied, command.OperationId, command.CommandHash));
+                }
+                return TryBuildProvedResult(
+                    HumanInputResponseLifecycleMutationStatus.Replayed,
+                    command,
+                    competing.Evidence,
+                    exactCommit.Snapshot,
+                    out var replayed)
+                    ? (false, replayed)
+                    : (false, Result(HumanInputResponseLifecycleMutationStatus.Ambiguous, command.OperationId, command.CommandHash));
+            }
             return (false, Result(HumanInputResponseLifecycleMutationStatus.Conflict, command.OperationId, command.CommandHash));
         }
         if (exactCommit.Status == HumanInputResponseLifecycleStoreCommitStatus.LimitExceeded)
@@ -721,7 +659,6 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
             if (commit.Snapshot is not null
                 && (!HumanInputResponseLifecycleStoreSnapshotGuard.TryCapture(commit.Snapshot, mutation.Operation.Request.RequestId, out snapshot)
                     || snapshot is null
-                    || !Equals(snapshot.ResponseRequest, snapshot.Request.Head.CurrentRequest)
                     || !WorkspaceMatches(snapshot)))
             {
                 return false;
@@ -731,7 +668,7 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
                 or HumanInputResponseLifecycleStoreCommitStatus.Replayed)
             {
                 if (stored is null
-                    || !Equals(stored.Evidence, mutation.Operation)
+                    || !HumanInputResponseOperationEvidenceComparer.ExactEquals(stored.Evidence, mutation.Operation)
                     || commit.StoreGeneration < mutation.ExpectedStoreGeneration + 1
                     || commit.Status == HumanInputResponseLifecycleStoreCommitStatus.Committed
                         && commit.StoreGeneration != mutation.ExpectedStoreGeneration + 1
@@ -763,15 +700,15 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
                 && mutation.RequestHeadToWrite is null;
         }
         if (mutation.ResponseToAppend is not null
-            && !snapshot.Responses.Any(response => Equals(response, mutation.ResponseToAppend)))
+            && !snapshot.Responses.Any(response => string.Equals(response.ResponseHash, mutation.ResponseToAppend.ResponseHash, StringComparison.Ordinal)))
         {
             return false;
         }
         if (mutation.SelectionToAppend is not null)
         {
-            return Equals(snapshot.Selection, mutation.SelectionToAppend)
+            return string.Equals(snapshot.Selection?.SelectionHash, mutation.SelectionToAppend.SelectionHash, StringComparison.Ordinal)
                 && Equals(snapshot.Request.Head, mutation.RequestHeadToWrite)
-                && Equals(snapshot.Request.AnswerOperation, mutation.Operation);
+                && HumanInputResponseOperationEvidenceComparer.ExactEquals(snapshot.Request.AnswerOperation, mutation.Operation);
         }
         return mutation.RequestHeadToWrite is null;
     }
@@ -787,7 +724,8 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
         if (!OperationMatchesCommand(evidence, command)
             || !HumanInputResponseOperationEvidenceSnapshot.TryCapture(evidence, out var captured, out _)
             || captured is null
-            || !StoredEvidenceFitsSnapshot(captured, snapshot))
+            || !StoredEvidenceFitsSnapshot(captured, snapshot)
+            || !HumanInputResponseOperationCausality.Matches(command, captured, snapshot))
         {
             return false;
         }
@@ -816,7 +754,10 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
         if (expectedIsRetained)
         {
             return Equals(snapshot.ResponseRequest, evidence.Request)
-                && HumanInputResponseLifecycleStoreSnapshotGuard.EvidenceMatchesSnapshot(evidence, snapshot);
+                && (HumanInputResponseLifecycleStoreSnapshotGuard.EvidenceMatchesSnapshot(evidence, snapshot)
+                    || HumanInputResponseLifecycleStoreSnapshotGuard.EvidenceMatchesHistoricallyAbsentExpectedLifecycle(
+                        evidence,
+                        snapshot.Request));
         }
         return Equals(snapshot.ResponseRequest, snapshot.Request.Head.CurrentRequest)
             && HumanInputResponseLifecycleStoreSnapshotGuard.EvidenceMatchesAbsentExpectedLifecycle(evidence, snapshot.Request);
@@ -833,6 +774,7 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
             if (!HumanInputIdentifier.IsValid(source.RequestId)
                 || !HumanInputResponseOperationEvidenceSnapshot.TryCapture(source.Evidence, out var evidence, out _)
                 || evidence is null
+                || !HumanInputResponseEligibilityEvidenceHash.Matches(evidence)
                 || !string.Equals(evidence.OperationId, expectedOperationId, StringComparison.Ordinal)
                 || !string.Equals(evidence.Request.RequestId, source.RequestId, StringComparison.Ordinal))
             {
@@ -859,27 +801,6 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
             && evidence.ExpectedLifecycleVersion == command.ExpectedLifecycleVersion
             && evidence.ExpectedLifecycleStatus == command.ExpectedLifecycleStatus
             && evidence.TargetResponses.SequenceEqual(command.TargetResponses);
-
-    private static bool SubmittedValueIsValid(
-        HumanInputRequest request,
-        HumanInputResponseLifecycleCommand command,
-        DateTimeOffset recordedAtUtc)
-    {
-        var representative = request.EligibleRespondents[0];
-        var response = new HumanInputResponse(
-            request.RequestId,
-            request.RequestVersionId,
-            request.Binding,
-            representative.RespondentId,
-            representative.RespondentRoleId,
-            recordedAtUtc,
-            command.Value!,
-            command.Explanation);
-        return HumanInputValidator.ValidateResponse(request, response).Kind == HumanInputResponseOutcomeKind.Valid;
-    }
-
-    private static string? EligibleRole(HumanInputRequest request, AuthorityActorId actorId)
-        => request.EligibleRespondents.SingleOrDefault(respondent => string.Equals(respondent.RespondentId, actorId.Value, StringComparison.Ordinal))?.RespondentRoleId;
 
     private static HumanInputRequest? FindResponseRequest(HumanInputResponseLifecycleStoreSnapshot snapshot)
         => FindRequest(snapshot, snapshot.ResponseRequest);

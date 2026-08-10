@@ -81,7 +81,8 @@ internal static class HumanInputResponseLifecycleStoreSnapshotGuard
             for (var index = 0; index < rawOperations.Length; index++)
             {
                 if (!HumanInputResponseOperationEvidenceSnapshot.TryCapture(rawOperations[index], out var captured, out _)
-                    || captured is null)
+                    || captured is null
+                    || !HumanInputResponseEligibilityEvidenceHash.Matches(captured))
                 {
                     return false;
                 }
@@ -184,7 +185,7 @@ internal static class HumanInputResponseLifecycleStoreSnapshotGuard
         HumanInputResponseOperationEvidence evidence,
         HumanInputResponseLifecycleStoreSnapshot snapshot)
     {
-        if (!snapshot.Operations.Any(candidate => Equals(candidate, evidence)))
+        if (!snapshot.Operations.Any(candidate => HumanInputResponseOperationEvidenceComparer.ExactEquals(candidate, evidence)))
         {
             return false;
         }
@@ -206,6 +207,51 @@ internal static class HumanInputResponseLifecycleStoreSnapshotGuard
                 && ObservedHeadsForRequest(lifecycle).Any(head => Equals(head, evidence.PreviousHead))
                 && FindResponseRequest(lifecycle, evidence.PreviousHead.CurrentRequest) is { } observedRequest
                 && Equals(evidence.ObservedBinding, observedRequest.Binding);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    internal static bool EvidenceMatchesHistoricallyAbsentExpectedLifecycle(
+        HumanInputResponseOperationEvidence evidence,
+        HumanInputRequestLifecycleStoreSnapshot lifecycle)
+    {
+        try
+        {
+            if (evidence.FailureCode is not HumanInputResponseOperationFailureCode.StaleResponse
+                    and not HumanInputResponseOperationFailureCode.RequestTerminal
+                || evidence.ActorRoleId is not null
+                || evidence.PreviousHead is null
+                || !ObservedHeadsForRequest(lifecycle).Any(head => Equals(head, evidence.PreviousHead))
+                || FindResponseRequest(lifecycle, evidence.PreviousHead.CurrentRequest) is not { } observedRequest
+                || !Equals(evidence.ObservedBinding, observedRequest.Binding))
+            {
+                return false;
+            }
+
+            var requestWasRetained = false;
+            foreach (var operation in lifecycle.Operations)
+            {
+                if (operation.Outcome == HumanInputRequestLifecycleOperationOutcome.Committed
+                    && operation.CandidateRequest is { } candidate
+                    && string.Equals(candidate.RequestId, evidence.Request.RequestId, StringComparison.Ordinal)
+                    && Equals(candidate, evidence.Request))
+                {
+                    requestWasRetained = true;
+                }
+                var result = string.Equals(operation.TargetRequestId, lifecycle.Head.RequestId, StringComparison.Ordinal)
+                    ? operation.ResultHead
+                    : string.Equals(operation.RelatedRequestId, lifecycle.Head.RequestId, StringComparison.Ordinal)
+                        ? operation.RelatedResultHead
+                        : null;
+                if (Equals(result, evidence.PreviousHead))
+                {
+                    return !requestWasRetained;
+                }
+            }
+            return false;
         }
         catch (Exception)
         {
@@ -238,7 +284,7 @@ internal static class HumanInputResponseLifecycleStoreSnapshotGuard
                 || !operationIds.Add(operation.OperationId)
                 || !Equals(operation.Request, RequestReference(request))
                 || !BindingsMatchLifecycleProof(operation, requestSnapshot, request)
-                || !RoleMatchesProjectedRequest(operation, request)
+                || !RoleMatchesProjectedRequest(operation, request, responsesById)
                 || previousTime is { } retainedTime && operation.RecordedAtUtc < retainedTime
                 || selectionSeen && operation.FailureCode != HumanInputResponseOperationFailureCode.RequestTerminal)
             {
@@ -270,7 +316,10 @@ internal static class HumanInputResponseLifecycleStoreSnapshotGuard
                 if (!responsesById.TryGetValue(reference.ResponseId, out var artifact)
                     || !reference.Matches(request, artifact)
                     || !claimedResponses.Add(reference.ResponseId)
-                    || activeById.Values.Any(existing => existing.ActorId.Equals(artifact.ActorId)))
+                    || activeById.Values.Any(existing => existing.ActorId.Equals(artifact.ActorId))
+                    || !artifact.ActorId.Equals(operation.ActorId)
+                    || !string.Equals(artifact.RespondentRoleId, operation.ActorRoleId, StringComparison.Ordinal)
+                    || artifact.SubmittedAtUtc != operation.RecordedAtUtc)
                 {
                     return false;
                 }
@@ -293,7 +342,9 @@ internal static class HumanInputResponseLifecycleStoreSnapshotGuard
                 && operation.Kind == HumanInputResponseOperationKind.Withdraw)
             {
                 var target = operation.TargetResponses[0];
-                if (!activeById.Remove(target.ResponseId, out var removed) || !target.Matches(request, removed))
+                if (!activeById.Remove(target.ResponseId, out var removed)
+                    || !target.Matches(request, removed)
+                    || !removed.ActorId.Equals(operation.ActorId))
                 {
                     return false;
                 }
@@ -303,7 +354,7 @@ internal static class HumanInputResponseLifecycleStoreSnapshotGuard
             if (operation.Selection is not null)
             {
                 selectionSeen = true;
-                if (!Equals(requestSnapshot.AnswerOperation, operation))
+                if (!HumanInputResponseOperationEvidenceComparer.ExactEquals(requestSnapshot.AnswerOperation, operation))
                 {
                     return false;
                 }
@@ -350,11 +401,44 @@ internal static class HumanInputResponseLifecycleStoreSnapshotGuard
 
     private static bool RoleMatchesProjectedRequest(
         HumanInputResponseOperationEvidence operation,
-        HumanInputRequest projectedRequest)
-        => operation.ActorRoleId is null
-            || projectedRequest.EligibleRespondents.Any(respondent => respondent is not null
-                && string.Equals(respondent.RespondentId, operation.ActorId.Value, StringComparison.Ordinal)
-                && string.Equals(respondent.RespondentRoleId, operation.ActorRoleId, StringComparison.Ordinal));
+        HumanInputRequest projectedRequest,
+        IReadOnlyDictionary<string, HumanInputResponseArtifact> retainedResponses)
+    {
+        var actorRoles = projectedRequest.EligibleRespondents
+            .Where(respondent => respondent is not null
+                && string.Equals(respondent.RespondentId, operation.ActorId.Value, StringComparison.Ordinal))
+            .Select(respondent => respondent!.RespondentRoleId)
+            .ToArray();
+        if (operation.FailureCode == HumanInputResponseOperationFailureCode.IneligibleRespondent)
+        {
+            if (operation.ActorRoleId is not null)
+            {
+                return false;
+            }
+            if (actorRoles.Length == 0)
+            {
+                return true;
+            }
+            return operation.Kind == HumanInputResponseOperationKind.Withdraw
+                && operation.TargetResponses.Length == 1
+                && retainedResponses.TryGetValue(operation.TargetResponses[0].ResponseId, out var target)
+                && operation.TargetResponses[0].Matches(projectedRequest, target)
+                && !target.ActorId.Equals(operation.ActorId);
+        }
+        if (operation.FailureCode == HumanInputResponseOperationFailureCode.IneligibleSelector)
+        {
+            return operation.ActorRoleId is null
+                && (projectedRequest.ResponsePolicy.Kind != HumanInputResponsePolicyKind.ManualSelection
+                    || projectedRequest.ResponsePolicy.OrderedRoleIds is null
+                    || !actorRoles.Any(role => projectedRequest.ResponsePolicy.OrderedRoleIds.Value.Contains(role)));
+        }
+        if (operation.ActorRoleId is null)
+        {
+            return operation.FailureCode is HumanInputResponseOperationFailureCode.StaleResponse
+                or HumanInputResponseOperationFailureCode.RequestTerminal;
+        }
+        return actorRoles.Contains(operation.ActorRoleId, StringComparer.Ordinal);
+    }
 
     private static IReadOnlyList<HumanInputRequestLifecycleHead> ObservedHeadsForRequest(
         HumanInputRequestLifecycleStoreSnapshot snapshot)
@@ -394,9 +478,17 @@ internal static class HumanInputResponseLifecycleStoreSnapshotGuard
         {
             return selection is not null
                 && request.AnswerOperation is { } answer
-                && operations.Any(operation => Equals(operation, answer))
+                && operations.Any(operation => HumanInputResponseOperationEvidenceComparer.ExactEquals(operation, answer))
                 && answer.Selection is not null
                 && answer.Selection.Matches(selection)
+                && string.Equals(selection.SelectionId, answer.OperationId, StringComparison.Ordinal)
+                && selection.SelectedAtUtc == answer.RecordedAtUtc
+                && (answer.Kind == HumanInputResponseOperationKind.Submit
+                    || answer.Kind == HumanInputResponseOperationKind.Select
+                        && selection.SelectorActorId is not null
+                        && selection.SelectorActorId.Equals(answer.ActorId)
+                        && string.Equals(selection.SelectorRoleId, answer.ActorRoleId, StringComparison.Ordinal)
+                        && selection.Responses.SequenceEqual(answer.TargetResponses))
                 && Equals(request.Head.AnswerSelection, answer.Selection);
         }
         if (Equals(request.Head.CurrentRequest, responseRequest))
