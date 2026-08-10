@@ -546,6 +546,58 @@ public sealed class AuthorityGrantStoreTests : IDisposable
         Assert.Single(read.Snapshot.Operations);
     }
 
+    [Theory]
+    [InlineData(UnexpectedAdvanceMode.NoOp)]
+    [InlineData(UnexpectedAdvanceMode.Stale)]
+    [InlineData(UnexpectedAdvanceMode.WrongWorkspace)]
+    [InlineData(UnexpectedAdvanceMode.WrongCurrentGeneration)]
+    [InlineData(UnexpectedAdvanceMode.WrongCurrentDigest)]
+    [InlineData(UnexpectedAdvanceMode.WrongPreviousGeneration)]
+    [InlineData(UnexpectedAdvanceMode.WrongPreviousDigest)]
+    public async Task Grant_commit_does_not_report_a_candidate_when_advance_returns_an_unproved_successor(UnexpectedAdvanceMode mode)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var profile = await CreateProfileAsync(Store(paths));
+        var grant = Grant(profile);
+        var mutation = Mutation(1, grant, Evidence(grant, "reject-unproved-grant-successor", AuthorityGrantOperationKind.Create, Hash('e')));
+        var unexpectedTrust = new UnexpectedAdvanceTrustProvider(_trustProvider, mode);
+
+        var result = await Store(paths, unexpectedTrust).CommitAsync(mutation);
+
+        Assert.Equal(AuthorityGrantStoreCommitStatus.Ambiguous, result.Status);
+        Assert.Equal(0, result.StoreGeneration);
+        Assert.Null(result.StoredOperation);
+        Assert.Null(result.Snapshot);
+    }
+
+    [Theory]
+    [InlineData(UnexpectedAdvanceMode.NoOp)]
+    [InlineData(UnexpectedAdvanceMode.Stale)]
+    [InlineData(UnexpectedAdvanceMode.WrongWorkspace)]
+    [InlineData(UnexpectedAdvanceMode.WrongCurrentGeneration)]
+    [InlineData(UnexpectedAdvanceMode.WrongCurrentDigest)]
+    [InlineData(UnexpectedAdvanceMode.WrongPreviousGeneration)]
+    [InlineData(UnexpectedAdvanceMode.WrongPreviousDigest)]
+    public async Task Grant_direct_successor_recovery_does_not_expose_a_candidate_when_advance_returns_an_unproved_successor(UnexpectedAdvanceMode mode)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var profile = await CreateProfileAsync(Store(paths));
+        var grant = Grant(profile);
+        var mutation = Mutation(1, grant, Evidence(grant, "reject-unproved-grant-recovery", AuthorityGrantOperationKind.Create, Hash('f')));
+        var interruptedTrust = new FailingCapabilityCatalogTrustProvider(_trustProvider) { FailNextAdvance = true };
+        Assert.Equal(AuthorityGrantStoreCommitStatus.Ambiguous, (await Store(paths, interruptedTrust).CommitAsync(mutation)).Status);
+        var unexpectedTrust = new UnexpectedAdvanceTrustProvider(_trustProvider, mode);
+
+        var result = await Store(paths, unexpectedTrust).CommitAsync(mutation);
+
+        Assert.Equal(AuthorityGrantStoreCommitStatus.Ambiguous, result.Status);
+        Assert.Equal(0, result.StoreGeneration);
+        Assert.Null(result.StoredOperation);
+        Assert.Null(result.Snapshot);
+    }
+
     [Fact]
     public async Task Receipt_only_direct_successor_recovers_exactly_after_trust_anchor_advance_failure()
     {

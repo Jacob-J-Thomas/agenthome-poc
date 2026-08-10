@@ -600,6 +600,26 @@ public sealed class AuthorityProfileStoreTests : IDisposable
         Assert.DoesNotContain(recovered.Record.Operations, operation => operation.OperationId == "transition-before-anchor-failure");
     }
 
+    [Theory]
+    [InlineData(UnexpectedAdvanceMode.NoOp)]
+    [InlineData(UnexpectedAdvanceMode.Stale)]
+    [InlineData(UnexpectedAdvanceMode.WrongWorkspace)]
+    [InlineData(UnexpectedAdvanceMode.WrongCurrentGeneration)]
+    [InlineData(UnexpectedAdvanceMode.WrongCurrentDigest)]
+    [InlineData(UnexpectedAdvanceMode.WrongPreviousGeneration)]
+    [InlineData(UnexpectedAdvanceMode.WrongPreviousDigest)]
+    public async Task Profile_mutation_does_not_report_a_candidate_when_advance_returns_an_unproved_successor(UnexpectedAdvanceMode mode)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var unexpectedTrust = new UnexpectedAdvanceTrustProvider(_trustProvider, mode);
+
+        var result = await new AuthorityProfileStore(paths, unexpectedTrust).MutateAsync(Create(Profile(), "reject-unproved-profile-successor"));
+
+        Assert.Equal(AuthorityProfileMutationStatus.Unavailable, result.Status);
+        Assert.Null(result.Record);
+    }
+
     [Fact]
     public async Task Windows_external_lock_owner_blocks_mutation_until_ownership_is_released()
     {

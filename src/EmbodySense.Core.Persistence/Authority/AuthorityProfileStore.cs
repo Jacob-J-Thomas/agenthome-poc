@@ -660,7 +660,12 @@ public sealed class AuthorityProfileStore : IAuthorityProfileStore, IAuthorityGr
         {
             try
             {
-                _ = await _trustProvider.AdvanceAsync(identity, trust.CurrentGeneration, trust.CurrentContentDigest, primary.Generation, primary.ContentDigest, cancellationToken);
+                var advanced = await _trustProvider.AdvanceAsync(identity, trust.CurrentGeneration, trust.CurrentContentDigest, primary.Generation, primary.ContentDigest, cancellationToken);
+                if (!MatchesExactSuccessor(identity, trust.CurrentGeneration, trust.CurrentContentDigest, primary.Generation, primary.ContentDigest, advanced))
+                {
+                    return new LoadResult(null, false, true);
+                }
+
                 return new LoadResult(primary, false);
             }
             catch (OperationCanceledException)
@@ -817,7 +822,11 @@ public sealed class AuthorityProfileStore : IAuthorityProfileStore, IAuthorityGr
         await session.WriteTextAtomicallyAsync(_paths.AuthorityProfilesProofPath, currentJson.Json, cancellationToken);
         var candidateJson = await SerializeAsync(identity, candidate, cancellationToken);
         await session.WriteTextAtomicallyAsync(_paths.AuthorityProfilesDocumentPath, candidateJson.Json, cancellationToken);
-        _ = await _trustProvider.AdvanceAsync(identity, trust.CurrentGeneration, trust.CurrentContentDigest, candidate.Generation, candidateJson.ContentDigest, cancellationToken);
+        var advanced = await _trustProvider.AdvanceAsync(identity, trust.CurrentGeneration, trust.CurrentContentDigest, candidate.Generation, candidateJson.ContentDigest, cancellationToken);
+        if (!MatchesExactSuccessor(identity, trust.CurrentGeneration, trust.CurrentContentDigest, candidate.Generation, candidateJson.ContentDigest, advanced))
+        {
+            throw new IOException("The server-owned authority-profile proof did not accept the exact committed successor.");
+        }
     }
 
     private async Task<SerializedDocument> SerializeAsync(string identity, AuthorityProfileStoreDocument document, CancellationToken cancellationToken)
@@ -1509,6 +1518,13 @@ public sealed class AuthorityProfileStore : IAuthorityProfileStore, IAuthorityGr
     private static bool IsEvidenceHashValid(string? value) => value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
     private static bool MatchesCurrent(AuthorityProfileStoreDocument document, CapabilityCatalogTrustState trust) => document.Generation == trust.CurrentGeneration && string.Equals(document.ContentDigest, trust.CurrentContentDigest, StringComparison.Ordinal);
     private static bool MatchesPrevious(AuthorityProfileStoreDocument document, CapabilityCatalogTrustState trust) => trust.PreviousGeneration == document.Generation && string.Equals(document.ContentDigest, trust.PreviousContentDigest, StringComparison.Ordinal);
+    private static bool MatchesExactSuccessor(string identity, long previousGeneration, string previousContentDigest, long currentGeneration, string currentContentDigest, CapabilityCatalogTrustState? trust)
+        => trust is not null
+            && string.Equals(trust.WorkspaceIdentity, identity, StringComparison.Ordinal)
+            && trust.CurrentGeneration == currentGeneration
+            && string.Equals(trust.CurrentContentDigest, currentContentDigest, StringComparison.Ordinal)
+            && trust.PreviousGeneration == previousGeneration
+            && string.Equals(trust.PreviousContentDigest, previousContentDigest, StringComparison.Ordinal);
     private static AuthorityProfileMutationResult Result(AuthorityProfileMutationStatus status, string operationId, AuthorityProfileRecord? record, string detail) => new(status, operationId, record, detail);
     private static AuthorityGrantStoreReadResult GrantReadResult(AuthorityGrantStoreReadStatus status, long generation, AuthorityGrantStoreSnapshot? snapshot, AuthorityGrantStoredOperation? operation) => new(status, generation, snapshot, operation);
     private static AuthorityGrantStoreCommitResult GrantCommitResult(AuthorityGrantStoreCommitStatus status, long generation, AuthorityGrantStoredOperation? operation, AuthorityGrantStoreSnapshot? snapshot) => new(status, generation, operation, snapshot);
