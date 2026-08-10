@@ -53,7 +53,7 @@ internal static class HumanInputRequestStoreTestData
             HumanInputRequestLifecycleOperationKind.Reroute => Rehash(previousRequest with
             {
                 RequestVersionId = "version-rerouted",
-                EligibleRespondents = [new HumanInputEligibleRespondent("user-two", "route-two")]
+                EligibleRespondents = [new HumanInputEligibleRespondent("user-two", "role-two", "route-two")]
             }),
             HumanInputRequestLifecycleOperationKind.Amend => Rehash(previousRequest with
             {
@@ -181,9 +181,9 @@ internal static class HumanInputRequestStoreTestData
             prompt,
             new HumanInputResponseSchema(HumanInputResponseKind.Text, 128, null, null, null),
             privacy,
-            [new HumanInputEligibleRespondent("user-one", "route-one")],
+            [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
             new HumanInputTiming(requestedAt, requestedAt.AddHours(1)),
-            new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstEligibleResponse),
+            new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
             new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, "node-one", "checkpoint-one"),
             string.Empty);
         return Rehash(request);
