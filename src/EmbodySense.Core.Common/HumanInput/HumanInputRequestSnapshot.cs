@@ -111,7 +111,7 @@ public static class HumanInputRequestSnapshot
 
     private static HumanInputResponsePolicy Snapshot(HumanInputResponsePolicy? value) => value is null
         ? null!
-        : new HumanInputResponsePolicy(value.Kind, value.RequiredResponseCount, value.OrderedRoleIds is { } roleIds ? roleIds.ToImmutableArray() : null);
+        : new HumanInputResponsePolicy(value.Kind, value.RequiredResponseCount, value.OrderedRoleIds is { } roleIds ? roleIds.ToArray().ToImmutableArray() : null);
 
     private static HumanInputContinuationBinding Snapshot(HumanInputContinuationBinding? value) => value is null ? null! : new HumanInputContinuationBinding(value.Kind, value.NodeId, value.CheckpointId);
 }
