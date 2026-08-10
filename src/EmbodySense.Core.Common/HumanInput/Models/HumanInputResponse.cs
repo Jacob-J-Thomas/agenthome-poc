@@ -7,7 +7,8 @@ namespace EmbodySense.Core.Common.HumanInput.Models;
 /// <param name="RequestVersionId">The exact immutable request-version ID.</param>
 /// <param name="Binding">The exact request workspace, loop graph and revision, node, run, and checkpoint binding.</param>
 /// <param name="AuthenticatedActorRef">The stable actor reference obtained by an external authentication boundary.</param>
+/// <param name="RespondentRoleId">The exact eligible role established by the external authentication and eligibility boundary.</param>
 /// <param name="SubmittedAtUtc">The UTC submission time.</param>
 /// <param name="Value">The required untrusted response data.</param>
 /// <param name="Explanation">Optional bounded canonical explanation data.</param>
-public sealed record HumanInputResponse(string RequestId, string RequestVersionId, HumanInputRequestBinding Binding, string AuthenticatedActorRef, DateTimeOffset SubmittedAtUtc, HumanInputResponseValue Value, string? Explanation);
+public sealed partial record HumanInputResponse(string RequestId, string RequestVersionId, HumanInputRequestBinding Binding, string AuthenticatedActorRef, string RespondentRoleId, DateTimeOffset SubmittedAtUtc, HumanInputResponseValue Value, string? Explanation);

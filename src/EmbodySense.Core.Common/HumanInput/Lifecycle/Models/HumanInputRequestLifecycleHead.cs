@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanInput.Responses.Models;
 
 namespace EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 
@@ -13,6 +14,7 @@ namespace EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 /// <param name="SupersededByRequestId">The later request that replaced this request, when terminally superseded.</param>
 /// <param name="LastOperationId">The exact operation that produced this projection.</param>
 /// <param name="UpdatedAtUtc">The trusted UTC projection time.</param>
+/// <param name="AnswerSelection">The exact immutable selection that atomically answered this request, or null while not answered.</param>
 public sealed record HumanInputRequestLifecycleHead(
     int SchemaVersion,
     string RequestId,
@@ -23,4 +25,5 @@ public sealed record HumanInputRequestLifecycleHead(
     string? SupersedesRequestId,
     string? SupersededByRequestId,
     string LastOperationId,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    HumanInputResponseSelectionReference? AnswerSelection = null);

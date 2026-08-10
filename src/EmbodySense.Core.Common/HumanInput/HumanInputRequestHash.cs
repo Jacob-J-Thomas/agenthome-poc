@@ -55,7 +55,7 @@ public static class HumanInputRequestHash
             writer.WritePropertyName("timing");
             WriteTiming(writer, request.Timing);
             writer.WritePropertyName("responsePolicy");
-            writer.WriteNumberValue((int)(request.ResponsePolicy?.Kind ?? HumanInputResponsePolicyKind.Unknown));
+            WriteResponsePolicy(writer, request.ResponsePolicy);
             writer.WritePropertyName("continuationBinding");
             WriteContinuationBinding(writer, request.ContinuationBinding);
             writer.WriteEndObject();
@@ -115,6 +115,7 @@ public static class HumanInputRequestHash
             {
                 if (respondents[index] is { } respondent
                     && (!IsWithin(respondent.RespondentId, HumanInputLimits.MaxIdentifierCharacters)
+                        || !IsWithin(respondent.RespondentRoleId, HumanInputLimits.MaxIdentifierCharacters)
                         || !IsWithin(respondent.RoutingReference, HumanInputLimits.MaxRoutingReferenceCharacters)))
                 {
                     return false;
@@ -126,7 +127,8 @@ public static class HumanInputRequestHash
         if (!IsOptionalMaximumBounded(schema?.MaxTextCharacters, HumanInputLimits.MaxResponseTextCharacters)
             || !IsOptionalMaximumBounded(schema?.ReferencePolicy?.MaxReferenceCharacters, HumanInputLimits.MaxReferenceCharacters)
             || schema?.Choices is { Length: > HumanInputLimits.MaxChoices }
-            || schema?.StructuredFields is { Length: > HumanInputLimits.MaxStructuredFields })
+            || schema?.StructuredFields is { Length: > HumanInputLimits.MaxStructuredFields }
+            || !IsBoundedPolicy(request.ResponsePolicy))
         {
             return false;
         }
@@ -325,7 +327,68 @@ public static class HumanInputRequestHash
 
         writer.WriteStartObject();
         WriteString(writer, "respondentId", respondent.RespondentId);
+        WriteString(writer, "respondentRoleId", respondent.RespondentRoleId);
         WriteString(writer, "routingReference", respondent.RoutingReference);
+        writer.WriteEndObject();
+    }
+
+    private static bool IsBoundedPolicy(HumanInputResponsePolicy? policy)
+    {
+        if (policy?.OrderedRoleIds is not { } roleIds)
+        {
+            return true;
+        }
+
+        if (roleIds.IsDefault || roleIds.Length > HumanInputLimits.MaxResponsePolicyRoles)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < roleIds.Length; index++)
+        {
+            if (!IsWithin(roleIds[index], HumanInputLimits.MaxIdentifierCharacters))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void WriteResponsePolicy(Utf8JsonWriter writer, HumanInputResponsePolicy? policy)
+    {
+        if (policy is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStartObject();
+        writer.WriteNumber("kind", (int)policy.Kind);
+        if (policy.RequiredResponseCount is { } count)
+        {
+            writer.WriteNumber("requiredResponseCount", count);
+        }
+        else
+        {
+            writer.WriteNull("requiredResponseCount");
+        }
+
+        writer.WritePropertyName("orderedRoleIds");
+        if (policy.OrderedRoleIds is not { } roleIds)
+        {
+            writer.WriteNullValue();
+        }
+        else
+        {
+            writer.WriteStartArray();
+            foreach (var roleId in roleIds)
+            {
+                writer.WriteStringValue(roleId);
+            }
+            writer.WriteEndArray();
+        }
+
         writer.WriteEndObject();
     }
 

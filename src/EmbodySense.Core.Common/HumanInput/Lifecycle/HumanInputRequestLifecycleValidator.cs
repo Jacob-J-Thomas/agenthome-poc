@@ -2,6 +2,7 @@ using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanInput.Responses.Models;
 
 namespace EmbodySense.Core.Common.HumanInput.Lifecycle;
 
@@ -236,7 +237,7 @@ public static class HumanInputRequestLifecycleValidator
             && SchemaEquals(previousRequest.ResponseSchema, candidate.ResponseSchema)
             && previousRequest.PrivacyClass == candidate.PrivacyClass
             && Equals(previousRequest.Timing, candidate.Timing)
-            && Equals(previousRequest.ResponsePolicy, candidate.ResponsePolicy)
+            && PolicyEquals(previousRequest.ResponsePolicy, candidate.ResponsePolicy)
             && Equals(previousRequest.ContinuationBinding, candidate.ContinuationBinding);
         if (!preserved || !changedRouting)
         {
@@ -254,7 +255,7 @@ public static class HumanInputRequestLifecycleValidator
         var preserved = SameRequestIdentity(previousRequest, candidate)
             && Equals(previousRequest.Binding, candidate.Binding)
             && RespondentsEqual(previousRequest.EligibleRespondents, candidate.EligibleRespondents)
-            && Equals(previousRequest.ResponsePolicy, candidate.ResponsePolicy)
+            && PolicyEquals(previousRequest.ResponsePolicy, candidate.ResponsePolicy)
             && Equals(previousRequest.ContinuationBinding, candidate.ContinuationBinding)
             && previousRequest.Timing.RequestedAtUtc == candidate.Timing.RequestedAtUtc;
         if (!preserved)
@@ -431,7 +432,8 @@ public static class HumanInputRequestLifecycleValidator
             || !string.Equals(head.SupersedesRequestId, supersedesRequestId, StringComparison.Ordinal)
             || head.SupersededByRequestId is not null
             || !string.Equals(head.LastOperationId, operationId, StringComparison.Ordinal)
-            || head.UpdatedAtUtc != recordedAtUtc)
+            || head.UpdatedAtUtc != recordedAtUtc
+            || head.AnswerSelection is not null)
         {
             Add(errors, HumanInputRequestLifecycleValidationErrorCode.InvalidTransition, path, "A new lifecycle head must be pending version 1 and exactly bind the candidate, operation, lineage, and trusted time.");
         }
@@ -566,6 +568,15 @@ public static class HumanInputRequestLifecycleValidator
             || head.Status != HumanInputRequestLifecycleStatus.Superseded && head.SupersededByRequestId is not null)
         {
             Add(errors, HumanInputRequestLifecycleValidationErrorCode.InvalidSupersession, path + ".supersededByRequestId", "Only a superseded lifecycle requires a successor request link.");
+        }
+        ValidateAnswerSelection(head.AnswerSelection, path + ".answerSelection", errors);
+        if (head.Status == HumanInputRequestLifecycleStatus.Answered != (head.AnswerSelection is not null))
+        {
+            Add(errors, HumanInputRequestLifecycleValidationErrorCode.InvalidHeadShape, path + ".answerSelection", "Exactly an answered lifecycle requires one exact immutable response selection reference.");
+        }
+        if (head.AnswerSelection is { } selection && !Equals(selection.Request, head.CurrentRequest))
+        {
+            Add(errors, HumanInputRequestLifecycleValidationErrorCode.InvalidHeadShape, path + ".answerSelection.request", "The answer selection must identify the exact current immutable request version.");
         }
         ValidateIdentifier(head.LastOperationId, path + ".lastOperationId", HumanInputRequestLifecycleContractLimits.MaxOperationIdCharacters, errors);
         ValidateUtc(head.UpdatedAtUtc, path + ".updatedAtUtc", errors);
@@ -775,7 +786,24 @@ public static class HumanInputRequestLifecycleValidator
 
     private static bool SameLinks(HumanInputRequestLifecycleHead left, HumanInputRequestLifecycleHead right)
         => string.Equals(left.SupersedesRequestId, right.SupersedesRequestId, StringComparison.Ordinal)
-            && string.Equals(left.SupersededByRequestId, right.SupersededByRequestId, StringComparison.Ordinal);
+            && string.Equals(left.SupersededByRequestId, right.SupersededByRequestId, StringComparison.Ordinal)
+            && Equals(left.AnswerSelection, right.AnswerSelection);
+
+    private static void ValidateAnswerSelection(HumanInputResponseSelectionReference? reference, string path, List<HumanInputRequestLifecycleValidationError> errors)
+    {
+        if (reference is null)
+        {
+            return;
+        }
+
+        if (reference.SchemaVersion != HumanInputResponseSelectionReference.CurrentSchemaVersion)
+        {
+            Add(errors, HumanInputRequestLifecycleValidationErrorCode.UnsupportedSchemaVersion, path + ".schemaVersion", "Human Input response selection schema version must be 1.");
+        }
+        ValidateIdentifier(reference.SelectionId, path + ".selectionId", HumanInputLimits.MaxIdentifierCharacters, errors);
+        ValidateReference(reference.Request, path + ".request", errors);
+        ValidateSha256(reference.SelectionHash, path + ".selectionHash", HumanInputRequestLifecycleValidationErrorCode.InvalidHash, errors);
+    }
 
     private static bool IsPrivacyDowngrade(HumanInputPrivacyClass previous, HumanInputPrivacyClass candidate)
         => previous == HumanInputPrivacyClass.Sensitive && candidate != HumanInputPrivacyClass.Sensitive;
@@ -859,6 +887,34 @@ public static class HumanInputRequestLifecycleValidator
         for (var index = 0; index < left.Length; index++)
         {
             if (!Equals(left[index], right[index]))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool PolicyEquals(HumanInputResponsePolicy? left, HumanInputResponsePolicy? right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+        if (left is null || right is null || left.Kind != right.Kind || left.RequiredResponseCount != right.RequiredResponseCount)
+        {
+            return false;
+        }
+        if (left.OrderedRoleIds is not { } leftRoles || right.OrderedRoleIds is not { } rightRoles)
+        {
+            return left.OrderedRoleIds is null && right.OrderedRoleIds is null;
+        }
+        if (leftRoles.IsDefault || rightRoles.IsDefault || leftRoles.Length != rightRoles.Length)
+        {
+            return false;
+        }
+        for (var index = 0; index < leftRoles.Length; index++)
+        {
+            if (!string.Equals(leftRoles[index], rightRoles[index], StringComparison.Ordinal))
             {
                 return false;
             }
