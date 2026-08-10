@@ -306,11 +306,20 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
 
         var lifecycleResult = await lifecycleService.MutateAsync(lifecycle, cancellationToken).ConfigureAwait(false);
         var status = MapLifecycleStatus(lifecycleResult.Status);
+        var expectedGraphValidationEvidenceHash = lifecycle.Kind switch
+        {
+            GovernedLoopRevisionOperationKind.CreateDraft or GovernedLoopRevisionOperationKind.ReplaceDraft
+                => graphValidationEvidenceHash,
+            GovernedLoopRevisionOperationKind.Publish or GovernedLoopRevisionOperationKind.Rollback
+                => lifecycleResult.Evidence?.PublicationValidationEvidenceHash,
+            _ => null,
+        };
         var proof = await ResolveDurableProofAsync(
             lifecycle,
             lifecycleRequestHash,
             authoringRequestHash,
             graphToAppend,
+            expectedGraphValidationEvidenceHash,
             lifecycleResult,
             adapter.LastCommit,
             cancellationToken).ConfigureAwait(false);
@@ -420,6 +429,7 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
         string lifecycleRequestHash,
         string authoringRequestHash,
         GovernedLoopGraphDefinition? graphToAppend,
+        string? expectedGraphValidationEvidenceHash,
         GovernedLoopRevisionLifecycleMutationResult lifecycleResult,
         GovernedLoopGraphRevisionCommitResult? commit,
         CancellationToken cancellationToken)
@@ -447,6 +457,7 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
                     lifecycleRequestHash,
                     authoringRequestHash,
                     graphToAppend,
+                    expectedGraphValidationEvidenceHash,
                     lifecycleResult,
                     commit.StoreGeneration,
                     commit.Operation,
@@ -471,6 +482,7 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
             lifecycleRequestHash,
             authoringRequestHash,
             graphToAppend,
+            expectedGraphValidationEvidenceHash,
             lifecycleResult,
             read.StoreGeneration,
             read.ExistingOperation,
@@ -482,6 +494,7 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
         string lifecycleRequestHash,
         string authoringRequestHash,
         GovernedLoopGraphDefinition? graphToAppend,
+        string? expectedGraphValidationEvidenceHash,
         GovernedLoopRevisionLifecycleMutationResult lifecycleResult,
         long storeGeneration,
         GovernedLoopGraphRevisionStoredOperation? operation,
@@ -499,6 +512,21 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
                 authoringRequestHash,
                 evidence)
             || !SnapshotProvesOperation(snapshot, evidence))
+        {
+            return GovernedLoopGraphAuthoringDurableProof.Ambiguous;
+        }
+
+        var validatesGraphContent = lifecycle.Kind is GovernedLoopRevisionOperationKind.CreateDraft
+            or GovernedLoopRevisionOperationKind.ReplaceDraft
+            or GovernedLoopRevisionOperationKind.Publish
+            or GovernedLoopRevisionOperationKind.Rollback;
+        if (evidence.Outcome == GovernedLoopRevisionOperationOutcome.Committed
+            && validatesGraphContent
+            && (!IsSha256(expectedGraphValidationEvidenceHash)
+                || !string.Equals(
+                    operation.GraphValidationEvidenceHash,
+                    expectedGraphValidationEvidenceHash,
+                    StringComparison.Ordinal)))
         {
             return GovernedLoopGraphAuthoringDurableProof.Ambiguous;
         }

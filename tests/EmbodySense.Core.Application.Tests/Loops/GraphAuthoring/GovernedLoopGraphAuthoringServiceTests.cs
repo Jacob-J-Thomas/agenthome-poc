@@ -259,6 +259,35 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
         Assert.Equal(0, store.MutationReadsAfterCommit);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task First_commit_proof_rejects_missing_or_substituted_validation_binding(bool substituteHash)
+    {
+        var candidate = Candidate("revision-1");
+        var hostileHash = substituteHash ? Hash('f') : null;
+        Func<GovernedLoopGraphRevisionStoredOperation, GovernedLoopGraphRevisionStoredOperation> project =
+            operation => operation with { GraphValidationEvidenceHash = hostileHash };
+        var createStore = new InMemoryGraphStore { CommitOperationProjection = project };
+
+        var create = await Service(createStore, candidate).MutateAsync(
+            Authoring(Create("hostile-create", candidate), candidate));
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Ambiguous, create.Status);
+
+        var publishStore = new InMemoryGraphStore();
+        Assert.Equal(
+            GovernedLoopGraphAuthoringStatus.Committed,
+            (await Service(publishStore, candidate).MutateAsync(
+                Authoring(Create("create-for-hostile-publish", candidate), candidate))).Status);
+        publishStore.CommitOperationProjection = project;
+
+        var publish = await Service(publishStore, candidate).MutateAsync(
+            Authoring(Publish("hostile-publish", publishStore.Snapshot(candidate.GraphId!)!), null));
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Ambiguous, publish.Status);
+    }
+
     [Fact]
     public async Task Stale_store_conflict_does_not_poison_subsequent_exact_read_replay()
     {
@@ -680,6 +709,7 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
         internal bool ConflictAfterExternalExactCommit { get; set; }
         internal Exception? MutationReadExceptionAfterCommit { get; set; }
         internal Action? AfterCommit { get; set; }
+        internal Func<GovernedLoopGraphRevisionStoredOperation, GovernedLoopGraphRevisionStoredOperation>? CommitOperationProjection { get; set; }
         internal int MutationReadsAfterCommit { get; private set; }
         private bool _hasCommitted;
 
@@ -863,7 +893,7 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
             return Task.FromResult(new GovernedLoopGraphRevisionCommitResult(
                 GovernedLoopRevisionStoreCommitStatus.Committed,
                 Generation,
-                stored,
+                CommitOperationProjection?.Invoke(stored) ?? stored,
                 next));
         }
 
