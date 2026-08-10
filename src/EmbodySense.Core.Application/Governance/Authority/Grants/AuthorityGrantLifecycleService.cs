@@ -198,6 +198,8 @@ public sealed class AuthorityGrantLifecycleService : IAuthorityGrantLifecycleSer
             || !string.Equals(decision.OperationId, request.OperationId, StringComparison.Ordinal)
             || !string.Equals(decision.RequestHash, request.RequestHash, StringComparison.Ordinal)
             || !Equals(decision.ActorId, request.ActorId)
+            || decision.EvaluatedAtUtc.Offset != TimeSpan.Zero
+            || decision.EvaluatedAtUtc != evaluatedAtUtc
             || !AuthorityGrantEvidenceHash.IsSha256(decision.AuthorityEvidenceHash))
         {
             return (AuthorityGrantActorAuthorizationStatus.Unavailable, string.Empty);

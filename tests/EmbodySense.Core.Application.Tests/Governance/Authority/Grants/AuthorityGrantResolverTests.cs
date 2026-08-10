@@ -133,6 +133,32 @@ public sealed class AuthorityGrantResolverTests
     }
 
     [Theory]
+    [InlineData("future")]
+    [InlineData("default")]
+    [InlineData("non-utc")]
+    public async Task Invalid_or_future_role_lifecycle_time_fails_closed(string failure)
+    {
+        var harness = new Harness(ActiveSnapshot());
+        var lifecycle = AuthorityGrantApplicationTestFixture.RoleLifecycle();
+        harness.Role.Lifecycle = lifecycle with
+        {
+            UpdatedAtUtc = failure switch
+            {
+                "future" => AuthorityGrantApplicationTestFixture.Now.AddTicks(1),
+                "default" => default,
+                "non-utc" => lifecycle.UpdatedAtUtc.ToOffset(TimeSpan.FromHours(1)),
+                _ => throw new ArgumentOutOfRangeException(nameof(failure)),
+            },
+        };
+
+        var result = await harness.Resolver.ResolveAsync(Reference(harness.Snapshot.CurrentGrant));
+
+        Assert.Equal(AuthorityGrantResolutionStatus.RoleUnavailable, result.Status);
+        Assert.Empty(result.EffectiveCeiling.Capabilities);
+        Assert.Empty(result.DependencyEvidenceHash);
+    }
+
+    [Theory]
     [InlineData(33, AuthorityGrantResolutionStatus.Active)]
     [InlineData(129, AuthorityGrantResolutionStatus.LoopUnavailable)]
     public async Task Loop_binding_uses_the_loop_contract_bound_without_widening_the_requested_ceiling(
@@ -379,11 +405,12 @@ public sealed class AuthorityGrantResolverTests
     private sealed class RoleSource : IAuthorityGrantRoleSource
     {
         internal AuthorityGrantDependencyStatus Status { get; set; } = AuthorityGrantDependencyStatus.Active;
+        internal EmbodySense.Core.Application.ContextualRoles.Models.ContextualRoleLifecycleSnapshot? Lifecycle { get; set; }
 
         public Task<AuthorityGrantRoleResolution> ResolveAsync(AuthorityGrantRolePin? pin, CancellationToken cancellationToken = default)
         {
             var role = AuthorityGrantApplicationTestFixture.Role();
-            return Task.FromResult(new AuthorityGrantRoleResolution(Status, pin, role, AuthorityGrantApplicationTestFixture.RoleLifecycle(role), AuthorityGrantApplicationTestFixture.Hash64('6')));
+            return Task.FromResult(new AuthorityGrantRoleResolution(Status, pin, role, Lifecycle ?? AuthorityGrantApplicationTestFixture.RoleLifecycle(role), AuthorityGrantApplicationTestFixture.Hash64('6')));
         }
     }
 

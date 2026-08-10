@@ -301,6 +301,24 @@ public sealed class AuthorityGrantLifecycleServiceTests
         Assert.Equal(0, malformedHarness.Store.CommitCalls);
     }
 
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(1)]
+    public async Task Cached_or_replayed_authorization_from_another_trusted_instant_fails_closed(int minuteDelta)
+    {
+        var harness = new Harness();
+        harness.Authorizer.EchoEvaluatedAtUtc = AuthorityGrantApplicationTestFixture.Now.AddMinutes(minuteDelta);
+
+        var result = await harness.Service.MutateAsync(AuthorityGrantApplicationTestFixture.Request());
+
+        Assert.Equal(AuthorityGrantMutationStatus.Unavailable, result.Status);
+        Assert.Null(result.Grant);
+        Assert.Null(result.Evidence);
+        Assert.Equal(1, harness.Authorizer.Calls);
+        Assert.Equal(0, harness.Profile.Calls);
+        Assert.Equal(0, harness.Store.CommitCalls);
+    }
+
     [Fact]
     public async Task Invalid_request_and_authority_fence_failures_return_value_free_closed_results()
     {
@@ -939,11 +957,18 @@ public sealed class AuthorityGrantLifecycleServiceTests
         internal int Calls { get; private set; }
         internal AuthorityGrantActorAuthorizationStatus Status { get; set; } = AuthorityGrantActorAuthorizationStatus.Authorized;
         internal string? EchoOperationId { get; set; }
+        internal DateTimeOffset? EchoEvaluatedAtUtc { get; set; }
         internal DateTimeOffset LastEvaluatedAtUtc { get; private set; }
         internal Func<AuthorityGrantActorAuthorizationRequest, CancellationToken, Task<AuthorityGrantActorAuthorization>>? Handler { get; set; }
 
         internal AuthorityGrantActorAuthorization Decision(AuthorityGrantActorAuthorizationRequest request)
-            => new(Status, EchoOperationId ?? request.Request.OperationId, request.RequestHash, request.Request.ActorId, AuthorityGrantApplicationTestFixture.Hash64('b'));
+            => new(
+                Status,
+                EchoOperationId ?? request.Request.OperationId,
+                request.RequestHash,
+                request.Request.ActorId,
+                EchoEvaluatedAtUtc ?? request.EvaluatedAtUtc,
+                AuthorityGrantApplicationTestFixture.Hash64('b'));
 
         public Task<AuthorityGrantActorAuthorization> AuthorizeAsync(AuthorityGrantActorAuthorizationRequest request, CancellationToken cancellationToken = default)
         {

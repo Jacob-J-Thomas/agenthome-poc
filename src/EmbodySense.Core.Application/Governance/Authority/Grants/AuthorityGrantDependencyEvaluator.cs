@@ -71,7 +71,7 @@ internal sealed class AuthorityGrantDependencyEvaluator
             return (AuthorityGrantOperationFailureCode.RoleUnavailable, string.Empty);
         }
 
-        if (!IsExactActiveRole(role, binding.Role))
+        if (!IsExactActiveRole(role, binding.Role, evaluatedAtUtc))
         {
             return (AuthorityGrantOperationFailureCode.RoleUnavailable, string.Empty);
         }
@@ -140,7 +140,10 @@ internal sealed class AuthorityGrantDependencyEvaluator
         return hash!.Equals(pin.ContentHash) && profile.Status == AuthorityProfileStatus.Active;
     }
 
-    private static bool IsExactActiveRole(AuthorityGrantRoleResolution? resolution, AuthorityGrantRolePin pin)
+    private static bool IsExactActiveRole(
+        AuthorityGrantRoleResolution? resolution,
+        AuthorityGrantRolePin pin,
+        DateTimeOffset evaluatedAtUtc)
         => resolution is
         {
             Status: AuthorityGrantDependencyStatus.Active,
@@ -154,7 +157,10 @@ internal sealed class AuthorityGrantDependencyEvaluator
             && string.Equals(revision.ContentHash, pin.ContentHash, StringComparison.Ordinal)
             && ContextualRoleRevisionValidator.Validate(revision).IsValid
             && Equals(lifecycle.CurrentIdentity, pin.Identity)
-            && lifecycle.State == ContextualRoleLifecycleState.Active;
+            && lifecycle.State == ContextualRoleLifecycleState.Active
+            && lifecycle.UpdatedAtUtc != default
+            && lifecycle.UpdatedAtUtc.Offset == TimeSpan.Zero
+            && lifecycle.UpdatedAtUtc <= evaluatedAtUtc;
 
     private static bool IsExactActiveLoop(
         GovernedLoopPublishedRevisionResolution? publication,
