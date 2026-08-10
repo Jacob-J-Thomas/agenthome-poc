@@ -5,7 +5,7 @@ using EmbodySense.Core.Common.HumanInput.Models;
 
 namespace EmbodySense.Core.Common.HumanInput.Responses.Models;
 
-/// <summary>Retains one bounded append-only authenticated-response operation without private response content, explanation, or caller assertions.</summary>
+/// <summary>Retains one bounded append-only authenticated-response operation, including the exact attempted artifact only after response content was inspected.</summary>
 /// <param name="SchemaVersion">The operation-evidence schema version.</param>
 /// <param name="OperationId">The workspace-global idempotency identifier.</param>
 /// <param name="CommandHash">The canonical exact-intent command digest.</param>
@@ -19,6 +19,7 @@ namespace EmbodySense.Core.Common.HumanInput.Responses.Models;
 /// <param name="ExpectedLifecycleStatus">The authenticated optimistic pending lifecycle status.</param>
 /// <param name="PreviousHead">The exact request head observed before the operation, when one existed.</param>
 /// <param name="ResultHead">The exact request head after commit or deterministic no-change disposition, when one existed.</param>
+/// <param name="AttemptedResponse">The exact bounded attempted response for an inspected submit failure, or null before inspection and after commit.</param>
 /// <param name="SubmittedResponse">The exact immutable response appended by a successful submit.</param>
 /// <param name="TargetResponses">The exact withdrawn response, or the exact manually selected response set in caller-authored order.</param>
 /// <param name="Selection">The exact deterministic response selection committed atomically with an answered request head.</param>
@@ -41,6 +42,7 @@ public sealed partial record HumanInputResponseOperationEvidence(
     HumanInputRequestLifecycleStatus ExpectedLifecycleStatus,
     HumanInputRequestLifecycleHead? PreviousHead,
     HumanInputRequestLifecycleHead? ResultHead,
+    HumanInputResponseArtifact? AttemptedResponse,
     HumanInputResponseReference? SubmittedResponse,
     ImmutableArray<HumanInputResponseReference> TargetResponses,
     HumanInputResponseSelectionReference? Selection,

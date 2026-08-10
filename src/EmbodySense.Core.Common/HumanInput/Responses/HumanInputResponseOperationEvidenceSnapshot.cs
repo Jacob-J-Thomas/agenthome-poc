@@ -35,6 +35,17 @@ public static class HumanInputResponseOperationEvidenceSnapshot
                 targets[index] = Snapshot(evidence.TargetResponses[index]);
             }
 
+            HumanInputResponseArtifact? attemptedResponse = null;
+            if (evidence.AttemptedResponse is not null
+                && (!HumanInputResponseArtifactSnapshot.TryCaptureBoundedAttempt(evidence.AttemptedResponse, out attemptedResponse, out _)
+                    || attemptedResponse is null))
+            {
+                snapshot = null;
+                validation = new HumanInputResponseValidationResult(
+                    [new HumanInputResponseValidationError(HumanInputResponseValidationErrorCode.InvalidEvidenceShape, "$.attemptedResponse", "The attempted response must be a stable bounded artifact with matching hashes.")]);
+                return false;
+            }
+
             snapshot = evidence with
             {
                 Request = Snapshot(evidence.Request),
@@ -42,6 +53,7 @@ public static class HumanInputResponseOperationEvidenceSnapshot
                 ObservedBinding = evidence.ObservedBinding is null ? null : Snapshot(evidence.ObservedBinding),
                 PreviousHead = evidence.PreviousHead is null ? null : Snapshot(evidence.PreviousHead),
                 ResultHead = evidence.ResultHead is null ? null : Snapshot(evidence.ResultHead),
+                AttemptedResponse = attemptedResponse,
                 SubmittedResponse = evidence.SubmittedResponse is null ? null : Snapshot(evidence.SubmittedResponse),
                 TargetResponses = targets.ToImmutableArray(),
                 Selection = evidence.Selection is null ? null : Snapshot(evidence.Selection)

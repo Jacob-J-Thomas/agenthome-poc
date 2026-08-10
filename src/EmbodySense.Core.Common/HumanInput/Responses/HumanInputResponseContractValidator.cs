@@ -294,6 +294,10 @@ public static class HumanInputResponseContractValidator
         ValidateSha256(evidence.AuthenticationEvidenceHash, "$.authenticationEvidenceHash", HumanInputResponseValidationErrorCode.InvalidAuthenticationEvidence, errors);
         ValidateSha256(evidence.EligibilityEvidenceHash, "$.eligibilityEvidenceHash", HumanInputResponseValidationErrorCode.InvalidEligibilityEvidence, errors);
         ValidateUtc(evidence.RecordedAtUtc, "$.recordedAtUtc", errors);
+        if (!HumanInputResponseEligibilityEvidenceHash.Matches(evidence))
+        {
+            Add(errors, HumanInputResponseValidationErrorCode.InvalidEligibilityEvidence, "$.eligibilityEvidenceHash", "Eligibility evidence must match every exact retained authority-bearing input.");
+        }
         return Result(errors);
     }
 
@@ -561,6 +565,29 @@ public static class HumanInputResponseContractValidator
             }
         }
 
+        var attemptedResponseRequired = RequiresAttemptedResponse(evidence);
+        if (attemptedResponseRequired != (evidence.AttemptedResponse is not null))
+        {
+            Add(errors, HumanInputResponseValidationErrorCode.InvalidEvidenceShape, "$.attemptedResponse", "An exact attempted response is retained only for a submit failure reached after response-content inspection.");
+        }
+        if (evidence.AttemptedResponse is not null)
+        {
+            if (!HumanInputResponseArtifactSnapshot.TryCaptureBoundedAttempt(evidence.AttemptedResponse, out var attempt, out _)
+                || attempt is null)
+            {
+                Add(errors, HumanInputResponseValidationErrorCode.InvalidEvidenceShape, "$.attemptedResponse", "The attempted response must be a bounded immutable artifact with matching value and artifact hashes.");
+            }
+            else if (!Equals(attempt.Request, evidence.Request)
+                || !Equals(attempt.Binding, evidence.ExpectedBinding)
+                || !Equals(attempt.Binding, evidence.ObservedBinding)
+                || !Equals(attempt.ActorId, evidence.ActorId)
+                || !string.Equals(attempt.RespondentRoleId, evidence.ActorRoleId, StringComparison.Ordinal)
+                || attempt.SubmittedAtUtc != evidence.RecordedAtUtc)
+            {
+                Add(errors, HumanInputResponseValidationErrorCode.InvalidEvidenceShape, "$.attemptedResponse", "The attempted response must exactly match the inspected request, trusted binding, actor, role, and evidence time.");
+            }
+        }
+
         switch (evidence.Kind)
         {
             case HumanInputResponseOperationKind.Submit:
@@ -584,6 +611,14 @@ public static class HumanInputResponseContractValidator
                 break;
         }
     }
+
+    private static bool RequiresAttemptedResponse(HumanInputResponseOperationEvidence evidence)
+        => evidence.Kind == HumanInputResponseOperationKind.Submit
+            && evidence.Outcome != HumanInputResponseOperationOutcome.Committed
+            && evidence.FailureCode is HumanInputResponseOperationFailureCode.MalformedResponse
+                or HumanInputResponseOperationFailureCode.DuplicateResponse
+                or HumanInputResponseOperationFailureCode.ResponseLimitExceeded
+                or HumanInputResponseOperationFailureCode.LifecycleVersionLimitExceeded;
 
     private static void ValidateVocabulary(HumanInputResponseOperationEvidence evidence, List<HumanInputResponseValidationError> errors)
     {
