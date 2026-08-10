@@ -478,7 +478,7 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
             ? null
             : HumanInputResponseSelectionReference.Create(plan.SelectionToAppend);
         HumanInputResponseArtifact? attempted = null;
-        if (RequiresAttemptedResponse(plan)
+        if (RequiresAttemptedResponse(command, plan)
             && (observedRequest is null
                 || actorRoleId is null
                 || !HumanInputResponsePolicyEvaluator.TryCreateAttempt(
@@ -529,8 +529,11 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
             : null;
     }
 
-    private static bool RequiresAttemptedResponse(HumanInputResponseLifecycleMutationPlan plan)
-        => plan.Outcome != HumanInputResponseOperationOutcome.Committed
+    private static bool RequiresAttemptedResponse(
+        HumanInputResponseLifecycleCommand command,
+        HumanInputResponseLifecycleMutationPlan plan)
+        => command.Kind == HumanInputResponseOperationKind.Submit
+            && plan.Outcome != HumanInputResponseOperationOutcome.Committed
             && plan.FailureCode is HumanInputResponseOperationFailureCode.MalformedResponse
                 or HumanInputResponseOperationFailureCode.DuplicateResponse
                 or HumanInputResponseOperationFailureCode.ResponseLimitExceeded
