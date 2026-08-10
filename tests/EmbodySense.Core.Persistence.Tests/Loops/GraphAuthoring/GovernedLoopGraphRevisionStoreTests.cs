@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Win32.SafeHandles;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
@@ -513,6 +514,204 @@ public sealed class GovernedLoopGraphRevisionStoreTests
     }
 
     [Fact]
+    public async Task Exact_artifact_destination_is_reflushed_after_failed_final_rename_before_lifecycle_visibility()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var mutation = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
+        var barrier = new FailOnceDestinationDurabilityBarrier(ArtifactPath(paths, graph));
+        var options = new GovernedLoopGraphRevisionStoreOptions
+        {
+            DurableBoundaryObserver = (boundary, _) =>
+            {
+                if (boundary == GovernedLoopGraphRevisionPersistenceBoundary.IntentPublished)
+                {
+                    Assert.True(barrier.TargetFlushCount >= 2);
+                }
+                return ValueTask.CompletedTask;
+            },
+        };
+
+        var interrupted = await Store(paths, trust, options, barrier).CommitAsync(mutation);
+        var recovered = await Store(paths, trust, options, barrier).CommitAsync(mutation);
+        var visible = await Store(paths, trust).ReadGraphAsync(graph.GraphId);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, interrupted.Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, recovered.Status);
+        Assert.True(barrier.TargetFlushCount >= 2);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, visible.Status);
+    }
+
+    [Fact]
+    public async Task Exact_intent_destination_is_reflushed_after_failed_final_rename_before_trust_and_lifecycle()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var mutation = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
+        var intentPath = Path.Combine(GraphRoot(paths), "operations", "create-one.json");
+        var barrier = new FailOnceDestinationDurabilityBarrier(intentPath);
+        var options = new GovernedLoopGraphRevisionStoreOptions
+        {
+            DurableBoundaryObserver = (boundary, _) =>
+            {
+                if (boundary == GovernedLoopGraphRevisionPersistenceBoundary.TrustAdvanced)
+                {
+                    Assert.True(barrier.TargetFlushCount >= 2);
+                }
+                return ValueTask.CompletedTask;
+            },
+        };
+
+        var interrupted = await Store(paths, trust, options, barrier).CommitAsync(mutation);
+        var recovered = await Store(paths, trust, options, barrier).CommitAsync(mutation);
+        var visible = await Store(paths, trust).ReadGraphAsync(graph.GraphId);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, interrupted.Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, recovered.Status);
+        Assert.True(barrier.TargetFlushCount >= 2);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, visible.Status);
+    }
+
+    [Fact]
+    public async Task Exact_race_winner_destination_is_reflushed_before_intent_trust_and_lifecycle()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var mutation = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
+        var artifactPath = ArtifactPath(paths, graph);
+        var barrier = new CompetingExactDestinationDurabilityBarrier(artifactPath);
+
+        var interrupted = await Store(paths, trust, durabilityBarrier: barrier).CommitAsync(mutation);
+
+        Assert.True(barrier.InjectedCompetingDestination);
+        Assert.Equal(1, barrier.TargetFlushCount);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, interrupted.Status);
+        Assert.True(File.Exists(artifactPath));
+        Assert.False(File.Exists(Path.Combine(GraphRoot(paths), "operations", "create-one.json")));
+
+        var recovered = await Store(paths, trust, durabilityBarrier: barrier).CommitAsync(mutation);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, recovered.Status);
+        Assert.Equal(2, barrier.TargetFlushCount);
+        Assert.Equal(
+            GovernedLoopRevisionStoreReadStatus.Ready,
+            (await Store(paths, trust).ReadGraphAsync(graph.GraphId)).Status);
+    }
+
+    [Fact]
+    public async Task Malformed_nested_lifecycle_mutations_are_rejected_before_graph_storage_exists()
+    {
+        var graph = Graph();
+        var valid = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
+        var lifecycle = valid.LifecycleMutation;
+        var malformed = new[]
+        {
+            valid with { LifecycleMutation = lifecycle with { ExpectedStoreGeneration = -1 } },
+            valid with { LifecycleMutation = lifecycle with { Operation = lifecycle.Operation with { ActorId = "BAD ID" } } },
+            valid with
+            {
+                LifecycleMutation = lifecycle with
+                {
+                    HeadToWrite = lifecycle.HeadToWrite! with { LifecycleVersion = 2 },
+                },
+            },
+            valid with
+            {
+                LifecycleMutation = lifecycle with
+                {
+                    ArtifactToAppend = lifecycle.ArtifactToAppend! with { CreatedByActorId = "actor-two" },
+                },
+            },
+            valid with { GraphValidationEvidenceHash = null },
+        };
+
+        foreach (var mutation in malformed)
+        {
+            using var workspace = new TestWorkspace();
+            var paths = new WorkspacePaths(workspace.RootPath);
+
+            var result = await Store(paths, new TestCapabilityLifecycleTrustProvider()).CommitAsync(mutation);
+
+            Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Unavailable, result.Status);
+            Assert.False(Directory.Exists(GraphRoot(paths)));
+        }
+    }
+
+    [Fact]
+    public async Task Committed_validation_evidence_matrix_rejects_mismatch_without_reserving_operations()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var created = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
+        var store = Store(paths, trust);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, (await store.CommitAsync(created)).Status);
+
+        var publish = Publish(created, "publish-one", HashB, HashC, 1, _time.AddMinutes(1));
+        var publishMismatch = publish with { GraphValidationEvidenceHash = HashB };
+        var publishResult = await store.CommitAsync(publishMismatch);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Unavailable, publishResult.Status);
+        Assert.False(File.Exists(Path.Combine(GraphRoot(paths), "operations", "publish-one.json")));
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, (await store.CommitAsync(publish)).Status);
+        var disable = Disable(publish, "disable-one", HashA, HashB, 2, _time.AddMinutes(2));
+        var disableResult = await store.CommitAsync(disable with { GraphValidationEvidenceHash = HashB });
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Unavailable, disableResult.Status);
+        Assert.False(File.Exists(Path.Combine(GraphRoot(paths), "operations", "disable-one.json")));
+
+        using var rollbackWorkspace = new TestWorkspace();
+        var rollbackPaths = new WorkspacePaths(rollbackWorkspace.RootPath);
+        var rollback = Rollback(Graph(revisionId: "revision-three"), "rollback-one", HashA, HashB, 0, _time);
+        Assert.True(GovernedLoopRevisionStoreMutationGuard.IsValid(rollback.LifecycleMutation));
+        var rollbackResult = await Store(rollbackPaths, new TestCapabilityLifecycleTrustProvider())
+            .CommitAsync(rollback with { GraphValidationEvidenceHash = HashB });
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Unavailable, rollbackResult.Status);
+        Assert.False(Directory.Exists(GraphRoot(rollbackPaths)));
+    }
+
+    [Fact]
+    public async Task Noncommitted_missing_replace_may_retain_valid_graph_validation_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var graph = Graph();
+        var committedShape = CreateDraft(graph, "replace-one", HashA, HashB, 0, _time);
+        var failureOperation = committedShape.LifecycleMutation.Operation with
+        {
+            Kind = GovernedLoopRevisionOperationKind.ReplaceDraft,
+            Outcome = GovernedLoopRevisionOperationOutcome.NotFound,
+            FailureCode = GovernedLoopRevisionOperationFailureCode.LifecycleNotFound,
+            ResultHead = null,
+            TargetRevision = Graph(revisionId: "missing-revision").RevisionReference,
+        };
+        var failure = new GovernedLoopGraphRevisionStoreMutation(
+            new GovernedLoopRevisionStoreMutation(graph.GraphId, 0, failureOperation, null, null),
+            null,
+            HashB,
+            HashC);
+        var operationValidation = GovernedLoopRevisionContractValidator.Validate(failureOperation);
+        Assert.True(operationValidation.IsValid, string.Join(" | ", operationValidation.Errors.Select(error => $"{error.Path}: {error.Message}")));
+        Assert.True(GovernedLoopRevisionStoreMutationGuard.IsValid(failure.LifecycleMutation));
+
+        var result = await Store(paths, new TestCapabilityLifecycleTrustProvider()).CommitAsync(failure);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, result.Status);
+        Assert.Equal(GovernedLoopRevisionOperationOutcome.NotFound, result.Operation!.LifecycleOperation!.Evidence.Outcome);
+        Assert.Equal(HashC, result.Operation.GraphValidationEvidenceHash);
+        Assert.True(File.Exists(Path.Combine(GraphRoot(paths), "operations", "replace-one.json")));
+    }
+
+    [Fact]
     public async Task Mutation_read_returns_authenticated_bound_operation_for_changed_request_identity()
     {
         using var workspace = new TestWorkspace();
@@ -692,7 +891,8 @@ public sealed class GovernedLoopGraphRevisionStoreTests
     private static GovernedLoopGraphRevisionStore Store(
         WorkspacePaths paths,
         ICapabilityCatalogTrustProvider trust,
-        GovernedLoopGraphRevisionStoreOptions? graphOptions = null)
+        GovernedLoopGraphRevisionStoreOptions? graphOptions = null,
+        ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null)
     {
         var authority = new CapabilityAuthorityTransaction(paths);
         var lifecycle = new GovernedLoopRevisionLifecycleStore(
@@ -704,6 +904,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             lifecycle,
             trust,
             graphOptions,
+            durabilityBarrier,
             authorityTransaction: authority);
     }
 
@@ -761,7 +962,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             new GovernedLoopRevisionStoreMutation(graph.GraphId, generation, operation, artifact, head),
             graph,
             authoringRequestHash,
-            null);
+            HashC);
     }
 
     private static GovernedLoopGraphRevisionStoreMutation ReplaceDraft(
@@ -812,7 +1013,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             new GovernedLoopRevisionStoreMutation(graph.GraphId, generation, operation, artifact, head),
             graph,
             authoringRequestHash,
-            null);
+            HashC);
     }
 
     private static GovernedLoopGraphRevisionStoreMutation Publish(
@@ -854,6 +1055,110 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         return new GovernedLoopGraphRevisionStoreMutation(
             new GovernedLoopRevisionStoreMutation(previousHead.GraphId, generation, operation, null, head),
             null,
+            authoringRequestHash,
+            HashC);
+    }
+
+    private static GovernedLoopGraphRevisionStoreMutation Disable(
+        GovernedLoopGraphRevisionStoreMutation previous,
+        string operationId,
+        string lifecycleRequestHash,
+        string authoringRequestHash,
+        long generation,
+        DateTimeOffset time)
+    {
+        var previousHead = previous.LifecycleMutation.HeadToWrite!;
+        var target = previousHead.PublishedRevision!.Revision;
+        var head = GovernedLoopRevisionLifecycleHeadFactory.Create(
+            1,
+            previousHead.GraphId,
+            previousHead.LifecycleVersion + 1,
+            GovernedLoopRevisionLifecycleStatus.Disabled,
+            previousHead.DraftRevision,
+            previousHead.PublishedRevision,
+            operationId,
+            time);
+        var operation = GovernedLoopRevisionOperationEvidenceFactory.Create(
+            1,
+            operationId,
+            "actor-one",
+            lifecycleRequestHash,
+            GovernedLoopRevisionOperationKind.Disable,
+            GovernedLoopRevisionOperationOutcome.Committed,
+            GovernedLoopRevisionOperationFailureCode.None,
+            previousHead,
+            head,
+            null,
+            target,
+            null,
+            HashA,
+            null,
+            time);
+        return new GovernedLoopGraphRevisionStoreMutation(
+            new GovernedLoopRevisionStoreMutation(previousHead.GraphId, generation, operation, null, head),
+            null,
+            authoringRequestHash,
+            null);
+    }
+
+    private static GovernedLoopGraphRevisionStoreMutation Rollback(
+        GovernedLoopGraphDefinition graph,
+        string operationId,
+        string lifecycleRequestHash,
+        string authoringRequestHash,
+        long generation,
+        DateTimeOffset time)
+    {
+        var source = Graph(revisionId: "revision-one").RevisionReference;
+        var current = Graph(revisionId: "revision-two").RevisionReference;
+        var sourcePin = GovernedLoopRevisionPublicationPinFactory.Create(1, source, "publish-source", HashA);
+        var currentPin = GovernedLoopRevisionPublicationPinFactory.Create(1, current, "publish-current", HashB);
+        var previousHead = GovernedLoopRevisionLifecycleHeadFactory.Create(
+            1,
+            graph.GraphId,
+            4,
+            GovernedLoopRevisionLifecycleStatus.Published,
+            null,
+            currentPin,
+            "publish-current",
+            time.AddMinutes(-1));
+        var resultPin = GovernedLoopRevisionPublicationPinFactory.Create(1, graph.RevisionReference, operationId, HashC);
+        var head = GovernedLoopRevisionLifecycleHeadFactory.Create(
+            1,
+            graph.GraphId,
+            5,
+            GovernedLoopRevisionLifecycleStatus.Published,
+            null,
+            resultPin,
+            operationId,
+            time);
+        var artifact = GovernedLoopRevisionArtifactFactory.Create(
+            1,
+            graph.RevisionReference,
+            current,
+            sourcePin,
+            operationId,
+            "actor-one",
+            time);
+        var operation = GovernedLoopRevisionOperationEvidenceFactory.Create(
+            1,
+            operationId,
+            "actor-one",
+            lifecycleRequestHash,
+            GovernedLoopRevisionOperationKind.Rollback,
+            GovernedLoopRevisionOperationOutcome.Committed,
+            GovernedLoopRevisionOperationFailureCode.None,
+            previousHead,
+            head,
+            graph.RevisionReference,
+            current,
+            sourcePin,
+            HashA,
+            HashC,
+            time);
+        return new GovernedLoopGraphRevisionStoreMutation(
+            new GovernedLoopRevisionStoreMutation(graph.GraphId, generation, operation, artifact, head),
+            graph,
             authoringRequestHash,
             HashC);
     }
@@ -1155,6 +1460,94 @@ public sealed class GovernedLoopGraphRevisionStoreTests
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private sealed class FailOnceDestinationDurabilityBarrier(string destination) : ICapabilityCatalogDurabilityBarrier
+    {
+        public int TargetFlushCount { get; private set; }
+
+        public void BeforeDirectoryMove(string stagingPath, string destinationPath)
+        {
+            _ = stagingPath;
+            _ = destinationPath;
+        }
+
+        public void AfterDirectoryMove(string stagingPath, string destinationPath)
+        {
+            _ = stagingPath;
+            _ = destinationPath;
+        }
+
+        public void FlushAfterDirectoryCreate(string directoryPath, SafeFileHandle parentDirectory)
+        {
+            _ = directoryPath;
+            _ = parentDirectory;
+        }
+
+        public ValueTask FlushAfterRenameAsync(string destinationPath, SafeFileHandle parentDirectory)
+        {
+            _ = parentDirectory;
+            if (!string.Equals(destinationPath, destination, PathComparison()))
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            TargetFlushCount++;
+            return TargetFlushCount == 1
+                ? ValueTask.FromException(new IOException("Injected first final-destination durability failure."))
+                : ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class CompetingExactDestinationDurabilityBarrier(string destination) : ICapabilityCatalogDurabilityBarrier
+    {
+        public bool InjectedCompetingDestination { get; private set; }
+
+        public int TargetFlushCount { get; private set; }
+
+        public void BeforeDirectoryMove(string stagingPath, string destinationPath)
+        {
+            _ = stagingPath;
+            _ = destinationPath;
+        }
+
+        public void AfterDirectoryMove(string stagingPath, string destinationPath)
+        {
+            _ = stagingPath;
+            _ = destinationPath;
+        }
+
+        public void FlushAfterDirectoryCreate(string directoryPath, SafeFileHandle parentDirectory)
+        {
+            _ = directoryPath;
+            _ = parentDirectory;
+        }
+
+        public ValueTask FlushAfterRenameAsync(string destinationPath, SafeFileHandle parentDirectory)
+        {
+            _ = parentDirectory;
+            if (!InjectedCompetingDestination
+                && destinationPath.EndsWith(".ready", StringComparison.Ordinal)
+                && string.Equals(Path.GetDirectoryName(destinationPath), Path.GetDirectoryName(destination), PathComparison())
+                && Path.GetFileName(destinationPath).StartsWith(
+                    "." + Path.GetFileName(destination) + ".",
+                    StringComparison.Ordinal))
+            {
+                File.Copy(destinationPath, destination);
+                InjectedCompetingDestination = true;
+                return ValueTask.CompletedTask;
+            }
+
+            if (!string.Equals(destinationPath, destination, PathComparison()))
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            TargetFlushCount++;
+            return TargetFlushCount == 1
+                ? ValueTask.FromException(new IOException("Injected competing-destination durability failure."))
+                : ValueTask.CompletedTask;
+        }
     }
 
     private sealed class HardLinkingPublicationObserver(

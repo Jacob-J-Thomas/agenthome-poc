@@ -429,6 +429,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             {
                 throw new IOException("Capability catalog immutable-artifact identity is already bound to different bytes.");
             }
+            await _durabilityBarrier.FlushAfterRenameAsync(safePath, parent);
             return false;
         }
 
@@ -509,6 +510,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
                 throw new IOException("Capability catalog immutable-artifact identity is already bound to different bytes.");
             }
 
+            await _durabilityBarrier.FlushAfterRenameAsync(safePath, parent);
             return false;
         }
         finally

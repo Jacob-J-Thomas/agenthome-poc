@@ -547,6 +547,10 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
         {
             markDurableWorkStarted();
             await RequireExistingPayloadAsync(session, existingIntent, proposedGraph, cancellationToken);
+            await session.WriteBytesImmutablyAsync(
+                _paths.OperationPath(operationId),
+                GovernedLoopGraphRevisionStoreJson.Serialize(existingIntent),
+                cancellationToken);
             await ReconcileIntentTrustAsync(existingIntent, cancellationToken);
         }
 
@@ -563,8 +567,15 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
             committedOperation = TerminalOperation(existingIntent, committed.Operation);
         }
 
+        var permitsMissingSnapshot = committedOperation?.LifecycleOperation?.Evidence is
+        {
+            Outcome: GovernedLoopRevisionOperationOutcome.NotFound,
+            FailureCode: GovernedLoopRevisionOperationFailureCode.LifecycleNotFound,
+            PreviousHead: null,
+            ResultHead: null,
+        };
         if (committed.Status is GovernedLoopRevisionStoreCommitStatus.Committed or GovernedLoopRevisionStoreCommitStatus.Replayed
-            && (committedOperation is null || committedSnapshot is null))
+            && (committedOperation is null || (committedSnapshot is null && !permitsMissingSnapshot)))
         {
             return Commit(GovernedLoopRevisionStoreCommitStatus.Ambiguous);
         }
@@ -688,6 +699,11 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
         {
             throw new IOException("The exact graph-authoring retry changed immutable payload bytes or identity.");
         }
+
+        await session.WriteBytesImmutablyAsync(
+            _paths.ArtifactPath(proposedGraph.GraphId, proposedGraph.RevisionId),
+            bytes,
+            cancellationToken);
     }
 
     private static GovernedLoopGraphRevisionStoredOperation TerminalOperation(
@@ -902,6 +918,10 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
             }
 
             var next = direct[0];
+            await session.WriteBytesImmutablyAsync(
+                _paths.OperationPath(next.OperationId),
+                GovernedLoopGraphRevisionStoreJson.Serialize(next),
+                cancellationToken);
             var advanced = await _trustProvider.AdvanceAsync(
                 workspaceIdentity,
                 current.CurrentGeneration,
@@ -1170,7 +1190,8 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
         ArgumentNullException.ThrowIfNull(mutation.LifecycleMutation);
         ArgumentNullException.ThrowIfNull(mutation.LifecycleMutation.Operation);
         var lifecycle = mutation.LifecycleMutation;
-        if (!IsMutableGraphId(lifecycle.GraphId)
+        if (!GovernedLoopRevisionStoreMutationGuard.IsValid(lifecycle)
+            || !IsMutableGraphId(lifecycle.GraphId)
             || !IsIdentifier(lifecycle.Operation.OperationId)
             || !IsHash(lifecycle.Operation.RequestHash)
             || !IsHash(mutation.AuthoringRequestHash)
@@ -1178,6 +1199,28 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
             || (lifecycle.ArtifactToAppend is null) != (mutation.GraphToAppend is null))
         {
             throw new ArgumentException("The graph-authoring store mutation is invalid.", nameof(mutation));
+        }
+
+        var committed = lifecycle.Operation.Outcome == GovernedLoopRevisionOperationOutcome.Committed;
+        var validationEvidenceIsValid = !committed
+            || lifecycle.Operation.Kind switch
+            {
+                GovernedLoopRevisionOperationKind.CreateDraft
+                    or GovernedLoopRevisionOperationKind.ReplaceDraft
+                    => mutation.GraphValidationEvidenceHash is not null,
+                GovernedLoopRevisionOperationKind.Publish
+                    or GovernedLoopRevisionOperationKind.Rollback
+                    => string.Equals(
+                        mutation.GraphValidationEvidenceHash,
+                        lifecycle.Operation.PublicationValidationEvidenceHash,
+                        StringComparison.Ordinal),
+                _ => mutation.GraphValidationEvidenceHash is null,
+            };
+        if (!validationEvidenceIsValid)
+        {
+            throw new ArgumentException(
+                "The graph-authoring validation evidence does not match the committed lifecycle operation.",
+                nameof(mutation));
         }
 
         if (mutation.GraphToAppend is null)
