@@ -13,7 +13,7 @@ namespace EmbodySense.Core.Persistence.ContextualRoles;
 /// an atomic current-state projection, immutable bounded proof, and immutable replay result. Every artifact is schema 1 and
 /// bound to a physical-workspace anchor. Roles remain declarations and never grant authority, approval, or credentials.
 /// </remarks>
-public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutationPort, IContextualRoleRevisionReader, IContextualRoleLifecycleReader, IDisposable
+public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutationPort, IContextualRoleRevisionReader, IContextualRoleLifecycleReader, IContextualRoleCatalogReader, IDisposable
 {
     private const int SchemaVersion = 1;
     private readonly string _workspaceId;
@@ -152,7 +152,7 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
                 return new ContextualRoleRevisionReadResult(ContextualRoleRevisionReadStatus.NotFound, null, ContextualRoleRevisionDisposition.Unknown, []);
             }
 
-            using var mutationLock = _guard.TryAcquireMutationLock();
+            using var mutationLock = _guard.TryAcquireExistingMutationLock();
             if (mutationLock is null)
             {
                 return new ContextualRoleRevisionReadResult(ContextualRoleRevisionReadStatus.Unavailable, null, ContextualRoleRevisionDisposition.Unknown, []);
@@ -208,7 +208,7 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
                 return new ContextualRoleLifecycleReadResult(ContextualRoleLifecycleReadStatus.NotFound, null);
             }
 
-            using var mutationLock = _guard.TryAcquireMutationLock();
+            using var mutationLock = _guard.TryAcquireExistingMutationLock();
             if (mutationLock is null)
             {
                 return new ContextualRoleLifecycleReadResult(ContextualRoleLifecycleReadStatus.Unavailable, null);
@@ -232,6 +232,66 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             return new ContextualRoleLifecycleReadResult(ContextualRoleLifecycleReadStatus.Unavailable, null);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<ContextualRoleCatalogReadResult> ReadCatalogAsync(ContextualRoleCatalogReadRequest request, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (request is null
+            || request.MaximumCount is < 1 or > ContextualRoleCatalogLimits.MaximumPageSize
+            || request.StartAfterRoleId is not null && !ContextualRoleId.IsValid(request.StartAfterRoleId))
+        {
+            return new ContextualRoleCatalogReadResult(ContextualRoleCatalogReadStatus.Invalid, [], null);
+        }
+
+        try
+        {
+            if (!_guard.StoreExists())
+            {
+                return new ContextualRoleCatalogReadResult(ContextualRoleCatalogReadStatus.Available, [], null);
+            }
+
+            using var mutationLock = _guard.TryAcquireExistingMutationLock();
+            if (mutationLock is null)
+            {
+                return new ContextualRoleCatalogReadResult(ContextualRoleCatalogReadStatus.Unavailable, [], null);
+            }
+
+            var anchor = await ReadRequiredAnchorAsync(cancellationToken);
+            await ValidateWorkspaceAsync(anchor, allowedPendingOperationId: null, cancellationToken);
+            var roleIds = _guard.EnumerateJsonFiles(_paths.States)
+                .Select(path => Path.GetFileNameWithoutExtension(path))
+                .Where(roleId => request.StartAfterRoleId is null || string.Compare(roleId, request.StartAfterRoleId, StringComparison.Ordinal) > 0)
+                .Order(StringComparer.Ordinal)
+                .Take(request.MaximumCount + 1)
+                .ToArray();
+            var hasMore = roleIds.Length > request.MaximumCount;
+            var pageRoleIds = hasMore ? roleIds[..request.MaximumCount] : roleIds;
+            var entries = new List<ContextualRoleCatalogEntry>(pageRoleIds.Length);
+            foreach (var roleId in pageRoleIds)
+            {
+                var state = await ReadStateIfExistsAsync(roleId, anchor.IntegrityHash, cancellationToken) ?? throw new FormatException("A cataloged contextual-role state disappeared after validation.");
+                var revision = await ReadRevisionIfExistsAsync(state.CurrentIdentity, anchor.IntegrityHash, cancellationToken) ?? throw new FormatException("A cataloged contextual-role revision disappeared after validation.");
+                entries.Add(new ContextualRoleCatalogEntry(
+                    revision.Revision,
+                    new ContextualRoleLifecycleSnapshot(SchemaVersion, state.RoleId, state.CurrentIdentity, state.State, state.LastOperationId, state.LastMutationKind, state.UpdatedAtUtc)));
+            }
+
+            return new ContextualRoleCatalogReadResult(ContextualRoleCatalogReadStatus.Available, entries, hasMore ? entries[^1].Revision.Identity.RoleId : null);
+        }
+        catch (FormatException)
+        {
+            return new ContextualRoleCatalogReadResult(ContextualRoleCatalogReadStatus.Ambiguous, [], null);
+        }
+        catch (InvalidOperationException)
+        {
+            return new ContextualRoleCatalogReadResult(ContextualRoleCatalogReadStatus.Ambiguous, [], null);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return new ContextualRoleCatalogReadResult(ContextualRoleCatalogReadStatus.Unavailable, [], null);
         }
     }
 

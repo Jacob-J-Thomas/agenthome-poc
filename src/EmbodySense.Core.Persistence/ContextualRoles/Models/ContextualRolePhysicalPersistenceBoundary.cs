@@ -14,5 +14,7 @@ public enum ContextualRolePhysicalPersistenceBoundary
     /// <summary>A retained directory was validated immediately before its entries were enumerated for persistence validation.</summary>
     BeforeHandleRelativeValidationEnumeration = 4,
     /// <summary>A retained directory was enumerated for persistence validation, before canonical mappings are revalidated.</summary>
-    AfterHandleRelativeValidationEnumeration = 5
+    AfterHandleRelativeValidationEnumeration = 5,
+    /// <summary>A bounded nearest-AGENTS.md read completed, immediately before its precedence is revalidated.</summary>
+    BeforeInstructionSourcePrecedenceRevalidation = 6
 }
