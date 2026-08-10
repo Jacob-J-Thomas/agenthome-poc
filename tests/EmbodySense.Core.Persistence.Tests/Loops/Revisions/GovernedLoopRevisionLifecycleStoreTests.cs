@@ -161,6 +161,69 @@ public sealed class GovernedLoopRevisionLifecycleStoreTests
         Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Replayed, replayed.Status);
     }
 
+    [Theory]
+    [InlineData("stale")]
+    [InlineData("workspace")]
+    [InlineData("current-generation")]
+    [InlineData("current-digest")]
+    [InlineData("previous-generation")]
+    [InlineData("previous-digest")]
+    [InlineData("null")]
+    public async Task Direct_commit_does_not_acknowledge_or_observe_a_non_exact_trust_successor(string substitution)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var observed = new List<GovernedLoopRevisionPersistenceBoundary>();
+        var options = ObserveBoundaries(observed);
+        var substituting = SubstituteAdvanceResult(trust, substitution);
+        var mutation = CreateDraftMutation("graph-one", "revision-one", "create-one", HashA, 0);
+
+        var result = await Store(paths, substituting, options).CommitAsync(mutation);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, result.Status);
+        Assert.Equal(0, result.StoreGeneration);
+        Assert.Null(result.Operation);
+        Assert.Null(result.Snapshot);
+        Assert.DoesNotContain(GovernedLoopRevisionPersistenceBoundary.TrustAdvanced, observed);
+        var recovered = await Store(paths, trust).ReadForMutationAsync("graph-one", "create-one", HashA);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, recovered.Status);
+        Assert.Equal(mutation.Operation, recovered.ExistingOperation!.Evidence);
+    }
+
+    [Theory]
+    [InlineData("stale")]
+    [InlineData("workspace")]
+    [InlineData("current-generation")]
+    [InlineData("current-digest")]
+    [InlineData("previous-generation")]
+    [InlineData("previous-digest")]
+    [InlineData("null")]
+    public async Task Pending_recovery_does_not_expose_or_observe_a_non_exact_trust_successor(string substitution)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var mutation = CreateDraftMutation("graph-one", "revision-one", "create-one", HashA, 0);
+        Assert.Equal(
+            GovernedLoopRevisionStoreCommitStatus.Ambiguous,
+            (await Store(paths, trust, FailAt(GovernedLoopRevisionPersistenceBoundary.PrimaryPublished)).CommitAsync(mutation)).Status);
+        var observed = new List<GovernedLoopRevisionPersistenceBoundary>();
+        var options = ObserveBoundaries(observed);
+        var substituting = SubstituteAdvanceResult(trust, substitution);
+
+        var result = await Store(paths, substituting, options).ReadForMutationAsync("graph-one", "create-one", HashA);
+
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ambiguous, result.Status);
+        Assert.Equal(0, result.StoreGeneration);
+        Assert.Null(result.ExistingOperation);
+        Assert.Null(result.Snapshot);
+        Assert.DoesNotContain(GovernedLoopRevisionPersistenceBoundary.TrustAdvanced, observed);
+        var recovered = await Store(paths, trust).ReadForMutationAsync("graph-one", "create-one", HashA);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, recovered.Status);
+        Assert.Equal(mutation.Operation, recovered.ExistingOperation!.Evidence);
+    }
+
     [Fact]
     public async Task Replacement_and_publication_form_one_append_only_lineage_and_operation_history()
     {
@@ -939,6 +1002,36 @@ public sealed class GovernedLoopRevisionLifecycleStoreTests
                 ? ValueTask.FromException(new IOException("Injected durable-boundary interruption."))
                 : ValueTask.CompletedTask
         };
+
+    private static GovernedLoopRevisionStoreOptions ObserveBoundaries(ICollection<GovernedLoopRevisionPersistenceBoundary> observed)
+        => new()
+        {
+            DurableBoundaryObserver = (boundary, _) =>
+            {
+                observed.Add(boundary);
+                return ValueTask.CompletedTask;
+            }
+        };
+
+    private static ICapabilityCatalogTrustProvider SubstituteAdvanceResult(
+        ICapabilityCatalogTrustProvider trust,
+        string substitution)
+    {
+        return new SubstitutingAdvanceTrustProvider(
+            trust,
+            advanceInner: substitution != "stale",
+            advanced => substitution switch
+            {
+                "stale" => advanced,
+                "workspace" => advanced with { WorkspaceIdentity = advanced.WorkspaceIdentity + "-substituted" },
+                "current-generation" => advanced with { CurrentGeneration = checked(advanced.CurrentGeneration + 1) },
+                "current-digest" => advanced with { CurrentContentDigest = "not-the-candidate-digest" },
+                "previous-generation" => advanced with { PreviousGeneration = checked(advanced.PreviousGeneration!.Value + 1) },
+                "previous-digest" => advanced with { PreviousContentDigest = "not-the-previous-digest" },
+                "null" => null!,
+                _ => throw new ArgumentOutOfRangeException(nameof(substitution))
+            });
+    }
 
     private static GovernedLoopRevisionStoreMutation CreateDraftMutation(
         string graphId,

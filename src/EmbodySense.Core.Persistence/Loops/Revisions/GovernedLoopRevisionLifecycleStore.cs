@@ -403,13 +403,20 @@ public sealed class GovernedLoopRevisionLifecycleStore : IGovernedLoopRevisionLi
             outcomeMayHaveCommitted = true;
             await session.WriteTextAtomicallyAsync(_paths.PrimaryPath, serializedCandidate.Json, cancellationToken);
             await ObserveAsync(GovernedLoopRevisionPersistenceBoundary.PrimaryPublished, cancellationToken);
-            _ = await _trustProvider.AdvanceAsync(
+            var advanced = await _trustProvider.AdvanceAsync(
                 workspaceIdentity,
                 trust.CurrentGeneration,
                 trust.CurrentContentDigest,
                 candidate.Generation,
                 serializedCandidate.ContentDigest,
                 cancellationToken);
+            RequireExactTrustSuccessor(
+                advanced,
+                workspaceIdentity,
+                candidate.Generation,
+                serializedCandidate.ContentDigest,
+                trust.CurrentGeneration,
+                trust.CurrentContentDigest);
             await ObserveAsync(GovernedLoopRevisionPersistenceBoundary.TrustAdvanced, cancellationToken);
             var committed = candidate with
             {
@@ -565,13 +572,20 @@ public sealed class GovernedLoopRevisionLifecycleStore : IGovernedLoopRevisionLi
         CancellationToken cancellationToken)
     {
         var pending = loaded.Pending ?? throw new InvalidOperationException("A pending direct successor is required.");
-        _ = await _trustProvider.AdvanceAsync(
+        var advanced = await _trustProvider.AdvanceAsync(
             workspaceIdentity,
             trust.CurrentGeneration,
             trust.CurrentContentDigest,
             pending.Generation,
             pending.ContentDigest,
             cancellationToken);
+        RequireExactTrustSuccessor(
+            advanced,
+            workspaceIdentity,
+            pending.Generation,
+            pending.ContentDigest,
+            trust.CurrentGeneration,
+            trust.CurrentContentDigest);
         await ObserveAsync(GovernedLoopRevisionPersistenceBoundary.TrustAdvanced, cancellationToken);
         return new GovernedLoopRevisionLoadResult(pending, null, GovernedLoopRevisionLoadDisposition.Current);
     }
@@ -1109,6 +1123,25 @@ public sealed class GovernedLoopRevisionLifecycleStore : IGovernedLoopRevisionLi
     private static bool MatchesPrevious(GovernedLoopRevisionStoreDocument document, CapabilityCatalogTrustState trust)
         => document.Generation == trust.PreviousGeneration
             && string.Equals(document.ContentDigest, trust.PreviousContentDigest, StringComparison.Ordinal);
+
+    private static void RequireExactTrustSuccessor(
+        CapabilityCatalogTrustState? advanced,
+        string workspaceIdentity,
+        long candidateGeneration,
+        string candidateContentDigest,
+        long previousGeneration,
+        string previousContentDigest)
+    {
+        if (advanced is null
+            || !string.Equals(advanced.WorkspaceIdentity, workspaceIdentity, StringComparison.Ordinal)
+            || advanced.CurrentGeneration != candidateGeneration
+            || !string.Equals(advanced.CurrentContentDigest, candidateContentDigest, StringComparison.Ordinal)
+            || advanced.PreviousGeneration != previousGeneration
+            || !string.Equals(advanced.PreviousContentDigest, previousContentDigest, StringComparison.Ordinal))
+        {
+            throw new IOException("The server-owned revision lifecycle trust provider did not return the exact committed successor state.");
+        }
+    }
 
     private static bool IsIdentifier(string? value)
         => CustomLoopArtifactIdentifier.IsValid(value, GovernedLoopRevisionContractLimits.MaxIdentifierCharacters);
