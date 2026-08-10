@@ -149,6 +149,7 @@ public sealed class ContextualRoleInspectionService
                 ?? ContextualRoleInstructionSourceProbeStatus.Ambiguous;
         }
 
+        // An empty projection is not proof that no dependents exist while no authoritative dependency reader is composed.
         var inspected = new ContextualRoleInspectionEntry(
             entry.Revision,
             entry.Lifecycle,
@@ -156,7 +157,7 @@ public sealed class ContextualRoleInspectionService
             applies,
             applies && entry.Lifecycle.State == ContextualRoleLifecycleState.Active && entry.Revision.Status == ContextualRoleStatus.Published && sourceStatus == ContextualRoleInstructionSourceProbeStatus.Ready,
             [],
-            AreDependentsComplete: true,
+            AreDependentsComplete: false,
             DependentsTruncated: false);
 
         var confirmation = await _lifecycleReader.ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest(entry.Revision.Identity.RoleId), cancellationToken);

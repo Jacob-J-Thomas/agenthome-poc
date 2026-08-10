@@ -36,7 +36,7 @@ public sealed class ContextualRoleInspectionServiceTests
         Assert.All(result.Entries, entry =>
         {
             Assert.Empty(entry.Dependents);
-            Assert.True(entry.AreDependentsComplete);
+            Assert.False(entry.AreDependentsComplete);
             Assert.False(entry.DependentsTruncated);
         });
         Assert.Equal(2, ports.ProbeCalls);
@@ -287,6 +287,9 @@ public sealed class ContextualRoleInspectionServiceTests
         Assert.Equal(expected, result.Status);
         Assert.Equal(ready, result.Entry!.IsAdmissionReady);
         Assert.Equal(sourceStatus, result.Entry.SourceStatus);
+        Assert.Empty(result.Entry.Dependents);
+        Assert.False(result.Entry.AreDependentsComplete);
+        Assert.False(result.Entry.DependentsTruncated);
         Assert.Equal(1, ports.ProbeCalls);
     }
 

@@ -78,7 +78,7 @@ public sealed class ContextualRoleCatalogFacadeTests
         Assert.True(firstRole.IsAdmissionReady);
         Assert.Equal(["workspace-read", "workspace-write"], firstRole.CapabilityMaximumIds);
         Assert.Empty(firstRole.Dependents);
-        Assert.True(firstRole.AreDependentsComplete);
+        Assert.False(firstRole.AreDependentsComplete);
         Assert.False(firstRole.DependentsTruncated);
         Assert.Equal("reviewer", first.NextCursor);
         Assert.Equal("writer", Assert.Single(second.Roles).RoleId);
@@ -112,6 +112,9 @@ public sealed class ContextualRoleCatalogFacadeTests
 
         Assert.Equal("ready", ready.Status);
         Assert.True(ready.Role!.IsAdmissionReady);
+        Assert.Empty(ready.Role.Dependents);
+        Assert.False(ready.Role.AreDependentsComplete);
+        Assert.False(ready.Role.DependentsTruncated);
         Assert.Null(ready.Error);
         Assert.Equal("stale", staleHash.Status);
         Assert.Equal("contextual_role_stale", staleHash.Error!.Code);
