@@ -534,6 +534,17 @@ test("initialization refresh hydrates a loop builder that booted disabled", asyn
   assert.match(app.elements.loopList.textContent, /Research pass/);
 });
 
+test("an affected-loop deep link selects the exact current loop", async () => {
+  const app = await loadLoopBuilder({
+    locationHref: "http://127.0.0.1:4378/?view=loops&loopId=loop-research",
+  });
+
+  assert.equal(
+    vm.runInContext("currentDefinition.id", app.context),
+    "loop-research",
+  );
+});
+
 test("the uninitialized Loops deep link explains exact effects and supports an explicit decline", async () => {
   const server = new FakeFetchServer(createCatalog());
   server.on("GET", "/api/status", () => ({
@@ -8687,7 +8698,9 @@ async function loadLoopBuilder(options = {}) {
     delayedHandlers: [],
     eventListeners,
     intervalHandlers: [],
-    location: { href: "http://127.0.0.1:4378/loops.html" },
+    location: {
+      href: options.locationHref ?? "http://127.0.0.1:4378/loops.html",
+    },
     localStorage,
     sessionStorage,
     embodySenseSession: options.embodySenseSession,
@@ -8741,6 +8754,7 @@ async function loadLoopBuilder(options = {}) {
     clearTimeout,
     structuredClone,
     TextEncoder,
+    URL,
     window,
   };
   context.globalThis = context;

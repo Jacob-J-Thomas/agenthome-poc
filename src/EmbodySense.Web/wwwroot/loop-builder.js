@@ -14,6 +14,7 @@ let loopBuilderRefreshQueued = false;
 let loopBuilderRecoveryQueued = false;
 let loopBuilderSessionAvailable =
   window.embodySenseSession?.getState?.().connected ?? true;
+let requestedLoopDeepLink = readRequestedLoopDeepLink();
 let loopBuilderSessionAbortController = new AbortController();
 let workspaceStatusSnapshot = null;
 let workspaceInitializationInFlight = false;
@@ -374,8 +375,14 @@ async function refreshWorkspaceCore(
       return true;
     }
 
-    if (!reuseCatalog || !catalog)
-      await loadCatalog(undefined, preserveUnsavedDraft, requestOptions);
+    if (!reuseCatalog || !catalog) {
+      await loadCatalog(
+        requestedLoopDeepLink ?? undefined,
+        preserveUnsavedDraft,
+        requestOptions,
+      );
+      requestedLoopDeepLink = null;
+    }
     if (signal?.aborted) return false;
     const runsLoaded = await loadRuns({ propagateFailure, requestOptions });
     if (runsLoaded === false) return false;
@@ -396,6 +403,15 @@ function initializationState(status = workspaceStatusSnapshot) {
   return status?.initializationState === "partial"
     ? "partial"
     : "uninitialized";
+}
+
+function readRequestedLoopDeepLink() {
+  try {
+    const loopId = new URL(window.location.href).searchParams.get("loopId");
+    return loopId && loopId.length <= 200 ? loopId.normalize("NFC") : null;
+  } catch {
+    return null;
+  }
 }
 
 function initializationRequiresCleanup(status = workspaceStatusSnapshot) {

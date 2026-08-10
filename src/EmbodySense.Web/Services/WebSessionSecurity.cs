@@ -114,7 +114,7 @@ public sealed class WebSessionSecurity
     public string Token { get; }
 
     /// <summary>
-    /// Gets a non-secret workspace scope used to partition bounded browser chat-request state.
+    /// Gets a non-secret workspace scope used to partition bounded browser request-reconciliation state.
     /// </summary>
     /// <remarks>
     /// This identity is deliberately independent from the bearer token and remains stable across Web process restarts

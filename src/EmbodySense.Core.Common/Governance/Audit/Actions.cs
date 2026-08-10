@@ -151,6 +151,8 @@ public static partial class AuditSchema
 
         /// <summary>Identifies deterministic capability lifecycle impact preview evidence.</summary>
         public const string CapabilityLifecyclePreview = "capability.lifecycle.preview";
+        /// <summary>Identifies explicit retirement of a lifecycle preview without mutation.</summary>
+        public const string CapabilityLifecycleDiscard = "capability.lifecycle.discard";
 
         /// <summary>Identifies a capability lifecycle conflict.</summary>
         public const string CapabilityLifecycleConflict = "capability.lifecycle.conflict";

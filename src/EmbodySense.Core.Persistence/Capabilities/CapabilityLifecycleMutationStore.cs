@@ -12,7 +12,7 @@ using EmbodySense.Core.Persistence.Capabilities.Models;
 namespace EmbodySense.Core.Persistence.Capabilities;
 
 /// <summary>Persists one authenticated schema-1 capability lifecycle aggregate under one cross-process mutation lock.</summary>
-/// <remarks>The aggregate owns lifecycle previews, dependent evidence, current state, tombstones, degradation evidence, history, and never-evicted operation receipts. It never rewrites immutable artifacts or domain-owned dependents.</remarks>
+/// <remarks>The aggregate owns lifecycle previews, dependent evidence, current state, tombstones, degradation evidence, history, and terminal mutation receipts. Audited no-mutation discard receipts are retired so abandoned previews cannot exhaust the bounded ledger. It never rewrites immutable artifacts or domain-owned dependents.</remarks>
 public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutationStore
 {
     private const int MaximumArtifactBytes = 4 * 1024 * 1024;
@@ -195,7 +195,7 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
 
             if (current.Operations.Count >= MaximumOperations)
             {
-                return PreviewResult(CapabilityLifecyclePreviewStatus.Unavailable, request, "The never-evicted lifecycle operation ledger reached its configured bound.", workspaceIdentity);
+                return PreviewResult(CapabilityLifecyclePreviewStatus.Unavailable, request, "The bounded lifecycle operation ledger reached its configured limit.", workspaceIdentity);
             }
 
             var target = ResolveTarget(request, entry!);
@@ -261,7 +261,7 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
                 return Result(CapabilityLifecycleMutationStatus.Unavailable, null, null, false, "The current lifecycle aggregate cannot be proved.");
             }
             var operation = current.Operations.SingleOrDefault(candidate => candidate.OperationId == preview.OperationId);
-            if (operation is null || operation.PreviewHash != preview.PreviewHash || operation.CapabilityId != preview.CapabilityId.Value || operation.Kind != preview.Kind || operation.BaselineCatalogRevision != preview.BaselineCatalogRevision || operation.BaselineActivationRevision != preview.BaselineActivationRevision || operation.PreviewRevision != preview.LifecycleRevision || operation.DependentSetRevision != preview.DependentSetRevision || operation.DependentSetHash != preview.DependentSetHash || operation.TargetDescriptorJson != SerializeDescriptor(preview.TargetDescriptor) || operation.TargetArtifactDigest != preview.TargetArtifactDigest?.Value || !operation.Impacts.SequenceEqual(preview.Impacts) || preview.WorkspaceIdentity != workspaceIdentity)
+            if (operation is null || !MatchesPreview(operation, preview, workspaceIdentity))
             {
                 return Result(CapabilityLifecycleMutationStatus.Conflict, Current(current, preview.CapabilityId.Value), current.Generation, false, "The supplied preview is forged, unknown, or bound to different lifecycle intent.");
             }
@@ -333,6 +333,52 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
     }
 
     /// <inheritdoc />
+    public Task<CapabilityLifecycleMutationResult> DiscardAsync(CapabilityLifecyclePreview preview, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => DiscardCoreAsync(preview, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityLifecycleMutationResult> DiscardCoreAsync(CapabilityLifecyclePreview preview, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(preview);
+        if (preview.Status is not CapabilityLifecyclePreviewStatus.Ready and not CapabilityLifecyclePreviewStatus.Replayed || preview.CapabilityId is null || !CapabilityArtifactManifestValidator.IsOperationId(preview.OperationId) || !Enum.IsDefined(preview.Kind) || preview.LifecycleRevision < 1 || preview.DependentSetRevision < 0 || !IsDigest(preview.PreviewHash) || !IsDigest(preview.DependentSetHash))
+        {
+            return Result(CapabilityLifecycleMutationStatus.Invalid, null, null, false, "Only an exact ready lifecycle preview may be discarded.");
+        }
+
+        try
+        {
+            await using var fileSystem = await AcquireAsync(cancellationToken);
+            var workspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(fileSystem.PhysicalIdentityMaterial);
+            var current = await LoadForMutationAsync(fileSystem, workspaceIdentity, cancellationToken);
+            if (current is null)
+            {
+                return Result(CapabilityLifecycleMutationStatus.Unavailable, null, null, false, "The current lifecycle aggregate cannot be proved.");
+            }
+            var operation = current.Operations.SingleOrDefault(candidate => candidate.OperationId == preview.OperationId);
+            if (operation is null || !MatchesPreview(operation, preview, workspaceIdentity))
+            {
+                return Result(CapabilityLifecycleMutationStatus.Conflict, Current(current, preview.CapabilityId.Value), current.Generation, false, "The supplied preview is forged, unknown, or bound to different lifecycle intent.");
+            }
+            if (operation.Outcome is { } terminal)
+            {
+                return Result(CapabilityLifecycleMutationStatus.Replayed, Current(current, operation.CapabilityId), operation.ResultRevision, operation.OutcomeAuditPending, $"The exact terminal {terminal.ToString().ToLowerInvariant()} lifecycle operation was replayed.", terminal);
+            }
+
+            var revision = checked(current.Generation + 1);
+            var completed = operation with { Outcome = CapabilityLifecycleMutationStatus.Discarded, ResultRevision = revision, OutcomeAuditPending = true };
+            var candidate = Seal(current with { Generation = revision, Operations = Replace(current.Operations, completed) });
+            await CommitAsync(fileSystem, current, candidate, cancellationToken);
+            return Result(CapabilityLifecycleMutationStatus.Discarded, Current(candidate, operation.CapabilityId), revision, true, "The exact lifecycle preview was durably retired without changing capability state.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception))
+        {
+            return Result(CapabilityLifecycleMutationStatus.Unavailable, null, null, false, "Lifecycle preview retirement is unavailable; the last proved aggregate was preserved.");
+        }
+    }
+
+    /// <inheritdoc />
     public Task<CapabilityLifecycleAuditMarkStatus> MarkOutcomeAuditedAsync(string operationId, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => MarkOutcomeAuditedCoreAsync(operationId, transactionCancellationToken), cancellationToken);
 
     private async Task<CapabilityLifecycleAuditMarkStatus> MarkOutcomeAuditedCoreAsync(string operationId, CancellationToken cancellationToken)
@@ -355,7 +401,10 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
             {
                 return CapabilityLifecycleAuditMarkStatus.NoChange;
             }
-            var candidate = Seal(current with { Generation = checked(current.Generation + 1), Operations = Replace(current.Operations, operation with { OutcomeAuditPending = false }) });
+            var operations = operation.Outcome == CapabilityLifecycleMutationStatus.Discarded
+                ? current.Operations.Where(candidate => candidate.OperationId != operation.OperationId).ToArray()
+                : Replace(current.Operations, operation with { OutcomeAuditPending = false });
+            var candidate = Seal(current with { Generation = checked(current.Generation + 1), Operations = operations });
             await CommitAsync(fileSystem, current, candidate, cancellationToken);
             return CapabilityLifecycleAuditMarkStatus.Applied;
         }
@@ -723,7 +772,23 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
         {
             return operation.ResultRevision is null && !operation.OutcomeAuditPending;
         }
-        return (operation.Outcome is CapabilityLifecycleMutationStatus.Applied or CapabilityLifecycleMutationStatus.Conflict or CapabilityLifecycleMutationStatus.Blocked or CapabilityLifecycleMutationStatus.NotFound) && operation.ResultRevision > operation.PreviewRevision && operation.ResultRevision <= generation;
+        return (operation.Outcome is CapabilityLifecycleMutationStatus.Applied or CapabilityLifecycleMutationStatus.Conflict or CapabilityLifecycleMutationStatus.Blocked or CapabilityLifecycleMutationStatus.NotFound or CapabilityLifecycleMutationStatus.Discarded) && operation.ResultRevision > operation.PreviewRevision && operation.ResultRevision <= generation;
+    }
+
+    private static bool MatchesPreview(CapabilityLifecycleOperationDocument operation, CapabilityLifecyclePreview preview, string workspaceIdentity)
+    {
+        return operation.PreviewHash == preview.PreviewHash
+            && operation.CapabilityId == preview.CapabilityId.Value
+            && operation.Kind == preview.Kind
+            && operation.BaselineCatalogRevision == preview.BaselineCatalogRevision
+            && operation.BaselineActivationRevision == preview.BaselineActivationRevision
+            && operation.PreviewRevision == preview.LifecycleRevision
+            && operation.DependentSetRevision == preview.DependentSetRevision
+            && operation.DependentSetHash == preview.DependentSetHash
+            && operation.TargetDescriptorJson == SerializeDescriptor(preview.TargetDescriptor)
+            && operation.TargetArtifactDigest == preview.TargetArtifactDigest?.Value
+            && operation.Impacts.SequenceEqual(preview.Impacts)
+            && preview.WorkspaceIdentity == workspaceIdentity;
     }
 
     private static bool IsValidImpact(CapabilityLifecycleImpact? impact)

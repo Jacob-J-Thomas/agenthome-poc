@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Capabilities · EmbodySense</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css?v=capability-catalog-v1" />
+    <link
+      rel="stylesheet"
+      href="/capability-catalog.css?v=capability-catalog-v1"
+    />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="app-rail" aria-label="Application navigation">
+        <a class="rail-brand" href="/?view=chat" aria-label="EmbodySense"
+          ><span>ES</span></a
+        >
+        <nav class="rail-nav" aria-label="EmbodySense views">
+          <a class="rail-button" href="/?view=chat">
+            <span class="rail-glyph" aria-hidden="true">&#9675;</span
+            ><span>Chat</span>
+          </a>
+          <a class="rail-button" href="/?view=loops">
+            <span class="rail-glyph" aria-hidden="true">&#10227;</span
+            ><span>Loops</span>
+          </a>
+          <a
+            id="capabilitiesNav"
+            class="rail-button active"
+            href="/capabilities.html"
+            aria-current="page"
+          >
+            <span class="rail-glyph" aria-hidden="true">&#9711;</span
+            ><span>Capabilities</span>
+          </a>
+          <span class="rail-divider" role="presentation"></span>
+          <a class="rail-button rail-button-small" href="/?view=overview">
+            <span class="rail-glyph" aria-hidden="true">&#9671;</span
+            ><span>Overview</span>
+          </a>
+          <a class="rail-button rail-button-small" href="/?view=permissions">
+            <span class="rail-glyph" aria-hidden="true">&#8961;</span
+            ><span>Permissions</span>
+          </a>
+          <a class="rail-button rail-button-small" href="/?view=audit">
+            <span class="rail-glyph" aria-hidden="true">&#10003;</span
+            ><span>Audit</span>
+          </a>
+        </nav>
+        <div class="rail-status" title="Workspace connection">
+          <span id="connectionDot" class="status-dot"></span
+          ><span id="workspaceStatus">Checking</span>
+        </div>
+        <div class="rail-avatar" title="Durable agent identity">ES</div>
+      </aside>
+
+      <div class="app-stage">
+        <header class="app-statusbar">
+          <div class="statusbar-identity">
+            <strong>Capabilities</strong
+            ><span id="workspaceRoot">Workspace loading</span>
+          </div>
+          <div class="statusbar-badges">
+            <span id="catalogRevision">Catalog revision unknown</span
+            ><span>Local agent body</span>
+          </div>
+        </header>
+
+        <main class="capability-shell">
+          <aside class="capability-sidebar" aria-label="Capability catalog">
+            <div class="capability-sidebar-heading">
+              <div>
+                <p class="eyebrow">Governed registry</p>
+                <h1>Catalog</h1>
+              </div>
+              <button
+                id="refreshCapabilitiesButton"
+                class="icon-button"
+                type="button"
+                aria-label="Refresh capability catalog"
+              >
+                &#8635;
+              </button>
+            </div>
+            <label class="capability-search" for="capabilitySearch">
+              <span class="sr-only">Filter capabilities</span>
+              <input
+                id="capabilitySearch"
+                type="search"
+                placeholder="Filter by identity or purpose"
+                autocomplete="off"
+              />
+            </label>
+            <p
+              id="catalogNotice"
+              class="capability-notice"
+              role="status"
+              aria-live="polite"
+            ></p>
+            <div
+              id="capabilityList"
+              class="capability-list"
+              role="listbox"
+              aria-label="Capabilities"
+            ></div>
+            <button
+              id="loadMoreCapabilitiesButton"
+              class="secondary-button capability-load-more"
+              type="button"
+              hidden
+            >
+              Load more
+            </button>
+          </aside>
+
+          <section class="capability-detail" aria-labelledby="capabilityTitle">
+            <header class="capability-detail-heading">
+              <div>
+                <p id="capabilityKind" class="eyebrow">
+                  Select a catalog entry
+                </p>
+                <h1 id="capabilityTitle" tabindex="-1">Capability posture</h1>
+                <p id="capabilityPurpose" class="capability-purpose">
+                  Inspect provenance, compatibility, lifecycle, dependencies,
+                  and declared reach without granting authority.
+                </p>
+              </div>
+              <div
+                id="capabilityBadges"
+                class="capability-badges"
+                aria-label="Capability posture"
+              ></div>
+            </header>
+
+            <div id="capabilityEmpty" class="capability-empty">
+              Choose a capability to inspect its exact safe posture and
+              lifecycle options.
+            </div>
+
+            <div id="capabilityContent" hidden>
+              <div id="capabilityFacts" class="capability-facts"></div>
+
+              <section
+                class="capability-card"
+                aria-labelledby="dependencyTitle"
+              >
+                <div class="capability-card-heading">
+                  <div>
+                    <p class="eyebrow">Dependency evidence</p>
+                    <h2 id="dependencyTitle">Affected artifacts</h2>
+                  </div>
+                </div>
+                <div
+                  id="capabilityDependents"
+                  class="capability-dependents"
+                ></div>
+              </section>
+
+              <section
+                class="capability-card lifecycle-card"
+                aria-labelledby="lifecycleTitle"
+              >
+                <div class="capability-card-heading">
+                  <div>
+                    <p class="eyebrow">Explicit operation</p>
+                    <h2 id="lifecycleTitle">Lifecycle preview</h2>
+                  </div>
+                  <span class="non-granting-badge"
+                    >Does not assign authority</span
+                  >
+                </div>
+                <form id="lifecyclePreviewForm" class="lifecycle-form">
+                  <label
+                    >Operation
+                    <select id="lifecycleOperation" required>
+                      <option value="enable">Enable</option>
+                      <option value="disable">Disable</option>
+                      <option value="upgrade">Upgrade</option>
+                      <option value="rollback">Rollback</option>
+                      <option value="remove">Remove</option>
+                    </select>
+                  </label>
+                  <label id="targetVersionLabel"
+                    >Exact target version
+                    <input
+                      id="targetVersion"
+                      type="text"
+                      maxlength="128"
+                      placeholder="Required for upgrade"
+                    />
+                  </label>
+                  <button
+                    id="previewLifecycleButton"
+                    class="primary-button"
+                    type="submit"
+                  >
+                    Preview impact
+                  </button>
+                </form>
+                <p
+                  id="lifecycleNotice"
+                  class="capability-notice"
+                  role="status"
+                  aria-live="polite"
+                ></p>
+                <div
+                  id="lifecyclePreview"
+                  class="lifecycle-preview"
+                  hidden
+                ></div>
+              </section>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+    <script src="/capability-catalog.js?v=capability-catalog-v1"></script>
+  </body>
+</html>

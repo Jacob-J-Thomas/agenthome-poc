@@ -329,4 +329,48 @@
       </root>
     </mxGraphModel>
   </diagram>
+  <diagram id="embodysense-capability-catalog" name="Capability Catalog">
+    <mxGraphModel dx="1500" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1500" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="p0" />
+        <mxCell id="p1" parent="p0" />
+        <mxCell id="p-title" value="EmbodySense capability catalog and lifecycle journey" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" vertex="1" parent="p1">
+          <mxGeometry x="50" y="30" width="900" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p-subtitle" value="Authenticated localhost inspection and exact lifecycle confirmation or discard through one safe Core.Startup facade. Catalog posture does not grant loop or node authority." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#4A5568" vertex="1" parent="p1">
+          <mxGeometry x="50" y="75" width="1300" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="p-web" value="Web /capabilities.html&lt;br&gt;Filter safe catalog posture&lt;br&gt;Inspect provenance, compatibility, declared reach, lifecycle, and affected artifacts&lt;br&gt;Hostile text rendered with textContent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E9D8FD;strokeColor=#6B46C1;fontSize=12;fontStyle=1" vertex="1" parent="p1">
+          <mxGeometry x="50" y="150" width="285" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="p-api" value="Authenticated no-store API&lt;br&gt;GET catalog / exact detail&lt;br&gt;POST lifecycle preview / confirm / discard&lt;br&gt;Strict closed JSON; initialized workspace required" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F2FF;strokeColor=#2B6CB0;fontSize=12" vertex="1" parent="p1">
+          <mxGeometry x="385" y="150" width="285" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="p-facade" value="Core.Startup CapabilityCatalogFacade&lt;br&gt;Surface accepts operation id, operation, capability id, and optional version only&lt;br&gt;Projects bounded redacted posture and evidence" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="p1">
+          <mxGeometry x="720" y="150" width="300" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="p-stores" value="Application policy + Persistence evidence&lt;br&gt;Authenticated catalog, artifact activation, lifecycle state, dependents, and audit&lt;br&gt;Server-owned descriptors, digests, trust roots, and authority transaction" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="p1">
+          <mxGeometry x="1070" y="150" width="330" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="p-preview" value="Durable preview&lt;br&gt;Binds catalog + activation + lifecycle revisions&lt;br&gt;Bounded locked registry preserves independent per-tab evidence&lt;br&gt;Shows blocked and degraded impacts" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="p1">
+          <mxGeometry x="315" y="380" width="320" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="p-confirm" value="Explicit browser disposition&lt;br&gt;Confirm or discard the same operation selection&lt;br&gt;Compares every observed revision and hash&lt;br&gt;Stale evidence conflicts before mutation or retirement" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAF5FF;strokeColor=#6B46C1;fontSize=12" vertex="1" parent="p1">
+          <mxGeometry x="700" y="380" width="320" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="p-terminal" value="Terminal lifecycle outcome&lt;br&gt;Apply, audited discard, or exact replay&lt;br&gt;Discard retires its receipt without capability mutation&lt;br&gt;Indeterminate transport retains exact intended disposition" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="p1">
+          <mxGeometry x="1085" y="380" width="315" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="p-boundary" value="Protected invariants&lt;br&gt;- No browser-supplied descriptor, artifact digest, secret value, trust decision, or authority grant.&lt;br&gt;- No lifecycle mutation without an explicit exact confirmation.&lt;br&gt;- Complete dependent evidence is required; ambiguous state fails closed.&lt;br&gt;- Schema version 1 artifacts and existing crash-safe stores remain authoritative." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF5F5;strokeColor=#C53030;fontSize=12;dashed=1" vertex="1" parent="p1">
+          <mxGeometry x="50" y="610" width="1350" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="pe1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6B46C1;endArrow=block;endFill=1" edge="1" parent="p1" source="p-web" target="p-api"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="pe2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2B6CB0;endArrow=block;endFill=1" edge="1" parent="p1" source="p-api" target="p-facade"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="pe3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2C7A7B;endArrow=block;endFill=1" edge="1" parent="p1" source="p-facade" target="p-stores"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="pe4" value="preview" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#B7791F;endArrow=block;endFill=1" edge="1" parent="p1" source="p-stores" target="p-preview"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1235" y="330" /><mxPoint x="475" y="330" /></Array></mxGeometry></mxCell>
+        <mxCell id="pe5" value="confirm or discard exact evidence" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6B46C1;endArrow=block;endFill=1" edge="1" parent="p1" source="p-preview" target="p-confirm"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="pe6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2F855A;endArrow=block;endFill=1" edge="1" parent="p1" source="p-confirm" target="p-terminal"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
 </mxfile>

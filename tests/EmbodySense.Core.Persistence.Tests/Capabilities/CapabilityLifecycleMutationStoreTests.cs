@@ -50,6 +50,54 @@ public sealed class CapabilityLifecycleMutationStoreTests
     }
 
     [Fact]
+    public async Task Discard_is_durable_idempotent_until_audit_then_retires_the_preview_receipt()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = Prepare(workspace);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var baselineSource = new StubCapabilityLifecycleBaselineSource();
+        var evidence = new StubCapabilityLifecycleArtifactEvidenceSource();
+        var store = new CapabilityLifecycleMutationStore(paths, trust, baselineSource, evidence);
+        var baseline = CapabilityLifecycleTestData.Baseline();
+        var dependents = await new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]).CaptureAsync();
+        var selection = new CapabilityLifecycleSelectionRequest("discard-preview", CapabilityLifecycleOperationKind.Disable, baseline.State.Descriptor.Id);
+        var preview = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest(selection.OperationId, selection.Kind, selection.CapabilityId, Selection: selection), baseline, dependents);
+        var before = await store.ReadAsync(selection.CapabilityId);
+
+        var discarded = await store.DiscardAsync(preview);
+        var replayed = await store.DiscardAsync(preview with { Status = CapabilityLifecyclePreviewStatus.Replayed });
+        var forged = await store.DiscardAsync(preview with { PreviewHash = CapabilityLifecycleTestData.Digest("forged").Value });
+        var persistedBeforeAudit = JsonNode.Parse(await File.ReadAllTextAsync(paths.CapabilityLifecycleDocumentPath))!.AsObject();
+        var audited = await store.MarkOutcomeAuditedAsync(selection.OperationId);
+        var persistedAfterAudit = JsonNode.Parse(await File.ReadAllTextAsync(paths.CapabilityLifecycleDocumentPath))!.AsObject();
+        var missing = await store.TryReplaySelectionAsync(selection);
+        var replacement = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest("discard-preview-replacement", selection.Kind, selection.CapabilityId), baseline, dependents);
+        var after = await store.ReadAsync(selection.CapabilityId);
+
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Ready, preview.Status);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Discarded, discarded.Status);
+        Assert.True(discarded.OutcomeAuditPending);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Replayed, replayed.Status);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Discarded, replayed.ReplayedOutcome);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Conflict, forged.Status);
+        Assert.Equal("discarded", persistedBeforeAudit["operations"]!.AsArray().Single()!["outcome"]!.GetValue<string>());
+        Assert.Equal(CapabilityLifecycleAuditMarkStatus.Applied, audited);
+        Assert.Empty(persistedAfterAudit["operations"]!.AsArray());
+        Assert.Equal(CapabilityLifecyclePreviewStatus.NotFound, missing.Status);
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Ready, replacement.Status);
+        Assert.Equal(before.State!.Descriptor.Id, after.State!.Descriptor.Id);
+        Assert.Equal(before.State.Descriptor.Version, after.State.Descriptor.Version);
+        Assert.Equal(before.State.ArtifactDigest, after.State.ArtifactDigest);
+        Assert.Equal(before.State.IsEnabled, after.State.IsEnabled);
+        Assert.Equal(before.State.IsRemoved, after.State.IsRemoved);
+        Assert.Equal(before.State.Revision, after.State.Revision);
+        Assert.Equal(before.State.LastOperationId, after.State.LastOperationId);
+        Assert.Equal(before.State.UpdatedAtUtc, after.State.UpdatedAtUtc);
+        Assert.Equal(before.History.Count, after.History.Count);
+        Assert.Equal(before.Degradations.Count, after.Degradations.Count);
+    }
+
+    [Fact]
     public async Task Enable_reproves_current_artifact_preserves_identity_and_enforces_required_optional_dependents()
     {
         using var workspace = new TestWorkspace();
@@ -618,6 +666,8 @@ public sealed class CapabilityLifecycleMutationStoreTests
         Assert.Equal(CapabilityLifecyclePreviewStatus.NotFound, unknown.Status);
         Assert.Equal(CapabilityLifecyclePreviewStatus.NotFound, rollback.Status);
         Assert.Equal(CapabilityLifecycleMutationStatus.Invalid, (await store.MutateAsync(invalidIdentity, CapabilityLifecycleTestData.Baseline(), snapshot)).Status);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Invalid, (await store.DiscardAsync(invalidIdentity)).Status);
+        await Assert.ThrowsAsync<ArgumentNullException>(() => store.DiscardAsync(null!));
         Assert.Equal(CapabilityLifecycleAuditMarkStatus.NotFound, await store.MarkOutcomeAuditedAsync(string.Empty));
         Assert.Equal(CapabilityLifecycleAuditMarkStatus.NotFound, await store.MarkOutcomeAuditedAsync("unknown-operation"));
     }
@@ -640,6 +690,7 @@ public sealed class CapabilityLifecycleMutationStoreTests
         await AssertCanceledAsync(async token => _ = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest("cancel-preview-io", CapabilityLifecycleOperationKind.Disable, request.CapabilityId), null, snapshot, token));
         await AssertCanceledAsync(async token => _ = await store.TryReplaySelectionAsync(new CapabilityLifecycleSelectionRequest(request.OperationId, request.Kind, request.CapabilityId), token));
         await AssertCanceledAsync(async token => _ = await store.MutateAsync(preview, CapabilityLifecycleTestData.Baseline(), snapshot, token));
+        await AssertCanceledAsync(async token => _ = await store.DiscardAsync(preview, token));
         await AssertCanceledAsync(async token => _ = await store.MarkOutcomeAuditedAsync(request.OperationId, token));
 
         async Task AssertCanceledAsync(Func<CancellationToken, Task> operation)
@@ -670,6 +721,7 @@ public sealed class CapabilityLifecycleMutationStoreTests
         Assert.Equal(CapabilityLifecyclePreviewStatus.Unavailable, (await missing.PreviewAsync(request, CapabilityLifecycleTestData.Baseline(), snapshot)).Status);
         Assert.Equal(CapabilityLifecyclePreviewStatus.Unavailable, (await missing.TryReplaySelectionAsync(new CapabilityLifecycleSelectionRequest(request.OperationId, request.Kind, request.CapabilityId))).Status);
         Assert.Equal(CapabilityLifecycleAuditMarkStatus.Unavailable, await missing.MarkOutcomeAuditedAsync(request.OperationId));
+        Assert.Equal(CapabilityLifecycleMutationStatus.Unavailable, (await missing.DiscardAsync(new CapabilityLifecyclePreview(CapabilityLifecyclePreviewStatus.Ready, "sha256:workspace", request.OperationId, request.Kind, request.CapabilityId, 1, 0, CapabilityLifecycleTestData.Digest("dependents").Value, CapabilityLifecycleTestData.Digest("preview").Value, [], "ready", 1, 1))).Status);
 
         using var preparedWorkspace = new TestWorkspace();
         var prepared = Store(Prepare(preparedWorkspace));

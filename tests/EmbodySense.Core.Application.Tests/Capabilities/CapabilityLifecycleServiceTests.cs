@@ -109,6 +109,29 @@ public sealed class CapabilityLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Discard_audits_terminal_retirement_and_repairs_its_pending_receipt()
+    {
+        var manifest = CapabilityArtifactTestData.Manifest();
+        var preview = Preview(manifest, CapabilityLifecyclePreviewStatus.Replayed, CapabilityLifecycleOperationKind.Disable);
+        var store = new StubCapabilityLifecycleMutationStore
+        {
+            MutationResult = new CapabilityLifecycleMutationResult(CapabilityLifecycleMutationStatus.Discarded, null, 5, true, "discarded")
+        };
+        var audit = new RecordingCapabilityAuditLog();
+        var service = new CapabilityLifecycleService(new StubCapabilityDependentIndex(), new StubCapabilityLifecycleBaselineSource(), new StubCapabilityLifecycleArtifactEvidenceSource(), store, audit, new StubCapabilityAuthorityTransaction());
+
+        var result = await service.DiscardAsync(preview);
+
+        Assert.Equal(CapabilityLifecycleMutationStatus.Discarded, result.Status);
+        Assert.False(result.OutcomeAuditPending);
+        Assert.Same(preview, store.DiscardedPreview);
+        Assert.Equal([AuditSchema.Actions.CapabilityLifecycleDiscard, AuditSchema.Actions.CapabilityLifecycleFinal], audit.Events.Select(item => item.Action));
+        Assert.All(audit.Events, item => Assert.Equal(AuditSchema.Outcomes.Succeeded, item.Outcome));
+        Assert.Equal(1, store.AuditMarks);
+        await Assert.ThrowsAsync<ArgumentNullException>(() => service.DiscardAsync(null!));
+    }
+
+    [Fact]
     public async Task Upgrade_preview_delegates_artifact_authority_to_authenticated_store()
     {
         var manifest = CapabilityArtifactTestData.Manifest();

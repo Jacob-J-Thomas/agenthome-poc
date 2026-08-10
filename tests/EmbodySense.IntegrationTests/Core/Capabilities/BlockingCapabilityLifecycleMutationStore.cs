@@ -43,6 +43,11 @@ internal sealed class BlockingCapabilityLifecycleMutationStore : ICapabilityLife
         return new CapabilityLifecycleMutationResult(CapabilityLifecycleMutationStatus.Applied, null, preview.LifecycleRevision + 1, false, "applied");
     }
 
+    public Task<CapabilityLifecycleMutationResult> DiscardAsync(CapabilityLifecyclePreview preview, CancellationToken cancellationToken = default)
+    {
+        throw new InvalidOperationException("Lifecycle discard is outside this ordering test.");
+    }
+
     public Task<CapabilityLifecycleAuditMarkStatus> MarkOutcomeAuditedAsync(string operationId, CancellationToken cancellationToken = default)
     {
         return Task.FromResult(CapabilityLifecycleAuditMarkStatus.NoChange);

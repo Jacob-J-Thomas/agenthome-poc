@@ -17,6 +17,9 @@ public interface ICapabilityLifecycleMutationStore
     /// <summary>Applies or rejects the exact preview after fresh baseline and dependent recapture.</summary>
     Task<CapabilityLifecycleMutationResult> MutateAsync(CapabilityLifecyclePreview preview, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken = default);
 
+    /// <summary>Durably retires one exact unresolved preview without applying its transition.</summary>
+    Task<CapabilityLifecycleMutationResult> DiscardAsync(CapabilityLifecyclePreview preview, CancellationToken cancellationToken = default);
+
     /// <summary>Marks a terminal operation receipt after its final audit event is durable.</summary>
     Task<CapabilityLifecycleAuditMarkStatus> MarkOutcomeAuditedAsync(string operationId, CancellationToken cancellationToken = default);
 }

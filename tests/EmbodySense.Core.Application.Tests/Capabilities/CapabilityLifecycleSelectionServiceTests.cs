@@ -235,6 +235,31 @@ public sealed class CapabilityLifecycleSelectionServiceTests
         Assert.Same(preview, store.MutatedPreview);
     }
 
+    [Fact]
+    public async Task Discard_requires_exact_persisted_evidence_and_is_idempotent_after_retirement()
+    {
+        var manifest = CapabilityArtifactTestData.Manifest();
+        var selection = new CapabilityLifecycleSelectionRequest("discard-selection", CapabilityLifecycleOperationKind.Disable, manifest.Descriptor.Id);
+        var preview = Preview(manifest, CapabilityLifecycleOperationKind.Disable, CapabilityLifecyclePreviewStatus.Replayed) with { OperationId = selection.OperationId };
+        var discarded = new CapabilityLifecycleMutationResult(CapabilityLifecycleMutationStatus.Discarded, null, 2, false, "discarded");
+        var store = new StubCapabilityLifecycleMutationStore { SelectionReplayResult = preview, MutationResult = discarded };
+        var service = Service(new StubCapabilityLifecycleTargetResolver(), store);
+        var request = new CapabilityLifecycleDispositionRequest(selection, preview.BaselineCatalogRevision, preview.BaselineActivationRevision, preview.LifecycleRevision, preview.DependentSetRevision, preview.DependentSetHash, preview.PreviewHash);
+
+        var stale = await service.DiscardAsync(request with { PreviewHash = CapabilityArtifactTestData.Manifest(content: "stale"u8.ToArray()).Checksum.Value });
+        var result = await service.DiscardAsync(request);
+        store.SelectionReplayResult = preview with { Status = CapabilityLifecyclePreviewStatus.NotFound };
+        var replayedAfterRetirement = await service.DiscardAsync(request);
+        var invalid = await service.DiscardAsync(request with { LifecycleRevision = 0 });
+
+        Assert.Equal(CapabilityLifecycleMutationStatus.Conflict, stale.Status);
+        Assert.Same(discarded, result);
+        Assert.Same(preview, store.DiscardedPreview);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Discarded, replayedAfterRetirement.Status);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Invalid, invalid.Status);
+        await Assert.ThrowsAsync<ArgumentNullException>(() => service.DiscardAsync(null!));
+    }
+
     private static CapabilityLifecycleSelectionService Service(StubCapabilityLifecycleTargetResolver resolver, StubCapabilityLifecycleMutationStore store, StubCapabilityLifecycleArtifactEvidenceSource? artifactEvidence = null)
     {
         var lifecycle = new CapabilityLifecycleService(new StubCapabilityDependentIndex(), new StubCapabilityLifecycleBaselineSource(), artifactEvidence ?? new StubCapabilityLifecycleArtifactEvidenceSource(), store, new RecordingCapabilityAuditLog(), new StubCapabilityAuthorityTransaction());
