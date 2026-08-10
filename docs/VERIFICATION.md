@@ -24,7 +24,7 @@ The required maximum-contract test still constructs the declared 65-attempt/30-m
 
 ## Bounds and progress
 
-Every native build, format, frontend, browser, test-project, coverage, and stress phase emits `VERIFY_PHASE_START` and `VERIFY_PHASE_COMPLETE` records. Nonzero exits and timeouts name the failed phase, elapsed time, and last completed phase. The pull-request test-session limit is 14 minutes per project beneath a 15-minute process bound. Stress sessions are bounded at 25 minutes; the maximum-artifact process bound is 30 minutes and the deletion-capacity process bound is 20 minutes. The outer required and stress jobs remain bounded at 45 and 75 minutes respectively.
+Every native build, format, frontend, browser, test-project, coverage, and stress phase emits `VERIFY_PHASE_START` and `VERIFY_PHASE_COMPLETE` records. Nonzero exits and timeouts name the failed phase, elapsed time, and last completed phase. Pull-request runsettings cap each test session at 20 minutes. Native test and coverage processes retain a 15-minute bound except Persistence coverage, which has a 21-minute process bound. Stress sessions are bounded at 25 minutes; the maximum-artifact process bound is 30 minutes and the deletion-capacity process bound is 20 minutes. The outer required and stress jobs remain bounded at 45 and 75 minutes respectively.
 
 The two profiled tests also emit JSON records:
 
