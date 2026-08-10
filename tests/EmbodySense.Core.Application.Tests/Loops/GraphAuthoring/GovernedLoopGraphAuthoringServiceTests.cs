@@ -119,6 +119,7 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
 
         Assert.Equal(GovernedLoopGraphAuthoringStatus.Replayed, replay.Status);
         Assert.Equal(missing.LifecycleResult.Evidence, replay.LifecycleResult!.Evidence);
+        Assert.Null(replay.RevisionIdentity);
         Assert.Equal(0, denied.Calls);
     }
 
@@ -190,6 +191,134 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
         Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, result.Status);
         Assert.True(store.Commits >= 2);
         Assert.Single(store.Snapshot(candidate.GraphId!)!.Artifacts);
+    }
+
+    [Fact]
+    public async Task Authority_release_failure_preserves_only_exact_durable_results()
+    {
+        var candidate = Candidate("revision-1");
+        var committed = await Service(
+            new InMemoryGraphStore(),
+            candidate,
+            authorityTransaction: new PostCallbackFailureTransaction(_ => new IOException("release failed"))).MutateAsync(
+                Authoring(Create("release-after-commit", candidate), candidate));
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, committed.Status);
+        Assert.NotNull(committed.LifecycleResult!.Evidence);
+
+        using var cancellation = new CancellationTokenSource();
+        var cancelledCommit = await Service(
+            new InMemoryGraphStore(),
+            candidate,
+            authorityTransaction: new PostCallbackFailureTransaction(
+                token => new OperationCanceledException(token),
+                cancellation.Cancel)).MutateAsync(
+                    Authoring(Create("cancel-release-after-commit", candidate), candidate),
+                    cancellation.Token);
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, cancelledCommit.Status);
+        Assert.True(cancellation.IsCancellationRequested);
+
+        var unproved = await Service(
+            new InMemoryGraphStore(),
+            candidate,
+            executableCatalog: false,
+            authorityTransaction: new PostCallbackFailureTransaction(_ => new IOException("release failed"))).MutateAsync(
+                Authoring(Create("release-after-rejection", candidate), candidate));
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Ambiguous, unproved.Status);
+        Assert.Null(unproved.LifecycleResult);
+    }
+
+    [Fact]
+    public async Task Exact_commit_proof_does_not_depend_on_a_second_cancellable_store_read()
+    {
+        var candidate = Candidate("revision-1");
+        var unavailableStore = new InMemoryGraphStore
+        {
+            MutationReadExceptionAfterCommit = new IOException("post-commit read unavailable"),
+        };
+        var unavailableRead = await Service(unavailableStore, candidate).MutateAsync(
+            Authoring(Create("commit-before-unavailable-read", candidate), candidate));
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, unavailableRead.Status);
+        Assert.Equal(0, unavailableStore.MutationReadsAfterCommit);
+
+        using var cancellation = new CancellationTokenSource();
+        var store = new InMemoryGraphStore
+        {
+            MutationReadExceptionAfterCommit = new OperationCanceledException(cancellation.Token),
+            AfterCommit = cancellation.Cancel,
+        };
+
+        var result = await Service(store, candidate).MutateAsync(
+            Authoring(Create("commit-before-cancelled-read", candidate), candidate),
+            cancellation.Token);
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, result.Status);
+        Assert.Equal(0, store.MutationReadsAfterCommit);
+    }
+
+    [Fact]
+    public async Task Stale_store_conflict_does_not_poison_subsequent_exact_read_replay()
+    {
+        var candidate = Candidate("revision-1");
+        var store = new InMemoryGraphStore { ConflictAfterExternalExactCommit = true };
+
+        var result = await Service(store, candidate).MutateAsync(
+            Authoring(Create("conflict-then-replay", candidate), candidate));
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Replayed, result.Status);
+        Assert.NotNull(result.RevisionIdentity);
+        Assert.Equal(GovernedLoopGraphRevisionOperationState.Terminal, store.Operation("conflict-then-replay")!.State);
+    }
+
+    [Fact]
+    public async Task Corrupt_pending_or_terminal_validation_bindings_fail_ambiguous_before_authority()
+    {
+        var candidate = Candidate("revision-1");
+        var lifecycle = Create("corrupt-pending", candidate);
+        var lifecycleHash = GovernedLoopRevisionLifecycleRequestHash.Compute(lifecycle);
+        var authoringHash = GovernedLoopGraphAuthoringRequestHash.Compute(lifecycle, candidate.Normalize());
+        var authorizer = new StubAuthorizer();
+
+        var wrongLifecycle = new InMemoryGraphStore();
+        wrongLifecycle.SeedPending(lifecycle.GraphId, lifecycle.OperationId, Hash('c'), authoringHash, Hash('b'));
+        var wrongLifecycleResult = await Service(wrongLifecycle, candidate, authorizer, catalogThrows: true).MutateAsync(Authoring(lifecycle, candidate));
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Ambiguous, wrongLifecycleResult.Status);
+
+        var missingValidation = new InMemoryGraphStore();
+        missingValidation.SeedPending(lifecycle.GraphId, lifecycle.OperationId, lifecycleHash, authoringHash, null);
+        var missingValidationResult = await Service(missingValidation, candidate, authorizer, catalogThrows: true).MutateAsync(Authoring(lifecycle, candidate));
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Ambiguous, missingValidationResult.Status);
+
+        var terminal = new InMemoryGraphStore();
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, (await Service(terminal, candidate).MutateAsync(Authoring(lifecycle, candidate))).Status);
+        terminal.RemoveOperationValidationEvidence(lifecycle.OperationId);
+        var missingTerminalEvidence = await Service(terminal, candidate, authorizer, catalogThrows: true).MutateAsync(Authoring(lifecycle, candidate));
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Ambiguous, missingTerminalEvidence.Status);
+        Assert.Equal(0, authorizer.Calls);
+    }
+
+    [Fact]
+    public async Task Well_formed_cross_graph_operation_binding_is_conflict_but_malformed_binding_is_ambiguous()
+    {
+        var candidate = Candidate("revision-1");
+        var lifecycle = Create("workspace-operation", candidate);
+        var lifecycleHash = GovernedLoopRevisionLifecycleRequestHash.Compute(lifecycle);
+        var authoringHash = GovernedLoopGraphAuthoringRequestHash.Compute(lifecycle, candidate.Normalize());
+        var valid = new InMemoryGraphStore();
+        valid.SeedPending("other-graph", lifecycle.OperationId, lifecycleHash, authoringHash, Hash('b'));
+
+        var conflict = await Service(valid, candidate, catalogThrows: true).MutateAsync(Authoring(lifecycle, candidate));
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Conflict, conflict.Status);
+
+        var malformed = new InMemoryGraphStore();
+        malformed.SeedPending("BAD GRAPH", lifecycle.OperationId, lifecycleHash, authoringHash, Hash('b'));
+        var ambiguous = await Service(malformed, candidate, catalogThrows: true).MutateAsync(Authoring(lifecycle, candidate));
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Ambiguous, ambiguous.Status);
     }
 
     [Fact]
@@ -286,7 +415,8 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
         GovernedLoopGraphCandidate candidate,
         StubAuthorizer? authorizer = null,
         bool executableCatalog = true,
-        bool catalogThrows = false)
+        bool catalogThrows = false,
+        ICapabilityAuthorityTransaction? authorityTransaction = null)
     {
         IGovernedLoopNodeCatalog catalog = catalogThrows
             ? new ThrowingCatalog()
@@ -296,7 +426,7 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
             store,
             validation,
             authorizer ?? new StubAuthorizer(),
-            new InlineAuthorityTransaction(),
+            authorityTransaction ?? new InlineAuthorityTransaction(),
             new FixedTimeProvider(_now));
     }
 
@@ -494,6 +624,40 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
             => await validator(cancellationToken) ? new StubLease() : null;
     }
 
+    private sealed class PostCallbackFailureTransaction(
+        Func<CancellationToken, Exception> exceptionFactory,
+        Action? beforeThrow = null) : ICapabilityAuthorityTransaction
+    {
+        private int _depth;
+
+        public async Task<TResult> ExecuteAsync<TResult>(
+            Func<CancellationToken, Task<TResult>> operation,
+            CancellationToken cancellationToken = default)
+        {
+            _depth++;
+            try
+            {
+                var result = await operation(cancellationToken);
+                if (_depth == 1)
+                {
+                    beforeThrow?.Invoke();
+                    throw exceptionFactory(cancellationToken);
+                }
+
+                return result;
+            }
+            finally
+            {
+                _depth--;
+            }
+        }
+
+        public async Task<ICapabilityAuthorityLease?> AcquireValidatedLeaseAsync(
+            Func<CancellationToken, Task<bool>> validator,
+            CancellationToken cancellationToken = default)
+            => await validator(cancellationToken) ? new StubLease() : null;
+    }
+
     private sealed class StubLease : ICapabilityAuthorityLease
     {
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -513,6 +677,11 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
         internal int Commits { get; private set; }
         internal int ArtifactReads { get; private set; }
         internal int ForcedStoreConflicts { get; set; }
+        internal bool ConflictAfterExternalExactCommit { get; set; }
+        internal Exception? MutationReadExceptionAfterCommit { get; set; }
+        internal Action? AfterCommit { get; set; }
+        internal int MutationReadsAfterCommit { get; private set; }
+        private bool _hasCommitted;
 
         internal GovernedLoopGraphRevisionSnapshot? Snapshot(string graphId)
             => _graphs.TryGetValue(graphId, out var snapshot) ? snapshot : null;
@@ -525,7 +694,7 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
             string operationId,
             string lifecycleRequestHash,
             string authoringRequestHash,
-            string graphValidationEvidenceHash)
+            string? graphValidationEvidenceHash)
         {
             _operations.Add(
                 operationId,
@@ -538,6 +707,11 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
                     null,
                     graphValidationEvidenceHash));
             Generation++;
+        }
+
+        internal void RemoveOperationValidationEvidence(string operationId)
+        {
+            _operations[operationId] = _operations[operationId] with { GraphValidationEvidenceHash = null };
         }
 
         internal void RemoveGraphPayloads(string graphId)
@@ -573,6 +747,12 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
             string authoringRequestHash,
             CancellationToken cancellationToken = default)
         {
+            if (_hasCommitted && MutationReadExceptionAfterCommit is not null)
+            {
+                MutationReadsAfterCommit++;
+                throw MutationReadExceptionAfterCommit;
+            }
+
             _operations.TryGetValue(operationId, out var operation);
             return Task.FromResult(_graphs.TryGetValue(graphId, out var snapshot)
                 ? new GovernedLoopGraphRevisionMutationReadResult(GovernedLoopRevisionStoreReadStatus.Ready, Generation, snapshot, operation)
@@ -594,6 +774,9 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
                     null,
                     null));
             }
+
+            var returnConflictAfterCommit = ConflictAfterExternalExactCommit;
+            ConflictAfterExternalExactCommit = false;
 
             var lifecycle = mutation.LifecycleMutation;
             if (_operations.TryGetValue(lifecycle.Operation.OperationId, out var existing))
@@ -666,6 +849,17 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
                 mutation.GraphValidationEvidenceHash);
             _operations[lifecycle.Operation.OperationId] = stored;
             Generation++;
+            _hasCommitted = true;
+            AfterCommit?.Invoke();
+            if (returnConflictAfterCommit)
+            {
+                return Task.FromResult(new GovernedLoopGraphRevisionCommitResult(
+                    GovernedLoopRevisionStoreCommitStatus.StoreConflict,
+                    Generation,
+                    null,
+                    next));
+            }
+
             return Task.FromResult(new GovernedLoopGraphRevisionCommitResult(
                 GovernedLoopRevisionStoreCommitStatus.Committed,
                 Generation,

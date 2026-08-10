@@ -43,22 +43,34 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
         GovernedLoopGraphAuthoringRequest? request,
         CancellationToken cancellationToken = default)
     {
+        GovernedLoopGraphAuthoringResult? completedResult = null;
         try
         {
             return await _authorityTransaction.ExecuteAsync(
-                token => MutateUnderFenceAsync(request, token),
+                async token =>
+                {
+                    completedResult = await MutateUnderFenceAsync(request, token).ConfigureAwait(false);
+                    return completedResult;
+                },
                 cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && completedResult is null)
         {
             throw;
         }
         catch (Exception)
         {
+            if (HasExactDurableProof(completedResult))
+            {
+                return completedResult!;
+            }
+
             return Result(
-                GovernedLoopGraphAuthoringStatus.Unavailable,
+                completedResult is null
+                    ? GovernedLoopGraphAuthoringStatus.Unavailable
+                    : GovernedLoopGraphAuthoringStatus.Ambiguous,
                 SafeOperationId(request),
-                string.Empty);
+                completedResult?.AuthoringRequestHash ?? string.Empty);
         }
     }
 
@@ -201,10 +213,14 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
         string? graphValidationEvidenceHash = null;
         if (initialRead.ExistingOperation is { } existing)
         {
-            if (!TryValidateStoredOperation(existing, lifecycle.OperationId)
-                || !string.Equals(existing.GraphId, lifecycle.GraphId, StringComparison.Ordinal))
+            if (!TryValidateStoredOperation(existing, lifecycle.OperationId))
             {
                 return Result(GovernedLoopGraphAuthoringStatus.Ambiguous, lifecycle.OperationId, authoringRequestHash);
+            }
+
+            if (!string.Equals(existing.GraphId, lifecycle.GraphId, StringComparison.Ordinal))
+            {
+                return Result(GovernedLoopGraphAuthoringStatus.Conflict, lifecycle.OperationId, authoringRequestHash);
             }
 
             if (!string.Equals(existing.AuthoringRequestHash, authoringRequestHash, StringComparison.Ordinal))
@@ -212,8 +228,16 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
                 return Result(GovernedLoopGraphAuthoringStatus.Conflict, lifecycle.OperationId, authoringRequestHash);
             }
 
-            if (existing.State == GovernedLoopGraphRevisionOperationState.Terminal
-                && !string.Equals(existing.LifecycleOperation!.Evidence.RequestHash, lifecycleRequestHash, StringComparison.Ordinal))
+            var validatesGraphContent = lifecycle.Kind is GovernedLoopRevisionOperationKind.CreateDraft
+                or GovernedLoopRevisionOperationKind.ReplaceDraft
+                or GovernedLoopRevisionOperationKind.Publish
+                or GovernedLoopRevisionOperationKind.Rollback;
+            var committedContent = existing.State == GovernedLoopGraphRevisionOperationState.Terminal
+                && existing.LifecycleOperation!.Evidence.Outcome == GovernedLoopRevisionOperationOutcome.Committed;
+            if (!string.Equals(existing.LifecycleRequestHash, lifecycleRequestHash, StringComparison.Ordinal)
+                || validatesGraphContent
+                    && (existing.State == GovernedLoopGraphRevisionOperationState.Pending || committedContent)
+                    && existing.GraphValidationEvidenceHash is null)
             {
                 return Result(GovernedLoopGraphAuthoringStatus.Ambiguous, lifecycle.OperationId, authoringRequestHash);
             }
@@ -295,10 +319,10 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
             return Result(statusOverride, lifecycle.OperationId, authoringRequestHash);
         }
 
-        var identity = status is GovernedLoopGraphAuthoringStatus.Committed or GovernedLoopGraphAuthoringStatus.Replayed
+        var contentCommitted = lifecycleResult.Evidence?.Outcome == GovernedLoopRevisionOperationOutcome.Committed;
+        var identity = contentCommitted
             ? FindIdentity(proof.Snapshot, RevisionForResult(lifecycle))
             : null;
-        var contentCommitted = lifecycleResult.Evidence?.Outcome == GovernedLoopRevisionOperationOutcome.Committed;
         if (contentCommitted
             && identity is null)
         {
@@ -391,7 +415,7 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
         };
     }
 
-    private async Task<DurableProof> ResolveDurableProofAsync(
+    private async Task<GovernedLoopGraphAuthoringDurableProof> ResolveDurableProofAsync(
         GovernedLoopRevisionLifecycleRequest lifecycle,
         string lifecycleRequestHash,
         string authoringRequestHash,
@@ -402,7 +426,32 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
     {
         if (lifecycleResult.Evidence is null)
         {
-            return DurableProof.None;
+            return lifecycleResult.Status is GovernedLoopRevisionLifecycleMutationStatus.Committed
+                or GovernedLoopRevisionLifecycleMutationStatus.Replayed
+                    ? GovernedLoopGraphAuthoringDurableProof.Ambiguous
+                    : GovernedLoopGraphAuthoringDurableProof.None;
+        }
+
+        if (commit is not null)
+        {
+            if (!Enum.IsDefined(commit.Status) || commit.Status == GovernedLoopRevisionStoreCommitStatus.Unknown)
+            {
+                return GovernedLoopGraphAuthoringDurableProof.Ambiguous;
+            }
+
+            if (commit.Status is GovernedLoopRevisionStoreCommitStatus.Committed
+                or GovernedLoopRevisionStoreCommitStatus.Replayed)
+            {
+                return ValidateDurableObservation(
+                    lifecycle,
+                    lifecycleRequestHash,
+                    authoringRequestHash,
+                    graphToAppend,
+                    lifecycleResult,
+                    commit.StoreGeneration,
+                    commit.Operation,
+                    commit.Snapshot);
+            }
         }
 
         var read = await ReadForMutationAsync(
@@ -412,42 +461,54 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
             authoringRequestHash,
             cancellationToken).ConfigureAwait(false);
         if (MapReadFailure(read, lifecycle.OperationId, authoringRequestHash) is not null
-            || read?.ExistingOperation is not { } operation
+            || read is null)
+        {
+            return GovernedLoopGraphAuthoringDurableProof.Ambiguous;
+        }
+
+        return ValidateDurableObservation(
+            lifecycle,
+            lifecycleRequestHash,
+            authoringRequestHash,
+            graphToAppend,
+            lifecycleResult,
+            read.StoreGeneration,
+            read.ExistingOperation,
+            read.Snapshot);
+    }
+
+    private static GovernedLoopGraphAuthoringDurableProof ValidateDurableObservation(
+        GovernedLoopRevisionLifecycleRequest lifecycle,
+        string lifecycleRequestHash,
+        string authoringRequestHash,
+        GovernedLoopGraphDefinition? graphToAppend,
+        GovernedLoopRevisionLifecycleMutationResult lifecycleResult,
+        long storeGeneration,
+        GovernedLoopGraphRevisionStoredOperation? operation,
+        GovernedLoopGraphRevisionSnapshot? snapshot)
+    {
+        if (storeGeneration <= 0
+            || operation is null
+            || lifecycleResult.Evidence is not { } evidence
+            || snapshot is not null && !TryValidateSnapshot(snapshot, storeGeneration)
             || !TerminalOperationMatches(
                 operation,
                 lifecycle.GraphId,
                 lifecycle.OperationId,
                 lifecycleRequestHash,
                 authoringRequestHash,
-                lifecycleResult.Evidence)
-            || !SnapshotProvesOperation(read.Snapshot, operation.LifecycleOperation!.Evidence))
+                evidence)
+            || !SnapshotProvesOperation(snapshot, evidence))
         {
-            return DurableProof.Ambiguous;
+            return GovernedLoopGraphAuthoringDurableProof.Ambiguous;
         }
 
-        if (commit is not null
-            && (!Enum.IsDefined(commit.Status)
-                || commit.Status is not (GovernedLoopRevisionStoreCommitStatus.Committed or GovernedLoopRevisionStoreCommitStatus.Replayed)
-                || commit.StoreGeneration <= 0
-                || commit.Operation is null
-                || !TerminalOperationMatches(
-                    commit.Operation,
-                    lifecycle.GraphId,
-                    lifecycle.OperationId,
-                    lifecycleRequestHash,
-                    authoringRequestHash,
-                    lifecycleResult.Evidence)
-                || !SnapshotsAgree(commit.Snapshot, read.Snapshot)))
+        if (evidence.Outcome == GovernedLoopRevisionOperationOutcome.Committed)
         {
-            return DurableProof.Ambiguous;
-        }
-
-        if (lifecycleResult.Evidence.Outcome == GovernedLoopRevisionOperationOutcome.Committed)
-        {
-            var artifact = FindArtifact(read.Snapshot, RevisionForResult(lifecycle));
+            var artifact = FindArtifact(snapshot, RevisionForResult(lifecycle));
             if (artifact is null
                 || lifecycleResult.Head is null
-                || !Equals(read.Snapshot?.Lifecycle.Head, lifecycleResult.Head)
+                || !Equals(snapshot?.Lifecycle.Head, lifecycleResult.Head)
                 || graphToAppend is not null
                     && (!SameRevision(artifact.RevisionArtifact.Revision, graphToAppend.RevisionReference)
                         || !string.Equals(artifact.Graph.ExecutableHash, graphToAppend.ExecutableHash, StringComparison.Ordinal)
@@ -456,11 +517,11 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
                             GovernedLoopGraphRevisionContractHash.ComputeLayoutHash(graphToAppend),
                             StringComparison.Ordinal)))
             {
-                return DurableProof.Ambiguous;
+                return GovernedLoopGraphAuthoringDurableProof.Ambiguous;
             }
         }
 
-        return new DurableProof(null, operation, read.Snapshot);
+        return new GovernedLoopGraphAuthoringDurableProof(null, operation, snapshot);
     }
 
     private static bool SnapshotProvesOperation(
@@ -771,15 +832,33 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
             && SHA256.HashSizeInBytes == 32;
     }
 
+    private static bool HasExactDurableProof(GovernedLoopGraphAuthoringResult? result)
+    {
+        if (result?.LifecycleResult?.Evidence is not { } evidence
+            || !IsSha256(result.AuthoringRequestHash)
+            || !GovernedLoopRevisionContractValidator.Validate(evidence).IsValid
+            || !string.Equals(result.OperationId, evidence.OperationId, StringComparison.Ordinal)
+            || !string.Equals(result.LifecycleResult.OperationId, evidence.OperationId, StringComparison.Ordinal)
+            || !string.Equals(result.LifecycleResult.RequestHash, evidence.RequestHash, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return result.Status switch
+        {
+            GovernedLoopGraphAuthoringStatus.Committed => evidence.Outcome == GovernedLoopRevisionOperationOutcome.Committed,
+            GovernedLoopGraphAuthoringStatus.Replayed => evidence.Outcome is GovernedLoopRevisionOperationOutcome.Committed
+                or GovernedLoopRevisionOperationOutcome.Conflict
+                or GovernedLoopRevisionOperationOutcome.NotFound
+                or GovernedLoopRevisionOperationOutcome.LimitExceeded,
+            GovernedLoopGraphAuthoringStatus.Conflict => evidence.Outcome == GovernedLoopRevisionOperationOutcome.Conflict,
+            GovernedLoopGraphAuthoringStatus.NotFound => evidence.Outcome == GovernedLoopRevisionOperationOutcome.NotFound,
+            GovernedLoopGraphAuthoringStatus.LimitExceeded => evidence.Outcome == GovernedLoopRevisionOperationOutcome.LimitExceeded,
+            _ => false,
+        };
+    }
+
     private static string SafeOperationId(GovernedLoopGraphAuthoringRequest? request)
         => request?.LifecycleRequest?.OperationId ?? string.Empty;
 
-    private sealed record DurableProof(
-        GovernedLoopGraphAuthoringStatus? StatusOverride,
-        GovernedLoopGraphRevisionStoredOperation? Operation,
-        GovernedLoopGraphRevisionSnapshot? Snapshot)
-    {
-        internal static DurableProof None { get; } = new(null, null, null);
-        internal static DurableProof Ambiguous { get; } = new(GovernedLoopGraphAuthoringStatus.Ambiguous, null, null);
-    }
 }
