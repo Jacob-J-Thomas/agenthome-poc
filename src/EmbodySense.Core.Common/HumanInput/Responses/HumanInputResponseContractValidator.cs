@@ -134,20 +134,39 @@ public static class HumanInputResponseContractValidator
         {
             Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$.responses", "A selection requires a bounded non-empty ordered response-reference set.");
         }
-        if (activeResponses is null || activeResponses.Count > HumanInputResponseContractLimits.MaxResponsesPerRequest)
+        if (!TrySnapshotActiveResponseList(activeResponses, out var activeCandidates, errors))
         {
-            Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$.activeResponses", "A bounded active response set is required.");
             return Result(errors);
         }
 
+        var active = new HumanInputResponseArtifact[activeCandidates.Length];
         var activeById = new Dictionary<string, HumanInputResponseArtifact>(StringComparer.Ordinal);
-        for (var index = 0; index < activeResponses.Count; index++)
+        var activeActorIds = new HashSet<string>(StringComparer.Ordinal);
+        var activeSetIsValid = true;
+        for (var index = 0; index < activeCandidates.Length; index++)
         {
-            var artifact = activeResponses[index];
-            if (artifact is null || !ValidateArtifact(request, artifact).IsValid || !activeById.TryAdd(artifact.ResponseId, artifact))
+            var candidate = activeCandidates[index];
+            if (candidate is null
+                || !HumanInputResponseArtifactSnapshot.TryCapture(request, candidate, out var artifact, out _)
+                || artifact is null)
             {
-                Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, $"$.activeResponses[{index}]", "Every active response must be valid, exact-bound, and uniquely identified.");
+                Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, $"$.activeResponses[{index}]", "Every active response must be a valid exact-bound immutable artifact.");
+                activeSetIsValid = false;
+                continue;
             }
+
+            active[index] = artifact;
+            var responseIsUnique = activeById.TryAdd(artifact.ResponseId, artifact);
+            var actorIsUnique = activeActorIds.Add(artifact.ActorId.Value);
+            if (!responseIsUnique || !actorIsUnique)
+            {
+                Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, $"$.activeResponses[{index}]", "Active response and authenticated actor identities must each be unique.");
+                activeSetIsValid = false;
+            }
+        }
+        if (!activeSetIsValid)
+        {
+            return Result(errors);
         }
 
         var selected = new List<HumanInputResponseArtifact>();
@@ -176,7 +195,7 @@ public static class HumanInputResponseContractValidator
             }
         }
 
-        ValidateSelectionPolicy(request, selection, selected, activeResponses, errors);
+        ValidateSelectionPolicy(request, selection, selected, active, errors);
         if (!HumanInputResponseSelectionHash.IsBounded(selection))
         {
             Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$", "The selection exceeds canonical schema-1 bounds.");
@@ -186,6 +205,42 @@ public static class HumanInputResponseContractValidator
             Add(errors, HumanInputResponseValidationErrorCode.InvalidHash, "$.selectionHash", "Selection hash must match the exact ordered response set and policy attribution.");
         }
         return Result(errors);
+    }
+
+    private static bool TrySnapshotActiveResponseList(
+        IReadOnlyList<HumanInputResponseArtifact>? activeResponses,
+        out HumanInputResponseArtifact[] snapshot,
+        List<HumanInputResponseValidationError> errors)
+    {
+        snapshot = [];
+        if (activeResponses is null)
+        {
+            Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$.activeResponses", "A bounded active response set is required.");
+            return false;
+        }
+
+        try
+        {
+            var count = activeResponses.Count;
+            if (count is < 0 or > HumanInputResponseContractLimits.MaxResponsesPerRequest)
+            {
+                Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$.activeResponses", "A bounded active response set is required.");
+                return false;
+            }
+
+            snapshot = new HumanInputResponseArtifact[count];
+            for (var index = 0; index < count; index++)
+            {
+                snapshot[index] = activeResponses[index];
+            }
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or IndexOutOfRangeException or NullReferenceException)
+        {
+            Add(errors, HumanInputResponseValidationErrorCode.InvalidSelectionShape, "$.activeResponses", "The bounded active response set changed while its durable order was captured.");
+            snapshot = [];
+            return false;
+        }
     }
 
     /// <summary>Validates one append-only authenticated-response operation evidence record without consulting mutable store state.</summary>
@@ -393,8 +448,25 @@ public static class HumanInputResponseContractValidator
         {
             Add(errors, HumanInputResponseValidationErrorCode.InvalidLifecycleState, "$.previousHead", "Every retained request lifecycle head must be independently valid.");
         }
+        if (evidence.FailureCode != HumanInputResponseOperationFailureCode.RequestNotFound)
+        {
+            if (evidence.PreviousHead is { } previousIdentity
+                && !string.Equals(previousIdentity.RequestId, evidence.Request?.RequestId, StringComparison.Ordinal))
+            {
+                Add(errors, HumanInputResponseValidationErrorCode.InvalidLifecycleState, "$.previousHead.requestId", "The observed previous head must belong to the exact requested lifecycle.");
+            }
+            if (evidence.ResultHead is { } resultIdentity
+                && !string.Equals(resultIdentity.RequestId, evidence.Request?.RequestId, StringComparison.Ordinal))
+            {
+                Add(errors, HumanInputResponseValidationErrorCode.InvalidLifecycleState, "$.resultHead.requestId", "The observed result head must belong to the exact requested lifecycle.");
+            }
+        }
         if (evidence.PreviousHead is { } previous)
         {
+            if (evidence.RecordedAtUtc < previous.UpdatedAtUtc)
+            {
+                Add(errors, HumanInputResponseValidationErrorCode.InvalidUtcTime, "$.recordedAtUtc", "Response evidence time cannot precede the observed request head.");
+            }
             var requestMatches = Equals(previous.CurrentRequest, evidence.Request);
             var bindingMatches = Equals(evidence.ObservedBinding, evidence.ExpectedBinding);
             var expectedMatches = requestMatches
@@ -574,7 +646,8 @@ public static class HumanInputResponseContractValidator
         HumanInputResponseOperationFailureCode.SelectionConflict => kind == HumanInputResponseOperationKind.Select,
         HumanInputResponseOperationFailureCode.ResponseLimitExceeded => kind == HumanInputResponseOperationKind.Submit,
         HumanInputResponseOperationFailureCode.OperationEvidenceLimitExceeded => true,
-        HumanInputResponseOperationFailureCode.LifecycleVersionLimitExceeded => true,
+        HumanInputResponseOperationFailureCode.LifecycleVersionLimitExceeded => kind is HumanInputResponseOperationKind.Submit
+            or HumanInputResponseOperationKind.Select,
         _ => false
     };
 
