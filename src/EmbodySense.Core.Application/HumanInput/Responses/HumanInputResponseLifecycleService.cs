@@ -417,7 +417,8 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
                 recordedAtUtc,
                 [],
                 [],
-                0);
+                0,
+                null);
         }
         var request = FindResponseRequest(snapshot);
         if (request is null || !Equals(snapshot.ResponseRequest, snapshot.Request.Head.CurrentRequest))
@@ -452,7 +453,8 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
             recordedAtUtc,
             snapshot.Responses,
             active,
-            snapshot.Operations.Count);
+            snapshot.Operations.Count,
+            snapshot.Operations.LastOrDefault()?.RecordedAtUtc);
     }
 
     private HumanInputResponseOperationEvidence? BuildEvidence(

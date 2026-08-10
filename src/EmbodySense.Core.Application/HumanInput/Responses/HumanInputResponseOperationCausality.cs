@@ -101,7 +101,8 @@ public static class HumanInputResponseOperationCausality
                     capturedEvidence.RecordedAtUtc,
                     [],
                     [],
-                    0);
+                    0,
+                    null);
                 return PlanMatchesEvidence(missing, capturedCommand, capturedEvidence, null);
             }
             if (!HumanInputResponseLifecycleStoreSnapshotGuard.TryCapture(snapshot, capturedEvidence.Request.RequestId, out var exactSnapshot)
@@ -142,7 +143,8 @@ public static class HumanInputResponseOperationCausality
                 capturedEvidence.RecordedAtUtc,
                 retained,
                 active,
-                Math.Max(operationIndex, 0));
+                Math.Max(operationIndex, 0),
+                operationIndex > 0 ? exactSnapshot.Operations[operationIndex - 1].RecordedAtUtc : null);
             return PlanMatchesEvidence(evaluated, capturedCommand, capturedEvidence, exactSnapshot);
         }
         catch (Exception)
@@ -160,7 +162,8 @@ public static class HumanInputResponseOperationCausality
         DateTimeOffset recordedAtUtc,
         IReadOnlyList<HumanInputResponseArtifact> retainedResponses,
         IReadOnlyList<HumanInputResponseArtifact> activeResponses,
-        int priorOperationCount)
+        int priorOperationCount,
+        DateTimeOffset? previousOperationAtUtc)
     {
         if (head is null || observedRequest is null)
         {
@@ -221,7 +224,9 @@ public static class HumanInputResponseOperationCausality
                     ? HumanInputResponseOperationFailureCode.IneligibleSelector
                     : HumanInputResponseOperationFailureCode.IneligibleRespondent), observedRequest, null);
         }
-        if (recordedAtUtc < head.UpdatedAtUtc || recordedAtUtc < observedRequest.Timing.RequestedAtUtc)
+        if (recordedAtUtc < head.UpdatedAtUtc
+            || recordedAtUtc < observedRequest.Timing.RequestedAtUtc
+            || previousOperationAtUtc is { } previousTime && recordedAtUtc < previousTime)
         {
             return (HumanInputResponsePolicyEvaluator.Failure(
                 head,
