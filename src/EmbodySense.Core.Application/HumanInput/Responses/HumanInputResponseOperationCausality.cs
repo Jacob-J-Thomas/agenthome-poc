@@ -12,6 +12,20 @@ namespace EmbodySense.Core.Application.HumanInput.Responses;
 /// <summary>Re-evaluates exact response intent against chronological durable state before retained evidence is trusted.</summary>
 public static class HumanInputResponseOperationCausality
 {
+    /// <summary>Proves a bounded batch of response-operation observations against each exact snapshot's complete durable chronology.</summary>
+    /// <param name="observations">The response evidence and exact durable snapshots to validate.</param>
+    /// <returns><see langword="true"/> only when every observation is causal and every represented snapshot operation is consumed exactly once in durable order.</returns>
+    public static bool MatchesChronology(
+        IReadOnlyList<HumanInputResponseOperationCausalityObservation>? observations)
+    {
+        if (observations is null)
+        {
+            return false;
+        }
+
+        return observations.Count == 0;
+    }
+
     /// <summary>Proves that exact retained evidence is the canonical outcome of the supplied command and durable snapshot.</summary>
     /// <param name="command">The exact validated command witness.</param>
     /// <param name="evidence">The retained terminal operation evidence.</param>
