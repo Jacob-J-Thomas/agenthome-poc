@@ -378,16 +378,24 @@ public static class HumanInputResponseContractValidator
         {
             Add(errors, HumanInputResponseValidationErrorCode.InvalidLifecycleState, "$.previousHead", "Every retained request lifecycle head must be independently valid.");
         }
-        if (evidence.PreviousHead is { } previous
-            && (!Equals(previous.CurrentRequest, evidence.Request)
-                || previous.LifecycleVersion != evidence.ExpectedLifecycleVersion
-                || previous.Status != evidence.ExpectedLifecycleStatus))
+        if (evidence.PreviousHead is { } previous)
         {
-            Add(errors, HumanInputResponseValidationErrorCode.InvalidLifecycleState, "$.previousHead", "The observed head must match the exact authenticated pending expectation and request reference.");
-        }
-        if (evidence.ResultHead is { } result && !Equals(result.CurrentRequest, evidence.Request))
-        {
-            Add(errors, HumanInputResponseValidationErrorCode.InvalidLifecycleState, "$.resultHead", "The resulting head must retain the exact immutable request reference.");
+            var expectedMatches = Equals(previous.CurrentRequest, evidence.Request)
+                && previous.LifecycleVersion == evidence.ExpectedLifecycleVersion
+                && previous.Status == evidence.ExpectedLifecycleStatus;
+            var observedShapeIsValid = evidence.FailureCode switch
+            {
+                HumanInputResponseOperationFailureCode.OptimisticStateConflict => Equals(previous.CurrentRequest, evidence.Request)
+                    && (previous.LifecycleVersion != evidence.ExpectedLifecycleVersion || previous.Status != evidence.ExpectedLifecycleStatus),
+                HumanInputResponseOperationFailureCode.StaleResponse => !Equals(previous.CurrentRequest, evidence.Request),
+                HumanInputResponseOperationFailureCode.RequestTerminal => Equals(previous.CurrentRequest, evidence.Request)
+                    && previous.Status != HumanInputRequestLifecycleStatus.Pending,
+                _ => expectedMatches
+            };
+            if (!observedShapeIsValid)
+            {
+                Add(errors, HumanInputResponseValidationErrorCode.InvalidLifecycleState, "$.previousHead", "Observed request-head truth is inconsistent with the exact expected state and terminal failure classification.");
+            }
         }
 
         if (evidence.Outcome == HumanInputResponseOperationOutcome.Committed && evidence.Selection is not null)
@@ -418,7 +426,8 @@ public static class HumanInputResponseContractValidator
 
         if (evidence.Selection is null)
         {
-            if (evidence.ResultHead?.Status == HumanInputRequestLifecycleStatus.Answered || evidence.ResultHead?.AnswerSelection is not null)
+            if (evidence.Outcome == HumanInputResponseOperationOutcome.Committed
+                && (evidence.ResultHead?.Status == HumanInputRequestLifecycleStatus.Answered || evidence.ResultHead?.AnswerSelection is not null))
             {
                 Add(errors, HumanInputResponseValidationErrorCode.InvalidLifecycleState, "$.selection", "Only one exact committed selection may project the request head to answered.");
             }
