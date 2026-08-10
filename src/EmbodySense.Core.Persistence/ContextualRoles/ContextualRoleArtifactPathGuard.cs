@@ -117,8 +117,24 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
     public FileStream? TryAcquireMutationLock()
     {
         PrepareRoots();
+        return TryAcquireMutationLockCore(create: true);
+    }
+
+    public FileStream? TryAcquireExistingMutationLock()
+    {
+        PrepareExistingRoots();
+        return TryAcquireMutationLockCore(create: false);
+    }
+
+    private FileStream? TryAcquireMutationLockCore(bool create)
+    {
         var (directory, _, name) = ResolveFile(_paths.Lock);
-        var handle = OpenRelativeFile(directory, name, allowMissing: false, create: true, exclusiveCreate: false, write: true) ?? throw new IOException("The contextual-role mutation lock could not be created.");
+        var handle = OpenRelativeFile(directory, name, allowMissing: !create, create, exclusiveCreate: false, write: true);
+        if (handle is null)
+        {
+            throw new FormatException("The existing contextual-role store has no mutation lock artifact.");
+        }
+
         var identity = ValidateRegularFile(handle, "contextual-role mutation lock");
         var stream = new FileStream(handle, FileAccess.ReadWrite, bufferSize: 1, isAsync: false);
         if (!CustomLoopCrossProcessFileLock.TryAcquire(stream))
@@ -128,8 +144,12 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         }
 
         ValidateIdentity(handle, identity, requireSingleLink: true, "contextual-role mutation lock");
-        FlushFile(handle);
-        FlushDirectory(directory);
+        if (create)
+        {
+            FlushFile(handle);
+            FlushDirectory(directory);
+        }
+
         VerifyAllMappings();
         return stream;
     }
@@ -559,6 +579,37 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
                 FlushDirectory(handle);
                 FlushDirectory(parent);
             }
+        }
+
+        VerifyDirectoryMapping(path, handle, identity);
+    }
+
+    private void PrepareExistingRoots()
+    {
+        lock (_directoryGate)
+        {
+            VerifyWorkspaceMapping();
+            RequireDirectory(ref _agentHandle, ref _agentIdentity, _workspaceHandle, _agentName, _agentPath);
+            RequireDirectory(ref _rootHandle, ref _rootIdentity, _agentHandle!, Path.GetFileName(_paths.Root), _paths.Root);
+            RequireDirectory(ref _revisionsHandle, ref _revisionsIdentity, _rootHandle!, Path.GetFileName(_paths.Revisions), _paths.Revisions);
+            RequireDirectory(ref _statesHandle, ref _statesIdentity, _rootHandle!, Path.GetFileName(_paths.States), _paths.States);
+            RequireDirectory(ref _operationsHandle, ref _operationsIdentity, _rootHandle!, Path.GetFileName(_paths.Operations), _paths.Operations);
+            RequireDirectory(ref _proofsHandle, ref _proofsIdentity, _rootHandle!, Path.GetFileName(_paths.Proofs), _paths.Proofs);
+            VerifyAllMappings();
+        }
+    }
+
+    private static void RequireDirectory(ref SafeFileHandle? handle, ref NativeIdentity identity, SafeFileHandle parent, string name, string path)
+    {
+        if (handle is null)
+        {
+            handle = OpenRelativeDirectory(parent, name, allowMissing: true, create: false, out _);
+            if (handle is null)
+            {
+                throw new FormatException($"The existing contextual-role store is missing required directory '{Path.GetFileName(path)}'.");
+            }
+
+            identity = ValidateDirectory(handle, "existing contextual-role persistence directory");
         }
 
         VerifyDirectoryMapping(path, handle, identity);

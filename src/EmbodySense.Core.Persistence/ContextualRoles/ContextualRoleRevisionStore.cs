@@ -152,7 +152,7 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
                 return new ContextualRoleRevisionReadResult(ContextualRoleRevisionReadStatus.NotFound, null, ContextualRoleRevisionDisposition.Unknown, []);
             }
 
-            using var mutationLock = _guard.TryAcquireMutationLock();
+            using var mutationLock = _guard.TryAcquireExistingMutationLock();
             if (mutationLock is null)
             {
                 return new ContextualRoleRevisionReadResult(ContextualRoleRevisionReadStatus.Unavailable, null, ContextualRoleRevisionDisposition.Unknown, []);
@@ -208,7 +208,7 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
                 return new ContextualRoleLifecycleReadResult(ContextualRoleLifecycleReadStatus.NotFound, null);
             }
 
-            using var mutationLock = _guard.TryAcquireMutationLock();
+            using var mutationLock = _guard.TryAcquireExistingMutationLock();
             if (mutationLock is null)
             {
                 return new ContextualRoleLifecycleReadResult(ContextualRoleLifecycleReadStatus.Unavailable, null);
@@ -253,7 +253,7 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
                 return new ContextualRoleCatalogReadResult(ContextualRoleCatalogReadStatus.Available, [], null);
             }
 
-            using var mutationLock = _guard.TryAcquireMutationLock();
+            using var mutationLock = _guard.TryAcquireExistingMutationLock();
             if (mutationLock is null)
             {
                 return new ContextualRoleCatalogReadResult(ContextualRoleCatalogReadStatus.Unavailable, [], null);

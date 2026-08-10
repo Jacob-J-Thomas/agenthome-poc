@@ -35,6 +35,66 @@ public sealed class ContextualRoleCatalogReaderTests
     }
 
     [Fact]
+    public async Task Partial_store_reads_fail_ambiguous_without_creating_layout_or_lock_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var partialRoot = Path.Combine(paths.AgentPath, "contextual-roles");
+        Directory.CreateDirectory(partialRoot);
+        await File.WriteAllTextAsync(Path.Combine(partialRoot, "interrupted.marker"), "partial");
+        var before = Directory.EnumerateFileSystemEntries(partialRoot, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(partialRoot, path))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        using var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+
+        var catalog = await store.ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 10));
+        var revision = await store.ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1)));
+        var lifecycle = await store.ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var after = Directory.EnumerateFileSystemEntries(partialRoot, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(partialRoot, path))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(ContextualRoleCatalogReadStatus.Ambiguous, catalog.Status);
+        Assert.Equal(ContextualRoleRevisionReadStatus.Ambiguous, revision.Status);
+        Assert.Equal(ContextualRoleLifecycleReadStatus.Ambiguous, lifecycle.Status);
+        Assert.Equal(before, after);
+        Assert.False(File.Exists(Path.Combine(partialRoot, ".mutations.lock")));
+        Assert.False(Directory.Exists(Path.Combine(partialRoot, "revisions")));
+        Assert.False(Directory.Exists(Path.Combine(partialRoot, "states")));
+        Assert.False(Directory.Exists(Path.Combine(partialRoot, "operations")));
+        Assert.False(Directory.Exists(Path.Combine(partialRoot, "proofs")));
+    }
+
+    [Fact]
+    public async Task Existing_directories_without_a_lock_fail_ambiguous_without_creating_the_lock()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = Path.Combine(paths.AgentPath, "contextual-roles");
+        Directory.CreateDirectory(Path.Combine(root, "revisions"));
+        Directory.CreateDirectory(Path.Combine(root, "states"));
+        Directory.CreateDirectory(Path.Combine(root, "operations"));
+        Directory.CreateDirectory(Path.Combine(root, "proofs"));
+        var before = Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(root, path))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        using var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+
+        var result = await store.ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 10));
+        var after = Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(root, path))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(ContextualRoleCatalogReadStatus.Ambiguous, result.Status);
+        Assert.Equal(before, after);
+        Assert.False(File.Exists(Path.Combine(root, ".mutations.lock")));
+    }
+
+    [Fact]
     public async Task Catalog_pages_current_roles_in_ordinal_order_with_exact_lifecycle_posture()
     {
         using var workspace = new TestWorkspace();
