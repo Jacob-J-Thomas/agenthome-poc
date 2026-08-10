@@ -1,0 +1,828 @@
+using System.Text;
+using System.Text.Json;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Application.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Revisions;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
+using EmbodySense.Core.Persistence.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Persistence.Loops.Revisions;
+using EmbodySense.Core.Persistence.Tests.Capabilities;
+using EmbodySense.Tests.Support;
+
+namespace EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring;
+
+public sealed class GovernedLoopGraphRevisionStoreTests
+{
+    private const string HashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private const string HashB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    private const string HashC = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    private static readonly DateTimeOffset _time = new(2026, 8, 10, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task Commit_restart_read_and_exact_replay_preserve_canonical_graph_and_generic_provenance()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var mutation = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
+
+        var committed = await Store(paths, trust).CommitAsync(mutation);
+        var restarted = Store(paths, trust);
+        var graphRead = await restarted.ReadGraphAsync(graph.GraphId);
+        var artifactRead = await restarted.ReadArtifactAsync(graph.RevisionReference);
+        var mutationRead = await restarted.ReadForMutationAsync(graph.GraphId, "create-one", HashA, HashB);
+        var replayed = await restarted.CommitAsync(mutation);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, committed.Status);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, graphRead.Status);
+        var expectedArtifact = GovernedLoopGraphRevisionArtifactFactory.Create(
+            GovernedLoopGraphRevisionArtifact.CurrentSchemaVersion,
+            mutation.LifecycleMutation.ArtifactToAppend!,
+            graph);
+        var storedArtifact = Assert.Single(graphRead.Snapshot!.Artifacts);
+        Assert.Equal(expectedArtifact.ArtifactHash, storedArtifact.ArtifactHash);
+        Assert.Equal(graph.RevisionReference, storedArtifact.Graph.RevisionReference);
+        Assert.Equal(expectedArtifact.ArtifactHash, artifactRead.Artifact!.ArtifactHash);
+        Assert.Equal(GovernedLoopGraphRevisionOperationState.Terminal, mutationRead.ExistingOperation!.State);
+        Assert.Equal(HashA, mutationRead.ExistingOperation.LifecycleRequestHash);
+        Assert.Equal(HashB, mutationRead.ExistingOperation.AuthoringRequestHash);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Replayed, replayed.Status);
+        Assert.Equal(committed.StoreGeneration, replayed.StoreGeneration);
+
+        var payload = await File.ReadAllTextAsync(ArtifactPath(paths, graph));
+        Assert.DoesNotContain("createdAtUtc", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("createdByActorId", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("creationOperationId", payload, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Layout_only_successor_keeps_executable_identity_but_changes_layout_and_full_artifact_hash()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var firstGraph = Graph();
+        var first = CreateDraft(firstGraph, "create-one", HashA, HashB, 0, _time);
+        var store = Store(paths, trust);
+        var created = await store.CommitAsync(first);
+        var secondGraph = Graph(
+            revisionId: "revision-two",
+            display: Display("Moved graph", 400, 500));
+        var second = ReplaceDraft(first, secondGraph, "replace-one", HashB, HashC, 1, _time.AddMinutes(1));
+
+        var replaced = await store.CommitAsync(second);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, created.Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, replaced.Status);
+        Assert.Equal(firstGraph.ExecutableHash, secondGraph.ExecutableHash);
+        var artifacts = replaced.Snapshot!.Artifacts;
+        Assert.Equal(2, artifacts.Count);
+        Assert.NotEqual(artifacts[0].LayoutHash, artifacts[1].LayoutHash);
+        Assert.NotEqual(artifacts[0].ArtifactHash, artifacts[1].ArtifactHash);
+        Assert.Equal(firstGraph.RevisionReference, artifacts[1].RevisionArtifact.PredecessorRevision);
+    }
+
+    [Fact]
+    public async Task Every_schema_one_graph_enum_round_trips_through_canonical_persistence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = GraphWithEveryClosedEnum();
+        var mutation = CreateDraft(graph, "create-all-enums", HashA, HashB, 0, _time);
+
+        var committed = await Store(paths, trust).CommitAsync(mutation);
+        var read = await Store(paths, trust).ReadArtifactAsync(graph.RevisionReference);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, committed.Status);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, read.Status);
+        Assert.Equal(
+            Enum.GetValues<GovernedLoopNodeKind>().Where(value => value != GovernedLoopNodeKind.Unknown).Order(),
+            read.Artifact!.Graph.Nodes.Select(node => node.Descriptor.Kind).Order());
+        Assert.Equal(
+            Enum.GetValues<GovernedLoopValueKind>().Where(value => value != GovernedLoopValueKind.Unknown).Order(),
+            read.Artifact.Graph.ValueSchemas.Select(schema => schema.Kind).Order());
+        Assert.Equal(
+            Enum.GetValues<GovernedLoopControlCondition>().Where(value => value != GovernedLoopControlCondition.Unknown).Order(),
+            read.Artifact.Graph.ControlEdges.Select(edge => edge.Condition).Order());
+        Assert.Contains(read.Artifact.Graph.Bindings, binding => binding.Kind == GovernedLoopBindingKind.Context);
+    }
+
+    [Fact]
+    public async Task Lifecycle_only_publication_persists_full_intent_without_a_second_graph_payload()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var draft = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
+        var store = Store(paths, trust);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, (await store.CommitAsync(draft)).Status);
+        var publish = Publish(draft, "publish-one", HashB, HashC, 1, _time.AddMinutes(1));
+
+        var published = await store.CommitAsync(publish);
+        var replayed = await Store(paths, trust).CommitAsync(publish);
+        var read = await Store(paths, trust).ReadForMutationAsync(graph.GraphId, "publish-one", HashB, HashC);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, published.Status);
+        Assert.Equal(GovernedLoopRevisionLifecycleStatus.Published, published.Snapshot!.Lifecycle.Head.Status);
+        Assert.Single(published.Snapshot.Artifacts);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Replayed, replayed.Status);
+        Assert.Equal(GovernedLoopGraphRevisionOperationState.Terminal, read.ExistingOperation!.State);
+        Assert.Equal(HashC, read.ExistingOperation.GraphValidationEvidenceHash);
+        var intent = await File.ReadAllTextAsync(
+            Path.Combine(GraphRoot(paths), "operations", "publish-one.json"));
+        Assert.Contains("\"graphPayloadHash\": null", intent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Payload_only_crash_is_recoverable_when_lifecycle_timestamp_is_replanned()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var original = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
+        var replanned = CreateDraft(graph, "create-one", HashA, HashB, 0, _time.AddHours(1));
+
+        var interrupted = await Store(paths, trust, FailAt(GovernedLoopGraphRevisionPersistenceBoundary.ArtifactPublished))
+            .CommitAsync(original);
+        var recovered = await Store(paths, trust).CommitAsync(replanned);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, interrupted.Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, recovered.Status);
+        Assert.Equal(_time.AddHours(1), Assert.Single(recovered.Snapshot!.Artifacts).RevisionArtifact.CreatedAtUtc);
+    }
+
+    [Fact]
+    public async Task Published_intent_reports_pending_only_for_exact_dual_hashes_and_exact_retry_finishes()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var mutation = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
+
+        var interrupted = await Store(paths, trust, FailAt(GovernedLoopGraphRevisionPersistenceBoundary.IntentPublished))
+            .CommitAsync(mutation);
+        var restarted = Store(paths, trust);
+        var exact = await restarted.ReadForMutationAsync(graph.GraphId, "create-one", HashA, HashB);
+        var changedAuthoring = await restarted.ReadForMutationAsync(graph.GraphId, "create-one", HashA, HashC);
+        var recovered = await restarted.CommitAsync(mutation);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, interrupted.Status);
+        Assert.Equal(GovernedLoopGraphRevisionOperationState.Pending, exact.ExistingOperation!.State);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ambiguous, changedAuthoring.Status);
+        Assert.Null(changedAuthoring.ExistingOperation);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, recovered.Status);
+    }
+
+    [Fact]
+    public async Task Payload_only_orphan_remains_recoverable_after_another_operation_advances_graph_trust()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var firstGraph = Graph(graphId: "graph-one", revisionId: "revision-one");
+        var secondGraph = Graph(graphId: "graph-two", revisionId: "revision-two");
+        var first = CreateDraft(firstGraph, "create-one", HashA, HashB, 0, _time);
+        var second = CreateDraft(secondGraph, "create-two", HashB, HashC, 0, _time.AddMinutes(1));
+
+        var interrupted = await Store(paths, trust, FailAt(GovernedLoopGraphRevisionPersistenceBoundary.ArtifactPublished))
+            .CommitAsync(first);
+        var advanced = await Store(paths, trust).CommitAsync(second);
+        var refreshed = CreateDraft(firstGraph, "create-one", HashA, HashB, 1, _time.AddMinutes(2));
+        var recovered = await Store(paths, trust).CommitAsync(refreshed);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, interrupted.Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, advanced.Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, recovered.Status);
+        Assert.Equal(2, recovered.StoreGeneration);
+        Assert.Equal(_time.AddMinutes(2), Assert.Single(recovered.Snapshot!.Artifacts).RevisionArtifact.CreatedAtUtc);
+    }
+
+    [Fact]
+    public async Task Pending_intent_is_reconciled_before_a_later_operation_allocates_the_next_trust_generation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var firstGraph = Graph(graphId: "graph-one", revisionId: "revision-one");
+        var secondGraph = Graph(graphId: "graph-two", revisionId: "revision-two");
+        var first = CreateDraft(firstGraph, "create-one", HashA, HashB, 0, _time);
+        var second = CreateDraft(secondGraph, "create-two", HashB, HashC, 0, _time.AddMinutes(1));
+
+        var interrupted = await Store(paths, trust, FailAt(GovernedLoopGraphRevisionPersistenceBoundary.IntentPublished))
+            .CommitAsync(first);
+        var later = await Store(paths, trust).CommitAsync(second);
+
+        var firstIntent = await IntentTrustGenerationAsync(paths, "create-one");
+        var secondIntent = await IntentTrustGenerationAsync(paths, "create-two");
+        var refreshed = CreateDraft(firstGraph, "create-one", HashA, HashB, 1, _time);
+        var recovered = await Store(paths, trust).CommitAsync(refreshed);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Ambiguous, interrupted.Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, later.Status);
+        Assert.Equal(1, firstIntent);
+        Assert.Equal(2, secondIntent);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, recovered.Status);
+        Assert.Equal(2, recovered.StoreGeneration);
+    }
+
+    [Fact]
+    public async Task Read_paths_do_not_create_storage_and_first_commit_creates_only_the_exact_root()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var store = Store(paths, trust);
+        var graph = Graph();
+        var root = GraphRoot(paths);
+
+        var graphRead = await store.ReadGraphAsync(graph.GraphId);
+        var mutationRead = await store.ReadForMutationAsync(graph.GraphId, "create-one", HashA, HashB);
+
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.NotFound, graphRead.Status);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.NotFound, mutationRead.Status);
+        Assert.False(Directory.Exists(root));
+
+        var committed = await store.CommitAsync(CreateDraft(graph, "create-one", HashA, HashB, 0, _time));
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, committed.Status);
+        Assert.True(Directory.Exists(root));
+        Assert.True(File.Exists(Path.Combine(root, ".mutations.lock")));
+    }
+
+    [Fact]
+    public async Task Visible_lifecycle_without_its_exact_payload_fails_closed_without_fallback_scanning()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var store = Store(paths, trust);
+        Assert.Equal(
+            GovernedLoopRevisionStoreCommitStatus.Committed,
+            (await store.CommitAsync(CreateDraft(graph, "create-one", HashA, HashB, 0, _time))).Status);
+        var exactPath = ArtifactPath(paths, graph);
+        var decoyPath = Path.Combine(Path.GetDirectoryName(exactPath)!, "decoy-revision.json");
+        File.Move(exactPath, decoyPath);
+
+        var graphRead = await store.ReadGraphAsync(graph.GraphId);
+        var artifactRead = await store.ReadArtifactAsync(graph.RevisionReference);
+
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ambiguous, graphRead.Status);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ambiguous, artifactRead.Status);
+        Assert.Null(graphRead.Snapshot);
+        Assert.Null(artifactRead.Artifact);
+    }
+
+    [Fact]
+    public async Task Malformed_unreferenced_artifacts_and_missing_current_intents_fail_the_workspace_closed()
+    {
+        using var malformedWorkspace = new TestWorkspace();
+        var malformedPaths = new WorkspacePaths(malformedWorkspace.RootPath);
+        var malformedTrust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var malformedStore = Store(malformedPaths, malformedTrust);
+        Assert.Equal(
+            GovernedLoopRevisionStoreCommitStatus.Committed,
+            (await malformedStore.CommitAsync(CreateDraft(graph, "create-one", HashA, HashB, 0, _time))).Status);
+        await File.WriteAllTextAsync(
+            Path.Combine(Path.GetDirectoryName(ArtifactPath(malformedPaths, graph))!, "orphan-revision.json"),
+            "{}\n");
+
+        Assert.Equal(
+            GovernedLoopRevisionStoreReadStatus.Ambiguous,
+            (await malformedStore.ReadGraphAsync(graph.GraphId)).Status);
+
+        using var missingIntentWorkspace = new TestWorkspace();
+        var missingIntentPaths = new WorkspacePaths(missingIntentWorkspace.RootPath);
+        var missingIntentTrust = new TestCapabilityLifecycleTrustProvider();
+        var missingIntentStore = Store(missingIntentPaths, missingIntentTrust);
+        Assert.Equal(
+            GovernedLoopRevisionStoreCommitStatus.Committed,
+            (await missingIntentStore.CommitAsync(CreateDraft(graph, "create-one", HashA, HashB, 0, _time))).Status);
+        File.Delete(Path.Combine(GraphRoot(missingIntentPaths), "operations", "create-one.json"));
+
+        Assert.Equal(
+            GovernedLoopRevisionStoreReadStatus.Ambiguous,
+            (await missingIntentStore.ReadGraphAsync(graph.GraphId)).Status);
+    }
+
+    [Theory]
+    [InlineData("bom")]
+    [InlineData("duplicate")]
+    [InlineData("unknown")]
+    [InlineData("noncanonical")]
+    public async Task Malformed_or_noncanonical_payloads_are_never_projected(string corruption)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = Graph();
+        var store = Store(paths, trust);
+        Assert.Equal(
+            GovernedLoopRevisionStoreCommitStatus.Committed,
+            (await store.CommitAsync(CreateDraft(graph, "create-one", HashA, HashB, 0, _time))).Status);
+        var path = ArtifactPath(paths, graph);
+        var bytes = await File.ReadAllBytesAsync(path);
+        var text = Encoding.UTF8.GetString(bytes);
+        bytes = corruption switch
+        {
+            "bom" => [0xef, 0xbb, 0xbf, .. bytes],
+            "duplicate" => Encoding.UTF8.GetBytes(text.Replace("{\n", "{\n  \"schemaVersion\": 1,\n", StringComparison.Ordinal)),
+            "unknown" => Encoding.UTF8.GetBytes(text.Replace("{\n", "{\n  \"unknown\": true,\n", StringComparison.Ordinal)),
+            "noncanonical" => Encoding.UTF8.GetBytes(text.Replace("\n", "\r\n", StringComparison.Ordinal)),
+            _ => throw new ArgumentOutOfRangeException(nameof(corruption)),
+        };
+        await File.WriteAllBytesAsync(path, bytes);
+
+        var read = await store.ReadArtifactAsync(graph.RevisionReference);
+
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ambiguous, read.Status);
+        Assert.Null(read.Artifact);
+    }
+
+    [Fact]
+    public async Task Canonical_partial_writing_is_bounded_and_inert_while_unknown_staging_fails_closed()
+    {
+        using var toleratedWorkspace = new TestWorkspace();
+        var toleratedPaths = new WorkspacePaths(toleratedWorkspace.RootPath);
+        var toleratedOperations = Path.Combine(GraphRoot(toleratedPaths), "operations");
+        Directory.CreateDirectory(toleratedOperations);
+        await File.WriteAllTextAsync(
+            Path.Combine(toleratedOperations, ".orphan.json.0123456789abcdef0123456789abcdef.writing"),
+            "partial");
+        var graph = Graph();
+        var tolerated = await Store(toleratedPaths, new TestCapabilityLifecycleTrustProvider())
+            .CommitAsync(CreateDraft(graph, "create-one", HashA, HashB, 0, _time));
+
+        using var rejectedWorkspace = new TestWorkspace();
+        var rejectedPaths = new WorkspacePaths(rejectedWorkspace.RootPath);
+        var rejectedOperations = Path.Combine(GraphRoot(rejectedPaths), "operations");
+        Directory.CreateDirectory(rejectedOperations);
+        await File.WriteAllTextAsync(Path.Combine(rejectedOperations, "orphan.tmp"), "partial");
+        var rejected = await Store(rejectedPaths, new TestCapabilityLifecycleTrustProvider())
+            .CommitAsync(CreateDraft(graph, "create-two", HashA, HashB, 0, _time));
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, tolerated.Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Unavailable, rejected.Status);
+    }
+
+    [Fact]
+    public async Task Aggregate_and_staging_capacity_are_enforced_before_immutable_publication()
+    {
+        using var bytesWorkspace = new TestWorkspace();
+        var bytesPaths = new WorkspacePaths(bytesWorkspace.RootPath);
+        var graph = Graph();
+        var bytesResult = await Store(
+                bytesPaths,
+                new TestCapabilityLifecycleTrustProvider(),
+                new GovernedLoopGraphRevisionStoreOptions
+                {
+                    MaxArtifactUtf8Bytes = 64,
+                    MaxIntentUtf8Bytes = 32 * 1024,
+                    MaxWorkspaceUtf8Bytes = 8 * 1024,
+                })
+            .CommitAsync(CreateDraft(graph, "create-one", HashA, HashB, 0, _time));
+
+        using var stagingWorkspace = new TestWorkspace();
+        var stagingPaths = new WorkspacePaths(stagingWorkspace.RootPath);
+        var operations = Path.Combine(GraphRoot(stagingPaths), "operations");
+        Directory.CreateDirectory(operations);
+        await File.WriteAllTextAsync(
+            Path.Combine(operations, ".orphan.json.0123456789abcdef0123456789abcdef.writing"),
+            "partial");
+        var stagingResult = await Store(
+                stagingPaths,
+                new TestCapabilityLifecycleTrustProvider(),
+                new GovernedLoopGraphRevisionStoreOptions { MaxStagingEntries = 1 })
+            .CommitAsync(CreateDraft(graph, "create-two", HashA, HashB, 0, _time));
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Unavailable, bytesResult.Status);
+        Assert.False(File.Exists(ArtifactPath(bytesPaths, graph)));
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Unavailable, stagingResult.Status);
+        Assert.False(File.Exists(Path.Combine(operations, "create-two.json")));
+    }
+
+    [Fact]
+    public async Task Concurrent_instances_serialize_the_global_generation_and_operation_reuse_conflicts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var firstGraph = Graph(graphId: "graph-one", revisionId: "revision-one");
+        var secondGraph = Graph(graphId: "graph-two", revisionId: "revision-two");
+        var commits = await Task.WhenAll(
+            Store(paths, trust).CommitAsync(CreateDraft(firstGraph, "create-one", HashA, HashB, 0, _time)),
+            Store(paths, trust).CommitAsync(CreateDraft(secondGraph, "create-two", HashB, HashC, 0, _time)));
+
+        Assert.Single(commits, result => result.Status == GovernedLoopRevisionStoreCommitStatus.Committed);
+        Assert.Single(commits, result => result.Status == GovernedLoopRevisionStoreCommitStatus.StoreConflict);
+
+        var winner = commits.Single(result => result.Status == GovernedLoopRevisionStoreCommitStatus.Committed);
+        var winnerGraph = winner.Snapshot!.Artifacts.Single().Graph;
+        var changedAuthoring = CreateDraft(winnerGraph, winner.Operation!.OperationId, winner.Operation.LifecycleRequestHash, HashA, 0, _time);
+        var reused = await Store(paths, trust).CommitAsync(changedAuthoring);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.OperationConflict, reused.Status);
+    }
+
+    [Fact]
+    public async Task Default_system_graph_is_rejected_without_creating_graph_authoring_storage()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var graph = Graph(graphId: BuiltInLoopIds.DefaultConversation);
+
+        var result = await Store(paths, new TestCapabilityLifecycleTrustProvider())
+            .CommitAsync(CreateDraft(graph, "create-one", HashA, HashB, 0, _time));
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Unavailable, result.Status);
+        Assert.False(Directory.Exists(GraphRoot(paths)));
+    }
+
+    [Fact]
+    public async Task Public_boundary_rejects_invalid_reads_reports_missing_exact_revisions_and_propagates_pre_cancellation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var store = Store(paths, trust);
+        var graph = Graph();
+
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Unavailable, (await store.ReadGraphAsync("invalid graph")).Status);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Unavailable, (await store.ReadArtifactAsync(null!)).Status);
+        Assert.Equal(
+            GovernedLoopRevisionStoreReadStatus.Unavailable,
+            (await store.ReadForMutationAsync(graph.GraphId, "invalid operation", HashA, HashB)).Status);
+
+        Assert.Equal(
+            GovernedLoopRevisionStoreCommitStatus.Committed,
+            (await store.CommitAsync(CreateDraft(graph, "create-one", HashA, HashB, 0, _time))).Status);
+        var missing = GovernedLoopRevisionReference.Create(1, graph.GraphId, "missing-revision", graph.ExecutableHash);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.NotFound, (await store.ReadArtifactAsync(missing)).Status);
+
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => store.ReadGraphAsync(graph.GraphId, canceled.Token));
+        await Assert.ThrowsAsync<OperationCanceledException>(() => store.CommitAsync(
+            CreateDraft(Graph(graphId: "graph-two"), "create-two", HashB, HashC, 1, _time),
+            canceled.Token));
+    }
+
+    [Fact]
+    public void Constructor_enforces_bounded_configuration_and_supports_default_server_trust_composition()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var authority = new CapabilityAuthorityTransaction(paths);
+        var lifecycle = new GovernedLoopRevisionLifecycleStore(paths, trust, authorityTransaction: authority);
+
+        _ = new GovernedLoopGraphRevisionStore(paths, lifecycle);
+        Assert.Throws<ArgumentOutOfRangeException>(() => new GovernedLoopGraphRevisionStore(
+            paths,
+            lifecycle,
+            trust,
+            new GovernedLoopGraphRevisionStoreOptions { MaxArtifacts = 0 },
+            authorityTransaction: authority));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new GovernedLoopGraphRevisionStore(
+            paths,
+            lifecycle,
+            new TestCapabilityLifecycleTrustProvider(0),
+            authorityTransaction: authority));
+    }
+
+    private static GovernedLoopGraphRevisionStore Store(
+        WorkspacePaths paths,
+        ICapabilityCatalogTrustProvider trust,
+        GovernedLoopGraphRevisionStoreOptions? graphOptions = null)
+    {
+        var authority = new CapabilityAuthorityTransaction(paths);
+        var lifecycle = new GovernedLoopRevisionLifecycleStore(
+            paths,
+            trust,
+            authorityTransaction: authority);
+        return new GovernedLoopGraphRevisionStore(
+            paths,
+            lifecycle,
+            trust,
+            graphOptions,
+            authorityTransaction: authority);
+    }
+
+    private static GovernedLoopGraphRevisionStoreOptions FailAt(
+        GovernedLoopGraphRevisionPersistenceBoundary boundary)
+        => new()
+        {
+            DurableBoundaryObserver = (observed, _) => observed == boundary
+                ? ValueTask.FromException(new IOException("Injected durable-boundary interruption."))
+                : ValueTask.CompletedTask,
+        };
+
+    private static GovernedLoopGraphRevisionStoreMutation CreateDraft(
+        GovernedLoopGraphDefinition graph,
+        string operationId,
+        string lifecycleRequestHash,
+        string authoringRequestHash,
+        long generation,
+        DateTimeOffset time)
+    {
+        var head = GovernedLoopRevisionLifecycleHeadFactory.Create(
+            1,
+            graph.GraphId,
+            1,
+            GovernedLoopRevisionLifecycleStatus.Draft,
+            graph.RevisionReference,
+            null,
+            operationId,
+            time);
+        var artifact = GovernedLoopRevisionArtifactFactory.Create(
+            1,
+            graph.RevisionReference,
+            null,
+            null,
+            operationId,
+            "actor-one",
+            time);
+        var operation = GovernedLoopRevisionOperationEvidenceFactory.Create(
+            1,
+            operationId,
+            "actor-one",
+            lifecycleRequestHash,
+            GovernedLoopRevisionOperationKind.CreateDraft,
+            GovernedLoopRevisionOperationOutcome.Committed,
+            GovernedLoopRevisionOperationFailureCode.None,
+            null,
+            head,
+            graph.RevisionReference,
+            null,
+            null,
+            HashA,
+            null,
+            time);
+        return new GovernedLoopGraphRevisionStoreMutation(
+            new GovernedLoopRevisionStoreMutation(graph.GraphId, generation, operation, artifact, head),
+            graph,
+            authoringRequestHash,
+            null);
+    }
+
+    private static GovernedLoopGraphRevisionStoreMutation ReplaceDraft(
+        GovernedLoopGraphRevisionStoreMutation previous,
+        GovernedLoopGraphDefinition graph,
+        string operationId,
+        string lifecycleRequestHash,
+        string authoringRequestHash,
+        long generation,
+        DateTimeOffset time)
+    {
+        var previousHead = previous.LifecycleMutation.HeadToWrite!;
+        var predecessor = previousHead.DraftRevision!;
+        var head = GovernedLoopRevisionLifecycleHeadFactory.Create(
+            1,
+            graph.GraphId,
+            previousHead.LifecycleVersion + 1,
+            GovernedLoopRevisionLifecycleStatus.Draft,
+            graph.RevisionReference,
+            null,
+            operationId,
+            time);
+        var artifact = GovernedLoopRevisionArtifactFactory.Create(
+            1,
+            graph.RevisionReference,
+            predecessor,
+            null,
+            operationId,
+            "actor-one",
+            time);
+        var operation = GovernedLoopRevisionOperationEvidenceFactory.Create(
+            1,
+            operationId,
+            "actor-one",
+            lifecycleRequestHash,
+            GovernedLoopRevisionOperationKind.ReplaceDraft,
+            GovernedLoopRevisionOperationOutcome.Committed,
+            GovernedLoopRevisionOperationFailureCode.None,
+            previousHead,
+            head,
+            graph.RevisionReference,
+            predecessor,
+            null,
+            HashA,
+            null,
+            time);
+        return new GovernedLoopGraphRevisionStoreMutation(
+            new GovernedLoopRevisionStoreMutation(graph.GraphId, generation, operation, artifact, head),
+            graph,
+            authoringRequestHash,
+            null);
+    }
+
+    private static GovernedLoopGraphRevisionStoreMutation Publish(
+        GovernedLoopGraphRevisionStoreMutation previous,
+        string operationId,
+        string lifecycleRequestHash,
+        string authoringRequestHash,
+        long generation,
+        DateTimeOffset time)
+    {
+        var previousHead = previous.LifecycleMutation.HeadToWrite!;
+        var target = previousHead.DraftRevision!;
+        var pin = GovernedLoopRevisionPublicationPinFactory.Create(1, target, operationId, HashC);
+        var head = GovernedLoopRevisionLifecycleHeadFactory.Create(
+            1,
+            previousHead.GraphId,
+            previousHead.LifecycleVersion + 1,
+            GovernedLoopRevisionLifecycleStatus.Published,
+            null,
+            pin,
+            operationId,
+            time);
+        var operation = GovernedLoopRevisionOperationEvidenceFactory.Create(
+            1,
+            operationId,
+            "actor-one",
+            lifecycleRequestHash,
+            GovernedLoopRevisionOperationKind.Publish,
+            GovernedLoopRevisionOperationOutcome.Committed,
+            GovernedLoopRevisionOperationFailureCode.None,
+            previousHead,
+            head,
+            null,
+            target,
+            null,
+            HashA,
+            HashC,
+            time);
+        return new GovernedLoopGraphRevisionStoreMutation(
+            new GovernedLoopRevisionStoreMutation(previousHead.GraphId, generation, operation, null, head),
+            null,
+            authoringRequestHash,
+            HashC);
+    }
+
+    private static GovernedLoopGraphDefinition Graph(
+        string graphId = "graph-one",
+        string revisionId = "revision-one",
+        GovernedLoopDisplayMetadata? display = null)
+        => GovernedLoopGraphDefinition.Create(
+            1,
+            graphId,
+            revisionId,
+            "Answer one bounded request.",
+            "researcher",
+            "trigger",
+            ["exit"],
+            GovernedLoopAuthorityCeiling.Create(["model-inference"]),
+            [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
+            [
+                new GovernedLoopNodeDefinition(
+                    "trigger",
+                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Trigger, "manual-trigger", 1),
+                    [OutputPort("request")],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>()),
+                new GovernedLoopNodeDefinition(
+                    "infer",
+                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
+                    [InputPort("request"), OutputPort("result")],
+                    GovernedLoopAuthorityCeiling.Create(["model-inference"]),
+                    new Dictionary<string, string> { ["instruction"] = "Answer from the explicit input." }),
+                new GovernedLoopNodeDefinition(
+                    "exit",
+                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
+                    [InputPort("result"), OutputPort("published-result")],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>()),
+            ],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success),
+            ],
+            [
+                new GovernedLoopBindingDefinition("request-binding", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new GovernedLoopBindingDefinition("result-binding", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ],
+            new GovernedLoopOutputContract(
+                "Return the answer.",
+                [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
+            display ?? Display("Graph one", 100, 200));
+
+    private static GovernedLoopGraphDefinition GraphWithEveryClosedEnum()
+    {
+        var kinds = Enum.GetValues<GovernedLoopNodeKind>()
+            .Where(value => value != GovernedLoopNodeKind.Unknown)
+            .ToArray();
+        var nodes = kinds.Select((kind, index) => new GovernedLoopNodeDefinition(
+            kind.ToString().ToLowerInvariant(),
+            new GovernedLoopNodeDescriptor(kind, kind.ToString().ToLowerInvariant() + "-type", 1),
+            kind switch
+            {
+                GovernedLoopNodeKind.Trigger =>
+                [
+                    new GovernedLoopPortDefinition("context-out", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context, "text", true),
+                    new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                ],
+                GovernedLoopNodeKind.Inference =>
+                [
+                    new GovernedLoopPortDefinition("context-in", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context, "text", true),
+                    new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                    new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                ],
+                GovernedLoopNodeKind.Exit =>
+                [
+                    new GovernedLoopPortDefinition("published", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                    new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                ],
+                _ => [],
+            },
+            GovernedLoopAuthorityCeiling.Create(kind == GovernedLoopNodeKind.Inference ? ["model-inference"] : []),
+            new Dictionary<string, string> { ["ordinal"] = index.ToString(System.Globalization.CultureInfo.InvariantCulture) }))
+            .ToArray();
+        var display = nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(
+            node.Id,
+            node.Descriptor.Kind.ToString(),
+            "Closed schema-one node.",
+            index * 10,
+            index * 20)).ToArray();
+        var conditions = Enum.GetValues<GovernedLoopControlCondition>()
+            .Where(value => value != GovernedLoopControlCondition.Unknown)
+            .Select(condition => new GovernedLoopControlEdgeDefinition(
+                "edge-" + condition.ToString().ToLowerInvariant(),
+                "trigger",
+                "exit",
+                condition))
+            .ToArray();
+        return GovernedLoopGraphDefinition.Create(
+            1,
+            "all-enums-graph",
+            "all-enums-revision",
+            "Round-trip every closed schema-one graph discriminator.",
+            "researcher",
+            "trigger",
+            ["exit", "fail"],
+            GovernedLoopAuthorityCeiling.Create(["model-inference"]),
+            [
+                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
+                new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, true),
+                new GovernedLoopValueSchemaDefinition("integer", GovernedLoopValueKind.Integer, false),
+                new GovernedLoopValueSchemaDefinition("number", GovernedLoopValueKind.Number, false),
+                new GovernedLoopValueSchemaDefinition("object", GovernedLoopValueKind.Object, true),
+                new GovernedLoopValueSchemaDefinition("array", GovernedLoopValueKind.Array, false, ElementSchemaId: "text"),
+                new GovernedLoopValueSchemaDefinition("binary", GovernedLoopValueKind.Binary, false, "base64"),
+            ],
+            nodes,
+            conditions,
+            [
+                new GovernedLoopBindingDefinition("context", GovernedLoopBindingKind.Context, "trigger", "context-out", "inference", "context-in"),
+                new GovernedLoopBindingDefinition("request", GovernedLoopBindingKind.Data, "trigger", "request", "inference", "request"),
+                new GovernedLoopBindingDefinition("result", GovernedLoopBindingKind.Data, "inference", "result", "exit", "result"),
+            ],
+            new GovernedLoopOutputContract(
+                "Return the result.",
+                [new GovernedLoopOutputDefinition("result", "text", "exit", "published", true)]),
+            new GovernedLoopDisplayMetadata("All enums", "Every closed discriminator.", display));
+    }
+
+    private static GovernedLoopDisplayMetadata Display(string name, int x, int y)
+        => new(
+            name,
+            "Display-only authoring metadata.",
+            [
+                new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Collect input.", x, y),
+                new GovernedLoopNodeDisplayMetadata("infer", "Inference", "Answer.", x + 100, y),
+                new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Publish.", x + 200, y),
+            ]);
+
+    private static GovernedLoopPortDefinition InputPort(string id)
+        => new(id, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true);
+
+    private static GovernedLoopPortDefinition OutputPort(string id)
+        => new(id, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true);
+
+    private static string GraphRoot(WorkspacePaths paths)
+        => Path.Combine(paths.AgentPath, "loops", "revisions", "graph-authoring");
+
+    private static string ArtifactPath(WorkspacePaths paths, GovernedLoopGraphDefinition graph)
+        => Path.Combine(GraphRoot(paths), "artifacts", graph.GraphId, graph.RevisionId + ".json");
+
+    private static async Task<long> IntentTrustGenerationAsync(WorkspacePaths paths, string operationId)
+    {
+        var bytes = await File.ReadAllBytesAsync(
+            Path.Combine(GraphRoot(paths), "operations", operationId + ".json"));
+        using var document = JsonDocument.Parse(bytes);
+        return document.RootElement.GetProperty("trustGeneration").GetInt64();
+    }
+}

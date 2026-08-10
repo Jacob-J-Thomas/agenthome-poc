@@ -41,6 +41,8 @@ internal static class CapabilityCatalogNativeFileSystem
     private const int ErrorMoreData = 234;
     private const int ErrorSharingViolation = 32;
     private const int ErrorLockViolation = 33;
+    private const int ErrorFileExists = 80;
+    private const int ErrorAlreadyExists = 183;
     private const int ErrorNoMoreFiles = 18;
     private const int FileRenameInformation = 10;
     private const int InitialWindowsDirectoryBufferBytes = 16 * 1_024;
@@ -49,6 +51,8 @@ internal static class CapabilityCatalogNativeFileSystem
     private const int LockExclusive = 2;
     private const int LockNonBlocking = 4;
     private const int PermissionUserReadWrite = 0x180;
+    private const uint RenameNoReplace = 1;
+    private const uint RenameExclusive = 0x4;
     private const ushort UnixFileTypeMask = 0xF000;
     private const ushort UnixRegularFile = 0x8000;
     private const uint StatxMode = 0x2;
@@ -142,6 +146,37 @@ internal static class CapabilityCatalogNativeFileSystem
         {
             throw NativeIOException("The capability catalog artifact could not be moved atomically", Marshal.GetLastPInvokeError());
         }
+    }
+
+    public static bool TryMoveFileNoReplace(string sourceFullPath, string destinationFullPath, SafeFileHandle parent, string sourceName, string destinationName)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            using var source = OpenWindowsRelative(parent, sourceName, DeleteAccess | FileReadAttributes | SynchronizeAccess, FileShareRead | FileShareWrite | FileShareDelete, NtFileOpen, NtFileNonDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint | NtFileWriteThrough, returnNullWhenMissing: false, returnNullWhenContended: false) ?? throw new FileNotFoundException("The capability catalog staging artifact disappeared before its retained-handle immutable publication.", sourceFullPath);
+            ValidateWindowsHandle(source, sourceName, requireDirectory: false);
+            return TryRenameWindowsByHandleNoReplace(source, parent, destinationName, destinationFullPath);
+        }
+
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            throw new PlatformNotSupportedException("Capability catalog immutable publication supports Windows, Linux, and macOS.");
+        }
+
+        var result = OperatingSystem.IsMacOS()
+            ? renameatx_np(parent, sourceName, parent, destinationName, RenameExclusive)
+            : renameat2(parent, sourceName, parent, destinationName, RenameNoReplace);
+        if (result == 0)
+        {
+            return true;
+        }
+
+        var error = Marshal.GetLastPInvokeError();
+        if (error == 17)
+        {
+            return false;
+        }
+
+        throw NativeIOException($"The capability catalog immutable artifact could not be published at `{destinationFullPath}`", error);
     }
 
     public static void DeleteFileIfPresent(string fullPath, SafeFileHandle parent, string name)
@@ -567,6 +602,43 @@ internal static class CapabilityCatalogNativeFileSystem
         }
     }
 
+    private static bool TryRenameWindowsByHandleNoReplace(SafeFileHandle source, SafeFileHandle parent, string destinationName, string destinationPath)
+    {
+        var fileName = Encoding.Unicode.GetBytes(destinationName);
+        var rootDirectoryOffset = IntPtr.Size == 8 ? 8 : 4;
+        var fileNameLengthOffset = rootDirectoryOffset + IntPtr.Size;
+        var fileNameOffset = fileNameLengthOffset + sizeof(uint);
+        var unalignedBufferSize = checked(fileNameOffset + fileName.Length + sizeof(char));
+        var bufferSize = checked((unalignedBufferSize + IntPtr.Size - 1) & -IntPtr.Size);
+        var information = Marshal.AllocHGlobal(bufferSize);
+        try
+        {
+            Marshal.Copy(new byte[bufferSize], 0, information, bufferSize);
+            Marshal.WriteByte(information, 0);
+            Marshal.WriteIntPtr(information, rootDirectoryOffset, parent.DangerousGetHandle());
+            Marshal.WriteInt32(information, fileNameLengthOffset, fileName.Length);
+            Marshal.Copy(fileName, 0, IntPtr.Add(information, fileNameOffset), fileName.Length);
+            var status = NtSetInformationFile(source, out _, information, (uint)bufferSize, FileRenameInformation);
+            GC.KeepAlive(parent);
+            if (status >= 0)
+            {
+                return true;
+            }
+
+            var error = unchecked((int)RtlNtStatusToDosError(status));
+            if (error is ErrorFileExists or ErrorAlreadyExists)
+            {
+                return false;
+            }
+
+            throw NativeIOException($"Capability catalog entry could not be published immutably at `{destinationPath}`", error);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(information);
+        }
+    }
+
     private static void MarkWindowsDirectoryForDeletion(SafeFileHandle directory)
     {
         if (!SetFileInformationByHandle(directory, FileInfoByHandleClass.FileDispositionInfo, [1], 1))
@@ -904,6 +976,12 @@ internal static class CapabilityCatalogNativeFileSystem
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int renameat(SafeFileHandle oldDirectory, string oldPath, SafeFileHandle newDirectory, string newPath);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int renameat2(SafeFileHandle oldDirectory, string oldPath, SafeFileHandle newDirectory, string newPath, uint flags);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int renameatx_np(SafeFileHandle oldDirectory, string oldPath, SafeFileHandle newDirectory, string newPath, uint flags);
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int unlinkat(SafeFileHandle directory, string path, int flags);
