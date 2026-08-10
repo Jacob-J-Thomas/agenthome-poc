@@ -60,6 +60,69 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
     }
 
     [Fact]
+    public async Task Exact_pending_intent_continues_without_catalog_refresh_while_changed_intent_conflicts()
+    {
+        var candidate = Candidate("revision-1");
+        var lifecycle = Create("pending-operation", candidate);
+        var request = Authoring(lifecycle, candidate);
+        var normalized = candidate.Normalize();
+        var lifecycleHash = GovernedLoopRevisionLifecycleRequestHash.Compute(lifecycle);
+        var authoringHash = GovernedLoopGraphAuthoringRequestHash.Compute(lifecycle, normalized);
+        var store = new InMemoryGraphStore();
+        store.SeedPending(lifecycle.GraphId, lifecycle.OperationId, lifecycleHash, authoringHash, Hash('b'));
+
+        var continued = await Service(store, candidate, catalogThrows: true).MutateAsync(request);
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, continued.Status);
+        Assert.Equal(Hash('b'), continued.GraphValidationEvidenceHash);
+        Assert.Equal(GovernedLoopGraphRevisionOperationState.Terminal, store.Operation(lifecycle.OperationId)!.State);
+
+        var secondStore = new InMemoryGraphStore();
+        secondStore.SeedPending(lifecycle.GraphId, lifecycle.OperationId, lifecycleHash, authoringHash, Hash('b'));
+        var changed = Candidate("revision-1", displayDescription: "Changed after the durable intent.");
+        var denied = new StubAuthorizer { Status = GovernedLoopRevisionActorAuthorizationStatus.Denied };
+        var conflict = await Service(secondStore, changed, denied, catalogThrows: true).MutateAsync(Authoring(lifecycle, changed));
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Conflict, conflict.Status);
+        Assert.Equal(0, denied.Calls);
+    }
+
+    [Fact]
+    public async Task Absent_graph_not_found_replays_from_causal_ledger_after_graph_is_later_created()
+    {
+        var store = new InMemoryGraphStore();
+        var candidate = Candidate("revision-1");
+        var reference = candidate.Reference();
+        var missingPublish = new GovernedLoopRevisionLifecycleRequest(
+            1,
+            "publish-before-create",
+            GovernedLoopRevisionOperationKind.Publish,
+            candidate.GraphId!,
+            Actor(),
+            GovernedLoopRevisionLifecycleStatus.Draft,
+            1,
+            reference,
+            null,
+            null,
+            reference,
+            null);
+
+        var missing = await Service(store, candidate).MutateAsync(Authoring(missingPublish, null));
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.NotFound, missing.Status);
+        Assert.NotNull(missing.LifecycleResult!.Evidence);
+
+        var created = await Service(store, candidate).MutateAsync(Authoring(Create("create-after-missing", candidate), candidate));
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, created.Status);
+
+        var denied = new StubAuthorizer { Status = GovernedLoopRevisionActorAuthorizationStatus.Denied };
+        var replay = await Service(store, candidate, denied, catalogThrows: true).MutateAsync(Authoring(missingPublish, null));
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Replayed, replay.Status);
+        Assert.Equal(missing.LifecycleResult.Evidence, replay.LifecycleResult!.Evidence);
+        Assert.Equal(0, denied.Calls);
+    }
+
+    [Fact]
     public async Task Replace_classifies_layout_only_and_executable_changes_as_new_revisions()
     {
         var store = new InMemoryGraphStore();
@@ -454,6 +517,29 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
         internal GovernedLoopGraphRevisionSnapshot? Snapshot(string graphId)
             => _graphs.TryGetValue(graphId, out var snapshot) ? snapshot : null;
 
+        internal GovernedLoopGraphRevisionStoredOperation? Operation(string operationId)
+            => _operations.TryGetValue(operationId, out var operation) ? operation : null;
+
+        internal void SeedPending(
+            string graphId,
+            string operationId,
+            string lifecycleRequestHash,
+            string authoringRequestHash,
+            string graphValidationEvidenceHash)
+        {
+            _operations.Add(
+                operationId,
+                new GovernedLoopGraphRevisionStoredOperation(
+                    GovernedLoopGraphRevisionOperationState.Pending,
+                    graphId,
+                    operationId,
+                    lifecycleRequestHash,
+                    authoringRequestHash,
+                    null,
+                    graphValidationEvidenceHash));
+            Generation++;
+        }
+
         internal void RemoveGraphPayloads(string graphId)
         {
             var snapshot = _graphs[graphId];
@@ -514,11 +600,14 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
             {
                 _graphs.TryGetValue(lifecycle.GraphId, out var existingSnapshot);
                 var exact = string.Equals(existing.AuthoringRequestHash, mutation.AuthoringRequestHash, StringComparison.Ordinal);
-                return Task.FromResult(new GovernedLoopGraphRevisionCommitResult(
-                    exact ? GovernedLoopRevisionStoreCommitStatus.Replayed : GovernedLoopRevisionStoreCommitStatus.OperationConflict,
-                    Generation,
-                    existing,
-                    existingSnapshot));
+                if (!exact || existing.State == GovernedLoopGraphRevisionOperationState.Terminal)
+                {
+                    return Task.FromResult(new GovernedLoopGraphRevisionCommitResult(
+                        exact ? GovernedLoopRevisionStoreCommitStatus.Replayed : GovernedLoopRevisionStoreCommitStatus.OperationConflict,
+                        Generation,
+                        existing,
+                        existingSnapshot));
+                }
             }
 
             if (lifecycle.ExpectedStoreGeneration != Generation)
@@ -542,7 +631,12 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
                     graphArtifacts.Add(GovernedLoopGraphRevisionArtifactFactory.Create(1, lifecycle.ArtifactToAppend, mutation.GraphToAppend!));
                 }
 
-                var operations = current?.Lifecycle.Operations.ToList() ?? [];
+                var operations = current?.Lifecycle.Operations.ToList()
+                    ?? _operations.Values
+                        .Where(operation => operation.State == GovernedLoopGraphRevisionOperationState.Terminal
+                            && string.Equals(operation.GraphId, lifecycle.GraphId, StringComparison.Ordinal))
+                        .Select(operation => operation.LifecycleOperation!.Evidence)
+                        .ToList();
                 operations.Add(lifecycle.Operation);
                 next = new GovernedLoopGraphRevisionSnapshot(
                     new GovernedLoopRevisionStoreSnapshot(
@@ -570,7 +664,7 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
                 mutation.AuthoringRequestHash,
                 new GovernedLoopRevisionStoredOperation(lifecycle.GraphId, lifecycle.Operation),
                 mutation.GraphValidationEvidenceHash);
-            _operations.Add(lifecycle.Operation.OperationId, stored);
+            _operations[lifecycle.Operation.OperationId] = stored;
             Generation++;
             return Task.FromResult(new GovernedLoopGraphRevisionCommitResult(
                 GovernedLoopRevisionStoreCommitStatus.Committed,

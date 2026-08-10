@@ -467,14 +467,15 @@ public sealed class GovernedLoopGraphAuthoringService : IGovernedLoopGraphAuthor
         GovernedLoopGraphRevisionSnapshot? snapshot,
         GovernedLoopRevisionOperationEvidence evidence)
     {
-        if (evidence.ResultHead is null)
+        if (snapshot is null)
         {
-            return snapshot is null;
+            return evidence.PreviousHead is null
+                && evidence.ResultHead is null
+                && evidence.Outcome == GovernedLoopRevisionOperationOutcome.NotFound
+                && evidence.FailureCode == GovernedLoopRevisionOperationFailureCode.LifecycleNotFound;
         }
 
-        return snapshot is not null
-            && Equals(snapshot.Lifecycle.Head, evidence.ResultHead)
-            && snapshot.Lifecycle.Operations.Any(candidate => Equals(candidate, evidence));
+        return snapshot.Lifecycle.Operations.Any(candidate => Equals(candidate, evidence));
     }
 
     private static bool TerminalOperationMatches(
