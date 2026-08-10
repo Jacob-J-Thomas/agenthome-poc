@@ -1,7 +1,9 @@
 using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.ContextualRoles.Models;
+using EmbodySense.Core.Common;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.ContextualRoles.Models;
 using System.Text;
 
 namespace EmbodySense.Core.Persistence.ContextualRoles;
@@ -13,13 +15,17 @@ public sealed class WorkspaceContextualRoleInstructionSourceProbe : IContextualR
     /// <summary>Maximum UTF-8 bytes accepted from one registered instruction source.</summary>
     public const int MaximumInstructionSourceBytes = 64 * 1024;
     private static readonly UTF8Encoding _strictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    private readonly Func<ContextualRolePhysicalPersistenceBoundary, CancellationToken, ValueTask>? _boundaryObserver;
     private readonly WorkspacePaths _paths;
 
     /// <summary>Creates a source probe bound to one canonical workspace root.</summary>
-    public WorkspaceContextualRoleInstructionSourceProbe(WorkspacePaths paths)
+    /// <param name="paths">The canonical workspace paths whose instruction-source conventions are admitted.</param>
+    /// <param name="options">Optional physical-boundary observation used for deterministic path-race evaluation.</param>
+    public WorkspaceContextualRoleInstructionSourceProbe(WorkspacePaths paths, ContextualRoleRevisionStoreOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         _paths = paths;
+        _boundaryObserver = options?.PhysicalBoundaryObserver;
     }
 
     /// <inheritdoc />
@@ -36,6 +42,24 @@ public sealed class WorkspaceContextualRoleInstructionSourceProbe : IContextualR
             var exactPath = path!;
             var directory = Path.GetDirectoryName(exactPath) ?? throw new InvalidOperationException("A registered contextual-role instruction source has no physical parent.");
             var bytes = await ContextualRoleArtifactPathGuard.ReadExternalBoundedFileAsync(directory, Path.GetFileName(exactPath), MaximumInstructionSourceBytes, cancellationToken);
+            if (IsNearestAgentsSource(source))
+            {
+                if (_boundaryObserver is { } observer)
+                {
+                    await observer(ContextualRolePhysicalPersistenceBoundary.BeforeInstructionSourcePrecedenceRevalidation, cancellationToken);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                var currentNearestPath = FindNearestAgentsCandidate();
+                var precedenceIsStable = bytes is null
+                    ? currentNearestPath is null
+                    : currentNearestPath is not null && string.Equals(currentNearestPath, exactPath, FileSystemPathComparer.GetPathComparison());
+                if (!precedenceIsStable)
+                {
+                    return new ContextualRoleInstructionSourceProbeResult(ContextualRoleInstructionSourceProbeStatus.Substituted);
+                }
+            }
+
             if (bytes is null)
             {
                 return new ContextualRoleInstructionSourceProbeResult(ContextualRoleInstructionSourceProbeStatus.Missing);
@@ -72,7 +96,7 @@ public sealed class WorkspaceContextualRoleInstructionSourceProbe : IContextualR
             return false;
         }
 
-        if (source.Kind == ContextualRoleInstructionSourceKind.AgentsMarkdown && string.Equals(source.ReferenceId, "nearest-agents", StringComparison.Ordinal))
+        if (IsNearestAgentsSource(source))
         {
             path = FindNearestAgentsCandidate() ?? Path.Combine(_paths.RootPath, WorkspaceInstructionLocator.FileName);
             return true;
@@ -86,6 +110,9 @@ public sealed class WorkspaceContextualRoleInstructionSourceProbe : IContextualR
 
         return false;
     }
+
+    private static bool IsNearestAgentsSource(ContextualRoleInstructionSourceReference source)
+        => source.Kind == ContextualRoleInstructionSourceKind.AgentsMarkdown && string.Equals(source.ReferenceId, "nearest-agents", StringComparison.Ordinal);
 
     private string? FindNearestAgentsCandidate()
     {

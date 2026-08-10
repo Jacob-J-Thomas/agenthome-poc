@@ -2,6 +2,7 @@ using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.ContextualRoles;
+using EmbodySense.Core.Persistence.ContextualRoles.Models;
 using EmbodySense.Tests.Support;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -43,6 +44,64 @@ public sealed class WorkspaceContextualRoleInstructionSourceProbeTests
         Assert.DoesNotContain("91d22e", agents.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("b882a1", role.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain(parent.RootPath, agents.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Nearest_agents_precedence_change_after_read_fails_closed()
+    {
+        using var parent = new TestWorkspace();
+        var workspaceRoot = Path.Combine(parent.RootPath, "nested", "workspace");
+        Directory.CreateDirectory(workspaceRoot);
+        await File.WriteAllTextAsync(Path.Combine(parent.RootPath, "AGENTS.md"), "parent secret canary 8b5b41");
+        var nearerPath = Path.Combine(parent.RootPath, "nested", "AGENTS.md");
+        var observed = false;
+        var options = new ContextualRoleRevisionStoreOptions
+        {
+            PhysicalBoundaryObserver = async (boundary, cancellationToken) =>
+            {
+                if (boundary == ContextualRolePhysicalPersistenceBoundary.BeforeInstructionSourcePrecedenceRevalidation)
+                {
+                    observed = true;
+                    await File.WriteAllTextAsync(nearerPath, "nearer secret canary 4ee2fd", cancellationToken);
+                }
+            }
+        };
+        var probe = new WorkspaceContextualRoleInstructionSourceProbe(new WorkspacePaths(workspaceRoot), options);
+
+        var result = await probe.ProbeAsync(Source(ContextualRoleInstructionSourceKind.AgentsMarkdown, "nearest-agents"));
+
+        Assert.True(observed);
+        Assert.Equal(ContextualRoleInstructionSourceProbeStatus.Substituted, result.Status);
+        Assert.DoesNotContain("8b5b41", result.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("4ee2fd", result.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(parent.RootPath, result.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Nearest_agents_missing_snapshot_change_after_read_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var agentsPath = Path.Combine(workspace.RootPath, "AGENTS.md");
+        var observed = false;
+        var options = new ContextualRoleRevisionStoreOptions
+        {
+            PhysicalBoundaryObserver = async (boundary, cancellationToken) =>
+            {
+                if (boundary == ContextualRolePhysicalPersistenceBoundary.BeforeInstructionSourcePrecedenceRevalidation)
+                {
+                    observed = true;
+                    await File.WriteAllTextAsync(agentsPath, "late secret canary 753f9a", cancellationToken);
+                }
+            }
+        };
+        var probe = new WorkspaceContextualRoleInstructionSourceProbe(new WorkspacePaths(workspace.RootPath), options);
+
+        var result = await probe.ProbeAsync(Source(ContextualRoleInstructionSourceKind.AgentsMarkdown, "nearest-agents"));
+
+        Assert.True(observed);
+        Assert.Equal(ContextualRoleInstructionSourceProbeStatus.Substituted, result.Status);
+        Assert.DoesNotContain("753f9a", result.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(workspace.RootPath, result.ToString(), StringComparison.Ordinal);
     }
 
     [Theory]
