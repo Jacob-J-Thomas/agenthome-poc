@@ -40,6 +40,8 @@ const capabilityState = {
   storageLockName: null,
   storageReady: false,
   tabId: null,
+  tabLeaseCompletion: null,
+  tabLeaseRelease: null,
   tabStorageKey: null,
 };
 
@@ -110,7 +112,7 @@ async function capabilityBoot() {
       status.initialized,
     );
     try {
-      configureCapabilityLifecycleStorage(workspaceScope);
+      await configureCapabilityLifecycleStorage(workspaceScope);
     } catch (error) {
       capabilityState.storageReady = false;
       capabilityElements.previewLifecycleButton.disabled = true;
@@ -711,7 +713,7 @@ async function restorePendingCapabilityPreview() {
   renderCapabilityPreview(capabilityState.pending.preview);
 }
 
-function configureCapabilityLifecycleStorage(scope) {
+async function configureCapabilityLifecycleStorage(scope) {
   if (
     !/^[0-9a-f]{64}$/.test(scope) ||
     !globalThis.localStorage?.getItem ||
@@ -729,19 +731,105 @@ function configureCapabilityLifecycleStorage(scope) {
   capabilityState.tabStorageKey = capabilityLifecycleTabStorageKey;
   let tabId = globalThis.sessionStorage.getItem(capabilityState.tabStorageKey);
   if (tabId === null) {
-    tabId = `capability-tab-${globalThis.crypto.randomUUID()}`;
-    globalThis.sessionStorage.setItem(capabilityState.tabStorageKey, tabId);
-    if (
-      globalThis.sessionStorage.getItem(capabilityState.tabStorageKey) !== tabId
-    ) {
-      throw new Error("Browser tab identity was not retained exactly.");
-    }
+    tabId = createCapabilityTabId();
+    retainCapabilityTabId(tabId);
   }
   if (!isCapabilityTabId(tabId)) {
     throw new Error("The retained browser tab identity is invalid.");
   }
+
+  if (!(await tryAcquireCapabilityTabOwnership(tabId))) {
+    tabId = createCapabilityTabId();
+    retainCapabilityTabId(tabId);
+    if (!(await tryAcquireCapabilityTabOwnership(tabId))) {
+      throw new Error("A distinct browser tab identity could not be claimed.");
+    }
+  }
+
   capabilityState.tabId = tabId;
   capabilityState.storageReady = true;
+  globalThis.addEventListener?.("pagehide", handleCapabilityPageHide);
+}
+
+function createCapabilityTabId() {
+  return `capability-tab-${globalThis.crypto.randomUUID()}`;
+}
+
+function retainCapabilityTabId(tabId) {
+  globalThis.sessionStorage.setItem(capabilityState.tabStorageKey, tabId);
+  if (
+    globalThis.sessionStorage.getItem(capabilityState.tabStorageKey) !== tabId
+  ) {
+    throw new Error("Browser tab identity was not retained exactly.");
+  }
+}
+
+async function tryAcquireCapabilityTabOwnership(tabId) {
+  let resolveDecision;
+  let rejectDecision;
+  let decisionSettled = false;
+  let releaseLease;
+  const decision = new Promise((resolve, reject) => {
+    resolveDecision = resolve;
+    rejectDecision = reject;
+  });
+  const lease = new Promise((resolve) => {
+    releaseLease = resolve;
+  });
+  const request = globalThis.navigator.locks.request(
+    `${capabilityState.storageLockName}.owner.${tabId}`,
+    { mode: "exclusive", ifAvailable: true },
+    async (lock) => {
+      if (!lock) {
+        decisionSettled = true;
+        resolveDecision(false);
+        return;
+      }
+
+      capabilityState.tabLeaseRelease = releaseLease;
+      decisionSettled = true;
+      resolveDecision(true);
+      await lease;
+    },
+  );
+  capabilityState.tabLeaseCompletion = request;
+  void request.catch((error) => {
+    if (!decisionSettled) {
+      decisionSettled = true;
+      rejectDecision(error);
+      return;
+    }
+
+    capabilityState.storageReady = false;
+    capabilityState.tabLeaseCompletion = null;
+    capabilityState.tabLeaseRelease = null;
+    capabilityElements.previewLifecycleButton.disabled = true;
+    showLifecycleNotice(
+      `Lifecycle changes are disabled: browser tab ownership failed. ${error.message}`,
+      true,
+    );
+  });
+  return await decision;
+}
+
+async function releaseCapabilityTabOwnership() {
+  const release = capabilityState.tabLeaseRelease;
+  const completion = capabilityState.tabLeaseCompletion;
+  capabilityState.storageReady = false;
+  capabilityState.tabLeaseCompletion = null;
+  capabilityState.tabLeaseRelease = null;
+  capabilityElements.previewLifecycleButton.disabled = true;
+  release?.();
+  try {
+    await completion;
+  } catch {
+    // The ownership request reports its authoritative failure separately.
+  }
+}
+
+function handleCapabilityPageHide(event) {
+  if (event?.persisted === true) return;
+  return releaseCapabilityTabOwnership();
 }
 
 function boundedRetainedCapabilitySelection(value) {
@@ -1131,6 +1219,7 @@ globalThis.embodySenseCapabilityCatalog = {
   capabilityState,
   capabilityToken,
   clearPendingCapabilityPreview,
+  releaseCapabilityTabOwnership,
   renderCapabilityPreview,
   requestCapabilityPreview,
   selectCapability,

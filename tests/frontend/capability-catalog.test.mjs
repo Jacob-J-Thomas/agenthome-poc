@@ -20,6 +20,7 @@ const catalogHtml = fs.readFileSync(
 );
 const workspaceScope = "a".repeat(64);
 const defaultTabId = "capability-tab-00000000-0000-4000-8000-000000000001";
+const tabStorageKey = "embodysense.capability-lifecycle-tab.v1";
 
 test("catalog boot uses authenticated same-origin reads and renders hostile posture as text", async () => {
   const app = await loadCapabilityCatalog();
@@ -178,6 +179,7 @@ test("an ambiguous discard response replays the exact retained disposition after
   assert.equal(retained.disposition, "discard");
   assert.equal(retained.evidence.previewHash, "sha256:preview");
 
+  await first.releaseTabOwnership();
   await loadCapabilityCatalog({
     server,
     localStorage,
@@ -259,6 +261,7 @@ test("same-workspace tabs retain and retire independent operation identities und
       detail: "The exact terminal operation was replayed.",
     },
   });
+  await second.releaseTabOwnership();
   await loadCapabilityCatalog({
     server,
     localStorage,
@@ -276,6 +279,117 @@ test("same-workspace tabs retain and retire independent operation identities und
     confirmations[2].body.operationId,
   );
   assert.deepEqual(pendingCapabilityEntries(second), []);
+});
+
+test("a duplicated live tab rotates only its cloned owner identity and leaves original reconciliation intact", async () => {
+  const server = new FakeCapabilityServer();
+  const localStorage = new FakeStorage();
+  const locks = new FakeLockManager();
+  const originalSessionStorage = new FakeStorage();
+  const original = await loadCapabilityCatalog({
+    server,
+    localStorage,
+    locks,
+    sessionStorage: originalSessionStorage,
+    randomUUID: uuidGenerator(1),
+  });
+  original.elements.lifecycleOperation.value = "disable";
+  await original.elements.lifecyclePreviewForm.submit();
+
+  const originalOwnerId = originalSessionStorage.getItem(tabStorageKey);
+  const originalOperation = pendingCapabilityEntries(original)[0];
+  const duplicatedSessionStorage = new FakeStorage(
+    originalSessionStorage.snapshot(),
+  );
+  const duplicate = await loadCapabilityCatalog({
+    server,
+    localStorage,
+    locks,
+    sessionStorage: duplicatedSessionStorage,
+    randomUUID: uuidGenerator(101),
+  });
+  const duplicateOwnerId = duplicatedSessionStorage.getItem(tabStorageKey);
+
+  assert.equal(originalSessionStorage.getItem(tabStorageKey), originalOwnerId);
+  assert.equal(
+    original.context.embodySenseCapabilityCatalog.capabilityState.tabId,
+    originalOwnerId,
+  );
+  assert.notEqual(duplicateOwnerId, originalOwnerId);
+  assert.equal(
+    duplicate.context.embodySenseCapabilityCatalog.capabilityState.tabId,
+    duplicateOwnerId,
+  );
+  assert.equal(
+    server.calls.filter(
+      (call) => call.url === "/api/capabilities/lifecycle/preview",
+    ).length,
+    1,
+  );
+  assert.deepEqual(pendingCapabilityEntries(original), [originalOperation]);
+
+  duplicate.elements.lifecycleOperation.value = "rollback";
+  await duplicate.elements.lifecyclePreviewForm.submit();
+
+  const retained = pendingCapabilityEntries(duplicate);
+  assert.equal(retained.length, 2);
+  assert.deepEqual(
+    new Set(retained.map((entry) => entry.ownerId)),
+    new Set([originalOwnerId, duplicateOwnerId]),
+  );
+  assert.notEqual(
+    retained[0].selection.operationId,
+    retained[1].selection.operationId,
+  );
+
+  await original.dispatchPageHide();
+  const reloadedOriginal = await loadCapabilityCatalog({
+    server,
+    localStorage,
+    locks,
+    sessionStorage: originalSessionStorage,
+    randomUUID: uuidGenerator(201),
+  });
+
+  assert.equal(originalSessionStorage.getItem(tabStorageKey), originalOwnerId);
+  assert.equal(
+    reloadedOriginal.context.embodySenseCapabilityCatalog.capabilityState.tabId,
+    originalOwnerId,
+  );
+  const originalCalls = server.calls.filter(
+    (call) =>
+      call.url === "/api/capabilities/lifecycle/preview" &&
+      call.body.operationId === originalOperation.selection.operationId,
+  );
+  assert.equal(originalCalls.length, 2);
+
+  await duplicate.releaseTabOwnership();
+  await reloadedOriginal.releaseTabOwnership();
+});
+
+test("BFCache pagehide retains tab ownership and terminal pagehide releases it fail closed", async () => {
+  const locks = new FakeLockManager();
+  const app = await loadCapabilityCatalog({ locks });
+  const ownerId = app.sessionStorage.getItem(tabStorageKey);
+  const ownerLockName = `${app.storageKey}.owner.${ownerId}`;
+
+  assert.equal(locks.isHeld(ownerLockName), true);
+  await app.dispatchPageHide({ persisted: true });
+
+  assert.equal(locks.isHeld(ownerLockName), true);
+  assert.equal(
+    app.context.embodySenseCapabilityCatalog.capabilityState.storageReady,
+    true,
+  );
+
+  await app.dispatchPageHide({ persisted: false });
+
+  assert.equal(locks.isHeld(ownerLockName), false);
+  assert.equal(
+    app.context.embodySenseCapabilityCatalog.capabilityState.storageReady,
+    false,
+  );
+  assert.equal(app.elements.previewLifecycleButton.disabled, true);
 });
 
 test("the bounded shared registry refuses a seventeenth operation before server admission", async () => {
@@ -399,6 +513,7 @@ test("an ambiguous preview transport failure keeps one operation identity for re
   await first.elements.lifecyclePreviewForm.submit();
   const retained = pendingCapabilityEntries(first)[0];
 
+  await first.releaseTabOwnership();
   const second = await loadCapabilityCatalog({
     server,
     localStorage,
@@ -698,6 +813,29 @@ test("unavailable browser storage prevents preview dispatch before durable admis
   );
 });
 
+test("rejected browser tab ownership fails closed before preview dispatch", async () => {
+  const server = new FakeCapabilityServer();
+  const locks = new FakeLockManager({ rejectOwnerRequests: true });
+  const app = await loadCapabilityCatalog({ server, locks });
+  app.elements.lifecycleOperation.value = "disable";
+
+  await app.elements.lifecyclePreviewForm.submit();
+
+  assert.equal(
+    app.context.embodySenseCapabilityCatalog.capabilityState.storageReady,
+    false,
+  );
+  assert.equal(app.elements.previewLifecycleButton.disabled, true);
+  assert.equal(
+    server.calls.some((call) => call.method === "POST"),
+    false,
+  );
+  assert.match(
+    app.elements.lifecycleNotice.textContent,
+    /durable cross-tab browser coordination is unavailable/i,
+  );
+});
+
 test("an authoritative mutation outcome survives browser cleanup failure", async () => {
   const app = await loadCapabilityCatalog();
   app.elements.lifecycleOperation.value = "disable";
@@ -755,6 +893,7 @@ async function loadCapabilityCatalog(options = {}) {
   const localStorage = options.localStorage ?? new FakeStorage();
   const sessionStorage = options.sessionStorage ?? new FakeStorage();
   const locks = options.locks ?? new FakeLockManager();
+  const listeners = new Map();
   const window = {
     confirmations: [],
     localStorage,
@@ -779,6 +918,11 @@ async function loadCapabilityCatalog(options = {}) {
     localStorage,
     navigator: { locks },
     sessionStorage,
+    addEventListener(type, listener, eventOptions = {}) {
+      const registrations = listeners.get(type) ?? [];
+      registrations.push({ listener, once: eventOptions.once === true });
+      listeners.set(type, registrations);
+    },
     setTimeout,
     clearTimeout,
     URLSearchParams,
@@ -799,15 +943,49 @@ async function loadCapabilityCatalog(options = {}) {
     sessionStorage,
     storageKey,
     window,
+    async dispatchPageHide(event = { persisted: false }) {
+      const registrations = [...(listeners.get("pagehide") ?? [])];
+      listeners.set(
+        "pagehide",
+        registrations.filter((registration) => !registration.once),
+      );
+      await Promise.all(
+        registrations.map((registration) =>
+          registration.listener({ type: "pagehide", ...event }),
+        ),
+      );
+    },
+    releaseTabOwnership() {
+      return context.embodySenseCapabilityCatalog.releaseCapabilityTabOwnership();
+    },
   };
 }
 
 class FakeLockManager {
-  constructor() {
+  constructor({ rejectOwnerRequests = false } = {}) {
+    this.held = new Set();
+    this.rejectOwnerRequests = rejectOwnerRequests;
     this.tails = new Map();
   }
 
-  async request(name, _options, callback) {
+  async request(name, options, callback) {
+    if (typeof options === "function") {
+      callback = options;
+      options = {};
+    }
+    if (this.rejectOwnerRequests && name.includes(".owner."))
+      throw new Error("Browser tab ownership was rejected.");
+    if (options.ifAvailable) {
+      if (this.held.has(name) || this.tails.has(name))
+        return await callback(null);
+      this.held.add(name);
+      try {
+        return await callback({ mode: options.mode ?? "exclusive", name });
+      } finally {
+        this.held.delete(name);
+      }
+    }
+
     const previous = this.tails.get(name) ?? Promise.resolve();
     let release;
     const gate = new Promise((resolve) => {
@@ -816,12 +994,18 @@ class FakeLockManager {
     const tail = previous.then(() => gate);
     this.tails.set(name, tail);
     await previous;
+    this.held.add(name);
     try {
-      return await callback();
+      return await callback({ mode: options.mode ?? "exclusive", name });
     } finally {
+      this.held.delete(name);
       release();
       if (this.tails.get(name) === tail) this.tails.delete(name);
     }
+  }
+
+  isHeld(name) {
+    return this.held.has(name);
   }
 }
 
@@ -1028,6 +1212,10 @@ class FakeStorage {
       throw new Error("Storage write failed.");
     if (Number.isInteger(this.writesBeforeFailure)) this.writesBeforeFailure--;
     this.values.set(key, String(value));
+  }
+
+  snapshot() {
+    return Object.fromEntries(this.values);
   }
 }
 
