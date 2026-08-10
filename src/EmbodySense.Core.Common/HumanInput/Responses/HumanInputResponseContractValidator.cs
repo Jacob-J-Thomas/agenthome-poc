@@ -217,7 +217,10 @@ public static class HumanInputResponseContractValidator
         {
             Add(errors, HumanInputResponseValidationErrorCode.InvalidActor, "$.actorId", "Canonical authenticated actor attribution is required.");
         }
-        ValidateIdentifier(evidence.ActorRoleId, "$.actorRoleId", HumanInputResponseValidationErrorCode.InvalidRole, errors);
+        if (evidence.Outcome == HumanInputResponseOperationOutcome.Committed || evidence.ActorRoleId is not null)
+        {
+            ValidateIdentifier(evidence.ActorRoleId, "$.actorRoleId", HumanInputResponseValidationErrorCode.InvalidRole, errors);
+        }
         ValidateSha256(evidence.AuthenticationEvidenceHash, "$.authenticationEvidenceHash", HumanInputResponseValidationErrorCode.InvalidAuthenticationEvidence, errors);
         ValidateSha256(evidence.EligibilityEvidenceHash, "$.eligibilityEvidenceHash", HumanInputResponseValidationErrorCode.InvalidEligibilityEvidence, errors);
         ValidateUtc(evidence.RecordedAtUtc, "$.recordedAtUtc", errors);

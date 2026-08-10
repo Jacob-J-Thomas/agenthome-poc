@@ -22,7 +22,7 @@ namespace EmbodySense.Core.Common.HumanInput.Responses.Models;
 /// <param name="TargetResponses">The exact withdrawn response, or the exact manually selected response set in caller-authored order.</param>
 /// <param name="Selection">The exact deterministic response selection committed atomically with an answered request head.</param>
 /// <param name="ActorId">The authenticated actor retained as attribution, not authority.</param>
-/// <param name="ActorRoleId">The trusted eligible role retained for this operation.</param>
+/// <param name="ActorRoleId">The trusted eligible role retained for a committed operation, or null when a noncommitted disposition cannot establish one without inventing authority.</param>
 /// <param name="AuthenticationEvidenceHash">The server-owned authentication evidence digest.</param>
 /// <param name="EligibilityEvidenceHash">The exact request-policy eligibility evidence digest.</param>
 /// <param name="RecordedAtUtc">The trusted UTC evidence time.</param>
@@ -43,7 +43,7 @@ public sealed partial record HumanInputResponseOperationEvidence(
     ImmutableArray<HumanInputResponseReference> TargetResponses,
     HumanInputResponseSelectionReference? Selection,
     AuthorityActorId ActorId,
-    string ActorRoleId,
+    string? ActorRoleId,
     string AuthenticationEvidenceHash,
     string EligibilityEvidenceHash,
     DateTimeOffset RecordedAtUtc)
