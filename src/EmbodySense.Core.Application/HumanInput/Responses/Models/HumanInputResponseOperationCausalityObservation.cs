@@ -4,7 +4,7 @@ namespace EmbodySense.Core.Application.HumanInput.Responses.Models;
 
 /// <summary>Associates one retained response-operation observation with the durable snapshot used to prove its causal chronology.</summary>
 /// <param name="Evidence">The immutable terminal response-operation evidence.</param>
-/// <param name="Snapshot">The exact durable response snapshot, or null only for request-not-found evidence.</param>
+/// <param name="Snapshot">The durable response snapshot used to prove the observation, or null only for request-not-found evidence.</param>
 public sealed record HumanInputResponseOperationCausalityObservation(
     HumanInputResponseOperationEvidence Evidence,
     HumanInputResponseLifecycleStoreSnapshot? Snapshot)

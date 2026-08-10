@@ -1,7 +1,9 @@
 using System.Collections.Immutable;
+using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Application.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.HumanInput;
+using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Responses;
@@ -18,12 +20,96 @@ public static class HumanInputResponseOperationCausality
     public static bool MatchesChronology(
         IReadOnlyList<HumanInputResponseOperationCausalityObservation>? observations)
     {
-        if (observations is null)
+        try
+        {
+            if (observations is null)
+            {
+                return false;
+            }
+
+            var capturedObservations = observations
+                .Take(HumanInputRequestLifecycleContractLimits.MaxOperationsPerStore + 1)
+                .ToArray();
+            if (capturedObservations.Length > HumanInputRequestLifecycleContractLimits.MaxOperationsPerStore)
+            {
+                return false;
+            }
+
+            var contextsBySource = new Dictionary<HumanInputResponseLifecycleStoreSnapshot, ChronologyContext>(
+                ReferenceEqualityComparer.Instance);
+            var contextsByRequest = new Dictionary<HumanInputRequestReference, ChronologyContext>();
+            var operationIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var observation in capturedObservations)
+            {
+                if (observation is null
+                    || !TryCaptureEvidence(observation.Evidence, out var evidence)
+                    || evidence is null
+                    || evidence.FailureCode is HumanInputResponseOperationFailureCode.OperationIntentConflict
+                        or HumanInputResponseOperationFailureCode.OperationEvidenceLimitExceeded
+                    || !operationIds.Add(evidence.OperationId))
+                {
+                    return false;
+                }
+
+                if (observation.Snapshot is null)
+                {
+                    if (evidence.FailureCode != HumanInputResponseOperationFailureCode.RequestNotFound
+                        || !TryReconstructCommand(evidence, null, out var missingCommand)
+                        || missingCommand is null
+                        || !MatchesCapturedCore(missingCommand, evidence, null, -1, [], []))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+
+                if (!TryGetChronologyContext(
+                        observation.Snapshot,
+                        evidence,
+                        contextsBySource,
+                        contextsByRequest,
+                        out var context)
+                    || context is null
+                    || !TryReconstructCommand(evidence, context.Snapshot, out var command)
+                    || command is null)
+                {
+                    return false;
+                }
+
+                if (!context.OperationIndexes.TryGetValue(evidence.OperationId, out var operationIndex))
+                {
+                    if (!EvidenceMatchesAbsentSnapshot(evidence, context.Snapshot)
+                        || !MatchesCapturedCore(command, evidence, context.Snapshot, -1, [], []))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+
+                if (operationIndex != context.NextOperationIndex
+                    || !HumanInputResponseOperationEvidenceComparer.ExactEquals(
+                        context.Snapshot.Operations[operationIndex],
+                        evidence)
+                    || !MatchesCapturedCore(
+                        command,
+                        evidence,
+                        context.Snapshot,
+                        operationIndex,
+                        context.RetainedResponses,
+                        context.ActiveResponses)
+                    || !TryAdvanceChronology(context, evidence))
+                {
+                    return false;
+                }
+                context.NextOperationIndex++;
+            }
+
+            return contextsByRequest.Values.All(context => context.NextOperationIndex == context.Snapshot.Operations.Count);
+        }
+        catch (Exception)
         {
             return false;
         }
-
-        return observations.Count == 0;
     }
 
     /// <summary>Proves that exact retained evidence is the canonical outcome of the supplied command and durable snapshot.</summary>
@@ -106,18 +192,7 @@ public static class HumanInputResponseOperationCausality
         {
             if (snapshot is null)
             {
-                var missing = Evaluate(
-                    capturedCommand,
-                    null,
-                    null,
-                    null,
-                    capturedEvidence.ActorId,
-                    capturedEvidence.RecordedAtUtc,
-                    [],
-                    [],
-                    0,
-                    null);
-                return PlanMatchesEvidence(missing, capturedCommand, capturedEvidence, null);
+                return MatchesCapturedCore(capturedCommand, capturedEvidence, null, -1, [], []);
             }
             if (!HumanInputResponseLifecycleStoreSnapshotGuard.TryCapture(snapshot, capturedEvidence.Request.RequestId, out var exactSnapshot)
                 || exactSnapshot is null)
@@ -128,19 +203,6 @@ public static class HumanInputResponseOperationCausality
             var operationIndex = Array.FindIndex(
                 exactSnapshot.Operations.ToArray(),
                 operation => HumanInputResponseOperationEvidenceComparer.ExactEquals(operation, capturedEvidence));
-            var expectedRequest = operationIndex < 0
-                ? null
-                : FindRequest(exactSnapshot, capturedCommand.ExpectedRequest);
-            var previousHead = capturedEvidence.PreviousHead;
-            var observedRequest = previousHead is null ? null : FindRequest(exactSnapshot, previousHead.CurrentRequest);
-            if (expectedRequest is not null && operationIndex < 0
-                || expectedRequest is null
-                    && capturedEvidence.FailureCode is not HumanInputResponseOperationFailureCode.StaleResponse
-                        and not HumanInputResponseOperationFailureCode.RequestTerminal)
-            {
-                return false;
-            }
-
             var retained = new List<HumanInputResponseArtifact>();
             var active = new List<HumanInputResponseArtifact>();
             if (operationIndex >= 0
@@ -148,23 +210,228 @@ public static class HumanInputResponseOperationCausality
             {
                 return false;
             }
-            var evaluated = Evaluate(
+            return MatchesCapturedCore(
                 capturedCommand,
-                observedRequest,
-                expectedRequest,
-                previousHead,
-                capturedEvidence.ActorId,
-                capturedEvidence.RecordedAtUtc,
+                capturedEvidence,
+                exactSnapshot,
+                operationIndex,
                 retained,
-                active,
-                Math.Max(operationIndex, 0),
-                operationIndex > 0 ? exactSnapshot.Operations[operationIndex - 1].RecordedAtUtc : null);
-            return PlanMatchesEvidence(evaluated, capturedCommand, capturedEvidence, exactSnapshot);
+                active);
         }
         catch (Exception)
         {
             return false;
         }
+    }
+
+    private static bool MatchesCapturedCore(
+        HumanInputResponseLifecycleCommand capturedCommand,
+        HumanInputResponseOperationEvidence capturedEvidence,
+        HumanInputResponseLifecycleStoreSnapshot? snapshot,
+        int operationIndex,
+        IReadOnlyList<HumanInputResponseArtifact> retainedResponses,
+        IReadOnlyList<HumanInputResponseArtifact> activeResponses)
+    {
+        var expectedRequest = snapshot is null || operationIndex < 0
+            ? null
+            : FindRequest(snapshot, capturedCommand.ExpectedRequest);
+        var previousHead = capturedEvidence.PreviousHead;
+        var observedRequest = snapshot is null || previousHead is null
+            ? null
+            : FindRequest(snapshot, previousHead.CurrentRequest);
+        if (snapshot is not null
+            && (expectedRequest is not null && operationIndex < 0
+                || expectedRequest is null
+                    && capturedEvidence.FailureCode is not HumanInputResponseOperationFailureCode.StaleResponse
+                        and not HumanInputResponseOperationFailureCode.RequestTerminal))
+        {
+            return false;
+        }
+
+        var evaluated = Evaluate(
+            capturedCommand,
+            observedRequest,
+            expectedRequest,
+            previousHead,
+            capturedEvidence.ActorId,
+            capturedEvidence.RecordedAtUtc,
+            retainedResponses,
+            activeResponses,
+            Math.Max(operationIndex, 0),
+            snapshot is not null && operationIndex > 0
+                ? snapshot.Operations[operationIndex - 1].RecordedAtUtc
+                : null);
+        return PlanMatchesEvidence(evaluated, capturedCommand, capturedEvidence, snapshot);
+    }
+
+    private static bool TryGetChronologyContext(
+        HumanInputResponseLifecycleStoreSnapshot source,
+        HumanInputResponseOperationEvidence evidence,
+        IDictionary<HumanInputResponseLifecycleStoreSnapshot, ChronologyContext> contextsBySource,
+        IDictionary<HumanInputRequestReference, ChronologyContext> contextsByRequest,
+        out ChronologyContext? context)
+    {
+        if (contextsBySource.TryGetValue(source, out context))
+        {
+            return string.Equals(
+                context.Snapshot.Request.Head.RequestId,
+                evidence.Request.RequestId,
+                StringComparison.Ordinal);
+        }
+
+        if (!HumanInputResponseLifecycleStoreSnapshotGuard.TryCapture(
+                source,
+                evidence.Request.RequestId,
+                out var capturedSnapshot)
+            || capturedSnapshot is null)
+        {
+            context = null;
+            return false;
+        }
+
+        if (contextsByRequest.TryGetValue(capturedSnapshot.ResponseRequest, out context))
+        {
+            if (!SnapshotsEquivalent(context.Snapshot, capturedSnapshot))
+            {
+                context = null;
+                return false;
+            }
+        }
+        else
+        {
+            context = new ChronologyContext(capturedSnapshot);
+            contextsByRequest.Add(capturedSnapshot.ResponseRequest, context);
+        }
+        contextsBySource.Add(source, context);
+        return true;
+    }
+
+    private static bool EvidenceMatchesAbsentSnapshot(
+        HumanInputResponseOperationEvidence evidence,
+        HumanInputResponseLifecycleStoreSnapshot snapshot)
+    {
+        var expectedIsRetained = snapshot.Request.RequestVersions.Any(evidence.Request.Matches);
+        if (expectedIsRetained)
+        {
+            return Equals(snapshot.ResponseRequest, evidence.Request)
+                && HumanInputResponseLifecycleStoreSnapshotGuard.EvidenceMatchesHistoricallyAbsentExpectedLifecycle(
+                    evidence,
+                    snapshot.Request);
+        }
+        return Equals(snapshot.ResponseRequest, snapshot.Request.Head.CurrentRequest)
+            && HumanInputResponseLifecycleStoreSnapshotGuard.EvidenceMatchesAbsentExpectedLifecycle(
+                evidence,
+                snapshot.Request);
+    }
+
+    private static bool TryAdvanceChronology(
+        ChronologyContext context,
+        HumanInputResponseOperationEvidence operation)
+    {
+        if (operation.Outcome != HumanInputResponseOperationOutcome.Committed)
+        {
+            return true;
+        }
+        if (FindRequest(context.Snapshot, operation.Request) is not { } request)
+        {
+            return false;
+        }
+        if (operation.Kind == HumanInputResponseOperationKind.Submit)
+        {
+            if (operation.SubmittedResponse is not { } submitted
+                || !context.ResponsesById.TryGetValue(submitted.ResponseId, out var artifact)
+                || !submitted.Matches(request, artifact))
+            {
+                return false;
+            }
+            context.RetainedResponses.Add(artifact);
+            context.ActiveResponses.Add(artifact);
+            return true;
+        }
+        if (operation.Kind == HumanInputResponseOperationKind.Withdraw)
+        {
+            if (operation.TargetResponses.Length != 1)
+            {
+                return false;
+            }
+            var target = operation.TargetResponses[0];
+            var activeIndex = context.ActiveResponses.FindIndex(response => target.Matches(request, response));
+            if (activeIndex < 0)
+            {
+                return false;
+            }
+            context.ActiveResponses.RemoveAt(activeIndex);
+        }
+        return true;
+    }
+
+    private static bool SnapshotsEquivalent(
+        HumanInputResponseLifecycleStoreSnapshot left,
+        HumanInputResponseLifecycleStoreSnapshot right)
+        => Equals(left.ResponseRequest, right.ResponseRequest)
+            && LifecycleSnapshotsEquivalent(left.Request, right.Request)
+            && left.Responses.Count == right.Responses.Count
+            && left.Responses.Zip(right.Responses).All(pair =>
+                HumanInputResponseOperationEvidenceComparer.ArtifactEquals(pair.First, pair.Second))
+            && left.Operations.Count == right.Operations.Count
+            && left.Operations.Zip(right.Operations).All(pair =>
+                HumanInputResponseOperationEvidenceComparer.ExactEquals(pair.First, pair.Second))
+            && SelectionsEquivalent(left.Selection, right.Selection);
+
+    private static bool LifecycleSnapshotsEquivalent(
+        HumanInputRequestLifecycleStoreSnapshot left,
+        HumanInputRequestLifecycleStoreSnapshot right)
+        => Equals(left.Head, right.Head)
+            && left.RequestVersions.Count == right.RequestVersions.Count
+            && left.RequestVersions.Zip(right.RequestVersions).All(pair => RequestArtifactsEquivalent(pair.First, pair.Second))
+            && left.Operations.SequenceEqual(right.Operations)
+            && HumanInputResponseOperationEvidenceComparer.ExactEquals(left.AnswerOperation, right.AnswerOperation);
+
+    private static bool RequestArtifactsEquivalent(HumanInputRequest left, HumanInputRequest right)
+        => left.SchemaVersion == right.SchemaVersion
+            && string.Equals(left.RequestId, right.RequestId, StringComparison.Ordinal)
+            && string.Equals(left.RequestVersionId, right.RequestVersionId, StringComparison.Ordinal)
+            && string.Equals(left.RequestHash, right.RequestHash, StringComparison.Ordinal);
+
+    private static bool SelectionsEquivalent(
+        HumanInputResponseSelection? left,
+        HumanInputResponseSelection? right)
+        => left is null || right is null
+            ? left is null && right is null
+            : left.SchemaVersion == right.SchemaVersion
+                && string.Equals(left.SelectionId, right.SelectionId, StringComparison.Ordinal)
+                && Equals(left.Request, right.Request)
+                && left.PolicyKind == right.PolicyKind
+                && !left.Responses.IsDefault
+                && !right.Responses.IsDefault
+                && left.Responses.SequenceEqual(right.Responses)
+                && Nullable.Equals(left.SelectorActorId, right.SelectorActorId)
+                && string.Equals(left.SelectorRoleId, right.SelectorRoleId, StringComparison.Ordinal)
+                && left.SelectedAtUtc == right.SelectedAtUtc
+                && string.Equals(left.SelectionHash, right.SelectionHash, StringComparison.Ordinal);
+
+    private sealed class ChronologyContext
+    {
+        internal ChronologyContext(HumanInputResponseLifecycleStoreSnapshot snapshot)
+        {
+            Snapshot = snapshot;
+            OperationIndexes = snapshot.Operations
+                .Select((operation, index) => (operation.OperationId, Index: index))
+                .ToDictionary(entry => entry.OperationId, entry => entry.Index, StringComparer.Ordinal);
+            ResponsesById = snapshot.Responses.ToDictionary(response => response.ResponseId, StringComparer.Ordinal);
+        }
+
+        internal HumanInputResponseLifecycleStoreSnapshot Snapshot { get; }
+
+        internal IReadOnlyDictionary<string, int> OperationIndexes { get; }
+
+        internal IReadOnlyDictionary<string, HumanInputResponseArtifact> ResponsesById { get; }
+
+        internal List<HumanInputResponseArtifact> RetainedResponses { get; } = [];
+
+        internal List<HumanInputResponseArtifact> ActiveResponses { get; } = [];
+
+        internal int NextOperationIndex { get; set; }
     }
 
     internal static (HumanInputResponseLifecycleMutationPlan Plan, HumanInputRequest? Request, string? ActorRoleId) Evaluate(
