@@ -8,6 +8,15 @@ namespace EmbodySense.Core.Common.Tests.HumanInput.Responses;
 
 public sealed class HumanInputResponseSelectionContractTests
 {
+    public static TheoryData<HumanInputResponsePolicyKind, int?, ImmutableArray<string>?> EveryPolicy => new()
+    {
+        { HumanInputResponsePolicyKind.FirstValid, null, null },
+        { HumanInputResponsePolicyKind.Quorum, 2, null },
+        { HumanInputResponsePolicyKind.NamedRoles, null, ImmutableArray.Create("role-one") },
+        { HumanInputResponsePolicyKind.Merge, 1, ImmutableArray.Create("role-one") },
+        { HumanInputResponsePolicyKind.ManualSelection, null, ImmutableArray.Create("role-selector") }
+    };
+
     [Fact]
     public void First_valid_selects_the_earliest_active_response_in_durable_order()
     {
@@ -47,6 +56,71 @@ public sealed class HumanInputResponseSelectionContractTests
         var selection = HumanInputResponseTestData.Selection(request, [first, duplicateActor]);
 
         Assert.False(HumanInputResponseContractValidator.ValidateSelection(request, selection, [first, duplicateActor]).IsValid);
+    }
+
+    [Theory]
+    [MemberData(nameof(EveryPolicy))]
+    public void Every_policy_rejects_null_active_items_without_evaluating_policy(
+        HumanInputResponsePolicyKind kind,
+        int? requiredCount,
+        ImmutableArray<string>? roles)
+    {
+        var request = HumanInputResponseTestData.Request(kind, requiredCount, roles);
+        var artifact = HumanInputResponseTestData.Artifact(request);
+        var selection = SelectionForPolicy(request, artifact);
+        var validation = HumanInputResponseContractValidator.ValidateSelection(request, selection, new HumanInputResponseArtifact[] { null! });
+
+        Assert.NotEmpty(validation.Errors);
+        Assert.All(validation.Errors, error => Assert.StartsWith("$.activeResponses", error.Path, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [MemberData(nameof(EveryPolicy))]
+    public void Every_policy_rejects_duplicate_authenticated_actors_before_policy_evaluation(
+        HumanInputResponsePolicyKind kind,
+        int? requiredCount,
+        ImmutableArray<string>? roles)
+    {
+        var request = HumanInputResponseTestData.Request(kind, requiredCount, roles);
+        var first = HumanInputResponseTestData.Artifact(request, "response-one", "user-one", "role-one", "value-one");
+        var duplicateActor = HumanInputResponseTestData.Artifact(request, "response-two", "user-one", "role-one", "value-two");
+        var selection = SelectionForPolicy(request, first);
+        var validation = HumanInputResponseContractValidator.ValidateSelection(request, selection, [first, duplicateActor]);
+
+        Assert.NotEmpty(validation.Errors);
+        Assert.All(validation.Errors, error => Assert.StartsWith("$.activeResponses", error.Path, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Invalid_active_value_hash_and_actor_are_fully_rejected_before_policy_evaluation()
+    {
+        var request = HumanInputResponseTestData.Request();
+        var artifact = HumanInputResponseTestData.Artifact(request);
+        var selection = HumanInputResponseTestData.Selection(request, [artifact]);
+        var invalidSets = new[]
+        {
+            new[] { artifact with { ValueHash = "bad" } },
+            new[] { artifact with { ActorId = null! } }
+        };
+
+        Assert.All(invalidSets, active =>
+        {
+            var validation = HumanInputResponseContractValidator.ValidateSelection(request, selection, active);
+            Assert.NotEmpty(validation.Errors);
+            Assert.All(validation.Errors, error => Assert.StartsWith("$.activeResponses", error.Path, StringComparison.Ordinal));
+        });
+    }
+
+    [Fact]
+    public void Active_response_ids_must_be_unique_independently_of_actor_and_value()
+    {
+        var request = HumanInputResponseTestData.Request();
+        var first = HumanInputResponseTestData.Artifact(request, "response-one", "user-one", "role-one", "value-one");
+        var duplicateId = HumanInputResponseTestData.Artifact(request, "response-one", "user-two", "role-two", "value-two");
+        var selection = HumanInputResponseTestData.Selection(request, [first]);
+        var validation = HumanInputResponseContractValidator.ValidateSelection(request, selection, [first, duplicateId]);
+
+        Assert.Contains(validation.Errors, error => error.Path == "$.activeResponses[1]");
     }
 
     [Fact]
@@ -119,7 +193,7 @@ public sealed class HumanInputResponseSelectionContractTests
         Assert.All(variants, variant => Assert.NotEqual(selection.SelectionHash, HumanInputResponseSelectionHash.Compute(variant)));
         Assert.Throws<ArgumentNullException>(() => HumanInputResponseSelectionHash.Compute(null!));
         Assert.Throws<ArgumentNullException>(() => HumanInputResponseSelectionHash.Apply(null!));
-        Assert.Throws<ArgumentNullException>(() => HumanInputResponseSelectionHash.Matches(null!));
+        Assert.False(HumanInputResponseSelectionHash.Matches(null));
     }
 
     [Fact]
@@ -147,6 +221,69 @@ public sealed class HumanInputResponseSelectionContractTests
         Assert.Throws<ArgumentException>(() => HumanInputResponseSelectionHash.Compute(oversizedRequest));
         Assert.Throws<ArgumentException>(() => HumanInputResponseSelectionHash.Compute(oversizedVersion));
         Assert.Throws<ArgumentException>(() => HumanInputResponseSelectionHash.Compute(oversizedHash));
+        Assert.False(HumanInputResponseSelectionHash.Matches(nullRequest));
+        Assert.False(HumanInputResponseSelectionHash.Matches(oversizedRequest));
+        Assert.False(HumanInputResponseSelectionHash.Matches(oversizedVersion));
+        Assert.False(HumanInputResponseSelectionHash.Matches(oversizedHash));
+    }
+
+    [Fact]
+    public void Selection_hash_rejects_malformed_nested_strings_and_matches_fails_closed()
+    {
+        var request = HumanInputResponseTestData.Request(
+            HumanInputResponsePolicyKind.ManualSelection,
+            orderedRoleIds: ImmutableArray.Create("role-selector"));
+        var artifact = HumanInputResponseTestData.Artifact(request);
+        var selection = HumanInputResponseTestData.Selection(
+            request,
+            [artifact],
+            selectorActorId: "selector-one",
+            selectorRoleId: "role-selector");
+        var reference = selection.Responses[0];
+        var variants = new[]
+        {
+            selection with { SelectionId = new string('s', HumanInputLimits.MaxIdentifierCharacters + 1) },
+            selection with { Request = selection.Request with { RequestId = "\uD800" } },
+            selection with { Request = selection.Request with { RequestVersionId = "Version-One" } },
+            selection with { Request = selection.Request with { RequestHash = "bad" } },
+            selection with { Responses = ImmutableArray.Create(reference with { ResponseId = "response/unsafe" }) },
+            selection with { Responses = ImmutableArray.Create(reference with { Request = reference.Request with { RequestId = "\uDC00" } }) },
+            selection with { Responses = ImmutableArray.Create(reference with { ValueHash = "bad" }) },
+            selection with { Responses = ImmutableArray.Create(reference with { ResponseHash = "bad" }) },
+            selection with { SelectorRoleId = "e\u0301" },
+            selection with { SelectorRoleId = new string('r', HumanInputLimits.MaxIdentifierCharacters + 1) },
+            selection with { Responses = default }
+        };
+
+        Assert.All(variants, variant =>
+        {
+            Assert.Throws<ArgumentException>(() => HumanInputResponseSelectionHash.Compute(variant));
+            Assert.Throws<ArgumentException>(() => HumanInputResponseSelectionHash.Apply(variant));
+            Assert.False(HumanInputResponseSelectionHash.Matches(variant));
+        });
+    }
+
+    [Fact]
+    public void Selection_hash_accepts_exact_nested_identifier_boundaries()
+    {
+        var request = HumanInputResponseTestData.Request();
+        var artifact = HumanInputResponseTestData.Artifact(request);
+        var selection = HumanInputResponseTestData.Selection(request, [artifact]);
+        var maximum = new string('r', HumanInputLimits.MaxIdentifierCharacters);
+        var boundary = selection with
+        {
+            SelectionId = maximum,
+            Request = selection.Request with { RequestId = maximum, RequestVersionId = maximum },
+            Responses = ImmutableArray.Create(selection.Responses[0] with
+            {
+                ResponseId = maximum,
+                Request = selection.Responses[0].Request with { RequestId = maximum, RequestVersionId = maximum }
+            }),
+            SelectionHash = string.Empty
+        };
+        var hashed = HumanInputResponseSelectionHash.Apply(boundary);
+
+        Assert.True(HumanInputResponseSelectionHash.Matches(hashed));
     }
 
     [Fact]
@@ -214,4 +351,9 @@ public sealed class HumanInputResponseSelectionContractTests
         Assert.Equal(HumanInputResponseContractLimits.MaxValidationErrors, result.Errors.Count);
         Assert.Throws<ArgumentNullException>(() => new HumanInputResponseValidationResult(null!));
     }
+
+    private static HumanInputResponseSelection SelectionForPolicy(HumanInputRequest request, HumanInputResponseArtifact artifact)
+        => request.ResponsePolicy.Kind == HumanInputResponsePolicyKind.ManualSelection
+            ? HumanInputResponseTestData.Selection(request, [artifact], selectorActorId: "selector-one", selectorRoleId: "role-selector")
+            : HumanInputResponseTestData.Selection(request, [artifact]);
 }

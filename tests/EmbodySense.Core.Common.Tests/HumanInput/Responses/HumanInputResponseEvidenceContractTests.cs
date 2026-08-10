@@ -192,6 +192,119 @@ public sealed class HumanInputResponseEvidenceContractTests
         Assert.False(HumanInputResponseContractValidator.ValidateEvidence(pendingSameVersionAsOptimistic).IsValid);
     }
 
+    [Fact]
+    public void Stale_and_terminal_evidence_reject_cross_lifecycle_heads()
+    {
+        var expected = HumanInputResponseTestData.Request();
+        var other = HumanInputRequestHash.Apply(expected with
+        {
+            RequestId = "request-other",
+            RequestVersionId = "request-other-version-one",
+            RequestHash = string.Empty
+        });
+        var otherPending = HumanInputResponseTestData.PendingHead(other);
+        var stale = HumanInputResponseTestData.Evidence(
+            expected,
+            HumanInputResponseOperationKind.Submit,
+            HumanInputResponseOperationOutcome.Conflict,
+            HumanInputResponseOperationFailureCode.StaleResponse,
+            previousHead: otherPending,
+            resultHead: otherPending,
+            observedBinding: other.Binding);
+
+        var otherArtifact = HumanInputResponseTestData.Artifact(other);
+        var otherSelection = HumanInputResponseTestData.Selection(other, [otherArtifact]);
+        var otherTerminal = HumanInputResponseTestData.AnsweredHead(other, otherSelection);
+        var terminal = HumanInputResponseTestData.Evidence(
+            expected,
+            HumanInputResponseOperationKind.Submit,
+            HumanInputResponseOperationOutcome.Rejected,
+            HumanInputResponseOperationFailureCode.RequestTerminal,
+            previousHead: otherTerminal,
+            resultHead: otherTerminal,
+            observedBinding: other.Binding);
+
+        Assert.Contains(
+            HumanInputResponseContractValidator.ValidateEvidence(stale).Errors,
+            error => error.Path == "$.previousHead.requestId");
+        Assert.Contains(
+            HumanInputResponseContractValidator.ValidateEvidence(terminal).Errors,
+            error => error.Path == "$.resultHead.requestId");
+    }
+
+    [Fact]
+    public void Terminal_precedence_accepts_same_lifecycle_request_version_and_hash_drift()
+    {
+        var expected = HumanInputResponseTestData.Request();
+        var current = HumanInputRequestHash.Apply(expected with
+        {
+            RequestVersionId = "request-version-two",
+            Prompt = "Current terminal prompt.",
+            RequestHash = string.Empty
+        });
+        var currentArtifact = HumanInputResponseTestData.Artifact(current);
+        var currentSelection = HumanInputResponseTestData.Selection(current, [currentArtifact]);
+        var currentTerminal = HumanInputResponseTestData.AnsweredHead(current, currentSelection);
+        var evidence = HumanInputResponseTestData.Evidence(
+            expected,
+            HumanInputResponseOperationKind.Submit,
+            HumanInputResponseOperationOutcome.Rejected,
+            HumanInputResponseOperationFailureCode.RequestTerminal,
+            previousHead: currentTerminal,
+            resultHead: currentTerminal,
+            observedBinding: current.Binding);
+
+        Assert.True(HumanInputResponseContractValidator.ValidateEvidence(evidence).IsValid);
+    }
+
+    [Fact]
+    public void Evidence_time_accepts_equality_and_rejects_regression_for_unchanged_and_answered_heads()
+    {
+        var request = HumanInputResponseTestData.Request();
+        var previous = HumanInputResponseTestData.PendingHead(request);
+        var unchangedEqual = HumanInputResponseTestData.Evidence(
+            request,
+            HumanInputResponseOperationKind.Submit,
+            HumanInputResponseOperationOutcome.Conflict,
+            HumanInputResponseOperationFailureCode.OperationIntentConflict,
+            previousHead: previous,
+            resultHead: previous,
+            recordedAtUtc: previous.UpdatedAtUtc);
+        var unchangedRegressed = unchangedEqual with { RecordedAtUtc = previous.UpdatedAtUtc.AddTicks(-1) };
+
+        var artifact = HumanInputResponseTestData.Artifact(request);
+        var equalSelection = HumanInputResponseTestData.Selection(request, [artifact], selectedAtUtc: previous.UpdatedAtUtc);
+        var equalAnswered = HumanInputResponseTestData.AnsweredHead(request, equalSelection);
+        var answeredEqual = HumanInputResponseTestData.Evidence(
+            request,
+            HumanInputResponseOperationKind.Submit,
+            submitted: artifact,
+            selection: equalSelection,
+            previousHead: previous,
+            resultHead: equalAnswered,
+            recordedAtUtc: previous.UpdatedAtUtc);
+
+        var regressedSelection = HumanInputResponseTestData.Selection(
+            request,
+            [artifact],
+            selectionId: "selection-regressed",
+            selectedAtUtc: previous.UpdatedAtUtc.AddTicks(-1));
+        var regressedAnswered = HumanInputResponseTestData.AnsweredHead(request, regressedSelection);
+        var answeredRegressed = HumanInputResponseTestData.Evidence(
+            request,
+            HumanInputResponseOperationKind.Submit,
+            submitted: artifact,
+            selection: regressedSelection,
+            previousHead: previous,
+            resultHead: regressedAnswered,
+            recordedAtUtc: regressedSelection.SelectedAtUtc);
+
+        Assert.True(HumanInputResponseContractValidator.ValidateEvidence(unchangedEqual).IsValid);
+        Assert.True(HumanInputResponseContractValidator.ValidateEvidence(answeredEqual).IsValid);
+        Assert.False(HumanInputResponseContractValidator.ValidateEvidence(unchangedRegressed).IsValid);
+        Assert.False(HumanInputResponseContractValidator.ValidateEvidence(answeredRegressed).IsValid);
+    }
+
     [Theory]
     [InlineData(HumanInputResponseOperationKind.Withdraw)]
     [InlineData(HumanInputResponseOperationKind.Select)]
@@ -277,6 +390,38 @@ public sealed class HumanInputResponseEvidenceContractTests
             HumanInputResponseOperationKind.Withdraw,
             HumanInputResponseOperationOutcome.Rejected,
             HumanInputResponseOperationFailureCode.LateResponse,
+            targets: [target]);
+
+        Assert.True(HumanInputResponseContractValidator.ValidateEvidence(submit).IsValid);
+        Assert.True(HumanInputResponseContractValidator.ValidateEvidence(select).IsValid);
+        Assert.False(HumanInputResponseContractValidator.ValidateEvidence(withdraw).IsValid);
+    }
+
+    [Fact]
+    public void Lifecycle_version_exhaustion_allows_submit_and_select_but_rejects_withdraw()
+    {
+        var request = HumanInputResponseTestData.Request(
+            HumanInputResponsePolicyKind.ManualSelection,
+            orderedRoleIds: ImmutableArray.Create("role-selector"));
+        var target = HumanInputResponseTestData.Artifact(request);
+        var submit = HumanInputResponseTestData.Evidence(
+            request,
+            HumanInputResponseOperationKind.Submit,
+            HumanInputResponseOperationOutcome.LimitExceeded,
+            HumanInputResponseOperationFailureCode.LifecycleVersionLimitExceeded);
+        var select = HumanInputResponseTestData.Evidence(
+            request,
+            HumanInputResponseOperationKind.Select,
+            HumanInputResponseOperationOutcome.LimitExceeded,
+            HumanInputResponseOperationFailureCode.LifecycleVersionLimitExceeded,
+            targets: [target],
+            actorId: "selector-one",
+            actorRoleId: "role-selector");
+        var withdraw = HumanInputResponseTestData.Evidence(
+            request,
+            HumanInputResponseOperationKind.Withdraw,
+            HumanInputResponseOperationOutcome.LimitExceeded,
+            HumanInputResponseOperationFailureCode.LifecycleVersionLimitExceeded,
             targets: [target]);
 
         Assert.True(HumanInputResponseContractValidator.ValidateEvidence(submit).IsValid);

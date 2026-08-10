@@ -111,6 +111,30 @@ public sealed class HumanInputResponsePolicyContractTests
     }
 
     [Fact]
+    public void Request_hash_rejects_malformed_policy_roles_before_serialization_and_accepts_exact_boundary()
+    {
+        var request = HumanInputResponseTestData.Request(
+            HumanInputResponsePolicyKind.NamedRoles,
+            orderedRoleIds: ImmutableArray.Create("role-one"));
+        var maximum = new string('r', HumanInputLimits.MaxIdentifierCharacters);
+        var boundary = request with
+        {
+            ResponsePolicy = request.ResponsePolicy with { OrderedRoleIds = ImmutableArray.Create(maximum) },
+            RequestHash = string.Empty
+        };
+        var malformed = new[]
+        {
+            boundary with { ResponsePolicy = boundary.ResponsePolicy with { OrderedRoleIds = ImmutableArray.Create("\uD800") } },
+            boundary with { ResponsePolicy = boundary.ResponsePolicy with { OrderedRoleIds = ImmutableArray.Create("\uDC00") } },
+            boundary with { ResponsePolicy = boundary.ResponsePolicy with { OrderedRoleIds = ImmutableArray.Create("e\u0301") } },
+            boundary with { ResponsePolicy = boundary.ResponsePolicy with { OrderedRoleIds = ImmutableArray.Create(new string('r', HumanInputLimits.MaxIdentifierCharacters + 1)) } }
+        };
+
+        Assert.NotEmpty(HumanInputRequestHash.Compute(boundary));
+        Assert.All(malformed, candidate => Assert.Throws<ArgumentException>(() => HumanInputRequestHash.Compute(candidate)));
+    }
+
+    [Fact]
     public void Request_snapshot_deep_copies_policy_roles_and_respondent_role_bindings()
     {
         var callerOwnedRoles = new[] { "role-two", "role-one" };

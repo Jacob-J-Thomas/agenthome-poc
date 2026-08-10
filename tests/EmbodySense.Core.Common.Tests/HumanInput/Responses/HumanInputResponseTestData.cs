@@ -112,7 +112,8 @@ internal static class HumanInputResponseTestData
         string? actorRoleId = "role-one",
         long? expectedLifecycleVersion = null,
         HumanInputRequestBinding? expectedBinding = null,
-        HumanInputRequestBinding? observedBinding = null)
+        HumanInputRequestBinding? observedBinding = null,
+        DateTimeOffset? recordedAtUtc = null)
     {
         Assert.True(AuthorityActorId.TryParse(actorId, out var actor, out _));
         var previous = previousHead ?? PendingHead(request);
@@ -137,7 +138,7 @@ internal static class HumanInputResponseTestData
             actorRoleId,
             Hash('b'),
             Hash('c'),
-            selection?.SelectedAtUtc ?? Now.AddMinutes(5));
+            recordedAtUtc ?? selection?.SelectedAtUtc ?? (previous.UpdatedAtUtc > Now.AddMinutes(5) ? previous.UpdatedAtUtc : Now.AddMinutes(5)));
     }
 
     internal static HumanInputRequestReference RequestReference(HumanInputRequest request)

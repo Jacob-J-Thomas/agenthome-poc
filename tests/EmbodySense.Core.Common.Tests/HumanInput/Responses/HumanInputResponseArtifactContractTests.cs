@@ -67,6 +67,98 @@ public sealed class HumanInputResponseArtifactContractTests
         Assert.Throws<ArgumentException>(() => HumanInputResponseValueHash.Compute(defaultFields));
         Assert.Throws<ArgumentException>(() => HumanInputResponseValueHash.Compute(tooMany));
         Assert.Throws<ArgumentException>(() => HumanInputResponseValueHash.Compute(oversized));
+        Assert.False(HumanInputResponseValueHash.Matches(null, HumanInputResponseTestData.Hash('a')));
+        Assert.False(HumanInputResponseValueHash.Matches(defaultFields, HumanInputResponseTestData.Hash('a')));
+        Assert.False(HumanInputResponseValueHash.Matches(tooMany, HumanInputResponseTestData.Hash('a')));
+        Assert.False(HumanInputResponseValueHash.Matches(oversized, HumanInputResponseTestData.Hash('a')));
+    }
+
+    [Fact]
+    public void Value_hash_rejects_noncanonical_unicode_and_identifiers_but_accepts_replacement_character()
+    {
+        var malformed = new[]
+        {
+            new HumanInputResponseValue(HumanInputResponseKind.Text, "\uD800", null, null, null, null),
+            new HumanInputResponseValue(HumanInputResponseKind.Text, "\uDC00", null, null, null, null),
+            new HumanInputResponseValue(HumanInputResponseKind.Text, "e\u0301", null, null, null, null),
+            new HumanInputResponseValue(HumanInputResponseKind.Choice, null, "Choice-One", null, null, null),
+            new HumanInputResponseValue(
+                HumanInputResponseKind.Structured,
+                null,
+                null,
+                null,
+                ImmutableArray.Create(new HumanInputStructuredFieldValue("field-one", "\uD800", null)),
+                null),
+            new HumanInputResponseValue(
+                HumanInputResponseKind.Reference,
+                null,
+                null,
+                null,
+                null,
+                new HumanInputReference(HumanInputReferenceKind.Artifact, "artifact/unsafe"))
+        };
+
+        Assert.All(malformed, value =>
+        {
+            Assert.Throws<ArgumentException>(() => HumanInputResponseValueHash.Compute(value));
+            Assert.False(HumanInputResponseValueHash.Matches(value, HumanInputResponseTestData.Hash('a')));
+        });
+
+        var replacement = new HumanInputResponseValue(HumanInputResponseKind.Text, "value-\uFFFD", null, null, null, null);
+        var hash = HumanInputResponseValueHash.Compute(replacement);
+        Assert.True(HumanInputResponseValueHash.Matches(replacement, hash));
+    }
+
+    [Fact]
+    public void Value_hash_enforces_every_nested_string_boundary_before_serialization()
+    {
+        var maximumText = new HumanInputResponseValue(
+            HumanInputResponseKind.Text,
+            new string('t', HumanInputLimits.MaxResponseTextCharacters),
+            null,
+            null,
+            null,
+            null);
+        var maximumChoice = new HumanInputResponseValue(
+            HumanInputResponseKind.Choice,
+            null,
+            new string('c', HumanInputLimits.MaxIdentifierCharacters),
+            null,
+            null,
+            null);
+        var maximumReference = new HumanInputResponseValue(
+            HumanInputResponseKind.Reference,
+            null,
+            null,
+            null,
+            null,
+            new HumanInputReference(HumanInputReferenceKind.Artifact, new string('r', HumanInputLimits.MaxReferenceCharacters)));
+        var maximumStructured = new HumanInputResponseValue(
+            HumanInputResponseKind.Structured,
+            null,
+            null,
+            null,
+            ImmutableArray.Create(new HumanInputStructuredFieldValue(
+                new string('f', HumanInputLimits.MaxIdentifierCharacters),
+                new string('s', HumanInputLimits.MaxResponseTextCharacters),
+                null)),
+            null);
+        var oversized = new[]
+        {
+            maximumText with { Text = new string('t', HumanInputLimits.MaxResponseTextCharacters + 1) },
+            maximumChoice with { ChoiceId = new string('c', HumanInputLimits.MaxIdentifierCharacters + 1) },
+            maximumReference with { Reference = maximumReference.Reference! with { Value = new string('r', HumanInputLimits.MaxReferenceCharacters + 1) } },
+            maximumStructured with
+            {
+                StructuredFields = ImmutableArray.Create(new HumanInputStructuredFieldValue(
+                    new string('f', HumanInputLimits.MaxIdentifierCharacters + 1),
+                    "value",
+                    null))
+            }
+        };
+
+        Assert.All(new[] { maximumText, maximumChoice, maximumReference, maximumStructured }, value => Assert.NotEmpty(HumanInputResponseValueHash.Compute(value)));
+        Assert.All(oversized, value => Assert.Throws<ArgumentException>(() => HumanInputResponseValueHash.Compute(value)));
     }
 
     [Fact]
@@ -146,7 +238,52 @@ public sealed class HumanInputResponseArtifactContractTests
         Assert.NotEqual(artifact.ValueHash, repaired.ValueHash);
         Assert.Throws<ArgumentNullException>(() => HumanInputResponseArtifactHash.Compute(null!));
         Assert.Throws<ArgumentNullException>(() => HumanInputResponseArtifactHash.Apply(null!));
-        Assert.Throws<ArgumentNullException>(() => HumanInputResponseArtifactHash.Matches(null!));
+        Assert.False(HumanInputResponseArtifactHash.Matches(null));
+    }
+
+    [Fact]
+    public void Artifact_hash_rejects_malformed_nested_strings_and_fails_closed()
+    {
+        var request = HumanInputResponseTestData.Request();
+        var artifact = HumanInputResponseTestData.Artifact(request);
+        var variants = new[]
+        {
+            artifact with { Explanation = "\uD800" },
+            artifact with { Explanation = "e\u0301" },
+            artifact with { Explanation = new string('e', HumanInputLimits.MaxExplanationCharacters + 1) },
+            artifact with { ResponseId = new string('r', HumanInputLimits.MaxIdentifierCharacters + 1) },
+            artifact with { Request = artifact.Request with { RequestId = "Request-One" } },
+            artifact with { Request = artifact.Request with { RequestVersionId = "\uDC00" } },
+            artifact with { Request = artifact.Request with { RequestHash = "bad" } },
+            artifact with { Binding = artifact.Binding with { CheckpointId = "checkpoint/unsafe" } },
+            artifact with { RespondentRoleId = "role/unsafe" }
+        };
+
+        Assert.All(variants, variant =>
+        {
+            Assert.Throws<ArgumentException>(() => HumanInputResponseArtifactHash.Compute(variant));
+            Assert.Throws<ArgumentException>(() => HumanInputResponseArtifactHash.Apply(variant));
+            Assert.False(HumanInputResponseArtifactHash.Matches(variant));
+        });
+
+        var maximumExplanation = HumanInputResponseArtifactHash.Apply(artifact with
+        {
+            Explanation = new string('e', HumanInputLimits.MaxExplanationCharacters),
+            ResponseHash = string.Empty
+        });
+        var replacement = HumanInputResponseArtifactHash.Apply(artifact with { Explanation = "value-\uFFFD", ResponseHash = string.Empty });
+        Assert.True(HumanInputResponseArtifactHash.Matches(maximumExplanation));
+        Assert.True(HumanInputResponseArtifactHash.Matches(replacement));
+        Assert.False(HumanInputResponseArtifactHash.Matches(artifact with
+        {
+            Value = new HumanInputResponseValue(
+                HumanInputResponseKind.Structured,
+                null,
+                null,
+                null,
+                default(ImmutableArray<HumanInputStructuredFieldValue>),
+                null)
+        }));
     }
 
     [Fact]
