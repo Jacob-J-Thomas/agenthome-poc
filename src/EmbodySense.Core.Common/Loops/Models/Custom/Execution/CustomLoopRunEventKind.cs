@@ -80,5 +80,9 @@ public enum CustomLoopRunEventKind
     /// <summary>
     /// Identifies the tool integrity failed custom loop run event kind.
     /// </summary>
-    ToolIntegrityFailed = 18
+    ToolIntegrityFailed = 18,
+    /// <summary>
+    /// Identifies an append-once canonical topology-pruning event for one exact undispatched activation.
+    /// </summary>
+    TopologyNodeSkipped = 19
 }

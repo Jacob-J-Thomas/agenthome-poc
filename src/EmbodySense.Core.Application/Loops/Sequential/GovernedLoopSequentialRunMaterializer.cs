@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Sequential;
 
 namespace EmbodySense.Core.Application.Loops.Sequential;
@@ -345,8 +346,17 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
             binding.ExecutionBinding.RunId,
             binding.ExecutionBinding.Revision,
             binding.ExecutionBinding.ExecutionGeneration,
+            0,
+            1,
             request.Plan.Nodes[0].NodeId,
             1,
+            null,
+            null,
+            GovernedLoopControlCondition.Always,
+            request.Plan.ControlEdges.Where(edge => string.Equals(edge.FromNodeId, request.Plan.Nodes[0].NodeId, StringComparison.Ordinal) && edge.Condition == GovernedLoopControlCondition.Always).Select(edge => edge.Id).Order(StringComparer.Ordinal).ToArray(),
+            request.Plan.ControlEdges.Where(edge => string.Equals(edge.FromNodeId, request.Plan.Nodes[0].NodeId, StringComparison.Ordinal) && edge.Condition != GovernedLoopControlCondition.Always).Select(edge => edge.Id).Order(StringComparer.Ordinal).ToArray(),
+            null,
+            null,
             CustomLoopSequentialNodeDisposition.Completed,
             CustomLoopSequentialOutcomeArtifactHash.Compute(admitted),
             string.Empty));
@@ -450,9 +460,14 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
             {
                 Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
                 Disposition: CustomLoopSequentialNodeDisposition.Completed,
+                ActivationOrdinal: 0,
+                VisitOrdinal: 1,
                 Attempt: 1,
             }
             && string.Equals(trigger.NodeId, request.Plan.Nodes[0].NodeId, StringComparison.Ordinal)
+            && trigger.ControlOutcome == GovernedLoopControlCondition.Always
+            && trigger.SelectedControlEdgeIds.SequenceEqual(run.Frontier?.Payload.Nodes[0].SelectedControlEdgeIds ?? [], StringComparer.Ordinal)
+            && trigger.SkippedControlEdgeIds.SequenceEqual(run.Frontier?.Payload.Nodes[0].SkippedControlEdgeIds ?? [], StringComparer.Ordinal)
             && string.Equals(run.Frontier?.Payload.Nodes[0].AttemptOperationId, initial.EventId, StringComparison.Ordinal)
             && string.Equals(run.Frontier?.Payload.Nodes[0].OutcomeEvidenceId, initial.EventId, StringComparison.Ordinal)
             && string.Equals(run.Frontier?.Payload.Nodes[0].OutcomeEvidenceHash, trigger.OutcomeArtifactHash, StringComparison.Ordinal)

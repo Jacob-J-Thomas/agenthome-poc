@@ -270,7 +270,8 @@ public sealed class CustomLoopRunStore :
 
             foreach (var runEvent in run.Events)
             {
-                if (runEvent.SequentialNodeEvidence is not { Kind: not CustomLoopSequentialNodeEvidenceKind.DispatchStarted } evidence
+                if (runEvent.SequentialNodeEvidence is not { } evidence
+                    || evidence.Kind is CustomLoopSequentialNodeEvidenceKind.DispatchStarted or CustomLoopSequentialNodeEvidenceKind.TopologySkipped
                     || !string.Equals(evidence.EvidenceHash, evidenceHash, StringComparison.Ordinal))
                 {
                     continue;
@@ -333,7 +334,8 @@ public sealed class CustomLoopRunStore :
             || run.Events[eventIndex] is not { } orderedEvent
             || orderedEvent.Sequence != request.OrderedEventSequence
             || !string.Equals(orderedEvent.EventId, request.OrderedEventId, StringComparison.Ordinal)
-            || orderedEvent.SequentialNodeEvidence is not { Kind: not CustomLoopSequentialNodeEvidenceKind.DispatchStarted } evidence)
+            || orderedEvent.SequentialNodeEvidence is not { } evidence
+            || evidence.Kind is CustomLoopSequentialNodeEvidenceKind.DispatchStarted or CustomLoopSequentialNodeEvidenceKind.TopologySkipped)
         {
             throw new FormatException("The exact ordered sequential-node terminal event is not present in the current durable run artifact.");
         }
@@ -346,8 +348,12 @@ public sealed class CustomLoopRunStore :
             || !string.Equals(receipt.RunId, execution.RunId, StringComparison.Ordinal)
             || !Equals(receipt.Revision, execution.Revision)
             || receipt.ExecutionGeneration != execution.ExecutionGeneration
+            || receipt.ActivationOrdinal != dispatch.Activation.ActivationOrdinal
+            || receipt.VisitOrdinal != dispatch.Activation.VisitOrdinal
             || !string.Equals(receipt.NodeId, dispatch.Node.NodeId, StringComparison.Ordinal)
             || receipt.Attempt != dispatch.Attempt
+            || !string.Equals(receipt.CycleId, dispatch.Activation.CycleId, StringComparison.Ordinal)
+            || receipt.CycleIteration != dispatch.Activation.CycleIteration
             || !CustomLoopSequentialOutcomeArtifactHash.Matches(orderedEvent)
             || !GovernedLoopSequentialNodeEvidenceHash.Matches(receipt))
         {
@@ -2343,12 +2349,12 @@ public sealed class CustomLoopRunStore :
 
     private static bool IsPureNodeEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
     {
-        if (item.SequentialNodeEvidence is not { NodeId: var nodeId })
+        if (item.SequentialNodeEvidence is not { ActivationOrdinal: var activationOrdinal })
         {
             return false;
         }
 
-        var node = run.Frontier?.Payload.Nodes.FirstOrDefault(candidate => string.Equals(candidate.NodeId, nodeId, StringComparison.Ordinal));
+        var node = run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal);
         return node?.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate;
     }
 
@@ -3048,8 +3054,15 @@ public sealed class CustomLoopRunStore :
                 evidence.Revision.RevisionId,
                 evidence.Revision.ExecutableHash),
             evidence.ExecutionGeneration,
+            evidence.ActivationOrdinal,
+            evidence.VisitOrdinal,
             evidence.NodeId,
-            evidence.Attempt,
+            evidence.Attempt!.Value,
+            evidence.CycleId,
+            evidence.CycleIteration,
+            evidence.ControlOutcome,
+            evidence.SelectedControlEdgeIds.ToArray(),
+            evidence.SkippedControlEdgeIds.ToArray(),
             disposition,
             evidence.OutcomeArtifactHash,
             evidence.EvidenceHash);
@@ -3069,6 +3082,7 @@ public sealed class CustomLoopRunStore :
             || dispatch.Anchor is null
             || dispatch.Plan is null
             || dispatch.Node is null
+            || dispatch.Activation is null
             || dispatch.Attempt is < 1 or > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxNodeAttempt
             || request.Disposition == GovernedLoopSequentialNodeHandlerResultStatus.Unknown
             || !Enum.IsDefined(request.Disposition)
@@ -3091,6 +3105,10 @@ public sealed class CustomLoopRunStore :
             || node.Ordinal < 0
             || node.Ordinal >= plan.Nodes.Count
             || !ReferenceEquals(plan.Nodes[node.Ordinal], node)
+            || dispatch.Activation.Status != GovernedLoopNodeExecutionStatus.Running
+            || dispatch.Activation.PlanOrdinal != node.Ordinal
+            || dispatch.Activation.Attempt != dispatch.Attempt
+            || !string.Equals(dispatch.Activation.NodeId, node.NodeId, StringComparison.Ordinal)
             || !EmbodySense.Core.Application.Loops.Sequential.GovernedLoopSequentialNodeDescriptors.IsSupported(node.Descriptor)
             || !Equals(plan.Revision, binding.ExecutionBinding.Revision)
             || !string.Equals(plan.GraphArtifactHash, binding.GraphArtifactHash, StringComparison.Ordinal)

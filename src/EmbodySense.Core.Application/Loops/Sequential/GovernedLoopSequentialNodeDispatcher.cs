@@ -1,5 +1,8 @@
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Application.Loops.Sequential;
 
@@ -65,11 +68,18 @@ public sealed class GovernedLoopSequentialNodeDispatcher
             || request.Anchor is null
             || request.Plan is null
             || request.Node is null
+            || request.Activation is null
             || request.Attempt is < 1 or > GovernedLoopExecutionLimits.MaxNodeAttempt
             || request.Plan.SchemaVersion != 1
             || request.Node.Ordinal < 0
             || request.Node.Ordinal >= request.Plan.Nodes.Count
             || !ReferenceEquals(request.Plan.Nodes[request.Node.Ordinal], request.Node)
+            || request.Activation.Status != GovernedLoopNodeExecutionStatus.Running
+            || request.Activation.PlanOrdinal != request.Node.Ordinal
+            || !string.Equals(request.Activation.NodeId, request.Node.NodeId, StringComparison.Ordinal)
+            || !Equals(request.Activation.Descriptor, request.Node.Descriptor)
+            || request.Activation.Attempt != request.Attempt
+            || request.Activation.AttemptOperationId is null
             || !GovernedLoopSequentialNodeDescriptors.IsSupported(request.Node.Descriptor))
         {
             return false;
@@ -105,10 +115,57 @@ public sealed class GovernedLoopSequentialNodeDispatcher
             && string.Equals(evidence.RunId, execution.RunId, StringComparison.Ordinal)
             && Equals(evidence.Revision, execution.Revision)
             && evidence.ExecutionGeneration == execution.ExecutionGeneration
+            && evidence.ActivationOrdinal == request.Activation.ActivationOrdinal
+            && evidence.VisitOrdinal == request.Activation.VisitOrdinal
             && string.Equals(evidence.NodeId, request.Node.NodeId, StringComparison.Ordinal)
             && evidence.Attempt == request.Attempt
+            && string.Equals(evidence.CycleId, request.Activation.CycleId, StringComparison.Ordinal)
+            && evidence.CycleIteration == request.Activation.CycleIteration
+            && IsExactRouteEvidence(evidence, request)
             && GovernedLoopSequentialNodeEvidenceHash.Matches(evidence);
     }
+
+    private static bool IsExactRouteEvidence(
+        GovernedLoopSequentialNodeEvidenceReceipt evidence,
+        GovernedLoopSequentialNodeDispatchRequest request)
+    {
+        if (evidence.SelectedControlEdgeIds is null
+            || evidence.SkippedControlEdgeIds is null
+            || !IsSortedUnique(evidence.SelectedControlEdgeIds)
+            || !IsSortedUnique(evidence.SkippedControlEdgeIds)
+            || evidence.SelectedControlEdgeIds.Intersect(evidence.SkippedControlEdgeIds, StringComparer.Ordinal).Any())
+        {
+            return false;
+        }
+
+        if (evidence.Disposition == GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview)
+        {
+            return evidence.ControlOutcome is null
+                && evidence.SelectedControlEdgeIds.Length == 0
+                && evidence.SkippedControlEdgeIds.Length == 0;
+        }
+
+        if (evidence.ControlOutcome is null or GovernedLoopControlCondition.Unknown)
+        {
+            return false;
+        }
+
+        var partition = evidence.SelectedControlEdgeIds.Concat(evidence.SkippedControlEdgeIds).Order(StringComparer.Ordinal);
+        if (!partition.SequenceEqual(request.Activation.OutgoingControlEdgeIds, StringComparer.Ordinal))
+        {
+            return false;
+        }
+
+        var planEdges = request.Plan.ControlEdges.ToDictionary(edge => edge.Id, StringComparer.Ordinal);
+        return evidence.SelectedControlEdgeIds.All(edgeId => planEdges.TryGetValue(edgeId, out var edge)
+            && string.Equals(edge.FromNodeId, request.Node.NodeId, StringComparison.Ordinal)
+            && edge.Condition == evidence.ControlOutcome)
+            && evidence.SkippedControlEdgeIds.All(planEdges.ContainsKey);
+    }
+
+    private static bool IsSortedUnique(IReadOnlyList<string> values)
+        => values.All(value => CustomLoopArtifactIdentifier.IsValid(value))
+            && values.SequenceEqual(values.Order(StringComparer.Ordinal).Distinct(StringComparer.Ordinal), StringComparer.Ordinal);
 
     private static GovernedLoopSequentialNodeEvidenceKind ExpectedEvidenceKind(GovernedLoopSequentialNodeHandlerResultStatus status)
         => status switch

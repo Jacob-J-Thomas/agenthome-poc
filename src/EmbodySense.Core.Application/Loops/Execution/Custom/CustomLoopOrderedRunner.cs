@@ -26,6 +26,7 @@ using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
@@ -246,15 +247,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return Result(CustomLoopOrderedRunStatus.Failed, run, "This runtime is already coordinating ordered execution for the custom-loop run.");
             }
 
-            var started = sequentialContext is null
-                ? await StartRunAsync(run, request.Actor, cancellationToken)
-                : await DispatchSequentialNodeAsync(
-                    sequentialContext,
-                    sequentialContext.Plan.Nodes[0],
-                    1,
-                    request.Actor,
-                    token => StartRunAsync(run, request.Actor, token),
-                    cancellationToken);
+            var started = await StartRunAsync(run, request.Actor, cancellationToken);
             if (started.Terminal is not null)
             {
                 return started.Terminal;
@@ -586,6 +579,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 var cancelledNode = selected.Node!;
                 var cancelled = await DispatchSequentialNodeAsync(
                     context,
+                    run,
                     cancelledNode,
                     selected.Attempt!.Value,
                     actor,
@@ -596,6 +590,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                             context.Anchor.AdapterBinding,
                             context.Artifact,
                             cancelledNode,
+                            selected.Activation!,
                             selected.Attempt.Value,
                             selected.AttemptOperationId!,
                             context.AllowedCapabilityIds,
@@ -632,6 +627,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
                 var rejected = await DispatchSequentialNodeAsync(
                     context,
+                    capabilityClaim.Run!,
                     node,
                     1,
                     actor,
@@ -642,6 +638,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                             context.Anchor.AdapterBinding,
                             context.Artifact,
                             node,
+                            RequireRunningSequentialActivation(capabilityClaim.Run!, node, 1, capabilityOperationId),
                             1,
                             capabilityOperationId,
                             context.AllowedCapabilityIds,
@@ -682,12 +679,14 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                         context.Anchor.AdapterBinding,
                         context.Artifact,
                         node,
+                        selected.Activation!,
                         selected.Attempt.Value,
                         selected.AttemptOperationId!,
                         context.AllowedCapabilityIds,
                         context.AuditRecorder);
                     var rejected = await DispatchSequentialNodeAsync(
                         context,
+                        run,
                         node,
                         selected.Attempt.Value,
                         actor,
@@ -735,6 +734,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 var isExit = Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit);
                 var rejected = await DispatchSequentialNodeAsync(
                     context,
+                    deadlineClaim.Run!,
                     node,
                     1,
                     actor,
@@ -742,13 +742,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                         ? RejectSequentialPureNodeAsync(
                             deadlineClaim.Run!,
                             actor,
-                            new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, context.Artifact, node, 1, deadlineOperationId, context.AllowedCapabilityIds, context.AuditRecorder),
+                            new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, context.Artifact, node, RequireRunningSequentialActivation(deadlineClaim.Run!, node, 1, deadlineOperationId), 1, deadlineOperationId, context.AllowedCapabilityIds, context.AuditRecorder),
                             "run_deadline_exceeded",
                             CanonicalDeadlineRejectionDetail)
                         : RejectSequentialNodeBeforeProviderAsync(
                             deadlineClaim.Run!,
                             actor,
-                            new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, context.Artifact, node, 1, deadlineOperationId, context.AllowedCapabilityIds, context.AuditRecorder),
+                            new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, context.Artifact, node, RequireRunningSequentialActivation(deadlineClaim.Run!, node, 1, deadlineOperationId), 1, deadlineOperationId, context.AllowedCapabilityIds, context.AuditRecorder),
                             isExit ? "exit" : node.NodeId,
                             isExit,
                             "run_deadline_exceeded",
@@ -800,11 +800,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         var now = Now(run);
+        var selection = GovernedLoopSequentialFrontierMachine.Select(run.Frontier, context.Anchor.AdapterBinding, context.Plan);
         var transition = GovernedLoopSequentialFrontierMachine.Start(
             run.Frontier,
             context.Anchor.AdapterBinding,
             context.Plan,
             node,
+            selection.Activation,
             1,
             attemptOperationId,
             now);
@@ -817,6 +819,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             context.Anchor.AdapterBinding,
             context.Artifact,
             node,
+            transition.Frontier.Payload.Nodes[selection.Activation!.ActivationOrdinal],
             1,
             attemptOperationId,
             context.AllowedCapabilityIds,
@@ -874,11 +877,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CancellationToken cancellationToken)
     {
         var now = Now(run);
+        var selection = GovernedLoopSequentialFrontierMachine.Select(run.Frontier, context.Anchor.AdapterBinding, context.Plan);
         var transition = GovernedLoopSequentialFrontierMachine.Start(
             run.Frontier,
             context.Anchor.AdapterBinding,
             context.Plan,
             node,
+            selection.Activation,
             1,
             attemptOperationId,
             now);
@@ -1030,6 +1035,19 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return matches.Length == 1 ? matches[0] : null;
     }
 
+    private static GovernedLoopNodeExecutionEvidence RequireRunningSequentialActivation(
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode node,
+        int attempt,
+        string attemptOperationId)
+        => run.Frontier?.Payload.Nodes.SingleOrDefault(candidate =>
+            candidate.Status == GovernedLoopNodeExecutionStatus.Running
+            && candidate.PlanOrdinal == node.Ordinal
+            && string.Equals(candidate.NodeId, node.NodeId, StringComparison.Ordinal)
+            && candidate.Attempt == attempt
+            && string.Equals(candidate.AttemptOperationId, attemptOperationId, StringComparison.Ordinal))
+        ?? throw new InvalidOperationException("The exact Running activation is unavailable for canonical node dispatch or evidence attribution.");
+
     private static GovernedLoopFrontierPosture? CompleteSequentialFrontier(
         CustomLoopRunRecord run,
         SequentialExecutionContext context,
@@ -1052,10 +1070,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             context.Anchor.AdapterBinding,
             context.Plan,
             node,
+            RequireRunningSequentialActivation(run, node, attempt, attemptOperationId),
             attempt,
             attemptOperationId,
             evidence.EventId,
             sequentialEvidence.OutcomeArtifactHash,
+            sequentialEvidence.ControlOutcome ?? GovernedLoopControlCondition.Success,
+            [],
             evidence.TimestampUtc);
         return completed.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied
             ? completed.Frontier
@@ -1075,6 +1096,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     {
         var prepared = await DispatchSequentialNodeAsync(
             context,
+            run,
             node,
             attempt,
             actor,
@@ -1233,6 +1255,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                     context.Anchor.AdapterBinding,
                     context.Artifact,
                     node,
+                    RequireRunningSequentialActivation(run, node, attempt, attemptOperationId),
                     attempt,
                     attemptOperationId,
                     context.AllowedCapabilityIds,
@@ -1304,7 +1327,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             dispatchState,
             cancellationToken,
             deferCheckpoint: true,
-            new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, context.Artifact, node, attempt, attemptOperationId, context.AllowedCapabilityIds, context.AuditRecorder));
+            new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, context.Artifact, node, RequireRunningSequentialActivation(run, node, attempt, attemptOperationId), attempt, attemptOperationId, context.AllowedCapabilityIds, context.AuditRecorder));
     }
 
     private async Task<RunAdvance> DispatchAndAdvanceSequentialPureNodeAsync(
@@ -1318,6 +1341,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     {
         var prepared = await DispatchSequentialNodeAsync(
             context,
+            run,
             node,
             attempt,
             actor,
@@ -1586,7 +1610,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             }
             || evidence.Attempt <= 0
             || !TryProjectPureNodeCheckpoint(outcomeSnapshot, context, node, outcome!, out var projectedCheckpoint, out _)
-            || CompleteSequentialFrontier(outcomeSnapshot, context, node, evidence.Attempt, attemptOperationId) is not { } frontier
+            || CompleteSequentialFrontier(outcomeSnapshot, context, node, evidence.Attempt!.Value, attemptOperationId) is not { } frontier
             || latest.Events.Skip(outcomeSnapshot.Events.Length).FirstOrDefault() is not
             {
                 Kind: CustomLoopRunEventKind.CheckpointCommitted,
@@ -1858,6 +1882,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             context.Anchor.AdapterBinding,
             context.Artifact,
             node,
+            RequireRunningSequentialActivation(run, node, attempt, attemptOperationId),
             attempt,
             attemptOperationId,
             context.AllowedCapabilityIds,
@@ -2681,6 +2706,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     {
         var prepared = await DispatchSequentialNodeAsync(
             context,
+            run,
             node,
             attempt,
             actor,
@@ -2750,7 +2776,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 actor,
                 detail,
                 cancellationToken,
-                new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, context.Artifact, node, attempt, attemptOperationId, context.AllowedCapabilityIds, context.AuditRecorder));
+                new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, context.Artifact, node, RequireRunningSequentialActivation(run, node, attempt, attemptOperationId), attempt, attemptOperationId, context.AllowedCapabilityIds, context.AuditRecorder));
         }
 
         if (completed.ExitDecision != CustomLoopExitDecision.Complete || run.Checkpoint.CurrentIterationResult is null)
@@ -2805,6 +2831,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 context.Anchor.AdapterBinding,
                 context.Artifact,
                 node,
+                RequireRunningSequentialActivation(run, node, attempt, attemptOperationId),
                 attempt,
                 attemptOperationId,
                 context.AllowedCapabilityIds,
@@ -2825,6 +2852,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private async Task<RunAdvance> DispatchSequentialNodeAsync(
         SequentialExecutionContext context,
+        CustomLoopRunRecord run,
         GovernedLoopSequentialPlanNode node,
         int attempt,
         string actor,
@@ -2836,6 +2864,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             context.Anchor,
             context.Plan,
             node,
+            RequireRunningSequentialActivation(run, node, attempt, run.Frontier!.Payload.Nodes.Single(candidate =>
+                candidate.Status == GovernedLoopNodeExecutionStatus.Running
+                && candidate.PlanOrdinal == node.Ordinal
+                && candidate.Attempt == attempt).AttemptOperationId!),
             attempt);
         RunAdvance? advance = null;
         var disposition = GovernedLoopSequentialNodeHandlerResultStatus.Unknown;
@@ -6365,6 +6397,26 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopSequentialNodeDisposition disposition)
     {
         var binding = context.Binding;
+        var controlOutcome = kind switch
+        {
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome => GovernedLoopControlCondition.Success,
+            CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection => GovernedLoopControlCondition.Failure,
+            _ => (GovernedLoopControlCondition?)null,
+        };
+        var selectedControlEdgeIds = controlOutcome is null
+            ? []
+            : context.Artifact.Graph.ControlEdges
+                .Where(edge => context.Activation.OutgoingControlEdgeIds.Contains(edge.Id, StringComparer.Ordinal)
+                    && edge.Condition == controlOutcome)
+                .Select(edge => edge.Id)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+        var skippedControlEdgeIds = controlOutcome is null
+            ? []
+            : context.Activation.OutgoingControlEdgeIds
+                .Except(selectedControlEdgeIds, StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
             kind,
@@ -6372,8 +6424,17 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             binding.ExecutionBinding.RunId,
             binding.ExecutionBinding.Revision,
             binding.ExecutionBinding.ExecutionGeneration,
+            context.Activation.ActivationOrdinal,
+            context.Activation.VisitOrdinal,
             context.Node.NodeId,
             context.Attempt,
+            context.Activation.CycleId,
+            context.Activation.CycleIteration,
+            controlOutcome,
+            selectedControlEdgeIds,
+            skippedControlEdgeIds,
+            null,
+            null,
             disposition,
             CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
             string.Empty));
@@ -7392,6 +7453,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         GovernedLoopSequentialAdapterBinding Binding,
         GovernedLoopGraphRevisionArtifact Artifact,
         GovernedLoopSequentialPlanNode Node,
+        GovernedLoopNodeExecutionEvidence Activation,
         int Attempt,
         string AttemptOperationId,
         IReadOnlyList<CapabilityId> AllowedCapabilityIds,

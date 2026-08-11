@@ -14,6 +14,8 @@ public static class GovernedLoopSequentialNodeEvidenceHash
     {
         ArgumentNullException.ThrowIfNull(receipt);
         ArgumentNullException.ThrowIfNull(receipt.Revision);
+        ArgumentNullException.ThrowIfNull(receipt.SelectedControlEdgeIds);
+        ArgumentNullException.ThrowIfNull(receipt.SkippedControlEdgeIds);
         var buffer = new ArrayBufferWriter<byte>();
         using var writer = new Utf8JsonWriter(buffer);
         writer.WriteStartObject();
