@@ -3796,9 +3796,25 @@ public sealed class DefaultConversationTurnRecoveryTests
             LlmInferenceRequest request,
             Func<string, CancellationToken, Task>? responseChunkHandler,
             CancellationToken cancellationToken,
-            Func<CancellationToken, Task> providerRequestStarting)
+            InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
         {
-            await providerRequestStarting(CancellationToken.None);
+            var writes = 0;
+            await providerTransportCommitBoundary(
+                _ =>
+                {
+                    if (Interlocked.Increment(ref writes) != 1)
+                    {
+                        throw new InvalidOperationException("Provider transport write committed more than once.");
+                    }
+
+                    return Task.CompletedTask;
+                },
+                cancellationToken);
+            if (writes != 1)
+            {
+                throw new InvalidOperationException("Provider transport write was not committed.");
+            }
+
             return await GenerateAsync(request, responseChunkHandler, cancellationToken);
         }
 

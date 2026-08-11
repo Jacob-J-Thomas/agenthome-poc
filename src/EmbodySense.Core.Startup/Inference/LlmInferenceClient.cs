@@ -60,7 +60,7 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
         CancellationToken cancellationToken = default)
     {
-        return GenerateAsync(request, responseChunkHandler, cancellationToken, providerRequestStarting: null);
+        return GenerateAsync(request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary: null);
     }
 
     /// <inheritdoc />
@@ -68,7 +68,7 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler,
         CancellationToken cancellationToken,
-        Func<CancellationToken, Task>? providerRequestStarting)
+        InferenceProviderTransportCommitBoundary? providerTransportCommitBoundary)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -79,9 +79,9 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
 
         try
         {
-            var response = providerRequestStarting is null
+            var response = providerTransportCommitBoundary is null
                 ? await _innerClient.GenerateAsync(request, responseChunkHandler, cancellationToken)
-                : await _innerClient.GenerateAsync(request, responseChunkHandler, cancellationToken, providerRequestStarting);
+                : await _innerClient.GenerateAsync(request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary);
             stopwatch.Stop();
             try
             {

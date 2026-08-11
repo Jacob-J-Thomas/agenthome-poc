@@ -38,7 +38,7 @@ public sealed class DefaultConversationLoopRunnerTests
             LlmInferenceRequest.FromUserText("hello"),
             responseChunkHandler: null,
             CancellationToken.None,
-            _ => Task.CompletedTask));
+            (commitTransportWrite, token) => commitTransportWrite(token)));
 
         Assert.Contains("irreversible provider transport-write boundary", exception.Message, StringComparison.Ordinal);
     }
@@ -1025,9 +1025,25 @@ public sealed class DefaultConversationLoopRunnerTests
             LlmInferenceRequest request,
             Func<string, CancellationToken, Task>? responseChunkHandler,
             CancellationToken cancellationToken,
-            Func<CancellationToken, Task> providerRequestStarting)
+            InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
         {
-            await providerRequestStarting(CancellationToken.None);
+            var writes = 0;
+            await providerTransportCommitBoundary(
+                _ =>
+                {
+                    if (Interlocked.Increment(ref writes) != 1)
+                    {
+                        throw new InvalidOperationException("Provider transport write committed more than once.");
+                    }
+
+                    return Task.CompletedTask;
+                },
+                cancellationToken);
+            if (writes != 1)
+            {
+                throw new InvalidOperationException("Provider transport write was not committed.");
+            }
+
             return await GenerateAsync(request, responseChunkHandler, cancellationToken);
         }
 
@@ -1130,9 +1146,25 @@ public sealed class DefaultConversationLoopRunnerTests
             LlmInferenceRequest request,
             Func<string, CancellationToken, Task>? responseChunkHandler,
             CancellationToken cancellationToken,
-            Func<CancellationToken, Task> providerRequestStarting)
+            InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
         {
-            await providerRequestStarting(CancellationToken.None);
+            var writes = 0;
+            await providerTransportCommitBoundary(
+                _ =>
+                {
+                    if (Interlocked.Increment(ref writes) != 1)
+                    {
+                        throw new InvalidOperationException("Provider transport write committed more than once.");
+                    }
+
+                    return Task.CompletedTask;
+                },
+                cancellationToken);
+            if (writes != 1)
+            {
+                throw new InvalidOperationException("Provider transport write was not committed.");
+            }
+
             return await GenerateAsync(request, responseChunkHandler, cancellationToken);
         }
     }
