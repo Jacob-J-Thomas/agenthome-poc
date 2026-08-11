@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -22,6 +23,7 @@ public static class GovernedLoopGraphNormalizer
         }
 
         ValidateScalars(candidate, errors);
+        ValidateAuthorityCeiling(candidate.AuthorityCeiling, candidate.GraphId, "graph.authorityCeiling", errors);
         var schemas = Snapshot(candidate.ValueSchemas, CustomLoopLimits.MaxGraphValueSchemas, 1, "valueSchemas", GovernedLoopGraphElementKind.ValueSchema, errors);
         var nodes = Snapshot(candidate.Nodes, CustomLoopLimits.MaxGraphNodes, 2, "nodes", GovernedLoopGraphElementKind.Node, errors);
         var edges = Snapshot(candidate.ControlEdges, CustomLoopLimits.MaxGraphControlEdges, 1, "controlEdges", GovernedLoopGraphElementKind.ControlEdge, errors);
@@ -203,13 +205,43 @@ public static class GovernedLoopGraphNormalizer
             {
                 errors.Add("node.authority.required", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.authorityCeiling", "A non-granting node authority ceiling is required.");
             }
-            else if (node.AuthorityCeiling.CapabilityIds.Any(capability => !loopCapabilities.Contains(capability)))
+            else
             {
-                errors.Add("node.authority.widens-loop", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.authorityCeiling", "The node authority ceiling cannot widen the loop ceiling.");
+                ValidateAuthorityCeiling(node.AuthorityCeiling, node.Id, $"{path}.authorityCeiling", errors);
+                if (node.AuthorityCeiling.CapabilityIds.Any(capability => !loopCapabilities.Contains(capability)))
+                {
+                    errors.Add("node.authority.widens-loop", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.authorityCeiling", "The node authority ceiling cannot widen the loop ceiling.");
+                }
             }
 
             ValidatePorts(node, path, schemaIds, errors);
             ValidateParameters(node, path, errors);
+        }
+    }
+
+    private static void ValidateAuthorityCeiling(
+        GovernedLoopAuthorityCeiling? ceiling,
+        string? elementId,
+        string path,
+        GovernedLoopGraphErrorCollector errors)
+    {
+        if (ceiling?.CapabilityIds is null)
+        {
+            return;
+        }
+
+        if (ceiling.CapabilityIds.Count > CustomLoopLimits.MaxGraphAuthorityCapabilities)
+        {
+            errors.Add("authority.capabilities.count", GovernedLoopGraphElementKind.Authority, elementId, path, $"Authority ceilings may contain at most {CustomLoopLimits.MaxGraphAuthorityCapabilities} capabilities.");
+            return;
+        }
+
+        var capabilities = ceiling.CapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).ToArray();
+        if (capabilities.Any(value => !CapabilityId.TryParse(value, out _, out _))
+            || capabilities.Distinct(StringComparer.Ordinal).Count() != capabilities.Length
+            || !capabilities.SequenceEqual(capabilities.Order(StringComparer.Ordinal), StringComparer.Ordinal))
+        {
+            errors.Add("authority.capabilities.invalid", GovernedLoopGraphElementKind.Authority, elementId, path, "Authority ceilings require unique canonical lowercase provider/path capability identifiers in ordinal order.");
         }
     }
 

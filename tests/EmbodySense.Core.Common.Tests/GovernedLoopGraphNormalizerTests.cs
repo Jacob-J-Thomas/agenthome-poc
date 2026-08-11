@@ -19,6 +19,7 @@ public sealed class GovernedLoopGraphNormalizerTests
         Assert.True(expected.IsValid);
         Assert.True(permuted.IsValid);
         Assert.Equal(expected.Graph!.ExecutableHash, permuted.Graph!.ExecutableHash);
+        Assert.Contains(expected.Graph.AuthorityCeiling.CapabilityIds, capability => capability.Contains('/', StringComparison.Ordinal));
         Assert.Empty(expected.Errors);
     }
 
@@ -351,7 +352,7 @@ public sealed class GovernedLoopGraphNormalizerTests
     [Fact]
     public void NormalizeCapsAndOrdinallySortsErrorsIndependentlyOfElementPermutation()
     {
-        var nodes = Enumerable.Range(0, CustomLoopLimits.MaxGraphNodes).Select(index => (GovernedLoopNodeDefinition?)new GovernedLoopNodeDefinition($"malformed-{index:D3}", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Unknown, "INVALID", 0), [new GovernedLoopPortDefinition("INVALID", GovernedLoopPortDirection.Unknown, GovernedLoopBindingKind.Unknown, "missing", true)], GovernedLoopAuthorityCeiling.Create(["outside-loop"]), new Dictionary<string, string> { ["INVALID"] = " bad" })).ToArray();
+        var nodes = Enumerable.Range(0, CustomLoopLimits.MaxGraphNodes).Select(index => (GovernedLoopNodeDefinition?)new GovernedLoopNodeDefinition($"malformed-{index:D3}", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Unknown, "INVALID", 0), [new GovernedLoopPortDefinition("INVALID", GovernedLoopPortDirection.Unknown, GovernedLoopBindingKind.Unknown, "missing", true)], GovernedLoopAuthorityCeiling.Create(["org.embodysense/outside-loop"]), new Dictionary<string, string> { ["INVALID"] = " bad" })).ToArray();
         var forward = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: nodes));
         var reverse = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: nodes.Reverse().ToArray()));
 
@@ -577,7 +578,7 @@ public sealed class GovernedLoopGraphNormalizerTests
         var malformed = GovernedLoopGraphTestFixture.Nodes()[1] with
         {
             Descriptor = new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Unknown, "INVALID", 0),
-            AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(["outside-loop"]),
+            AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(["org.embodysense/outside-loop"]),
             Ports =
             [
                 new GovernedLoopPortDefinition("bad-port", GovernedLoopPortDirection.Unknown, GovernedLoopBindingKind.Unknown, "missing", true),
@@ -602,7 +603,7 @@ public sealed class GovernedLoopGraphNormalizerTests
             GovernedLoopGraphTestFixture.Role(),
             "trigger",
             ["exit"],
-            GovernedLoopAuthorityCeiling.Create(["model-inference", "workspace-read"]),
+            GovernedLoopAuthorityCeiling.Create([GovernedLoopGraphTestFixture.ModelInferenceCapability, GovernedLoopGraphTestFixture.WorkspaceReadCapability]),
             GovernedLoopGraphTestFixture.Schemas(),
             nodes ?? GovernedLoopGraphTestFixture.Nodes(),
             edges ?? GovernedLoopGraphTestFixture.Edges(),

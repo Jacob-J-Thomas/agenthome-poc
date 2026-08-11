@@ -6,6 +6,9 @@ namespace EmbodySense.Core.Common.Tests;
 
 internal static class GovernedLoopGraphTestFixture
 {
+    public const string ModelInferenceCapability = "org.embodysense/model-inference";
+    public const string WorkspaceReadCapability = "org.embodysense/workspace-read";
+
     public static GovernedLoopGraphDefinition Create(
         string graphId = "research-loop",
         string revisionId = "revision-1",
@@ -22,7 +25,7 @@ internal static class GovernedLoopGraphTestFixture
         GovernedLoopDisplayMetadata? display = null,
         int schemaVersion = GovernedLoopGraphDefinition.CurrentSchemaVersion)
     {
-        authorityCeiling ??= GovernedLoopAuthorityCeiling.Create(["model-inference", "workspace-read"]);
+        authorityCeiling ??= GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, WorkspaceReadCapability]);
         schemas ??= Schemas();
         nodes ??= Nodes();
         edges ??= Edges();
@@ -63,7 +66,7 @@ internal static class GovernedLoopGraphTestFixture
                 "infer",
                 new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
                 [InputPort("request", GovernedLoopBindingKind.Data), InputPort("invocation-context", GovernedLoopBindingKind.Context), OutputPort("result", GovernedLoopBindingKind.Data)],
-                GovernedLoopAuthorityCeiling.Create(["model-inference"]),
+                GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability]),
                 new Dictionary<string, string> { ["instruction"] = "Answer using only explicitly bound inputs." }),
             new GovernedLoopNodeDefinition(
                 "exit",

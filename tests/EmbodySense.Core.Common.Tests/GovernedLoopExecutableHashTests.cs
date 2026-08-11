@@ -8,7 +8,7 @@ public sealed class GovernedLoopExecutableHashTests
     [Fact]
     public void Canonical_schema_one_hash_is_pinned()
     {
-        Assert.Equal("6ffe63101d6747b8d5cc8ed212b16e2a32c16ca31f4bc4efc14c3d4f29339faa", GovernedLoopGraphTestFixture.Create().ExecutableHash);
+        Assert.Equal("29387ab65d7ff51d19a84d517021c45fe74fd1c035f68209bee1f7257badc5b4", GovernedLoopGraphTestFixture.Create().ExecutableHash);
     }
 
     [Fact]
@@ -92,7 +92,7 @@ public sealed class GovernedLoopExecutableHashTests
         nodes[1] = nodes[1] with { Parameters = new Dictionary<string, string> { ["instruction"] = "Use a different bounded instruction." } };
 
         Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(purpose: "Perform a different governed purpose.").ExecutableHash);
-        Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(authorityCeiling: GovernedLoopAuthorityCeiling.Create(["model-inference"]), nodes: nodes.Select(node => node.Id == "infer" ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(["model-inference"]) } : node)).ExecutableHash);
+        Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopGraphTestFixture.ModelInferenceCapability]), nodes: nodes.Select(node => node.Id == "infer" ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([GovernedLoopGraphTestFixture.ModelInferenceCapability]) } : node)).ExecutableHash);
         Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(nodes: nodes).ExecutableHash);
     }
 
