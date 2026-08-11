@@ -1407,9 +1407,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             }
 
             var latestOutcome = FindSequentialNodeEvidence(latest, node, attempt);
-            var successorValidation = CustomLoopRunValidator.ValidateUpdate(run, latest);
-            if (!successorValidation.IsValid
-                || !IsAcceptedPureControlSuccessor(run, latest)
+            if (!IsAcceptedPureControlSuccessor(run, latest)
                 || latestOutcome is null
                 || !string.Equals(latestOutcome.EventId, durableOutcome.EventId, StringComparison.Ordinal)
                 || !string.Equals(latestOutcome.SequentialNodeEvidence?.EvidenceHash, durableOutcome.SequentialNodeEvidence.EvidenceHash, StringComparison.Ordinal)
@@ -1758,9 +1756,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return new RunAdvance(latest, null);
             }
 
-            var successorValidation = CustomLoopRunValidator.ValidateUpdate(run, latest);
-            if (!successorValidation.IsValid
-                || !IsAcceptedPureControlSuccessor(run, latest)
+            if (!IsAcceptedPureControlSuccessor(run, latest)
                 || !HasExactOpenPureAttempt(latest, sequentialNode))
             {
                 return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, latest, "The pure-node completion conflicted with a successor outside the exact pause/cancel control protocol; no outcome was replayed."));
@@ -1950,9 +1946,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 break;
             }
 
-            var successorValidation = CustomLoopRunValidator.ValidateUpdate(run, latest);
-            if (!successorValidation.IsValid
-                || !IsAcceptedPureControlSuccessor(run, latest)
+            if (!IsAcceptedPureControlSuccessor(run, latest)
                 || !HasExactOpenPureAttempt(latest, sequentialNode))
             {
                 return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, latest, "The pure-node rejection conflicted with a successor outside the exact pause/cancel control protocol; no rejection was replayed."));
@@ -2089,8 +2083,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return new RunAdvance(reconciled.Run, reconciled);
             }
 
-            var successorValidation = CustomLoopRunValidator.ValidateUpdate(run, latest);
-            if (!successorValidation.IsValid || !IsAcceptedPureControlSuccessor(run, latest))
+            if (!IsAcceptedPureControlSuccessor(run, latest))
             {
                 return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, latest, "The pure-node terminal lifecycle conflicted with a successor outside the exact lifecycle-only control protocol."));
             }
@@ -2169,8 +2162,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return new RunAdvance(cancellation.Run, cancellation);
             }
 
-            var successorValidation = CustomLoopRunValidator.ValidateUpdate(run, latest);
-            if (!sameFailure || !successorValidation.IsValid || !IsAcceptedPureControlSuccessor(run, latest))
+            if (!sameFailure || !IsAcceptedPureControlSuccessor(run, latest))
             {
                 return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, latest, "The pure-node cancellation request conflicted with a successor outside the exact lifecycle-only control protocol."));
             }
@@ -4599,8 +4591,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, latest, "The pure-node run changed without advancing its lifecycle version; no evaluation or replay was attempted."));
         }
 
-        var validation = CustomLoopRunValidator.ValidateUpdate(run, latest);
-        if (!validation.IsValid || !IsAcceptedPureControlSuccessor(run, latest))
+        if (!IsAcceptedPureControlSuccessor(run, latest))
         {
             return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, latest, "The pure-node run changed outside the exact lifecycle-only pause/cancel protocol; no evaluation or replay was attempted."));
         }
@@ -4639,20 +4630,17 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     }
 
     private static bool IsAcceptedPureControlSuccessor(CustomLoopRunRecord current, CustomLoopRunRecord latest)
-    {
-        if (!IsAcceptedControlSuccessor(current, latest)
-            || !string.Equals(current.Frontier?.Payload.ContentHash, latest.Frontier?.Payload.ContentHash, StringComparison.Ordinal))
+        => (current.Status, latest.Status) switch
         {
-            return false;
-        }
-
-        var appended = latest.Events.Skip(current.Events.Length).ToArray();
-        return appended.Length == 1
-            && appended.All(item => item.Kind == CustomLoopRunEventKind.LifecycleChanged)
-            && (current.Status, latest.Status) is
-                (CustomLoopRunStatus.Running, CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.CancelRequested)
-                or (CustomLoopRunStatus.PauseRequested, CustomLoopRunStatus.CancelRequested);
-    }
+            (CustomLoopRunStatus.Running, CustomLoopRunStatus.PauseRequested)
+                => IsAcceptedPureLifecycleChain(current, latest, CustomLoopRunStatus.PauseRequested),
+            (CustomLoopRunStatus.Running, CustomLoopRunStatus.CancelRequested)
+                => IsAcceptedPureLifecycleChain(current, latest, CustomLoopRunStatus.CancelRequested)
+                    || IsAcceptedPureLifecycleChain(current, latest, CustomLoopRunStatus.PauseRequested, CustomLoopRunStatus.CancelRequested),
+            (CustomLoopRunStatus.PauseRequested, CustomLoopRunStatus.CancelRequested)
+                => IsAcceptedPureLifecycleChain(current, latest, CustomLoopRunStatus.CancelRequested),
+            _ => false,
+        };
 
     private static bool TryGetAcceptedPureCancellationTerminalSuccessor(
         CustomLoopRunRecord current,
@@ -4669,33 +4657,23 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return false;
         }
 
-        var appended = latest.Events.Skip(current.Events.Length).ToArray();
-        if (appended.Length == 1 && current.Status == CustomLoopRunStatus.CancelRequested)
+        var accepted = current.Status switch
         {
-            if (!CustomLoopRunValidator.ValidateUpdate(current, latest).IsValid
-                || appended[0].Kind != CustomLoopRunEventKind.LifecycleChanged)
-            {
-                return false;
-            }
-        }
-        else if (appended.Length == 2
-            && current.Status is CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested)
-        {
-            var cancellationRequested = current with
-            {
-                LifecycleVersion = checked(current.LifecycleVersion + 1),
-                Status = CustomLoopRunStatus.CancelRequested,
-                UpdatedAtUtc = appended[0].TimestampUtc,
-                Events = [.. current.Events, appended[0]],
-            };
-            if (appended.Any(item => item.Kind != CustomLoopRunEventKind.LifecycleChanged)
-                || !CustomLoopRunValidator.ValidateUpdate(current, cancellationRequested).IsValid
-                || !CustomLoopRunValidator.ValidateUpdate(cancellationRequested, latest).IsValid)
-            {
-                return false;
-            }
-        }
-        else
+            CustomLoopRunStatus.CancelRequested
+                => IsAcceptedPureLifecycleChain(current, latest, CustomLoopRunStatus.Cancelled),
+            CustomLoopRunStatus.PauseRequested
+                => IsAcceptedPureLifecycleChain(current, latest, CustomLoopRunStatus.CancelRequested, CustomLoopRunStatus.Cancelled),
+            CustomLoopRunStatus.Running
+                => IsAcceptedPureLifecycleChain(current, latest, CustomLoopRunStatus.CancelRequested, CustomLoopRunStatus.Cancelled)
+                    || IsAcceptedPureLifecycleChain(
+                        current,
+                        latest,
+                        CustomLoopRunStatus.PauseRequested,
+                        CustomLoopRunStatus.CancelRequested,
+                        CustomLoopRunStatus.Cancelled),
+            _ => false,
+        };
+        if (!accepted)
         {
             return false;
         }
@@ -4704,6 +4682,46 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return terminalLifecycle is not null
             && terminalLifecycle.Sequence == latest.Events.Length
             && latest.CompletedAtUtc == terminalLifecycle.TimestampUtc;
+    }
+
+    private static bool IsAcceptedPureLifecycleChain(
+        CustomLoopRunRecord current,
+        CustomLoopRunRecord latest,
+        params CustomLoopRunStatus[] successorStatuses)
+    {
+        var appended = latest.Events.Skip(current.Events.Length).ToArray();
+        if (successorStatuses.Length == 0
+            || current.LifecycleVersion > int.MaxValue - successorStatuses.Length
+            || appended.Length != successorStatuses.Length
+            || latest.LifecycleVersion != current.LifecycleVersion + successorStatuses.Length
+            || latest.Status != successorStatuses[^1]
+            || appended.Any(item => item.Kind != CustomLoopRunEventKind.LifecycleChanged))
+        {
+            return false;
+        }
+
+        var predecessor = current;
+        for (var index = 0; index < successorStatuses.Length; index++)
+        {
+            var candidate = index == successorStatuses.Length - 1
+                ? latest
+                : predecessor with
+                {
+                    LifecycleVersion = checked(predecessor.LifecycleVersion + 1),
+                    Status = successorStatuses[index],
+                    UpdatedAtUtc = appended[index].TimestampUtc,
+                    Events = [.. predecessor.Events, appended[index]],
+                };
+            if (candidate.Status != successorStatuses[index]
+                || !CustomLoopRunValidator.ValidateUpdate(predecessor, candidate).IsValid)
+            {
+                return false;
+            }
+
+            predecessor = candidate;
+        }
+
+        return true;
     }
 
     private static bool HasExactRetainedPureRejection(CustomLoopRunRecord run, CustomLoopRunEvent durableFailure)
