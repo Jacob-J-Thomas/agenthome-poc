@@ -104,6 +104,70 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
+    public void Sequential_inference_evidence_requires_the_exact_admitted_legacy_step_identity()
+    {
+        var run = CreateSequentialRun();
+        var binding = run.SequentialAdapterBinding!;
+        var validStart = SequentialEvent(2, "inference-start", CustomLoopRunEventKind.NodeAttemptStarted, binding, "step-1", "step-1", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var validOutcome = SequentialEvent(3, "inference-complete", CustomLoopRunEventKind.NodeAttemptCompleted, binding, "step-1", "step-1", CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed);
+        var valid = run with { Events = [run.Events[0], validStart, validOutcome] };
+        Assert.True(CustomLoopRunValidator.Validate(valid).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(valid).Errors));
+
+        var mismatchedStart = SequentialEvent(2, "inference-start", CustomLoopRunEventKind.NodeAttemptStarted, binding, "canonical-inference", "step-1", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var mismatchedOutcome = SequentialEvent(3, "inference-complete", CustomLoopRunEventKind.NodeAttemptCompleted, binding, "canonical-inference", "step-1", CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed);
+        var unknownStart = SequentialEvent(2, "inference-start", CustomLoopRunEventKind.NodeAttemptStarted, binding, "other-step", "other-step", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var unknownOutcome = SequentialEvent(3, "inference-complete", CustomLoopRunEventKind.NodeAttemptCompleted, binding, "other-step", "other-step", CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed);
+
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], mismatchedStart, mismatchedOutcome] }), "sequential_inference_step_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], unknownStart, unknownOutcome] }), "sequential_inference_step_mismatch");
+    }
+
+    [Fact]
+    public void Sequential_exit_evidence_requires_the_reserved_legacy_exit_step_without_aliasing_the_canonical_node()
+    {
+        var run = CreateSequentialRun();
+        var binding = run.SequentialAdapterBinding!;
+        var validStart = SequentialEvent(2, "exit-start", CustomLoopRunEventKind.ExitDecisionStarted, binding, "canonical-exit-node", "exit", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var validOutcome = SequentialEvent(3, "exit-complete", CustomLoopRunEventKind.ExitDecisionCompleted, binding, "canonical-exit-node", "exit", CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed);
+        var valid = run with { Events = [run.Events[0], validStart, validOutcome] };
+        Assert.True(CustomLoopRunValidator.Validate(valid).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(valid).Errors));
+
+        var wrongStart = SequentialEvent(2, "exit-start", CustomLoopRunEventKind.ExitDecisionStarted, binding, "canonical-exit-node", "canonical-exit-node", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var wrongOutcome = SequentialEvent(3, "exit-complete", CustomLoopRunEventKind.ExitDecisionCompleted, binding, "canonical-exit-node", "canonical-exit-node", CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed);
+
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], wrongStart, wrongOutcome] }), "sequential_exit_step_mismatch");
+    }
+
+    [Fact]
+    public void Sequential_trigger_evidence_forbids_legacy_step_coordinates()
+    {
+        var run = CreateSequentialRun();
+        var coordinatedTrigger = run.Events[0] with { Iteration = 1, StepId = "trigger-node", Attempt = 1 };
+        coordinatedTrigger = WithSequentialEvidence(
+            coordinatedTrigger,
+            run.SequentialAdapterBinding!,
+            "trigger-node",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [coordinatedTrigger] }), "sequential_trigger_coordinates_mismatch");
+    }
+
+    [Fact]
+    public void Sequential_initial_materialization_requires_trigger_evidence_without_changing_the_legacy_shape()
+    {
+        var run = CreateSequentialRun();
+        var missingTriggerEvidence = run with
+        {
+            Events = [run.Events[0] with { SequentialNodeEvidence = null }],
+        };
+
+        AssertCodes(CustomLoopRunValidator.Validate(missingTriggerEvidence), "sequential_trigger_evidence_required");
+        Assert.True(CustomLoopRunValidator.Validate(CreateRun()).IsValid);
+    }
+
+    [Fact]
     public void Validate_accepts_a_complete_admitted_trace_and_hashes_exact_content()
     {
         var run = CreateRun();
@@ -761,6 +825,27 @@ public sealed class CustomLoopRunValidatorTests
             CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
             string.Empty));
         return runEvent with { SequentialNodeEvidence = evidence };
+    }
+
+    private static CustomLoopRunEvent SequentialEvent(
+        long sequence,
+        string eventId,
+        CustomLoopRunEventKind eventKind,
+        GovernedLoopSequentialAdapterBinding binding,
+        string nodeId,
+        string stepId,
+        CustomLoopSequentialNodeEvidenceKind evidenceKind,
+        CustomLoopSequentialNodeDisposition disposition)
+    {
+        var runEvent = Event(sequence, eventId, eventKind, iteration: 1, attempt: 1) with
+        {
+            StepId = stepId,
+            ExitDecision = eventKind == CustomLoopRunEventKind.ExitDecisionCompleted ? CustomLoopExitDecision.Complete : null,
+            TraceReservationUtf8Bytes = eventKind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted
+                ? CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes
+                : null,
+        };
+        return WithSequentialEvidence(runEvent, binding, nodeId, 1, evidenceKind, disposition);
     }
 
     private static CustomLoopToolAuthoritySnapshot Authority(CustomLoopToolAssignment[] effectiveAssignments)
