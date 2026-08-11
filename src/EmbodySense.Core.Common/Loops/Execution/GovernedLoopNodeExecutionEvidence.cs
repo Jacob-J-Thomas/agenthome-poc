@@ -1,64 +1,108 @@
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Common.Loops.Execution;
 
-/// <summary>Records bounded value-free evidence for one exact graph-node posture.</summary>
-/// <remarks>Construction validates attempt and committed-outcome shape before retaining defensive incoming-edge evidence.</remarks>
+/// <summary>Records the immutable plan coordinates and committed posture of one canonical graph node.</summary>
 public sealed record GovernedLoopNodeExecutionEvidence
 {
-    private GovernedLoopNodeExecutionEvidence(string nodeId, IReadOnlyList<string> incomingEdgeIds, int? attempt, GovernedLoopNodeExecutionStatus status, string? outcomeEvidenceId)
+    private GovernedLoopNodeExecutionEvidence(
+        int planOrdinal,
+        string nodeId,
+        GovernedLoopNodeDescriptor descriptor,
+        IReadOnlyList<string> incomingControlEdgeIds,
+        IReadOnlyList<string> outgoingControlEdgeIds,
+        GovernedLoopNodeExecutionStatus status,
+        int? attempt,
+        string? attemptOperationId,
+        string? outcomeEvidenceId,
+        string? outcomeEvidenceHash)
     {
+        SchemaVersion = CurrentSchemaVersion;
+        PlanOrdinal = planOrdinal;
         NodeId = nodeId;
-        IncomingEdgeIds = incomingEdgeIds;
-        Attempt = attempt;
+        Descriptor = descriptor with { };
+        IncomingControlEdgeIds = Array.AsReadOnly(incomingControlEdgeIds.ToArray());
+        OutgoingControlEdgeIds = Array.AsReadOnly(outgoingControlEdgeIds.ToArray());
         Status = status;
+        Attempt = attempt;
+        AttemptOperationId = attemptOperationId;
         OutcomeEvidenceId = outcomeEvidenceId;
+        OutcomeEvidenceHash = outcomeEvidenceHash;
     }
 
-    /// <summary>Gets the exact node identity from the bound graph revision.</summary>
+    /// <summary>Gets the only supported schema version.</summary>
+    public const int CurrentSchemaVersion = GovernedLoopExecutionLimits.CurrentSchemaVersion;
+
+    /// <summary>Gets the schema version.</summary>
+    public int SchemaVersion { get; }
+
+    /// <summary>Gets the zero-based deterministic execution-plan ordinal.</summary>
+    public int PlanOrdinal { get; }
+
+    /// <summary>Gets the exact graph-node identity.</summary>
     public string NodeId { get; }
 
-    /// <summary>Gets the sorted unique incoming control-edge identities committed for this node execution.</summary>
-    public IReadOnlyList<string> IncomingEdgeIds { get; }
+    /// <summary>Gets a defensive copy of the exact admitted node descriptor.</summary>
+    public GovernedLoopNodeDescriptor Descriptor { get; }
 
-    /// <summary>Gets the positive node attempt, or <see langword="null"/> before selection or when skipped.</summary>
-    public int? Attempt { get; }
+    /// <summary>Gets the sorted unique incoming control-edge identities.</summary>
+    public IReadOnlyList<string> IncomingControlEdgeIds { get; }
 
-    /// <summary>Gets the committed node execution posture.</summary>
+    /// <summary>Gets the sorted unique outgoing control-edge identities.</summary>
+    public IReadOnlyList<string> OutgoingControlEdgeIds { get; }
+
+    /// <summary>Gets the committed node posture.</summary>
     public GovernedLoopNodeExecutionStatus Status { get; }
 
-    /// <summary>Gets the retained value-free outcome evidence identity for a committed terminal node outcome.</summary>
+    /// <summary>Gets the positive attempt for selected nodes.</summary>
+    public int? Attempt { get; }
+
+    /// <summary>Gets the durable operation correlation for selected nodes.</summary>
+    public string? AttemptOperationId { get; }
+
+    /// <summary>Gets the retained outcome identity for committed terminal node outcomes.</summary>
     public string? OutcomeEvidenceId { get; }
 
-    /// <summary>Creates validated node execution evidence.</summary>
-    /// <param name="nodeId">The exact node identity.</param>
-    /// <param name="incomingEdgeIds">The sorted unique committed incoming edge identities.</param>
-    /// <param name="attempt">The positive attempt for selected nodes, otherwise <see langword="null"/>.</param>
-    /// <param name="status">The supported node posture.</param>
-    /// <param name="outcomeEvidenceId">The retained outcome evidence identity when required.</param>
-    /// <returns>The validated node execution evidence.</returns>
-    /// <exception cref="ArgumentNullException">Thrown when <paramref name="incomingEdgeIds"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">Thrown when the attempt or incoming-edge count exceeds its supported bound.</exception>
-    /// <exception cref="ArgumentException">Thrown when an identity, status, collection order, or node-evidence shape is invalid.</exception>
-    public static GovernedLoopNodeExecutionEvidence Create(string nodeId, IEnumerable<string> incomingEdgeIds, int? attempt, GovernedLoopNodeExecutionStatus status, string? outcomeEvidenceId)
-    {
-        if (!GovernedLoopExecutionStateMatrix.IsSupported(status))
-        {
-            throw new ArgumentException("A supported governed-loop node execution status is required.", nameof(status));
-        }
+    /// <summary>Gets the exact hash of retained terminal outcome evidence.</summary>
+    public string? OutcomeEvidenceHash { get; }
 
-        var validatedAttempt = GovernedLoopExecutionContractGuard.RequireOptionalAttempt(attempt, nameof(attempt));
-        var validatedOutcome = GovernedLoopExecutionContractGuard.RequireOptionalIdentifier(outcomeEvidenceId, nameof(outcomeEvidenceId), GovernedLoopExecutionLimits.MaxEvidenceReferenceCharacters);
-        if (!GovernedLoopExecutionStateMatrix.IsNodeEvidenceShapeValid(status, validatedAttempt, validatedOutcome is not null))
+    /// <summary>Creates validated schema-1 node evidence.</summary>
+    public static GovernedLoopNodeExecutionEvidence Create(
+        int planOrdinal,
+        string nodeId,
+        GovernedLoopNodeDescriptor descriptor,
+        IEnumerable<string> incomingControlEdgeIds,
+        IEnumerable<string> outgoingControlEdgeIds,
+        GovernedLoopNodeExecutionStatus status,
+        int? attempt = null,
+        string? attemptOperationId = null,
+        string? outcomeEvidenceId = null,
+        string? outcomeEvidenceHash = null)
+    {
+        GovernedLoopExecutionContractGuard.RequirePlanOrdinal(planOrdinal, nameof(planOrdinal));
+        GovernedLoopExecutionContractGuard.RequireNodeDescriptor(descriptor, nameof(descriptor));
+        var incoming = GovernedLoopExecutionContractGuard.SnapshotSortedUniqueIdentifiers(incomingControlEdgeIds, nameof(incomingControlEdgeIds), GovernedLoopExecutionLimits.MaxIncomingEdges);
+        var outgoing = GovernedLoopExecutionContractGuard.SnapshotSortedUniqueIdentifiers(outgoingControlEdgeIds, nameof(outgoingControlEdgeIds), GovernedLoopExecutionLimits.MaxOutgoingEdges);
+        var selectedAttempt = GovernedLoopExecutionContractGuard.RequireOptionalAttempt(attempt, nameof(attempt));
+        var operationId = GovernedLoopExecutionContractGuard.RequireOptionalIdentifier(attemptOperationId, nameof(attemptOperationId), GovernedLoopExecutionLimits.MaxEvidenceReferenceCharacters);
+        var evidenceId = GovernedLoopExecutionContractGuard.RequireOptionalIdentifier(outcomeEvidenceId, nameof(outcomeEvidenceId), GovernedLoopExecutionLimits.MaxEvidenceReferenceCharacters);
+        var evidenceHash = outcomeEvidenceHash is null ? null : GovernedLoopExecutionContractGuard.RequireSha256(outcomeEvidenceHash, nameof(outcomeEvidenceHash));
+        if (!GovernedLoopExecutionStateMatrix.IsNodeEvidenceShapeValid(status, selectedAttempt, operationId is not null, evidenceId is not null, evidenceHash is not null))
         {
-            throw new ArgumentException("Node attempt and outcome evidence do not match the node execution status.", nameof(status));
+            throw new ArgumentException("Node attempt, operation, and outcome evidence do not match the node execution status.", nameof(status));
         }
 
         return new GovernedLoopNodeExecutionEvidence(
+            planOrdinal,
             GovernedLoopExecutionContractGuard.RequireIdentifier(nodeId, nameof(nodeId)),
-            GovernedLoopExecutionContractGuard.SnapshotSortedUniqueIdentifiers(incomingEdgeIds, nameof(incomingEdgeIds), GovernedLoopExecutionLimits.MaxIncomingEdges),
-            validatedAttempt,
+            descriptor,
+            incoming,
+            outgoing,
             status,
-            validatedOutcome);
+            selectedAttempt,
+            operationId,
+            evidenceId,
+            evidenceHash);
     }
 }

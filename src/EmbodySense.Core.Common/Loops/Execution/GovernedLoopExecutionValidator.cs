@@ -499,10 +499,15 @@ public static class GovernedLoopExecutionValidator
     private static bool SameNodeEvidence(GovernedLoopNodeExecutionEvidence current, GovernedLoopNodeExecutionEvidence next)
     {
         return string.Equals(current.NodeId, next.NodeId, StringComparison.Ordinal)
-            && current.IncomingEdgeIds.SequenceEqual(next.IncomingEdgeIds, StringComparer.Ordinal)
+            && current.PlanOrdinal == next.PlanOrdinal
+            && current.Descriptor == next.Descriptor
+            && current.IncomingControlEdgeIds.SequenceEqual(next.IncomingControlEdgeIds, StringComparer.Ordinal)
+            && current.OutgoingControlEdgeIds.SequenceEqual(next.OutgoingControlEdgeIds, StringComparer.Ordinal)
             && current.Attempt == next.Attempt
+            && string.Equals(current.AttemptOperationId, next.AttemptOperationId, StringComparison.Ordinal)
             && current.Status == next.Status
-            && string.Equals(current.OutcomeEvidenceId, next.OutcomeEvidenceId, StringComparison.Ordinal);
+            && string.Equals(current.OutcomeEvidenceId, next.OutcomeEvidenceId, StringComparison.Ordinal)
+            && string.Equals(current.OutcomeEvidenceHash, next.OutcomeEvidenceHash, StringComparison.Ordinal);
     }
 
     private static void ValidateEvidenceTimes(

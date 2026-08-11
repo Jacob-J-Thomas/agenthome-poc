@@ -1,4 +1,6 @@
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.ContextualRoles;
 
 namespace EmbodySense.Core.Common.Loops.Execution;
 
@@ -37,6 +39,16 @@ internal static class GovernedLoopExecutionContractGuard
         return value;
     }
 
+    internal static string RequireWorkspaceId(string? value, string parameterName)
+    {
+        if (!ContextualRoleWorkspaceId.IsValid(value))
+        {
+            throw new ArgumentException("A canonical hash-derived workspace scope identifier is required.", parameterName);
+        }
+
+        return value!;
+    }
+
     internal static long RequirePositiveVersion(long value, string parameterName, long maximum = GovernedLoopExecutionLimits.MaxVersion)
     {
         if (value is < 1 || value > maximum)
@@ -55,6 +67,41 @@ internal static class GovernedLoopExecutionContractGuard
         }
 
         return value;
+    }
+
+    internal static int RequirePlanOrdinal(int value, string parameterName)
+    {
+        if (value is < 0 or >= GovernedLoopExecutionLimits.MaxFrontierNodes)
+        {
+            throw new ArgumentOutOfRangeException(parameterName, $"Governed-loop plan ordinals must be between 0 and {GovernedLoopExecutionLimits.MaxFrontierNodes - 1}.");
+        }
+
+        return value;
+    }
+
+    internal static GovernedLoopNodeDescriptor RequireNodeDescriptor(GovernedLoopNodeDescriptor? descriptor, string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor, parameterName);
+        if (descriptor.Kind == GovernedLoopNodeKind.Unknown || !Enum.IsDefined(descriptor.Kind))
+        {
+            throw new ArgumentException("A supported governed-loop node kind is required.", parameterName);
+        }
+
+        RequireIdentifier(descriptor.TypeId, parameterName);
+        RequirePositiveVersion(descriptor.Version, parameterName);
+        return descriptor;
+    }
+
+    internal static void RequireContiguousPlanPrefix(IReadOnlyList<GovernedLoopNodeExecutionEvidence> nodes, string parameterName)
+    {
+        var nodeIds = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < nodes.Count; index++)
+        {
+            if (nodes[index].PlanOrdinal != index || !nodeIds.Add(nodes[index].NodeId))
+            {
+                throw new ArgumentException("Governed-loop frontier nodes must form a contiguous zero-based plan-ordinal prefix with unique node identities.", parameterName);
+            }
+        }
     }
 
     internal static DateTimeOffset RequireUtc(DateTimeOffset value, string parameterName)
