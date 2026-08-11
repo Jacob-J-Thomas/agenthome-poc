@@ -70,6 +70,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private const string CanonicalPauseRejectionDetail = "A durable pause request rejected this canonical attempt before provider invocation; Resume may dispatch the next canonical attempt.";
     private const string CanonicalDeadlineRejectionDetail = "The custom-loop execution deadline was reached before the provider request could start.";
     private const string CanonicalPreProviderRejectionStartDetail = "Canonical node dispatch was retained before its pre-provider checks were rejected.";
+    private const string CanonicalPreProviderFailureCodePrefix = "canonical-pre-provider-failure-code-v1:";
     private const string CanonicalPureNodeFailureCodePrefix = "canonical-pure-node-failure-code-v1:";
 
     private readonly ICustomLoopRunStore _runStore;
@@ -843,7 +844,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             now,
             CustomLoopRunEventKind.NodeAttemptStarted,
             "Deterministic pure-node dispatch was retained before evaluation.",
-            run.Checkpoint.Iteration,
+            sequentialNode.Activation.CycleIteration ?? run.Checkpoint.Iteration,
             node.NodeId,
             1,
             traceReservationUtf8Bytes: CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
@@ -2545,7 +2546,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 Now(run),
                 CustomLoopRunEventKind.NodeAttemptCompleted,
                 "Deterministic pure-node outcome was committed.",
-                run.Checkpoint.Iteration,
+                sequentialNode.Activation.CycleIteration ?? run.Checkpoint.Iteration,
                 sequentialNode.Node.NodeId,
                 sequentialNode.Attempt,
                 pureNodeOutcomeJson: outcome.CanonicalJson);
@@ -2740,7 +2741,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 Now(run),
                 CustomLoopRunEventKind.NodeAttemptFailed,
                 durableDetail,
-                run.Checkpoint.Iteration,
+                sequentialNode.Activation.CycleIteration ?? run.Checkpoint.Iteration,
                 sequentialNode.Node.NodeId,
                 sequentialNode.Attempt);
             failed = WithSequentialEvidence(failed, sequentialNode, CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected);
@@ -3178,6 +3179,74 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             && string.Equals(detail, BoundPureNodeFailureDetail(failureCode, detail), StringComparison.Ordinal);
     }
 
+    private static string BoundPreProviderFailureCode(string failureCode)
+    {
+        return !string.IsNullOrWhiteSpace(failureCode)
+            && failureCode.Length <= CustomLoopLimits.MaxTraceReferenceCharacters
+            && string.Equals(failureCode, failureCode.Trim(), StringComparison.Ordinal)
+            && !failureCode.Contains('\r', StringComparison.Ordinal)
+            && !failureCode.Contains('\n', StringComparison.Ordinal)
+                ? failureCode
+                : "canonical_node_rejected";
+    }
+
+    private static string WritePreProviderRejection(string failureCode, string detail)
+    {
+        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(failureCode));
+        return $"{CanonicalPreProviderFailureCodePrefix}{encoded}\n{detail}";
+    }
+
+    private static string BoundPreProviderFailureDetail(string failureCode, string detail)
+    {
+        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(failureCode));
+        var maximum = CustomLoopLimits.MaxRunDetailCharacters - CanonicalPreProviderFailureCodePrefix.Length - encoded.Length - 1;
+        var bounded = string.IsNullOrWhiteSpace(detail)
+            ? "The canonical node was rejected before provider invocation."
+            : detail;
+        if (bounded.Length <= maximum)
+        {
+            return bounded;
+        }
+
+        bounded = bounded[..maximum];
+        return bounded.Length > 0 && char.IsHighSurrogate(bounded[^1]) ? bounded[..^1] : bounded;
+    }
+
+    private static bool TryReadPreProviderRejection(string durableDetail, out string failureCode, out string detail)
+    {
+        failureCode = string.Empty;
+        detail = string.Empty;
+        if (!durableDetail.StartsWith(CanonicalPreProviderFailureCodePrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var separator = durableDetail.IndexOf('\n', CanonicalPreProviderFailureCodePrefix.Length);
+        if (separator < 0)
+        {
+            return false;
+        }
+
+        var encodedFailureCode = durableDetail[CanonicalPreProviderFailureCodePrefix.Length..separator];
+        byte[] encodedBytes;
+        try
+        {
+            encodedBytes = Convert.FromBase64String(encodedFailureCode);
+            failureCode = _strictUtf8.GetString(encodedBytes);
+        }
+        catch (Exception exception) when (exception is FormatException or DecoderFallbackException)
+        {
+            return false;
+        }
+
+        detail = durableDetail[(separator + 1)..];
+        return durableDetail.Length <= CustomLoopLimits.MaxRunDetailCharacters
+            && string.Equals(encodedFailureCode, Convert.ToBase64String(encodedBytes), StringComparison.Ordinal)
+            && string.Equals(failureCode, BoundPreProviderFailureCode(failureCode), StringComparison.Ordinal)
+            && !string.IsNullOrWhiteSpace(detail)
+            && string.Equals(detail, BoundPreProviderFailureDetail(failureCode, detail), StringComparison.Ordinal);
+    }
+
     private async Task<CustomLoopOrderedRunResult> DispatchAndAdvanceSequentialExitAsync(
         SequentialExecutionContext context,
         CustomLoopRunRecord run,
@@ -3243,6 +3312,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         var exactTerminal = FindSequentialNodeEvidence(run, node, activation, attempt);
+        var exactStart = FindSequentialDispatchStart(run, node, activation, attempt, attemptOperationId);
         var completed = exactTerminal is
         {
             Kind: CustomLoopRunEventKind.ExitDecisionCompleted,
@@ -3269,7 +3339,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 : null;
             if (rejected is not null)
             {
-                return await ReconcileSequentialExitRejectionAsync(context, run, rejected, actor);
+                return await ReconcileSequentialExitRejectionAsync(context, run, exactStart, rejected, actor);
             }
 
             return await PrepareDeterministicExitAsync(
@@ -3338,6 +3408,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var checkpoint = run.Checkpoint with
         {
             PendingExitDecision = false,
+            NextStepIndex = run.AdmittedDefinition.InferenceSteps.Length,
             CurrentIterationResult = exactExitResult,
         };
         return new RunAdvance(
@@ -3540,7 +3611,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                     effectiveAssignments);
             }
             EnsureRequestBound(assembly);
-            EnsureAttemptBound(run);
+            EnsureAttemptBound(run, sequentialNode);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -4356,6 +4427,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         var exitEvents = new List<CustomLoopRunEvent>();
+        var exitIteration = sequentialNode?.Activation.CycleIteration ?? run.Checkpoint.Iteration;
         if (sequentialNode is not null)
         {
             var started = Event(
@@ -4363,7 +4435,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 Now(run),
                 CustomLoopRunEventKind.ExitDecisionStarted,
                 "Deterministic canonical Exit dispatch was retained before evaluation.",
-                run.Checkpoint.Iteration,
+                exitIteration,
                 "exit",
                 sequentialNode.Attempt,
                 traceReservationUtf8Bytes: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes,
@@ -4377,7 +4449,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             Now(run),
             CustomLoopRunEventKind.ExitDecisionCompleted,
             detail,
-            run.Checkpoint.Iteration,
+            exitIteration,
             "exit",
             sequentialNode?.Attempt ?? 1,
             retained: outputPolicy.RetainForLoopReasoning,
@@ -4447,6 +4519,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var checkpoint = run.Checkpoint with
         {
             PendingExitDecision = false,
+            NextStepIndex = sequentialNode is null
+                ? run.Checkpoint.NextStepIndex
+                : run.AdmittedDefinition.InferenceSteps.Length,
             CurrentIterationResult = iterationResult,
         };
         return new RunAdvance(
@@ -5128,7 +5203,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopRunStatus terminalStatus = CustomLoopRunStatus.Failed)
     {
         var attempt = sequentialNode.Attempt;
-        var iteration = run.Checkpoint.Iteration;
+        var iteration = sequentialNode.Activation.CycleIteration ?? run.Checkpoint.Iteration;
+        var durableFailureCode = failureCode is null ? null : BoundPreProviderFailureCode(failureCode);
+        var terminalDetail = durableFailureCode is null ? detail : BoundPreProviderFailureDetail(durableFailureCode, detail);
+        var durableDetail = durableFailureCode is null ? terminalDetail : WritePreProviderRejection(durableFailureCode, terminalDetail);
         var correlation = NewCorrelationId(isExit ? "exit-rejection" : "attempt-rejection");
         var now = Now(run);
         var events = new List<CustomLoopRunEvent>();
@@ -5159,7 +5237,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             failureOwner,
             now,
             CustomLoopRunEventKind.NodeAttemptFailed,
-            detail,
+            durableDetail,
             iteration,
             stepId,
             attempt,
@@ -5191,10 +5269,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         if (terminalStatus == CustomLoopRunStatus.Cancelled)
         {
-            return await CompleteSequentialCancellationAsync(run, actor, detail);
+            return await CompleteSequentialCancellationAsync(run, actor, terminalDetail);
         }
 
-        var terminal = await TerminateAsync(run, actor, terminalStatus, failureCode, detail);
+        var terminal = await TerminateAsync(run, actor, terminalStatus, durableFailureCode, terminalDetail);
         return new RunAdvance(terminal.Run, terminal);
     }
 
@@ -5421,19 +5499,39 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return await CompleteSequentialCancellationAsync(run, actor, rejection.Detail);
         }
 
-        var failureCode = string.Equals(rejection.Detail, CanonicalDeadlineRejectionDetail, StringComparison.Ordinal)
-            ? "run_deadline_exceeded"
-            : "canonical_inference_rejected";
-        var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, failureCode, rejection.Detail);
+        string failureCode;
+        string terminalDetail;
+        if (string.Equals(start.Detail, CanonicalPreProviderRejectionStartDetail, StringComparison.Ordinal))
+        {
+            if (!TryReadPreProviderRejection(rejection.Detail, out failureCode, out terminalDetail))
+            {
+                var invalid = await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, "canonical_rejection_classification_missing", "The retained pre-provider inference rejection has no exact bounded failure classification; automatic terminal replay is forbidden.");
+                return new RunAdvance(invalid.Run, invalid);
+            }
+        }
+        else
+        {
+            failureCode = "canonical_inference_rejected";
+            terminalDetail = rejection.Detail;
+        }
+
+        var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, failureCode, terminalDetail);
         return new RunAdvance(terminal.Run, terminal);
     }
 
     private async Task<RunAdvance> ReconcileSequentialExitRejectionAsync(
         SequentialExecutionContext context,
         CustomLoopRunRecord run,
+        CustomLoopRunEvent? exactStart,
         CustomLoopRunEvent rejection,
         string actor)
     {
+        if (exactStart is null || rejection.Sequence <= exactStart.Sequence)
+        {
+            var invalid = await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, "canonical_rejection_reconciliation_failed", "The retained canonical Exit rejection has no exact preceding dispatch marker.");
+            return new RunAdvance(invalid.Run, invalid);
+        }
+
         var auditFailure = await AppendOutcomeAuditAsync(
             run,
             rejection,
@@ -5452,12 +5550,28 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return await CompleteSequentialCancellationAsync(run, actor, rejection.Detail);
         }
 
+        string failureCode;
+        string terminalDetail;
+        if (string.Equals(exactStart.Detail, CanonicalPreProviderRejectionStartDetail, StringComparison.Ordinal))
+        {
+            if (!TryReadPreProviderRejection(rejection.Detail, out failureCode, out terminalDetail))
+            {
+                var invalid = await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, "canonical_rejection_classification_missing", "The retained pre-provider Exit rejection has no exact bounded failure classification; automatic terminal replay is forbidden.");
+                return new RunAdvance(invalid.Run, invalid);
+            }
+        }
+        else
+        {
+            failureCode = "canonical_exit_rejected";
+            terminalDetail = rejection.Detail;
+        }
+
         var terminal = await TerminateAsync(
             run,
             actor,
             CustomLoopRunStatus.Failed,
-            "canonical_exit_rejected",
-            rejection.Detail);
+            failureCode,
+            terminalDetail);
         return new RunAdvance(terminal.Run, terminal);
     }
 
@@ -7650,14 +7764,48 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
     }
 
-    private static void EnsureAttemptBound(CustomLoopRunRecord run)
+    private static void EnsureAttemptBound(CustomLoopRunRecord run, SequentialNodeExecutionContext? sequentialNode = null)
     {
         var startedAttempts = run.Events.Count(start => (start.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted) && AttemptConsumesBudget(run, start));
-        var definitionMaximum = CustomLoopLimits.GetMaximumModelAttempts(run.AdmittedDefinition.InferenceSteps.Length, run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations);
+        var definitionMaximum = sequentialNode is null
+            ? CustomLoopLimits.GetMaximumModelAttempts(run.AdmittedDefinition.InferenceSteps.Length, run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations)
+            : GetCanonicalModelAttemptMaximum(sequentialNode.Plan);
         if (startedAttempts >= definitionMaximum || startedAttempts >= CustomLoopLimits.MaxModelAttemptsPerRun)
         {
             throw new InvalidOperationException("The custom-loop model-attempt limit has been reached.");
         }
+    }
+
+    private static int GetCanonicalModelAttemptMaximum(GovernedLoopSequentialPlan plan)
+    {
+        var maximum = 0;
+        foreach (var node in plan.Nodes.Where(candidate => Equals(candidate.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference)))
+        {
+            var visits = 1;
+            if (node.CycleId is not null)
+            {
+                var components = plan.Components
+                    .Where(component => string.Equals(component.CycleId, node.CycleId, StringComparison.Ordinal))
+                    .Take(2)
+                    .ToArray();
+                if (components.Length != 1 || components[0].MaximumIterations is not { } maximumIterations)
+                {
+                    throw new InvalidOperationException("The canonical inference cycle has no exact admitted iteration budget.");
+                }
+
+                visits = maximumIterations;
+            }
+
+            maximum = checked(maximum + visits);
+            if (maximum >= CustomLoopLimits.MaxModelAttemptsPerRun)
+            {
+                return CustomLoopLimits.MaxModelAttemptsPerRun;
+            }
+        }
+
+        return maximum > 0
+            ? maximum
+            : throw new InvalidOperationException("The canonical graph exposes no provider-inference attempt budget.");
     }
 
     private static void EnsureAuthorityBound(CustomLoopRunRecord run, CustomLoopToolAuthoritySnapshot authority, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum)
@@ -7716,14 +7864,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             {
                 Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
             } sequentialStart
-            && run.Events.Any(item => item.Sequence > start.Sequence
-                && string.Equals(item.Detail, CanonicalPauseRejectionDetail, StringComparison.Ordinal)
-                && item.SequentialNodeEvidence is
-                {
-                    Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
-                } rejection
-                && string.Equals(rejection.NodeId, sequentialStart.NodeId, StringComparison.Ordinal)
-                && rejection.Attempt == sequentialStart.Attempt))
+            && HasExactPauseRejection(run, start, sequentialStart))
         {
             return false;
         }
@@ -7736,6 +7877,62 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var nextMatchingStart = run.Events.FirstOrDefault(item => item.Sequence > start.Sequence && item.Kind == start.Kind && AttemptCoordinatesEqual(item, start));
         var endSequence = nextMatchingStart?.Sequence ?? long.MaxValue;
         return run.Events.Any(item => item.Sequence > start.Sequence && item.Sequence < endSequence && AttemptCoordinatesEqual(item, start) && CompletesAttempt(start, item));
+    }
+
+    private static bool HasExactPauseRejection(
+        CustomLoopRunRecord run,
+        CustomLoopRunEvent start,
+        CustomLoopSequentialNodeEvidence sequentialStart)
+    {
+        if (run.SequentialAdapterBinding is not { } binding
+            || run.Frontier?.Payload.Nodes.ElementAtOrDefault(sequentialStart.ActivationOrdinal) is not
+            {
+                Attempt: { } attempt,
+                AttemptOperationId: { } attemptOperationId,
+            } activation
+            || !string.Equals(attemptOperationId, start.EventId, StringComparison.Ordinal)
+            || attempt != start.Attempt
+            || activation.ActivationOrdinal != sequentialStart.ActivationOrdinal
+            || activation.VisitOrdinal != sequentialStart.VisitOrdinal
+            || !string.Equals(activation.NodeId, sequentialStart.NodeId, StringComparison.Ordinal)
+            || activation.Attempt != sequentialStart.Attempt
+            || !string.Equals(activation.CycleId, sequentialStart.CycleId, StringComparison.Ordinal)
+            || activation.CycleIteration != sequentialStart.CycleIteration
+            || !string.Equals(sequentialStart.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(sequentialStart.RunId, binding.ExecutionBinding.RunId, StringComparison.Ordinal)
+            || !Equals(sequentialStart.Revision, binding.ExecutionBinding.Revision)
+            || sequentialStart.ExecutionGeneration != binding.ExecutionBinding.ExecutionGeneration
+            || !CustomLoopSequentialNodeEvidenceHash.Matches(sequentialStart)
+            || !CustomLoopSequentialOutcomeArtifactHash.Matches(start))
+        {
+            return false;
+        }
+
+        var matches = run.Events.Where(item => item.Sequence > start.Sequence
+            && item.Kind == CustomLoopRunEventKind.NodeAttemptFailed
+            && item.Iteration == start.Iteration
+            && string.Equals(item.StepId, start.StepId, StringComparison.Ordinal)
+            && item.Attempt == start.Attempt
+            && string.Equals(item.ProviderResponseId, start.ProviderResponseId, StringComparison.Ordinal)
+            && string.Equals(item.Detail, CanonicalPauseRejectionDetail, StringComparison.Ordinal)
+            && item.SequentialNodeEvidence is
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+                Disposition: CustomLoopSequentialNodeDisposition.Rejected,
+            } rejection
+            && rejection.ActivationOrdinal == sequentialStart.ActivationOrdinal
+            && rejection.VisitOrdinal == sequentialStart.VisitOrdinal
+            && string.Equals(rejection.NodeId, sequentialStart.NodeId, StringComparison.Ordinal)
+            && rejection.Attempt == sequentialStart.Attempt
+            && string.Equals(rejection.CycleId, sequentialStart.CycleId, StringComparison.Ordinal)
+            && rejection.CycleIteration == sequentialStart.CycleIteration
+            && string.Equals(rejection.WorkspaceId, sequentialStart.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(rejection.RunId, sequentialStart.RunId, StringComparison.Ordinal)
+            && Equals(rejection.Revision, sequentialStart.Revision)
+            && rejection.ExecutionGeneration == sequentialStart.ExecutionGeneration
+            && CustomLoopSequentialNodeEvidenceHash.Matches(rejection)
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(item)).Take(2).ToArray();
+        return matches.Length == 1;
     }
 
     private static bool AttemptCoordinatesEqual(CustomLoopRunEvent left, CustomLoopRunEvent right) => left.Iteration == right.Iteration && string.Equals(left.StepId, right.StepId, StringComparison.Ordinal) && left.Attempt == right.Attempt;

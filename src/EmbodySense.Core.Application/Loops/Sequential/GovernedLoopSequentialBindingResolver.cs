@@ -262,6 +262,14 @@ public static class GovernedLoopSequentialBindingResolver
         out IReadOnlyList<GovernedLoopNodeExecutionEvidence> predecessors)
     {
         var resolved = new List<GovernedLoopNodeExecutionEvidence>();
+        if (target.IncomingControlEdgeIds.Count == 0)
+        {
+            predecessors = [];
+            return target.ActivationOrdinal == 0
+                && target.PlanOrdinal == 0
+                && Equals(plan.Nodes[0].Descriptor, GovernedLoopSequentialNodeDescriptors.ManualTrigger);
+        }
+
         if (target.JoinArrivals.Count > 0)
         {
             foreach (var arrival in target.JoinArrivals)

@@ -37,10 +37,16 @@ public sealed class GovernedLoopSequentialBindingResolverTests
     {
         var context = await ContextAsync();
         var identity = Node(context, "identity");
+        var triggerEvent = context.Run.Events[0];
+        Assert.True(CustomLoopSequentialOutcomeArtifactHash.Matches(triggerEvent));
+        Assert.True(CustomLoopSequentialNodeEvidenceHash.Matches(triggerEvent.SequentialNodeEvidence));
+        var triggerActivation = Assert.IsType<GovernedLoopFrontierPosture>(context.Run.Frontier).Payload.Nodes[0];
+        Assert.Equal(triggerEvent.EventId, triggerActivation.OutcomeEvidenceId);
+        Assert.Equal(triggerEvent.SequentialNodeEvidence!.OutcomeArtifactHash, triggerActivation.OutcomeEvidenceHash);
 
         var identityResolution = GovernedLoopSequentialBindingResolver.Resolve(context.Artifact, context.Plan, identity, context.Run);
 
-        Assert.True(identityResolution.IsResolved);
+        Assert.True(identityResolution.IsResolved, $"{identityResolution.FailureCode} at {identityResolution.FailurePath}");
         var identityInput = Assert.Single(identityResolution.Inputs);
         Assert.Equal("request-to-identity", identityInput.BindingId);
         Assert.Equal(GovernedLoopValueKind.Text, identityInput.Value.Kind);

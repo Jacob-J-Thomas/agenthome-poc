@@ -1688,7 +1688,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             AuditSchema.Actors.Cli));
 
         Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
-        Assert.Equal("canonical_inference_rejected", result.Run!.FailureCode);
+        Assert.Equal("canonical_run_capability_invalid", result.Run!.FailureCode);
+        Assert.Equal("Custom-loop capability revalidation could not complete safely: IOException.", result.Run.FailureDetail);
         Assert.Empty(firstExecutor.Requests);
         Assert.Empty(resumedExecutor.Requests);
         Assert.Empty(resumedPublisher.Requests);
@@ -1804,7 +1805,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             AuditSchema.Actors.Cli));
 
         Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
-        Assert.Equal("canonical_exit_rejected", result.Run!.FailureCode);
+        Assert.Equal("canonical_exit_capability_check_failed", result.Run!.FailureCode);
+        Assert.Equal("Canonical Exit capability revalidation could not complete: IOException.", result.Run.FailureDetail);
         Assert.Single(firstExecutor.Requests);
         Assert.Empty(resumedExecutor.Requests);
         Assert.Empty(firstPublisher.Requests);
@@ -7062,6 +7064,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Trigger => orderedEvent?.Kind == CustomLoopRunEventKind.Admitted,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Inference => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Transform or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Validate => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
+                EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Condition or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Join => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Exit => orderedEvent?.Kind is CustomLoopRunEventKind.ExitDecisionCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
                 _ => false,
             };
