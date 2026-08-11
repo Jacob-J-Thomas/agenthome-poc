@@ -11,6 +11,7 @@ internal static class GovernedLoopSequentialApplicationTestFixture
 {
     internal const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     internal const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    internal const string WorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
 
     internal static readonly DateTimeOffset Now = new(2026, 8, 10, 22, 0, 0, TimeSpan.Zero);
 
@@ -18,7 +19,8 @@ internal static class GovernedLoopSequentialApplicationTestFixture
         int inferenceCount = 1,
         IReadOnlyList<string>? inferenceIds = null,
         Func<int, GovernedLoopNodeDescriptor>? inferenceDescriptor = null,
-        ContextualRoleRevisionPin? owningRole = null)
+        ContextualRoleRevisionPin? owningRole = null,
+        bool allowWorkspaceTools = false)
     {
         inferenceIds ??= Enumerable.Range(1, inferenceCount).Select(index => $"infer-{index:D2}").ToArray();
         if (inferenceIds.Count != inferenceCount)
@@ -31,8 +33,8 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             Trigger("trigger"),
         };
         nodes.AddRange(inferenceIds.Select((id, index) => inferenceDescriptor is null
-            ? Inference(id, $"Execute bounded inference step {index + 1}.")
-            : Inference(id, $"Execute bounded inference step {index + 1}.") with { Descriptor = inferenceDescriptor(index) }));
+            ? Inference(id, $"Execute bounded inference step {index + 1}.", allowWorkspaceTools)
+            : Inference(id, $"Execute bounded inference step {index + 1}.", allowWorkspaceTools) with { Descriptor = inferenceDescriptor(index) }));
         nodes.Add(Exit("exit"));
 
         var executionOrder = new[] { "trigger" }.Concat(inferenceIds).Append("exit").ToArray();
@@ -53,7 +55,16 @@ internal static class GovernedLoopSequentialApplicationTestFixture
         }
 
         bindings.Add(new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, dataSourceNodeId, dataSourcePortId, "exit", "result"));
-        return Artifact(nodes, edges, ["exit"], owningRole, bindings);
+        return Artifact(
+            nodes,
+            edges,
+            ["exit"],
+            owningRole,
+            bindings,
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create(
+                allowWorkspaceTools
+                    ? [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]
+                    : [ConversationTurnCapabilityId, ModelInferenceCapabilityId]));
     }
 
     internal static GovernedLoopGraphRevisionArtifact Artifact(
@@ -113,7 +124,7 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             GovernedLoopAuthorityCeiling.Create([]),
             new Dictionary<string, string>());
 
-    internal static GovernedLoopNodeDefinition Inference(string id, string instruction = "Answer safely.")
+    internal static GovernedLoopNodeDefinition Inference(string id, string instruction = "Answer safely.", bool allowWorkspaceTools = false)
         => new(
             id,
             GovernedLoopSequentialNodeDescriptors.ProviderInference,
@@ -122,7 +133,10 @@ internal static class GovernedLoopSequentialApplicationTestFixture
                 Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context),
                 Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
             ],
-            GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
+            GovernedLoopAuthorityCeiling.Create(
+                allowWorkspaceTools
+                    ? [ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]
+                    : [ModelInferenceCapabilityId]),
             new Dictionary<string, string> { ["instruction"] = instruction });
 
     internal static GovernedLoopNodeDefinition Exit(string id)
