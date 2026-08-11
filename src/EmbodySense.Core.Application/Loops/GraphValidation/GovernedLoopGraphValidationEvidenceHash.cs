@@ -61,7 +61,14 @@ internal static class GovernedLoopGraphValidationEvidenceHash
                 writer.WriteString("id", port.Id);
                 writer.WriteString("direction", port.Direction.ToString());
                 writer.WriteString("bindingKind", port.BindingKind.ToString());
-                writer.WriteString("valueKind", port.ValueKind.ToString());
+                writer.WritePropertyName("allowedValueKinds");
+                writer.WriteStartArray();
+                foreach (var valueKind in port.AllowedValueKinds.Kinds)
+                {
+                    writer.WriteStringValue(valueKind.ToString());
+                }
+
+                writer.WriteEndArray();
                 writer.WriteBoolean("required", port.Required);
                 writer.WriteEndObject();
             }

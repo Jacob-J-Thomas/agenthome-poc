@@ -8,6 +8,7 @@ using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
 
 namespace EmbodySense.Core.Application.Loops.GraphValidation;
 
@@ -172,7 +173,14 @@ public sealed class GovernedLoopGraphValidationService
             var portIds = new HashSet<string>(StringComparer.Ordinal);
             foreach (var port in descriptor.Ports.Take(CustomLoopLimits.MaxGraphPortsPerNode))
             {
-                if (port is null || !CustomLoopArtifactIdentifier.IsValid(port.Id) || !portIds.Add(port.Id) || !Enum.IsDefined(port.Direction) || port.Direction == GovernedLoopPortDirection.Unknown || !Enum.IsDefined(port.BindingKind) || port.BindingKind == GovernedLoopBindingKind.Unknown || !Enum.IsDefined(port.ValueKind) || port.ValueKind == GovernedLoopValueKind.Unknown)
+                if (port is null
+                    || !CustomLoopArtifactIdentifier.IsValid(port.Id)
+                    || !portIds.Add(port.Id)
+                    || !Enum.IsDefined(port.Direction)
+                    || port.Direction == GovernedLoopPortDirection.Unknown
+                    || !Enum.IsDefined(port.BindingKind)
+                    || port.BindingKind == GovernedLoopBindingKind.Unknown
+                    || !IsValidKindSet(port.AllowedValueKinds))
                 {
                     Add(errors, "catalog.port-contract.invalid", GovernedLoopGraphElementKind.Catalog, id, $"{path}.ports", "Catalog port contracts must be canonical, unique, and fully defined.");
                 }
@@ -356,7 +364,12 @@ public sealed class GovernedLoopGraphValidationService
                 continue;
             }
 
-            if (!schemas.TryGetValue(port.ValueSchemaId, out var schema) || port.Direction != contract.Direction || port.BindingKind != contract.BindingKind || port.Required != contract.Required || schema.Kind != contract.ValueKind)
+            if (!schemas.TryGetValue(port.ValueSchemaId, out var schema)
+                || port.Direction != contract.Direction
+                || port.BindingKind != contract.BindingKind
+                || port.Required != contract.Required
+                || contract.AllowedValueKinds is null
+                || !contract.AllowedValueKinds.Contains(schema.Kind))
             {
                 Add(errors, "node.port-contract.incompatible", GovernedLoopGraphElementKind.Port, $"{node.Id}.{portId}", path, "The port direction, channel, requiredness, or portable value kind conflicts with the descriptor contract.");
             }
@@ -406,10 +419,68 @@ public sealed class GovernedLoopGraphValidationService
             GovernedLoopParameterValueKind.Text => true,
             GovernedLoopParameterValueKind.Boolean => value is "true" or "false",
             GovernedLoopParameterValueKind.Integer => contract.MinimumInteger.HasValue && contract.MaximumInteger.HasValue && long.TryParse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var integer) && string.Equals(integer.ToString(CultureInfo.InvariantCulture), value, StringComparison.Ordinal) && integer >= contract.MinimumInteger.Value && integer <= contract.MaximumInteger.Value,
+            GovernedLoopParameterValueKind.Number => IsCanonicalFiniteNumber(value),
             GovernedLoopParameterValueKind.Identifier => CustomLoopArtifactIdentifier.IsValid(value),
+            GovernedLoopParameterValueKind.JsonPointer => IsCanonicalJsonPointer(value),
             GovernedLoopParameterValueKind.Enumeration => contract.AllowedValues.Contains(value, StringComparer.Ordinal),
             _ => false
         };
+    }
+
+    private static bool IsValidKindSet(GovernedLoopValueKindSet? kinds)
+    {
+        if (kinds?.Kinds is not { Count: > 0 } values)
+        {
+            return false;
+        }
+
+        var maximum = Enum.GetValues<GovernedLoopValueKind>().Count(value => value != GovernedLoopValueKind.Unknown);
+        return values.Count <= maximum
+            && values.All(value => Enum.IsDefined(value) && value != GovernedLoopValueKind.Unknown)
+            && values.Distinct().Count() == values.Count
+            && values.SequenceEqual(values.Order());
+    }
+
+    private static bool IsCanonicalFiniteNumber(string value)
+    {
+        return GovernedLoopTypedValue.TryCreate(
+                GovernedLoopTypedValue.CurrentSchemaVersion,
+                GovernedLoopValueKind.Number,
+                value,
+                out var canonical,
+                out _)
+            && !canonical!.IsNull
+            && string.Equals(canonical.CanonicalValueJson, value, StringComparison.Ordinal)
+            && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+            && double.IsFinite(number);
+    }
+
+    private static bool IsCanonicalJsonPointer(string value)
+    {
+        if (value.Length == 0)
+        {
+            return true;
+        }
+
+        if (value[0] != '/')
+        {
+            return false;
+        }
+
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (value[index] != '~')
+            {
+                continue;
+            }
+
+            if (++index >= value.Length || value[index] is not ('0' or '1'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool IsCanonicalParameterText(string? value, int minimumCharacters, int maximumCharacters)

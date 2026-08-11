@@ -19,6 +19,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Workspace;
@@ -1474,7 +1475,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                     port.Id,
                     port.Direction,
                     port.BindingKind,
-                    schemas[port.ValueSchemaId],
+                    GovernedLoopValueKindSet.Create([schemas[port.ValueSchemaId]]),
                     port.Required)).ToArray(),
                 node.Parameters.Select(parameter => new GovernedLoopCatalogParameterContract(
                     parameter.Key,

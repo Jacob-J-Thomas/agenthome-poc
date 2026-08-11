@@ -11,6 +11,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Tests.Support;
@@ -75,6 +76,54 @@ internal static class GovernedLoopSequentialApplicationTestFixture
                 allowWorkspaceTools
                     ? [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]
                     : [ConversationTurnCapabilityId, ModelInferenceCapabilityId]));
+    }
+
+    internal static GovernedLoopGraphRevisionArtifact MixedPureArtifact()
+    {
+        var nodes = new GovernedLoopNodeDefinition[]
+        {
+            Trigger("trigger"),
+            new(
+                "identity",
+                GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+                [Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>()),
+            Inference("infer", "Answer from the exact transformed request."),
+            new(
+                "validate-length",
+                GovernedLoopSequentialNodeDescriptors.TextLength,
+                [Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port(GovernedLoopPureNodeVocabulary.ResultPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "boolean")],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>
+                {
+                    [GovernedLoopPureNodeVocabulary.MinimumParameter] = "1",
+                    [GovernedLoopPureNodeVocabulary.MaximumParameter] = CustomLoopLimits.MaxGraphTypedValueStringCharacters.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                }),
+            Exit("exit")
+        };
+        return Artifact(
+            nodes,
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-identity", "trigger", "identity", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("identity-to-infer", "identity", "infer", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("infer-to-validation", "infer", "validate-length", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("validation-to-exit", "validate-length", "exit", GovernedLoopControlCondition.Success)
+            ],
+            ["exit"],
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("request-to-identity", GovernedLoopBindingKind.Data, "trigger", "request", "identity", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("identity-to-request", GovernedLoopBindingKind.Data, "identity", GovernedLoopPureNodeVocabulary.OutputPort, "infer", "request"),
+                new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new GovernedLoopBindingDefinition("result-to-validation", GovernedLoopBindingKind.Data, "infer", "result", "validate-length", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result")
+            ],
+            valueSchemas:
+            [
+                new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, false),
+                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)
+            ]);
     }
 
     internal static GovernedLoopGraphRevisionArtifact Artifact(

@@ -8,6 +8,7 @@ using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
 
 namespace EmbodySense.Core.Application.Tests.Loops.GraphValidation;
 
@@ -113,7 +114,9 @@ public sealed class GovernedLoopGraphValidationServiceTests
         var missing = Descriptors(candidate).Where(descriptor => descriptor.Descriptor.TypeId != "provider-inference").ToArray();
         var incompatible = Descriptors(candidate).Select(descriptor => descriptor.Descriptor.TypeId == "provider-inference" ? descriptor with
         {
-            Ports = descriptor.Ports.Select(port => port.Id == "result" ? port with { ValueKind = GovernedLoopValueKind.Boolean } : port).ToArray()
+            Ports = descriptor.Ports.Select(port => port.Id == "result"
+                ? port with { AllowedValueKinds = GovernedLoopValueKindSet.Create([GovernedLoopValueKind.Boolean]) }
+                : port).ToArray()
         } : descriptor).ToArray();
 
         var missingResult = await Service(missing).ValidateAsync(candidate);
@@ -121,6 +124,45 @@ public sealed class GovernedLoopGraphValidationServiceTests
 
         Assert.Contains(missingResult.Errors, error => error.Code == "node.descriptor.not-advertised");
         Assert.Contains(incompatibleResult.Errors, error => error.Code == "node.port-contract.incompatible" && error.Element.Id == "infer.result");
+    }
+
+    [Fact]
+    public async Task ValidateAdmitsCanonicalMultiKindPortsAndHashesTheExactAllowedSet()
+    {
+        var candidate = Candidate();
+        var baseline = Descriptors(candidate);
+        var widened = baseline.Select(descriptor => descriptor.Descriptor.TypeId == "provider-inference" ? descriptor with
+        {
+            Ports = descriptor.Ports.Select(port => port.Id == "result"
+                ? port with { AllowedValueKinds = GovernedLoopValueKindSet.Create([GovernedLoopValueKind.Boolean, GovernedLoopValueKind.Text]) }
+                : port).ToArray()
+        } : descriptor).ToArray();
+
+        var baselineResult = await Service(baseline).ValidateAsync(candidate);
+        var widenedResult = await Service(widened).ValidateAsync(candidate);
+
+        Assert.True(baselineResult.IsValid);
+        Assert.True(widenedResult.IsValid);
+        Assert.NotEqual(baselineResult.Evidence!.CatalogHash, widenedResult.Evidence!.CatalogHash);
+    }
+
+    [Fact]
+    public async Task ValidateRejectsMissingAllowedKindSetBeforeEvidenceHashing()
+    {
+        var candidate = Candidate();
+        var malformed = Descriptors(candidate);
+        malformed[1] = malformed[1] with
+        {
+            Ports = malformed[1].Ports.Select(port => port.Id == "result"
+                ? port with { AllowedValueKinds = null! }
+                : port).ToArray()
+        };
+
+        var result = await Service(malformed).ValidateAsync(candidate);
+
+        Assert.False(result.IsValid);
+        Assert.Null(result.Evidence);
+        Assert.Contains(result.Errors, error => error.Code == "catalog.port-contract.invalid");
     }
 
     [Fact]
@@ -437,6 +479,74 @@ public sealed class GovernedLoopGraphValidationServiceTests
     }
 
     [Fact]
+    public async Task ValidateEnforcesCanonicalFiniteNumberAndJsonPointerParameters()
+    {
+        var nodes = Nodes();
+        nodes[1] = nodes[1] with
+        {
+            Parameters = new Dictionary<string, string>
+            {
+                ["instruction"] = "Answer safely.",
+                ["threshold"] = "15e-1",
+                ["pointer"] = "/items/0"
+            }
+        };
+        var candidate = Candidate(nodes: nodes);
+        var descriptors = Descriptors(candidate).Select(descriptor => descriptor.Descriptor.TypeId == "provider-inference" ? descriptor with
+        {
+            Parameters =
+            [
+                new GovernedLoopCatalogParameterContract("instruction", GovernedLoopParameterValueKind.Text, true, 1, CustomLoopLimits.MaxGraphParameterValueCharacters, null, null, []),
+                new GovernedLoopCatalogParameterContract("threshold", GovernedLoopParameterValueKind.Number, true, 1, CustomLoopLimits.MaxGraphTypedValueNumberCharacters, null, null, []),
+                new GovernedLoopCatalogParameterContract("pointer", GovernedLoopParameterValueKind.JsonPointer, true, 0, CustomLoopLimits.MaxGraphParameterValueCharacters, null, null, [])
+            ]
+        } : descriptor).ToArray();
+
+        var valid = await Service(descriptors).ValidateAsync(candidate);
+        nodes[1] = nodes[1] with
+        {
+            Parameters = new Dictionary<string, string>
+            {
+                ["instruction"] = "Answer safely.",
+                ["threshold"] = "1.5",
+                ["pointer"] = "/items/~2"
+            }
+        };
+        var invalid = await Service(descriptors).ValidateAsync(candidate with { Nodes = nodes });
+        var nullNumber = await Service(descriptors).ValidateAsync(candidate with
+        {
+            Nodes = nodes.Select(node => node.Id == "infer" ? node with
+            {
+                Parameters = new Dictionary<string, string>
+                {
+                    ["instruction"] = "Answer safely.",
+                    ["threshold"] = "null",
+                    ["pointer"] = string.Empty
+                }
+            } : node).ToArray()
+        });
+        var nonFiniteNumber = await Service(descriptors).ValidateAsync(candidate with
+        {
+            Nodes = nodes.Select(node => node.Id == "infer" ? node with
+            {
+                Parameters = new Dictionary<string, string>
+                {
+                    ["instruction"] = "Answer safely.",
+                    ["threshold"] = "1e999",
+                    ["pointer"] = string.Empty
+                }
+            } : node).ToArray()
+        });
+
+        Assert.True(valid.IsValid, string.Join(Environment.NewLine, valid.Errors.Select(error => $"{error.Code}: {error.Element.Path}")));
+        Assert.Equal(2, invalid.Errors.Count(error => error.Code == "node.parameter.incompatible"));
+        Assert.Contains(invalid.Errors, error => error.Element.Path.EndsWith("[threshold]", StringComparison.Ordinal));
+        Assert.Contains(invalid.Errors, error => error.Element.Path.EndsWith("[pointer]", StringComparison.Ordinal));
+        Assert.Contains(nullNumber.Errors, error => error.Code == "node.parameter.incompatible" && error.Element.Path.EndsWith("[threshold]", StringComparison.Ordinal));
+        Assert.Contains(nonFiniteNumber.Errors, error => error.Code == "node.parameter.incompatible" && error.Element.Path.EndsWith("[threshold]", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task ValidateRejectsMalformedParameterContractsAndHashesTheirSemantics()
     {
         var candidate = Candidate();
@@ -749,7 +859,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
             AllowedControlOutcomes = [GovernedLoopControlCondition.Unknown],
             RequiredControlOutcomes = [GovernedLoopControlCondition.Failure],
             CycleIterationBudgetParameterId = "iterations",
-            Ports = [new GovernedLoopCatalogPortContract("INVALID", GovernedLoopPortDirection.Unknown, GovernedLoopBindingKind.Unknown, GovernedLoopValueKind.Unknown, true)],
+            Ports = [new GovernedLoopCatalogPortContract("INVALID", GovernedLoopPortDirection.Unknown, GovernedLoopBindingKind.Unknown, null!, true)],
             RequiredCapabilityIds = ["INVALID"],
             ResourceBudget = new GovernedLoopNodeResourceBudget(-1, -1, -1, -1)
         }).ToArray();
@@ -978,7 +1088,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
                 false,
                 null,
                 null,
-                node.Ports.Select(port => new GovernedLoopCatalogPortContract(port.Id, port.Direction, port.BindingKind, schemas[port.ValueSchemaId], port.Required)).ToArray(),
+                node.Ports.Select(port => new GovernedLoopCatalogPortContract(port.Id, port.Direction, port.BindingKind, GovernedLoopValueKindSet.Create([schemas[port.ValueSchemaId]]), port.Required)).ToArray(),
                 ParameterContracts(node),
                 node.AuthorityCeiling.CapabilityIds,
                 new GovernedLoopNodeResourceBudget(0, 0, 0, 0));

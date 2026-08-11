@@ -1,6 +1,7 @@
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 
@@ -71,6 +72,109 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
         Assert.Null(plan.Nodes[^1].OutgoingControlEdgeId);
         Assert.Equal("trigger-to-z-infer", plan.Nodes[0].OutgoingControlEdgeId);
         Assert.Equal("z-infer-to-a-infer", plan.Nodes[2].IncomingControlEdgeId);
+    }
+
+    [Fact]
+    public void Mixed_transform_inference_and_validate_line_builds_one_deterministic_plan()
+    {
+        var artifact = GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact();
+
+        var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, result.Status);
+        Assert.Null(result.FailurePath);
+        var plan = Assert.IsType<GovernedLoopSequentialPlan>(result.Plan);
+        Assert.Equal(["trigger", "identity", "infer", "validate-length", "exit"], plan.Nodes.Select(node => node.NodeId));
+        Assert.Equal(
+            [
+                GovernedLoopSequentialNodeDescriptors.ManualTrigger,
+                GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+                GovernedLoopSequentialNodeDescriptors.ProviderInference,
+                GovernedLoopSequentialNodeDescriptors.TextLength,
+                GovernedLoopSequentialNodeDescriptors.SuccessExit
+            ],
+            plan.Nodes.Select(node => node.Descriptor));
+        Assert.Equal([0, 1, 2, 3, 4], plan.Nodes.Select(node => node.Ordinal));
+        Assert.Single(plan.Nodes, node => node.Descriptor == GovernedLoopSequentialNodeDescriptors.ProviderInference);
+    }
+
+    [Fact]
+    public void Pure_node_descriptor_authority_parameter_and_schema_substitutions_fail_closed()
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact().Graph;
+        var identity = source.Nodes.Single(node => node.Id == "identity");
+        var validation = source.Nodes.Single(node => node.Id == "validate-length");
+        var wrongVersion = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == identity.Id
+                ? node with { Descriptor = node.Descriptor with { Version = 2 } }
+                : node).ToArray());
+        var authorityWidening = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == identity.Id
+                ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId]) }
+                : node).ToArray());
+        var reversedRange = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == validation.Id
+                ? node with
+                {
+                    Parameters = new Dictionary<string, string>
+                    {
+                        [GovernedLoopPureNodeVocabulary.MinimumParameter] = "2",
+                        [GovernedLoopPureNodeVocabulary.MaximumParameter] = "1"
+                    }
+                }
+                : node).ToArray());
+        var formattedSchema = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            valueSchemas: source.ValueSchemas.Select(schema => schema.Id == "text" ? schema with { Format = "markdown" } : schema).ToArray());
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedDescriptor, GovernedLoopSequentialPlanBuilder.Build(wrongVersion).Status);
+        Assert.All(new[] { authorityWidening, reversedRange }, artifact =>
+        {
+            var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
+            Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, result.Status);
+            Assert.Equal("$.graph.nodes", result.FailurePath);
+        });
+        var schemaResult = GovernedLoopSequentialPlanBuilder.Build(formattedSchema);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, schemaResult.Status);
+        Assert.Equal("$.graph.valueSchemas", schemaResult.FailurePath);
+    }
+
+    [Fact]
+    public void Pure_inputs_require_explicit_data_bindings_from_earlier_plan_nodes()
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact().Graph;
+        var requestBinding = source.Bindings.Single(binding => binding.Id == "request-to-identity");
+        var identity = source.Nodes.Single(node => node.Id == "identity");
+        var contextIdentity = identity with
+        {
+            Ports = identity.Ports.Select(port => port.Id == GovernedLoopPureNodeVocabulary.InputPort
+                ? port with { BindingKind = GovernedLoopBindingKind.Context }
+                : port).ToArray()
+        };
+        var contextBound = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == identity.Id ? contextIdentity : node).ToArray(),
+            bindings: source.Bindings.Select(binding => binding.Id == requestBinding.Id
+                ? binding with { Kind = GovernedLoopBindingKind.Context, FromPortId = "invocation-context" }
+                : binding).ToArray());
+        var futureBound = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            bindings: source.Bindings.Select(binding => binding.Id == requestBinding.Id
+                ? binding with { FromNodeId = "infer", FromPortId = "result" }
+                : binding).ToArray());
+
+        Assert.Throws<ArgumentException>(() => GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            bindings: source.Bindings.Where(binding => binding.Id != requestBinding.Id).ToArray()));
+        var contextResult = GovernedLoopSequentialPlanBuilder.Build(contextBound);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, contextResult.Status);
+        Assert.Equal("$.graph.nodes", contextResult.FailurePath);
+        var futureResult = GovernedLoopSequentialPlanBuilder.Build(futureBound);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, futureResult.Status);
+        Assert.Equal("$.graph.bindings", futureResult.FailurePath);
     }
 
     [Theory]
@@ -172,14 +276,20 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
     }
 
     [Fact]
-    public void Substituted_schema_binding_and_output_contracts_fail_closed()
+    public void Typed_earlier_sources_and_schema_id_renames_are_supported_while_future_sources_and_output_substitution_fail_closed()
     {
         var source = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(2).Graph;
+        var firstInference = source.Nodes.Single(node => node.Id == "infer-01");
         var secondInference = source.Nodes.Single(node => node.Id == "infer-02");
         var bypassedDataChain = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
             bindings: source.Bindings.Select(binding => binding.ToNodeId == secondInference.Id && binding.ToPortId == "request"
                 ? binding with { FromNodeId = "trigger", FromPortId = "request" }
+                : binding).ToArray());
+        var futureDataSource = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            bindings: source.Bindings.Select(binding => binding.ToNodeId == firstInference.Id && binding.ToPortId == "request"
+                ? binding with { FromNodeId = secondInference.Id, FromPortId = "result" }
                 : binding).ToArray());
         var substitutedOutput = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
@@ -194,11 +304,12 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
                 source.OutputContract.Summary,
                 [source.OutputContract.Outputs[0] with { ValueSchemaId = "message" }]));
 
-        Assert.Equal("$.graph.bindings", GovernedLoopSequentialPlanBuilder.Build(bypassedDataChain).FailurePath);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, GovernedLoopSequentialPlanBuilder.Build(bypassedDataChain).Status);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, GovernedLoopSequentialPlanBuilder.Build(renamedSchema).Status);
+        Assert.Equal("$.graph.bindings", GovernedLoopSequentialPlanBuilder.Build(futureDataSource).FailurePath);
         Assert.Equal("$.graph.outputContract", GovernedLoopSequentialPlanBuilder.Build(substitutedOutput).FailurePath);
-        Assert.Equal("$.graph.valueSchemas", GovernedLoopSequentialPlanBuilder.Build(renamedSchema).FailurePath);
         Assert.All(
-            new[] { bypassedDataChain, substitutedOutput, renamedSchema },
+            new[] { futureDataSource, substitutedOutput },
             artifact => Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, GovernedLoopSequentialPlanBuilder.Build(artifact).Status));
     }
 
