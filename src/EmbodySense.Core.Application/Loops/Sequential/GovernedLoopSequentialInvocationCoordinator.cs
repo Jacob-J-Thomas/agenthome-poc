@@ -210,7 +210,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
                 request.InvocationSnapshot,
                 adapterBinding),
             cancellationToken).ConfigureAwait(false);
-        if (!materialization.IsReady || materialization.Run is not { } run || materialization.Anchor is null)
+        if (!materialization.IsReady() || materialization.Run is not { } run || materialization.Anchor is null)
         {
             return Result(
                 MapMaterializationStatus(materialization.Status),

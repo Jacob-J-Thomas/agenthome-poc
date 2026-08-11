@@ -3879,31 +3879,6 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         IReadOnlyList<CapabilityId> AllowedCapabilityIds,
         IGovernedLoopSequentialAuditRecorder AuditRecorder);
 
-    private sealed class SingleSequentialNodeHandler : IGovernedLoopSequentialNodeHandler
-    {
-        private readonly Func<CancellationToken, Task<GovernedLoopSequentialNodeHandlerResult>> _dispatch;
-
-        public SingleSequentialNodeHandler(
-            EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeDescriptor descriptor,
-            Func<CancellationToken, Task<GovernedLoopSequentialNodeHandlerResult>> dispatch)
-        {
-            Descriptor = descriptor ?? throw new ArgumentNullException(nameof(descriptor));
-            _dispatch = dispatch ?? throw new ArgumentNullException(nameof(dispatch));
-        }
-
-        public EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeDescriptor Descriptor { get; }
-
-        public bool WasInvoked { get; private set; }
-
-        public Task<GovernedLoopSequentialNodeHandlerResult> DispatchAsync(
-            GovernedLoopSequentialNodeDispatchRequest request,
-            CancellationToken cancellationToken = default)
-        {
-            WasInvoked = true;
-            return _dispatch(cancellationToken);
-        }
-    }
-
     private sealed record CanonicalOutput(string Text, int OriginalCharacterCount, bool Truncated);
 
 }

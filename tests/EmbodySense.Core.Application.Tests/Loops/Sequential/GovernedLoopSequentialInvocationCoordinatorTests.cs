@@ -67,7 +67,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
         var result = await coordinator.InvokeAsync(context.Request);
 
         Assert.Equal(GovernedLoopSequentialInvocationStatus.Executed, result.Status);
-        Assert.True(result.ProviderWasInvoked);
+        Assert.True(result.ProviderWasInvoked());
         Assert.Equal(1, operations.BindCallCount);
         Assert.Equal(1, operations.CompleteCallCount);
         Assert.Equal(1, admission.CallCount);
@@ -674,7 +674,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
             new GovernedLoopSequentialRunMaterializerTests.RecordingEventIdentityGenerator(),
             new GovernedLoopSequentialRunMaterializerTests.FixedTimeProvider(_coordinatedAtUtc));
         var result = await materializer.MaterializeAsync(context.MaterializationRequest);
-        Assert.True(result.IsReady);
+        Assert.True(result.IsReady());
         return result;
     }
 
