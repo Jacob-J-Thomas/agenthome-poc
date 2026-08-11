@@ -128,6 +128,8 @@ internal sealed class GovernedLoopAdmissionTestHarness :
 
     internal Action<int>? AfterStoreRead { get; set; }
 
+    internal Action<string>? AfterMutableRead { get; set; }
+
     internal GovernedLoopGraphRevisionArtifactReadResult GraphReadResult { get; set; }
 
     internal GovernedLoopGrantBindingResolution BindingResolution { get; set; }
@@ -221,6 +223,7 @@ internal sealed class GovernedLoopAdmissionTestHarness :
     {
         MutableRead(cancellationToken);
         GraphReadCount++;
+        AfterMutableRead?.Invoke("graph");
         return Task.FromResult(GraphReadResult);
     }
 
@@ -228,6 +231,7 @@ internal sealed class GovernedLoopAdmissionTestHarness :
     {
         MutableRead(cancellationToken);
         BindingReadCount++;
+        AfterMutableRead?.Invoke("binding");
         return Task.FromResult(BindingResolution);
     }
 
@@ -235,6 +239,7 @@ internal sealed class GovernedLoopAdmissionTestHarness :
     {
         MutableRead(cancellationToken);
         RoleReadCount++;
+        AfterMutableRead?.Invoke("role");
         return Task.FromResult(RoleResolution);
     }
 
@@ -242,6 +247,7 @@ internal sealed class GovernedLoopAdmissionTestHarness :
     {
         MutableRead(cancellationToken);
         GrantReadCount++;
+        AfterMutableRead?.Invoke("grant");
         return Task.FromResult(GrantResolution);
     }
 
@@ -254,6 +260,7 @@ internal sealed class GovernedLoopAdmissionTestHarness :
         CapabilityAdmissionCount++;
         LastRequirements = requirements;
         LastAllowedCapabilityIds = allowedCapabilityIds.ToArray();
+        AfterMutableRead?.Invoke("capability");
         return Task.FromResult(CapabilityResultFactory?.Invoke(requirements, allowedCapabilityIds) ?? CapabilityResult);
     }
 

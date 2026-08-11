@@ -123,11 +123,18 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                     cancellationToken: cancellationToken).ConfigureAwait(false);
             }
 
+            if (read?.Status is not GovernedLoopAdmissionStoreReadStatus.Found and not GovernedLoopAdmissionStoreReadStatus.Recoverable)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
             return readDisposition;
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         var storeGeneration = read!.StoreGeneration;
         var artifactRead = await ReadArtifactAsync(request, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (artifactRead.Status != GovernedLoopRevisionStoreReadStatus.Ready)
         {
             return artifactRead.Status is GovernedLoopRevisionStoreReadStatus.NotFound or GovernedLoopRevisionStoreReadStatus.Unavailable
@@ -158,6 +165,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         }
 
         var binding = await ResolveBindingAsync(request, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (binding.Status != AuthorityGrantDependencyStatus.Active)
         {
             return MapBindingFailure(request, binding.Status);
@@ -169,9 +177,10 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         }
 
         var role = await ResolveRoleAsync(intent.Role, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (role.Status != AuthorityGrantDependencyStatus.Active)
         {
-            return MapRoleFailure(request, intent, role, storeGeneration);
+            return await MapRoleFailureAsync(request, intent, role, storeGeneration, cancellationToken).ConfigureAwait(false);
         }
 
         if (!IsExactActiveRole(role, intent.Role))
@@ -180,20 +189,49 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         }
 
         var grant = await ResolveGrantAsync(request.AuthorityGrant, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (grant.Status != AuthorityGrantResolutionStatus.Active)
         {
-            return MapGrantFailure(request, intent, grant.Status, storeGeneration);
+            return await MapGrantFailureAsync(request, intent, grant, storeGeneration, cancellationToken).ConfigureAwait(false);
         }
 
-        if (!IsExactActiveGrant(grant, request.AuthorityGrant, intent.Role, request.Publication))
+        if (!IsExactActiveGrant(grant, request.AuthorityGrant))
         {
             return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
         }
 
-        if (role.Lifecycle!.UpdatedAtUtc > grant.EvaluatedAtUtc
-            || role.Revision!.Provenance.RecordedAtUtc > grant.EvaluatedAtUtc)
+        if (!Equals(grant.Grant!.Binding.Role, intent.Role))
+        {
+            return await CommitDefinitiveFailureAsync(
+                request,
+                intent,
+                GovernedLoopAdmissionFailureCode.RoleMismatch,
+                storeGeneration,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!Equals(grant.Grant.Binding.Loop, request.Publication))
+        {
+            return await CommitDefinitiveFailureAsync(
+                request,
+                intent,
+                GovernedLoopAdmissionFailureCode.GrantMismatch,
+                storeGeneration,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (artifact.RevisionArtifact.CreatedAtUtc > grant.EvaluatedAtUtc
+            || role.Revision!.Provenance.RecordedAtUtc > role.Lifecycle!.UpdatedAtUtc
+            || role.Lifecycle.UpdatedAtUtc > grant.EvaluatedAtUtc
+            || grant.Grant!.RecordedAtUtc > grant.EvaluatedAtUtc
+            || grant.Grant.Boundary.EffectiveAtUtc > grant.EvaluatedAtUtc)
         {
             return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+        }
+
+        if (artifact.Graph.AuthorityCeiling.CapabilityIds.Count > CapabilityContractLimits.MaxDependencyManifestDependencies)
+        {
+            return Result(GovernedLoopAdmissionStatus.LimitExceeded, request);
         }
 
         if (!TryBuildCapabilityManifest(artifact, out var manifest, out var requirementsHash))
@@ -203,13 +241,41 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
 
         var graphIds = artifact.Graph.AuthorityCeiling.CapabilityIds.ToHashSet(StringComparer.Ordinal);
         var roleIds = role.Revision!.PolicyMaxima.CapabilityIds.ToHashSet(StringComparer.Ordinal);
-        var grantIds = grant.EffectiveCeiling.Capabilities.Select(item => item.Id.Value).ToHashSet(StringComparer.Ordinal);
+        var policyCapabilities = grant.EffectiveCeiling.Capabilities
+            .Where(item => roleIds.Contains(item.Id.Value))
+            .ToArray();
+        var policyAuthority = new AuthorityCeiling(
+            policyCapabilities,
+            grant.EffectiveCeiling.DataClasses,
+            grant.EffectiveCeiling.MaxTargetCount,
+            grant.EffectiveCeiling.MaxSideEffectClass,
+            grant.EffectiveCeiling.AllowsRecurrence,
+            grant.EffectiveCeiling.AllowsExternalPublication,
+            grant.EffectiveCeiling.AllowsIrreversibleAction);
+        if (!AuthorityProfileValidator.ValidateCeiling(policyAuthority).IsValid)
+        {
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+        }
+
+        var policyIds = policyCapabilities.Select(item => item.Id.Value).ToHashSet(StringComparer.Ordinal);
+        if (!graphIds.IsSubsetOf(policyIds))
+        {
+            return await CommitCapabilityFailureAsync(
+                request,
+                intent,
+                manifest!,
+                requirementsHash!,
+                policyAuthority,
+                storeGeneration,
+                cancellationToken).ConfigureAwait(false);
+        }
+
         var allowedIds = new List<CapabilityId>(graphIds.Count);
         foreach (var id in graphIds.Order(StringComparer.Ordinal))
         {
-            if (!roleIds.Contains(id) || !grantIds.Contains(id) || !CapabilityId.TryParse(id, out var parsed, out _))
+            if (!CapabilityId.TryParse(id, out var parsed, out _))
             {
-                return DefinitiveFailure(request, intent, GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied, storeGeneration);
+                return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
             }
 
             allowedIds.Add(parsed!);
@@ -236,6 +302,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         else
         {
             var capability = await AdmitCapabilitiesAsync(manifest!, allowedIds, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             if (!capability.IsAdmitted)
             {
                 return Result(GovernedLoopAdmissionStatus.Unavailable, request);
@@ -255,8 +322,13 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         }
 
         if (!IsTrustedUtc(grant.EvaluatedAtUtc)
-            || grant.EvaluatedAtUtc > evaluatedAtUtc
+            || grant.EvaluatedAtUtc > capabilitySnapshot.AdmittedAtUtc
             || capabilitySnapshot.AdmittedAtUtc > evaluatedAtUtc)
+        {
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+        }
+
+        if (grant.Grant!.Boundary.ExpiresAtUtc is { } expiry && expiry <= evaluatedAtUtc)
         {
             return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
         }
@@ -267,7 +339,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
             .ToArray();
         if (effectiveCapabilities.Select(item => item.Id.Value).ToHashSet(StringComparer.Ordinal).Count != graphIds.Count)
         {
-            return DefinitiveFailure(request, intent, GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied, storeGeneration);
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
         }
 
         var effectiveAuthority = new AuthorityCeiling(
@@ -286,6 +358,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         GovernedLoopExecutionBinding executionBinding;
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             executionBinding = GovernedLoopExecutionBinding.Create(
                 1,
                 _runIdentityGenerator.CreateRunId(),
@@ -350,16 +423,23 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         GovernedLoopAdmissionStatus committedStatus,
         bool honorCallerCancellation,
         CancellationToken cancellationToken,
+        int remainingCommitAttempts = MaximumCommitAttempts,
         int remainingRecoveryFinalizations = 1)
     {
-        var intentHash = GovernedLoopAdmissionContractHash.ComputeIntentHash(outcome.Intent);
-        for (var attempt = 0; attempt < MaximumCommitAttempts; attempt++)
+        if (remainingCommitAttempts <= 0)
         {
-            if (attempt == 0 && honorCallerCancellation)
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+        }
+
+        var intentHash = GovernedLoopAdmissionContractHash.ComputeIntentHash(outcome.Intent);
+        while (remainingCommitAttempts > 0)
+        {
+            if (honorCallerCancellation)
             {
                 cancellationToken.ThrowIfCancellationRequested();
             }
 
+            remainingCommitAttempts--;
             GovernedLoopAdmissionStoreCommitResult? commit;
             try
             {
@@ -375,12 +455,22 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
             }
             catch (Exception)
             {
-                return await RecoverUncertainCommitAsync(request, outcome, remainingRecoveryFinalizations).ConfigureAwait(false);
+                return await RecoverUncertainCommitAsync(
+                    request,
+                    expectedGeneration,
+                    remainingCommitAttempts,
+                    allowSameRecoverableGeneration: committedStatus == GovernedLoopAdmissionStatus.Replayed,
+                    remainingRecoveryFinalizations).ConfigureAwait(false);
             }
 
             if (commit is null || !Enum.IsDefined(commit.Status) || commit.Status == GovernedLoopAdmissionStoreCommitStatus.Unknown || commit.StoreGeneration < 0)
             {
-                return await RecoverUncertainCommitAsync(request, outcome, remainingRecoveryFinalizations).ConfigureAwait(false);
+                return await RecoverUncertainCommitAsync(
+                    request,
+                    expectedGeneration,
+                    remainingCommitAttempts,
+                    allowSameRecoverableGeneration: committedStatus == GovernedLoopAdmissionStatus.Replayed,
+                    remainingRecoveryFinalizations).ConfigureAwait(false);
             }
 
             switch (commit.Status)
@@ -390,13 +480,30 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                         ? Result(committedStatus, request, outcome)
                         : Result(GovernedLoopAdmissionStatus.Ambiguous, request);
                 case GovernedLoopAdmissionStoreCommitStatus.AlreadyCommitted:
-                    return commit.StoreGeneration > 0
-                        ? ClassifyCommittedOutcome(request, commit.Outcome)
+                    if (commit.StoreGeneration <= expectedGeneration)
+                    {
+                        return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+                    }
+
+                    var committed = ClassifyCommittedOutcome(request, commit.Outcome);
+                    return committed.Status == GovernedLoopAdmissionStatus.Replayed
+                        ? committed
                         : Result(GovernedLoopAdmissionStatus.Ambiguous, request);
                 case GovernedLoopAdmissionStoreCommitStatus.OperationConflict:
-                    return commit.Outcome is null
-                        ? Result(GovernedLoopAdmissionStatus.Conflict, request)
-                        : ClassifyCommittedOutcome(request, commit.Outcome);
+                    if (commit.StoreGeneration <= expectedGeneration)
+                    {
+                        return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+                    }
+
+                    if (commit.Outcome is null)
+                    {
+                        return Result(GovernedLoopAdmissionStatus.Conflict, request);
+                    }
+
+                    var conflict = ClassifyCommittedOutcome(request, commit.Outcome);
+                    return conflict.Status == GovernedLoopAdmissionStatus.Conflict
+                        ? conflict
+                        : Result(GovernedLoopAdmissionStatus.Ambiguous, request);
                 case GovernedLoopAdmissionStoreCommitStatus.GenerationConflict:
                     if (commit.Outcome is not null || commit.StoreGeneration <= expectedGeneration)
                     {
@@ -404,6 +511,11 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                     }
 
                     var reread = await ReadStoreAsync(request, CancellationToken.None).ConfigureAwait(false);
+                    if (reread is null || reread.StoreGeneration < commit.StoreGeneration)
+                    {
+                        return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+                    }
+
                     var disposition = ClassifyRead(request, reread);
                     if (disposition is not null)
                     {
@@ -415,6 +527,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                             intentHash = GovernedLoopAdmissionContractHash.ComputeIntentHash(outcome.Intent);
                             expectedGeneration = reread.StoreGeneration;
                             committedStatus = GovernedLoopAdmissionStatus.Replayed;
+                            honorCallerCancellation = false;
                             continue;
                         }
 
@@ -424,28 +537,43 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                     expectedGeneration = reread!.StoreGeneration;
                     break;
                 case GovernedLoopAdmissionStoreCommitStatus.LimitExceeded:
-                    return commit.Outcome is null
+                    return commit.StoreGeneration == expectedGeneration && commit.Outcome is null
                         ? Result(GovernedLoopAdmissionStatus.LimitExceeded, request)
                         : Result(GovernedLoopAdmissionStatus.Ambiguous, request);
                 case GovernedLoopAdmissionStoreCommitStatus.Unavailable:
-                    return commit.Outcome is null
+                    return commit.StoreGeneration == expectedGeneration && commit.Outcome is null
                         ? Result(GovernedLoopAdmissionStatus.Unavailable, request)
                         : Result(GovernedLoopAdmissionStatus.Ambiguous, request);
                 case GovernedLoopAdmissionStoreCommitStatus.Ambiguous:
                 default:
-                    return await RecoverUncertainCommitAsync(request, outcome, remainingRecoveryFinalizations).ConfigureAwait(false);
+                    return await RecoverUncertainCommitAsync(
+                        request,
+                        expectedGeneration,
+                        remainingCommitAttempts,
+                        allowSameRecoverableGeneration: committedStatus == GovernedLoopAdmissionStatus.Replayed,
+                        remainingRecoveryFinalizations).ConfigureAwait(false);
             }
         }
 
-        return Result(GovernedLoopAdmissionStatus.Conflict, request);
+        return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
     }
 
     private async Task<GovernedLoopAdmissionResult> RecoverUncertainCommitAsync(
         GovernedLoopAdmissionRequest request,
-        GovernedLoopAdmissionTerminalOutcome proposed,
+        long minimumStoreGeneration,
+        int remainingCommitAttempts,
+        bool allowSameRecoverableGeneration,
         int remainingRecoveryFinalizations)
     {
         var read = await ReadStoreAsync(request, CancellationToken.None).ConfigureAwait(false);
+        if (read is null
+            || read.StoreGeneration < minimumStoreGeneration
+            || read.StoreGeneration == minimumStoreGeneration
+                && (read.Status != GovernedLoopAdmissionStoreReadStatus.Recoverable || !allowSameRecoverableGeneration))
+        {
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+        }
+
         var disposition = ClassifyRead(request, read);
         if (disposition is null)
         {
@@ -455,7 +583,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         if (read?.Status == GovernedLoopAdmissionStoreReadStatus.Recoverable
             && disposition.Status == GovernedLoopAdmissionStatus.Replayed
             && read.Outcome is not null
-            && SameOutcome(read.Outcome, proposed)
+            && remainingCommitAttempts > 0
             && remainingRecoveryFinalizations > 0)
         {
             return await CommitOutcomeAsync(
@@ -465,6 +593,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                 GovernedLoopAdmissionStatus.Replayed,
                 honorCallerCancellation: false,
                 cancellationToken: CancellationToken.None,
+                remainingCommitAttempts: remainingCommitAttempts,
                 remainingRecoveryFinalizations: remainingRecoveryFinalizations - 1).ConfigureAwait(false);
         }
 
@@ -636,27 +765,38 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
             _ => Result(GovernedLoopAdmissionStatus.Ambiguous, request),
         };
 
-    private GovernedLoopAdmissionResult MapRoleFailure(
+    private async Task<GovernedLoopAdmissionResult> MapRoleFailureAsync(
         GovernedLoopAdmissionRequest request,
         GovernedLoopAdmissionIntent intent,
         AuthorityGrantRoleResolution role,
-        long storeGeneration)
+        long storeGeneration,
+        CancellationToken cancellationToken)
     {
-        var code = role.Status switch
+        var code = (role.Status, role.SourceStatus) switch
         {
-            AuthorityGrantDependencyStatus.Stale => GovernedLoopAdmissionFailureCode.RoleReplaced,
-            AuthorityGrantDependencyStatus.NotFound => GovernedLoopAdmissionFailureCode.RoleNotFound,
-            AuthorityGrantDependencyStatus.Disabled when role.SourceStatus == ContextualRoleInstructionSourceProbeStatus.WorkspaceMismatch => GovernedLoopAdmissionFailureCode.RoleWorkspaceMismatch,
-            AuthorityGrantDependencyStatus.Disabled when role.SourceStatus is ContextualRoleInstructionSourceProbeStatus.Missing
-                or ContextualRoleInstructionSourceProbeStatus.Unsupported
-                or ContextualRoleInstructionSourceProbeStatus.Oversized
-                or ContextualRoleInstructionSourceProbeStatus.Substituted => GovernedLoopAdmissionFailureCode.RoleSourceMismatch,
-            AuthorityGrantDependencyStatus.Disabled or AuthorityGrantDependencyStatus.Expired => GovernedLoopAdmissionFailureCode.RoleInactive,
+            (AuthorityGrantDependencyStatus.NotFound, ContextualRoleInstructionSourceProbeStatus.Missing)
+                when HasExactMissingRoleSourceProof(role, intent.Role)
+                => GovernedLoopAdmissionFailureCode.RoleSourceMismatch,
+            (AuthorityGrantDependencyStatus.Disabled, ContextualRoleInstructionSourceProbeStatus.WorkspaceMismatch)
+                when HasExactRoleWorkspaceMismatchProof(role, intent.Role)
+                => GovernedLoopAdmissionFailureCode.RoleWorkspaceMismatch,
+            (AuthorityGrantDependencyStatus.Disabled, ContextualRoleInstructionSourceProbeStatus.Ineligible)
+                when HasExactInactiveRoleProof(role, intent.Role)
+                => GovernedLoopAdmissionFailureCode.RoleInactive,
+            (AuthorityGrantDependencyStatus.Stale, _) when HasExactReplacedRoleProof(role, intent.Role)
+                => GovernedLoopAdmissionFailureCode.RoleReplaced,
+            (AuthorityGrantDependencyStatus.NotFound, ContextualRoleInstructionSourceProbeStatus.Unknown)
+                when HasExactAbsentRoleProof(role, intent.Role) => GovernedLoopAdmissionFailureCode.RoleNotFound,
             _ => GovernedLoopAdmissionFailureCode.None,
         };
         if (code != GovernedLoopAdmissionFailureCode.None)
         {
-            return DefinitiveFailure(request, intent, code, storeGeneration);
+            return await CommitDefinitiveFailureAsync(
+                request,
+                intent,
+                code,
+                storeGeneration,
+                cancellationToken).ConfigureAwait(false);
         }
 
         return role.Status == AuthorityGrantDependencyStatus.Unavailable
@@ -664,28 +804,32 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
             : Result(GovernedLoopAdmissionStatus.Ambiguous, request);
     }
 
-    private GovernedLoopAdmissionResult MapGrantFailure(
+    private async Task<GovernedLoopAdmissionResult> MapGrantFailureAsync(
         GovernedLoopAdmissionRequest request,
         GovernedLoopAdmissionIntent intent,
-        AuthorityGrantResolutionStatus status,
-        long storeGeneration)
+        AuthorityGrantResolution resolution,
+        long storeGeneration,
+        CancellationToken cancellationToken)
     {
-        var code = status switch
+        var code = resolution.Status switch
         {
             AuthorityGrantResolutionStatus.NotEffective or AuthorityGrantResolutionStatus.Suspended or AuthorityGrantResolutionStatus.Revoked or AuthorityGrantResolutionStatus.Expired
-                => GovernedLoopAdmissionFailureCode.GrantInactive,
+                when HasExactInactiveGrantProof(resolution, request.AuthorityGrant) => GovernedLoopAdmissionFailureCode.GrantInactive,
             AuthorityGrantResolutionStatus.Stale or AuthorityGrantResolutionStatus.NotFound
-                => GovernedLoopAdmissionFailureCode.GrantMismatch,
-            AuthorityGrantResolutionStatus.CeilingExceeded
-                => GovernedLoopAdmissionFailureCode.AuthorityDenied,
+                when HasExactGrantMismatchProof(resolution, request.AuthorityGrant) => GovernedLoopAdmissionFailureCode.GrantMismatch,
             _ => GovernedLoopAdmissionFailureCode.None,
         };
         if (code != GovernedLoopAdmissionFailureCode.None)
         {
-            return DefinitiveFailure(request, intent, code, storeGeneration);
+            return await CommitDefinitiveFailureAsync(
+                request,
+                intent,
+                code,
+                storeGeneration,
+                cancellationToken).ConfigureAwait(false);
         }
 
-        return status is AuthorityGrantResolutionStatus.Unavailable
+        return resolution.Status is AuthorityGrantResolutionStatus.Unavailable
             or AuthorityGrantResolutionStatus.ProfileUnavailable
             or AuthorityGrantResolutionStatus.RoleUnavailable
             or AuthorityGrantResolutionStatus.LoopUnavailable
@@ -693,33 +837,293 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
             : Result(GovernedLoopAdmissionStatus.Ambiguous, request);
     }
 
-    private static GovernedLoopAdmissionResult DefinitiveFailure(
+    private async Task<GovernedLoopAdmissionResult> CommitCapabilityFailureAsync(
+        GovernedLoopAdmissionRequest request,
+        GovernedLoopAdmissionIntent intent,
+        CapabilityDependencyManifest requirements,
+        string requirementsHash,
+        AuthorityCeiling effectiveAuthority,
+        long storeGeneration,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!TryGetTrustedUtcNow(out var rejectedAtUtc))
+        {
+            return Result(GovernedLoopAdmissionStatus.Unavailable, request);
+        }
+
+        var violations = requirements.Required
+            .Where(dependency => !effectiveAuthority.Capabilities.Any(identity =>
+                identity.Id.Equals(dependency.CapabilityId)
+                && dependency.CompatibleVersionRange.Contains(identity.Version)))
+            .OrderBy(dependency => dependency.CapabilityId.Value, StringComparer.Ordinal)
+            .ThenBy(dependency => dependency.CompatibleVersionRange.Value, StringComparer.Ordinal)
+            .Select(dependency => new GovernedLoopAdmissionCapabilityDenialViolation(
+                dependency.CapabilityId,
+                dependency.CompatibleVersionRange,
+                GovernedLoopAdmissionCapabilityDenialReason.RequiredCapabilityOutsideEffectiveAuthority))
+            .ToArray();
+        if (violations.Length == 0)
+        {
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+        }
+
+        var proof = new GovernedLoopAdmissionCapabilityDenialProof(
+            GovernedLoopAdmissionCapabilityDenialProof.CurrentSchemaVersion,
+            requirements,
+            requirementsHash,
+            effectiveAuthority,
+            violations,
+            rejectedAtUtc);
+        return await CommitDefinitiveFailureAtAsync(
+            request,
+            intent,
+            GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied,
+            authorityDenial: null,
+            capabilityDenial: proof,
+            rejectedAtUtc,
+            storeGeneration,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<GovernedLoopAdmissionResult> CommitDefinitiveFailureAsync(
         GovernedLoopAdmissionRequest request,
         GovernedLoopAdmissionIntent intent,
         GovernedLoopAdmissionFailureCode failureCode,
-        long storeGeneration)
+        long storeGeneration,
+        CancellationToken cancellationToken)
     {
-        _ = intent;
-        _ = failureCode;
-        _ = storeGeneration;
-        return Result(GovernedLoopAdmissionStatus.Unavailable, request);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!TryGetTrustedUtcNow(out var rejectedAtUtc))
+        {
+            return Result(GovernedLoopAdmissionStatus.Unavailable, request);
+        }
+
+        return await CommitDefinitiveFailureAtAsync(
+            request,
+            intent,
+            failureCode,
+            authorityDenial: null,
+            capabilityDenial: null,
+            rejectedAtUtc,
+            storeGeneration,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<GovernedLoopAdmissionResult> CommitDefinitiveFailureAtAsync(
+        GovernedLoopAdmissionRequest request,
+        GovernedLoopAdmissionIntent intent,
+        GovernedLoopAdmissionFailureCode failureCode,
+        GovernedLoopAdmissionAuthorityDenialProof? authorityDenial,
+        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial,
+        DateTimeOffset rejectedAtUtc,
+        long storeGeneration,
+        CancellationToken cancellationToken)
+    {
+        GovernedLoopAdmissionTerminalOutcome outcome;
+        try
+        {
+            var references = GovernedLoopAdmissionContractHash.CreateRejectionEvidenceReferences(
+                intent,
+                failureCode,
+                authorityDenial,
+                capabilityDenial);
+            var rejection = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionRejection(
+                GovernedLoopAdmissionRejection.CurrentSchemaVersion,
+                intent,
+                failureCode,
+                authorityDenial,
+                capabilityDenial,
+                references,
+                rejectedAtUtc,
+                string.Empty));
+            outcome = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionTerminalOutcome(
+                GovernedLoopAdmissionTerminalOutcome.CurrentSchemaVersion,
+                intent,
+                GovernedLoopAdmissionDisposition.Rejected,
+                null,
+                rejection,
+                rejectedAtUtc,
+                string.Empty));
+        }
+        catch (ArgumentException)
+        {
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+        }
+
+        if (!IsValidTerminalOutcome(outcome))
+        {
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+        }
+
+        return await CommitOutcomeAsync(
+            request,
+            outcome,
+            storeGeneration,
+            GovernedLoopAdmissionStatus.Rejected,
+            honorCallerCancellation: true,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    private bool HasExactRoleFailureProof(AuthorityGrantRoleResolution role, ContextualRoleRevisionPin pin)
+    {
+        try
+        {
+            return Equals(role.RequestedPin, pin)
+                && role.Revision is not null
+                && ContextualRoleRevisionValidator.Validate(role.Revision).IsValid
+                && Equals(role.Revision.Identity, pin.Identity)
+                && string.Equals(role.Revision.ContentHash, pin.ContentHash, StringComparison.Ordinal)
+                && role.Lifecycle is not null
+                && role.Lifecycle.SchemaVersion == 1
+                && string.Equals(role.Lifecycle.RoleId, pin.Identity.RoleId, StringComparison.Ordinal)
+                && ContextualRoleId.IsValid(role.Lifecycle.LastOperationId)
+                && Enum.IsDefined(role.Lifecycle.LastMutationKind)
+                && role.Lifecycle.LastMutationKind != ContextualRoleRevisionMutationKind.Unknown
+                && IsTrustedUtc(role.Lifecycle.UpdatedAtUtc)
+                && string.Equals(role.WorkspaceId, _workspaceId, StringComparison.Ordinal)
+                && IsSha256(role.EvidenceHash);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private bool HasExactMissingRoleSourceProof(AuthorityGrantRoleResolution role, ContextualRoleRevisionPin pin)
+        => HasExactRoleFailureProof(role, pin)
+            && role.Revision!.Status == ContextualRoleStatus.Published
+            && role.Revision.WorkspaceApplicability.AppliesTo(_workspaceId)
+            && role.Lifecycle!.State == ContextualRoleLifecycleState.Active
+            && Equals(role.Lifecycle.CurrentIdentity, pin.Identity);
+
+    private bool HasExactRoleWorkspaceMismatchProof(AuthorityGrantRoleResolution role, ContextualRoleRevisionPin pin)
+        => HasExactRoleFailureProof(role, pin)
+            && role.Revision!.Status == ContextualRoleStatus.Published
+            && !role.Revision.WorkspaceApplicability.AppliesTo(_workspaceId)
+            && role.Lifecycle!.State == ContextualRoleLifecycleState.Active
+            && Equals(role.Lifecycle.CurrentIdentity, pin.Identity);
+
+    private bool HasExactInactiveRoleProof(AuthorityGrantRoleResolution role, ContextualRoleRevisionPin pin)
+        => HasExactRoleFailureProof(role, pin)
+            && Equals(role.Lifecycle!.CurrentIdentity, pin.Identity)
+            && (role.Revision!.Status != ContextualRoleStatus.Published
+                || role.Lifecycle.State != ContextualRoleLifecycleState.Active);
+
+    private bool HasExactReplacedRoleProof(AuthorityGrantRoleResolution role, ContextualRoleRevisionPin pin)
+        => HasExactRoleFailureProof(role, pin)
+            && !Equals(role.Lifecycle!.CurrentIdentity, pin.Identity);
+
+    private bool HasExactAbsentRoleProof(AuthorityGrantRoleResolution role, ContextualRoleRevisionPin pin)
+        => Equals(role.RequestedPin, pin)
+            && role.Revision is null
+            && role.Lifecycle is null
+            && string.Equals(role.WorkspaceId, _workspaceId, StringComparison.Ordinal)
+            && string.IsNullOrEmpty(role.EvidenceHash);
+
+    private static bool HasExactInactiveGrantProof(AuthorityGrantResolution resolution, AuthorityGrantReference reference)
+    {
+        if (!HasExactGrantRecord(resolution, reference)
+            || !HasCanonicalEmptyAuthority(resolution.EffectiveCeiling)
+            || !string.IsNullOrEmpty(resolution.DependencyEvidenceHash)
+            || !IsTrustedUtc(resolution.EvaluatedAtUtc)
+            || resolution.Grant!.RecordedAtUtc > resolution.EvaluatedAtUtc)
+        {
+            return false;
+        }
+
+        var grant = resolution.Grant;
+        return resolution.Status switch
+        {
+            AuthorityGrantResolutionStatus.NotEffective => grant.Status == AuthorityGrantLifecycleStatus.Active
+                && resolution.EvaluatedAtUtc < grant.Boundary.EffectiveAtUtc,
+            AuthorityGrantResolutionStatus.Suspended => grant.Status == AuthorityGrantLifecycleStatus.Suspended,
+            AuthorityGrantResolutionStatus.Revoked => grant.Status == AuthorityGrantLifecycleStatus.Revoked,
+            AuthorityGrantResolutionStatus.Expired => grant.Status == AuthorityGrantLifecycleStatus.Expired
+                || grant.Boundary.ExpiresAtUtc is { } expiry && expiry <= resolution.EvaluatedAtUtc,
+            _ => false,
+        };
+    }
+
+    private static bool HasExactGrantMismatchProof(AuthorityGrantResolution resolution, AuthorityGrantReference reference)
+    {
+        if (!Equals(resolution.RequestedReference, reference)
+            || !HasCanonicalEmptyAuthority(resolution.EffectiveCeiling)
+            || !string.IsNullOrEmpty(resolution.DependencyEvidenceHash))
+        {
+            return false;
+        }
+
+        return resolution.Status switch
+        {
+            AuthorityGrantResolutionStatus.NotFound => resolution.Grant is null && resolution.EvaluatedAtUtc == default,
+            AuthorityGrantResolutionStatus.Stale => resolution.EvaluatedAtUtc == default && HasExactGrantRecord(resolution, reference),
+            _ => false,
+        };
+    }
+
+    private static bool HasExactGrantRecord(AuthorityGrantResolution resolution, AuthorityGrantReference reference)
+    {
+        try
+        {
+            return Equals(resolution.RequestedReference, reference)
+                && resolution.Grant is { } grant
+                && AuthorityGrantHash.Matches(grant)
+                && Equals(grant.GrantId, reference.GrantId)
+                && Equals(grant.Revision, reference.Revision)
+                && string.Equals(grant.ContentHash, reference.ContentHash, StringComparison.Ordinal);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static bool HasCanonicalEmptyAuthority(AuthorityCeiling ceiling)
+    {
+        try
+        {
+            return AuthorityProfileValidator.ValidateCeiling(ceiling).IsValid
+                && AuthorityCeilingSubset.IsEqual(ceiling, AuthorityCeilingIntersection.EmptyCeiling());
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     private static bool IsValidRequest(GovernedLoopAdmissionRequest? request)
     {
-        return request is not null
-            && request.SchemaVersion == GovernedLoopAdmissionRequest.CurrentSchemaVersion
-            && IsToken(request.OperationId, GovernedLoopAdmissionLimits.MaxIdentifierCharacters)
-            && IsSha256(request.InvocationPayloadHash)
-            && GovernedLoopAdmissionRequestHash.Matches(request)
-            && GovernedLoopRevisionContractValidator.Validate(request.Publication).IsValid
-            && request.AuthorityGrant?.GrantId is not null
-            && request.AuthorityGrant.Revision is not null
-            && IsOciSha256(request.AuthorityGrant.ContentHash)
-            && request.ActorId is not null
-            && AuthorityActorId.TryParse(request.ActorId.Value, out var actor, out _)
-            && request.ActorId.Equals(actor)
-            && IsToken(request.Surface, GovernedLoopAdmissionLimits.MaxSurfaceCharacters);
+        if (request is null
+            || request.SchemaVersion != GovernedLoopAdmissionRequest.CurrentSchemaVersion
+            || !IsToken(request.OperationId, GovernedLoopAdmissionLimits.MaxIdentifierCharacters)
+            || !IsSha256(request.InvocationPayloadHash)
+            || !IsSha256(request.RequestHash)
+            || !IsToken(request.Surface, GovernedLoopAdmissionLimits.MaxSurfaceCharacters))
+        {
+            return false;
+        }
+
+        try
+        {
+            return GovernedLoopRevisionContractValidator.Validate(request.Publication).IsValid
+                && request.AuthorityGrant?.GrantId is not null
+                && AuthorityGrantId.TryParse(request.AuthorityGrant.GrantId.Value, out _, out _)
+                && request.AuthorityGrant.Revision is not null
+                && AuthorityGrantRevision.TryParse(
+                    request.AuthorityGrant.Revision.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    out _,
+                    out _)
+                && IsOciSha256(request.AuthorityGrant.ContentHash)
+                && request.ActorId is not null
+                && AuthorityActorId.TryParse(request.ActorId.Value, out var actor, out _)
+                && request.ActorId.Equals(actor)
+                && GovernedLoopAdmissionRequestHash.Matches(request);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     private static bool TryValidateArtifact(
@@ -779,48 +1183,58 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
 
     private bool IsExactActiveRole(AuthorityGrantRoleResolution role, ContextualRoleRevisionPin pin)
     {
-        return Equals(role.RequestedPin, pin)
-            && role.Revision is not null
-            && ContextualRoleRevisionValidator.Validate(role.Revision).IsValid
-            && Equals(role.Revision.Identity, pin.Identity)
-            && string.Equals(role.Revision.ContentHash, pin.ContentHash, StringComparison.Ordinal)
-            && role.Revision.Status == ContextualRoleStatus.Published
-            && role.Revision.WorkspaceApplicability.AppliesTo(_workspaceId)
-            && role.Lifecycle is
-            {
-                SchemaVersion: 1,
-                State: ContextualRoleLifecycleState.Active,
-                CurrentIdentity: not null,
-            }
-            && Equals(role.Lifecycle.CurrentIdentity, pin.Identity)
-            && string.Equals(role.Lifecycle.RoleId, pin.Identity.RoleId, StringComparison.Ordinal)
-            && ContextualRoleId.IsValid(role.Lifecycle.LastOperationId)
-            && Enum.IsDefined(role.Lifecycle.LastMutationKind)
-            && role.Lifecycle.LastMutationKind != ContextualRoleRevisionMutationKind.Unknown
-            && IsTrustedUtc(role.Lifecycle.UpdatedAtUtc)
-            && string.Equals(role.WorkspaceId, _workspaceId, StringComparison.Ordinal)
-            && role.SourceStatus == ContextualRoleInstructionSourceProbeStatus.Ready
-            && IsSha256(role.EvidenceHash);
+        try
+        {
+            return Equals(role.RequestedPin, pin)
+                && role.Revision is not null
+                && ContextualRoleRevisionValidator.Validate(role.Revision).IsValid
+                && Equals(role.Revision.Identity, pin.Identity)
+                && string.Equals(role.Revision.ContentHash, pin.ContentHash, StringComparison.Ordinal)
+                && role.Revision.Status == ContextualRoleStatus.Published
+                && role.Revision.WorkspaceApplicability.AppliesTo(_workspaceId)
+                && role.Lifecycle is
+                {
+                    SchemaVersion: 1,
+                    State: ContextualRoleLifecycleState.Active,
+                    CurrentIdentity: not null,
+                }
+                && Equals(role.Lifecycle.CurrentIdentity, pin.Identity)
+                && string.Equals(role.Lifecycle.RoleId, pin.Identity.RoleId, StringComparison.Ordinal)
+                && ContextualRoleId.IsValid(role.Lifecycle.LastOperationId)
+                && Enum.IsDefined(role.Lifecycle.LastMutationKind)
+                && role.Lifecycle.LastMutationKind != ContextualRoleRevisionMutationKind.Unknown
+                && IsTrustedUtc(role.Lifecycle.UpdatedAtUtc)
+                && string.Equals(role.WorkspaceId, _workspaceId, StringComparison.Ordinal)
+                && role.SourceStatus == ContextualRoleInstructionSourceProbeStatus.Ready
+                && IsSha256(role.EvidenceHash);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     private static bool IsExactActiveGrant(
         AuthorityGrantResolution resolution,
-        AuthorityGrantReference reference,
-        ContextualRoleRevisionPin role,
-        GovernedLoopRevisionPublicationPin publication)
+        AuthorityGrantReference reference)
     {
-        return Equals(resolution.RequestedReference, reference)
-            && resolution.Grant is { Status: AuthorityGrantLifecycleStatus.Active } grant
-            && AuthorityGrantHash.Matches(grant)
-            && Equals(grant.GrantId, reference.GrantId)
-            && Equals(grant.Revision, reference.Revision)
-            && string.Equals(grant.ContentHash, reference.ContentHash, StringComparison.Ordinal)
-            && Equals(grant.Binding.Role, role)
-            && Equals(grant.Binding.Loop, publication)
-            && AuthorityProfileValidator.ValidateCeiling(resolution.EffectiveCeiling).IsValid
-            && AuthorityCeilingSubset.IsEqual(resolution.EffectiveCeiling, grant.RequestedCeiling)
-            && IsSha256(resolution.DependencyEvidenceHash)
-            && IsTrustedUtc(resolution.EvaluatedAtUtc);
+        try
+        {
+            return Equals(resolution.RequestedReference, reference)
+                && resolution.Grant is { Status: AuthorityGrantLifecycleStatus.Active } grant
+                && AuthorityGrantHash.Matches(grant)
+                && Equals(grant.GrantId, reference.GrantId)
+                && Equals(grant.Revision, reference.Revision)
+                && string.Equals(grant.ContentHash, reference.ContentHash, StringComparison.Ordinal)
+                && AuthorityProfileValidator.ValidateCeiling(resolution.EffectiveCeiling).IsValid
+                && AuthorityCeilingSubset.IsEqual(resolution.EffectiveCeiling, grant.RequestedCeiling)
+                && IsSha256(resolution.DependencyEvidenceHash)
+                && IsTrustedUtc(resolution.EvaluatedAtUtc);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     private static bool TryBuildCapabilityManifest(
@@ -967,7 +1381,11 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         GovernedLoopAdmissionStatus status,
         GovernedLoopAdmissionRequest? request,
         GovernedLoopAdmissionTerminalOutcome? outcome = null)
-        => new(status, request?.OperationId ?? string.Empty, request?.RequestHash ?? string.Empty, outcome);
+        => new(
+            status,
+            IsToken(request?.OperationId, GovernedLoopAdmissionLimits.MaxIdentifierCharacters) ? request!.OperationId : string.Empty,
+            status != GovernedLoopAdmissionStatus.Invalid && IsSha256(request?.RequestHash) ? request!.RequestHash : string.Empty,
+            outcome);
 
     private static GovernedLoopGrantBindingResolution EmptyBinding(AuthorityGrantDependencyStatus status)
         => new(status, null, null, null, [], string.Empty);

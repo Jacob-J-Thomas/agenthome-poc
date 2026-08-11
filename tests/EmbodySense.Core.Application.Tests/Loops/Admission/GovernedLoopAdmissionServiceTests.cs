@@ -115,6 +115,8 @@ public sealed class GovernedLoopAdmissionServiceTests
             GovernedLoopAdmissionRejection.CurrentSchemaVersion,
             admitted.Intent,
             GovernedLoopAdmissionFailureCode.RoleInactive,
+            null,
+            null,
             [roleReference],
             admitted.RecordedAtUtc,
             string.Empty));
@@ -180,14 +182,37 @@ public sealed class GovernedLoopAdmissionServiceTests
         var harness = GovernedLoopAdmissionTestHarness.Create();
         var invalid = GovernedLoopAdmissionRequestHash.Apply(harness.Request with { SchemaVersion = 2 });
         var forged = harness.Request with { RequestHash = AuthorityGrantApplicationTestFixture.Hash64('9') };
+        var overlongOperation = harness.Request with
+        {
+            OperationId = new string('a', GovernedLoopAdmissionLimits.MaxIdentifierCharacters + 1),
+        };
+        var overlongSurface = harness.Request with
+        {
+            Surface = new string('a', GovernedLoopAdmissionLimits.MaxSurfaceCharacters + 1),
+        };
+        var malformedPublication = harness.Request with
+        {
+            Publication = harness.Publication with { PublicationOperationId = new string('a', 10_000) },
+        };
 
         var result = await harness.CreateService().AdmitAsync(invalid);
         var forgedResult = await harness.CreateService().AdmitAsync(forged);
+        var overlongOperationResult = await harness.CreateService().AdmitAsync(overlongOperation);
+        var overlongSurfaceResult = await harness.CreateService().AdmitAsync(overlongSurface);
+        var malformedPublicationResult = await harness.CreateService().AdmitAsync(malformedPublication);
         var absent = await harness.CreateService().AdmitAsync(null);
 
-        Assert.Equal(GovernedLoopAdmissionStatus.Invalid, result.Status);
-        Assert.Equal(GovernedLoopAdmissionStatus.Invalid, forgedResult.Status);
-        Assert.Equal(GovernedLoopAdmissionStatus.Invalid, absent.Status);
+        Assert.All(
+            new[] { result, forgedResult, overlongOperationResult, overlongSurfaceResult, malformedPublicationResult, absent },
+            item =>
+            {
+                Assert.Equal(GovernedLoopAdmissionStatus.Invalid, item.Status);
+                Assert.Empty(item.RequestHash);
+                Assert.Null(item.Outcome);
+            });
+        Assert.Empty(overlongOperationResult.OperationId);
+        Assert.Equal(harness.Request.OperationId, overlongSurfaceResult.OperationId);
+        Assert.Equal(harness.Request.OperationId, malformedPublicationResult.OperationId);
         Assert.Null(result.Outcome);
         Assert.Equal(0, harness.StoreReadCount);
         Assert.Equal(0, harness.FenceExecutionCount);
@@ -393,9 +418,9 @@ public sealed class GovernedLoopAdmissionServiceTests
 
         var result = await harness.CreateService().AdmitAsync(harness.Request);
 
-        Assert.Equal(GovernedLoopAdmissionStatus.Conflict, result.Status);
+        Assert.Equal(GovernedLoopAdmissionStatus.Ambiguous, result.Status);
         Assert.Null(result.Outcome);
-        Assert.InRange(harness.CommitCount, 1, 4);
+        Assert.Equal(3, harness.CommitCount);
         Assert.Equal(1, harness.FenceExecutionCount);
     }
 
