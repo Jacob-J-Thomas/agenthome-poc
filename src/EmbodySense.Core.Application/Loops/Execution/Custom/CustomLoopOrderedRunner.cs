@@ -6,11 +6,17 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
+using EmbodySense.Core.Application.Loops.Execution.Authority;
+using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Loops.Execution.Authority;
+using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Application.Capabilities;
@@ -1247,6 +1253,43 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 dispatchState.MarkProviderRequestStarted();
             });
         }
+        catch (GovernedLoopEffectAuthorityStoppedException exception)
+        {
+            var denied = IsDefinitiveAuthorityDeny(exception, run, sequentialNode);
+            return await RecordAttemptFailureAsync(
+                run,
+                actor,
+                step.Id,
+                iteration,
+                correlation,
+                assembly,
+                exception,
+                isExit: false,
+                providerWasInvoked: providerInvoked,
+                sequentialNode,
+                denied ? CustomLoopRunStatus.Failed : CustomLoopRunStatus.NeedsReview,
+                denied ? "effect_authority_denied" : "effect_authority_requires_review",
+                denied
+                    ? "The exact governed effect was durably denied without crossing its protected boundary."
+                    : "The governed effect stopped without a definitive denial or completed outcome and requires review.");
+        }
+        catch (ToolActuationReviewRequiredException exception)
+        {
+            return await RecordAttemptFailureAsync(
+                run,
+                actor,
+                step.Id,
+                iteration,
+                correlation,
+                assembly,
+                exception,
+                isExit: false,
+                providerWasInvoked: providerInvoked,
+                sequentialNode,
+                CustomLoopRunStatus.NeedsReview,
+                "tool_actuation_requires_review",
+                "Governed tool actuation stopped after approval because its authority outcome requires operator review.");
+        }
         catch (OperationCanceledException exception) when (!providerInvoked)
         {
             if (sequentialNode is not null)
@@ -1531,6 +1574,38 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 providerInvoked = true;
                 dispatchState.MarkProviderRequestStarted();
             });
+        }
+        catch (GovernedLoopEffectAuthorityStoppedException exception)
+        {
+            return await RecordAttemptFailureAsync(
+                run,
+                actor,
+                "exit",
+                iteration,
+                correlation,
+                assembly,
+                exception,
+                isExit: true,
+                providerWasInvoked: providerInvoked,
+                terminalStatusOverride: CustomLoopRunStatus.NeedsReview,
+                failureCodeOverride: "effect_authority_requires_review",
+                terminalDetailOverride: "The governed Exit effect stopped without a completed outcome and requires review.");
+        }
+        catch (ToolActuationReviewRequiredException exception)
+        {
+            return await RecordAttemptFailureAsync(
+                run,
+                actor,
+                "exit",
+                iteration,
+                correlation,
+                assembly,
+                exception,
+                isExit: true,
+                providerWasInvoked: providerInvoked,
+                terminalStatusOverride: CustomLoopRunStatus.NeedsReview,
+                failureCodeOverride: "tool_actuation_requires_review",
+                terminalDetailOverride: "Governed tool actuation stopped after approval because its authority outcome requires operator review.");
         }
         catch (OperationCanceledException) when (!providerInvoked)
         {
@@ -2151,8 +2226,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             terminalDetailOverride = CanonicalDurableCancellationDetail;
         }
 
-        var uncertain = providerWasInvoked && IsUncertainProviderFailure(exception);
-        var needsReview = providerWasInvoked && (isExit || uncertain);
+        var needsReviewOverride = terminalStatusOverride == CustomLoopRunStatus.NeedsReview;
+        var uncertain = needsReviewOverride || providerWasInvoked && IsUncertainProviderFailure(exception);
+        var needsReview = needsReviewOverride || providerWasInvoked && (isExit || uncertain);
         var detail = terminalDetailOverride ?? (!providerWasInvoked
             ? $"Provider setup failed before dispatch: {SafeExceptionClass(exception)}."
             : uncertain
@@ -2220,6 +2296,25 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         var terminal = await TerminateAsync(run, actor, status, code, detail);
         return new RunAdvance(terminal.Run, terminal);
+    }
+
+    private static bool IsDefinitiveAuthorityDeny(
+        GovernedLoopEffectAuthorityStoppedException exception,
+        CustomLoopRunRecord run,
+        SequentialNodeExecutionContext? sequentialNode)
+    {
+        var decision = exception.Decision;
+        return sequentialNode is not null
+            && exception.ExecutionStatus == GovernedLoopEffectAuthorityExecutionStatus.Decided
+            && exception.EvidenceStatus == GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended
+            && decision is not null
+            && decision.Disposition == GovernedLoopEffectAuthorityDisposition.Deny
+            && string.Equals(decision.RunId, run.Id, StringComparison.Ordinal)
+            && decision.ExecutionGeneration == sequentialNode.Binding.ExecutionBinding.ExecutionGeneration
+            && string.Equals(decision.AdmissionReceiptHash, sequentialNode.Binding.AdmissionReceiptHash, StringComparison.Ordinal)
+            && string.Equals(decision.NodeId, sequentialNode.Node.NodeId, StringComparison.Ordinal)
+            && decision.NodeAttempt == sequentialNode.Attempt
+            && GovernedLoopEffectAuthorityContractValidator.Validate(decision).IsValid;
     }
 
     private async Task<RunAdvance> RejectSequentialNodeBeforeProviderAsync(

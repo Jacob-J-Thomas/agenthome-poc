@@ -6,16 +6,22 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Application.Governance.Tools.Models;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Admission;
 using EmbodySense.Core.Application.Loops.Admission.Models;
+using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
+using EmbodySense.Core.Application.Loops.Execution.Authority;
+using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Tests.Loops.Admission;
+using EmbodySense.Core.Application.Tests.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Tests.Loops.Sequential;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
@@ -24,10 +30,13 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Authority;
+using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Revisions;
@@ -344,6 +353,93 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(0, result.Run.Checkpoint.NextStepIndex);
         Assert.Single(executor.Requests);
         Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview, evidence.Requests[^1].Disposition);
+    }
+
+    [Fact]
+    public async Task Canonical_effect_authority_denial_is_a_definitive_rejection_without_provider_dispatch()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var store = new FakeRunStore(context.Run);
+        var denial = DefinitiveEffectAuthorityDeny(context);
+        var inferenceNode = context.Plan.Nodes.Single(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference));
+        Assert.Equal(context.Run.Id, denial.Decision!.RunId);
+        Assert.Equal(context.Evidence.AdapterBinding.ExecutionBinding.ExecutionGeneration, denial.Decision.ExecutionGeneration);
+        Assert.Equal(inferenceNode.NodeId, denial.Decision.NodeId);
+        var executor = new QueueExecutor(denial)
+        {
+            MarkProviderRequestStarted = false,
+        };
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
+
+        Assert.Equal("effect_authority_denied", result.Run!.FailureCode);
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.False(result.ProviderWasInvoked);
+        Assert.Equal(0, result.Run.Checkpoint.NextStepIndex);
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Rejected, evidence.Requests[^1].Disposition);
+        Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            Disposition: CustomLoopSequentialNodeDisposition.Rejected,
+        });
+    }
+
+    [Fact]
+    public async Task Canonical_unresolved_effect_authority_requires_review_without_provider_dispatch()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var store = new FakeRunStore(context.Run);
+        var stopped = new GovernedLoopEffectAuthorityStoppedException(
+            "Current authority was unavailable.",
+            GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable,
+            GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown,
+            null);
+        var executor = new QueueExecutor(stopped)
+        {
+            MarkProviderRequestStarted = false,
+        };
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal("effect_authority_requires_review", result.Run!.FailureCode);
+        Assert.False(result.ProviderWasInvoked);
+        Assert.Equal(0, result.Run.Checkpoint.NextStepIndex);
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview, evidence.Requests[^1].Disposition);
+        Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            Disposition: CustomLoopSequentialNodeDisposition.NeedsReview,
+        });
+    }
+
+    [Fact]
+    public async Task Canonical_tool_actuation_review_is_retained_as_attention_after_provider_dispatch()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition(allowWorkspaceTools: true)));
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(new ToolActuationReviewRequiredException(
+            ToolActuationAuthorityDisposition.ReviewRequired,
+            "Authority changed after approval."));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal("tool_actuation_requires_review", result.Run!.FailureCode);
+        Assert.True(result.ProviderWasInvoked);
+        Assert.Equal(0, result.Run.Checkpoint.NextStepIndex);
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview, evidence.Requests[^1].Disposition);
+        Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            Disposition: CustomLoopSequentialNodeDisposition.NeedsReview,
+        });
     }
 
     [Fact]
@@ -3790,6 +3886,62 @@ public sealed class CustomLoopOrderedRunnerTests
     private static CustomLoopInferenceAttemptResult Result(string output, int toolCalls = 0)
     {
         return new CustomLoopInferenceAttemptResult(output, "provider", "model", $"response-{Guid.NewGuid():N}", toolCalls);
+    }
+
+    private static GovernedLoopEffectAuthorityStoppedException DefinitiveEffectAuthorityDeny(SequentialTestContext context)
+    {
+        var adapterBinding = context.Evidence.AdapterBinding;
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        var receipt = fixture.Request.AdmissionReceipt;
+        var inferenceNode = context.Plan.Nodes.Single(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference));
+        var grantBinding = new AuthorityGrantBinding(receipt.Evidence.GrantProfile, receipt.Intent.Role, receipt.Intent.Publication);
+        var admitted = new GovernedLoopEffectAuthorityProof(
+            GovernedLoopEffectAuthorityProof.CurrentSchemaVersion,
+            receipt.Intent.AuthorityGrant,
+            grantBinding,
+            AuthorityGrantLifecycleStatus.Active,
+            GovernedLoopEffectAuthorityGrantPosture.Active,
+            receipt.Evidence.GrantBoundary,
+            receipt.Evidence.EffectiveAuthority,
+            receipt.Evidence.CapabilityAdmission.Pins,
+            [],
+            receipt.Evidence.GrantDependencyEvidenceHash);
+        var current = new GovernedLoopEffectAuthorityProof(
+            admitted.SchemaVersion,
+            admitted.Grant,
+            admitted.Binding,
+            AuthorityGrantLifecycleStatus.Revoked,
+            GovernedLoopEffectAuthorityGrantPosture.Revoked,
+            admitted.Boundary,
+            admitted.Ceiling,
+            [],
+            [],
+            admitted.DependencyEvidenceHash);
+        var decision = GovernedLoopEffectAuthorityContractHash.Apply(new GovernedLoopEffectAuthorityDecision(
+            GovernedLoopEffectAuthorityDecision.CurrentSchemaVersion,
+            adapterBinding.ExecutionBinding.RunId,
+            adapterBinding.ExecutionBinding.ExecutionGeneration,
+            inferenceNode.NodeId,
+            1,
+            fixture.Request.EffectOperationId,
+            fixture.Request.CorrelationId,
+            GovernedLoopEffectBoundaryKind.ProviderTransport,
+            adapterBinding.AdmissionReceiptHash,
+            admitted,
+            current,
+            fixture.Request.RequiredAuthority,
+            AuthorityCeilingIntersection.EmptyCeiling(),
+            fixture.Request.RequiredCapabilityPins,
+            GovernedLoopEffectAuthorityDisposition.Deny,
+            GovernedLoopEffectAuthorityReason.GrantRevoked,
+            _now,
+            string.Empty));
+        Assert.True(GovernedLoopEffectAuthorityContractValidator.Validate(decision).IsValid);
+        return new GovernedLoopEffectAuthorityStoppedException(
+            "The exact governed effect was denied.",
+            GovernedLoopEffectAuthorityExecutionStatus.Decided,
+            GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
+            decision);
     }
 
     private static string Hash(string content)
