@@ -2140,6 +2140,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         run = refreshed.Run!;
+        if (sequentialNode is not null && !providerWasInvoked && run.Status == CustomLoopRunStatus.CancelRequested)
+        {
+            terminalStatusOverride = CustomLoopRunStatus.Cancelled;
+            failureCodeOverride = null;
+            terminalDetailOverride = CanonicalDurableCancellationDetail;
+        }
+
         var uncertain = providerWasInvoked && IsUncertainProviderFailure(exception);
         var needsReview = providerWasInvoked && (isExit || uncertain);
         var detail = terminalDetailOverride ?? (!providerWasInvoked
@@ -2202,6 +2209,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             ?? (terminalStatusOverride is not null
                 ? failureCodeOverride
                 : isExit ? "exit_attempt_failed" : uncertain ? "inference_attempt_uncertain" : "inference_attempt_failed");
+        if (status == CustomLoopRunStatus.Cancelled && sequentialNode is not null)
+        {
+            return await CompleteSequentialCancellationAsync(run, actor, detail);
+        }
+
         var terminal = await TerminateAsync(run, actor, status, code, detail);
         return new RunAdvance(terminal.Run, terminal);
     }
@@ -2279,8 +2291,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         if (terminalStatus == CustomLoopRunStatus.Cancelled)
         {
-            var cancelled = await CancelBeforeDispatchAsync(run, actor);
-            return new RunAdvance(cancelled.Run, cancelled);
+            return await CompleteSequentialCancellationAsync(run, actor, detail);
         }
 
         var terminal = await TerminateAsync(run, actor, terminalStatus, failureCode, detail);
@@ -2350,10 +2361,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return await PauseAtBoundaryAsync(run, actor);
         }
 
-        if (nextStatus == CustomLoopRunStatus.Cancelled && run.Status != CustomLoopRunStatus.CancelRequested)
+        if (nextStatus == CustomLoopRunStatus.Cancelled)
         {
-            var cancelled = await CancelBeforeDispatchAsync(run, actor);
-            return new RunAdvance(cancelled.Run, cancelled);
+            return await CompleteSequentialCancellationAsync(run, actor, detail);
         }
 
         var terminal = await TerminateAsync(run, actor, nextStatus, null, detail);
@@ -2485,10 +2495,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var cancelled = IsCanonicalCancellationRejection(rejection);
         if (cancelled)
         {
-            var cancellation = run.Status == CustomLoopRunStatus.CancelRequested
-                ? await TerminateAsync(run, actor, CustomLoopRunStatus.Cancelled, null, rejection.Detail)
-                : await CancelBeforeDispatchAsync(run, actor);
-            return new RunAdvance(cancellation.Run, cancellation);
+            return await CompleteSequentialCancellationAsync(run, actor, rejection.Detail);
         }
 
         var failureCode = string.Equals(rejection.Detail, CanonicalDeadlineRejectionDetail, StringComparison.Ordinal)
@@ -2519,10 +2526,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var cancelled = IsCanonicalCancellationRejection(rejection);
         if (cancelled)
         {
-            var cancellation = run.Status == CustomLoopRunStatus.CancelRequested
-                ? await TerminateAsync(run, actor, CustomLoopRunStatus.Cancelled, null, rejection.Detail)
-                : await CancelBeforeDispatchAsync(run, actor);
-            return new RunAdvance(cancellation.Run, cancellation);
+            return await CompleteSequentialCancellationAsync(run, actor, rejection.Detail);
         }
 
         var terminal = await TerminateAsync(
@@ -2537,6 +2541,18 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private static bool IsCanonicalCancellationRejection(CustomLoopRunEvent rejection)
         => string.Equals(rejection.Detail, CanonicalCallerCancellationDetail, StringComparison.Ordinal)
             || string.Equals(rejection.Detail, CanonicalDurableCancellationDetail, StringComparison.Ordinal);
+
+    private async Task<RunAdvance> CompleteSequentialCancellationAsync(CustomLoopRunRecord run, string actor, string detail)
+    {
+        if (run.Status == CustomLoopRunStatus.CancelRequested)
+        {
+            var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Cancelled, null, detail);
+            return new RunAdvance(terminal.Run, terminal);
+        }
+
+        var cancelled = await CancelBeforeDispatchAsync(run, actor);
+        return new RunAdvance(cancelled.Run, cancelled);
+    }
 
     private async Task<RunAdvance> ObserveControlBoundaryAsync(CustomLoopRunRecord run, string actor)
     {

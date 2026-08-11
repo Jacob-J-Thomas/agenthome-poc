@@ -826,6 +826,71 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Canonical_caller_cancellation_after_the_final_control_refresh_closes_rejected_evidence_without_provider_invocation()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("must not run"))
+        {
+            BeforeProviderRequestStarted = _ =>
+            {
+                cancellation.Cancel();
+                return Task.CompletedTask;
+            },
+        };
+        var publisher = new RecordingPublisher();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor, publisher), evidence, evidence);
+
+        var result = await adapter.RunAsync(
+            new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web),
+            cancellation.Token);
+
+        Assert.True(result.Status == CustomLoopOrderedRunStatus.Cancelled, result.Detail);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Single(executor.Requests);
+        Assert.Equal(0, executor.ProviderRequestStartedCount);
+        Assert.Empty(publisher.Requests);
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Rejected, evidence.Requests[^1].Disposition);
+        var rejection = Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection });
+        Assert.Contains("Caller cancellation rejected", rejection.Detail, StringComparison.Ordinal);
+        Assert.Single(evidence.AuditRequests);
+    }
+
+    [Fact]
+    public async Task Canonical_durable_cancel_after_the_final_control_refresh_closes_rejected_evidence_without_provider_invocation()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("must not run"));
+        var publisher = new RecordingPublisher();
+        var audit = new RecordingAuditLog();
+        var runner = Runner(store, executor, publisher, audit);
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
+        CustomLoopControlResult? cancel = null;
+        executor.BeforeProviderRequestStarted = async _ =>
+        {
+            cancel = await lifecycle.CancelAsync(new CustomLoopCancelRequest(store.Current.Id, store.Current.LifecycleVersion, "cancel-canonical-after-refresh", AuditSchema.Actors.Web));
+        };
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(runner, evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.CancelRequested, cancel!.Status);
+        Assert.True(result.Status == CustomLoopOrderedRunStatus.Cancelled, result.Detail);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Single(executor.Requests);
+        Assert.Equal(0, executor.ProviderRequestStartedCount);
+        Assert.Empty(publisher.Requests);
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Rejected, evidence.Requests[^1].Disposition);
+        var rejection = Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection });
+        Assert.Contains("Durable cancellation rejected", rejection.Detail, StringComparison.Ordinal);
+        Assert.Single(evidence.AuditRequests);
+    }
+
+    [Fact]
     public async Task Canonical_durable_cancel_at_the_final_dispatch_boundary_closes_rejected_evidence_without_provider_dispatch()
     {
         var context = await SequentialContextAsync(Run(SequentialDefinition()));
@@ -4106,15 +4171,26 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Func<CustomLoopInferenceAttemptRequest, Task>? AfterExecute { get; set; }
 
+        public Func<CustomLoopInferenceAttemptRequest, Task>? BeforeProviderRequestStarted { get; set; }
+
         public bool MarkProviderRequestStarted { get; set; } = true;
+
+        public int ProviderRequestStartedCount { get; private set; }
 
         public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
         {
             Requests.Add(request);
             cancellationToken.ThrowIfCancellationRequested();
+            if (BeforeProviderRequestStarted is not null)
+            {
+                await BeforeProviderRequestStarted(request);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
             if (MarkProviderRequestStarted)
             {
                 providerRequestStarted?.Invoke();
+                ProviderRequestStartedCount++;
             }
 
             if (BeforeExecute is not null)
