@@ -764,6 +764,96 @@ public sealed class CustomLoopOrderedRunnerTests
         => AssertRetainedPureRejectionCancellationChainAsync(includePause: true, includeTerminalWarning: true);
 
     [Fact]
+    public async Task Canonical_concurrent_pure_completion_checkpoint_and_cancel_terminal_is_adopted_once()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact(role));
+        var store = new FakeRunStore(context.Run);
+        string? concurrentCompletionId = null;
+        store.RawConflictSuccessorFactory = (current, candidate) =>
+        {
+            if (concurrentCompletionId is not null || !IsPureCompletion(candidate.Events[^1], "identity"))
+            {
+                return null;
+            }
+
+            concurrentCompletionId = candidate.Events[^1].EventId;
+            return CreateConcurrentPureCompletionCheckpointCancellation(context, current, candidate);
+        };
+        var executor = new QueueExecutor();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.NotNull(concurrentCompletionId);
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Empty(executor.Requests);
+        var completion = Assert.Single(result.Run.Events, item => IsPureCompletion(item, "identity"));
+        Assert.Equal(concurrentCompletionId, completion.EventId);
+        Assert.Single(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted && item.Sequence > completion.Sequence);
+        Assert.Equal(GovernedLoopFrontierStatus.Cancelled, result.Run.Frontier!.Payload.Status);
+        Assert.True(CustomLoopRunValidator.Validate(result.Run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(result.Run).Errors));
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public Task Canonical_concurrent_identical_pure_rejection_failed_terminal_is_replayed()
+        => AssertConcurrentPureRejectionTerminalAsync(CustomLoopRunStatus.Failed);
+
+    [Fact]
+    public Task Canonical_concurrent_identical_pure_rejection_cancelled_terminal_is_replayed()
+        => AssertConcurrentPureRejectionTerminalAsync(CustomLoopRunStatus.Cancelled);
+
+    [Fact]
+    public async Task Canonical_control_first_pause_then_concurrent_pure_completion_is_reconciled()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact(role));
+        var store = new FakeRunStore(context.Run);
+        string? concurrentCompletionId = null;
+        store.RawConflictSuccessorFactory = (current, candidate) =>
+        {
+            if (concurrentCompletionId is not null || !IsPureCompletion(candidate.Events[^1], "identity"))
+            {
+                return null;
+            }
+
+            var successor = CreateControlFirstPureCompletion(current, candidate);
+            concurrentCompletionId = successor.Events[^1].EventId;
+            return successor;
+        };
+        var executor = new QueueExecutor();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.NotNull(concurrentCompletionId);
+        Assert.Equal(CustomLoopOrderedRunStatus.Paused, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Paused, result.Run!.Status);
+        Assert.Empty(executor.Requests);
+        var completion = Assert.Single(result.Run.Events, item => IsPureCompletion(item, "identity"));
+        Assert.Equal(concurrentCompletionId, completion.EventId);
+        Assert.Single(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted && item.Sequence > completion.Sequence);
+        Assert.True(CustomLoopRunValidator.Validate(result.Run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(result.Run).Errors));
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
     public async Task Canonical_conversation_publication_supplies_exact_success_exit_proof_and_crosses_the_boundary_once()
     {
         var admitted = Run(
@@ -5612,6 +5702,210 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Empty(store.ValidationFailures);
     }
 
+    private static async Task AssertConcurrentPureRejectionTerminalAsync(CustomLoopRunStatus terminalStatus)
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact(role));
+        var store = new FakeRunStore(context.Run);
+        string? concurrentRejectionId = null;
+        store.RawConflictSuccessorFactory = (_, candidate) =>
+        {
+            if (concurrentRejectionId is not null || !IsPureRejection(candidate.Events[^1], "identity"))
+            {
+                return null;
+            }
+
+            concurrentRejectionId = candidate.Events[^1].EventId;
+            return terminalStatus == CustomLoopRunStatus.Failed
+                ? CreatePureFailedTerminal(candidate)
+                : CreatePureCancellationTerminalSuccessor(candidate, includePause: false, includeTerminalWarning: false);
+        };
+        var executor = new QueueExecutor();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(store, executor, timeProvider: new CanonicalPureDeadlineTimeProvider(_now, store)),
+            evidence,
+            evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.NotNull(concurrentRejectionId);
+        Assert.Equal(
+            terminalStatus == CustomLoopRunStatus.Failed ? CustomLoopOrderedRunStatus.Failed : CustomLoopOrderedRunStatus.Cancelled,
+            result.Status);
+        Assert.Equal(terminalStatus, result.Run!.Status);
+        Assert.Empty(executor.Requests);
+        var rejection = Assert.Single(result.Run.Events, item => IsPureRejection(item, "identity"));
+        Assert.Equal(concurrentRejectionId, rejection.EventId);
+        Assert.True(CustomLoopRunValidator.Validate(result.Run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(result.Run).Errors));
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    private static CustomLoopRunRecord CreateConcurrentPureCompletionCheckpointCancellation(
+        SequentialTestContext context,
+        CustomLoopRunRecord current,
+        CustomLoopRunRecord completed)
+    {
+        var completion = completed.Events[^1];
+        Assert.True(IsPureCompletion(completion, "identity"));
+        var completionValidation = CustomLoopRunValidator.ValidateUpdate(current, completed);
+        Assert.True(completionValidation.IsValid, string.Join(Environment.NewLine, completionValidation.Errors));
+        var node = context.Plan.Nodes.Single(item => string.Equals(item.NodeId, "identity", StringComparison.Ordinal));
+        var running = Assert.IsType<GovernedLoopFrontierPosture>(completed.Frontier).Payload.Nodes[^1];
+        var completedFrontier = GovernedLoopSequentialFrontierMachine.CompleteRunning(
+            completed.Frontier,
+            context.Anchor.AdapterBinding,
+            context.Plan,
+            node,
+            running.Attempt!.Value,
+            running.AttemptOperationId!,
+            completion.EventId,
+            completion.SequentialNodeEvidence!.OutcomeArtifactHash,
+            completion.TimestampUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, completedFrontier.Status);
+        Assert.True(GovernedLoopPureNodeOutcome.TryDeserialize(context.Artifact.Graph, completion.PureNodeOutcomeJson!, out var outcome, out var outcomeValidation));
+        Assert.True(outcomeValidation.IsValid, string.Join(Environment.NewLine, outcomeValidation.Errors));
+        var textOutput = Assert.Single(outcome!.Outputs, item => item.Value.Kind == GovernedLoopValueKind.Text && !item.Value.IsNull);
+        var text = Assert.IsType<string>(JsonSerializer.Deserialize<string>(textOutput.Value.CanonicalValueJson));
+        var retained = new CustomLoopRetainedOutput(
+            node.NodeId,
+            completed.Checkpoint.Iteration,
+            text,
+            CustomLoopTraceContentHash.Compute(text));
+        var checkpointEvent = new CustomLoopRunEvent(
+            completion.Sequence + 1,
+            "concurrent-pure-checkpoint",
+            completion.TimestampUtc,
+            CustomLoopRunEventKind.CheckpointCommitted,
+            completed.Checkpoint.Iteration,
+            null,
+            null,
+            "The concurrent worker committed the exact deterministic pure-node checkpoint.",
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+        var checkpointed = completed with
+        {
+            LifecycleVersion = completed.LifecycleVersion + 1,
+            Checkpoint = completed.Checkpoint with
+            {
+                EarlierRetainedOutputs = [.. completed.Checkpoint.EarlierRetainedOutputs, retained],
+                LastCommittedSequence = checkpointEvent.Sequence,
+            },
+            UpdatedAtUtc = checkpointEvent.TimestampUtc,
+            Events = [.. completed.Events, checkpointEvent],
+            Frontier = completedFrontier.Frontier,
+        };
+        var checkpointValidation = CustomLoopRunValidator.ValidateUpdate(completed, checkpointed);
+        Assert.True(checkpointValidation.IsValid, string.Join(Environment.NewLine, checkpointValidation.Errors));
+        return CreatePureCancellationTerminalSuccessor(checkpointed, includePause: false, includeTerminalWarning: false);
+    }
+
+    private static CustomLoopRunRecord CreateControlFirstPureCompletion(CustomLoopRunRecord current, CustomLoopRunRecord attemptedCompletion)
+    {
+        var pause = CreatePureControlSuccessor(
+            current,
+            CustomLoopRunStatus.PauseRequested,
+            "pause-before-concurrent-pure-completion",
+            "Pause was requested before the concurrent deterministic completion was retained.",
+            current.UpdatedAtUtc.AddSeconds(1));
+        var attempted = attemptedCompletion.Events[^1];
+        var resequenced = attempted with
+        {
+            Sequence = pause.Events[^1].Sequence + 1,
+            EventId = "concurrent-pure-completion-after-pause",
+            TimestampUtc = pause.UpdatedAtUtc.AddSeconds(1),
+            SequentialNodeEvidence = null,
+        };
+        var completion = WithSequentialEvidence(
+            resequenced,
+            pause.SequentialAdapterBinding!,
+            "identity",
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var successor = pause with
+        {
+            LifecycleVersion = pause.LifecycleVersion + 1,
+            UpdatedAtUtc = completion.TimestampUtc,
+            Events = [.. pause.Events, completion],
+        };
+        var validation = CustomLoopRunValidator.ValidateUpdate(pause, successor);
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+        return successor;
+    }
+
+    private static CustomLoopRunRecord CreatePureFailedTerminal(CustomLoopRunRecord rejected)
+    {
+        const string FailurePrefix = "canonical-pure-node-failure-code-v1:";
+        var rejection = rejected.Events[^1];
+        Assert.True(IsPureRejection(rejection, "identity"));
+        var separator = rejection.Detail.IndexOf('\n', StringComparison.Ordinal);
+        Assert.StartsWith(FailurePrefix, rejection.Detail, StringComparison.Ordinal);
+        Assert.True(separator > FailurePrefix.Length);
+        var failureCode = Encoding.UTF8.GetString(Convert.FromBase64String(rejection.Detail[FailurePrefix.Length..separator]));
+        var failureDetail = rejection.Detail[(separator + 1)..];
+        var terminalAt = rejection.TimestampUtc.AddSeconds(1);
+        var running = Assert.IsType<GovernedLoopFrontierPosture>(rejected.Frontier).Payload.Nodes[^1];
+        var failedFrontier = GovernedLoopSequentialFrontierMachine.FailCurrent(
+            rejected.Frontier,
+            rejected.SequentialAdapterBinding,
+            running.AttemptOperationId,
+            rejection.EventId,
+            rejection.SequentialNodeEvidence!.OutcomeArtifactHash,
+            terminalAt);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, failedFrontier.Status);
+        var terminalEvent = new CustomLoopRunEvent(
+            rejection.Sequence + 1,
+            "concurrent-pure-failed",
+            terminalAt,
+            CustomLoopRunEventKind.LifecycleChanged,
+            null,
+            null,
+            null,
+            failureDetail,
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+        var failed = rejected with
+        {
+            LifecycleVersion = rejected.LifecycleVersion + 1,
+            Status = CustomLoopRunStatus.Failed,
+            UpdatedAtUtc = terminalAt,
+            CompletedAtUtc = terminalAt,
+            ExecutionClock = StopPureTestClock(rejected.ExecutionClock, terminalAt),
+            Events = [.. rejected.Events, terminalEvent],
+            FinalOutput = null,
+            FailureCode = failureCode,
+            FailureDetail = failureDetail,
+            Frontier = failedFrontier.Frontier,
+        };
+        var validation = CustomLoopRunValidator.ValidateUpdate(rejected, failed);
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+        return failed;
+    }
+
     private static CustomLoopRunRecord CreatePureCancellationTerminalSuccessor(
         CustomLoopRunRecord current,
         bool includePause,
@@ -5634,6 +5928,11 @@ public sealed class CustomLoopOrderedRunnerTests
             "concurrent-cancel-requested",
             "Cancellation was requested after the deterministic rejection became durable.",
             predecessor.UpdatedAtUtc.AddSeconds(1));
+        return CreatePureCancelledTerminal(cancelRequested, includeTerminalWarning);
+    }
+
+    private static CustomLoopRunRecord CreatePureCancelledTerminal(CustomLoopRunRecord cancelRequested, bool includeTerminalWarning)
+    {
         var cancelledAt = cancelRequested.UpdatedAtUtc.AddSeconds(1);
         var cancelledEvent = new CustomLoopRunEvent(
             cancelRequested.Events[^1].Sequence + 1,
@@ -5660,19 +5959,13 @@ public sealed class CustomLoopOrderedRunnerTests
             cancelRequested.SequentialAdapterBinding,
             cancelledAt);
         Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, frontier.Status);
-        var accumulatedMilliseconds = cancelRequested.ExecutionClock.AccumulatedRunningMilliseconds;
-        if (cancelRequested.ExecutionClock.ActiveSinceUtc is { } activeSince)
-        {
-            accumulatedMilliseconds = checked(accumulatedMilliseconds + Math.Max(0, (long)(cancelledAt - activeSince).TotalMilliseconds));
-        }
-
         var cancelled = cancelRequested with
         {
             LifecycleVersion = cancelRequested.LifecycleVersion + 1,
             Status = CustomLoopRunStatus.Cancelled,
             UpdatedAtUtc = cancelledAt,
             CompletedAtUtc = cancelledAt,
-            ExecutionClock = new CustomLoopExecutionClock(Math.Min(accumulatedMilliseconds, CustomLoopLimits.MaxRunExecutionMilliseconds), null),
+            ExecutionClock = StopPureTestClock(cancelRequested.ExecutionClock, cancelledAt),
             Events = [.. cancelRequested.Events, cancelledEvent],
             FinalOutput = null,
             FailureCode = null,
@@ -5714,6 +6007,17 @@ public sealed class CustomLoopOrderedRunnerTests
             UpdatedAtUtc = warning.TimestampUtc,
             Events = [.. cancelled.Events, warning],
         };
+    }
+
+    private static CustomLoopExecutionClock StopPureTestClock(CustomLoopExecutionClock clock, DateTimeOffset stoppedAt)
+    {
+        var accumulatedMilliseconds = clock.AccumulatedRunningMilliseconds;
+        if (clock.ActiveSinceUtc is { } activeSince)
+        {
+            accumulatedMilliseconds = checked(accumulatedMilliseconds + Math.Max(0, (long)(stoppedAt - activeSince).TotalMilliseconds));
+        }
+
+        return new CustomLoopExecutionClock(Math.Min(accumulatedMilliseconds, CustomLoopLimits.MaxRunExecutionMilliseconds), null);
     }
 
     private static CustomLoopRunRecord CreatePureControlSuccessor(
