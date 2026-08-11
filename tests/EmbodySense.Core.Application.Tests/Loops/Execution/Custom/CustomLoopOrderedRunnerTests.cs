@@ -1441,6 +1441,42 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Canonical_paused_review_blocked_frontier_cancels_without_provider_or_attempt_retry()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("must not run"));
+        var audit = new RecordingAuditLog();
+        var runner = Runner(store, executor, audit: audit);
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(runner, evidence, evidence);
+        audit.AfterAppend = async auditEvent =>
+        {
+            if (auditEvent.Action == AuditSchema.Actions.LoopNodeAttempt && auditEvent.Outcome == AuditSchema.Outcomes.Started)
+            {
+                _ = await lifecycle.PauseAsync(new CustomLoopPauseRequest(store.Current.Id, store.Current.LifecycleVersion, "pause-canonical-before-cancel", AuditSchema.Actors.Web));
+            }
+        };
+
+        var paused = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
+        var cancelled = await lifecycle.CancelAsync(new CustomLoopCancelRequest(
+            paused.Run!.Id,
+            paused.Run.LifecycleVersion,
+            "cancel-canonical-paused-run",
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Paused, paused.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, paused.Run.Frontier!.Payload.Status);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, cancelled.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, cancelled.Run!.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Cancelled, cancelled.Run.Frontier!.Payload.Status);
+        Assert.Empty(executor.Requests);
+        Assert.DoesNotContain(cancelled.Run.Events, item => item.Attempt == 2);
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
     public async Task Canonical_pause_boundary_audit_failure_from_ready_frontier_parks_review_without_provider_dispatch()
     {
         var context = await SequentialContextAsync(Run(SequentialDefinition()));
