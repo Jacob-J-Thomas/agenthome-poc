@@ -44,38 +44,55 @@ public sealed class CustomLoopFrontierStoreTests
             CustomLoopRunArtifactSerializer.Serialize(hydrated));
         Assert.Equal(frontier.Payload.ContentHash, hydratedFrontier.Payload.ContentHash);
         Assert.True(GovernedLoopFrontierContractHash.Matches(hydratedFrontier));
-        Assert.All(hydratedFrontier.Payload.Nodes, node =>
-        {
-            Assert.Equal(node.PlanOrdinal, node.ActivationOrdinal);
-            Assert.Equal(1, node.VisitOrdinal);
-            Assert.Null(node.CycleId);
-            Assert.Null(node.CycleIteration);
-            Assert.Null(node.ControlOutcome);
-            Assert.Empty(node.SelectedControlEdgeIds);
-            Assert.Empty(node.SkippedControlEdgeIds);
-            Assert.Empty(node.JoinArrivals);
-        });
+        Assert.Collection(
+            hydratedFrontier.Payload.Nodes,
+            trigger =>
+            {
+                Assert.Equal(trigger.PlanOrdinal, trigger.ActivationOrdinal);
+                Assert.Equal(1, trigger.VisitOrdinal);
+                Assert.Null(trigger.CycleId);
+                Assert.Null(trigger.CycleIteration);
+                Assert.Equal(GovernedLoopControlCondition.Always, trigger.ControlOutcome);
+                Assert.Equal(trigger.OutgoingControlEdgeIds, trigger.SelectedControlEdgeIds);
+                Assert.Empty(trigger.SkippedControlEdgeIds);
+                Assert.Empty(trigger.JoinArrivals);
+                Assert.Equal(hydrated.Events[0].EventId, trigger.OutcomeEvidenceId);
+                Assert.Equal(hydrated.Events[0].SequentialNodeEvidence!.OutcomeArtifactHash, trigger.OutcomeEvidenceHash);
+            },
+            inference =>
+            {
+                Assert.Equal(inference.PlanOrdinal, inference.ActivationOrdinal);
+                Assert.Equal(1, inference.VisitOrdinal);
+                Assert.Null(inference.CycleId);
+                Assert.Null(inference.CycleIteration);
+                Assert.Null(inference.ControlOutcome);
+                Assert.Empty(inference.SelectedControlEdgeIds);
+                Assert.Empty(inference.SkippedControlEdgeIds);
+                Assert.Empty(inference.JoinArrivals);
+                Assert.Null(inference.OutcomeEvidenceId);
+                Assert.Null(inference.OutcomeEvidenceHash);
+            });
 
-        var first = frontier.Payload.Nodes[0];
-        var routedCycleActivation = GovernedLoopNodeExecutionEvidence.CreateActivation(
-            first.ActivationOrdinal,
-            first.PlanOrdinal,
-            first.VisitOrdinal,
-            first.NodeId,
-            first.Descriptor,
-            first.IncomingControlEdgeIds,
-            first.OutgoingControlEdgeIds,
-            first.Status,
-            first.Attempt,
-            first.AttemptOperationId,
-            first.OutcomeEvidenceId,
-            first.OutcomeEvidenceHash,
+        var source = frontier.Payload.Nodes[1];
+        var cycleActivation = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            source.ActivationOrdinal,
+            source.PlanOrdinal,
+            source.VisitOrdinal,
+            source.NodeId,
+            source.Descriptor,
+            source.IncomingControlEdgeIds,
+            source.OutgoingControlEdgeIds,
+            source.Status,
+            source.Attempt,
+            source.AttemptOperationId,
+            source.OutcomeEvidenceId,
+            source.OutcomeEvidenceHash,
             "cycle-main",
             1,
-            GovernedLoopControlCondition.Always,
-            first.OutgoingControlEdgeIds,
+            null,
             [],
-            []);
+            [],
+            source.JoinArrivals);
         var enrichedFrontier = GovernedLoopFrontierPosture.Create(
             frontier.Binding,
             frontier.WorkspaceId,
@@ -85,16 +102,17 @@ public sealed class CustomLoopFrontierStoreTests
             frontier.Payload.FrontierVersion,
             frontier.Payload.ConcurrencyCeiling,
             frontier.Payload.Status,
-            [routedCycleActivation, .. frontier.Payload.Nodes.Skip(1)],
+            [frontier.Payload.Nodes[0], cycleActivation],
             frontier.Payload.UpdatedAtUtc,
             string.Empty);
         var enriched = context.Run with { Frontier = enrichedFrontier };
         var hydratedEnriched = CustomLoopRunArtifactSerializer.Deserialize(CustomLoopRunArtifactSerializer.Serialize(enriched));
-        var enrichedActivation = Assert.IsType<GovernedLoopFrontierPosture>(hydratedEnriched.Frontier).Payload.Nodes[0];
+        var enrichedActivation = Assert.IsType<GovernedLoopFrontierPosture>(hydratedEnriched.Frontier).Payload.Nodes[1];
         Assert.Equal("cycle-main", enrichedActivation.CycleId);
         Assert.Equal(1, enrichedActivation.CycleIteration);
-        Assert.Equal(GovernedLoopControlCondition.Always, enrichedActivation.ControlOutcome);
-        Assert.Equal(first.OutgoingControlEdgeIds, enrichedActivation.SelectedControlEdgeIds);
+        Assert.Null(enrichedActivation.ControlOutcome);
+        Assert.Empty(enrichedActivation.SelectedControlEdgeIds);
+        Assert.Empty(enrichedActivation.SkippedControlEdgeIds);
 
         var capabilityAdmission = TestCapabilityAdmissionFactory.Create(
             context.Run.AdmittedDefinition.CapabilityRequirements,
@@ -208,12 +226,14 @@ public sealed class CustomLoopFrontierStoreTests
             CustomLoopRunEventKind.NodeAttemptCompleted,
             context.Binding,
             context.Plan.Nodes[1],
+            running.Frontier!.Payload.Nodes[1],
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed,
             running.UpdatedAtUtc.AddMinutes(1));
         var advanced = await UpdateAndRestartAsync(paths, CompleteInference(running, context, completion), 3);
         Assert.Equal(GovernedLoopNodeExecutionStatus.Completed, advanced.Frontier!.Payload.Nodes[1].Status);
         Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, advanced.Frontier.Payload.Nodes[2].Status);
+        AssertExactOutcomeEvidence(advanced, nodeIndex: 1);
 
         var exitRunning = await UpdateAndRestartAsync(paths, StartExit(advanced, context, "event-exit-start"), 4);
         Assert.Equal(GovernedLoopNodeExecutionStatus.Running, exitRunning.Frontier!.Payload.Nodes[2].Status);
@@ -221,6 +241,7 @@ public sealed class CustomLoopFrontierStoreTests
         Assert.Equal(CustomLoopRunStatus.Completed, completed.Status);
         Assert.Equal(GovernedLoopFrontierStatus.Completed, completed.Frontier!.Payload.Status);
         Assert.All(completed.Frontier.Payload.Nodes, node => Assert.Equal(GovernedLoopNodeExecutionStatus.Completed, node.Status));
+        AssertExactOutcomeEvidence(completed, nodeIndex: 2);
         Assert.Equal(CustomLoopRunEventKind.LifecycleChanged, completed.Events[^1].Kind);
         Assert.Equal(CustomLoopRunEventKind.CheckpointCommitted, completed.Events[^2].Kind);
         Assert.Equal(completed.Events[^2].Sequence, completed.Checkpoint.LastCommittedSequence);
@@ -262,6 +283,7 @@ public sealed class CustomLoopFrontierStoreTests
         Assert.Equal(nodeStatus, loaded.Frontier.Payload.Nodes[1].Status);
         Assert.Equal(loaded.Events[^2].EventId, loaded.Frontier.Payload.Nodes[1].OutcomeEvidenceId);
         Assert.Equal(loaded.Events[^2].SequentialNodeEvidence!.OutcomeArtifactHash, loaded.Frontier.Payload.Nodes[1].OutcomeEvidenceHash);
+        AssertExactOutcomeEvidence(loaded, nodeIndex: 1);
         Assert.Equal(CustomLoopRunEventKind.LifecycleChanged, loaded.Events[^1].Kind);
         Assert.True(GovernedLoopFrontierContractHash.Matches(loaded.Frontier));
     }
@@ -285,6 +307,7 @@ public sealed class CustomLoopFrontierStoreTests
             CustomLoopRunEventKind.NodeAttemptCompleted,
             context.Binding,
             context.Plan.Nodes[1],
+            running.Frontier!.Payload.Nodes[1],
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed,
             running.UpdatedAtUtc.AddMinutes(1));
@@ -294,6 +317,7 @@ public sealed class CustomLoopFrontierStoreTests
             CustomLoopRunEventKind.NodeAttemptCompleted,
             context.Binding,
             context.Plan.Nodes[1],
+            running.Frontier!.Payload.Nodes[1],
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed,
             running.UpdatedAtUtc.AddMinutes(1));
@@ -311,6 +335,7 @@ public sealed class CustomLoopFrontierStoreTests
         Assert.Equal(3, winner.Frontier!.Payload.FrontierVersion);
         Assert.Equal(GovernedLoopNodeExecutionStatus.Completed, winner.Frontier.Payload.Nodes[1].Status);
         Assert.Equal(winner.Events[^2].EventId, winner.Frontier.Payload.Nodes[1].OutcomeEvidenceId);
+        AssertExactOutcomeEvidence(winner, nodeIndex: 1);
         Assert.Equal(CustomLoopRunEventKind.CheckpointCommitted, winner.Events[^1].Kind);
         Assert.Equal(winner.Events[^1].Sequence, winner.Checkpoint.LastCommittedSequence);
         Assert.Equal(1, winner.Checkpoint.NextStepIndex);
@@ -334,6 +359,7 @@ public sealed class CustomLoopFrontierStoreTests
             CustomLoopRunEventKind.NodeAttemptCompleted,
             context.Binding,
             context.Plan.Nodes[1],
+            running.Frontier!.Payload.Nodes[1],
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed,
             running.UpdatedAtUtc.AddMinutes(1));
@@ -349,6 +375,7 @@ public sealed class CustomLoopFrontierStoreTests
         Assert.Equal(completion.SequentialNodeEvidence!.OutcomeArtifactHash, loaded.Frontier.Payload.Nodes[1].OutcomeEvidenceHash);
         Assert.Equal(GovernedLoopNodeExecutionStatus.Completed, loaded.Frontier.Payload.Nodes[1].Status);
         Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, loaded.Frontier.Payload.Nodes[2].Status);
+        AssertExactOutcomeEvidence(loaded, nodeIndex: 1);
         Assert.True(GovernedLoopFrontierContractHash.Matches(loaded.Frontier));
     }
 
@@ -406,6 +433,7 @@ public sealed class CustomLoopFrontierStoreTests
             CustomLoopRunEventKind.NodeAttemptCompleted,
             context.Binding,
             context.Plan.Nodes[1],
+            running.Frontier!.Payload.Nodes[1],
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed,
             running.UpdatedAtUtc.AddMinutes(1));
@@ -581,6 +609,7 @@ public sealed class CustomLoopFrontierStoreTests
         string eventId)
     {
         var node = context.Plan.Nodes[1];
+        var activation = run.Frontier!.Payload.Nodes[1];
         var updatedAtUtc = run.UpdatedAtUtc.AddMinutes(1);
         var start = CreateSequentialEvent(
             run.Events[^1].Sequence + 1,
@@ -588,18 +617,24 @@ public sealed class CustomLoopFrontierStoreTests
             CustomLoopRunEventKind.NodeAttemptStarted,
             context.Binding,
             node,
+            activation,
             CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
             CustomLoopSequentialNodeDisposition.Unknown,
             updatedAtUtc);
-        var runningNode = GovernedLoopNodeExecutionEvidence.Create(
-            node.Ordinal,
-            node.NodeId,
-            node.Descriptor,
-            ControlEdges(node.IncomingControlEdgeId),
-            ControlEdges(node.OutgoingControlEdgeId),
+        var runningNode = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            activation.ActivationOrdinal,
+            activation.PlanOrdinal,
+            activation.VisitOrdinal,
+            activation.NodeId,
+            activation.Descriptor,
+            activation.IncomingControlEdgeIds,
+            activation.OutgoingControlEdgeIds,
             GovernedLoopNodeExecutionStatus.Running,
             1,
-            start.EventId);
+            start.EventId,
+            cycleId: activation.CycleId,
+            cycleIteration: activation.CycleIteration,
+            joinArrivals: activation.JoinArrivals);
         return run with
         {
             LifecycleVersion = run.LifecycleVersion + 1,
@@ -654,21 +689,32 @@ public sealed class CustomLoopFrontierStoreTests
         CustomLoopSequentialEvidenceStoreTests.SequentialContext context,
         CustomLoopRunEvent completion)
     {
-        var node = context.Plan.Nodes[1];
         var exit = context.Plan.Nodes[2];
-        var completedNode = GovernedLoopNodeExecutionEvidence.Create(
-            node.Ordinal,
-            node.NodeId,
-            node.Descriptor,
-            ControlEdges(node.IncomingControlEdgeId),
-            ControlEdges(node.OutgoingControlEdgeId),
+        var activation = running.Frontier!.Payload.Nodes[1];
+        var evidence = completion.SequentialNodeEvidence!;
+        var completedNode = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            activation.ActivationOrdinal,
+            activation.PlanOrdinal,
+            activation.VisitOrdinal,
+            activation.NodeId,
+            activation.Descriptor,
+            activation.IncomingControlEdgeIds,
+            activation.OutgoingControlEdgeIds,
             GovernedLoopNodeExecutionStatus.Completed,
             1,
-            running.Frontier!.Payload.Nodes[1].AttemptOperationId,
+            activation.AttemptOperationId,
             completion.EventId,
-            completion.SequentialNodeEvidence!.OutcomeArtifactHash);
-        var readyExit = GovernedLoopNodeExecutionEvidence.Create(
+            evidence.OutcomeArtifactHash,
+            activation.CycleId,
+            activation.CycleIteration,
+            evidence.ControlOutcome,
+            evidence.SelectedControlEdgeIds,
+            evidence.SkippedControlEdgeIds,
+            activation.JoinArrivals);
+        var readyExit = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            checked(completedNode.ActivationOrdinal + 1),
             exit.Ordinal,
+            1,
             exit.NodeId,
             exit.Descriptor,
             ControlEdges(exit.IncomingControlEdgeId),
@@ -693,6 +739,7 @@ public sealed class CustomLoopFrontierStoreTests
         string eventId)
     {
         var exit = context.Plan.Nodes[2];
+        var activation = run.Frontier!.Payload.Nodes[2];
         var updatedAtUtc = run.UpdatedAtUtc.AddMinutes(1);
         var start = CreateSequentialEvent(
             run.Events[^1].Sequence + 1,
@@ -700,18 +747,24 @@ public sealed class CustomLoopFrontierStoreTests
             CustomLoopRunEventKind.ExitDecisionStarted,
             context.Binding,
             exit,
+            activation,
             CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
             CustomLoopSequentialNodeDisposition.Unknown,
             updatedAtUtc);
-        var runningExit = GovernedLoopNodeExecutionEvidence.Create(
-            exit.Ordinal,
-            exit.NodeId,
-            exit.Descriptor,
-            ControlEdges(exit.IncomingControlEdgeId),
-            ControlEdges(exit.OutgoingControlEdgeId),
+        var runningExit = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            activation.ActivationOrdinal,
+            activation.PlanOrdinal,
+            activation.VisitOrdinal,
+            activation.NodeId,
+            activation.Descriptor,
+            activation.IncomingControlEdgeIds,
+            activation.OutgoingControlEdgeIds,
             GovernedLoopNodeExecutionStatus.Running,
             1,
-            start.EventId);
+            start.EventId,
+            cycleId: activation.CycleId,
+            cycleIteration: activation.CycleIteration,
+            joinArrivals: activation.JoinArrivals);
         return run with
         {
             LifecycleVersion = run.LifecycleVersion + 1,
@@ -731,6 +784,7 @@ public sealed class CustomLoopFrontierStoreTests
         string eventId)
     {
         var exit = context.Plan.Nodes[2];
+        var activation = running.Frontier!.Payload.Nodes[2];
         var outcomeAtUtc = running.UpdatedAtUtc.AddMinutes(1);
         var completion = CreateSequentialEvent(
             running.Events[^1].Sequence + 1,
@@ -738,20 +792,30 @@ public sealed class CustomLoopFrontierStoreTests
             CustomLoopRunEventKind.ExitDecisionCompleted,
             context.Binding,
             exit,
+            activation,
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed,
             outcomeAtUtc);
-        var completedExit = GovernedLoopNodeExecutionEvidence.Create(
-            exit.Ordinal,
-            exit.NodeId,
-            exit.Descriptor,
-            ControlEdges(exit.IncomingControlEdgeId),
-            ControlEdges(exit.OutgoingControlEdgeId),
+        var evidence = completion.SequentialNodeEvidence!;
+        var completedExit = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            activation.ActivationOrdinal,
+            activation.PlanOrdinal,
+            activation.VisitOrdinal,
+            activation.NodeId,
+            activation.Descriptor,
+            activation.IncomingControlEdgeIds,
+            activation.OutgoingControlEdgeIds,
             GovernedLoopNodeExecutionStatus.Completed,
             1,
-            running.Frontier!.Payload.Nodes[2].AttemptOperationId,
+            activation.AttemptOperationId,
             completion.EventId,
-            completion.SequentialNodeEvidence!.OutcomeArtifactHash);
+            evidence.OutcomeArtifactHash,
+            activation.CycleId,
+            activation.CycleIteration,
+            evidence.ControlOutcome,
+            evidence.SelectedControlEdgeIds,
+            evidence.SkippedControlEdgeIds,
+            activation.JoinArrivals);
         var checkpointAtUtc = outcomeAtUtc.AddSeconds(1);
         var checkpoint = CreateRunEvent(
             completion.Sequence + 1,
@@ -798,6 +862,7 @@ public sealed class CustomLoopFrontierStoreTests
         CustomLoopRunStatus runStatus)
     {
         var node = context.Plan.Nodes[1];
+        var activation = running.Frontier!.Payload.Nodes[1];
         var outcomeAtUtc = running.UpdatedAtUtc.AddMinutes(1);
         var outcome = CreateSequentialEvent(
             running.Events[^1].Sequence + 1,
@@ -805,20 +870,30 @@ public sealed class CustomLoopFrontierStoreTests
             CustomLoopRunEventKind.NodeAttemptFailed,
             context.Binding,
             node,
+            activation,
             evidenceKind,
             disposition,
             outcomeAtUtc);
-        var outcomeNode = GovernedLoopNodeExecutionEvidence.Create(
-            node.Ordinal,
-            node.NodeId,
-            node.Descriptor,
-            ControlEdges(node.IncomingControlEdgeId),
-            ControlEdges(node.OutgoingControlEdgeId),
+        var evidence = outcome.SequentialNodeEvidence!;
+        var outcomeNode = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            activation.ActivationOrdinal,
+            activation.PlanOrdinal,
+            activation.VisitOrdinal,
+            activation.NodeId,
+            activation.Descriptor,
+            activation.IncomingControlEdgeIds,
+            activation.OutgoingControlEdgeIds,
             nodeStatus,
             1,
-            running.Frontier!.Payload.Nodes[1].AttemptOperationId,
+            activation.AttemptOperationId,
             outcome.EventId,
-            outcome.SequentialNodeEvidence!.OutcomeArtifactHash);
+            evidence.OutcomeArtifactHash,
+            activation.CycleId,
+            activation.CycleIteration,
+            evidence.ControlOutcome,
+            evidence.SelectedControlEdgeIds,
+            evidence.SkippedControlEdgeIds,
+            activation.JoinArrivals);
         var terminalAtUtc = outcomeAtUtc.AddSeconds(1);
         var lifecycle = CreateRunEvent(
             outcome.Sequence + 1,
@@ -855,6 +930,28 @@ public sealed class CustomLoopFrontierStoreTests
         }
 
         return new CustomLoopExecutionClock(accumulated, null);
+    }
+
+    private static void AssertExactOutcomeEvidence(CustomLoopRunRecord run, int nodeIndex)
+    {
+        var node = run.Frontier!.Payload.Nodes[nodeIndex];
+        var evidenceId = Assert.IsType<string>(node.OutcomeEvidenceId);
+        var outcomeEvent = Assert.Single(
+            run.Events,
+            item => string.Equals(item.EventId, evidenceId, StringComparison.Ordinal));
+        var evidence = Assert.IsType<CustomLoopSequentialNodeEvidence>(outcomeEvent.SequentialNodeEvidence);
+
+        Assert.True(CustomLoopSequentialNodeEvidenceHash.Matches(evidence));
+        Assert.Equal(node.ActivationOrdinal, evidence.ActivationOrdinal);
+        Assert.Equal(node.VisitOrdinal, evidence.VisitOrdinal);
+        Assert.Equal(node.NodeId, evidence.NodeId);
+        Assert.Equal(node.Attempt, evidence.Attempt);
+        Assert.Equal(node.CycleId, evidence.CycleId);
+        Assert.Equal(node.CycleIteration, evidence.CycleIteration);
+        Assert.Equal(node.ControlOutcome, evidence.ControlOutcome);
+        Assert.Equal(node.SelectedControlEdgeIds, evidence.SelectedControlEdgeIds);
+        Assert.Equal(node.SkippedControlEdgeIds, evidence.SkippedControlEdgeIds);
+        Assert.Equal(node.OutcomeEvidenceHash, evidence.OutcomeArtifactHash);
     }
 
     private static async Task<CustomLoopRunRecord> UpdateAndRestartAsync(
@@ -902,6 +999,7 @@ public sealed class CustomLoopFrontierStoreTests
         CustomLoopRunEventKind kind,
         GovernedLoopSequentialAdapterBinding binding,
         GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
         CustomLoopSequentialNodeEvidenceKind evidenceKind,
         CustomLoopSequentialNodeDisposition disposition,
         DateTimeOffset timestampUtc)
@@ -931,11 +1029,17 @@ public sealed class CustomLoopFrontierStoreTests
                 : null);
         var controlOutcome = evidenceKind switch
         {
-            CustomLoopSequentialNodeEvidenceKind.DispatchStarted => (GovernedLoopControlCondition?)null,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted or CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention => (GovernedLoopControlCondition?)null,
             _ when node.Descriptor.Kind == GovernedLoopNodeKind.Trigger => GovernedLoopControlCondition.Always,
             _ when disposition == CustomLoopSequentialNodeDisposition.Rejected => GovernedLoopControlCondition.Failure,
             _ => GovernedLoopControlCondition.Success,
         };
+        IReadOnlyList<string> selectedControlEdgeIds = controlOutcome is GovernedLoopControlCondition.Always or GovernedLoopControlCondition.Success
+            ? activation.OutgoingControlEdgeIds
+            : [];
+        IReadOnlyList<string> skippedControlEdgeIds = controlOutcome == GovernedLoopControlCondition.Failure
+            ? activation.OutgoingControlEdgeIds
+            : [];
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             1,
             evidenceKind,
@@ -943,15 +1047,15 @@ public sealed class CustomLoopFrontierStoreTests
             binding.ExecutionBinding.RunId,
             binding.ExecutionBinding.Revision,
             binding.ExecutionBinding.ExecutionGeneration,
-            node.Ordinal,
-            1,
+            activation.ActivationOrdinal,
+            activation.VisitOrdinal,
             node.NodeId,
             1,
-            node.CycleId,
-            node.CycleId is null ? null : 1,
+            activation.CycleId,
+            activation.CycleIteration,
             controlOutcome,
-            controlOutcome is null || controlOutcome == GovernedLoopControlCondition.Failure ? [] : node.OutgoingControlEdgeIds.ToArray(),
-            controlOutcome == GovernedLoopControlCondition.Failure ? node.OutgoingControlEdgeIds.ToArray() : [],
+            selectedControlEdgeIds,
+            skippedControlEdgeIds,
             null,
             null,
             disposition,
