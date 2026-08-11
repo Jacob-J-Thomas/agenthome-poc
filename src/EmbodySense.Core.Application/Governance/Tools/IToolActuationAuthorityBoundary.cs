@@ -14,8 +14,9 @@ public interface IToolActuationAuthorityBoundary
     /// <summary>Evaluates current authority and, only for a direct decision, executes the supplied actuator inside that authority boundary.</summary>
     /// <typeparam name="TResult">The private actuator result type, which is captured and interpreted by the broker.</typeparam>
     /// <param name="request">The already permission-checked and, when required, human-approved tool request.</param>
+    /// <param name="resolvedTargetPath">The exact normalized absolute target resolved and checked by the server.</param>
     /// <param name="executeActuatorAsync">The single-use continuation that durably records the supplied direct decision and performs the exact workspace operation.</param>
     /// <param name="cancellationToken">The cancellation token used while evaluating authority and executing the continuation.</param>
     /// <returns>The terminal authority disposition and bounded audit evidence.</returns>
-    Task<ToolActuationAuthorityExecution> ExecuteAsync<TResult>(ToolRequest request, Func<ToolActuationAuthorityExecution, CancellationToken, Task<TResult>> executeActuatorAsync, CancellationToken cancellationToken = default);
+    Task<ToolActuationAuthorityExecution> ExecuteAsync<TResult>(ToolRequest request, string resolvedTargetPath, Func<ToolActuationAuthorityExecution, CancellationToken, Task<TResult>> executeActuatorAsync, CancellationToken cancellationToken = default);
 }

@@ -23,6 +23,7 @@ public sealed class WorkspaceToolEffectAuthorityRequestFactoryTests
             WorkspaceToolAuthorityTestFixture.NodeAttempt,
             WorkspaceToolAuthorityTestFixture.ServerCorrelationId,
             fixture.ToolRequest,
+            ResolvedTarget(fixture.ToolRequest),
             GovernedLoopEffectBoundaryKind.WorkspaceActuation);
 
         Assert.Same(fixture.Receipt, request.AdmissionReceipt);
@@ -45,6 +46,7 @@ public sealed class WorkspaceToolEffectAuthorityRequestFactoryTests
         Assert.False(request.RequiredAuthority.AllowsRecurrence);
         Assert.False(request.RequiredAuthority.AllowsExternalPublication);
         Assert.False(request.RequiredAuthority.AllowsIrreversibleAction);
+        Assert.Matches("^[0-9a-f]{64}$", request.TargetFingerprint);
     }
 
     [Fact]
@@ -59,6 +61,7 @@ public sealed class WorkspaceToolEffectAuthorityRequestFactoryTests
         Assert.StartsWith("workspace-tool-intake-", intake.EffectOperationId, StringComparison.Ordinal);
         Assert.StartsWith("workspace-tool-actuation-", actuation.EffectOperationId, StringComparison.Ordinal);
         Assert.NotEqual(intake.EffectOperationId, actuation.EffectOperationId);
+        Assert.Equal(intake.TargetFingerprint, actuation.TargetFingerprint);
         var audit = fixture.ToolRequest.AuditCorrelation!;
         var variations = new[]
         {
@@ -81,6 +84,7 @@ public sealed class WorkspaceToolEffectAuthorityRequestFactoryTests
             WorkspaceToolAuthorityTestFixture.NodeAttempt,
             nextCorrelation,
             nextToolRequest,
+            ResolvedTarget(nextToolRequest),
             GovernedLoopEffectBoundaryKind.WorkspaceActuation);
         Assert.NotEqual(actuation.EffectOperationId, nextOperation.EffectOperationId);
     }
@@ -102,6 +106,7 @@ public sealed class WorkspaceToolEffectAuthorityRequestFactoryTests
             WorkspaceToolAuthorityTestFixture.NodeAttempt,
             WorkspaceToolAuthorityTestFixture.ServerCorrelationId,
             fixture.ToolRequest,
+            ResolvedTarget(fixture.ToolRequest),
             GovernedLoopEffectBoundaryKind.WorkspaceActuation));
         Assert.Throws<ArgumentException>(() => Create(
             fixture,
@@ -140,6 +145,7 @@ public sealed class WorkspaceToolEffectAuthorityRequestFactoryTests
             WorkspaceToolAuthorityTestFixture.NodeAttempt,
             WorkspaceToolAuthorityTestFixture.ServerCorrelationId,
             fixture.ToolRequest,
+            ResolvedTarget(fixture.ToolRequest),
             GovernedLoopEffectBoundaryKind.WorkspaceActuation));
     }
 
@@ -156,6 +162,7 @@ public sealed class WorkspaceToolEffectAuthorityRequestFactoryTests
             0,
             WorkspaceToolAuthorityTestFixture.ServerCorrelationId,
             fixture.ToolRequest,
+            ResolvedTarget(fixture.ToolRequest),
             GovernedLoopEffectBoundaryKind.WorkspaceActuation));
         Assert.Throws<ArgumentException>(() => WorkspaceToolEffectAuthorityRequestFactory.Create(
             fixture.Receipt,
@@ -165,6 +172,7 @@ public sealed class WorkspaceToolEffectAuthorityRequestFactoryTests
             WorkspaceToolAuthorityTestFixture.NodeAttempt,
             WorkspaceToolAuthorityTestFixture.ServerCorrelationId,
             fixture.ToolRequest,
+            ResolvedTarget(fixture.ToolRequest),
             GovernedLoopEffectBoundaryKind.WorkspaceActuation));
         Assert.Throws<ArgumentException>(() => Create(fixture, fixture.ToolRequest with { TargetPath = " " }, GovernedLoopEffectBoundaryKind.WorkspaceActuation));
         Assert.Throws<ArgumentException>(() => Create(fixture, fixture.ToolRequest with { CorrelationId = null }, GovernedLoopEffectBoundaryKind.WorkspaceActuation));
@@ -174,6 +182,48 @@ public sealed class WorkspaceToolEffectAuthorityRequestFactoryTests
             fixture,
             fixture.ToolRequest with { AuditCorrelation = fixture.ToolRequest.AuditCorrelation! with { AdmittedCommands = new string('a', 19_000) } },
             GovernedLoopEffectBoundaryKind.WorkspaceActuation));
+    }
+
+    [Fact]
+    public void Target_identity_uses_only_the_exact_server_resolved_normalized_absolute_path()
+    {
+        var fixture = WorkspaceToolAuthorityTestFixture.Create();
+        var canonical = ResolvedTarget(fixture.ToolRequest);
+        var aliasRequest = fixture.ToolRequest with { TargetPath = "shared/alias-note.txt" };
+
+        var original = WorkspaceToolEffectAuthorityRequestFactory.Create(
+            fixture.Receipt,
+            fixture.Binding,
+            fixture.Artifact,
+            WorkspaceToolAuthorityTestFixture.NodeId,
+            WorkspaceToolAuthorityTestFixture.NodeAttempt,
+            WorkspaceToolAuthorityTestFixture.ServerCorrelationId,
+            fixture.ToolRequest,
+            canonical,
+            GovernedLoopEffectBoundaryKind.WorkspaceToolIntake);
+        var alias = WorkspaceToolEffectAuthorityRequestFactory.Create(
+            fixture.Receipt,
+            fixture.Binding,
+            fixture.Artifact,
+            WorkspaceToolAuthorityTestFixture.NodeId,
+            WorkspaceToolAuthorityTestFixture.NodeAttempt,
+            WorkspaceToolAuthorityTestFixture.ServerCorrelationId,
+            aliasRequest,
+            canonical,
+            GovernedLoopEffectBoundaryKind.WorkspaceToolIntake);
+
+        Assert.Equal(original.TargetFingerprint, alias.TargetFingerprint);
+        Assert.Equal(original.EffectOperationId, alias.EffectOperationId);
+        Assert.Throws<ArgumentException>(() => WorkspaceToolEffectAuthorityRequestFactory.Create(
+            fixture.Receipt,
+            fixture.Binding,
+            fixture.Artifact,
+            WorkspaceToolAuthorityTestFixture.NodeId,
+            WorkspaceToolAuthorityTestFixture.NodeAttempt,
+            WorkspaceToolAuthorityTestFixture.ServerCorrelationId,
+            fixture.ToolRequest,
+            fixture.ToolRequest.TargetPath,
+            GovernedLoopEffectBoundaryKind.WorkspaceToolIntake));
     }
 
     private static EmbodySense.Core.Application.Loops.Execution.Authority.Models.GovernedLoopEffectAuthorityRequest Create(
@@ -192,5 +242,9 @@ public sealed class WorkspaceToolEffectAuthorityRequestFactoryTests
             WorkspaceToolAuthorityTestFixture.NodeAttempt,
             WorkspaceToolAuthorityTestFixture.ServerCorrelationId,
             request,
+            ResolvedTarget(request),
             boundaryKind);
+
+    private static string ResolvedTarget(ToolRequest request)
+        => Path.GetFullPath(request.TargetPath);
 }

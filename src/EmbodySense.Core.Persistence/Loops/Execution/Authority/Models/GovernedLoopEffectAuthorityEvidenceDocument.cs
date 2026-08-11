@@ -7,6 +7,8 @@ internal sealed record GovernedLoopEffectAuthorityEvidenceDocument(
     string WorkspaceIdentity,
     long Generation,
     IReadOnlyList<GovernedLoopEffectAuthorityDecision> Decisions,
+    IReadOnlyList<GovernedLoopEffectAuthorityTargetReservation> TargetReservations,
+    IReadOnlyList<GovernedLoopEffectAuthorityCompletionClaim> CompletionClaims,
     string ContentDigest,
     string AuthenticationTag)
 {

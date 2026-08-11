@@ -27,9 +27,10 @@ public sealed class DefaultConversationCapabilityAuthorityRevalidator : IToolAct
     }
 
     /// <inheritdoc />
-    public Task<ToolActuationAuthorityExecution> ExecuteAsync<TResult>(ToolRequest request, Func<ToolActuationAuthorityExecution, CancellationToken, Task<TResult>> executeActuatorAsync, CancellationToken cancellationToken = default)
+    public Task<ToolActuationAuthorityExecution> ExecuteAsync<TResult>(ToolRequest request, string resolvedTargetPath, Func<ToolActuationAuthorityExecution, CancellationToken, Task<TResult>> executeActuatorAsync, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resolvedTargetPath);
         ArgumentNullException.ThrowIfNull(executeActuatorAsync);
         return _authorityTransaction.ExecuteAsync(transactionCancellationToken => ExecuteUnderAuthorityAsync(request, executeActuatorAsync, transactionCancellationToken), cancellationToken);
     }

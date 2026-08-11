@@ -31,5 +31,8 @@ public enum GovernedLoopEffectAuthorityGrantPosture
     LoopUnavailable = 9,
 
     /// <summary>The grant request exceeds one or more exact profile, role, or loop ceilings.</summary>
-    CeilingExceeded = 10
+    CeilingExceeded = 10,
+
+    /// <summary>The grant's first exact bound-run completion claim has been durably consumed.</summary>
+    Completed = 11
 }
