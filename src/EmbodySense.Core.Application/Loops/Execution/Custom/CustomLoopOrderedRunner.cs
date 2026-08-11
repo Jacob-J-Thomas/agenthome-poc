@@ -1525,10 +1525,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
             if (run.Status == CustomLoopRunStatus.CancelRequested || IsCanonicalCancellationRejection(retained))
             {
-                return await CompleteSequentialCancellationAsync(
+                return await TerminateSequentialPureRejectionAsync(
                     run,
                     actor,
-                    run.Status == CustomLoopRunStatus.CancelRequested ? CanonicalDurableCancellationDetail : retained.Detail);
+                    CustomLoopRunStatus.Cancelled,
+                    null,
+                    run.Status == CustomLoopRunStatus.CancelRequested ? CanonicalDurableCancellationDetail : retained.Detail,
+                    retained);
             }
 
             if (!TryReadPureNodeRejection(retained.Detail, out var retainedFailureCode, out var retainedFailureDetail))
@@ -1537,8 +1540,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return new RunAdvance(invalid.Run, invalid);
             }
 
-            var rejected = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, retainedFailureCode, retainedFailureDetail);
-            return new RunAdvance(rejected.Run, rejected);
+            return await TerminateSequentialPureRejectionAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.Failed,
+                retainedFailureCode,
+                retainedFailureDetail,
+                retained);
         }
 
         var sequentialNode = new SequentialNodeExecutionContext(
