@@ -40,18 +40,50 @@ public static class GovernedLoopSequentialLegacyDefinitionProjector
             return Failure(GovernedLoopSequentialLegacyDefinitionProjectionStatus.InvalidArtifact);
         }
 
-        var rebuilt = GovernedLoopSequentialPlanBuilder.Build(artifact);
-        if (plan is null
-            || rebuilt.Status != GovernedLoopSequentialPlanBuildStatus.Ready
-            || rebuilt.Plan is null
-            || !PlansEqual(plan, rebuilt.Plan)
-            || !Equals(plan.Revision, binding.ExecutionBinding.Revision)
+        if (!IsExactPlan(plan, artifact)
+            || !Equals(plan!.Revision, binding.ExecutionBinding.Revision)
             || !string.Equals(plan.GraphArtifactHash, binding.GraphArtifactHash, StringComparison.Ordinal)
             || !string.Equals(plan.GraphLayoutHash, binding.GraphLayoutHash, StringComparison.Ordinal))
         {
             return Failure(GovernedLoopSequentialLegacyDefinitionProjectionStatus.InvalidPlan);
         }
 
+        return CreateProjection(binding.AdmissionOperationId, invocationSnapshot, plan, artifact);
+    }
+
+    /// <summary>Projects the deterministic compatibility definition before admission assigns the server-owned run identity.</summary>
+    /// <remarks>The returned definition carries no admission, authority, or execution grant and exists only to authenticate a pre-admission invocation receipt.</remarks>
+    public static GovernedLoopSequentialLegacyDefinitionProjectionResult ProjectPrepared(
+        string? admissionOperationId,
+        GovernedLoopSequentialInvocationSnapshot? invocationSnapshot,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopGraphRevisionArtifact? artifact)
+    {
+        if (!CustomLoopArtifactIdentifier.IsValid(admissionOperationId, GovernedLoopSequentialContractLimits.MaxIdentifierCharacters)
+            || !GovernedLoopSequentialContractValidator.Validate(invocationSnapshot).IsValid)
+        {
+            return Failure(GovernedLoopSequentialLegacyDefinitionProjectionStatus.InvalidBinding);
+        }
+
+        if (!IsExactArtifact(artifact))
+        {
+            return Failure(GovernedLoopSequentialLegacyDefinitionProjectionStatus.InvalidArtifact);
+        }
+
+        if (!IsExactPlan(plan, artifact!))
+        {
+            return Failure(GovernedLoopSequentialLegacyDefinitionProjectionStatus.InvalidPlan);
+        }
+
+        return CreateProjection(admissionOperationId!, invocationSnapshot!, plan!, artifact!);
+    }
+
+    private static GovernedLoopSequentialLegacyDefinitionProjectionResult CreateProjection(
+        string admissionOperationId,
+        GovernedLoopSequentialInvocationSnapshot invocationSnapshot,
+        GovernedLoopSequentialPlan plan,
+        GovernedLoopGraphRevisionArtifact artifact)
+    {
         try
         {
             var graph = artifact.Graph;
@@ -99,7 +131,7 @@ public static class GovernedLoopSequentialLegacyDefinitionProjector
                     0,
                     CustomLoopDefinition.DefaultExitDecisionInstruction,
                     CustomLoopNodeContextPolicy.Inherit()),
-                binding.AdmissionOperationId)
+                admissionOperationId)
             {
                 // This manifest exists only to satisfy the fenced legacy definition contract. The canonical ordered
                 // path revalidates the exact graph capability pins supplied by its immutable adapter hand-off.
@@ -129,6 +161,17 @@ public static class GovernedLoopSequentialLegacyDefinitionProjector
                 && Equals(pair.First.Descriptor, pair.Second.Descriptor)
                 && string.Equals(pair.First.IncomingControlEdgeId, pair.Second.IncomingControlEdgeId, StringComparison.Ordinal)
                 && string.Equals(pair.First.OutgoingControlEdgeId, pair.Second.OutgoingControlEdgeId, StringComparison.Ordinal));
+
+    private static bool IsExactPlan(
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopGraphRevisionArtifact artifact)
+    {
+        var rebuilt = GovernedLoopSequentialPlanBuilder.Build(artifact);
+        return plan is not null
+            && rebuilt.Status == GovernedLoopSequentialPlanBuildStatus.Ready
+            && rebuilt.Plan is not null
+            && PlansEqual(plan, rebuilt.Plan);
+    }
 
     private static bool IsExactArtifact(GovernedLoopGraphRevisionArtifact? artifact)
     {

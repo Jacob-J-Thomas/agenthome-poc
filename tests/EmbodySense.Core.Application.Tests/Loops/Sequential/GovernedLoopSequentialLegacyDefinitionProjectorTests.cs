@@ -169,6 +169,31 @@ public sealed class GovernedLoopSequentialLegacyDefinitionProjectorTests
             GovernedLoopSequentialLegacyDefinitionProjector.Project(binding, invocation, toolFreePlan, toolFreeArtifact).Status);
     }
 
+    [Fact]
+    public void Prepared_projection_matches_the_later_exact_bound_projection_without_a_run_identity()
+    {
+        var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(allowWorkspaceTools: true);
+        var plan = Assert.IsType<GovernedLoopSequentialPlan>(GovernedLoopSequentialPlanBuilder.Build(artifact).Plan);
+        var invocation = Invocation(includeConversation: false);
+        var binding = Binding(artifact, invocation);
+
+        var prepared = GovernedLoopSequentialLegacyDefinitionProjector.ProjectPrepared(
+            binding.AdmissionOperationId,
+            invocation,
+            plan,
+            artifact);
+        var bound = GovernedLoopSequentialLegacyDefinitionProjector.Project(binding, invocation, plan, artifact);
+
+        Assert.Equal(GovernedLoopSequentialLegacyDefinitionProjectionStatus.Ready, prepared.Status);
+        Assert.Equal(bound.Definition?.ContentHash, prepared.Definition?.ContentHash);
+        Assert.Equal(
+            GovernedLoopSequentialLegacyDefinitionProjectionStatus.InvalidBinding,
+            GovernedLoopSequentialLegacyDefinitionProjector.ProjectPrepared("BAD OPERATION", invocation, plan, artifact).Status);
+        Assert.Equal(
+            GovernedLoopSequentialLegacyDefinitionProjectionStatus.InvalidPlan,
+            GovernedLoopSequentialLegacyDefinitionProjector.ProjectPrepared(binding.AdmissionOperationId, invocation, null, artifact).Status);
+    }
+
     private static GovernedLoopSequentialInvocationSnapshot Invocation(bool includeConversation)
     {
         var context = CustomLoopContextSnapshot.CreateEmpty(GovernedLoopSequentialApplicationTestFixture.Now);
