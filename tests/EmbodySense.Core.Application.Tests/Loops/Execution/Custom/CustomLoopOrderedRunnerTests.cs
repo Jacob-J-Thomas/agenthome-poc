@@ -782,8 +782,9 @@ public sealed class CustomLoopOrderedRunnerTests
             return CreateConcurrentPureCompletionCheckpointCancellation(context, current, candidate);
         };
         var executor = new QueueExecutor();
+        var audit = new RecordingAuditLog();
         var evidence = new SequentialEvidenceHarness(store, context.Evidence);
-        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor, audit: audit), evidence, evidence);
 
         var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
             1,
@@ -802,6 +803,7 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(GovernedLoopFrontierStatus.Cancelled, result.Run.Frontier!.Payload.Status);
         Assert.True(CustomLoopRunValidator.Validate(result.Run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(result.Run).Errors));
         Assert.Empty(store.ValidationFailures);
+        AssertSequentialPureTerminalAuditOnce(result.Run, CustomLoopRunStatus.Cancelled, evidence, audit);
     }
 
     [Fact]
@@ -5722,9 +5724,10 @@ public sealed class CustomLoopOrderedRunnerTests
                 : CreatePureCancellationTerminalSuccessor(candidate, includePause: false, includeTerminalWarning: false);
         };
         var executor = new QueueExecutor();
+        var audit = new RecordingAuditLog();
         var evidence = new SequentialEvidenceHarness(store, context.Evidence);
         var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
-            Runner(store, executor, timeProvider: new CanonicalPureDeadlineTimeProvider(_now, store)),
+            Runner(store, executor, audit: audit, timeProvider: new CanonicalPureDeadlineTimeProvider(_now, store)),
             evidence,
             evidence);
 
@@ -5745,6 +5748,30 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(concurrentRejectionId, rejection.EventId);
         Assert.True(CustomLoopRunValidator.Validate(result.Run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(result.Run).Errors));
         Assert.Empty(store.ValidationFailures);
+        AssertSequentialPureTerminalAuditOnce(result.Run, terminalStatus, evidence, audit);
+    }
+
+    private static void AssertSequentialPureTerminalAuditOnce(
+        CustomLoopRunRecord terminalRun,
+        CustomLoopRunStatus terminalStatus,
+        SequentialEvidenceHarness evidence,
+        RecordingAuditLog legacyAudit)
+    {
+        var terminalEvent = terminalRun.Events.Last(item => item.Kind == CustomLoopRunEventKind.LifecycleChanged);
+        Assert.Equal(terminalRun.CompletedAtUtc, terminalEvent.TimestampUtc);
+        var terminalArtifactHash = CustomLoopSequentialOutcomeArtifactHash.Compute(terminalEvent);
+        var terminalAudit = Assert.Single(
+            evidence.AuditRequests,
+            item => item.AuditEvent.Action == AuditSchema.Actions.LoopRunLifecycle
+                && Equals(item.AuditEvent.Metadata.GetValueOrDefault("terminalStatus"), terminalStatus.ToString().ToLowerInvariant()));
+        Assert.Equal(GovernedLoopSequentialAuditOperationId.ForTerminalLifecycle(terminalArtifactHash), terminalAudit.OperationId);
+        Assert.Equal(terminalArtifactHash, terminalAudit.EvidenceHash);
+        Assert.Equal(
+            terminalStatus == CustomLoopRunStatus.Failed ? AuditSchema.Outcomes.Failed : AuditSchema.Outcomes.Succeeded,
+            terminalAudit.AuditEvent.Outcome);
+        Assert.DoesNotContain(
+            legacyAudit.Events,
+            item => item.Action == AuditSchema.Actions.LoopRunLifecycle && item.Metadata.ContainsKey("terminalStatus"));
     }
 
     private static CustomLoopRunRecord CreateConcurrentPureCompletionCheckpointCancellation(
