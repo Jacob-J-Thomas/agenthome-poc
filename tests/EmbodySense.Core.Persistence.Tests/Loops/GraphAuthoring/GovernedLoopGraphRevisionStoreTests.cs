@@ -407,6 +407,64 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             (await missingIntentStore.ReadGraphAsync(graph.GraphId)).Status);
     }
 
+    [Fact]
+    public async Task Restarted_reads_fail_closed_when_historical_intent_is_missing_but_current_trust_remains_intact()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trustRoot = Path.Combine(workspace.ServerStatePath, "graph-revision-trust");
+        var firstGraph = Graph();
+        var first = CreateDraft(firstGraph, "create-one", HashA, HashB, 0, _time);
+        var secondGraph = Graph(revisionId: "revision-two");
+        var second = ReplaceDraft(first, secondGraph, "replace-one", HashB, HashC, 1, _time.AddMinutes(1));
+        var firstTrust = new FileCapabilityCatalogTrustProvider(trustRoot);
+        var firstAuthority = new CapabilityAuthorityTransaction(paths);
+        var firstLifecycle = new GovernedLoopRevisionLifecycleStore(
+            paths,
+            firstTrust,
+            authorityTransaction: firstAuthority);
+        var firstStore = new GovernedLoopGraphRevisionStore(
+            paths,
+            firstLifecycle,
+            firstTrust,
+            authorityTransaction: firstAuthority);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, (await firstStore.CommitAsync(first)).Status);
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, (await firstStore.CommitAsync(second)).Status);
+        Assert.Equal(2, await IntentTrustGenerationAsync(paths, "replace-one"));
+        var currentIntentPath = Path.Combine(GraphRoot(paths), "operations", "replace-one.json");
+        File.Delete(Path.Combine(GraphRoot(paths), "operations", "create-one.json"));
+        Assert.True(File.Exists(currentIntentPath));
+
+        var restartedTrust = new FileCapabilityCatalogTrustProvider(trustRoot);
+        var restartedAuthority = new CapabilityAuthorityTransaction(paths);
+        var restartedLifecycle = new GovernedLoopRevisionLifecycleStore(
+            paths,
+            restartedTrust,
+            authorityTransaction: restartedAuthority);
+        var restarted = new GovernedLoopGraphRevisionStore(
+            paths,
+            restartedLifecycle,
+            restartedTrust,
+            authorityTransaction: restartedAuthority);
+
+        var graphRead = await restarted.ReadGraphAsync(firstGraph.GraphId);
+        var artifactRead = await restarted.ReadArtifactAsync(secondGraph.RevisionReference);
+        var mutationRead = await restarted.ReadForMutationAsync(
+            firstGraph.GraphId,
+            "replace-one",
+            HashB,
+            HashC);
+
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ambiguous, graphRead.Status);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ambiguous, artifactRead.Status);
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ambiguous, mutationRead.Status);
+        Assert.Null(graphRead.Snapshot);
+        Assert.Null(artifactRead.Artifact);
+        Assert.Null(mutationRead.Snapshot);
+        Assert.Null(mutationRead.ExistingOperation);
+    }
+
     [Theory]
     [InlineData("bom")]
     [InlineData("duplicate")]
