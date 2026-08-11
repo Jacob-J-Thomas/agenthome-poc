@@ -192,6 +192,41 @@ public static class CustomLoopRunValidator
         return true;
     }
 
+    /// <summary>Determines whether a later valid run preserves one exact immutable admission and event prefix.</summary>
+    /// <param name="expectedPrefix">The authenticated earlier durable record.</param>
+    /// <param name="actual">The later durable record that must preserve its complete event prefix.</param>
+    /// <returns><see langword="true"/> only when both records are valid and every earlier event is byte-semantically unchanged.</returns>
+    public static bool HasExactDurableEventPrefix(CustomLoopRunRecord? expectedPrefix, CustomLoopRunRecord? actual)
+    {
+        if (expectedPrefix is null
+            || actual is null
+            || !Validate(expectedPrefix).IsValid
+            || !Validate(actual).IsValid
+            || actual.LifecycleVersion < expectedPrefix.LifecycleVersion
+            || actual.UpdatedAtUtc < expectedPrefix.UpdatedAtUtc
+            || expectedPrefix.Events.Length > actual.Events.Length)
+        {
+            return false;
+        }
+
+        var immutableErrors = new List<CustomLoopValidationError>();
+        ValidateImmutableAdmission(expectedPrefix, actual, immutableErrors);
+        if (immutableErrors.Count != 0)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < expectedPrefix.Events.Length; index++)
+        {
+            if (!EventsEqual(expectedPrefix.Events[index], actual.Events[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /// <summary>
     /// Validates the one narrowly permitted post-terminal integrity-warning append.
     /// </summary>
