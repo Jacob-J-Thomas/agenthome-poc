@@ -53,21 +53,24 @@ public static class GovernedLoopExecutionStateMatrix
     /// <summary>Determines whether node attempt and outcome-reference presence match a node posture.</summary>
     /// <param name="status">The node posture.</param>
     /// <param name="attempt">The optional positive attempt.</param>
+    /// <param name="hasAttemptOperation">Whether the selected attempt has a durable operation correlation.</param>
     /// <param name="hasOutcomeEvidence">Whether retained outcome evidence is identified.</param>
+    /// <param name="hasOutcomeEvidenceHash">Whether the retained outcome evidence has an exact hash.</param>
     /// <returns><see langword="true"/> when the shape is legal.</returns>
-    public static bool IsNodeEvidenceShapeValid(GovernedLoopNodeExecutionStatus status, int? attempt, bool hasOutcomeEvidence)
+    public static bool IsNodeEvidenceShapeValid(GovernedLoopNodeExecutionStatus status, int? attempt, bool hasAttemptOperation, bool hasOutcomeEvidence, bool hasOutcomeEvidenceHash)
     {
-        if (!IsSupported(status))
+        if (!IsSupported(status) || hasOutcomeEvidence != hasOutcomeEvidenceHash)
         {
             return false;
         }
 
         return status switch
         {
-            GovernedLoopNodeExecutionStatus.Ready => attempt is null && !hasOutcomeEvidence,
-            GovernedLoopNodeExecutionStatus.Skipped => attempt is null,
-            GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed => attempt is > 0 && hasOutcomeEvidence,
-            _ => attempt is > 0 && !hasOutcomeEvidence
+            GovernedLoopNodeExecutionStatus.Ready => attempt is null && !hasAttemptOperation && !hasOutcomeEvidence,
+            GovernedLoopNodeExecutionStatus.Skipped => attempt is null && !hasAttemptOperation && hasOutcomeEvidence,
+            GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed => attempt is > 0 && hasAttemptOperation && hasOutcomeEvidence,
+            GovernedLoopNodeExecutionStatus.ReviewBlocked => attempt is > 0 && hasAttemptOperation,
+            _ => attempt is > 0 && hasAttemptOperation && !hasOutcomeEvidence
         };
     }
 
@@ -235,8 +238,12 @@ public static class GovernedLoopExecutionStateMatrix
     public static bool IsNodeEvidenceTransitionAllowed(GovernedLoopNodeExecutionEvidence? current, GovernedLoopNodeExecutionEvidence? next)
     {
         if (current is null || next is null
+            || current.SchemaVersion != next.SchemaVersion
+            || current.PlanOrdinal != next.PlanOrdinal
             || !string.Equals(current.NodeId, next.NodeId, StringComparison.Ordinal)
-            || !current.IncomingEdgeIds.SequenceEqual(next.IncomingEdgeIds, StringComparer.Ordinal)
+            || current.Descriptor != next.Descriptor
+            || !current.IncomingControlEdgeIds.SequenceEqual(next.IncomingControlEdgeIds, StringComparer.Ordinal)
+            || !current.OutgoingControlEdgeIds.SequenceEqual(next.OutgoingControlEdgeIds, StringComparer.Ordinal)
             || !IsNodeTransitionAllowed(current.Status, next.Status))
         {
             return false;
@@ -244,7 +251,10 @@ public static class GovernedLoopExecutionStateMatrix
 
         if (current.Status == next.Status)
         {
-            return current.Attempt == next.Attempt && string.Equals(current.OutcomeEvidenceId, next.OutcomeEvidenceId, StringComparison.Ordinal);
+            return current.Attempt == next.Attempt
+                && string.Equals(current.AttemptOperationId, next.AttemptOperationId, StringComparison.Ordinal)
+                && string.Equals(current.OutcomeEvidenceId, next.OutcomeEvidenceId, StringComparison.Ordinal)
+                && string.Equals(current.OutcomeEvidenceHash, next.OutcomeEvidenceHash, StringComparison.Ordinal);
         }
 
         if (current.Status == GovernedLoopNodeExecutionStatus.Ready)
@@ -252,13 +262,14 @@ public static class GovernedLoopExecutionStateMatrix
             return next.Status switch
             {
                 GovernedLoopNodeExecutionStatus.Skipped => next.Attempt is null,
-                GovernedLoopNodeExecutionStatus.Running => next.Attempt == 1,
+                GovernedLoopNodeExecutionStatus.Running => next.Attempt == 1 && next.AttemptOperationId is not null,
                 GovernedLoopNodeExecutionStatus.Failed => next.Attempt == 1 && next.OutcomeEvidenceId is not null,
                 _ => false
             };
         }
 
         return current.Attempt == next.Attempt
+            && string.Equals(current.AttemptOperationId, next.AttemptOperationId, StringComparison.Ordinal)
             && current.OutcomeEvidenceId is null
             && (next.Status is not (GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed) || next.OutcomeEvidenceId is not null);
     }

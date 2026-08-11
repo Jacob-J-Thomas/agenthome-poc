@@ -27,6 +27,12 @@ public static class GovernedLoopExecutionLimits
     /// <summary>Gets the maximum committed incoming control edges recorded for one node execution.</summary>
     public const int MaxIncomingEdges = 512;
 
+    /// <summary>Gets the maximum committed outgoing control edges recorded for one node execution.</summary>
+    public const int MaxOutgoingEdges = 512;
+
+    /// <summary>Gets the only supported schema-1 concurrent-node ceiling.</summary>
+    public const int Schema1ConcurrencyCeiling = 1;
+
     /// <summary>Gets the maximum effect evidence items in one aggregate.</summary>
     public const int MaxEffects = 1_024;
 

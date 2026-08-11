@@ -73,6 +73,9 @@ public sealed class GovernedLoopExecutionValidationError : IEquatable<GovernedLo
             GovernedLoopExecutionValidationErrorCode.InvalidSuccessorVersion => "Governed-loop execution contract rejected: the successor version is not contiguous.",
             GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged => "Governed-loop execution contract rejected: immutable evidence changed across a transition.",
             GovernedLoopExecutionValidationErrorCode.HistoricalEvidenceMissing => "Governed-loop execution contract rejected: previously retained evidence is absent from the successor.",
+            GovernedLoopExecutionValidationErrorCode.IntegrityMismatch => "Governed-loop execution contract rejected: retained evidence does not match its exact content hash.",
+            GovernedLoopExecutionValidationErrorCode.ConcurrencyCeilingExceeded => "Governed-loop execution contract rejected: active nodes exceed the admitted concurrency ceiling.",
+            GovernedLoopExecutionValidationErrorCode.PlanPrefixInvalid => "Governed-loop execution contract rejected: frontier nodes are not a contiguous deterministic plan prefix.",
             _ => "Governed-loop execution contract rejected."
         };
     }
