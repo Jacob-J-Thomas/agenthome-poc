@@ -319,38 +319,83 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
-    public void Needs_review_requires_an_attention_frontier_that_may_retain_exact_outcome_evidence()
+    public void Needs_review_frontier_may_retain_each_exact_closed_terminal_disposition()
     {
-        var admitted = CreateSequentialRun();
-        var running = CreateRunningSequentialRun(admitted);
-        var reviewBaseSeed = Advance(running, CustomLoopRunStatus.NeedsReview);
-        var reviewEvidence = SequentialEvent(
-            running.Events.Length + 1L,
-            "review-outcome",
-            CustomLoopRunEventKind.NodeAttemptFailed,
-            running.SequentialAdapterBinding!,
-            "step-1",
-            "step-1",
-            CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
-            CustomLoopSequentialNodeDisposition.NeedsReview,
-            reviewBaseSeed.UpdatedAtUtc);
-        var reviewLifecycle = reviewBaseSeed.Events[^1] with
+        var cases = new[]
         {
-            Sequence = reviewEvidence.Sequence + 1,
-            EventId = "event-review-lifecycle",
-        };
-        var reviewBase = reviewBaseSeed with { Events = [.. running.Events, reviewEvidence, reviewLifecycle] };
-        var review = reviewBase with
-        {
-            Frontier = TransitionInferenceFrontier(running.Frontier!, GovernedLoopFrontierStatus.ReviewBlocked, GovernedLoopNodeExecutionStatus.ReviewBlocked, reviewBase.UpdatedAtUtc, reviewEvidence),
-        };
-        var hiddenAttention = reviewBase with
-        {
-            Frontier = TransitionInferenceFrontier(running.Frontier!, GovernedLoopFrontierStatus.Completed, GovernedLoopNodeExecutionStatus.Completed, reviewBase.UpdatedAtUtc, reviewEvidence),
+            (CustomLoopRunEventKind.NodeAttemptCompleted, CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed),
+            (CustomLoopRunEventKind.NodeAttemptFailed, CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected),
+            (CustomLoopRunEventKind.NodeAttemptFailed, CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention, CustomLoopSequentialNodeDisposition.NeedsReview),
         };
 
-        Assert.True(CustomLoopRunValidator.ValidateUpdate(running, review).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.ValidateUpdate(running, review).Errors));
-        AssertCodes(CustomLoopRunValidator.Validate(hiddenAttention), "execution_frontier_lifecycle_mismatch");
+        foreach (var (eventKind, evidenceKind, disposition) in cases)
+        {
+            var admitted = CreateSequentialRun();
+            var running = CreateRunningSequentialRun(admitted);
+            var reviewBaseSeed = Advance(running, CustomLoopRunStatus.NeedsReview);
+            var reviewEvidence = SequentialEvent(
+                running.Events.Length + 1L,
+                $"review-outcome-{(int)evidenceKind}",
+                eventKind,
+                running.SequentialAdapterBinding!,
+                "step-1",
+                "step-1",
+                evidenceKind,
+                disposition,
+                reviewBaseSeed.UpdatedAtUtc);
+            var reviewLifecycle = reviewBaseSeed.Events[^1] with
+            {
+                Sequence = reviewEvidence.Sequence + 1,
+                EventId = $"event-review-lifecycle-{(int)evidenceKind}",
+            };
+            var reviewBase = reviewBaseSeed with { Events = [.. running.Events, reviewEvidence, reviewLifecycle] };
+            var review = reviewBase with
+            {
+                Frontier = TransitionInferenceFrontier(running.Frontier!, GovernedLoopFrontierStatus.ReviewBlocked, GovernedLoopNodeExecutionStatus.ReviewBlocked, reviewBase.UpdatedAtUtc, reviewEvidence),
+            };
+
+            Assert.True(CustomLoopRunValidator.ValidateUpdate(running, review).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.ValidateUpdate(running, review).Errors));
+        }
+    }
+
+    [Fact]
+    public void Needs_review_frontier_rejects_malformed_terminal_kind_disposition_pairs()
+    {
+        var cases = new[]
+        {
+            (CustomLoopRunEventKind.NodeAttemptCompleted, CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Rejected),
+            (CustomLoopRunEventKind.NodeAttemptFailed, CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Completed),
+            (CustomLoopRunEventKind.NodeAttemptFailed, CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention, CustomLoopSequentialNodeDisposition.Rejected),
+        };
+
+        foreach (var (eventKind, evidenceKind, disposition) in cases)
+        {
+            var admitted = CreateSequentialRun();
+            var running = CreateRunningSequentialRun(admitted);
+            var reviewBaseSeed = Advance(running, CustomLoopRunStatus.NeedsReview);
+            var malformedEvidence = SequentialEvent(
+                running.Events.Length + 1L,
+                $"malformed-review-{(int)evidenceKind}-{(int)disposition}",
+                eventKind,
+                running.SequentialAdapterBinding!,
+                "step-1",
+                "step-1",
+                evidenceKind,
+                disposition,
+                reviewBaseSeed.UpdatedAtUtc);
+            var lifecycle = reviewBaseSeed.Events[^1] with
+            {
+                Sequence = malformedEvidence.Sequence + 1,
+                EventId = $"event-malformed-review-{(int)evidenceKind}-{(int)disposition}",
+            };
+            var reviewBase = reviewBaseSeed with { Events = [.. running.Events, malformedEvidence, lifecycle] };
+            var malformed = reviewBase with
+            {
+                Frontier = TransitionInferenceFrontier(running.Frontier!, GovernedLoopFrontierStatus.ReviewBlocked, GovernedLoopNodeExecutionStatus.ReviewBlocked, reviewBase.UpdatedAtUtc, malformedEvidence),
+            };
+
+            AssertCodes(CustomLoopRunValidator.Validate(malformed), "invalid_sequential_node_evidence", "execution_frontier_outcome_evidence_mismatch");
+        }
     }
 
     [Fact]
