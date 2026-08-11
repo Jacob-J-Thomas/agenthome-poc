@@ -509,20 +509,22 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             GovernedLoopRevisionStoreCommitStatus.Committed,
             (await store.CommitAsync(CreateDraft(graph, "create-one", HashA, HashB, 0, _time))).Status);
         var path = ArtifactPath(paths, graph);
-        var bytes = await File.ReadAllBytesAsync(path);
-        var text = Encoding.UTF8.GetString(bytes);
-        bytes = corruption switch
+        var originalBytes = await File.ReadAllBytesAsync(path);
+        var text = Encoding.UTF8.GetString(originalBytes);
+        var newline = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var bytes = corruption switch
         {
-            "bom" => [0xef, 0xbb, 0xbf, .. bytes],
-            "duplicate" => Encoding.UTF8.GetBytes(text.Replace("{\n", "{\n  \"schemaVersion\": 1,\n", StringComparison.Ordinal)),
-            "unknown" => Encoding.UTF8.GetBytes(text.Replace("{\n", "{\n  \"unknown\": true,\n", StringComparison.Ordinal)),
-            "noncanonical" => Encoding.UTF8.GetBytes(text.Replace("\n", "\r\n", StringComparison.Ordinal)),
+            "bom" => [0xef, 0xbb, 0xbf, .. originalBytes],
+            "duplicate" => Encoding.UTF8.GetBytes(text.Replace("{" + newline, "{" + newline + "  \"schemaVersion\": 1," + newline, StringComparison.Ordinal)),
+            "unknown" => Encoding.UTF8.GetBytes(text.Replace("{" + newline, "{" + newline + "  \"unknown\": true," + newline, StringComparison.Ordinal)),
+            "noncanonical" => Encoding.UTF8.GetBytes(newline == "\n" ? text.Replace("\n", "\r\n", StringComparison.Ordinal) : text.Replace("\r\n", "\n", StringComparison.Ordinal)),
             "raw-content-digest" => Encoding.UTF8.GetBytes(text.Replace("\"contentDigest\": \"sha256:", "\"contentDigest\": \"", StringComparison.Ordinal)),
-            "legacy-owning-role" => Encoding.UTF8.GetBytes(ReplaceOwningRole(text, "\"owningRoleId\": \"researcher\"")),
-            "mixed-owning-role" => Encoding.UTF8.GetBytes(text.Replace("\"owningRole\": {", "\"owningRoleId\": \"researcher\",\n    \"owningRole\": {", StringComparison.Ordinal)),
+            "legacy-owning-role" => Encoding.UTF8.GetBytes(ReplaceOwningRole(text, newline, "\"owningRoleId\": \"researcher\"")),
+            "mixed-owning-role" => Encoding.UTF8.GetBytes(text.Replace("\"owningRole\": {", "\"owningRoleId\": \"researcher\"," + newline + "    \"owningRole\": {", StringComparison.Ordinal)),
             "malformed-owning-role" => Encoding.UTF8.GetBytes(text.Replace("\"revision\": 1", "\"revision\": 0", StringComparison.Ordinal)),
             _ => throw new ArgumentOutOfRangeException(nameof(corruption)),
         };
+        Assert.False(originalBytes.SequenceEqual(bytes));
         await File.WriteAllBytesAsync(path, bytes);
 
         var read = await store.ReadArtifactAsync(graph.RevisionReference);
@@ -1712,14 +1714,14 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         return ContextualRoleRevisionContentHash.Apply(role);
     }
 
-    private static string ReplaceOwningRole(string json, string replacement)
+    private static string ReplaceOwningRole(string json, string newline, string replacement)
     {
         const string StartMarker = "    \"owningRole\": {";
-        const string EndMarker = "    },\n    \"entryNodeId\"";
+        var endMarker = "    }," + newline + "    \"entryNodeId\"";
         var start = json.IndexOf(StartMarker, StringComparison.Ordinal);
-        var end = json.IndexOf(EndMarker, start, StringComparison.Ordinal);
+        var end = json.IndexOf(endMarker, start, StringComparison.Ordinal);
         Assert.True(start >= 0 && end > start);
-        return json[..start] + "    " + replacement + ",\n    \"entryNodeId\"" + json[(end + EndMarker.Length)..];
+        return json[..start] + "    " + replacement + "," + newline + "    \"entryNodeId\"" + json[(end + endMarker.Length)..];
     }
 
     private static GovernedLoopDisplayMetadata Display(string name, int x, int y)
