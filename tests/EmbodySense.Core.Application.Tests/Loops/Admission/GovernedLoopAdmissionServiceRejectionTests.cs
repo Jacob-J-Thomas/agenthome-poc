@@ -413,6 +413,23 @@ public sealed class GovernedLoopAdmissionServiceRejectionTests
     }
 
     [Fact]
+    public async Task Not_effective_grant_never_becomes_permanent_rejection_after_effective_time()
+    {
+        var harness = GovernedLoopAdmissionTestHarness.Create();
+        var request = BindGrantStatus(
+            harness,
+            AuthorityGrantResolutionStatus.NotEffective,
+            AuthorityGrantLifecycleStatus.Active,
+            AuthorityGrantApplicationTestFixture.Now.AddTicks(1));
+
+        var result = await harness.CreateService().AdmitAsync(request);
+
+        Assert.Equal(GovernedLoopAdmissionStatus.Ambiguous, result.Status);
+        Assert.Null(result.Outcome);
+        Assert.Equal(0, harness.CommitCount);
+    }
+
+    [Fact]
     public async Task Deterministic_grant_label_with_contradictory_payload_remains_ambiguous()
     {
         var harness = GovernedLoopAdmissionTestHarness.Create();
@@ -478,7 +495,8 @@ public sealed class GovernedLoopAdmissionServiceRejectionTests
     private static GovernedLoopAdmissionRequest BindGrantStatus(
         GovernedLoopAdmissionTestHarness harness,
         AuthorityGrantResolutionStatus status,
-        AuthorityGrantLifecycleStatus? lifecycle)
+        AuthorityGrantLifecycleStatus? lifecycle,
+        DateTimeOffset? effectiveAtUtc = null)
     {
         if (status == AuthorityGrantResolutionStatus.NotFound)
         {
@@ -496,7 +514,10 @@ public sealed class GovernedLoopAdmissionServiceRejectionTests
         {
             Status = lifecycle!.Value,
             Boundary = status == AuthorityGrantResolutionStatus.NotEffective
-                ? harness.Grant.Boundary with { EffectiveAtUtc = AuthorityGrantApplicationTestFixture.Now.AddTicks(1) }
+                ? harness.Grant.Boundary with
+                {
+                    EffectiveAtUtc = effectiveAtUtc ?? AuthorityGrantApplicationTestFixture.Now.AddMinutes(2),
+                }
                 : harness.Grant.Boundary,
             ContentHash = string.Empty,
         });

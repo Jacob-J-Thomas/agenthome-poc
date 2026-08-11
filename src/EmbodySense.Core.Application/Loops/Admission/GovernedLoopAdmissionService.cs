@@ -872,7 +872,10 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                 code,
                 storeGeneration,
                 evidenceAtUtc,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                rejectionMustPrecedeUtc: resolution.Status == AuthorityGrantResolutionStatus.NotEffective
+                    ? resolution.Grant!.Boundary.EffectiveAtUtc
+                    : null).ConfigureAwait(false);
         }
 
         return resolution.Status is AuthorityGrantResolutionStatus.Unavailable
@@ -945,7 +948,8 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         GovernedLoopAdmissionFailureCode failureCode,
         long storeGeneration,
         DateTimeOffset minimumEvidenceTimeUtc,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        DateTimeOffset? rejectionMustPrecedeUtc = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!TryGetTrustedUtcNow(out var rejectedAtUtc))
@@ -955,6 +959,12 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
 
         if (minimumEvidenceTimeUtc != default
             && (!IsTrustedUtc(minimumEvidenceTimeUtc) || minimumEvidenceTimeUtc > rejectedAtUtc))
+        {
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+        }
+
+        if (rejectionMustPrecedeUtc is { } upperBoundUtc
+            && (!IsTrustedUtc(upperBoundUtc) || rejectedAtUtc >= upperBoundUtc))
         {
             return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
         }
