@@ -441,14 +441,15 @@ public sealed class CustomLoopLifecycleService
             if (execution.Status is CustomLoopOrderedRunStatus.Failed
                 or CustomLoopOrderedRunStatus.InvalidState
                 or CustomLoopOrderedRunStatus.NotFound
-                or CustomLoopOrderedRunStatus.Conflict)
+                or CustomLoopOrderedRunStatus.Conflict
+                or CustomLoopOrderedRunStatus.NeedsReview)
             {
                 var current = await TryLoadAsync(resumed.Run.Id, IntegrityToken());
-                if (current?.Status == CustomLoopRunStatus.Running)
+                if (current is null || current.Status == CustomLoopRunStatus.Running)
                 {
                     return await HandleResumeExecutorFailureAsync(
                         operation,
-                        current,
+                        current ?? resumed.Run,
                         new InvalidOperationException($"The ordered resume executor returned non-dispatchable status {execution.Status} while the durable run remained Running."));
                 }
             }
