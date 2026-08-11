@@ -8,6 +8,7 @@ using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Admission;
+using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
@@ -346,6 +347,9 @@ public sealed class AgentRuntimeFactory
                 paths,
                 _capabilityTrustProvider,
                 authorityTransaction: capabilityAuthority);
+            var governedRunCompletion = new GovernedLoopFirstBoundRunCompletionBoundary(
+                governedEffectAuthorityEvidence,
+                capabilityAuthority);
             var governedEffectAuthority = new GovernedLoopEffectAuthorityBoundary(
                 governedGrantResolver,
                 capabilityAdmission,
@@ -372,7 +376,8 @@ public sealed class AgentRuntimeFactory
                 governedToolAuthority,
                 attemptCancellationBroker: customExecutionGate,
                 capabilityAdmissionService: capabilityAdmission,
-                conversationPublicationAuthorityBoundaryProvider: governedPublicationAuthority);
+                conversationPublicationAuthorityBoundaryProvider: governedPublicationAuthority,
+                firstBoundRunCompletionBoundary: governedRunCompletion);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,
