@@ -806,6 +806,53 @@ public sealed class CustomLoopOrderedRunnerTests
         AssertSequentialPureTerminalAuditOnce(result.Run, CustomLoopRunStatus.Cancelled, evidence, audit);
     }
 
+    [Theory]
+    [InlineData(CustomLoopRunStatus.Running)]
+    [InlineData(CustomLoopRunStatus.PauseRequested)]
+    [InlineData(CustomLoopRunStatus.CancelRequested)]
+    public async Task Canonical_concurrent_pure_completion_does_not_control_a_later_running_provider(CustomLoopRunStatus status)
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact(role));
+        var store = new FakeRunStore(context.Run);
+        CustomLoopRunRecord? concurrentProvider = null;
+        store.RawConflictSuccessorFactory = (current, candidate) =>
+        {
+            if (concurrentProvider is not null || !IsPureCompletion(candidate.Events[^1], "identity"))
+            {
+                return null;
+            }
+
+            concurrentProvider = CreateConcurrentPureCompletionCheckpointLaterProvider(
+                context,
+                current,
+                candidate,
+                status);
+            return concurrentProvider;
+        };
+        var executor = new QueueExecutor();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Conflict, result.Status);
+        Assert.Same(concurrentProvider, result.Run);
+        Assert.Same(concurrentProvider, store.Current);
+        Assert.Equal(status, store.Current.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Running, store.Current.Frontier!.Payload.Nodes[^1].Status);
+        Assert.Equal("infer", store.Current.Frontier.Payload.Nodes[^1].NodeId);
+        Assert.Empty(executor.Requests);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(store.Current).Errors));
+        Assert.Empty(store.ValidationFailures);
+    }
+
     [Fact]
     public Task Canonical_concurrent_identical_pure_rejection_failed_terminal_is_replayed()
         => AssertConcurrentPureRejectionTerminalAsync(CustomLoopRunStatus.Failed);
@@ -5778,6 +5825,15 @@ public sealed class CustomLoopOrderedRunnerTests
         SequentialTestContext context,
         CustomLoopRunRecord current,
         CustomLoopRunRecord completed)
+        => CreatePureCancellationTerminalSuccessor(
+            CreateConcurrentPureCompletionCheckpoint(context, current, completed),
+            includePause: false,
+            includeTerminalWarning: false);
+
+    private static CustomLoopRunRecord CreateConcurrentPureCompletionCheckpoint(
+        SequentialTestContext context,
+        CustomLoopRunRecord current,
+        CustomLoopRunRecord completed)
     {
         var completion = completed.Events[^1];
         Assert.True(IsPureCompletion(completion, "identity"));
@@ -5839,7 +5895,52 @@ public sealed class CustomLoopOrderedRunnerTests
         };
         var checkpointValidation = CustomLoopRunValidator.ValidateUpdate(completed, checkpointed);
         Assert.True(checkpointValidation.IsValid, string.Join(Environment.NewLine, checkpointValidation.Errors));
-        return CreatePureCancellationTerminalSuccessor(checkpointed, includePause: false, includeTerminalWarning: false);
+        return checkpointed;
+    }
+
+    private static CustomLoopRunRecord CreateConcurrentPureCompletionCheckpointLaterProvider(
+        SequentialTestContext context,
+        CustomLoopRunRecord current,
+        CustomLoopRunRecord completed,
+        CustomLoopRunStatus status)
+    {
+        var checkpointed = CreateConcurrentPureCompletionCheckpoint(context, current, completed);
+        var inference = context.Plan.Nodes.Single(item => string.Equals(item.NodeId, "infer", StringComparison.Ordinal));
+        var startedAt = checkpointed.UpdatedAtUtc.AddSeconds(1);
+        var started = GovernedLoopSequentialFrontierMachine.Start(
+            checkpointed.Frontier,
+            context.Anchor.AdapterBinding,
+            context.Plan,
+            inference,
+            1,
+            "concurrent-provider-attempt",
+            startedAt);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, started.Status);
+        var providerRunning = checkpointed with
+        {
+            LifecycleVersion = checkpointed.LifecycleVersion + 1,
+            UpdatedAtUtc = startedAt,
+            Frontier = started.Frontier,
+        };
+        var providerValidation = CustomLoopRunValidator.ValidateUpdate(checkpointed, providerRunning);
+        Assert.True(providerValidation.IsValid, string.Join(Environment.NewLine, providerValidation.Errors));
+        return status switch
+        {
+            CustomLoopRunStatus.Running => providerRunning,
+            CustomLoopRunStatus.PauseRequested => CreatePureControlSuccessor(
+                providerRunning,
+                CustomLoopRunStatus.PauseRequested,
+                "pause-after-later-provider-start",
+                "Pause was requested after the later provider attempt entered Running.",
+                startedAt.AddSeconds(1)),
+            CustomLoopRunStatus.CancelRequested => CreatePureControlSuccessor(
+                providerRunning,
+                CustomLoopRunStatus.CancelRequested,
+                "cancel-after-later-provider-start",
+                "Cancellation was requested after the later provider attempt entered Running.",
+                startedAt.AddSeconds(1)),
+            _ => throw new ArgumentOutOfRangeException(nameof(status)),
+        };
     }
 
     private static CustomLoopRunRecord CreateControlFirstPureCompletion(CustomLoopRunRecord current, CustomLoopRunRecord attemptedCompletion)

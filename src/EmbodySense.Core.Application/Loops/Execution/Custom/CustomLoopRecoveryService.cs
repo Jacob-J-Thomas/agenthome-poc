@@ -312,41 +312,6 @@ public sealed class CustomLoopRecoveryService
                 && !IsRestartSafePureAttemptStart(run, exactStarts[0]);
     }
 
-    internal static bool HasRestartSafePureAttemptSinceCheckpoint(CustomLoopRunRecord run)
-        => run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence && IsRestartSafePureAttemptStart(run, item));
-
-    private static bool IsRestartSafePureAttemptStart(CustomLoopRunRecord run, CustomLoopRunEvent item)
-    {
-        if (run.Frontier?.Payload.Nodes[^1] is not
-            {
-                Status: GovernedLoopNodeExecutionStatus.Running,
-                Attempt: { } attempt,
-                AttemptOperationId: { } attemptOperationId,
-                Descriptor.Kind: GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate,
-            } node
-            || item is not
-            {
-                Kind: CustomLoopRunEventKind.NodeAttemptStarted,
-                TraceReservationUtf8Bytes: CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
-                SequentialNodeEvidence:
-                {
-                    Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
-                    Disposition: CustomLoopSequentialNodeDisposition.Unknown,
-                } evidence,
-            })
-        {
-            return false;
-        }
-
-        return string.Equals(item.EventId, attemptOperationId, StringComparison.Ordinal)
-            && item.Attempt == attempt
-            && string.Equals(item.StepId, node.NodeId, StringComparison.Ordinal)
-            && evidence.Attempt == attempt
-            && string.Equals(evidence.NodeId, node.NodeId, StringComparison.Ordinal)
-            && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
-            && CustomLoopSequentialOutcomeArtifactHash.Matches(item);
-    }
-
     private static bool HasAuthenticatedTerminalSequentialOutcome(CustomLoopRunRecord run, CustomLoopRunEvent started)
     {
         if (started.SequentialNodeEvidence is not
@@ -432,6 +397,70 @@ public sealed class CustomLoopRecoveryService
             or (CustomLoopRunEventKind.NodeAttemptFailed,
                 CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
                 CustomLoopSequentialNodeDisposition.Rejected);
+
+    internal static bool HasRestartSafePureAttemptSinceCheckpoint(CustomLoopRunRecord run)
+        => run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence && IsRestartSafePureAttemptStart(run, item));
+
+    private static bool IsRestartSafePureAttemptStart(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        if (item is not
+            {
+                Kind: CustomLoopRunEventKind.NodeAttemptStarted,
+                Iteration: > 0,
+                TraceReservationUtf8Bytes: CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
+                SequentialNodeEvidence:
+                {
+                    Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+                    Disposition: CustomLoopSequentialNodeDisposition.Unknown,
+                } evidence,
+            })
+        {
+            return false;
+        }
+
+        var matchingNodes = run.Frontier?.Payload.Nodes.Where(node => node is
+        {
+            Status: GovernedLoopNodeExecutionStatus.Running,
+            Attempt: { } attempt,
+            AttemptOperationId: { } attemptOperationId,
+            Descriptor.Kind: GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate,
+        }
+            && string.Equals(item.EventId, attemptOperationId, StringComparison.Ordinal)
+            && item.Attempt == attempt
+            && string.Equals(item.StepId, node.NodeId, StringComparison.Ordinal)
+            && evidence.Attempt == attempt
+            && string.Equals(evidence.NodeId, node.NodeId, StringComparison.Ordinal))
+            .Take(2)
+            .ToArray() ?? [];
+        return matchingNodes.Length == 1
+            && run.SequentialAdapterBinding is { } binding
+            && SequentialBindingMatchesRun(evidence, run, binding)
+            && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(item);
+    }
+
+    private static GovernedLoopFrontierPosture? ProjectRecoveryFrontier(
+        CustomLoopRunRecord run,
+        CustomLoopRunStatus status,
+        DateTimeOffset now)
+    {
+        if (run.Frontier is not { } frontier || run.SequentialAdapterBinding is not { } binding)
+        {
+            return run.Frontier;
+        }
+
+        var transition = status switch
+        {
+            CustomLoopRunStatus.NeedsReview when frontier.Payload.Nodes[^1].Status == GovernedLoopNodeExecutionStatus.Running
+                => GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(frontier, binding, null, null, now),
+            CustomLoopRunStatus.Cancelled
+                => GovernedLoopSequentialFrontierMachine.CancelCurrent(frontier, binding, now),
+            _ => null,
+        };
+        return transition?.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied
+            ? transition.Frontier
+            : frontier;
+    }
 
     private static CustomLoopExecutionClock StopAtLastDurableUpdate(CustomLoopExecutionClock clock, DateTimeOffset durableStop)
     {

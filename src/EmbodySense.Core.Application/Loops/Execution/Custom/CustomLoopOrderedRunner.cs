@@ -1469,25 +1469,36 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         IGovernedLoopSequentialAuditRecorder auditRecorder,
         CustomLoopRunRecord? authenticatedOutcomeSnapshot)
     {
-        if (run.Status is CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.CancelRequested)
+        if (authenticatedOutcomeSnapshot is null
+            || !TryCreateAuthenticatedPureCheckpointSnapshot(
+                authenticatedOutcomeSnapshot,
+                run,
+                context,
+                out var checkpointSnapshot))
+        {
+            if (run.IsTerminal)
+            {
+                var terminal = await CompleteOrProjectSequentialTerminalAsync(run, actor, context);
+                return new RunAdvance(terminal.Run, terminal);
+            }
+
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, run, "The committed pure-node checkpoint is followed by execution progress outside this worker's authenticated checkpoint boundary."));
+        }
+
+        if (CustomLoopRunValidator.HasSameDurableVersion(checkpointSnapshot, run)
+            || IsAcceptedPureControlSuccessor(checkpointSnapshot, run))
         {
             return await HonorPureCheckpointControlAsync(run, actor, auditRecorder);
         }
 
-        if (run.Status == CustomLoopRunStatus.Paused)
+        if (TryGetAcceptedPurePausedLifecycleSuccessor(checkpointSnapshot, run))
         {
             return new RunAdvance(run, Result(CustomLoopOrderedRunStatus.Paused, run, "The exact pure-node checkpoint is durable and the run is paused."));
         }
 
         if (run.IsTerminal)
         {
-            if (authenticatedOutcomeSnapshot is not null
-                && TryCreateAuthenticatedPureCheckpointSnapshot(
-                    authenticatedOutcomeSnapshot,
-                    run,
-                    context,
-                    out var checkpointSnapshot)
-                && TryGetAcceptedPureCancellationLifecycleSuccessor(
+            if (TryGetAcceptedPureCancellationLifecycleSuccessor(
                     checkpointSnapshot,
                     run,
                     out var cancellationLifecycle))
@@ -1511,7 +1522,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return new RunAdvance(terminal.Run, terminal);
         }
 
-        return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, run, $"The committed pure-node checkpoint cannot continue from {run.Status}."));
+        return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, run, $"The committed pure-node checkpoint is followed by {run.Status} execution progress outside this worker's authenticated boundary."));
     }
 
     private static bool HasCommittedSequentialPureCheckpoint(
@@ -5133,6 +5144,72 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             && terminalSnapshot.CompletedAtUtc == terminalLifecycle.TimestampUtc
             && string.Equals(terminalLifecycle.Detail, CanonicalDurableCancellationDetail, StringComparison.Ordinal)
             && terminalLifecycle.ControlExpectedLifecycleVersion is null;
+    }
+
+    private static bool TryGetAcceptedPurePausedLifecycleSuccessor(
+        CustomLoopRunRecord current,
+        CustomLoopRunRecord latest)
+    {
+        if (latest.Status != CustomLoopRunStatus.Paused
+            || latest.IsTerminal
+            || !CustomLoopRunValidator.HasExactDurableEventPrefix(current, latest))
+        {
+            return false;
+        }
+
+        var appended = latest.Events.Skip(current.Events.Length).ToArray();
+        var pausePredecessor = current;
+        if (appended.Length == 2 && current.Status == CustomLoopRunStatus.Running)
+        {
+            if (current.LifecycleVersion == int.MaxValue)
+            {
+                return false;
+            }
+
+            var pauseRequested = current with
+            {
+                LifecycleVersion = current.LifecycleVersion + 1,
+                Status = CustomLoopRunStatus.PauseRequested,
+                UpdatedAtUtc = appended[0].TimestampUtc,
+                Events = [.. current.Events, appended[0]],
+            };
+            if (!IsAcceptedPureLifecycleChain(current, pauseRequested, CustomLoopRunStatus.PauseRequested))
+            {
+                return false;
+            }
+
+            pausePredecessor = pauseRequested;
+            appended = appended[1..];
+        }
+
+        const string PausedDetail = "The run entered Paused at a proved checkpoint boundary; Resume is required for any later dispatch.";
+        if (pausePredecessor.Status != CustomLoopRunStatus.PauseRequested
+            || appended is not [{ Kind: CustomLoopRunEventKind.LifecycleChanged } lifecycle]
+            || lifecycle.Sequence != pausePredecessor.Events.Length + 1L
+            || !string.Equals(lifecycle.Detail, PausedDetail, StringComparison.Ordinal)
+            || lifecycle.ControlExpectedLifecycleVersion is not null
+            || pausePredecessor.LifecycleVersion == int.MaxValue)
+        {
+            return false;
+        }
+
+        var expectedFrontier = ProjectPausedFrontier(pausePredecessor, lifecycle);
+        if (pausePredecessor.SequentialAdapterBinding is not null && expectedFrontier is null)
+        {
+            return false;
+        }
+
+        var expectedPaused = pausePredecessor with
+        {
+            LifecycleVersion = pausePredecessor.LifecycleVersion + 1,
+            Status = CustomLoopRunStatus.Paused,
+            UpdatedAtUtc = lifecycle.TimestampUtc,
+            ExecutionClock = AdvanceClock(pausePredecessor.ExecutionClock, lifecycle.TimestampUtc, terminal: true),
+            Events = [.. pausePredecessor.Events, lifecycle],
+            Frontier = expectedFrontier,
+        };
+        return CustomLoopRunValidator.ValidateUpdate(pausePredecessor, expectedPaused).IsValid
+            && CustomLoopRunValidator.HasSameDurableVersion(expectedPaused, latest);
     }
 
     private static bool TryGetAcceptedPureRejectionTerminalSuccessor(

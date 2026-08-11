@@ -669,8 +669,7 @@ public static class CustomLoopRunValidator
             CustomLoopRunStatus.Paused => frontierStatus is GovernedLoopFrontierStatus.Waiting or GovernedLoopFrontierStatus.ReviewBlocked
                 || frontierStatus == GovernedLoopFrontierStatus.Active
                     && (frontier.Payload.Nodes.All(node => node.Status != GovernedLoopNodeExecutionStatus.Running)
-                        || HasRestartSafePureRunningAttempt(run, frontier)
-                        || AllRunningAttemptsHaveAuthenticatedTerminals(run, frontier)),
+                        || AllRunningAttemptsAreRestartSafe(run, frontier)),
             CustomLoopRunStatus.Completed => frontierStatus == GovernedLoopFrontierStatus.Completed,
             CustomLoopRunStatus.Failed => frontierStatus == GovernedLoopFrontierStatus.Failed,
             CustomLoopRunStatus.Cancelled => frontierStatus == GovernedLoopFrontierStatus.Cancelled,
@@ -679,47 +678,37 @@ public static class CustomLoopRunValidator
         };
     }
 
-    private static bool HasRestartSafePureRunningAttempt(CustomLoopRunRecord run, GovernedLoopFrontierPosture frontier)
-    {
-        if (frontier.Payload.Nodes[^1] is not
-            {
-                Status: GovernedLoopNodeExecutionStatus.Running,
-                Attempt: { } attempt,
-                AttemptOperationId: { } attemptOperationId,
-                Descriptor.Kind: GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate,
-            } node)
-        {
-            return false;
-        }
-
-        var starts = run.Events.Where(item => item.Sequence > run.Checkpoint.LastCommittedSequence
-            && item is
-            {
-                Kind: CustomLoopRunEventKind.NodeAttemptStarted,
-                TraceReservationUtf8Bytes: CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
-                SequentialNodeEvidence:
-                {
-                    Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
-                    Disposition: CustomLoopSequentialNodeDisposition.Unknown,
-                } evidence,
-            }
-            && string.Equals(item.EventId, attemptOperationId, StringComparison.Ordinal)
-            && item.Attempt == attempt
-            && string.Equals(item.StepId, node.NodeId, StringComparison.Ordinal)
-            && evidence.Attempt == attempt
-            && string.Equals(evidence.NodeId, node.NodeId, StringComparison.Ordinal)
-            && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
-            && CustomLoopSequentialOutcomeArtifactHash.Matches(item)).Take(2).ToArray();
-        return starts.Length == 1;
-    }
-
-    private static bool AllRunningAttemptsHaveAuthenticatedTerminals(CustomLoopRunRecord run, GovernedLoopFrontierPosture frontier)
+    private static bool AllRunningAttemptsAreRestartSafe(CustomLoopRunRecord run, GovernedLoopFrontierPosture frontier)
     {
         var runningNodes = frontier.Payload.Nodes
             .Where(node => node.Status == GovernedLoopNodeExecutionStatus.Running)
             .ToArray();
         return runningNodes.Length > 0
-            && runningNodes.All(node => HasAuthenticatedTerminalRunningAttempt(run, node));
+            && runningNodes.All(node => HasRestartSafePureRunningAttempt(run, node)
+                || HasAuthenticatedTerminalRunningAttempt(run, node));
+    }
+
+    private static bool HasRestartSafePureRunningAttempt(CustomLoopRunRecord run, GovernedLoopNodeExecutionEvidence node)
+    {
+        if (node is not
+            {
+                Status: GovernedLoopNodeExecutionStatus.Running,
+                Attempt: not null,
+                AttemptOperationId: not null,
+                Descriptor.Kind: GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate,
+            })
+        {
+            return false;
+        }
+
+        var starts = ExactRunningAttemptStarts(run, node)
+            .Where(item => item is
+            {
+                TraceReservationUtf8Bytes: CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
+            })
+            .Take(2)
+            .ToArray();
+        return starts.Length == 1;
     }
 
     private static bool HasAuthenticatedTerminalRunningAttempt(CustomLoopRunRecord run, GovernedLoopNodeExecutionEvidence node)
