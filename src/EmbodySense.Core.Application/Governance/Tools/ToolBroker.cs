@@ -200,8 +200,17 @@ public sealed class ToolBroker : IToolBroker
         if (authorityExecution.Disposition is ToolActuationAuthorityDisposition.ReviewRequired or ToolActuationAuthorityDisposition.Ambiguous)
         {
             actuation.ValidateNoActuation();
-            await RecordActuationAuthorityAsync(requestId, request, check, authorityExecution, cancellationToken);
-            throw new ToolActuationReviewRequiredException(authorityExecution.Disposition, authorityExecution.Detail);
+            Exception? auditFailure = null;
+            try
+            {
+                await RecordActuationAuthorityAsync(requestId, request, check, authorityExecution, cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                auditFailure = exception;
+            }
+
+            throw new ToolActuationReviewRequiredException(authorityExecution.Disposition, authorityExecution.Detail, auditFailure);
         }
 
         var expectedFailure = actuation.GetExpectedFailure(authorityExecution);

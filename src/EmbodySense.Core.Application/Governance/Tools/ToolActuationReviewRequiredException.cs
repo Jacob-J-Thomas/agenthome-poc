@@ -9,7 +9,16 @@ public sealed class ToolActuationReviewRequiredException : Exception
     /// <param name="disposition">The review-required or ambiguous disposition.</param>
     /// <param name="detail">The bounded operator-facing explanation.</param>
     public ToolActuationReviewRequiredException(ToolActuationAuthorityDisposition disposition, string detail)
-        : base(detail)
+        : this(disposition, detail, null)
+    {
+    }
+
+    /// <summary>Creates a review checkpoint while retaining a secondary audit failure that must not replace it.</summary>
+    /// <param name="disposition">The review-required or ambiguous disposition.</param>
+    /// <param name="detail">The bounded operator-facing explanation.</param>
+    /// <param name="auditFailure">An optional secondary audit failure observed after the authority decision.</param>
+    public ToolActuationReviewRequiredException(ToolActuationAuthorityDisposition disposition, string detail, Exception? auditFailure)
+        : base(detail, auditFailure)
     {
         if (disposition is not (ToolActuationAuthorityDisposition.ReviewRequired or ToolActuationAuthorityDisposition.Ambiguous))
         {
