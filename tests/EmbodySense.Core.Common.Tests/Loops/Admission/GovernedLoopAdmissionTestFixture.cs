@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
+using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops;
@@ -111,18 +112,35 @@ internal static class GovernedLoopAdmissionTestFixture
     internal static GovernedLoopAdmissionRejection Rejection(
         GovernedLoopAdmissionIntent? intent = null,
         GovernedLoopAdmissionFailureCode failureCode = GovernedLoopAdmissionFailureCode.RoleInactive,
+        GovernedLoopAdmissionAuthorityDenialProof? authorityDenial = null,
+        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial = null,
         IReadOnlyList<GovernedLoopAdmissionEvidenceReference>? references = null,
         DateTimeOffset? rejectedAtUtc = null,
         bool applyHash = true)
     {
         var exactIntent = intent ?? Intent();
-        var exactReferences = references ?? DefaultRejectionReferences(exactIntent, failureCode);
+        var rejectedAt = rejectedAtUtc ?? RecordedAtUtc;
+        var exactAuthorityDenial = failureCode == GovernedLoopAdmissionFailureCode.AuthorityDenied
+            ? authorityDenial ?? AuthorityDenialProof(rejectedAt)
+            : authorityDenial;
+        var exactCapabilityDenial = failureCode == GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied
+            ? capabilityDenial ?? CapabilityDenialProof(evaluatedAtUtc: rejectedAt)
+            : capabilityDenial;
+        var exactReferences = references ?? (Enum.IsDefined(failureCode) && failureCode != GovernedLoopAdmissionFailureCode.None
+            ? GovernedLoopAdmissionContractHash.CreateRejectionEvidenceReferences(
+                exactIntent,
+                failureCode,
+                exactAuthorityDenial,
+                exactCapabilityDenial)
+            : [RoleReference(exactIntent)]);
         var candidate = new GovernedLoopAdmissionRejection(
             GovernedLoopAdmissionLimits.CurrentSchemaVersion,
             exactIntent,
             failureCode,
+            exactAuthorityDenial,
+            exactCapabilityDenial,
             exactReferences,
-            rejectedAtUtc ?? RecordedAtUtc,
+            rejectedAt,
             string.Empty);
         return applyHash ? GovernedLoopAdmissionContractHash.Apply(candidate) : candidate;
     }
@@ -175,20 +193,47 @@ internal static class GovernedLoopAdmissionTestFixture
 
     internal static string Hash(char value) => new(value, GovernedLoopAdmissionLimits.Sha256HexCharacters);
 
-    private static IReadOnlyList<GovernedLoopAdmissionEvidenceReference> DefaultRejectionReferences(
-        GovernedLoopAdmissionIntent intent,
-        GovernedLoopAdmissionFailureCode failureCode)
+    internal static GovernedLoopAdmissionAuthorityDenialProof AuthorityDenialProof(DateTimeOffset? evaluatedAtUtc = null)
     {
-        if (!Enum.IsDefined(failureCode) || failureCode == GovernedLoopAdmissionFailureCode.None)
-        {
-            return [RoleReference(intent)];
-        }
-
-        var requiredKinds = GovernedLoopAdmissionValidator.RequiredRejectionEvidenceKinds(failureCode);
-        var complete = GovernedLoopAdmissionContractHash.CreateEvidenceReferences(
-            intent,
+        var evaluatedAt = evaluatedAtUtc ?? RecordedAtUtc;
+        Assert.True(AuthorityBoundaryReceiptFactory.TryCreate(
+            AuthorityBoundaryReceipt.CurrentSchemaVersion,
+            AuthorityBoundaryDecision.Deny,
+            [new AuthorityBoundaryCondition(AuthorityBoundaryDecision.Deny, AuthorityBoundaryReason.ProfileRetired)],
+            [],
+            evaluatedAt,
+            out var receipt,
+            out var validation), string.Join(',', validation.Errors));
+        return new GovernedLoopAdmissionAuthorityDenialProof(
+            GovernedLoopAdmissionLimits.CurrentSchemaVersion,
             EffectiveAuthority(),
-            CapabilityAdmission());
-        return Array.AsReadOnly(complete.Where(reference => requiredKinds.Contains(reference.Kind)).ToArray());
+            AuthorityCeilingIntersection.EmptyCeiling(),
+            receipt!);
+    }
+
+    internal static GovernedLoopAdmissionCapabilityDenialProof CapabilityDenialProof(
+        CapabilityDependencyManifest? requirements = null,
+        AuthorityCeiling? effectiveAuthority = null,
+        IReadOnlyList<GovernedLoopAdmissionCapabilityDenialViolation>? violations = null,
+        DateTimeOffset? evaluatedAtUtc = null)
+    {
+        var exactRequirements = requirements ?? LoopCapabilityRequirements.CreateDefaultConversationManifest();
+        var authority = effectiveAuthority ?? EffectiveAuthority();
+        Assert.True(CapabilityDependencyManifestHash.TryCompute(exactRequirements, out var requirementsHash, out _));
+        var exactViolations = violations ?? exactRequirements.Required
+            .Where(dependency => !authority.Capabilities.Any(identity => identity.Id.Equals(dependency.CapabilityId) && dependency.CompatibleVersionRange.Contains(identity.Version)))
+            .OrderBy(dependency => dependency.CapabilityId.Value, StringComparer.Ordinal)
+            .Select(dependency => new GovernedLoopAdmissionCapabilityDenialViolation(
+                dependency.CapabilityId,
+                dependency.CompatibleVersionRange,
+                GovernedLoopAdmissionCapabilityDenialReason.RequiredCapabilityOutsideEffectiveAuthority))
+            .ToArray();
+        return new GovernedLoopAdmissionCapabilityDenialProof(
+            GovernedLoopAdmissionLimits.CurrentSchemaVersion,
+            exactRequirements,
+            requirementsHash!.Value,
+            authority,
+            exactViolations,
+            evaluatedAtUtc ?? RecordedAtUtc);
     }
 }

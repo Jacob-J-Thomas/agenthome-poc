@@ -234,8 +234,11 @@ public sealed class GovernedLoopAdmissionContractTests
         Assert.DoesNotContain(names, name => name.Contains("Ambiguous", StringComparison.Ordinal));
         Assert.DoesNotContain(names, name => name.Contains("Conflict", StringComparison.Ordinal));
         Assert.DoesNotContain(names, name => name.Contains("Store", StringComparison.Ordinal));
+        Assert.DoesNotContain("PublicationMismatch", names);
+        Assert.DoesNotContain("GraphArtifactMismatch", names);
         Assert.Equal(
             [
+                GovernedLoopAdmissionEvidenceKind.GraphArtifact,
                 GovernedLoopAdmissionEvidenceKind.EffectiveAuthority,
                 GovernedLoopAdmissionEvidenceKind.CapabilityAdmission
             ],
@@ -364,6 +367,8 @@ public sealed class GovernedLoopAdmissionContractTests
             value.SchemaVersion,
             value.Intent,
             value.FailureCode,
+            value.AuthorityDenial,
+            value.CapabilityDenial,
             references,
             value.RejectedAtUtc,
             string.Empty);

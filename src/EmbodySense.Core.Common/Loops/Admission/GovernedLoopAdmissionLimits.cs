@@ -15,6 +15,9 @@ public static class GovernedLoopAdmissionLimits
     /// <summary>Gets the maximum number of exact evidence references retained with one disposition.</summary>
     public const int MaxEvidenceReferences = 7;
 
+    /// <summary>Gets the maximum number of required root capability-policy violations retained in one denial proof.</summary>
+    public const int MaxCapabilityDenialViolations = 64;
+
     /// <summary>Gets the maximum number of structured validation errors returned per call.</summary>
     public const int MaxValidationErrors = 64;
 

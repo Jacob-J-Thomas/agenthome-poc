@@ -20,6 +20,33 @@ internal static class GovernedLoopAdmissionContractCopy
                 value.AllowsExternalPublication,
                 value.AllowsIrreversibleAction);
 
+    internal static AuthorityBoundaryReceipt Copy(AuthorityBoundaryReceipt? value)
+        => value is null || value.Conditions is null || value.Profiles is null
+            ? null!
+            : new AuthorityBoundaryReceipt(
+                value.SchemaVersion,
+                value.Decision,
+                Snapshot(value.Conditions, AuthorityContractLimits.MaxBoundaryConditionsPerReceipt),
+                Snapshot(value.Profiles, AuthorityContractLimits.MaxProfilesPerIntersection),
+                value.EvaluatedAtUtc);
+
+    internal static GovernedLoopAdmissionAuthorityDenialProof Copy(GovernedLoopAdmissionAuthorityDenialProof value)
+        => new(value.SchemaVersion, value.CandidateCeiling, value.EffectiveCeiling, value.BoundaryReceipt);
+
+    internal static GovernedLoopAdmissionCapabilityDenialProof Copy(GovernedLoopAdmissionCapabilityDenialProof value)
+        => new(value.SchemaVersion, value.Requirements, value.RequirementsHash, value.EffectiveAuthority, value.Violations, value.EvaluatedAtUtc);
+
+    internal static CapabilityDependencyManifest Copy(CapabilityDependencyManifest? value)
+        => value is null || value.Required is null || value.Optional is null
+            ? null!
+            : new CapabilityDependencyManifest(
+                value.SchemaVersion,
+                value.Kind,
+                value.SubjectId,
+                Snapshot(value.Required, CapabilityContractLimits.MaxDependencyManifestDependencies),
+                Snapshot(value.Optional, CapabilityContractLimits.MaxDependencyManifestDependencies),
+                value.Artifact);
+
     internal static CapabilityAdmissionSnapshot Copy(CapabilityAdmissionSnapshot? value)
     {
         if (value is null)
@@ -27,15 +54,7 @@ internal static class GovernedLoopAdmissionContractCopy
             return null!;
         }
 
-        var requirements = value.Requirements is null || value.Requirements.Required is null || value.Requirements.Optional is null
-            ? null!
-            : new CapabilityDependencyManifest(
-                value.Requirements.SchemaVersion,
-                value.Requirements.Kind,
-                value.Requirements.SubjectId,
-                Snapshot(value.Requirements.Required, CapabilityContractLimits.MaxDependencyManifestDependencies),
-                Snapshot(value.Requirements.Optional, CapabilityContractLimits.MaxDependencyManifestDependencies),
-                value.Requirements.Artifact);
+        var requirements = Copy(value.Requirements);
         var pins = value.Pins is null ? null! : Snapshot(value.Pins, CapabilityContractLimits.MaxCapabilityAdmissionPins);
         var evidence = value.Evidence is null ? null! : Snapshot(value.Evidence, CapabilityContractLimits.MaxCapabilityAdmissionEvidenceEntries);
         return new CapabilityAdmissionSnapshot(
@@ -50,6 +69,9 @@ internal static class GovernedLoopAdmissionContractCopy
 
     internal static IReadOnlyList<GovernedLoopAdmissionEvidenceReference> Copy(IReadOnlyList<GovernedLoopAdmissionEvidenceReference>? values)
         => values is null ? null! : Snapshot(values, GovernedLoopAdmissionLimits.MaxEvidenceReferences);
+
+    internal static IReadOnlyList<GovernedLoopAdmissionCapabilityDenialViolation> Copy(IReadOnlyList<GovernedLoopAdmissionCapabilityDenialViolation>? values)
+        => values is null ? null! : Snapshot(values, GovernedLoopAdmissionLimits.MaxCapabilityDenialViolations);
 
     private static IReadOnlyList<TValue> Snapshot<TValue>(IEnumerable<TValue> values, int maximum)
         => Array.AsReadOnly(values.Take(maximum + 1).ToArray());

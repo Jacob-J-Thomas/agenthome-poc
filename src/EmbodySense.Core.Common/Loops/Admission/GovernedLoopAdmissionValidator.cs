@@ -1,6 +1,8 @@
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
+using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Execution;
@@ -80,6 +82,12 @@ public static class GovernedLoopAdmissionValidator
 
     internal static GovernedLoopAdmissionValidationResult ValidateForHash(GovernedLoopAdmissionRejection? rejection)
         => Result(ValidateRejectionStructure(rejection));
+
+    internal static GovernedLoopAdmissionValidationResult ValidateRejectionProofsForHash(
+        GovernedLoopAdmissionFailureCode failureCode,
+        GovernedLoopAdmissionAuthorityDenialProof? authorityDenial,
+        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial)
+        => Result(ValidateRejectionProofs(failureCode, authorityDenial, capabilityDenial));
 
     internal static GovernedLoopAdmissionValidationResult ValidateForHash(GovernedLoopAdmissionTerminalOutcome? outcome)
         => Result(ValidateTerminalOutcomeStructure(outcome));
@@ -210,14 +218,182 @@ public static class GovernedLoopAdmissionValidator
         if (Enum.IsDefined(rejection.FailureCode) && rejection.FailureCode != GovernedLoopAdmissionFailureCode.None)
         {
             ValidateReferences(rejection.References, RequiredRejectionEvidenceKinds(rejection.FailureCode), "$.references", errors);
+            AddNested(errors, ValidateRejectionProofs(rejection.FailureCode, rejection.AuthorityDenial, rejection.CapabilityDenial), "$.proofs");
         }
         else
         {
             ValidateReferences(rejection.References, requireCompleteSet: false, "$.references", errors);
         }
         ValidateUtc(rejection.RejectedAtUtc, "$.rejectedAtUtc", errors);
+        if (rejection.AuthorityDenial?.BoundaryReceipt is { } authorityReceipt
+            && authorityReceipt.EvaluatedAtUtc != rejection.RejectedAtUtc)
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidTimestamp, "$.authorityDenial.boundaryReceipt.evaluatedAtUtc");
+        }
+
+        if (rejection.CapabilityDenial is { } capabilityDenial
+            && capabilityDenial.EvaluatedAtUtc != rejection.RejectedAtUtc)
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidTimestamp, "$.capabilityDenial.evaluatedAtUtc");
+        }
+
+        if (errors.Count == 0)
+        {
+            IReadOnlyList<GovernedLoopAdmissionEvidenceReference> expectedReferences;
+            try
+            {
+                expectedReferences = GovernedLoopAdmissionContractHash.CreateRejectionEvidenceReferences(
+                    rejection.Intent,
+                    rejection.FailureCode,
+                    rejection.AuthorityDenial,
+                    rejection.CapabilityDenial);
+            }
+            catch (ArgumentException)
+            {
+                Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.proofs");
+                return errors;
+            }
+
+            if (!expectedReferences.SequenceEqual(rejection.References))
+            {
+                Add(errors, GovernedLoopAdmissionValidationErrorCode.EvidenceSetMismatch, "$.references");
+            }
+        }
+
         return errors;
     }
+
+    private static List<GovernedLoopAdmissionValidationError> ValidateRejectionProofs(
+        GovernedLoopAdmissionFailureCode failureCode,
+        GovernedLoopAdmissionAuthorityDenialProof? authorityDenial,
+        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial)
+    {
+        var errors = new List<GovernedLoopAdmissionValidationError>();
+        var requiresAuthority = failureCode == GovernedLoopAdmissionFailureCode.AuthorityDenied;
+        var requiresCapability = failureCode == GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied;
+        if (requiresAuthority != (authorityDenial is not null) || requiresCapability != (capabilityDenial is not null))
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidComposition, "$");
+        }
+
+        if (authorityDenial is not null)
+        {
+            AddNested(errors, ValidateAuthorityDenialProofStructure(authorityDenial), "$.authorityDenial");
+        }
+
+        if (capabilityDenial is not null)
+        {
+            AddNested(errors, ValidateCapabilityDenialProofStructure(capabilityDenial), "$.capabilityDenial");
+        }
+
+        return errors;
+    }
+
+    private static List<GovernedLoopAdmissionValidationError> ValidateAuthorityDenialProofStructure(GovernedLoopAdmissionAuthorityDenialProof? proof)
+    {
+        var errors = new List<GovernedLoopAdmissionValidationError>();
+        if (proof is null)
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.Required, "$");
+            return errors;
+        }
+
+        ValidateSchema(proof.SchemaVersion, "$.schemaVersion", errors);
+        if (!AuthorityProfileValidator.ValidateCeiling(proof.CandidateCeiling).IsValid)
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.candidateCeiling");
+        }
+
+        if (!AuthorityProfileValidator.ValidateCeiling(proof.EffectiveCeiling).IsValid || !IsCanonicalEmptyCeiling(proof.EffectiveCeiling))
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.effectiveCeiling");
+        }
+
+        if (!AuthorityBoundaryReceiptFactory.Validate(proof.BoundaryReceipt).IsValid
+            || proof.BoundaryReceipt?.Decision != AuthorityBoundaryDecision.Deny)
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.boundaryReceipt");
+        }
+        else
+        {
+            ValidateUtc(proof.BoundaryReceipt.EvaluatedAtUtc, "$.boundaryReceipt.evaluatedAtUtc", errors);
+            if (!proof.BoundaryReceipt.Conditions.SequenceEqual(proof.BoundaryReceipt.Conditions.OrderBy(item => item.Decision).ThenBy(item => item.Reason))
+                || !proof.BoundaryReceipt.Profiles.SequenceEqual(proof.BoundaryReceipt.Profiles.OrderBy(item => item.ProfileId).ThenBy(item => item.Revision)))
+            {
+                Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.boundaryReceipt");
+            }
+        }
+
+        return errors;
+    }
+
+    private static List<GovernedLoopAdmissionValidationError> ValidateCapabilityDenialProofStructure(GovernedLoopAdmissionCapabilityDenialProof? proof)
+    {
+        var errors = new List<GovernedLoopAdmissionValidationError>();
+        if (proof is null)
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.Required, "$");
+            return errors;
+        }
+
+        ValidateSchema(proof.SchemaVersion, "$.schemaVersion", errors);
+        if (!CapabilityDependencyManifestHash.TryCompute(proof.Requirements, out var requirementsHash, out _)
+            || !string.Equals(proof.RequirementsHash, requirementsHash?.Value, StringComparison.Ordinal))
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.requirements");
+        }
+
+        if (!AuthorityProfileValidator.ValidateCeiling(proof.EffectiveAuthority).IsValid)
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.effectiveAuthority");
+        }
+
+        ValidateUtc(proof.EvaluatedAtUtc, "$.evaluatedAtUtc", errors);
+        if (proof.Violations is null
+            || proof.Violations.Count is < 1 or > GovernedLoopAdmissionLimits.MaxCapabilityDenialViolations
+            || proof.Violations.Any(item => item?.DependencyId is null
+                || item.CompatibleVersionRange is null
+                || item.Reason != GovernedLoopAdmissionCapabilityDenialReason.RequiredCapabilityOutsideEffectiveAuthority))
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.violations");
+        }
+
+        if (errors.Count == 0)
+        {
+            var expected = ComputeCapabilityDenialViolations(proof.Requirements, proof.EffectiveAuthority);
+            if (expected.Count == 0 || !expected.SequenceEqual(proof.Violations!))
+            {
+                Add(errors, GovernedLoopAdmissionValidationErrorCode.BindingMismatch, "$.violations");
+            }
+        }
+
+        return errors;
+    }
+
+    private static IReadOnlyList<GovernedLoopAdmissionCapabilityDenialViolation> ComputeCapabilityDenialViolations(
+        CapabilityDependencyManifest requirements,
+        AuthorityCeiling effectiveAuthority)
+        => Array.AsReadOnly(requirements.Required
+            .Where(dependency => !effectiveAuthority.Capabilities.Any(identity => identity.Id.Equals(dependency.CapabilityId) && dependency.CompatibleVersionRange.Contains(identity.Version)))
+            .OrderBy(dependency => dependency.CapabilityId.Value, StringComparer.Ordinal)
+            .ThenBy(dependency => dependency.CompatibleVersionRange.Value, StringComparer.Ordinal)
+            .Select(dependency => new GovernedLoopAdmissionCapabilityDenialViolation(
+                dependency.CapabilityId,
+                dependency.CompatibleVersionRange,
+                GovernedLoopAdmissionCapabilityDenialReason.RequiredCapabilityOutsideEffectiveAuthority))
+            .ToArray());
+
+    private static bool IsCanonicalEmptyCeiling(AuthorityCeiling? ceiling)
+        => ceiling is
+        {
+            Capabilities.Count: 0,
+            DataClasses.Count: 0,
+            MaxTargetCount: 0,
+            MaxSideEffectClass: CapabilitySideEffectClass.None,
+            AllowsRecurrence: false,
+            AllowsExternalPublication: false,
+            AllowsIrreversibleAction: false
+        };
 
     private static List<GovernedLoopAdmissionValidationError> ValidateTerminalOutcomeStructure(GovernedLoopAdmissionTerminalOutcome? outcome)
     {
@@ -364,12 +540,6 @@ public static class GovernedLoopAdmissionValidator
                 or GovernedLoopAdmissionFailureCode.RoleSourceMismatch => [GovernedLoopAdmissionEvidenceKind.ContextualRoleRevision],
             GovernedLoopAdmissionFailureCode.GrantMismatch
                 or GovernedLoopAdmissionFailureCode.GrantInactive => [GovernedLoopAdmissionEvidenceKind.AuthorityGrant],
-            GovernedLoopAdmissionFailureCode.PublicationMismatch => [GovernedLoopAdmissionEvidenceKind.LoopPublication],
-            GovernedLoopAdmissionFailureCode.GraphArtifactMismatch =>
-            [
-                GovernedLoopAdmissionEvidenceKind.GraphArtifact,
-                GovernedLoopAdmissionEvidenceKind.GraphLayout
-            ],
             GovernedLoopAdmissionFailureCode.AuthorityDenied =>
             [
                 GovernedLoopAdmissionEvidenceKind.ContextualRoleRevision,
@@ -380,6 +550,7 @@ public static class GovernedLoopAdmissionValidator
             ],
             GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied =>
             [
+                GovernedLoopAdmissionEvidenceKind.GraphArtifact,
                 GovernedLoopAdmissionEvidenceKind.EffectiveAuthority,
                 GovernedLoopAdmissionEvidenceKind.CapabilityAdmission
             ],

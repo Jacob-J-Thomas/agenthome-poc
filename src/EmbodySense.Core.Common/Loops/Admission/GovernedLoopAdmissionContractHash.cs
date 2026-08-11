@@ -76,6 +76,18 @@ public static class GovernedLoopAdmissionContractHash
         Append(canonical, rejection.SchemaVersion);
         Append(canonical, ComputeIntentHash(rejection.Intent));
         Append(canonical, (int)rejection.FailureCode);
+        Append(canonical, rejection.AuthorityDenial is not null);
+        if (rejection.AuthorityDenial is not null)
+        {
+            Append(canonical, ComputeAuthorityDenialProofHash(rejection.AuthorityDenial));
+        }
+
+        Append(canonical, rejection.CapabilityDenial is not null);
+        if (rejection.CapabilityDenial is not null)
+        {
+            Append(canonical, ComputeCapabilityDenialProofHash(rejection.CapabilityDenial));
+        }
+
         AppendReferences(canonical, rejection.References);
         Append(canonical, rejection.RejectedAtUtc);
         return Digest(canonical);
@@ -157,6 +169,36 @@ public static class GovernedLoopAdmissionContractHash
             new GovernedLoopAdmissionEvidenceReference(GovernedLoopAdmissionEvidenceKind.EffectiveAuthority, ComputeAuthorityCeilingReferenceHash(effectiveAuthority)),
             new GovernedLoopAdmissionEvidenceReference(GovernedLoopAdmissionEvidenceKind.CapabilityAdmission, ComputeCapabilityAdmissionReferenceHash(capabilityAdmission))
         });
+    }
+
+    /// <summary>Creates the exact canonical evidence-reference set for one definitive rejection.</summary>
+    /// <param name="intent">The complete server-owned immutable admission intent.</param>
+    /// <param name="failureCode">The supported definitive failure classification.</param>
+    /// <param name="authorityDenial">The structured authority proof required only for authority denial.</param>
+    /// <param name="capabilityDenial">The structured capability proof required only for capability-policy denial.</param>
+    /// <returns>A defensively wrapped, canonically ordered reference set whose hashes are derived only from structured evidence.</returns>
+    /// <exception cref="ArgumentException">Thrown when the intent, failure classification, or proof composition is invalid.</exception>
+    public static IReadOnlyList<GovernedLoopAdmissionEvidenceReference> CreateRejectionEvidenceReferences(
+        GovernedLoopAdmissionIntent intent,
+        GovernedLoopAdmissionFailureCode failureCode,
+        GovernedLoopAdmissionAuthorityDenialProof? authorityDenial = null,
+        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial = null)
+    {
+        RequireValid(GovernedLoopAdmissionValidator.ValidateForHash(intent), nameof(intent));
+        if (!Enum.IsDefined(failureCode) || failureCode == GovernedLoopAdmissionFailureCode.None)
+        {
+            throw new ArgumentException("A supported definitive admission failure is required.", nameof(failureCode));
+        }
+
+        RequireValid(
+            GovernedLoopAdmissionValidator.ValidateRejectionProofsForHash(failureCode, authorityDenial, capabilityDenial),
+            nameof(failureCode));
+        var references = GovernedLoopAdmissionValidator.RequiredRejectionEvidenceKinds(failureCode)
+            .Select(kind => new GovernedLoopAdmissionEvidenceReference(
+                kind,
+                ComputeRejectionEvidenceReferenceHash(intent, failureCode, kind, authorityDenial, capabilityDenial)))
+            .ToArray();
+        return Array.AsReadOnly(references);
     }
 
     /// <summary>Computes the domain-separated digest of one exact contextual-role revision pin.</summary>
@@ -245,6 +287,88 @@ public static class GovernedLoopAdmissionContractHash
     internal static bool IsCanonicalHash(string? value)
         => value?.Length == GovernedLoopAdmissionLimits.Sha256HexCharacters
             && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static string ComputeRejectionEvidenceReferenceHash(
+        GovernedLoopAdmissionIntent intent,
+        GovernedLoopAdmissionFailureCode failureCode,
+        GovernedLoopAdmissionEvidenceKind kind,
+        GovernedLoopAdmissionAuthorityDenialProof? authorityDenial,
+        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial)
+        => kind switch
+        {
+            GovernedLoopAdmissionEvidenceKind.ContextualRoleRevision => ComputeContextualRoleReferenceHash(intent.Role),
+            GovernedLoopAdmissionEvidenceKind.AuthorityGrant => ComputeAuthorityGrantReferenceHash(intent.AuthorityGrant),
+            GovernedLoopAdmissionEvidenceKind.LoopPublication => GovernedLoopRevisionContractHash.ComputePublicationPinHash(intent.Publication),
+            GovernedLoopAdmissionEvidenceKind.GraphArtifact => ReferenceDigest("governed-loop-admission-graph-artifact-reference-v1", intent.GraphArtifactHash),
+            GovernedLoopAdmissionEvidenceKind.GraphLayout => ReferenceDigest("governed-loop-admission-graph-layout-reference-v1", intent.GraphLayoutHash),
+            GovernedLoopAdmissionEvidenceKind.EffectiveAuthority when failureCode == GovernedLoopAdmissionFailureCode.AuthorityDenied => ComputeAuthorityCeilingReferenceHash(authorityDenial!.EffectiveCeiling),
+            GovernedLoopAdmissionEvidenceKind.EffectiveAuthority when failureCode == GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied => ComputeAuthorityCeilingReferenceHash(capabilityDenial!.EffectiveAuthority),
+            GovernedLoopAdmissionEvidenceKind.CapabilityAdmission when failureCode == GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied => ComputeCapabilityDenialProofHash(capabilityDenial!),
+            _ => throw new ArgumentException("The rejection evidence kind is not supported by the failure classification.", nameof(kind))
+        };
+
+    private static string ComputeAuthorityDenialProofHash(GovernedLoopAdmissionAuthorityDenialProof proof)
+    {
+        RequireValid(
+            GovernedLoopAdmissionValidator.ValidateRejectionProofsForHash(
+                GovernedLoopAdmissionFailureCode.AuthorityDenied,
+                proof,
+                null),
+            nameof(proof));
+        var canonical = Begin("governed-loop-admission-authority-denial-proof-v1");
+        Append(canonical, proof.SchemaVersion);
+        Append(canonical, ComputeAuthorityCeilingReferenceHash(proof.CandidateCeiling));
+        Append(canonical, ComputeAuthorityCeilingReferenceHash(proof.EffectiveCeiling));
+        AppendBoundaryReceipt(canonical, proof.BoundaryReceipt);
+        return Digest(canonical);
+    }
+
+    private static string ComputeCapabilityDenialProofHash(GovernedLoopAdmissionCapabilityDenialProof proof)
+    {
+        RequireValid(
+            GovernedLoopAdmissionValidator.ValidateRejectionProofsForHash(
+                GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied,
+                null,
+                proof),
+            nameof(proof));
+        _ = CapabilityDependencyManifestHash.TryCompute(proof.Requirements, out var requirementsHash, out _);
+        var canonical = Begin("governed-loop-admission-capability-denial-proof-v1");
+        Append(canonical, proof.SchemaVersion);
+        Append(canonical, requirementsHash!.Value);
+        Append(canonical, proof.RequirementsHash);
+        Append(canonical, ComputeAuthorityCeilingReferenceHash(proof.EffectiveAuthority));
+        Append(canonical, proof.Violations.Count);
+        foreach (var violation in proof.Violations)
+        {
+            Append(canonical, violation.DependencyId.Value);
+            Append(canonical, violation.CompatibleVersionRange.Value);
+            Append(canonical, (int)violation.Reason);
+        }
+
+        Append(canonical, proof.EvaluatedAtUtc);
+        return Digest(canonical);
+    }
+
+    private static void AppendBoundaryReceipt(StringBuilder canonical, AuthorityBoundaryReceipt receipt)
+    {
+        Append(canonical, receipt.SchemaVersion);
+        Append(canonical, (int)receipt.Decision);
+        Append(canonical, receipt.Conditions.Count);
+        foreach (var condition in receipt.Conditions)
+        {
+            Append(canonical, (int)condition.Decision);
+            Append(canonical, (int)condition.Reason);
+        }
+
+        Append(canonical, receipt.Profiles.Count);
+        foreach (var profile in receipt.Profiles)
+        {
+            Append(canonical, profile.ProfileId.Value);
+            Append(canonical, profile.Revision.Value);
+        }
+
+        Append(canonical, receipt.EvaluatedAtUtc);
+    }
 
     private static string ReferenceDigest(string domain, string hash)
     {

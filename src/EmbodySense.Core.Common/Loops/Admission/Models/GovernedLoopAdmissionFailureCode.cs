@@ -30,12 +30,6 @@ public enum GovernedLoopAdmissionFailureCode
     /// <summary>The exact authority grant was not currently effective.</summary>
     GrantInactive = 8,
 
-    /// <summary>The current published loop revision did not match the exact publication pin.</summary>
-    PublicationMismatch = 9,
-
-    /// <summary>The immutable graph artifact or layout identity did not match.</summary>
-    GraphArtifactMismatch = 10,
-
     /// <summary>The effective authority intersection denied admission.</summary>
     AuthorityDenied = 11,
 
