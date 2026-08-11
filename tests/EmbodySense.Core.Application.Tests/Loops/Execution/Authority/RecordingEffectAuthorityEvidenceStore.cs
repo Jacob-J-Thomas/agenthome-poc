@@ -14,6 +14,8 @@ internal sealed class RecordingEffectAuthorityEvidenceStore : IGovernedLoopEffec
 
     internal Exception? Exception { get; set; }
 
+    internal Action<GovernedLoopEffectAuthorityDecision>? BeforeReturn { get; set; }
+
     public Task<GovernedLoopEffectAuthorityEvidenceStoreResult> AppendAsync(GovernedLoopEffectAuthorityDecision decision, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -27,6 +29,7 @@ internal sealed class RecordingEffectAuthorityEvidenceStore : IGovernedLoopEffec
         var hash = status is GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended or GovernedLoopEffectAuthorityEvidenceStoreStatus.AlreadyPresent
             ? decision.ContentHash
             : null;
+        BeforeReturn?.Invoke(decision);
         return Task.FromResult(new GovernedLoopEffectAuthorityEvidenceStoreResult(status, hash));
     }
 }

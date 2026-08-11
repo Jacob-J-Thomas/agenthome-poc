@@ -298,6 +298,68 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
     }
 
     [Fact]
+    public async Task Expiry_while_direct_evidence_is_appending_stops_before_the_effect_callback()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        var clock = new FixedEffectAuthorityTimeProvider(GovernedLoopEffectAuthorityTestFixture.Now);
+        var evidence = new RecordingEffectAuthorityEvidenceStore
+        {
+            BeforeReturn = _ => clock.Value = GovernedLoopEffectAuthorityTestFixture.Now.AddHours(2),
+        };
+        var capabilities = new StubEffectCapabilityAdmissionService
+        {
+            Result = new CapabilityRevalidationResult(true, [fixture.RequiredPin], "Current.", CapabilityRevalidationStatus.Active),
+        };
+        var commits = 0;
+
+        var result = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
+            capabilities,
+            evidence,
+            timeProvider: clock).ExecuteAsync(fixture.Request, _ => Task.FromResult(++commits));
+
+        Assert.Equal(0, commits);
+        Assert.False(result.CommitInvoked);
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected, result.Status);
+        Assert.Equal(GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended, result.EvidenceStatus);
+        Assert.Equal(GovernedLoopEffectAuthorityDisposition.Pause, result.Decision?.Disposition);
+        Assert.Equal(GovernedLoopEffectAuthorityReason.EvidenceAmbiguous, result.Decision?.Reason);
+        Assert.Single(evidence.Decisions);
+    }
+
+    [Fact]
+    public async Task Cancellation_while_direct_evidence_is_appending_stops_before_the_effect_callback()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        using var cancellation = new CancellationTokenSource();
+        var evidence = new RecordingEffectAuthorityEvidenceStore
+        {
+            BeforeReturn = _ => cancellation.Cancel(),
+        };
+        var capabilities = new StubEffectCapabilityAdmissionService
+        {
+            Result = new CapabilityRevalidationResult(true, [fixture.RequiredPin], "Current.", CapabilityRevalidationStatus.Active),
+        };
+        var commits = 0;
+
+        var result = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
+            capabilities,
+            evidence).ExecuteAsync(
+                fixture.Request,
+                _ => Task.FromResult(++commits),
+                cancellation.Token);
+
+        Assert.Equal(0, commits);
+        Assert.False(result.CommitInvoked);
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected, result.Status);
+        Assert.Equal(GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended, result.EvidenceStatus);
+        Assert.Equal(GovernedLoopEffectAuthorityDisposition.Pause, result.Decision?.Disposition);
+        Assert.Equal(GovernedLoopEffectAuthorityReason.EvidenceAmbiguous, result.Decision?.Reason);
+        Assert.Single(evidence.Decisions);
+    }
+
+    [Fact]
     public void Stopped_exception_preserves_the_exact_boundary_posture()
     {
         var exception = new GovernedLoopEffectAuthorityStoppedException(
@@ -412,6 +474,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         StubEffectAuthorityGrantResolver grant,
         StubEffectCapabilityAdmissionService capabilities,
         RecordingEffectAuthorityEvidenceStore evidence,
-        RecordingEffectAuthorityTransaction? transaction = null)
-        => new(grant, capabilities, evidence, transaction ?? new RecordingEffectAuthorityTransaction(), new FixedEffectAuthorityTimeProvider(GovernedLoopEffectAuthorityTestFixture.Now));
+        RecordingEffectAuthorityTransaction? transaction = null,
+        TimeProvider? timeProvider = null)
+        => new(grant, capabilities, evidence, transaction ?? new RecordingEffectAuthorityTransaction(), timeProvider ?? new FixedEffectAuthorityTimeProvider(GovernedLoopEffectAuthorityTestFixture.Now));
 }

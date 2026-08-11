@@ -159,6 +159,24 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
             return Result<TResult>(GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected, replayDecision, stored.Status, "The exact direct decision was already present; effect completion is ambiguous and the continuation was not retried.");
         }
 
+        if (cancellationToken.IsCancellationRequested
+            || !TryGetUtcNow(out var commitAtUtc)
+            || !IsActiveAt(admitted.Boundary, commitAtUtc)
+            || !IsActiveAt(decision.CurrentAuthority!.Boundary, commitAtUtc))
+        {
+            var stoppedDecision = CreateEvidenceStoppedDecision(
+                request,
+                admitted,
+                decision.CurrentAuthority!,
+                GovernedLoopEffectAuthorityEvidenceStoreStatus.Ambiguous,
+                decision.EvaluatedAtUtc);
+            return Result<TResult>(
+                GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected,
+                stoppedDecision,
+                stored.Status,
+                "Authority expired, trusted time became unavailable, or cancellation arrived after the direct decision was appended; the protected continuation was not invoked and reconciliation is required.");
+        }
+
         var commitResult = await commit(cancellationToken).ConfigureAwait(false);
         return new GovernedLoopEffectAuthorityExecutionResult<TResult>(
             GovernedLoopEffectAuthorityExecutionStatus.Decided,
@@ -559,6 +577,10 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
         => value?.Length == 64 && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static bool IsTrustedUtc(DateTimeOffset value) => value != default && value.Offset == TimeSpan.Zero;
+
+    private static bool IsActiveAt(AuthorityGrantBoundary boundary, DateTimeOffset evaluatedAtUtc)
+        => evaluatedAtUtc >= boundary.EffectiveAtUtc
+            && (boundary.ExpiresAtUtc is null || evaluatedAtUtc < boundary.ExpiresAtUtc);
 
     private static GovernedLoopEffectAuthorityProof ReplaceGrantPosture(
         GovernedLoopEffectAuthorityProof proof,
