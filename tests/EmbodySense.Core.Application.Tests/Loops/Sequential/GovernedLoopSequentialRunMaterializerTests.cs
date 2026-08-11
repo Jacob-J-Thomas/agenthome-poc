@@ -5,6 +5,7 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Tests.Loops.Admission;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Governance.Audit;
@@ -47,6 +48,12 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         Assert.Equal(context.Invocation.InvokingConversation, run.InvokingConversation);
         Assert.Equal(context.Invocation.ContentHash, run.SequentialInvocationSnapshot?.ContentHash);
         Assert.Equal(context.AdapterBinding.ContentHash, run.SequentialAdapterBinding?.ContentHash);
+        Assert.Equal(context.Receipt.ContentHash, run.SequentialAdapterBinding?.AdmissionReceiptHash);
+        Assert.Equal(context.Receipt.ContentHash, run.SequentialAdapterBinding?.AdmissionReceipt.ContentHash);
+        Assert.NotSame(context.Receipt, run.SequentialAdapterBinding?.AdmissionReceipt);
+        Assert.Equal(context.Receipt.Evidence.GrantProfile, run.SequentialAdapterBinding?.AdmissionReceipt.Evidence.GrantProfile);
+        Assert.Equal(context.Receipt.Evidence.GrantBoundary, run.SequentialAdapterBinding?.AdmissionReceipt.Evidence.GrantBoundary);
+        Assert.Equal(context.Receipt.Evidence.GrantDependencyEvidenceHash, run.SequentialAdapterBinding?.AdmissionReceipt.Evidence.GrantDependencyEvidenceHash);
         Assert.Equal(1, store.CreateCallCount);
         Assert.Equal(1, store.UpdateCallCount);
         Assert.Equal(2, identities.CallCount);
@@ -403,23 +410,31 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
             GovernedLoopAdmissionEvidence.CurrentSchemaVersion,
             GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
             execution,
+            seedReceipt.Evidence.GrantProfile,
+            new AuthorityGrantBoundary(
+                _admittedAtUtc.AddHours(-1),
+                _admittedAtUtc.AddHours(1),
+                seedReceipt.Evidence.GrantBoundary.CompletionConstraint),
+            seedReceipt.Evidence.GrantDependencyEvidenceHash,
             seedReceipt.Evidence.EffectiveAuthority,
             capabilityAdmission,
             GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, seedReceipt.Evidence.EffectiveAuthority, capabilityAdmission),
             _admittedAtUtc,
             string.Empty));
-        var receipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
+        var receiptDraft = new GovernedLoopAdmissionReceipt(
             GovernedLoopAdmissionReceipt.CurrentSchemaVersion,
             intent,
             evidence,
             _admittedAtUtc,
-            string.Empty));
+            string.Empty);
+        var receipt = GovernedLoopAdmissionContractHash.Apply(receiptDraft);
         Assert.True(GovernedLoopAdmissionValidator.Validate(receipt).IsValid);
         var adapterBinding = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
             GovernedLoopSequentialAdapterBinding.CurrentSchemaVersion,
             intent.WorkspaceId,
             execution,
             admissionRequest.OperationId,
+            receipt,
             receipt.ContentHash,
             admissionRequest.RequestHash,
             invocation.ContentHash,

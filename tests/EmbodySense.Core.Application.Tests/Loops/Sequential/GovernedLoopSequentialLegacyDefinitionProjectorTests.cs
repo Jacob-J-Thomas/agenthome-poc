@@ -1,6 +1,8 @@
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Common.Loops.Admission;
+using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
@@ -215,20 +217,66 @@ public sealed class GovernedLoopSequentialLegacyDefinitionProjectorTests
     private static GovernedLoopSequentialAdapterBinding Binding(
         GovernedLoopGraphRevisionArtifact artifact,
         GovernedLoopSequentialInvocationSnapshot invocation)
-        => GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
-            GovernedLoopSequentialAdapterBinding.CurrentSchemaVersion,
-            "workspace-sha256:" + Hash('a'),
-            GovernedLoopExecutionBinding.Create(1, "run-sequential", artifact.RevisionArtifact.Revision, 1),
+    {
+        var workspaceId = "workspace-sha256:" + Hash('a');
+        var execution = GovernedLoopExecutionBinding.Create(1, "run-sequential", artifact.RevisionArtifact.Revision, 1);
+        var receipt = GovernedLoopSequentialApplicationTestFixture.AdmissionReceipt(
+            artifact,
+            execution,
+            workspaceId,
             "admit-sequential",
-            Hash('b'),
+            Hash('c'),
+            artifact.ArtifactHash,
+            artifact.LayoutHash);
+        return GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
+            GovernedLoopSequentialAdapterBinding.CurrentSchemaVersion,
+            workspaceId,
+            execution,
+            "admit-sequential",
+            receipt,
+            receipt.ContentHash,
             Hash('c'),
             invocation.ContentHash,
             artifact.ArtifactHash,
             artifact.LayoutHash,
             string.Empty));
+    }
 
     private static GovernedLoopSequentialAdapterBinding Rehash(GovernedLoopSequentialAdapterBinding binding)
-        => GovernedLoopSequentialContractHash.Apply(binding with { ContentHash = string.Empty });
+    {
+        var receipt = binding.AdmissionReceipt;
+        var intent = receipt.Intent with
+        {
+            GraphArtifactHash = binding.GraphArtifactHash,
+            GraphLayoutHash = binding.GraphLayoutHash,
+        };
+        var source = receipt.Evidence;
+        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
+            source.SchemaVersion,
+            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+            source.Binding,
+            source.GrantProfile,
+            source.GrantBoundary,
+            source.GrantDependencyEvidenceHash,
+            source.EffectiveAuthority,
+            source.CapabilityAdmission,
+            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, source.EffectiveAuthority, source.CapabilityAdmission),
+            source.EvaluatedAtUtc,
+            string.Empty));
+        receipt = GovernedLoopAdmissionContractHash.Apply(receipt with { Intent = intent, Evidence = evidence, ContentHash = string.Empty });
+        return GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
+            binding.SchemaVersion,
+            binding.WorkspaceId,
+            binding.ExecutionBinding,
+            binding.AdmissionOperationId,
+            receipt,
+            receipt.ContentHash,
+            binding.AdmissionRequestHash,
+            binding.InvocationPayloadHash,
+            binding.GraphArtifactHash,
+            binding.GraphLayoutHash,
+            string.Empty));
+    }
 
     private static string Hash(char value) => new(value, 64);
 }

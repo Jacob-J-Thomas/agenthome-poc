@@ -8,6 +8,7 @@ using EmbodySense.Core.Application.Loops.Admission.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
@@ -52,12 +53,19 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         var loaded = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(context.Run.Id));
         Assert.Equal(context.Invocation.ContentHash, loaded.SequentialInvocationSnapshot?.ContentHash);
         Assert.Equal(context.Binding.ContentHash, loaded.SequentialAdapterBinding?.ContentHash);
+        Assert.Equal(context.Binding.AdmissionReceiptHash, loaded.SequentialAdapterBinding?.AdmissionReceiptHash);
+        Assert.Equal(context.Binding.AdmissionReceipt.ContentHash, loaded.SequentialAdapterBinding?.AdmissionReceipt.ContentHash);
+        Assert.NotSame(context.Binding.AdmissionReceipt, loaded.SequentialAdapterBinding?.AdmissionReceipt);
+        Assert.Equal(context.Binding.AdmissionReceipt.Evidence.GrantProfile, loaded.SequentialAdapterBinding?.AdmissionReceipt.Evidence.GrantProfile);
+        Assert.Equal(context.Binding.AdmissionReceipt.Evidence.GrantBoundary, loaded.SequentialAdapterBinding?.AdmissionReceipt.Evidence.GrantBoundary);
+        Assert.Equal(context.Binding.AdmissionReceipt.Evidence.GrantDependencyEvidenceHash, loaded.SequentialAdapterBinding?.AdmissionReceipt.Evidence.GrantDependencyEvidenceHash);
         Assert.Equal(context.Run.Events[0].SequentialNodeEvidence, loaded.Events[0].SequentialNodeEvidence);
         var evidence = Assert.IsType<CustomLoopSequentialNodeEvidence>(loaded.Events[0].SequentialNodeEvidence);
         Assert.Equal(evidence.EvidenceHash, (await restarted.ResolveAsync(evidence.EvidenceHash))?.EvidenceHash);
         var runSource = (IGovernedLoopSequentialRunEvidenceSource)restarted;
         var runEvidence = Assert.IsType<GovernedLoopSequentialRunEvidence>(await runSource.ResolveAsync(context.Run.Id));
         Assert.NotSame(loaded.SequentialAdapterBinding, runEvidence.AdapterBinding);
+        Assert.NotSame(loaded.SequentialAdapterBinding!.AdmissionReceipt, runEvidence.AdapterBinding.AdmissionReceipt);
         Assert.NotSame(loaded.SequentialInvocationSnapshot, runEvidence.InvocationSnapshot);
         Assert.NotSame(loaded.SequentialAdapterBinding!.ExecutionBinding, runEvidence.AdapterBinding.ExecutionBinding);
         Assert.NotSame(loaded.SequentialInvocationSnapshot!.ContextManifest, runEvidence.InvocationSnapshot.ContextManifest);
@@ -555,6 +563,9 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             1,
             GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
             execution,
+            grant.Binding.Profile,
+            new AuthorityGrantBoundary(_timestamp.AddMinutes(-1), _timestamp.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
+            Hash('9'),
             effectiveAuthority,
             capabilityAdmission,
             GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilityAdmission),
@@ -572,6 +583,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             intent.WorkspaceId,
             execution,
             request.OperationId,
+            receipt,
             receipt.ContentHash,
             request.RequestHash,
             invocation.ContentHash,

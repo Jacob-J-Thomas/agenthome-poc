@@ -1,6 +1,8 @@
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Common.Loops.Admission;
+using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Governance.Tools.Models;
@@ -11,6 +13,8 @@ using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Loops.Revisions;
+using EmbodySense.Core.Common.Tests.Loops.Admission;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Common.Tests;
@@ -832,15 +836,30 @@ public sealed class CustomLoopRunValidatorTests
             string.Empty));
         var revision = GovernedLoopRevisionReference.Create(1, "graph-alpha", "revision-alpha", new string('a', 64));
         var execution = GovernedLoopExecutionBinding.Create(1, run.Id, revision, 1);
+        var workspaceId = "workspace-sha256:" + new string('b', 64);
+        var graphArtifactHash = new string('e', 64);
+        var capabilityAdmission = CreateSequentialCapabilityAdmission(graphArtifactHash, [ConversationTurnCapabilityId, ModelInferenceCapabilityId]) with { WorkspaceScopeId = workspaceId };
+        var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, revision, "publish-alpha", new string('7', 64));
+        var intent = GovernedLoopAdmissionTestFixture.Intent(
+            workspaceId: workspaceId,
+            operationId: run.AdmissionOperationId,
+            requestHash: new string('d', 64),
+            publication: publication,
+            graphArtifactHash: graphArtifactHash,
+            graphLayoutHash: new string('f', 64));
+        var receipt = GovernedLoopAdmissionTestFixture.Receipt(
+            intent,
+            GovernedLoopAdmissionTestFixture.Evidence(intent, binding: execution, capabilityAdmission: capabilityAdmission));
         var binding = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
             GovernedLoopSequentialAdapterBinding.CurrentSchemaVersion,
-            "workspace-sha256:" + new string('b', 64),
+            workspaceId,
             execution,
             run.AdmissionOperationId,
-            new string('c', 64),
+            receipt,
+            receipt.ContentHash,
             new string('d', 64),
             invocation.ContentHash,
-            new string('e', 64),
+            graphArtifactHash,
             new string('f', 64),
             string.Empty));
         var admitted = WithSequentialEvidence(
@@ -850,7 +869,6 @@ public sealed class CustomLoopRunValidatorTests
             1,
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed);
-        var capabilityAdmission = CreateSequentialCapabilityAdmission(binding, [ConversationTurnCapabilityId, ModelInferenceCapabilityId]);
         return CustomLoopAdmissionRequestHash.Apply(run with
         {
             CapabilityAdmission = capabilityAdmission,
@@ -864,10 +882,16 @@ public sealed class CustomLoopRunValidatorTests
         GovernedLoopSequentialAdapterBinding binding,
         IReadOnlyList<string> capabilityIds,
         string? graphArtifactHash = null)
+        => CreateSequentialCapabilityAdmission(binding.GraphArtifactHash, capabilityIds, graphArtifactHash) with { WorkspaceScopeId = binding.WorkspaceId };
+
+    private static CapabilityAdmissionSnapshot CreateSequentialCapabilityAdmission(
+        string admittedGraphArtifactHash,
+        IReadOnlyList<string> capabilityIds,
+        string? graphArtifactHash = null)
     {
-        Assert.True(CapabilityId.TryParse("org.embodysense/loop-" + binding.GraphArtifactHash[..32], out var subject, out _));
+        Assert.True(CapabilityId.TryParse("org.embodysense/loop-" + admittedGraphArtifactHash[..32], out var subject, out _));
         Assert.True(CapabilityVersionRange.TryParse("*", out var compatibleVersions, out _));
-        Assert.True(CapabilityIntegrityDigest.TryParse("sha256:" + (graphArtifactHash ?? binding.GraphArtifactHash), out var checksum, out _));
+        Assert.True(CapabilityIntegrityDigest.TryParse("sha256:" + (graphArtifactHash ?? admittedGraphArtifactHash), out var checksum, out _));
         var dependencies = capabilityIds.Select(capabilityId =>
         {
             Assert.True(CapabilityId.TryParse(capabilityId, out var dependency, out _));
@@ -897,11 +921,47 @@ public sealed class CustomLoopRunValidatorTests
         {
             CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(definition.Id, assignments),
         });
+        var capabilityAdmission = CreateSequentialCapabilityAdmission(run.SequentialAdapterBinding!, capabilityIds);
+        var binding = WithCapabilityAdmission(run.SequentialAdapterBinding!, capabilityAdmission);
         return CustomLoopAdmissionRequestHash.Apply(run with
         {
             AdmittedDefinition = definition,
-            CapabilityAdmission = CreateSequentialCapabilityAdmission(run.SequentialAdapterBinding!, capabilityIds),
+            CapabilityAdmission = capabilityAdmission,
+            SequentialAdapterBinding = binding,
         });
+    }
+
+    private static GovernedLoopSequentialAdapterBinding WithCapabilityAdmission(
+        GovernedLoopSequentialAdapterBinding binding,
+        CapabilityAdmissionSnapshot capabilityAdmission)
+    {
+        var receipt = binding.AdmissionReceipt;
+        var source = receipt.Evidence;
+        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
+            source.SchemaVersion,
+            source.IntentHash,
+            source.Binding,
+            source.GrantProfile,
+            source.GrantBoundary,
+            source.GrantDependencyEvidenceHash,
+            source.EffectiveAuthority,
+            capabilityAdmission,
+            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(receipt.Intent, source.EffectiveAuthority, capabilityAdmission),
+            source.EvaluatedAtUtc,
+            string.Empty));
+        receipt = GovernedLoopAdmissionContractHash.Apply(receipt with { Evidence = evidence, ContentHash = string.Empty });
+        return GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
+            binding.SchemaVersion,
+            binding.WorkspaceId,
+            binding.ExecutionBinding,
+            binding.AdmissionOperationId,
+            receipt,
+            receipt.ContentHash,
+            binding.AdmissionRequestHash,
+            binding.InvocationPayloadHash,
+            binding.GraphArtifactHash,
+            binding.GraphLayoutHash,
+            string.Empty));
     }
 
     private static string GetRequirementsHash(CustomLoopDefinition definition)

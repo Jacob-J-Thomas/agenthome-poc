@@ -9,6 +9,7 @@ using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Tests.Loops.Admission;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
@@ -176,6 +177,12 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
             1,
             GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
             execution,
+            seedReceipt.Evidence.GrantProfile,
+            new AuthorityGrantBoundary(
+                _now.AddHours(-1),
+                _now.AddHours(1),
+                seedReceipt.Evidence.GrantBoundary.CompletionConstraint),
+            seedReceipt.Evidence.GrantDependencyEvidenceHash,
             seedReceipt.Evidence.EffectiveAuthority,
             seedReceipt.Evidence.CapabilityAdmission,
             GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, seedReceipt.Evidence.EffectiveAuthority, seedReceipt.Evidence.CapabilityAdmission),
@@ -195,6 +202,7 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
             intent.WorkspaceId,
             execution,
             request.OperationId,
+            receipt,
             receipt.ContentHash,
             request.RequestHash,
             invocation.ContentHash,

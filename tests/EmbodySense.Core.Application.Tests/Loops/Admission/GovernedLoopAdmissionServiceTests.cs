@@ -50,6 +50,9 @@ public sealed class GovernedLoopAdmissionServiceTests
         Assert.Null(outcome.Rejection);
         Assert.Equal(1, receipt.Evidence.Binding.ExecutionGeneration);
         Assert.Equal(harness.Publication.Revision, receipt.Evidence.Binding.Revision);
+        Assert.Equal(harness.Grant.Binding.Profile, receipt.Evidence.GrantProfile);
+        Assert.Equal(harness.Grant.Boundary, receipt.Evidence.GrantBoundary);
+        Assert.Equal(harness.GrantResolution.DependencyEvidenceHash, receipt.Evidence.GrantDependencyEvidenceHash);
         Assert.Empty(receipt.Evidence.EffectiveAuthority.Capabilities);
         Assert.Empty(receipt.Evidence.CapabilityAdmission.Requirements.Required);
         Assert.Empty(receipt.Evidence.CapabilityAdmission.Requirements.Optional);
@@ -633,6 +636,9 @@ public sealed class GovernedLoopAdmissionServiceTests
             receipt.Evidence.SchemaVersion,
             GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
             receipt.Evidence.Binding,
+            receipt.Evidence.GrantProfile,
+            receipt.Evidence.GrantBoundary,
+            receipt.Evidence.GrantDependencyEvidenceHash,
             receipt.Evidence.EffectiveAuthority,
             snapshot,
             GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, receipt.Evidence.EffectiveAuthority, snapshot),

@@ -23,6 +23,7 @@ using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
@@ -279,11 +280,11 @@ public sealed class CustomLoopOrderedRunnerTests
         var context = await SequentialContextAsync(admitted);
         var store = new FakeRunStore(context.Run);
         var executor = new QueueExecutor(Result("must not run"));
-        var substitutedBinding = GovernedLoopSequentialContractHash.Apply(context.Evidence.AdapterBinding with
+        var substitutedBinding = context.Evidence.AdapterBinding with
         {
             AdmissionRequestHash = Hash("substituted-canonical-request"),
             ContentHash = string.Empty
-        });
+        };
         var evidence = new SequentialEvidenceHarness(store, context.Evidence with { AdapterBinding = substitutedBinding });
         var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
 
@@ -3604,6 +3605,12 @@ public sealed class CustomLoopOrderedRunnerTests
             1,
             GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
             execution,
+            seedReceipt.Evidence.GrantProfile,
+            new AuthorityGrantBoundary(
+                GovernedLoopSequentialApplicationTestFixture.Now.AddHours(-1),
+                GovernedLoopSequentialApplicationTestFixture.Now.AddHours(1),
+                seedReceipt.Evidence.GrantBoundary.CompletionConstraint),
+            seedReceipt.Evidence.GrantDependencyEvidenceHash,
             seedReceipt.Evidence.EffectiveAuthority,
             capabilityAdmission,
             GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, seedReceipt.Evidence.EffectiveAuthority, capabilityAdmission),
@@ -3620,6 +3627,7 @@ public sealed class CustomLoopOrderedRunnerTests
             intent.WorkspaceId,
             execution,
             request.OperationId,
+            receipt,
             receipt.ContentHash,
             request.RequestHash,
             invocation.ContentHash,

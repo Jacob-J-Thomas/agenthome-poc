@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
@@ -153,6 +154,26 @@ public static class GovernedLoopAdmissionValidator
         {
             Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.binding");
         }
+
+        if (evidence.GrantProfile?.Reference?.ProfileId is null
+            || evidence.GrantProfile.Reference.Revision is null
+            || evidence.GrantProfile.ContentHash is null
+            || !AuthorityGrantHash.IsCanonical(evidence.GrantProfile.ContentHash.Value))
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.grantProfile");
+        }
+
+        if (evidence.GrantBoundary is null
+            || evidence.GrantBoundary.EffectiveAtUtc == default
+            || evidence.GrantBoundary.EffectiveAtUtc.Offset != TimeSpan.Zero
+            || evidence.GrantBoundary.ExpiresAtUtc is { } expiry && (expiry.Offset != TimeSpan.Zero || expiry <= evidence.GrantBoundary.EffectiveAtUtc)
+            || !Enum.IsDefined(evidence.GrantBoundary.CompletionConstraint)
+            || evidence.GrantBoundary.CompletionConstraint == AuthorityGrantCompletionConstraintKind.Unknown)
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.grantBoundary");
+        }
+
+        ValidateHash(evidence.GrantDependencyEvidenceHash, "$.grantDependencyEvidenceHash", errors);
 
         if (!AuthorityProfileValidator.ValidateCeiling(evidence.EffectiveAuthority).IsValid)
         {
@@ -460,7 +481,9 @@ public static class GovernedLoopAdmissionValidator
             || evidence.Binding is null
             || !SameRevision(evidence.Binding.Revision, intent.Publication.Revision)
             || !string.Equals(evidence.CapabilityAdmission.WorkspaceScopeId, intent.WorkspaceId, StringComparison.Ordinal)
-            || evidence.CapabilityAdmission.AdmittedAtUtc > evidence.EvaluatedAtUtc)
+            || evidence.CapabilityAdmission.AdmittedAtUtc > evidence.EvaluatedAtUtc
+            || evidence.GrantBoundary.EffectiveAtUtc > evidence.EvaluatedAtUtc
+            || evidence.GrantBoundary.ExpiresAtUtc is { } expiry && expiry <= evidence.EvaluatedAtUtc)
         {
             Add(errors, GovernedLoopAdmissionValidationErrorCode.BindingMismatch, "$.evidence");
         }

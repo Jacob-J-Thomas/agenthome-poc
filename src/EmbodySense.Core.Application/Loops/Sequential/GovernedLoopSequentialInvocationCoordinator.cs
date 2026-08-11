@@ -194,6 +194,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
             receipt.Intent.WorkspaceId,
             receipt.Evidence.Binding,
             request.AdmissionRequest.OperationId,
+            receipt,
             receipt.ContentHash,
             request.AdmissionRequest.RequestHash,
             request.InvocationSnapshot.ContentHash,
