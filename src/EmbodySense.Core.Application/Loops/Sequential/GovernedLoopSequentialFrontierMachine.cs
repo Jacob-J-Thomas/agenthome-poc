@@ -251,6 +251,14 @@ public static class GovernedLoopSequentialFrontierMachine
         };
     }
 
+    internal static bool IsUndispatchedReadyCheckpoint(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding)
+        => ValidateBoundPrefix(frontier, binding)
+            && frontier!.Payload.Status == GovernedLoopFrontierStatus.Active
+            && frontier.Payload.Nodes[^1].Status == GovernedLoopNodeExecutionStatus.Ready
+            && frontier.Payload.Nodes.All(node => node.Status != GovernedLoopNodeExecutionStatus.Running);
+
     /// <summary>Transitions the exact selected Ready node to Running before any node behavior may dispatch.</summary>
     public static GovernedLoopSequentialFrontierTransitionResult Start(
         GovernedLoopFrontierPosture? frontier,
