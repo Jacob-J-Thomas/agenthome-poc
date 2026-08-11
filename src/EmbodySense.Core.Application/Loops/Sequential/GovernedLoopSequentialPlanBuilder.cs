@@ -164,6 +164,11 @@ public static class GovernedLoopSequentialPlanBuilder
             }
         }
 
+        if (!graph.AuthorityCeiling.CapabilityIds.SequenceEqual([ModelInferenceCapabilityId], StringComparer.Ordinal))
+        {
+            return "$.graph.authorityCeiling";
+        }
+
         if (!HasExactBindings(graph.Bindings, planNodes))
         {
             return "$.graph.bindings";
