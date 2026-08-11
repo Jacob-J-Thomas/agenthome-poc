@@ -211,6 +211,91 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     }
 
     [Fact]
+    public void Pure_node_outcome_round_trips_through_the_canonical_content_registry()
+    {
+        var context = CreateContext();
+        var pure = WithPureFrontier(context.Run);
+        var start = PureEvent(2, "event-pure-start", CustomLoopRunEventKind.NodeAttemptStarted, context.Binding);
+        var outcomeJson = "{\"schemaVersion\":1,\"nodeId\":\"step-1\",\"value\":\"retained\"}";
+        var completion = PureEvent(3, "event-pure-complete", CustomLoopRunEventKind.NodeAttemptCompleted, context.Binding, outcomeJson);
+        var run = pure with
+        {
+            LifecycleVersion = 3,
+            UpdatedAtUtc = _timestamp.AddMinutes(2),
+            Frontier = CompletePureFrontier(StartPureFrontier(pure.Frontier!, start), start, completion),
+            Events = [pure.Events[0], start, completion],
+        };
+
+        var encoded = CustomLoopRunArtifactSerializer.Serialize(run);
+        var root = JsonNode.Parse(encoded)!.AsObject();
+        var reference = root["run"]!["events"]![2]!["pureNodeOutcomeJson"]!.AsObject()["$content"]!.GetValue<string>();
+        var entry = root["content"]!.AsArray().Select(item => item!.AsObject()).Single(item => item["id"]!.GetValue<string>() == reference);
+        var retained = Encoding.UTF8.GetString(Convert.FromBase64String(entry["base64"]!.GetValue<string>()));
+        var decoded = CustomLoopRunArtifactSerializer.Deserialize(encoded);
+
+        Assert.Equal(outcomeJson, retained);
+        Assert.Equal(outcomeJson, decoded.Events[2].PureNodeOutcomeJson);
+        Assert.True(CustomLoopSequentialOutcomeArtifactHash.Matches(decoded.Events[2]));
+        Assert.Equal(encoded, CustomLoopRunArtifactSerializer.Serialize(decoded));
+
+        var missingRequiredProperty = JsonNode.Parse(encoded)!.AsObject();
+        Assert.True(missingRequiredProperty["run"]!["events"]![2]!.AsObject().Remove("pureNodeOutcomeJson"));
+        Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(missingRequiredProperty.ToJsonString() + "\n")));
+    }
+
+    [Fact]
+    public async Task Pure_node_completion_uses_its_base64_aware_reservation_without_widening_provider_attempts()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var pure = WithPureFrontier(context.Run);
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(pure)).Status);
+
+        var baselineCapacity = CustomLoopRunStore.CalculateRequiredTraceCapacity(context.Run, 1_000);
+        var pureCapacity = CustomLoopRunStore.CalculateRequiredTraceCapacity(pure, 1_000);
+        Assert.Equal(CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes, pureCapacity - baselineCapacity);
+
+        var start = PureEvent(2, "event-pure-start", CustomLoopRunEventKind.NodeAttemptStarted, context.Binding);
+        var started = pure with
+        {
+            LifecycleVersion = 2,
+            UpdatedAtUtc = _timestamp.AddMinutes(1),
+            Frontier = StartPureFrontier(pure.Frontier!, start),
+            Events = [.. pure.Events, start],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(started, 1)).Status);
+
+        var outcomeJson = "{\"payload\":\"" + new string('x', CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes * 2) + "\"}";
+        var completion = PureEvent(3, "event-pure-complete", CustomLoopRunEventKind.NodeAttemptCompleted, context.Binding, outcomeJson);
+        var completed = started with
+        {
+            LifecycleVersion = 3,
+            UpdatedAtUtc = _timestamp.AddMinutes(2),
+            Frontier = CompletePureFrontier(started.Frontier!, start, completion),
+            Events = [.. started.Events, completion],
+        };
+        var beforeBytes = CustomLoopRunArtifactSerializer.Serialize(started).LongLength;
+        var afterBytes = CustomLoopRunArtifactSerializer.Serialize(completed).LongLength;
+        Assert.True(afterBytes - beforeBytes > CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
+        Assert.True(afterBytes - beforeBytes < CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, 2)).Status);
+    }
+
+    [Fact]
+    public async Task Store_rejects_when_remaining_pure_outcomes_exhaust_the_trace_ceiling()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var overLimit = WithPendingPureFrontier(context.Run, 3);
+
+        Assert.True(CustomLoopRunValidator.Validate(overLimit).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(overLimit).Errors));
+        Assert.True(CustomLoopRunStore.CalculateRequiredTraceCapacity(overLimit, 1_000) > CustomLoopLimits.MaxRunTraceUtf8Bytes);
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CustomLoopRunStoreStatus.LimitExceeded, (await store.CreateAsync(overLimit)).Status);
+    }
+
+    [Fact]
     public async Task Store_rejects_missing_or_payload_substituted_trigger_outcome()
     {
         using var missingWorkspace = new TestWorkspace();
@@ -707,6 +792,109 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             payload);
     }
 
+    private static CustomLoopRunRecord WithPureFrontier(CustomLoopRunRecord run)
+    {
+        var current = run.Frontier!;
+        var source = current.Payload.Nodes[1];
+        var pure = GovernedLoopNodeExecutionEvidence.Create(
+            source.PlanOrdinal,
+            source.NodeId,
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "identity", 1),
+            source.IncomingControlEdgeIds,
+            source.OutgoingControlEdgeIds,
+            GovernedLoopNodeExecutionStatus.Ready);
+        return run with { Frontier = RebuildFrontier(current, current.Payload.FrontierVersion, [current.Payload.Nodes[0], pure], current.Payload.UpdatedAtUtc) };
+    }
+
+    private static CustomLoopRunRecord WithPendingPureFrontier(CustomLoopRunRecord run, int pureNodeCount)
+    {
+        var current = run.Frontier!;
+        var trigger = current.Payload.Nodes[0];
+        var nodes = new List<GovernedLoopNodeExecutionEvidence> { trigger };
+        for (var index = 0; index < pureNodeCount; index++)
+        {
+            var incoming = index == 0 ? trigger.OutgoingControlEdgeIds : [$"edge-pure-{index}-pure-{index + 1}"];
+            var outgoing = index == pureNodeCount - 1 ? Array.Empty<string>() : [$"edge-pure-{index + 1}-pure-{index + 2}"];
+            var status = index == 0 ? GovernedLoopNodeExecutionStatus.Ready : GovernedLoopNodeExecutionStatus.Waiting;
+            nodes.Add(GovernedLoopNodeExecutionEvidence.Create(
+                index + 1,
+                $"pure-{index + 1}",
+                new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "identity", 1),
+                incoming,
+                outgoing,
+                status,
+                status == GovernedLoopNodeExecutionStatus.Waiting ? 1 : null,
+                status == GovernedLoopNodeExecutionStatus.Waiting ? $"attempt-pure-{index + 1}-1" : null));
+        }
+
+        return run with { Frontier = RebuildFrontier(current, current.Payload.FrontierVersion, nodes, current.Payload.UpdatedAtUtc) };
+    }
+
+    private static GovernedLoopFrontierPosture StartPureFrontier(GovernedLoopFrontierPosture current, CustomLoopRunEvent start)
+    {
+        var source = current.Payload.Nodes[1];
+        var running = GovernedLoopNodeExecutionEvidence.Create(
+            source.PlanOrdinal,
+            source.NodeId,
+            source.Descriptor,
+            source.IncomingControlEdgeIds,
+            source.OutgoingControlEdgeIds,
+            GovernedLoopNodeExecutionStatus.Running,
+            1,
+            start.EventId);
+        return RebuildFrontier(current, current.Payload.FrontierVersion + 1, [current.Payload.Nodes[0], running], start.TimestampUtc);
+    }
+
+    private static GovernedLoopFrontierPosture CompletePureFrontier(
+        GovernedLoopFrontierPosture current,
+        CustomLoopRunEvent start,
+        CustomLoopRunEvent completion)
+    {
+        var source = current.Payload.Nodes[1];
+        var completed = GovernedLoopNodeExecutionEvidence.Create(
+            source.PlanOrdinal,
+            source.NodeId,
+            source.Descriptor,
+            source.IncomingControlEdgeIds,
+            source.OutgoingControlEdgeIds,
+            GovernedLoopNodeExecutionStatus.Completed,
+            1,
+            start.EventId,
+            completion.EventId,
+            completion.SequentialNodeEvidence!.OutcomeArtifactHash);
+        var exit = GovernedLoopNodeExecutionEvidence.Create(
+            2,
+            "exit",
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
+            source.OutgoingControlEdgeIds,
+            [],
+            GovernedLoopNodeExecutionStatus.Ready);
+        return RebuildFrontier(current, current.Payload.FrontierVersion + 1, [current.Payload.Nodes[0], completed, exit], completion.TimestampUtc);
+    }
+
+    private static GovernedLoopFrontierPosture RebuildFrontier(
+        GovernedLoopFrontierPosture current,
+        long frontierVersion,
+        IEnumerable<GovernedLoopNodeExecutionEvidence> nodes,
+        DateTimeOffset updatedAtUtc)
+    {
+        var payload = GovernedLoopFrontierPayload.Create(
+            1,
+            frontierVersion,
+            current.Payload.ConcurrencyCeiling,
+            GovernedLoopFrontierStatus.Active,
+            nodes,
+            updatedAtUtc,
+            string.Empty);
+        return GovernedLoopFrontierPosture.Create(
+            current.Binding,
+            current.WorkspaceId,
+            current.GraphArtifactHash,
+            current.GraphLayoutHash,
+            current.AdmissionReceiptHash,
+            payload);
+    }
+
     private static string[] ControlEdges(string? edgeId)
         => edgeId is null ? [] : [edgeId];
 
@@ -836,6 +1024,33 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
             string.Empty));
         return runEvent with { SequentialNodeEvidence = evidence };
+    }
+
+    private static CustomLoopRunEvent PureEvent(
+        long sequence,
+        string eventId,
+        CustomLoopRunEventKind kind,
+        GovernedLoopSequentialAdapterBinding binding,
+        string? outcomeJson = null)
+    {
+        var runEvent = Event(sequence, eventId, kind, "step-1", 1) with
+        {
+            PureNodeOutcomeJson = outcomeJson,
+            TraceReservationUtf8Bytes = kind == CustomLoopRunEventKind.NodeAttemptStarted
+                ? CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes
+                : null,
+        };
+        return WithEvidence(
+            runEvent,
+            binding,
+            "step-1",
+            1,
+            kind == CustomLoopRunEventKind.NodeAttemptStarted
+                ? CustomLoopSequentialNodeEvidenceKind.DispatchStarted
+                : CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            kind == CustomLoopRunEventKind.NodeAttemptStarted
+                ? CustomLoopSequentialNodeDisposition.Unknown
+                : CustomLoopSequentialNodeDisposition.Completed);
     }
 
     private static GovernedLoopSequentialOrderedNodeEvidenceRequest OrderedRequest(

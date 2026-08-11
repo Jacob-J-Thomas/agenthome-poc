@@ -12,8 +12,10 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops.Models;
 
@@ -1220,7 +1222,9 @@ public sealed class CustomLoopRunStore :
             && left.ControlExpectedLifecycleVersion is null
             && right.ControlExpectedLifecycleVersion is null
             && left.SequentialNodeEvidence is null
-            && right.SequentialNodeEvidence is null;
+            && right.SequentialNodeEvidence is null
+            && left.PureNodeOutcomeJson is null
+            && right.PureNodeOutcomeJson is null;
     }
 
     private async Task<ArtifactScanResult> ScanArtifactsAsync(Action<RunArtifact>? visitor, CancellationToken cancellationToken)
@@ -2154,7 +2158,8 @@ public sealed class CustomLoopRunStore :
         var toolEvidenceBudget = appended.Where(item => item.ToolEvidence is not null).Sum(item => (long)GetToolEvidencePhaseUtf8Bytes(item.ToolEvidence!));
         var appendedAttemptStarts = appended.Where(item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted).ToArray();
         var priorAttemptStarts = current.Events.Where(item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted).ToArray();
-        var closesAttempt = appended.Any(item => item.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.ExitDecisionCompleted or CustomLoopRunEventKind.NodeAttemptFailed);
+        var attemptClosures = appended.Where(IsAttemptClosure).ToArray();
+        var pureCompletions = attemptClosures.Count(item => IsExactPureCompletion(candidate, item));
         var lifecycleEvents = appended.Count(IsLifecycleControlEvent);
         if (toolEvidenceBudget > 0 && delta > toolEvidenceBudget)
         {
@@ -2184,12 +2189,19 @@ public sealed class CustomLoopRunStore :
 
         if (appendedAttemptStarts.Length > 0 && delta > attemptStartBudget)
         {
-            throw new FormatException($"A provider-attempt start exceeded its reserved maximum serialized footprint ({delta} > {attemptStartBudget}).");
+            throw new FormatException($"A node-attempt start exceeded its reserved maximum serialized footprint ({delta} > {attemptStartBudget}).");
         }
 
-        if (closesAttempt && delta > CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes)
+        var attemptClosureBudget = checked(
+            (long)pureCompletions * CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes
+            + (long)(attemptClosures.Length - pureCompletions) * CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
+        if (attemptClosures.Length > 0 && delta > attemptClosureBudget)
         {
-            throw new FormatException("A provider-attempt outcome exceeded its reserved maximum serialized footprint.");
+            throw new FormatException(pureCompletions == attemptClosures.Length
+                ? "A pure-node outcome exceeded its reserved maximum serialized footprint."
+                : pureCompletions == 0
+                    ? "A provider-attempt outcome exceeded its reserved maximum serialized footprint."
+                    : "A mixed node-attempt outcome append exceeded its reserved maximum serialized footprint.");
         }
 
         var controlEventCount = candidate.Events.Count(IsLifecycleControlEvent);
@@ -2207,7 +2219,7 @@ public sealed class CustomLoopRunStore :
         var committedAndReserved = CalculateRequiredTraceCapacity(candidate, candidateUtf8Bytes);
         if (committedAndReserved > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
-            throw new FormatException("The run trace lacks atomically reserved capacity for all mandatory provider/tool evidence, remaining lifecycle/control events, and terminal/integrity evidence.");
+            throw new FormatException("The run trace lacks atomically reserved capacity for all mandatory pure-node/provider/tool evidence, remaining lifecycle/control events, and terminal/integrity evidence.");
         }
     }
 
@@ -2237,7 +2249,8 @@ public sealed class CustomLoopRunStore :
             throw new FormatException("A schema-1 sequential run can retain only one deterministic canonical Exit dispatch marker.");
         }
 
-        var startedModelAttempts = run.Events.Count(item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
+        var startedModelAttempts = run.Events.Count(item => (item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
+                && !IsPureNodeEvent(run, item))
             - canonicalExitStarts;
         if (startedModelAttempts > maximumAttempts)
         {
@@ -2251,12 +2264,15 @@ public sealed class CustomLoopRunStore :
         }
 
         var outstanding = CalculateOutstandingReservation(run);
+        var remainingPureNodeReserve = CalculateRemainingPureNodeReservation(run);
         var remainingControlReserve = CustomLoopLimits.MaxTraceControlReserveUtf8Bytes - checked(controlEventCount * CustomLoopLimits.MaxTraceControlEventUtf8Bytes);
-        // Reserve evidence only for effects that are already open. Future provider and tool effects are
-        // independently capacity-gated before dispatch; workspace quota reserves the full per-run ceiling.
+        // Pure nodes retain exact bounded outcome artifacts, so every selected-but-unfinished pure node must
+        // have capacity before execution. Future provider and tool effects remain independently gated before
+        // dispatch; workspace quota reserves the full per-run ceiling.
         return checked(
             persistedUtf8Bytes
             + outstanding.Utf8Bytes
+            + remainingPureNodeReserve
             + remainingControlReserve
             + CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes);
     }
@@ -2311,6 +2327,57 @@ public sealed class CustomLoopRunStore :
     private static bool IsLifecycleControlEvent(CustomLoopRunEvent item)
     {
         return item.Kind is CustomLoopRunEventKind.LifecycleChanged or CustomLoopRunEventKind.IntegrityWarning;
+    }
+
+    private static bool IsAttemptClosure(CustomLoopRunEvent item)
+        => item.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.ExitDecisionCompleted or CustomLoopRunEventKind.NodeAttemptFailed;
+
+    private static bool IsExactPureCompletion(CustomLoopRunRecord run, CustomLoopRunEvent item)
+        => item is
+        {
+            Kind: CustomLoopRunEventKind.NodeAttemptCompleted,
+            PureNodeOutcomeJson: not null,
+            SequentialNodeEvidence:
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                Disposition: CustomLoopSequentialNodeDisposition.Completed,
+            },
+        }
+        && IsPureNodeEvent(run, item);
+
+    private static bool IsPureNodeEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        if (item.SequentialNodeEvidence is not { NodeId: var nodeId })
+        {
+            return false;
+        }
+
+        var node = run.Frontier?.Payload.Nodes.FirstOrDefault(candidate => string.Equals(candidate.NodeId, nodeId, StringComparison.Ordinal));
+        return node?.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate;
+    }
+
+    private static long CalculateRemainingPureNodeReservation(CustomLoopRunRecord run)
+    {
+        if (run.Frontier is not { } frontier)
+        {
+            return 0;
+        }
+
+        var openPureNodeIds = run.Events
+            .Where(item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted
+                && item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes
+                && IsPureNodeEvent(run, item)
+                && !run.Events.Any(candidate => candidate.Sequence > item.Sequence
+                    && candidate.Iteration == item.Iteration
+                    && string.Equals(candidate.StepId, item.StepId, StringComparison.Ordinal)
+                    && candidate.Attempt == item.Attempt
+                    && IsAttemptClosure(candidate)))
+            .Select(item => item.SequentialNodeEvidence!.NodeId)
+            .ToHashSet(StringComparer.Ordinal);
+        var unreserved = frontier.Payload.Nodes.Count(node => (node.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate)
+            && node.Status is not (GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Skipped or GovernedLoopNodeExecutionStatus.Failed)
+            && !openPureNodeIds.Contains(node.NodeId));
+        return checked((long)unreserved * CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes);
     }
 
     /// <summary>
@@ -2369,7 +2436,7 @@ public sealed class CustomLoopRunStore :
 
         if (openAttempts > 1)
         {
-            throw new FormatException("A custom-loop run cannot hold more than one provider-attempt trace reservation.");
+            throw new FormatException("A custom-loop run cannot hold more than one node-attempt trace reservation.");
         }
 
         foreach (var group in run.Events.Where(item => item.ToolEvidence is not null).GroupBy(item => (item.ToolEvidence!.RequestOrdinal, item.ToolEvidence.RequestCorrelationId)))
