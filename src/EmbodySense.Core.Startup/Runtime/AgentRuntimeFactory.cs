@@ -9,6 +9,7 @@ using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Admission;
 using EmbodySense.Core.Application.Loops.Execution;
+using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
@@ -29,6 +30,7 @@ using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.Admission;
+using EmbodySense.Core.Persistence.Loops.Execution.Authority;
 using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
 using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Core.Persistence.Memory;
@@ -319,8 +321,6 @@ public sealed class AgentRuntimeFactory
             var customAdmission = new CustomLoopAdmissionService(customDefinitionStore, customRunStore, auditLog, customToolAuthority, capabilityAdmission);
             var customRuntimeContext = new CustomLoopRuntimeContext(paths, conversationState, conversationMemory);
             var customPublisher = new CurrentConversationLoopPublisher(conversationState, conversationMemory, _conversationPublicationObserver);
-            var customInferenceExecutor = new CustomLoopInferenceAttemptExecutor(effectiveOptions, _approvalPrompt, customToolAuthority, customToolEvidence, capabilityAdmission, capabilityAuthorityTransaction: capabilityAuthority);
-            var customRunner = new CustomLoopOrderedRunner(customRunStore, new CustomLoopContextResolver(), customInferenceExecutor, customPublisher, auditLog, customToolAuthority, attemptCancellationBroker: customExecutionGate, capabilityAdmissionService: capabilityAdmission);
             _capabilityTrustProvider.RequireDisjointWorkspace(paths.RootPath);
             var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
             var governedRevisionStore = new GovernedLoopRevisionLifecycleStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
@@ -342,6 +342,33 @@ public sealed class AgentRuntimeFactory
                 governedPublicationSource,
                 governedBindingSource,
                 capabilityAuthority);
+            var governedEffectAuthorityEvidence = new GovernedLoopEffectAuthorityEvidenceStore(
+                paths,
+                _capabilityTrustProvider,
+                authorityTransaction: capabilityAuthority);
+            var governedEffectAuthority = new GovernedLoopEffectAuthorityBoundary(
+                governedGrantResolver,
+                capabilityAdmission,
+                governedEffectAuthorityEvidence,
+                capabilityAuthority);
+            var governedToolAuthority = new GovernedLoopReadOnlyWorkspaceToolAdapter();
+            var customInferenceExecutor = new CustomLoopInferenceAttemptExecutor(
+                effectiveOptions,
+                _approvalPrompt,
+                governedToolAuthority,
+                customToolEvidence,
+                capabilityAdmission,
+                capabilityAuthorityTransaction: capabilityAuthority,
+                effectAuthorityBoundary: governedEffectAuthority);
+            var customRunner = new CustomLoopOrderedRunner(
+                customRunStore,
+                new CustomLoopContextResolver(),
+                customInferenceExecutor,
+                customPublisher,
+                auditLog,
+                governedToolAuthority,
+                attemptCancellationBroker: customExecutionGate,
+                capabilityAdmissionService: capabilityAdmission);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,
