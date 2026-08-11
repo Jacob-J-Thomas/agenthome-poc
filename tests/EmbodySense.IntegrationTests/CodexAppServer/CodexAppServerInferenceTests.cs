@@ -563,6 +563,24 @@ public sealed class CodexAppServerInferenceTests
     }
 
     [Fact]
+    public async Task GenerateAsync_governed_overload_rejects_a_null_boundary_before_provider_activity()
+    {
+        var providerRequestStarted = false;
+        var transport = new ScriptedAppServerTransport();
+        await using var client = CreateRawClient(transport, providerRequestStarted: () => providerRequestStarted = true);
+
+        var exception = await Assert.ThrowsAsync<ArgumentNullException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            providerTransportCommitBoundary: null!));
+
+        Assert.Equal("providerTransportCommitBoundary", exception.ParamName);
+        Assert.Empty(transport.Writes);
+        Assert.False(providerRequestStarted);
+    }
+
+    [Fact]
     public async Task GenerateAsync_preserves_legacy_dispatch_notification_when_the_turn_write_fails()
     {
         var transport = new ScriptedAppServerTransport(
@@ -781,7 +799,7 @@ public sealed class CodexAppServerInferenceTests
     }
 
     [Fact]
-    public async Task GenerateAsync_does_not_mark_durable_dispatch_when_cancelled_before_the_turn_transport_write()
+    public async Task GenerateAsync_fences_request_correlated_setup_before_turn_start_and_preserves_request_start_timing()
     {
         using var cancellation = new CancellationTokenSource();
         var transport = new ScriptedAppServerTransport(
@@ -796,7 +814,8 @@ public sealed class CodexAppServerInferenceTests
                 }
             }
         };
-        var client = CreateClient(transport);
+        var providerRequestStarted = false;
+        var client = CreateClient(transport, providerRequestStarted: () => providerRequestStarted = true);
         var durableDispatchStarted = false;
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.GenerateAsync(
@@ -809,8 +828,11 @@ public sealed class CodexAppServerInferenceTests
                 await commitTransportWrite(token);
             }));
 
-        Assert.False(durableDispatchStarted);
+        Assert.True(durableDispatchStarted);
+        Assert.False(providerRequestStarted);
         Assert.DoesNotContain(transport.Writes, IsTurnStart);
+        await transport.DisposedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(transport.Disposed);
     }
 
     [Fact]
@@ -828,14 +850,15 @@ public sealed class CodexAppServerInferenceTests
             (_, _) => Task.FromException(new IOException("durable checkpoint unavailable"))));
 
         Assert.Equal("durable checkpoint unavailable", exception.Message);
-        Assert.DoesNotContain(transport.Writes, IsTurnStart);
+        Assert.Empty(transport.Writes);
     }
 
     [Fact]
     public async Task GenerateAsync_commits_the_turn_transport_write_inside_the_durable_boundary()
     {
         var boundaryActive = false;
-        var writeObservedInsideBoundary = false;
+        var writeObservedOutsideBoundary = false;
+        var providerRequestStarted = false;
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
             Response(2, """{"thread":{"id":"thread-1"}}"""),
@@ -844,13 +867,13 @@ public sealed class CodexAppServerInferenceTests
         {
             AfterWrite = line =>
             {
-                if (IsTurnStart(line))
+                if (!boundaryActive)
                 {
-                    writeObservedInsideBoundary = boundaryActive;
+                    writeObservedOutsideBoundary = true;
                 }
             }
         };
-        var client = CreateClient(transport);
+        var client = CreateClient(transport, providerRequestStarted: () => providerRequestStarted = true);
 
         var response = await client.GenerateAsync(
             LlmInferenceRequest.FromUserText("hello"),
@@ -858,12 +881,17 @@ public sealed class CodexAppServerInferenceTests
             CancellationToken.None,
             async (commitTransportWrite, token) =>
             {
-                Assert.DoesNotContain(transport.Writes, IsTurnStart);
+                Assert.Empty(transport.Writes);
+                Assert.False(providerRequestStarted);
                 boundaryActive = true;
                 try
                 {
                     await commitTransportWrite(token);
+                    Assert.Contains(transport.Writes, IsInitialize);
+                    Assert.Contains(transport.Writes, IsInitialized);
+                    Assert.Contains(transport.Writes, IsThreadStart);
                     Assert.Contains(transport.Writes, IsTurnStart);
+                    Assert.False(providerRequestStarted);
                 }
                 finally
                 {
@@ -872,8 +900,9 @@ public sealed class CodexAppServerInferenceTests
             });
 
         Assert.Equal("done", response.OutputText);
-        Assert.True(writeObservedInsideBoundary);
+        Assert.False(writeObservedOutsideBoundary);
         Assert.False(boundaryActive);
+        Assert.True(providerRequestStarted);
         Assert.Equal(1, transport.Writes.Count(IsTurnStart));
     }
 
@@ -882,7 +911,9 @@ public sealed class CodexAppServerInferenceTests
     {
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
-            Response(2, """{"thread":{"id":"thread-1"}}"""));
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""));
         var client = CreateClient(transport);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(
@@ -892,8 +923,39 @@ public sealed class CodexAppServerInferenceTests
             (_, _) => Task.CompletedTask));
 
         Assert.Contains("without invoking its write callback", exception.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(transport.Writes, IsTurnStart);
+        Assert.Empty(transport.Writes);
         Assert.False(transport.Disposed);
+
+        var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("retry safely"));
+
+        Assert.Equal("done", response.OutputText);
+        Assert.Equal(1, GetRequestId(transport.Writes.Single(IsInitialize)));
+        Assert.Equal(2, GetRequestId(transport.Writes.Single(IsThreadStart)));
+        Assert.Equal(3, GetRequestId(transport.Writes.Single(IsTurnStart)));
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_a_late_dispatch_callback_without_provider_writes_and_quarantines_the_transport()
+    {
+        var transport = new ScriptedAppServerTransport();
+        await using var client = CreateRawClient(transport);
+        Func<CancellationToken, Task>? capturedCommit = null;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            (commitProviderDispatch, _) =>
+            {
+                capturedCommit = commitProviderDispatch;
+                return Task.CompletedTask;
+            }));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => capturedCommit!(CancellationToken.None));
+        await transport.DisposedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("after its boundary returns", exception.Message, StringComparison.Ordinal);
+        Assert.Empty(transport.Writes);
+        Assert.True(transport.Disposed);
     }
 
     [Fact]
@@ -1092,7 +1154,10 @@ public sealed class CodexAppServerInferenceTests
         }, broker, transport, providerRequestStarted);
     }
 
-    private static CodexAppServerInferenceClient CreateRawClient(ScriptedAppServerTransport transport, IAuditLog? auditLog = null)
+    private static CodexAppServerInferenceClient CreateRawClient(
+        ScriptedAppServerTransport transport,
+        IAuditLog? auditLog = null,
+        Action? providerRequestStarted = null)
     {
         return new CodexAppServerInferenceClient(new LlmInferenceClientOptions
         {
@@ -1100,7 +1165,7 @@ public sealed class CodexAppServerInferenceTests
             Model = "gpt-test",
             WorkingDirectory = Directory.GetCurrentDirectory(),
             CodexSandbox = "read-only"
-        }, transport: transport, auditLog: auditLog);
+        }, transport: transport, auditLog: auditLog, providerRequestStarted: providerRequestStarted);
     }
 
     private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt prompt, LoopDefinition? loopDefinition = null)
@@ -1133,10 +1198,28 @@ public sealed class CodexAppServerInferenceTests
         return document.RootElement.TryGetProperty("method", out var method) && method.GetString() == "thread/start";
     }
 
+    private static bool IsInitialize(string line)
+    {
+        using var document = JsonDocument.Parse(line);
+        return document.RootElement.TryGetProperty("method", out var method) && method.GetString() == "initialize";
+    }
+
+    private static bool IsInitialized(string line)
+    {
+        using var document = JsonDocument.Parse(line);
+        return document.RootElement.TryGetProperty("method", out var method) && method.GetString() == "initialized";
+    }
+
     private static bool IsTurnStart(string line)
     {
         using var document = JsonDocument.Parse(line);
         return document.RootElement.TryGetProperty("method", out var method) && method.GetString() == "turn/start";
+    }
+
+    private static int GetRequestId(string line)
+    {
+        using var document = JsonDocument.Parse(line);
+        return document.RootElement.GetProperty("id").GetInt32();
     }
 
     private static async Task<IReadOnlyList<AuditEvent>> ReadAuditEventsAsync(TestWorkspace workspace)
