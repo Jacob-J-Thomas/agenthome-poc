@@ -101,7 +101,11 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         Assert.True(CustomLoopRunValidator.Validate(loaded).IsValid);
         var loadedEvidence = Assert.IsType<CustomLoopSequentialNodeEvidence>(loaded.Events[0].SequentialNodeEvidence);
         Assert.NotSame(context.Run.Events[0].SequentialNodeEvidence!.SelectedControlEdgeIds, loadedEvidence.SelectedControlEdgeIds);
-        Assert.NotSame(context.Run.Events[0].SequentialNodeEvidence!.SkippedControlEdgeIds, loadedEvidence.SkippedControlEdgeIds);
+        var sourceSkippedControlEdgeIds = context.Run.Events[0].SequentialNodeEvidence!.SkippedControlEdgeIds;
+        Assert.Equal(sourceSkippedControlEdgeIds, loadedEvidence.SkippedControlEdgeIds);
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)loadedEvidence.SkippedControlEdgeIds).Add("mutated-edge"));
+        Assert.Empty(sourceSkippedControlEdgeIds);
+        Assert.Empty(loadedEvidence.SkippedControlEdgeIds);
 
         var marker = Event(2, "event-admission-audit", CustomLoopRunEventKind.AdmissionAuditCompleted);
         var exact = loaded with
@@ -429,10 +433,21 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             1,
             CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
             CustomLoopSequentialNodeDisposition.Unknown);
+        var selection = GovernedLoopSequentialFrontierMachine.Select(context.Run.Frontier, context.Binding, context.Plan);
+        var startedFrontier = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Start(
+            context.Run.Frontier,
+            context.Binding,
+            context.Plan,
+            context.Plan.Nodes[1],
+            selection.Activation,
+            1,
+            start.EventId,
+            start.TimestampUtc).Frontier);
         var started = context.Run with
         {
             LifecycleVersion = 2,
             UpdatedAtUtc = _timestamp.AddMinutes(1),
+            Frontier = startedFrontier,
             Events = [.. context.Run.Events, start],
         };
 
@@ -462,10 +477,21 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             1,
             CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
             CustomLoopSequentialNodeDisposition.Unknown);
+        var selection = GovernedLoopSequentialFrontierMachine.Select(context.Run.Frontier, context.Binding, context.Plan);
+        var startedFrontier = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Start(
+            context.Run.Frontier,
+            context.Binding,
+            context.Plan,
+            context.Plan.Nodes[1],
+            selection.Activation,
+            1,
+            start.EventId,
+            start.TimestampUtc).Frontier);
         var started = context.Run with
         {
             LifecycleVersion = 2,
             UpdatedAtUtc = _timestamp.AddMinutes(1),
+            Frontier = startedFrontier,
             Events = [.. context.Run.Events, start],
         };
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(started, 1)).Status);
@@ -632,10 +658,21 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             1,
             CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
             CustomLoopSequentialNodeDisposition.Unknown);
+        var selection = GovernedLoopSequentialFrontierMachine.Select(context.Run.Frontier, context.Binding, context.Plan);
+        var startedFrontier = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Start(
+            context.Run.Frontier,
+            context.Binding,
+            context.Plan,
+            context.Plan.Nodes[1],
+            selection.Activation,
+            1,
+            start.EventId,
+            start.TimestampUtc).Frontier);
         var started = context.Run with
         {
             LifecycleVersion = 2,
             UpdatedAtUtc = _timestamp.AddMinutes(1),
+            Frontier = startedFrontier,
             Events = [.. context.Run.Events, start],
         };
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await firstStore.UpdateAsync(started, 1)).Status);
