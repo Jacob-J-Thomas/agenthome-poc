@@ -10,6 +10,7 @@ namespace EmbodySense.Core.Application.Loops.Sequential;
 /// <summary>Builds one deterministic supported linear plan by traversing canonical control edges from the graph entry.</summary>
 public static class GovernedLoopSequentialPlanBuilder
 {
+    private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
 
     /// <summary>Builds a plan for exactly <c>Manual Trigger -&gt; 1-5 Inference -&gt; Exit</c>.</summary>
@@ -164,7 +165,9 @@ public static class GovernedLoopSequentialPlanBuilder
             }
         }
 
-        if (!graph.AuthorityCeiling.CapabilityIds.SequenceEqual([ModelInferenceCapabilityId], StringComparer.Ordinal))
+        if (!graph.AuthorityCeiling.CapabilityIds.SequenceEqual(
+                [ConversationTurnCapabilityId, ModelInferenceCapabilityId],
+                StringComparer.Ordinal))
         {
             return "$.graph.authorityCeiling";
         }
@@ -205,7 +208,7 @@ public static class GovernedLoopSequentialPlanBuilder
                 new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true));
 
     private static bool IsExactExit(GovernedLoopNodeDefinition node)
-        => node.AuthorityCeiling.CapabilityIds.Count == 0
+        => node.AuthorityCeiling.CapabilityIds.SequenceEqual([ConversationTurnCapabilityId], StringComparer.Ordinal)
             && node.Parameters.Count == 0
             && HasExactPorts(
                 node,

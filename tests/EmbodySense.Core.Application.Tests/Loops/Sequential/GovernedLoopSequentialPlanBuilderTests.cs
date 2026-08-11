@@ -95,7 +95,7 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
         var substitutedAuthority = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
             nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(["org.embodysense/workspace-read"]) } : node).ToArray(),
-            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, "org.embodysense/workspace-read"]));
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, "org.embodysense/workspace-read"]));
         var missingContextPort = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
             nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { Ports = node.Ports.Where(port => port.Id != "invocation-context").ToArray() } : node).ToArray(),
@@ -105,8 +105,19 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
             nodes: source.Nodes.Select(node => node.Id == inference.Id
                 ? node with { Ports = [.. node.Ports, GovernedLoopSequentialApplicationTestFixture.Port("debug", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, required: false)] }
                 : node).ToArray());
+        var exit = source.Nodes.Single(node => node.Descriptor == GovernedLoopSequentialNodeDescriptors.SuccessExit);
+        var missingPublicationAuthority = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == exit.Id
+                ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([]) }
+                : node).ToArray());
+        var substitutedPublicationAuthority = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == exit.Id
+                ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId]) }
+                : node).ToArray());
 
-        foreach (var artifact in new[] { missingInstruction, emptyInstruction, missingAuthority, substitutedAuthority, missingContextPort, extraPort })
+        foreach (var artifact in new[] { missingInstruction, emptyInstruction, missingAuthority, substitutedAuthority, missingContextPort, extraPort, missingPublicationAuthority, substitutedPublicationAuthority })
         {
             var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
 
@@ -123,7 +134,7 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
         var artifact = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
             authorityCeiling: GovernedLoopAuthorityCeiling.Create(
-                [GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, "org.embodysense/workspace-read"]));
+                [GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, "org.embodysense/workspace-read"]));
 
         var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
 
