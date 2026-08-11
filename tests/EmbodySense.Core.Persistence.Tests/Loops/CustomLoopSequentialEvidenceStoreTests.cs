@@ -86,6 +86,73 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     }
 
     [Fact]
+    public async Task Restarted_store_accepts_only_an_exact_trigger_predecessor_when_appending_the_admission_audit_marker()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using (var writer = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await writer.CreateAsync(context.Run)).Status);
+        }
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var loaded = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(context.Run.Id));
+        Assert.True(CustomLoopRunValidator.Validate(loaded).IsValid);
+        var loadedEvidence = Assert.IsType<CustomLoopSequentialNodeEvidence>(loaded.Events[0].SequentialNodeEvidence);
+        Assert.NotSame(context.Run.Events[0].SequentialNodeEvidence!.SelectedControlEdgeIds, loadedEvidence.SelectedControlEdgeIds);
+        Assert.NotSame(context.Run.Events[0].SequentialNodeEvidence!.SkippedControlEdgeIds, loadedEvidence.SkippedControlEdgeIds);
+
+        var marker = Event(2, "event-admission-audit", CustomLoopRunEventKind.AdmissionAuditCompleted);
+        var exact = loaded with
+        {
+            LifecycleVersion = 2,
+            UpdatedAtUtc = marker.TimestampUtc,
+            Events = [loaded.Events[0] with
+            {
+                SequentialNodeEvidence = loadedEvidence with
+                {
+                    SelectedControlEdgeIds = loadedEvidence.SelectedControlEdgeIds.ToArray(),
+                    SkippedControlEdgeIds = loadedEvidence.SkippedControlEdgeIds.ToArray(),
+                },
+            }, marker],
+        };
+        Assert.True(CustomLoopRunValidator.ValidateUpdate(loaded, exact).IsValid);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await restarted.UpdateAsync(exact, 1)).Status);
+        Assert.True(CustomLoopRunValidator.HasCompleteAdmissionAudit(await restarted.GetAsync(context.Run.Id)));
+    }
+
+    [Fact]
+    public void Append_only_evidence_comparison_rejects_route_coordinate_and_hash_substitution()
+    {
+        var context = CreateContext();
+        var evidence = Assert.IsType<CustomLoopSequentialNodeEvidence>(context.Run.Events[0].SequentialNodeEvidence);
+        var marker = Event(2, "event-admission-audit", CustomLoopRunEventKind.AdmissionAuditCompleted);
+        var substitutions = new CustomLoopSequentialNodeEvidence[]
+        {
+            evidence with { SelectedControlEdgeIds = ["trigger-to-exit"] },
+            evidence with { SelectedControlEdgeIds = [.. evidence.SelectedControlEdgeIds.Reverse()] , SkippedControlEdgeIds = ["trigger-to-inference"] },
+            evidence with { ActivationOrdinal = 1 },
+            evidence with { VisitOrdinal = 2 },
+            evidence with { Attempt = 2 },
+            evidence with { EvidenceHash = Hash('8') },
+            evidence with { OutcomeArtifactHash = Hash('8') },
+        };
+
+        foreach (var substitution in substitutions)
+        {
+            var candidate = context.Run with
+            {
+                LifecycleVersion = 2,
+                UpdatedAtUtc = marker.TimestampUtc,
+                Events = [context.Run.Events[0] with { SequentialNodeEvidence = substitution }, marker],
+            };
+            var validation = CustomLoopRunValidator.ValidateUpdate(context.Run, candidate);
+            Assert.Contains(validation.Errors, error => error.Code == "event_history_changed" && error.Field == "events[0]");
+        }
+    }
+
+    [Fact]
     public async Task Canonical_evidence_resolves_after_an_external_process_restart()
     {
         using var workspace = new TestWorkspace();

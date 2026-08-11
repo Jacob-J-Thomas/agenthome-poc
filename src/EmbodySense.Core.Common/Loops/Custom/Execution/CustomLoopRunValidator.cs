@@ -2443,8 +2443,45 @@ public static class CustomLoopRunValidator
             && ToolEvidenceEqual(left.ToolEvidence, right.ToolEvidence)
             && left.TraceReservationUtf8Bytes == right.TraceReservationUtf8Bytes
             && left.ControlExpectedLifecycleVersion == right.ControlExpectedLifecycleVersion
-            && Equals(left.SequentialNodeEvidence, right.SequentialNodeEvidence)
+            && SequentialNodeEvidenceEqual(left.SequentialNodeEvidence, right.SequentialNodeEvidence)
             && string.Equals(left.PureNodeOutcomeJson, right.PureNodeOutcomeJson, StringComparison.Ordinal);
+    }
+
+    private static bool SequentialNodeEvidenceEqual(
+        CustomLoopSequentialNodeEvidence? left,
+        CustomLoopSequentialNodeEvidence? right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        return left is not null
+            && right is not null
+            && left.SchemaVersion == right.SchemaVersion
+            && left.Kind == right.Kind
+            && string.Equals(left.WorkspaceId, right.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(left.RunId, right.RunId, StringComparison.Ordinal)
+            && Equals(left.Revision, right.Revision)
+            && left.ExecutionGeneration == right.ExecutionGeneration
+            && left.ActivationOrdinal == right.ActivationOrdinal
+            && left.VisitOrdinal == right.VisitOrdinal
+            && string.Equals(left.NodeId, right.NodeId, StringComparison.Ordinal)
+            && left.Attempt == right.Attempt
+            && string.Equals(left.CycleId, right.CycleId, StringComparison.Ordinal)
+            && left.CycleIteration == right.CycleIteration
+            && left.ControlOutcome == right.ControlOutcome
+            && left.SelectedControlEdgeIds is not null
+            && right.SelectedControlEdgeIds is not null
+            && left.SelectedControlEdgeIds.SequenceEqual(right.SelectedControlEdgeIds, StringComparer.Ordinal)
+            && left.SkippedControlEdgeIds is not null
+            && right.SkippedControlEdgeIds is not null
+            && left.SkippedControlEdgeIds.SequenceEqual(right.SkippedControlEdgeIds, StringComparer.Ordinal)
+            && left.GoverningActivationOrdinal == right.GoverningActivationOrdinal
+            && string.Equals(left.GoverningControlEdgeId, right.GoverningControlEdgeId, StringComparison.Ordinal)
+            && left.Disposition == right.Disposition
+            && string.Equals(left.OutcomeArtifactHash, right.OutcomeArtifactHash, StringComparison.Ordinal)
+            && string.Equals(left.EvidenceHash, right.EvidenceHash, StringComparison.Ordinal);
     }
 
     private static bool ToolAuthoritiesEqual(CustomLoopToolAuthoritySnapshot? left, CustomLoopToolAuthoritySnapshot? right)
