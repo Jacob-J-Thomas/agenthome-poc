@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -9,6 +10,8 @@ namespace EmbodySense.Core.Application.Loops.Sequential;
 /// <summary>Builds one deterministic supported linear plan by traversing canonical control edges from the graph entry.</summary>
 public static class GovernedLoopSequentialPlanBuilder
 {
+    private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+
     /// <summary>Builds a plan for exactly <c>Manual Trigger -&gt; 1-5 Inference -&gt; Exit</c>.</summary>
     public static GovernedLoopSequentialPlanBuildResult Build(GovernedLoopGraphRevisionArtifact? artifact)
     {
@@ -97,6 +100,12 @@ public static class GovernedLoopSequentialPlanBuilder
             return Failure(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, "$.graph");
         }
 
+        var contractFailurePath = ExactContractFailurePath(graph, planNodes);
+        if (contractFailurePath is not null)
+        {
+            return Failure(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, contractFailurePath);
+        }
+
         var revision = GovernedLoopRevisionReference.Create(
             artifact.RevisionArtifact.Revision.SchemaVersion,
             artifact.RevisionArtifact.Revision.GraphId,
@@ -127,6 +136,121 @@ public static class GovernedLoopSequentialPlanBuilder
             return false;
         }
     }
+
+    private static string? ExactContractFailurePath(
+        GovernedLoopGraphDefinition graph,
+        IReadOnlyList<GovernedLoopSequentialPlanNode> planNodes)
+    {
+        if (graph.ValueSchemas.Count != 1
+            || graph.ValueSchemas[0] is not { Id: "text", Kind: GovernedLoopValueKind.Text, Nullable: false, Format: null, ElementSchemaId: null })
+        {
+            return "$.graph.valueSchemas";
+        }
+
+        var nodeById = graph.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
+        foreach (var planNode in planNodes)
+        {
+            var node = nodeById[planNode.NodeId];
+            var exact = planNode.Descriptor.Kind switch
+            {
+                GovernedLoopNodeKind.Trigger => IsExactTrigger(node),
+                GovernedLoopNodeKind.Inference => IsExactInference(node),
+                GovernedLoopNodeKind.Exit => IsExactExit(node),
+                _ => false,
+            };
+            if (!exact)
+            {
+                return "$.graph.nodes";
+            }
+        }
+
+        if (!HasExactBindings(graph.Bindings, planNodes))
+        {
+            return "$.graph.bindings";
+        }
+
+        var exitNodeId = planNodes[^1].NodeId;
+        if (graph.OutputContract.Outputs.Count != 1
+            || graph.OutputContract.Outputs[0] is not { Id: "result", ValueSchemaId: "text", SourcePortId: "published-result", Required: true } output
+            || !string.Equals(output.SourceNodeId, exitNodeId, StringComparison.Ordinal))
+        {
+            return "$.graph.outputContract";
+        }
+
+        return null;
+    }
+
+    private static bool IsExactTrigger(GovernedLoopNodeDefinition node)
+        => node.AuthorityCeiling.CapabilityIds.Count == 0
+            && node.Parameters.Count == 0
+            && HasExactPorts(
+                node,
+                new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context, "text", true));
+
+    private static bool IsExactInference(GovernedLoopNodeDefinition node)
+        => node.AuthorityCeiling.CapabilityIds.SequenceEqual([ModelInferenceCapabilityId], StringComparer.Ordinal)
+            && node.Parameters.Count == 1
+            && node.Parameters.TryGetValue("instruction", out var instruction)
+            && !string.IsNullOrWhiteSpace(instruction)
+            && HasExactPorts(
+                node,
+                new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context, "text", true),
+                new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true));
+
+    private static bool IsExactExit(GovernedLoopNodeDefinition node)
+        => node.AuthorityCeiling.CapabilityIds.Count == 0
+            && node.Parameters.Count == 0
+            && HasExactPorts(
+                node,
+                new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true));
+
+    private static bool HasExactPorts(GovernedLoopNodeDefinition node, params GovernedLoopPortDefinition[] expected)
+        => node.Ports.Count == expected.Length
+            && expected.All(port => node.Ports.Contains(port));
+
+    private static bool HasExactBindings(
+        IReadOnlyList<GovernedLoopBindingDefinition> bindings,
+        IReadOnlyList<GovernedLoopSequentialPlanNode> planNodes)
+    {
+        var inferenceNodes = planNodes.Skip(1).SkipLast(1).ToArray();
+        if (bindings.Count != (inferenceNodes.Length * 2) + 1)
+        {
+            return false;
+        }
+
+        var triggerNodeId = planNodes[0].NodeId;
+        var dataSourceNodeId = triggerNodeId;
+        var dataSourcePortId = "request";
+        foreach (var inferenceNode in inferenceNodes)
+        {
+            if (!ContainsBinding(bindings, GovernedLoopBindingKind.Data, dataSourceNodeId, dataSourcePortId, inferenceNode.NodeId, "request")
+                || !ContainsBinding(bindings, GovernedLoopBindingKind.Context, triggerNodeId, "invocation-context", inferenceNode.NodeId, "invocation-context"))
+            {
+                return false;
+            }
+
+            dataSourceNodeId = inferenceNode.NodeId;
+            dataSourcePortId = "result";
+        }
+
+        return ContainsBinding(bindings, GovernedLoopBindingKind.Data, dataSourceNodeId, dataSourcePortId, planNodes[^1].NodeId, "result");
+    }
+
+    private static bool ContainsBinding(
+        IReadOnlyList<GovernedLoopBindingDefinition> bindings,
+        GovernedLoopBindingKind kind,
+        string fromNodeId,
+        string fromPortId,
+        string toNodeId,
+        string toPortId)
+        => bindings.Count(binding => binding.Kind == kind
+            && string.Equals(binding.FromNodeId, fromNodeId, StringComparison.Ordinal)
+            && string.Equals(binding.FromPortId, fromPortId, StringComparison.Ordinal)
+            && string.Equals(binding.ToNodeId, toNodeId, StringComparison.Ordinal)
+            && string.Equals(binding.ToPortId, toPortId, StringComparison.Ordinal)) == 1;
 
     private static GovernedLoopSequentialPlanBuildResult Failure(GovernedLoopSequentialPlanBuildStatus status, string path)
         => new(status, null, path);

@@ -9,6 +9,8 @@ namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 
 internal static class GovernedLoopSequentialApplicationTestFixture
 {
+    internal const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+
     internal static readonly DateTimeOffset Now = new(2026, 8, 10, 22, 0, 0, TimeSpan.Zero);
 
     internal static GovernedLoopGraphRevisionArtifact LinearArtifact(
@@ -25,9 +27,11 @@ internal static class GovernedLoopSequentialApplicationTestFixture
 
         var nodes = new List<GovernedLoopNodeDefinition>
         {
-            Node("trigger", GovernedLoopSequentialNodeDescriptors.ManualTrigger),
+            Trigger("trigger"),
         };
-        nodes.AddRange(inferenceIds.Select((id, index) => Node(id, inferenceDescriptor?.Invoke(index) ?? GovernedLoopSequentialNodeDescriptors.ProviderInference)));
+        nodes.AddRange(inferenceIds.Select((id, index) => inferenceDescriptor is null
+            ? Inference(id, $"Execute bounded inference step {index + 1}.")
+            : Node(id, inferenceDescriptor(index))));
         nodes.Add(Exit("exit"));
 
         var executionOrder = new[] { "trigger" }.Concat(inferenceIds).Append("exit").ToArray();
@@ -36,16 +40,35 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             from,
             to,
             string.Equals(from, "trigger", StringComparison.Ordinal) ? GovernedLoopControlCondition.Always : GovernedLoopControlCondition.Success)).ToArray();
-        return Artifact(nodes, edges, ["exit"], owningRole);
+        var bindings = new List<GovernedLoopBindingDefinition>();
+        var dataSourceNodeId = "trigger";
+        var dataSourcePortId = "request";
+        foreach (var inferenceId in inferenceIds)
+        {
+            bindings.Add(new GovernedLoopBindingDefinition($"data-to-{inferenceId}", GovernedLoopBindingKind.Data, dataSourceNodeId, dataSourcePortId, inferenceId, "request"));
+            bindings.Add(new GovernedLoopBindingDefinition($"context-to-{inferenceId}", GovernedLoopBindingKind.Context, "trigger", "invocation-context", inferenceId, "invocation-context"));
+            dataSourceNodeId = inferenceId;
+            dataSourcePortId = "result";
+        }
+
+        bindings.Add(new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, dataSourceNodeId, dataSourcePortId, "exit", "result"));
+        return Artifact(nodes, edges, ["exit"], owningRole, bindings);
     }
 
     internal static GovernedLoopGraphRevisionArtifact Artifact(
         IReadOnlyList<GovernedLoopNodeDefinition> nodes,
         IReadOnlyList<GovernedLoopControlEdgeDefinition> edges,
         IReadOnlyList<string> terminalNodeIds,
-        ContextualRoleRevisionPin? owningRole = null)
+        ContextualRoleRevisionPin? owningRole = null,
+        IReadOnlyList<GovernedLoopBindingDefinition>? bindings = null,
+        IReadOnlyList<GovernedLoopValueSchemaDefinition>? valueSchemas = null,
+        GovernedLoopOutputContract? outputContract = null,
+        GovernedLoopAuthorityCeiling? authorityCeiling = null)
     {
         owningRole ??= new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("sequential-role", 1), Hash('a'));
+        valueSchemas ??= [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)];
+        outputContract ??= new GovernedLoopOutputContract("Return the exact bounded result.", [new GovernedLoopOutputDefinition("result", "text", terminalNodeIds[0], "published-result", true)]);
+        authorityCeiling ??= GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]);
         var graph = GovernedLoopGraphDefinition.Create(
             1,
             "sequential-loop",
@@ -54,12 +77,12 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             owningRole,
             "trigger",
             terminalNodeIds,
-            GovernedLoopAuthorityCeiling.Create([]),
-            [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
+            authorityCeiling,
+            valueSchemas,
             nodes,
             edges,
-            [],
-            new GovernedLoopOutputContract("Return the exact bounded result.", [new GovernedLoopOutputDefinition("result", "text", terminalNodeIds[0], "published-result", true)]),
+            bindings ?? [],
+            outputContract,
             new GovernedLoopDisplayMetadata(
                 "Sequential loop",
                 "Display metadata is not execution order.",
@@ -71,13 +94,64 @@ internal static class GovernedLoopSequentialApplicationTestFixture
     internal static GovernedLoopNodeDefinition Node(string id, GovernedLoopNodeDescriptor descriptor)
         => new(id, descriptor, [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
 
+    internal static GovernedLoopNodeDefinition Trigger(string id)
+        => new(
+            id,
+            GovernedLoopSequentialNodeDescriptors.ManualTrigger,
+            [
+                Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+                Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+
+    internal static GovernedLoopNodeDefinition Inference(string id, string instruction = "Answer safely.")
+        => new(
+            id,
+            GovernedLoopSequentialNodeDescriptors.ProviderInference,
+            [
+                Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context),
+                Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+            ],
+            GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
+            new Dictionary<string, string> { ["instruction"] = instruction });
+
     internal static GovernedLoopNodeDefinition Exit(string id)
         => new(
             id,
             GovernedLoopSequentialNodeDescriptors.SuccessExit,
-            [new GovernedLoopPortDefinition("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true)],
+            [
+                Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+            ],
             GovernedLoopAuthorityCeiling.Create([]),
             new Dictionary<string, string>());
+
+    internal static GovernedLoopGraphRevisionArtifact Rebuild(
+        GovernedLoopGraphDefinition source,
+        IReadOnlyList<GovernedLoopNodeDefinition>? nodes = null,
+        IReadOnlyList<GovernedLoopBindingDefinition>? bindings = null,
+        IReadOnlyList<GovernedLoopValueSchemaDefinition>? valueSchemas = null,
+        GovernedLoopOutputContract? outputContract = null,
+        GovernedLoopAuthorityCeiling? authorityCeiling = null)
+        => Artifact(
+            nodes ?? source.Nodes,
+            source.ControlEdges,
+            source.TerminalNodeIds,
+            source.OwningRole,
+            bindings ?? source.Bindings,
+            valueSchemas ?? source.ValueSchemas,
+            outputContract ?? source.OutputContract,
+            authorityCeiling ?? source.AuthorityCeiling);
+
+    internal static GovernedLoopPortDefinition Port(
+        string id,
+        GovernedLoopPortDirection direction,
+        GovernedLoopBindingKind kind,
+        string schemaId = "text",
+        bool required = true)
+        => new(id, direction, kind, schemaId, required);
 
     internal static string Hash(char value) => new(value, 64);
 }
