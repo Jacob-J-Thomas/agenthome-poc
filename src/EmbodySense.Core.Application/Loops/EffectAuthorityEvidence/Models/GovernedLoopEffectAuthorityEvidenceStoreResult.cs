@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Application.Loops.Execution.Authority.Models;
+namespace EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 
 /// <summary>Returns the append-only persistence posture for one exact authority decision.</summary>
 /// <param name="Status">The closed store outcome.</param>

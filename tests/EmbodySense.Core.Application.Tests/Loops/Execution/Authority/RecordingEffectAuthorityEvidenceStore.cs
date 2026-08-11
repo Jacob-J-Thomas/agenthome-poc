@@ -1,5 +1,5 @@
-using EmbodySense.Core.Application.Loops.Execution.Authority;
-using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
+using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence;
+using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Authority;
