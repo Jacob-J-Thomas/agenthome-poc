@@ -609,7 +609,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
             if (cancellationToken.IsCancellationRequested)
             {
-                return await CancelBeforeDispatchAsync(run, actor);
+                return await CancelBeforeDispatchAsync(run, actor, context.AuditRecorder);
             }
 
             var node = selected.Node!;
@@ -1065,8 +1065,21 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return capacityBoundary;
         }
 
-        var persisted = await PersistAsync(run, candidate, cancellationToken, outcomeMayExist: false, propagateCancellation: true);
-        if (persisted.Run is null || isCompleted)
+        RunAdvance persisted;
+        try
+        {
+            persisted = await PersistAsync(run, candidate, cancellationToken, outcomeMayExist: false, propagateCancellation: true);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            persisted = await ReconcileInterruptedTopologyClaimAsync(
+                run,
+                candidate,
+                actor,
+                context.AuditRecorder);
+        }
+
+        if (persisted.Terminal is not null || persisted.Run is null || isCompleted)
         {
             return persisted;
         }
@@ -1106,6 +1119,60 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return new RunAdvance(null, audited);
     }
 
+    private async Task<RunAdvance> ReconcileInterruptedTopologyClaimAsync(
+        CustomLoopRunRecord current,
+        CustomLoopRunRecord candidate,
+        string actor,
+        IGovernedLoopSequentialAuditRecorder auditRecorder)
+    {
+        CustomLoopRunRecord? latest;
+        try
+        {
+            latest = await _runStore.GetAsync(current.Id, IntegrityToken());
+        }
+        catch (Exception exception)
+        {
+            return new RunAdvance(
+                null,
+                Result(
+                    CustomLoopOrderedRunStatus.NeedsReview,
+                    current,
+                    $"Caller cancellation interrupted the atomic topology-node claim, and its durable outcome could not be loaded safely: {SafeExceptionClass(exception)}."));
+        }
+
+        if (latest is null)
+        {
+            return new RunAdvance(
+                null,
+                Result(CustomLoopOrderedRunStatus.NotFound, null, "Caller cancellation interrupted the atomic topology-node claim, and the run trace could not be found."));
+        }
+
+        if (!CustomLoopRunValidator.Validate(latest).IsValid)
+        {
+            return new RunAdvance(
+                null,
+                Result(CustomLoopOrderedRunStatus.Conflict, latest, "Caller cancellation interrupted the atomic topology-node claim, but the durable run is invalid; no topology outcome was adopted or redispatched."));
+        }
+
+        if (DurableTraceVersionMatches(current, latest))
+        {
+            var cancelled = await CancelBeforeDispatchAsync(latest, actor, auditRecorder);
+            return new RunAdvance(cancelled.Run, cancelled);
+        }
+
+        if (DurableTraceVersionMatches(candidate, latest)
+            || IsAcceptedControlSuccessor(candidate, latest))
+        {
+            // The exact atomic start/outcome candidate is durable. Return it for append-once
+            // topology audit and frontier reconciliation before the caller cancellation is honored.
+            return new RunAdvance(latest, null);
+        }
+
+        return new RunAdvance(
+            null,
+            Result(CustomLoopOrderedRunStatus.Conflict, latest, "Caller cancellation interrupted the atomic topology-node claim, but the durable run changed outside the exact candidate or its lifecycle-only control successor; no topology outcome was adopted or redispatched."));
+    }
+
     private async Task<RunAdvance> DispatchSelectedSequentialNodeAsync(
         SequentialExecutionContext context,
         CustomLoopRunRecord run,
@@ -1117,9 +1184,28 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CancellationToken cancellationToken)
     {
         if (cancellationToken.IsCancellationRequested
+            && GovernedLoopSequentialNodeDescriptors.IsTopology(node.Descriptor)
+            && run.Frontier?.Payload.Nodes.SingleOrDefault(candidate =>
+                candidate.Status == GovernedLoopNodeExecutionStatus.Running
+                && candidate.PlanOrdinal == node.Ordinal
+                && candidate.Attempt == attempt
+                && string.Equals(candidate.AttemptOperationId, attemptOperationId, StringComparison.Ordinal)) is { } activation
+            && FindSequentialNodeEvidence(run, node, activation, attempt) is not null)
+        {
+            return await DispatchAndAdvanceSequentialTopologyNodeAsync(
+                context,
+                run,
+                node,
+                attempt,
+                attemptOperationId,
+                actor,
+                IntegrityToken());
+        }
+
+        if (cancellationToken.IsCancellationRequested
             && !GovernedLoopSequentialNodeDescriptors.IsPure(node.Descriptor))
         {
-            var cancelled = await CancelBeforeDispatchAsync(run, actor);
+            var cancelled = await CancelBeforeDispatchAsync(run, actor, context.AuditRecorder);
             return new RunAdvance(cancelled.Run, cancelled);
         }
 
@@ -6197,12 +6283,21 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             && Equals(left.CurrentIterationResult, right.CurrentIterationResult);
     }
 
-    private async Task<CustomLoopOrderedRunResult> CancelBeforeDispatchAsync(CustomLoopRunRecord run, string actor)
+    private async Task<CustomLoopOrderedRunResult> CancelBeforeDispatchAsync(
+        CustomLoopRunRecord run,
+        string actor,
+        IGovernedLoopSequentialAuditRecorder? terminalAuditRecorder = null)
     {
         var integrity = IntegrityToken();
         if (run.Status == CustomLoopRunStatus.Admitted)
         {
-            return await TerminateAsync(run, actor, CustomLoopRunStatus.Cancelled, null, "Caller cancellation was observed before any provider dispatch.");
+            return await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.Cancelled,
+                null,
+                "Caller cancellation was observed before any provider dispatch.",
+                terminalAuditRecorder: terminalAuditRecorder);
         }
 
         var requestedNow = Now(run);
@@ -6230,7 +6325,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             // Cancellation remains safe because no provider request or actuator is open.
         }
 
-        return await TerminateAsync(requested.Run!, actor, CustomLoopRunStatus.Cancelled, null, "Custom-loop execution was cancelled at a proved safe boundary.");
+        return await TerminateAsync(
+            requested.Run!,
+            actor,
+            CustomLoopRunStatus.Cancelled,
+            null,
+            "Custom-loop execution was cancelled at a proved safe boundary.",
+            terminalAuditRecorder: terminalAuditRecorder);
     }
 
     private async Task<CustomLoopOrderedRunResult> CompleteCanonicalAsync(

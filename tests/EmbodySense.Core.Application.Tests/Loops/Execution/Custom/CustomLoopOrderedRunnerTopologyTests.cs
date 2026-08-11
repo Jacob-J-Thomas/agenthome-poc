@@ -11,6 +11,7 @@ using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -191,6 +192,104 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Canonical_condition_claim_cancellation_before_commit_cancels_without_topology_dispatch()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => ConditionalSelectedJoinArtifact(role));
+        var injected = false;
+        var store = new FakeRunStore(context.Run)
+        {
+            BeforeUpdate = (candidate, token) =>
+            {
+                if (injected || !HasTopologyDispatchStart(candidate, "condition"))
+                {
+                    return;
+                }
+
+                injected = true;
+                cancellation.Cancel();
+                token.ThrowIfCancellationRequested();
+            },
+        };
+        var executor = new QueueExecutor(Result("select-a"));
+        var audit = new RecordingAuditLog();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor, audit: audit), evidence, evidence);
+
+        var result = await adapter.RunAsync(
+            new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web),
+            cancellation.Token);
+
+        Assert.True(injected);
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Cancelled, result.Run.Frontier!.Payload.Status);
+        Assert.Single(executor.Requests);
+        Assert.DoesNotContain(result.Run.Events, item => item.SequentialNodeEvidence?.NodeId == "condition");
+        Assert.DoesNotContain(result.Run.Events, item => item.StepId is "branch-a" or "branch-b");
+        Assert.Empty(store.ValidationFailures);
+        AssertSequentialPureTerminalAuditOnce(result.Run, CustomLoopRunStatus.Cancelled, evidence, audit);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Canonical_join_claim_cancellation_after_commit_adopts_exact_outcome_and_cancels_without_redispatch(
+        bool persistenceThrowsCancellation)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => ParallelJoinArtifact(role, GovernedLoopSequentialNodeDescriptors.AllJoin));
+        var injected = false;
+        var store = new FakeRunStore(context.Run)
+        {
+            AfterUpdate = candidate =>
+            {
+                if (injected || !HasTopologyDispatchStart(candidate, "join"))
+                {
+                    return Task.CompletedTask;
+                }
+
+                injected = true;
+                cancellation.Cancel();
+                return persistenceThrowsCancellation
+                    ? Task.FromException(new OperationCanceledException(cancellation.Token))
+                    : Task.CompletedTask;
+            },
+        };
+        var executor = new QueueExecutor(Result("fanout input"));
+        var audit = new RecordingAuditLog();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor, audit: audit), evidence, evidence);
+
+        var result = await adapter.RunAsync(
+            new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web),
+            cancellation.Token);
+
+        Assert.True(injected);
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Cancelled, result.Run.Frontier!.Payload.Status);
+        Assert.Single(executor.Requests);
+        var start = Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is { NodeId: "join", Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted });
+        var outcome = Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is { NodeId: "join", Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome });
+        Assert.Single(
+            evidence.AuditRequests,
+            item => string.Equals(item.OperationId, GovernedLoopSequentialAuditOperationId.ForNodeStart(start.SequentialNodeEvidence!.EvidenceHash), StringComparison.Ordinal)
+                && item.AuditEvent.Outcome == AuditSchema.Outcomes.Started);
+        Assert.Single(
+            evidence.AuditRequests,
+            item => string.Equals(item.OperationId, GovernedLoopSequentialAuditOperationId.ForNodeOutcome(outcome.SequentialNodeEvidence!.EvidenceHash), StringComparison.Ordinal)
+                && item.AuditEvent.Outcome == AuditSchema.Outcomes.Succeeded);
+        Assert.DoesNotContain(result.Run.Events, item => item.SequentialNodeEvidence?.NodeId == "exit");
+        Assert.Empty(store.ValidationFailures);
+        AssertSequentialPureTerminalAuditOnce(result.Run, CustomLoopRunStatus.Cancelled, evidence, audit);
+    }
+
+    [Fact]
     public async Task Canonical_cycle_duration_expiry_before_claim_does_not_start_or_dispatch_the_second_provider_visit()
     {
         const int MaximumDurationMilliseconds = 10;
@@ -238,6 +337,12 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.DoesNotContain(result.Run.Events, item => item.SequentialNodeEvidence is { NodeId: "infer-01", VisitOrdinal: 2, Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted });
         Assert.Empty(store.ValidationFailures);
     }
+
+    private static bool HasTopologyDispatchStart(CustomLoopRunRecord run, string nodeId)
+        => run.Events.Any(item => item.SequentialNodeEvidence is
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+        } evidence && string.Equals(evidence.NodeId, nodeId, StringComparison.Ordinal));
 
     private static GovernedLoopGraphRevisionArtifact ConditionalSelectedJoinArtifact(ContextualRoleRevisionPin owningRole)
     {
