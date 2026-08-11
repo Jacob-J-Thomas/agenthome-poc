@@ -8,6 +8,37 @@ namespace EmbodySense.Core.Common.Tests.Loops.Admission;
 public sealed class GovernedLoopAdmissionCapabilitySnapshotTests
 {
     [Fact]
+    public void Empty_capability_proof_is_valid_only_when_no_selected_evidence_exists()
+    {
+        var intent = GovernedLoopAdmissionTestFixture.Intent();
+        var populated = GovernedLoopAdmissionTestFixture.CapabilityAdmission();
+        var emptyManifest = populated.Requirements with { Required = [], Optional = [] };
+        Assert.True(CapabilityDependencyManifestHash.TryCompute(emptyManifest, out var manifestHash, out _));
+        var empty = new CapabilityAdmissionSnapshot(
+            CapabilityAdmissionSnapshot.CurrentSchemaVersion,
+            intent.WorkspaceId,
+            emptyManifest,
+            manifestHash!.Value,
+            [],
+            [],
+            GovernedLoopAdmissionTestFixture.CapabilityAdmittedAtUtc);
+        var inconsistent = empty with { Evidence = [populated.Evidence[0]] };
+
+        Assert.Null(CapabilityAdmissionSnapshotValidator.Validate(empty));
+        Assert.NotNull(CapabilityAdmissionSnapshotValidator.Validate(inconsistent));
+
+        var authority = GovernedLoopAdmissionTestFixture.EffectiveAuthority() with { Capabilities = [] };
+        var evidence = GovernedLoopAdmissionTestFixture.Evidence(
+            intent,
+            effectiveAuthority: authority,
+            capabilityAdmission: empty);
+
+        Assert.True(GovernedLoopAdmissionValidator.Validate(evidence, intent).IsValid);
+        Assert.True(GovernedLoopAdmissionContractHash.Matches(evidence));
+        Assert.Throws<ArgumentException>(() => GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(inconsistent));
+    }
+
+    [Fact]
     public void Hostile_nested_capability_shapes_fail_closed_without_escaping_public_validation()
     {
         var intent = GovernedLoopAdmissionTestFixture.Intent();

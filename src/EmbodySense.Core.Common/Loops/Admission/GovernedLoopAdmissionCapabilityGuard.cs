@@ -16,7 +16,7 @@ internal static class GovernedLoopAdmissionCapabilityGuard
             || snapshot.Requirements is null
             || !CapabilityDependencyManifestValidator.Validate(snapshot.Requirements).IsValid
             || snapshot.Pins is null
-            || snapshot.Pins.Count is < 1 or > CapabilityContractLimits.MaxCapabilityAdmissionPins
+            || snapshot.Pins.Count > CapabilityContractLimits.MaxCapabilityAdmissionPins
             || snapshot.Evidence is null
             || snapshot.Evidence.Count > CapabilityContractLimits.MaxCapabilityAdmissionEvidenceEntries)
         {

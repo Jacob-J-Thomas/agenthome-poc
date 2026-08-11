@@ -30,7 +30,7 @@ public static class CapabilityAdmissionSnapshotValidator
             return "Capability admission requirement evidence was forged or corrupted.";
         }
 
-        if (snapshot.Pins.Count == 0 || snapshot.Pins.Count > CapabilityContractLimits.MaxCapabilityAdmissionPins
+        if (snapshot.Pins.Count > CapabilityContractLimits.MaxCapabilityAdmissionPins
             || snapshot.Pins.Any(pin => pin is null || pin.DescriptorIdentity is null || pin.Implementation is null || pin.Provenance is null || pin.Artifact is null
                 || string.IsNullOrWhiteSpace(pin.SafeDescription) || pin.SafeDescription.Length > CapabilityContractLimits.MaxPurposeCharacters)
             || snapshot.Pins.Select(pin => pin.DescriptorIdentity.Id.Value).Distinct(StringComparer.Ordinal).Count() != snapshot.Pins.Count)

@@ -13,6 +13,22 @@ public sealed class CapabilityAdmissionServiceTests
     private static readonly DateTimeOffset _now = DateTimeOffset.Parse("2026-08-01T12:00:00+00:00");
 
     [Fact]
+    public async Task Admission_records_an_empty_proof_without_consulting_the_catalog_when_no_capabilities_are_required()
+    {
+        var store = new MutableCatalogStore([]) { Status = CapabilityCatalogReadStatus.Unavailable };
+        var requirements = EmptyManifest();
+
+        var result = await Service(store).AdmitAsync(requirements, []);
+
+        Assert.True(result.IsAdmitted, result.Detail);
+        var snapshot = Assert.IsType<CapabilityAdmissionSnapshot>(result.Snapshot);
+        Assert.Empty(snapshot.Pins);
+        Assert.Empty(snapshot.Evidence);
+        Assert.Equal(0, store.ReadCount);
+        Assert.Null(CapabilityAdmissionSnapshotValidator.Validate(snapshot));
+    }
+
+    [Fact]
     public async Task Admission_persists_exact_descriptor_implementation_provenance_and_resolution_evidence()
     {
         var entry = Entry();
@@ -300,6 +316,18 @@ public sealed class CapabilityAdmissionServiceTests
             new CapabilityDependencyArtifactMetadata(null, null));
     }
 
+    private static CapabilityDependencyManifest EmptyManifest()
+    {
+        Assert.True(CapabilityId.TryParse("org.example/authority-free-loop", out var subject, out _));
+        return new CapabilityDependencyManifest(
+            CapabilityDependencyManifest.CurrentSchemaVersion,
+            CapabilityDependencyManifestKind.LoopPackage,
+            subject!,
+            [],
+            [],
+            new CapabilityDependencyArtifactMetadata(null, null));
+    }
+
     private static CapabilityVersion Version(string value)
     {
         Assert.True(CapabilityVersion.TryParse(value, out var version, out _));
@@ -363,9 +391,12 @@ public sealed class CapabilityAdmissionServiceTests
 
         public CapabilityCatalogReadStatus Status { get; init; } = CapabilityCatalogReadStatus.Available;
 
+        public int ReadCount { get; private set; }
+
         public Task<CapabilityCatalogReadResult> ReadAsync(string? startAfterId, int maximumCount, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            ReadCount++;
             var page = Status == CapabilityCatalogReadStatus.Available ? new CapabilityCatalogPage(7, Entries, null) : null;
             return Task.FromResult(new CapabilityCatalogReadResult(Status, page, "Test catalog read."));
         }
