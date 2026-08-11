@@ -2,6 +2,7 @@ using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 
@@ -64,6 +65,7 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             context.AdapterBinding,
             context.Plan,
             inference,
+            SelectedActivation(initial, context),
             1,
             "attempt-inference-1",
             _startedAtUtc.AddSeconds(1));
@@ -81,10 +83,13 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             context.AdapterBinding,
             context.Plan,
             inference,
+            SelectedActivation(running, context),
             1,
             "attempt-inference-1",
             "event-inference-1-completed",
             Hash('b'),
+            GovernedLoopControlCondition.Success,
+            [],
             _startedAtUtc.AddSeconds(2));
         var advanced = Frontier(completed);
 
@@ -121,6 +126,7 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
                 context.AdapterBinding,
                 context.Plan,
                 selected.Node,
+                selected.Activation,
                 1,
                 operationId,
                 _startedAtUtc.AddSeconds(ordinal * 2 - 1)));
@@ -129,10 +135,13 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
                 context.AdapterBinding,
                 context.Plan,
                 selected.Node,
+                SelectedActivation(frontier, context),
                 1,
                 operationId,
                 $"event-plan-{ordinal}",
                 Hash((char)('b' + ordinal)),
+                GovernedLoopControlCondition.Success,
+                [],
                 _startedAtUtc.AddSeconds(ordinal * 2)));
         }
 
@@ -155,6 +164,7 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             context.AdapterBinding,
             context.Plan,
             node,
+            SelectedActivation(initial, context),
             1,
             "attempt-running",
             _startedAtUtc.AddSeconds(1)));
@@ -164,10 +174,12 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             context.AdapterBinding,
             context.Plan,
             node,
+            SelectedActivation(running, context),
             1,
             "attempt-running",
             "event-failed",
             Hash('f'),
+            GovernedLoopControlCondition.Failure,
             _startedAtUtc.AddSeconds(2)));
         Assert.Equal(GovernedLoopFrontierStatus.Failed, failed.Payload.Status);
         Assert.Equal(initial.Payload.Nodes.Count, failed.Payload.Nodes.Count);
@@ -178,6 +190,7 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             context.AdapterBinding,
             context.Plan,
             node,
+            SelectedActivation(running, context),
             1,
             "attempt-running",
             null,
@@ -226,6 +239,7 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             context.AdapterBinding,
             context.Plan,
             node,
+            SelectedActivation(initial, context),
             1,
             "attempt-exact",
             _startedAtUtc.AddSeconds(1)));
@@ -235,6 +249,7 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             context.AdapterBinding,
             context.Plan,
             node,
+            SelectedActivation(running, context),
             2,
             "attempt-second",
             _startedAtUtc.AddSeconds(2)).Status);
@@ -243,30 +258,39 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             context.AdapterBinding,
             context.Plan,
             node,
+            SelectedActivation(running, context),
             1,
             "attempt-substituted",
             "event-complete",
             Hash('c'),
+            GovernedLoopControlCondition.Success,
+            [],
             _startedAtUtc.AddSeconds(2)).Status);
         Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Invalid, GovernedLoopSequentialFrontierMachine.CompleteRunning(
             running,
             context.AdapterBinding,
             context.Plan,
             context.Plan.Nodes[2],
+            SelectedActivation(running, context),
             1,
             "attempt-exact",
             "event-complete",
             Hash('c'),
+            GovernedLoopControlCondition.Success,
+            [],
             _startedAtUtc.AddSeconds(2)).Status);
         Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Invalid, GovernedLoopSequentialFrontierMachine.CompleteRunning(
             running,
             context.AdapterBinding,
             context.Plan,
             node,
+            SelectedActivation(running, context),
             1,
             "attempt-exact",
             null,
             null,
+            GovernedLoopControlCondition.Success,
+            [],
             _startedAtUtc.AddSeconds(2)).Status);
         Assert.Equal(GovernedLoopSequentialFrontierSelectionStatus.Running, GovernedLoopSequentialFrontierMachine.Select(running, context.AdapterBinding, context.Plan).Status);
     }
@@ -319,6 +343,7 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             context.AdapterBinding,
             context.Plan,
             context.Plan.Nodes[1],
+            SelectedActivation(initial, context),
             1,
             "attempt-open",
             _startedAtUtc.AddSeconds(1)));
@@ -350,6 +375,12 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
         Assert.True(result.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied, result.Detail);
         return Assert.IsType<GovernedLoopFrontierPosture>(result.Frontier);
     }
+
+    private static GovernedLoopNodeExecutionEvidence SelectedActivation(
+        GovernedLoopFrontierPosture frontier,
+        GovernedLoopSequentialRunMaterializerTests.TestContext context)
+        => Assert.IsType<GovernedLoopNodeExecutionEvidence>(
+            GovernedLoopSequentialFrontierMachine.Select(frontier, context.AdapterBinding, context.Plan).Activation);
 
     private static string Hash(char value) => GovernedLoopSequentialApplicationTestFixture.Hash(value);
 

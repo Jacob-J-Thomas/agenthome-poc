@@ -929,6 +929,13 @@ public sealed class CustomLoopFrontierStoreTests
             TraceReservationUtf8Bytes: kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted
                 ? CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes
                 : null);
+        var controlOutcome = evidenceKind switch
+        {
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted => (GovernedLoopControlCondition?)null,
+            _ when node.Descriptor.Kind == GovernedLoopNodeKind.Trigger => GovernedLoopControlCondition.Always,
+            _ when disposition == CustomLoopSequentialNodeDisposition.Rejected => GovernedLoopControlCondition.Failure,
+            _ => GovernedLoopControlCondition.Success,
+        };
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             1,
             evidenceKind,
@@ -936,8 +943,17 @@ public sealed class CustomLoopFrontierStoreTests
             binding.ExecutionBinding.RunId,
             binding.ExecutionBinding.Revision,
             binding.ExecutionBinding.ExecutionGeneration,
+            node.Ordinal,
+            1,
             node.NodeId,
             1,
+            node.CycleId,
+            node.CycleId is null ? null : 1,
+            controlOutcome,
+            controlOutcome is null || controlOutcome == GovernedLoopControlCondition.Failure ? [] : node.OutgoingControlEdgeIds.ToArray(),
+            controlOutcome == GovernedLoopControlCondition.Failure ? node.OutgoingControlEdgeIds.ToArray() : [],
+            null,
+            null,
             disposition,
             CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
             string.Empty));

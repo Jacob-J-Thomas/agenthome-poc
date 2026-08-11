@@ -5866,10 +5866,13 @@ public sealed class CustomLoopOrderedRunnerTests
             context.Anchor.AdapterBinding,
             context.Plan,
             node,
+            running,
             running.Attempt!.Value,
             running.AttemptOperationId!,
             completion.EventId,
             completion.SequentialNodeEvidence!.OutcomeArtifactHash,
+            GovernedLoopControlCondition.Success,
+            [],
             completion.TimestampUtc);
         Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, completedFrontier.Status);
         Assert.True(GovernedLoopPureNodeOutcome.TryDeserialize(context.Artifact.Graph, completion.PureNodeOutcomeJson!, out var outcome, out var outcomeValidation));
@@ -5927,11 +5930,17 @@ public sealed class CustomLoopOrderedRunnerTests
         var checkpointed = CreateConcurrentPureCompletionCheckpoint(context, current, completed);
         var inference = context.Plan.Nodes.Single(item => string.Equals(item.NodeId, "infer", StringComparison.Ordinal));
         var startedAt = checkpointed.UpdatedAtUtc.AddSeconds(1);
+        var readyActivation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(
+            GovernedLoopSequentialFrontierMachine.Select(
+                checkpointed.Frontier,
+                context.Anchor.AdapterBinding,
+                context.Plan).Activation);
         var started = GovernedLoopSequentialFrontierMachine.Start(
             checkpointed.Frontier,
             context.Anchor.AdapterBinding,
             context.Plan,
             inference,
+            readyActivation,
             1,
             "concurrent-provider-attempt",
             startedAt);
@@ -5984,7 +5993,11 @@ public sealed class CustomLoopOrderedRunnerTests
             pause.SequentialAdapterBinding!,
             "identity",
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
-            CustomLoopSequentialNodeDisposition.Completed);
+            CustomLoopSequentialNodeDisposition.Completed,
+            Assert.IsType<GovernedLoopFrontierPosture>(pause.Frontier).Payload.Nodes.Single(item =>
+                string.Equals(item.NodeId, "identity", StringComparison.Ordinal)
+                && item.Status == GovernedLoopNodeExecutionStatus.Running),
+            GovernedLoopControlCondition.Success);
         var successor = pause with
         {
             LifecycleVersion = pause.LifecycleVersion + 1,
@@ -6216,12 +6229,19 @@ public sealed class CustomLoopOrderedRunnerTests
         var events = current.Events.ToArray();
         var index = Array.FindIndex(events, item => IsPureStart(item, nodeId));
         Assert.True(index >= 0);
+        var originalEvidence = Assert.IsType<CustomLoopSequentialNodeEvidence>(events[index].SequentialNodeEvidence);
+        var exactActivation = Assert.IsType<GovernedLoopFrontierPosture>(current.Frontier).Payload.Nodes.Single(item =>
+            item.ActivationOrdinal == originalEvidence.ActivationOrdinal
+            && item.VisitOrdinal == originalEvidence.VisitOrdinal
+            && string.Equals(item.NodeId, originalEvidence.NodeId, StringComparison.Ordinal));
         events[index] = WithSequentialEvidence(
             events[index] with { Detail = "A same-version store substitution changed the authenticated pure-node start evidence." },
             binding,
             nodeId,
             CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
-            CustomLoopSequentialNodeDisposition.Unknown);
+            CustomLoopSequentialNodeDisposition.Unknown,
+            exactActivation,
+            null);
         var frontier = Assert.IsType<GovernedLoopFrontierPosture>(current.Frontier);
         var substitutedFrontier = GovernedLoopFrontierPosture.Create(
             frontier.Binding,
@@ -6462,7 +6482,10 @@ public sealed class CustomLoopOrderedRunnerTests
             binding,
             artifact.Graph.EntryNodeId,
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
-            CustomLoopSequentialNodeDisposition.Completed);
+            CustomLoopSequentialNodeDisposition.Completed,
+            null,
+            GovernedLoopControlCondition.Always,
+            plan.Nodes[0].OutgoingControlEdgeIds);
         var initializedFrontier = GovernedLoopSequentialFrontierMachine.Initialize(
             binding,
             plan,
@@ -6523,8 +6546,14 @@ public sealed class CustomLoopOrderedRunnerTests
         GovernedLoopSequentialAdapterBinding binding,
         string nodeId,
         CustomLoopSequentialNodeEvidenceKind kind,
-        CustomLoopSequentialNodeDisposition disposition)
+        CustomLoopSequentialNodeDisposition disposition,
+        GovernedLoopNodeExecutionEvidence? activation,
+        GovernedLoopControlCondition? controlOutcome,
+        IReadOnlyList<string>? selectedControlEdgeIds = null,
+        IReadOnlyList<string>? skippedControlEdgeIds = null)
     {
+        selectedControlEdgeIds ??= controlOutcome is null ? [] : activation?.OutgoingControlEdgeIds ?? [];
+        skippedControlEdgeIds ??= [];
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
             kind,
@@ -6532,8 +6561,17 @@ public sealed class CustomLoopOrderedRunnerTests
             binding.ExecutionBinding.RunId,
             binding.ExecutionBinding.Revision,
             binding.ExecutionBinding.ExecutionGeneration,
+            activation?.ActivationOrdinal ?? 0,
+            activation?.VisitOrdinal ?? 1,
             nodeId,
             1,
+            activation?.CycleId,
+            activation?.CycleIteration,
+            controlOutcome,
+            selectedControlEdgeIds.ToArray(),
+            skippedControlEdgeIds.ToArray(),
+            null,
+            null,
             disposition,
             CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
             string.Empty));
@@ -7053,8 +7091,15 @@ public sealed class CustomLoopOrderedRunnerTests
                 durable.RunId,
                 durable.Revision,
                 durable.ExecutionGeneration,
+                durable.ActivationOrdinal,
+                durable.VisitOrdinal,
                 durable.NodeId,
-                durable.Attempt,
+                durable.Attempt!.Value,
+                durable.CycleId,
+                durable.CycleIteration,
+                durable.ControlOutcome,
+                durable.SelectedControlEdgeIds,
+                durable.SkippedControlEdgeIds,
                 request.Disposition,
                 durable.OutcomeArtifactHash,
                 durable.EvidenceHash);

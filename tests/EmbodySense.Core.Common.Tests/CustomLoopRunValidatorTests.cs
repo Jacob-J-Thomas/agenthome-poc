@@ -1690,6 +1690,16 @@ public sealed class CustomLoopRunValidatorTests
         CustomLoopSequentialNodeEvidenceKind kind,
         CustomLoopSequentialNodeDisposition disposition)
     {
+        var activationOrdinal = string.Equals(nodeId, "trigger", StringComparison.Ordinal)
+            ? 0
+            : nodeId.Contains("exit", StringComparison.Ordinal) ? 2 : 1;
+        var controlOutcome = kind switch
+        {
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted => (GovernedLoopControlCondition?)null,
+            _ when string.Equals(nodeId, "trigger", StringComparison.Ordinal) => GovernedLoopControlCondition.Always,
+            _ when disposition == CustomLoopSequentialNodeDisposition.Rejected => GovernedLoopControlCondition.Failure,
+            _ => GovernedLoopControlCondition.Success,
+        };
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
             kind,
@@ -1697,8 +1707,17 @@ public sealed class CustomLoopRunValidatorTests
             binding.ExecutionBinding.RunId,
             binding.ExecutionBinding.Revision,
             binding.ExecutionBinding.ExecutionGeneration,
+            activationOrdinal,
+            1,
             nodeId,
             attempt,
+            null,
+            null,
+            controlOutcome,
+            [],
+            [],
+            null,
+            null,
             disposition,
             CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
             string.Empty));

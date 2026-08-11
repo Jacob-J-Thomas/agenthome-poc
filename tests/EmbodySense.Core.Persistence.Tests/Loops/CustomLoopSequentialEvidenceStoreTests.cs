@@ -761,41 +761,15 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         GovernedLoopSequentialPlan plan,
         CustomLoopRunEvent admitted)
     {
-        var trigger = plan.Nodes[0];
-        var next = plan.Nodes[1];
-        var triggerEvidence = GovernedLoopNodeExecutionEvidence.Create(
-            trigger.Ordinal,
-            trigger.NodeId,
-            trigger.Descriptor,
-            ControlEdges(trigger.IncomingControlEdgeId),
-            ControlEdges(trigger.OutgoingControlEdgeId),
-            GovernedLoopNodeExecutionStatus.Completed,
-            1,
-            "attempt-trigger-1",
+        var initialized = GovernedLoopSequentialFrontierMachine.Initialize(
+            binding,
+            plan,
             admitted.EventId,
-            admitted.SequentialNodeEvidence!.OutcomeArtifactHash);
-        var readyEvidence = GovernedLoopNodeExecutionEvidence.Create(
-            next.Ordinal,
-            next.NodeId,
-            next.Descriptor,
-            ControlEdges(next.IncomingControlEdgeId),
-            ControlEdges(next.OutgoingControlEdgeId),
-            GovernedLoopNodeExecutionStatus.Ready);
-        var payload = GovernedLoopFrontierPayload.Create(
-            1,
-            1,
-            GovernedLoopExecutionLimits.Schema1ConcurrencyCeiling,
-            GovernedLoopFrontierStatus.Active,
-            [triggerEvidence, readyEvidence],
-            admitted.TimestampUtc,
-            string.Empty);
-        return GovernedLoopFrontierPosture.Create(
-            binding.ExecutionBinding,
-            binding.WorkspaceId,
-            binding.GraphArtifactHash,
-            binding.GraphLayoutHash,
-            binding.AdmissionReceiptHash,
-            payload);
+            admitted.EventId,
+            admitted.SequentialNodeEvidence!.OutcomeArtifactHash,
+            admitted.TimestampUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, initialized.Status);
+        return Assert.IsType<GovernedLoopFrontierPosture>(initialized.Frontier);
     }
 
     private static CustomLoopRunRecord WithPureFrontier(CustomLoopRunRecord run)
@@ -1017,6 +991,22 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         CustomLoopSequentialNodeEvidenceKind kind,
         CustomLoopSequentialNodeDisposition disposition)
     {
+        var activationOrdinal = string.Equals(nodeId, "trigger", StringComparison.Ordinal)
+            ? 0
+            : string.Equals(nodeId, "exit", StringComparison.Ordinal) ? 2 : 1;
+        var controlOutcome = kind switch
+        {
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted => (GovernedLoopControlCondition?)null,
+            _ when string.Equals(nodeId, "trigger", StringComparison.Ordinal) => GovernedLoopControlCondition.Always,
+            _ when disposition == CustomLoopSequentialNodeDisposition.Rejected => GovernedLoopControlCondition.Failure,
+            _ => GovernedLoopControlCondition.Success,
+        };
+        var outgoing = nodeId switch
+        {
+            "trigger" => new[] { "trigger-to-step" },
+            "step-1" => new[] { "step-to-exit" },
+            _ => [],
+        };
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             1,
             kind,
@@ -1024,8 +1014,17 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             binding.ExecutionBinding.RunId,
             binding.ExecutionBinding.Revision,
             binding.ExecutionBinding.ExecutionGeneration,
+            activationOrdinal,
+            1,
             nodeId,
             attempt,
+            null,
+            null,
+            controlOutcome,
+            controlOutcome is null or GovernedLoopControlCondition.Failure ? [] : outgoing,
+            controlOutcome == GovernedLoopControlCondition.Failure ? outgoing : [],
+            null,
+            null,
             disposition,
             CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
             string.Empty));
@@ -1063,13 +1062,29 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         SequentialContext context,
         GovernedLoopSequentialPlanNode node,
         CustomLoopRunEvent runEvent)
-        => new(
+    {
+        var evidence = Assert.IsType<CustomLoopSequentialNodeEvidence>(runEvent.SequentialNodeEvidence);
+        var activation = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            evidence.ActivationOrdinal,
+            node.Ordinal,
+            evidence.VisitOrdinal,
+            node.NodeId,
+            node.Descriptor,
+            node.IncomingControlEdgeIds,
+            node.OutgoingControlEdgeIds,
+            GovernedLoopNodeExecutionStatus.Running,
+            evidence.Attempt,
+            $"ordered-{node.NodeId}",
+            cycleId: evidence.CycleId,
+            cycleIteration: evidence.CycleIteration);
+        return new GovernedLoopSequentialOrderedNodeEvidenceRequest(
             1,
-            new GovernedLoopSequentialNodeDispatchRequest(1, context.Anchor, context.Plan, node, 1),
+            new GovernedLoopSequentialNodeDispatchRequest(1, context.Anchor, context.Plan, node, activation, evidence.Attempt!.Value),
             GovernedLoopSequentialNodeHandlerResultStatus.Completed,
             context.Run.LifecycleVersion,
             runEvent.Sequence,
             runEvent.EventId);
+    }
 
     private static Process StartCrossProcessResolver(string workspaceRoot, string evidenceHash, string resultPath)
         => CancellationHostProcess.Start(
