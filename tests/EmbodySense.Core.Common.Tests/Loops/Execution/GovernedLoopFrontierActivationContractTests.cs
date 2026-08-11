@@ -153,6 +153,40 @@ public sealed class GovernedLoopFrontierActivationContractTests
             "outcome-source-1",
             Hash('b'));
         Assert.Throws<ArgumentException>(() => Payload([missingSelection, join]));
+        var reviewSource = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            0,
+            0,
+            1,
+            "condition",
+            Descriptor(GovernedLoopNodeKind.Condition),
+            [],
+            ["edge-join", "edge-skip"],
+            GovernedLoopNodeExecutionStatus.ReviewBlocked,
+            1,
+            "attempt-condition-1",
+            "outcome-condition-1",
+            Hash('a'),
+            controlOutcome: GovernedLoopControlCondition.True,
+            selectedControlEdgeIds: ["edge-join"],
+            skippedControlEdgeIds: ["edge-skip"]);
+        var failedSource = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            0,
+            0,
+            1,
+            "condition",
+            Descriptor(GovernedLoopNodeKind.Condition),
+            [],
+            ["edge-join", "edge-skip"],
+            GovernedLoopNodeExecutionStatus.Failed,
+            1,
+            "attempt-condition-1",
+            "outcome-condition-1",
+            Hash('a'),
+            controlOutcome: GovernedLoopControlCondition.True,
+            selectedControlEdgeIds: ["edge-join"],
+            skippedControlEdgeIds: ["edge-skip"]);
+        Assert.Throws<ArgumentException>(() => Payload([reviewSource, join]));
+        Assert.Throws<ArgumentException>(() => Payload([failedSource, join]));
         var selfArrival = GovernedLoopNodeExecutionEvidence.CreateActivation(
             1,
             1,

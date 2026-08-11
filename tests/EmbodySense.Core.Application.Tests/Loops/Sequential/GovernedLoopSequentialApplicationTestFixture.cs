@@ -127,6 +127,53 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             ]);
     }
 
+    internal static GovernedLoopGraphRevisionArtifact ParallelAllJoinArtifact(ContextualRoleRevisionPin? owningRole = null)
+    {
+        var branches = new[] { "branch-a", "branch-b" };
+        var nodes = new List<GovernedLoopNodeDefinition>
+        {
+            Trigger("trigger"),
+            Inference("infer"),
+        };
+        nodes.AddRange(branches.Select(id => new GovernedLoopNodeDefinition(
+            id,
+            GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+            [
+                Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                Port(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>())));
+        nodes.Add(new GovernedLoopNodeDefinition(
+            "join",
+            GovernedLoopSequentialNodeDescriptors.AllJoin,
+            [],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>()));
+        nodes.Add(Exit("exit"));
+
+        return Artifact(
+            nodes,
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("infer-to-branch-a", "infer", "branch-a", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("infer-to-branch-b", "infer", "branch-b", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("branch-a-to-join", "branch-a", "join", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("branch-b-to-join", "branch-b", "join", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("join-to-exit", "join", "exit", GovernedLoopControlCondition.Success),
+            ],
+            ["exit"],
+            owningRole,
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new GovernedLoopBindingDefinition("result-to-branch-a", GovernedLoopBindingKind.Data, "infer", "result", "branch-a", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("result-to-branch-b", GovernedLoopBindingKind.Data, "infer", "result", "branch-b", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ]);
+    }
+
     internal static GovernedLoopGraphRevisionArtifact Artifact(
         IReadOnlyList<GovernedLoopNodeDefinition> nodes,
         IReadOnlyList<GovernedLoopControlEdgeDefinition> edges,

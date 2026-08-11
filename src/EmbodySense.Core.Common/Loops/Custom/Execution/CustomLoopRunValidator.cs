@@ -1447,8 +1447,8 @@ public static class CustomLoopRunValidator
         var skipped = evidence.SkippedControlEdgeIds;
         if (selected is null
             || skipped is null
-            || selected.Length > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxOutgoingEdges
-            || skipped.Length > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxOutgoingEdges
+            || selected.Count > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxOutgoingEdges
+            || skipped.Count > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxOutgoingEdges
             || !IsSortedUniqueIdentifiers(selected)
             || !IsSortedUniqueIdentifiers(skipped)
             || selected.Intersect(skipped, StringComparer.Ordinal).Any())
@@ -1459,8 +1459,8 @@ public static class CustomLoopRunValidator
         if (evidence.Kind == CustomLoopSequentialNodeEvidenceKind.TopologySkipped)
         {
             return evidence.ControlOutcome is null
-                && selected.Length == 0
-                && skipped.Length == 0
+                && selected.Count == 0
+                && skipped.Count == 0
                 && evidence.GoverningActivationOrdinal is >= 0
                 && evidence.GoverningActivationOrdinal < evidence.ActivationOrdinal
                 && CustomLoopArtifactIdentifier.IsValid(evidence.GoverningControlEdgeId);
@@ -1473,7 +1473,7 @@ public static class CustomLoopRunValidator
 
         if (evidence.Kind is CustomLoopSequentialNodeEvidenceKind.DispatchStarted or CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention)
         {
-            return evidence.ControlOutcome is null && selected.Length == 0 && skipped.Length == 0;
+            return evidence.ControlOutcome is null && selected.Count == 0 && skipped.Count == 0;
         }
 
         return evidence.ControlOutcome is { } outcome
@@ -1514,7 +1514,7 @@ public static class CustomLoopRunValidator
             || !string.Equals(activation.NodeId, evidence.NodeId, StringComparison.Ordinal)
             || !string.Equals(activation.CycleId, evidence.CycleId, StringComparison.Ordinal)
             || activation.CycleIteration != evidence.CycleIteration
-            || evidence.Attempt is { } attempt && activation.Attempt is { } frontierAttempt && frontierAttempt != attempt
+            || activation.Attempt != evidence.Attempt
             || evidence.Kind == CustomLoopSequentialNodeEvidenceKind.TopologySkipped && activation.Status != GovernedLoopNodeExecutionStatus.Skipped
             || evidence.Kind == CustomLoopSequentialNodeEvidenceKind.TopologySkipped
                 && !HasExactGoverningSkipActivation(run.Frontier.Payload.Nodes, activation, evidence)
@@ -1546,7 +1546,7 @@ public static class CustomLoopRunValidator
         }
 
         return governing.ActivationOrdinal == governingOrdinal
-            && governing.Status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed
+            && governing.Status == GovernedLoopNodeExecutionStatus.Completed
             && governing.SkippedControlEdgeIds.Contains(governingEdgeId, StringComparer.Ordinal)
             && governing.OutgoingControlEdgeIds.Contains(governingEdgeId, StringComparer.Ordinal)
             && skipped.IncomingControlEdgeIds.Contains(governingEdgeId, StringComparer.Ordinal);
@@ -2443,45 +2443,8 @@ public static class CustomLoopRunValidator
             && ToolEvidenceEqual(left.ToolEvidence, right.ToolEvidence)
             && left.TraceReservationUtf8Bytes == right.TraceReservationUtf8Bytes
             && left.ControlExpectedLifecycleVersion == right.ControlExpectedLifecycleVersion
-            && SequentialNodeEvidenceEqual(left.SequentialNodeEvidence, right.SequentialNodeEvidence)
+            && Equals(left.SequentialNodeEvidence, right.SequentialNodeEvidence)
             && string.Equals(left.PureNodeOutcomeJson, right.PureNodeOutcomeJson, StringComparison.Ordinal);
-    }
-
-    private static bool SequentialNodeEvidenceEqual(
-        CustomLoopSequentialNodeEvidence? left,
-        CustomLoopSequentialNodeEvidence? right)
-    {
-        if (ReferenceEquals(left, right))
-        {
-            return true;
-        }
-
-        return left is not null
-            && right is not null
-            && left.SchemaVersion == right.SchemaVersion
-            && left.Kind == right.Kind
-            && string.Equals(left.WorkspaceId, right.WorkspaceId, StringComparison.Ordinal)
-            && string.Equals(left.RunId, right.RunId, StringComparison.Ordinal)
-            && Equals(left.Revision, right.Revision)
-            && left.ExecutionGeneration == right.ExecutionGeneration
-            && left.ActivationOrdinal == right.ActivationOrdinal
-            && left.VisitOrdinal == right.VisitOrdinal
-            && string.Equals(left.NodeId, right.NodeId, StringComparison.Ordinal)
-            && left.Attempt == right.Attempt
-            && string.Equals(left.CycleId, right.CycleId, StringComparison.Ordinal)
-            && left.CycleIteration == right.CycleIteration
-            && left.ControlOutcome == right.ControlOutcome
-            && left.SelectedControlEdgeIds is not null
-            && right.SelectedControlEdgeIds is not null
-            && left.SelectedControlEdgeIds.SequenceEqual(right.SelectedControlEdgeIds, StringComparer.Ordinal)
-            && left.SkippedControlEdgeIds is not null
-            && right.SkippedControlEdgeIds is not null
-            && left.SkippedControlEdgeIds.SequenceEqual(right.SkippedControlEdgeIds, StringComparer.Ordinal)
-            && left.GoverningActivationOrdinal == right.GoverningActivationOrdinal
-            && string.Equals(left.GoverningControlEdgeId, right.GoverningControlEdgeId, StringComparison.Ordinal)
-            && left.Disposition == right.Disposition
-            && string.Equals(left.OutcomeArtifactHash, right.OutcomeArtifactHash, StringComparison.Ordinal)
-            && string.Equals(left.EvidenceHash, right.EvidenceHash, StringComparison.Ordinal);
     }
 
     private static bool ToolAuthoritiesEqual(CustomLoopToolAuthoritySnapshot? left, CustomLoopToolAuthoritySnapshot? right)

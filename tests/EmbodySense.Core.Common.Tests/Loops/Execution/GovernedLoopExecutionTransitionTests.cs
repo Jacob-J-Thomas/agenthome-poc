@@ -144,6 +144,55 @@ public sealed class GovernedLoopExecutionTransitionTests
     }
 
     [Fact]
+    public void Aggregate_review_retains_ready_activations_exactly_and_never_accepts_running_or_rewritten_work()
+    {
+        var binding = GovernedLoopExecutionTestFixture.Binding();
+        var trigger = GovernedLoopExecutionTestFixture.Node(
+            GovernedLoopNodeExecutionStatus.Completed,
+            "trigger",
+            planOrdinal: 0);
+        var first = GovernedLoopExecutionTestFixture.Node(
+            GovernedLoopNodeExecutionStatus.Ready,
+            "branch-a",
+            incomingEdgeIds: ["infer-to-branch-a"],
+            planOrdinal: 1);
+        var second = GovernedLoopExecutionTestFixture.Node(
+            GovernedLoopNodeExecutionStatus.Ready,
+            "branch-b",
+            incomingEdgeIds: ["infer-to-branch-b"],
+            planOrdinal: 2);
+        var current = GovernedLoopExecutionTestFixture.Frontier(
+            binding,
+            GovernedLoopFrontierStatus.Active,
+            1,
+            [trigger, first, second]);
+        var reviewed = GovernedLoopExecutionTestFixture.Frontier(
+            binding,
+            GovernedLoopFrontierStatus.ReviewBlocked,
+            2,
+            [trigger, first, second],
+            GovernedLoopExecutionTestFixture.UpdatedAtUtc.AddMinutes(1));
+        var rewritten = GovernedLoopExecutionTestFixture.Frontier(
+            binding,
+            GovernedLoopFrontierStatus.ReviewBlocked,
+            2,
+            [trigger, first, GovernedLoopExecutionTestFixture.Node(
+                GovernedLoopNodeExecutionStatus.Ready,
+                "branch-b",
+                incomingEdgeIds: ["substituted-edge"],
+                planOrdinal: 2)],
+            GovernedLoopExecutionTestFixture.UpdatedAtUtc.AddMinutes(1));
+
+        Assert.True(GovernedLoopExecutionValidator.ValidateTransition(current, reviewed).IsValid);
+        Assert.Contains(
+            GovernedLoopExecutionValidator.ValidateTransition(current, rewritten).Errors,
+            error => error.Code == GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged);
+        Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(
+            GovernedLoopFrontierStatus.ReviewBlocked,
+            [trigger, first, GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Running, "running", planOrdinal: 2)]));
+    }
+
+    [Fact]
     public void Frontier_transition_freezes_workspace_graph_layout_and_admission_coordinates()
     {
         var binding = GovernedLoopExecutionTestFixture.Binding();

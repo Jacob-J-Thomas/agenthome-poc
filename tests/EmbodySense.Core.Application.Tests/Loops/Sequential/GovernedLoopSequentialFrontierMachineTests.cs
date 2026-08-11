@@ -169,6 +169,21 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             "attempt-running",
             _startedAtUtc.AddSeconds(1)));
 
+        var completedWithUnroutedFailure = GovernedLoopSequentialFrontierMachine.CompleteRunning(
+            running,
+            context.AdapterBinding,
+            context.Plan,
+            node,
+            SelectedActivation(running, context),
+            1,
+            "attempt-running",
+            "event-invalid-completion",
+            Hash('e'),
+            GovernedLoopControlCondition.Failure,
+            [],
+            _startedAtUtc.AddSeconds(2));
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Invalid, completedWithUnroutedFailure.Status);
+
         var failed = Frontier(GovernedLoopSequentialFrontierMachine.FailRunning(
             running,
             context.AdapterBinding,
@@ -184,6 +199,7 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
         Assert.Equal(GovernedLoopFrontierStatus.Failed, failed.Payload.Status);
         Assert.Equal(initial.Payload.Nodes.Count, failed.Payload.Nodes.Count);
         Assert.Equal(GovernedLoopNodeExecutionStatus.Failed, failed.Payload.Nodes[^1].Status);
+        Assert.True(GovernedLoopSequentialFrontierMachine.Validate(failed, context.AdapterBinding, context.Plan));
 
         var review = Frontier(GovernedLoopSequentialFrontierMachine.ReviewBlockRunning(
             running,
@@ -226,6 +242,77 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             initial.Payload.Nodes.Select(node => (node.PlanOrdinal, node.NodeId, node.Status, node.Attempt, node.AttemptOperationId, node.OutcomeEvidenceId, node.OutcomeEvidenceHash)),
             cancelled.Payload.Nodes.Select(node => (node.PlanOrdinal, node.NodeId, node.Status, node.Attempt, node.AttemptOperationId, node.OutcomeEvidenceId, node.OutcomeEvidenceHash)));
         Assert.True(GovernedLoopSequentialFrontierMachine.Validate(cancelled, context.AdapterBinding, context.Plan));
+    }
+
+    [Fact]
+    public async Task Fan_out_ready_siblings_survive_aggregate_review_claimed_failure_review_and_cancellation()
+    {
+        var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync(
+            artifactFactory: GovernedLoopSequentialApplicationTestFixture.ParallelAllJoinArtifact);
+        var fanOut = AdvanceInferenceToFanOut(context);
+        var ready = fanOut.Payload.Nodes.Where(node => node.Status == GovernedLoopNodeExecutionStatus.Ready).ToArray();
+        Assert.Equal(["branch-a", "branch-b"], ready.Select(node => node.NodeId).Order(StringComparer.Ordinal).ToArray());
+
+        var aggregateReview = Frontier(GovernedLoopSequentialFrontierMachine.ReviewBlockAggregate(
+            fanOut,
+            context.AdapterBinding,
+            _startedAtUtc.AddSeconds(3)));
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, aggregateReview.Payload.Status);
+        Assert.All(ready.Zip(aggregateReview.Payload.Nodes.Skip(2)), pair => AssertNodeEqual(pair.First, pair.Second));
+        Assert.True(GovernedLoopSequentialFrontierMachine.Validate(aggregateReview, context.AdapterBinding, context.Plan));
+
+        var cancelled = Frontier(GovernedLoopSequentialFrontierMachine.Cancel(
+            fanOut,
+            context.AdapterBinding,
+            context.Plan,
+            _startedAtUtc.AddSeconds(3)));
+        Assert.Equal(GovernedLoopFrontierStatus.Cancelled, cancelled.Payload.Status);
+        Assert.All(fanOut.Payload.Nodes.Zip(cancelled.Payload.Nodes), pair => AssertNodeEqual(pair.First, pair.Second));
+
+        var selection = GovernedLoopSequentialFrontierMachine.Select(fanOut, context.AdapterBinding, context.Plan);
+        var running = Frontier(GovernedLoopSequentialFrontierMachine.Start(
+            fanOut,
+            context.AdapterBinding,
+            context.Plan,
+            selection.Node,
+            selection.Activation,
+            1,
+            "attempt-branch-a",
+            _startedAtUtc.AddSeconds(3)));
+        var runningActivation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(
+            GovernedLoopSequentialFrontierMachine.Select(running, context.AdapterBinding, context.Plan).Activation);
+        Assert.Single(running.Payload.Nodes, node => node.Status == GovernedLoopNodeExecutionStatus.Ready);
+
+        var review = Frontier(GovernedLoopSequentialFrontierMachine.ReviewBlockRunning(
+            running,
+            context.AdapterBinding,
+            context.Plan,
+            selection.Node,
+            runningActivation,
+            1,
+            "attempt-branch-a",
+            null,
+            null,
+            _startedAtUtc.AddSeconds(4)));
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, review.Payload.Status);
+        Assert.Single(review.Payload.Nodes, node => node.Status == GovernedLoopNodeExecutionStatus.Ready);
+        Assert.True(GovernedLoopSequentialFrontierMachine.Validate(review, context.AdapterBinding, context.Plan));
+
+        var failed = Frontier(GovernedLoopSequentialFrontierMachine.FailRunning(
+            running,
+            context.AdapterBinding,
+            context.Plan,
+            selection.Node,
+            runningActivation,
+            1,
+            "attempt-branch-a",
+            "event-branch-failed",
+            Hash('d'),
+            GovernedLoopControlCondition.Failure,
+            _startedAtUtc.AddSeconds(4)));
+        Assert.Equal(GovernedLoopFrontierStatus.Failed, failed.Payload.Status);
+        Assert.Single(failed.Payload.Nodes, node => node.Status == GovernedLoopNodeExecutionStatus.Ready);
+        Assert.True(GovernedLoopSequentialFrontierMachine.Validate(failed, context.AdapterBinding, context.Plan));
     }
 
     [Fact]
@@ -381,6 +468,35 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
         GovernedLoopSequentialRunMaterializerTests.TestContext context)
         => Assert.IsType<GovernedLoopNodeExecutionEvidence>(
             GovernedLoopSequentialFrontierMachine.Select(frontier, context.AdapterBinding, context.Plan).Activation);
+
+    private static GovernedLoopFrontierPosture AdvanceInferenceToFanOut(
+        GovernedLoopSequentialRunMaterializerTests.TestContext context)
+    {
+        var initial = Frontier(Initialize(context));
+        var selection = GovernedLoopSequentialFrontierMachine.Select(initial, context.AdapterBinding, context.Plan);
+        var running = Frontier(GovernedLoopSequentialFrontierMachine.Start(
+            initial,
+            context.AdapterBinding,
+            context.Plan,
+            selection.Node,
+            selection.Activation,
+            1,
+            "attempt-infer",
+            _startedAtUtc.AddSeconds(1)));
+        return Frontier(GovernedLoopSequentialFrontierMachine.CompleteRunning(
+            running,
+            context.AdapterBinding,
+            context.Plan,
+            selection.Node,
+            SelectedActivation(running, context),
+            1,
+            "attempt-infer",
+            "event-infer-complete",
+            Hash('c'),
+            GovernedLoopControlCondition.Success,
+            [],
+            _startedAtUtc.AddSeconds(2)));
+    }
 
     private static string Hash(char value) => GovernedLoopSequentialApplicationTestFixture.Hash(value);
 

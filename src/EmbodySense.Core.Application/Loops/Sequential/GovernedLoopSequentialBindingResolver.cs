@@ -32,7 +32,7 @@ public static class GovernedLoopSequentialBindingResolver
             .ToArray();
         return activation is { Length: 1 }
             ? Resolve(artifact, plan, node, activation[0], run)
-            : Rejected("pure-node.activation-invalid", "$.frontier");
+            : Rejected("canonical-binding.activation-invalid", "$.frontier");
     }
 
     /// <summary>Resolves exact graph-pinned inputs for one immutable durable activation and its causal ancestors.</summary>
@@ -45,7 +45,7 @@ public static class GovernedLoopSequentialBindingResolver
     {
         if (!IsExactContext(artifact, plan, node, activation, run))
         {
-            return Rejected("pure-node.context-invalid", "$");
+            return Rejected("canonical-binding.context-invalid", "$");
         }
 
         try
@@ -54,7 +54,7 @@ public static class GovernedLoopSequentialBindingResolver
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
         {
-            return Rejected("pure-node.source-evidence-invalid", "$.bindings");
+            return Rejected("canonical-binding.source-evidence-invalid", "$.bindings");
         }
     }
 
@@ -68,10 +68,9 @@ public static class GovernedLoopSequentialBindingResolver
         var graph = artifact.Graph;
         var graphNode = graph.Nodes.SingleOrDefault(value => string.Equals(value.Id, node.NodeId, StringComparison.Ordinal));
         if (graphNode is null
-            || graphNode.Descriptor.Kind is not (GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate or GovernedLoopNodeKind.Condition)
-            || graph.Bindings.Any(binding => string.Equals(binding.ToNodeId, graphNode.Id, StringComparison.Ordinal) && binding.Kind != GovernedLoopBindingKind.Data))
+            || graphNode.Descriptor.Kind is not (GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate or GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Inference or GovernedLoopNodeKind.Exit))
         {
-            return Rejected("pure-node.binding-invalid", "$.bindings");
+            return Rejected("canonical-binding.node-invalid", "$.bindings");
         }
 
         var inputs = new List<GovernedLoopTypedBindingValue>();
@@ -79,18 +78,28 @@ public static class GovernedLoopSequentialBindingResolver
                      .Where(value => string.Equals(value.ToNodeId, graphNode.Id, StringComparison.Ordinal))
                      .OrderBy(value => value.Id, StringComparer.Ordinal))
         {
-            if (!TryResolveSourceValue(artifact, plan, run, activation, binding.FromNodeId, binding.FromPortId, out var value))
+            var resolved = binding.Kind switch
             {
-                return Rejected("pure-node.source-evidence-invalid", $"$.bindings[{binding.Id}]");
+                GovernedLoopBindingKind.Data => TryResolveSourceValue(artifact, plan, run, activation, binding.FromNodeId, binding.FromPortId, out var value)
+                    ? value
+                    : null,
+                GovernedLoopBindingKind.Context => TryResolveInvocationContextValue(artifact, plan, run, activation, binding, out var contextValue)
+                    ? contextValue
+                    : null,
+                _ => null,
+            };
+            if (resolved is null)
+            {
+                return Rejected("canonical-binding.source-evidence-invalid", $"$.bindings[{binding.Id}]");
             }
 
             try
             {
-                inputs.Add(GovernedLoopTypedBindingValue.Create(graph, binding.Id, value!));
+                inputs.Add(GovernedLoopTypedBindingValue.Create(graph, binding.Id, resolved));
             }
             catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
             {
-                return Rejected("pure-node.binding-schema-mismatch", $"$.bindings[{binding.Id}]");
+                return Rejected("canonical-binding.schema-mismatch", $"$.bindings[{binding.Id}]");
             }
         }
 
@@ -99,6 +108,38 @@ public static class GovernedLoopSequentialBindingResolver
             Array.AsReadOnly(inputs.ToArray()),
             null,
             null);
+    }
+
+    private static bool TryResolveInvocationContextValue(
+        GovernedLoopGraphRevisionArtifact artifact,
+        GovernedLoopSequentialPlan plan,
+        CustomLoopRunRecord run,
+        GovernedLoopNodeExecutionEvidence targetActivation,
+        GovernedLoopBindingDefinition binding,
+        out GovernedLoopTypedValue? value)
+    {
+        value = null;
+        if (!string.Equals(binding.FromNodeId, plan.Nodes[0].NodeId, StringComparison.Ordinal)
+            || !string.Equals(binding.FromPortId, "invocation-context", StringComparison.Ordinal)
+            || !string.Equals(binding.ToPortId, "invocation-context", StringComparison.Ordinal)
+            || run.SequentialInvocationSnapshot is not { } snapshot
+            || !GovernedLoopSequentialContractValidator.Validate(snapshot).IsValid
+            || !CustomLoopContextSnapshotHash.Matches(run.ContextSnapshot)
+            || snapshot.ContextCapturedAtUtc != run.ContextSnapshot.CapturedAtUtc
+            || !snapshot.ContextManifest.SequenceEqual(run.ContextSnapshot.SourceManifest)
+            || !TryResolveCausalSourceActivation(plan, run, targetActivation, binding.FromNodeId, out var triggerActivation)
+            || triggerActivation is null
+            || !HasExactCompletedFrontierEvidence(run, plan.Nodes[triggerActivation.PlanOrdinal], triggerActivation, out _))
+        {
+            return false;
+        }
+
+        return GovernedLoopTypedValue.TryCreate(
+            GovernedLoopTypedValue.CurrentSchemaVersion,
+            GovernedLoopValueKind.Text,
+            JsonSerializer.Serialize(snapshot.ContentHash),
+            out value,
+            out _);
     }
 
     private static bool TryResolveSourceValue(
@@ -242,26 +283,23 @@ public static class GovernedLoopSequentialBindingResolver
             return true;
         }
 
-        foreach (var edgeId in target.IncomingControlEdgeIds)
-        {
-            var matches = activations
+        var directMatches = target.IncomingControlEdgeIds
+            .SelectMany(edgeId => activations
                 .Take(target.ActivationOrdinal)
                 .Where(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Completed
                     && candidate.SelectedControlEdgeIds.Contains(edgeId, StringComparer.Ordinal)
                     && EdgeReachesActivation(plan, candidate, target, edgeId))
-                .OrderByDescending(candidate => candidate.ActivationOrdinal)
-                .Take(2)
-                .ToArray();
-            if (matches.Length == 0)
-            {
-                predecessors = [];
-                return false;
-            }
-
-            resolved.Add(matches[0]);
+                .Select(candidate => (EdgeId: edgeId, Activation: candidate)))
+            .OrderByDescending(candidate => candidate.Activation.ActivationOrdinal)
+            .Take(2)
+            .ToArray();
+        if (directMatches.Length != 1)
+        {
+            predecessors = [];
+            return false;
         }
 
-        predecessors = resolved.DistinctBy(candidate => candidate.ActivationOrdinal).ToArray();
+        predecessors = [directMatches[0].Activation];
         return true;
     }
 

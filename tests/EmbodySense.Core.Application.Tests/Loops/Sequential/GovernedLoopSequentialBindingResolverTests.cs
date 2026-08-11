@@ -88,7 +88,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
 
         Assert.False(result.IsResolved);
         Assert.Empty(result.Inputs);
-        Assert.Equal("pure-node.activation-invalid", result.FailureCode);
+        Assert.Equal("canonical-binding.activation-invalid", result.FailureCode);
         Assert.Equal("$.frontier", result.FailurePath);
     }
 
@@ -121,7 +121,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
 
         Assert.False(result.IsResolved);
         Assert.Empty(result.Inputs);
-        Assert.Equal("pure-node.source-evidence-invalid", result.FailureCode);
+        Assert.Equal("canonical-binding.source-evidence-invalid", result.FailureCode);
         Assert.Equal("$.bindings[validation-to-equality-left]", result.FailurePath);
     }
 
@@ -162,7 +162,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
 
         Assert.False(rejected.IsResolved);
         Assert.Empty(rejected.Inputs);
-        Assert.Equal("pure-node.context-invalid", rejected.FailureCode);
+        Assert.Equal("canonical-binding.context-invalid", rejected.FailureCode);
         Assert.Equal("$", rejected.FailurePath);
     }
 

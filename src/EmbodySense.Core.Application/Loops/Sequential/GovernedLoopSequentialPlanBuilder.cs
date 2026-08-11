@@ -250,6 +250,18 @@ public static class GovernedLoopSequentialPlanBuilder
             }
         }
 
+        var selectedJoins = graph.Nodes.Where(node => GovernedLoopTopologyNodeCatalogContract.TryResolve(node.Descriptor, out var contract)
+            && contract?.JoinPolicy == GovernedLoopJoinPolicy.Selected);
+        if (selectedJoins.Any(join => graph.ControlEdges
+            .Where(edge => string.Equals(edge.ToNodeId, join.Id, StringComparison.Ordinal))
+            .Any(edge => componentByNodeId[edge.FromNodeId].IsCyclic
+                && !string.Equals(componentByNodeId[edge.FromNodeId].ComponentId, componentByNodeId[join.Id].ComponentId, StringComparison.Ordinal))))
+        {
+            // Schema 1 has no cycle-termination artifact that can prove a skipped exit from an
+            // earlier iteration will remain pruned for a downstream Selected Join.
+            return null;
+        }
+
         return new GovernedLoopTopologyAnalysis(Array.AsReadOnly(components.ToArray()), componentByNodeId);
     }
 

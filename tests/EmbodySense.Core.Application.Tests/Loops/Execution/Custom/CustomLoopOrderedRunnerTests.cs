@@ -56,7 +56,7 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
-public sealed class CustomLoopOrderedRunnerTests
+public sealed partial class CustomLoopOrderedRunnerTests
 {
     private static readonly DateTimeOffset _now = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
     private static readonly JsonSerializerOptions _rawTraceSizingJsonOptions = new(JsonSerializerDefaults.Web)
@@ -499,7 +499,7 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopControlStatus.CancelRequested, cancel.Status);
         Assert.Equal(CustomLoopRecoveryStatus.NeedsReview, recovery.Status);
         Assert.Equal(CustomLoopRunStatus.NeedsReview, recovery.Run.Status);
-        Assert.Equal("recovery_pure_cancellation_reconciliation_required", recovery.Run.FailureCode);
+        Assert.Equal("recovery_deterministic_cancellation_reconciliation_required", recovery.Run.FailureCode);
         Assert.Single(recovery.Run.Events, item => IsPureRejection(item, "identity"));
         Assert.Empty(store.ValidationFailures);
     }
@@ -2563,8 +2563,7 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run!.Status);
         Assert.Equal("pause_boundary_audit_failed", result.Run.FailureCode);
         Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, result.Run.Frontier!.Payload.Status);
-        var current = result.Run.Frontier.Payload.Nodes[^1];
-        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, current.Status);
+        var current = Assert.Single(result.Run.Frontier.Payload.Nodes, node => node.Status == GovernedLoopNodeExecutionStatus.Ready);
         Assert.Null(current.Attempt);
         Assert.Null(current.AttemptOperationId);
         Assert.Null(current.OutcomeEvidenceId);
@@ -7112,8 +7111,8 @@ public sealed class CustomLoopOrderedRunnerTests
                 durable.CycleId,
                 durable.CycleIteration,
                 durable.ControlOutcome,
-                durable.SelectedControlEdgeIds,
-                durable.SkippedControlEdgeIds,
+                durable.SelectedControlEdgeIds.ToArray(),
+                durable.SkippedControlEdgeIds.ToArray(),
                 request.Disposition,
                 durable.OutcomeArtifactHash,
                 durable.EvidenceHash);

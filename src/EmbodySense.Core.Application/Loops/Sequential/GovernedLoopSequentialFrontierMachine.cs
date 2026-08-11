@@ -192,7 +192,8 @@ public static class GovernedLoopSequentialFrontierMachine
         }
 
         var pruned = frontier!.Payload.Nodes
-            .Where(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Ready)
+            .Where(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Ready
+                && candidate.Descriptor.Kind != GovernedLoopNodeKind.Join)
             .Select(candidate => new
             {
                 Activation = candidate,
@@ -536,6 +537,11 @@ public static class GovernedLoopSequentialFrontierMachine
                 {
                     return Invalid(successorFailure!);
                 }
+
+                if (!TryAppendNewlyEligibleJoins(plan!, nodes, updatedAtUtc, cycleStartedAtUtc, out successorFailure))
+                {
+                    return Invalid(successorFailure!);
+                }
             }
 
             var aggregate = resolution switch
@@ -630,7 +636,8 @@ public static class GovernedLoopSequentialFrontierMachine
         GovernedLoopNodeExecutionEvidence governing,
         IReadOnlyList<string> skippedEdges)
         => nodes
-            .Where(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Ready)
+            .Where(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Ready
+                && candidate.Descriptor.Kind != GovernedLoopNodeKind.Join)
             .Select(candidate => new
             {
                 Activation = candidate,
@@ -697,7 +704,7 @@ public static class GovernedLoopSequentialFrontierMachine
             }
 
             var arrivals = ResolveJoinArrivals(plan, nodes, target, cycleIteration);
-            if (!IsEligibleTarget(plan, nodes, target, arrivals))
+            if (!IsEligibleTarget(plan, nodes, target, arrivals, cycleIteration))
             {
                 continue;
             }
@@ -768,6 +775,79 @@ public static class GovernedLoopSequentialFrontierMachine
         return true;
     }
 
+    private static bool TryAppendNewlyEligibleJoins(
+        GovernedLoopSequentialPlan plan,
+        List<GovernedLoopNodeExecutionEvidence> nodes,
+        DateTimeOffset updatedAtUtc,
+        DateTimeOffset? cycleStartedAtUtc,
+        out string? failure)
+    {
+        failure = null;
+        var candidates = plan.Nodes
+            .Where(target => target.Descriptor.Kind == GovernedLoopNodeKind.Join)
+            .SelectMany(target => target.IncomingControlEdgeIds
+                .SelectMany(edgeId => nodes
+                    .Where(source => source.Status == GovernedLoopNodeExecutionStatus.Completed
+                        && source.SelectedControlEdgeIds.Contains(edgeId, StringComparer.Ordinal)
+                        && TryGetTargetCycleIteration(plan, source, target, out _, out _))
+                    .Select(source =>
+                    {
+                        _ = TryGetTargetCycleIteration(plan, source, target, out var cycleIteration, out _);
+                        return (Target: target, CycleIteration: cycleIteration);
+                    })))
+            .DistinctBy(candidate => (candidate.Target.Ordinal, candidate.CycleIteration))
+            .OrderBy(candidate => candidate.Target.StaticOrdinal)
+            .ThenBy(candidate => candidate.CycleIteration)
+            .ToArray();
+        foreach (var candidate in candidates)
+        {
+            var target = candidate.Target;
+            var cycleIteration = candidate.CycleIteration;
+            if (HasExistingActivation(nodes, target, cycleIteration))
+            {
+                continue;
+            }
+
+            var arrivals = ResolveJoinArrivals(plan, nodes, target, cycleIteration);
+            if (!IsEligibleTarget(plan, nodes, target, arrivals, cycleIteration))
+            {
+                continue;
+            }
+
+            var source = nodes[arrivals[0].SourceActivationOrdinal];
+            var entersCycle = target.CycleId is not null
+                && !string.Equals(source.CycleId, target.CycleId, StringComparison.Ordinal);
+            if (!WithinCycleBudget(plan, target, cycleIteration, entersCycle, updatedAtUtc, cycleStartedAtUtc, out failure))
+            {
+                return false;
+            }
+
+            if (nodes.Count >= GovernedLoopExecutionLimits.MaxFrontierNodes)
+            {
+                failure = "The bounded activation-history budget was exhausted before another Join activation could become Ready.";
+                return false;
+            }
+
+            var visit = nodes.Count(item => string.Equals(item.NodeId, target.NodeId, StringComparison.Ordinal)) + 1;
+            nodes.Add(CreateActivation(
+                target,
+                nodes.Count,
+                visit,
+                cycleIteration,
+                GovernedLoopNodeExecutionStatus.Ready,
+                null,
+                null,
+                null,
+                null,
+                null,
+                [],
+                [],
+                arrivals));
+        }
+
+        return true;
+    }
+
     private static bool WithinCycleBudget(
         GovernedLoopSequentialPlan plan,
         GovernedLoopSequentialPlanNode target,
@@ -823,7 +903,8 @@ public static class GovernedLoopSequentialFrontierMachine
         foreach (var edgeId in target.IncomingControlEdgeIds)
         {
             var source = nodes
-                .Where(candidate => candidate.ActivationOrdinal < nodes.Count
+                .Where(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Completed
+                    && candidate.ActivationOrdinal < nodes.Count
                     && candidate.SelectedControlEdgeIds.Contains(edgeId, StringComparer.Ordinal)
                     && SourceReachesTargetIteration(plan, candidate, target, targetCycleIteration))
                 .OrderByDescending(candidate => candidate.ActivationOrdinal)
@@ -855,7 +936,8 @@ public static class GovernedLoopSequentialFrontierMachine
         GovernedLoopSequentialPlan plan,
         IReadOnlyList<GovernedLoopNodeExecutionEvidence> nodes,
         GovernedLoopSequentialPlanNode target,
-        IReadOnlyList<GovernedLoopJoinArrivalEvidence> arrivals)
+        IReadOnlyList<GovernedLoopJoinArrivalEvidence> arrivals,
+        int? targetCycleIteration)
     {
         if (target.Descriptor.Kind != GovernedLoopNodeKind.Join)
         {
@@ -871,7 +953,7 @@ public static class GovernedLoopSequentialFrontierMachine
         {
             GovernedLoopJoinPolicy.Any => arrivals.Count > 0,
             GovernedLoopJoinPolicy.All => arrivals.Count == target.IncomingControlEdgeIds.Count,
-            GovernedLoopJoinPolicy.Selected => arrivals.Count > 0 && target.IncomingControlEdgeIds.All(edgeId => arrivals.Any(arrival => string.Equals(arrival.ControlEdgeId, edgeId, StringComparison.Ordinal)) || IsControlEdgePruned(plan, nodes, edgeId, [])),
+            GovernedLoopJoinPolicy.Selected => arrivals.Count > 0 && target.IncomingControlEdgeIds.All(edgeId => arrivals.Any(arrival => string.Equals(arrival.ControlEdgeId, edgeId, StringComparison.Ordinal)) || IsControlEdgePruned(plan, nodes, edgeId, target, targetCycleIteration, [])),
             _ => false,
         };
     }
@@ -880,27 +962,65 @@ public static class GovernedLoopSequentialFrontierMachine
         GovernedLoopSequentialPlan plan,
         IReadOnlyList<GovernedLoopNodeExecutionEvidence> nodes,
         string edgeId,
-        HashSet<string> visited)
+        GovernedLoopSequentialPlanNode target,
+        int? targetCycleIteration,
+        HashSet<(string EdgeId, int? TargetCycleIteration)> visited)
     {
-        if (!visited.Add(edgeId))
+        if (!visited.Add((edgeId, targetCycleIteration)))
         {
             return false;
-        }
-
-        if (nodes.Any(candidate => candidate.SkippedControlEdgeIds.Contains(edgeId, StringComparer.Ordinal)))
-        {
-            return true;
         }
 
         var edge = plan.ControlEdges.Single(candidate => string.Equals(candidate.Id, edgeId, StringComparison.Ordinal));
-        if (nodes.Any(candidate => string.Equals(candidate.NodeId, edge.FromNodeId, StringComparison.Ordinal)))
+        var source = plan.Nodes.Single(candidate => string.Equals(candidate.NodeId, edge.FromNodeId, StringComparison.Ordinal));
+        if (!TryGetSourceCycleIteration(source, target, targetCycleIteration, out var sourceCycleIteration))
         {
             return false;
         }
 
-        var source = plan.Nodes.Single(candidate => string.Equals(candidate.NodeId, edge.FromNodeId, StringComparison.Ordinal));
+        var exactSources = nodes
+            .Where(candidate => candidate.PlanOrdinal == source.Ordinal
+                && candidate.CycleIteration == sourceCycleIteration)
+            .ToArray();
+        if (exactSources.Length > 0)
+        {
+            return exactSources.Any(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Completed
+                && candidate.SkippedControlEdgeIds.Contains(edgeId, StringComparer.Ordinal));
+        }
+
         return source.IncomingControlEdgeIds.Count > 0
-            && source.IncomingControlEdgeIds.All(incoming => IsControlEdgePruned(plan, nodes, incoming, new HashSet<string>(visited, StringComparer.Ordinal)));
+            && source.IncomingControlEdgeIds.All(incoming => IsControlEdgePruned(
+                plan,
+                nodes,
+                incoming,
+                source,
+                sourceCycleIteration,
+                new HashSet<(string EdgeId, int? TargetCycleIteration)>(visited)));
+    }
+
+    private static bool TryGetSourceCycleIteration(
+        GovernedLoopSequentialPlanNode source,
+        GovernedLoopSequentialPlanNode target,
+        int? targetCycleIteration,
+        out int? sourceCycleIteration)
+    {
+        sourceCycleIteration = null;
+        if (source.CycleId is null)
+        {
+            return target.CycleId is null || targetCycleIteration == 1;
+        }
+
+        if (target.CycleId is null
+            || !string.Equals(source.CycleId, target.CycleId, StringComparison.Ordinal)
+            || targetCycleIteration is not { } targetIteration)
+        {
+            return false;
+        }
+
+        sourceCycleIteration = target.ComponentTraversalOrdinal > source.ComponentTraversalOrdinal
+            ? targetIteration
+            : targetIteration - 1;
+        return sourceCycleIteration > 0;
     }
 
     private static bool HasExistingActivation(
@@ -919,12 +1039,26 @@ public static class GovernedLoopSequentialFrontierMachine
         if (activation.Descriptor.Kind == GovernedLoopNodeKind.Join)
         {
             var target = plan.Nodes[activation.PlanOrdinal];
+            if (!GovernedLoopTopologyNodeCatalogContract.TryResolve(target.Descriptor, out var contract) || contract is null)
+            {
+                return false;
+            }
+
             var exactArrivals = ResolveJoinArrivals(plan, prior, target, activation.CycleIteration);
-            return exactArrivals.SequenceEqual(activation.JoinArrivals)
-                && IsEligibleTarget(plan, prior, target, exactArrivals);
+            return contract.JoinPolicy switch
+            {
+                GovernedLoopJoinPolicy.Any => activation.JoinArrivals.Count > 0
+                    && activation.JoinArrivals.All(exactArrivals.Contains),
+                GovernedLoopJoinPolicy.All => exactArrivals.SequenceEqual(activation.JoinArrivals)
+                    && IsEligibleTarget(plan, prior, target, exactArrivals, activation.CycleIteration),
+                GovernedLoopJoinPolicy.Selected => exactArrivals.SequenceEqual(activation.JoinArrivals)
+                    && IsEligibleTarget(plan, prior, target, exactArrivals, activation.CycleIteration),
+                _ => false,
+            };
         }
 
-        return activation.IncomingControlEdgeIds.Any(edgeId => prior.Any(source => source.SelectedControlEdgeIds.Contains(edgeId, StringComparer.Ordinal)
+        return activation.IncomingControlEdgeIds.Any(edgeId => prior.Any(source => source.Status == GovernedLoopNodeExecutionStatus.Completed
+            && source.SelectedControlEdgeIds.Contains(edgeId, StringComparer.Ordinal)
             && SourceReachesTargetIteration(plan, source, plan.Nodes[activation.PlanOrdinal], activation.CycleIteration)));
     }
 
@@ -942,7 +1076,13 @@ public static class GovernedLoopSequentialFrontierMachine
             return activation.SelectedControlEdgeIds.Count == 0 && activation.SkippedControlEdgeIds.Count == 0;
         }
 
-        return TryResolveRoute(plan, plan.Nodes[activation.PlanOrdinal], activation.ControlOutcome.Value, out var selected, out var skipped)
+        return TryResolveRoute(
+                plan,
+                plan.Nodes[activation.PlanOrdinal],
+                activation.ControlOutcome.Value,
+                out var selected,
+                out var skipped,
+                allowUnroutedFailure: activation.Status == GovernedLoopNodeExecutionStatus.Failed)
             && activation.SelectedControlEdgeIds.SequenceEqual(selected, StringComparer.Ordinal)
             && activation.SkippedControlEdgeIds.SequenceEqual(skipped, StringComparer.Ordinal);
     }

@@ -8,6 +8,7 @@ using EmbodySense.Core.Application.Tests.Loops.Admission;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
@@ -354,16 +355,18 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         string surface = "web",
         bool allowWorkspaceTools = false,
         int inferenceCount = 1,
-        IReadOnlyList<string>? inferenceIds = null)
+        IReadOnlyList<string>? inferenceIds = null,
+        Func<ContextualRoleRevisionPin, GovernedLoopGraphRevisionArtifact>? artifactFactory = null)
     {
         var seedHarness = GovernedLoopAdmissionTestHarness.Create();
         var seedOutcome = Assert.IsType<GovernedLoopAdmissionTerminalOutcome>((await seedHarness.CreateService().AdmitAsync(seedHarness.Request)).Outcome);
         var seedReceipt = Assert.IsType<GovernedLoopAdmissionReceipt>(seedOutcome.Receipt);
-        var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(
-            inferenceCount,
-            inferenceIds,
-            owningRole: seedReceipt.Intent.Role,
-            allowWorkspaceTools: allowWorkspaceTools);
+        var artifact = artifactFactory?.Invoke(seedReceipt.Intent.Role)
+            ?? GovernedLoopSequentialApplicationTestFixture.LinearArtifact(
+                inferenceCount,
+                inferenceIds,
+                owningRole: seedReceipt.Intent.Role,
+                allowWorkspaceTools: allowWorkspaceTools);
         var publication = GovernedLoopRevisionPublicationPinFactory.Create(
             1,
             artifact.RevisionArtifact.Revision,

@@ -344,9 +344,9 @@ public sealed class CustomLoopLifecycleService
 
         if (run.Status == CustomLoopRunStatus.Paused)
         {
-            if (CustomLoopRecoveryService.HasRestartSafePureAttemptSinceCheckpoint(run))
+            if (CustomLoopRecoveryService.HasRestartSafeDeterministicAttemptSinceCheckpoint(run))
             {
-                const string Detail = "Cancellation found a recovery-parked deterministic pure-node attempt whose start/outcome audits and terminal disposition require reconciliation; the run was attention-blocked without dispatch.";
+                const string Detail = "Cancellation found a recovery-parked deterministic node attempt whose start/outcome audits and terminal disposition require reconciliation; the run was attention-blocked without dispatch.";
                 var parked = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, Detail);
                 var parkedOutcome = parked.Run is null ? parked.Status : CustomLoopControlStatus.NeedsReview;
                 return await CompleteAsync(operation, parkedOutcome, parked.Run ?? parked.CurrentRun, parked.AuditRecorded, parked.Detail);
@@ -868,7 +868,9 @@ public sealed class CustomLoopLifecycleService
             return frontier;
         }
 
-        var blocked = GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(frontier, binding, null, null, now);
+        var blocked = frontier.Payload.Nodes.Any(node => node.Status == GovernedLoopNodeExecutionStatus.Running)
+            ? GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(frontier, binding, null, null, now)
+            : GovernedLoopSequentialFrontierMachine.ReviewBlockAggregate(frontier, binding, now);
         return blocked.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied && blocked.Frontier is not null
             ? blocked.Frontier
             : throw new InvalidOperationException("The exact canonical frontier could not enter ReviewBlocked without fabricating node-attempt evidence.");

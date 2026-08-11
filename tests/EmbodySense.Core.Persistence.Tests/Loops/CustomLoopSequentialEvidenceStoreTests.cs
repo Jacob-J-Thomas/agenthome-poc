@@ -131,7 +131,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         var substitutions = new CustomLoopSequentialNodeEvidence[]
         {
             evidence with { SelectedControlEdgeIds = ["trigger-to-exit"] },
-            evidence with { SelectedControlEdgeIds = [.. evidence.SelectedControlEdgeIds.Reverse()] , SkippedControlEdgeIds = ["trigger-to-inference"] },
+            evidence with { SelectedControlEdgeIds = [], SkippedControlEdgeIds = ["trigger-to-inference"] },
             evidence with { ActivationOrdinal = 1 },
             evidence with { VisitOrdinal = 2 },
             evidence with { Attempt = 2 },
@@ -150,6 +150,34 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             var validation = CustomLoopRunValidator.ValidateUpdate(context.Run, candidate);
             Assert.Contains(validation.Errors, error => error.Code == "event_history_changed" && error.Field == "events[0]");
         }
+    }
+
+    [Fact]
+    public void Sequential_evidence_value_semantics_are_structural_and_route_order_is_significant()
+    {
+        var context = CreateContext();
+        var trigger = Assert.IsType<CustomLoopSequentialNodeEvidence>(context.Run.Events[0].SequentialNodeEvidence);
+        var baseline = CustomLoopSequentialNodeEvidenceHash.Apply(trigger with
+        {
+            SelectedControlEdgeIds = ["edge-a", "edge-b"],
+            SkippedControlEdgeIds = ["edge-c", "edge-d"],
+        });
+        var independent = baseline with
+        {
+            SelectedControlEdgeIds = baseline.SelectedControlEdgeIds.ToArray(),
+            SkippedControlEdgeIds = baseline.SkippedControlEdgeIds.ToArray(),
+        };
+        var reordered = CustomLoopSequentialNodeEvidenceHash.Apply(baseline with
+        {
+            SelectedControlEdgeIds = ["edge-b", "edge-a"],
+            EvidenceHash = string.Empty,
+        });
+
+        Assert.NotSame(baseline.SelectedControlEdgeIds, independent.SelectedControlEdgeIds);
+        Assert.Equal(baseline, independent);
+        Assert.Equal(baseline.GetHashCode(), independent.GetHashCode());
+        Assert.NotEqual(baseline, reordered);
+        Assert.NotEqual(baseline.EvidenceHash, reordered.EvidenceHash);
     }
 
     [Fact]
@@ -185,21 +213,21 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
         var request = OrderedRequest(context, context.Plan.Nodes[0], context.Run.Events[0]);
-        var substitutions = new[]
+        var persistedCoordinateSubstitutions = new[]
         {
             request with { OrderedLifecycleVersion = 2 },
             request with { OrderedEventSequence = 2 },
             request with { OrderedEventId = "event-other" },
             request with { Disposition = GovernedLoopSequentialNodeHandlerResultStatus.Rejected },
-            request with { Dispatch = request.Dispatch with { Attempt = 2 } },
-            request with { Dispatch = request.Dispatch with { Node = context.Plan.Nodes[1] } },
         };
 
-        foreach (var substitution in substitutions)
+        foreach (var substitution in persistedCoordinateSubstitutions)
         {
             await Assert.ThrowsAsync<FormatException>(() => store.RetainAsync(substitution));
         }
 
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RetainAsync(request with { Dispatch = request.Dispatch with { Attempt = 2 } }));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RetainAsync(request with { Dispatch = request.Dispatch with { Node = context.Plan.Nodes[1] } }));
         await Assert.ThrowsAsync<ArgumentException>(() => store.RetainAsync(request with { SchemaVersion = 2 }));
         var loaded = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(context.Run.Id));
         Assert.Equal(context.Run.LifecycleVersion, loaded.LifecycleVersion);
@@ -483,25 +511,27 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             1,
             CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
             CustomLoopSequentialNodeDisposition.Unknown);
-        var exitCompleted = WithEvidence(
-            Event(5, "event-exit-completed", CustomLoopRunEventKind.ExitDecisionCompleted, "exit", 1) with
-            {
-                ExitDecision = CustomLoopExitDecision.Complete,
-            },
+        var exitReady = Assert.IsType<GovernedLoopNodeExecutionEvidence>(
+            GovernedLoopSequentialFrontierMachine.Select(afterInference.Frontier, context.Binding, context.Plan).Activation);
+        var exitRunning = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Start(
+            afterInference.Frontier,
             context.Binding,
-            "exit",
+            context.Plan,
+            context.Plan.Nodes[2],
+            exitReady,
             1,
-            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
-            CustomLoopSequentialNodeDisposition.Completed);
-        var candidate = afterInference with
+            exitStarted.EventId,
+            exitStarted.TimestampUtc).Frontier);
+        var startedExitRun = afterInference with
         {
             LifecycleVersion = 4,
-            UpdatedAtUtc = _timestamp.AddMinutes(4),
-            Events = [.. afterInference.Events, exitStarted, exitCompleted],
+            UpdatedAtUtc = exitStarted.TimestampUtc,
+            Frontier = exitRunning,
+            Events = [.. afterInference.Events, exitStarted],
         };
 
-        Assert.True(await store.HasSufficientTraceCapacityForDispatchAsync(candidate, 3));
-        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(candidate, 3)).Status);
+        Assert.True(await store.HasSufficientTraceCapacityForDispatchAsync(startedExitRun, 3));
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(startedExitRun, 3)).Status);
     }
 
     [Fact]
@@ -560,7 +590,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         };
 
         var exception = await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(overLimit, 3));
-        Assert.Contains("more provider-attempt starts", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("exact durable frontier activation", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -786,10 +816,21 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             1,
             CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
             CustomLoopSequentialNodeDisposition.Unknown);
+        var selection = GovernedLoopSequentialFrontierMachine.Select(context.Run.Frontier, context.Binding, context.Plan);
+        var startedFrontier = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Start(
+            context.Run.Frontier,
+            context.Binding,
+            context.Plan,
+            context.Plan.Nodes[1],
+            selection.Activation,
+            1,
+            start.EventId,
+            start.TimestampUtc).Frontier);
         var started = context.Run with
         {
             LifecycleVersion = 2,
             UpdatedAtUtc = _timestamp.AddMinutes(1),
+            Frontier = startedFrontier,
             Events = [.. context.Run.Events, start],
         };
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(started, 1)).Status);
@@ -800,10 +841,24 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             1,
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed);
+        var completedFrontier = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.CompleteRunning(
+            startedFrontier,
+            context.Binding,
+            context.Plan,
+            context.Plan.Nodes[1],
+            startedFrontier.Payload.Nodes[1],
+            1,
+            start.EventId,
+            completion.EventId,
+            completion.SequentialNodeEvidence!.OutcomeArtifactHash,
+            GovernedLoopControlCondition.Success,
+            [],
+            completion.TimestampUtc).Frontier);
         var completed = started with
         {
             LifecycleVersion = 3,
             UpdatedAtUtc = _timestamp.AddMinutes(2),
+            Frontier = completedFrontier,
             Events = [.. started.Events, completion],
         };
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, 2)).Status);
@@ -880,15 +935,20 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     private static GovernedLoopFrontierPosture StartPureFrontier(GovernedLoopFrontierPosture current, CustomLoopRunEvent start)
     {
         var source = current.Payload.Nodes[1];
-        var running = GovernedLoopNodeExecutionEvidence.Create(
+        var running = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            source.ActivationOrdinal,
             source.PlanOrdinal,
+            source.VisitOrdinal,
             source.NodeId,
             source.Descriptor,
             source.IncomingControlEdgeIds,
             source.OutgoingControlEdgeIds,
             GovernedLoopNodeExecutionStatus.Running,
             1,
-            start.EventId);
+            start.EventId,
+            cycleId: source.CycleId,
+            cycleIteration: source.CycleIteration,
+            joinArrivals: source.JoinArrivals);
         return RebuildFrontier(current, current.Payload.FrontierVersion + 1, [current.Payload.Nodes[0], running], start.TimestampUtc);
     }
 
@@ -898,8 +958,11 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         CustomLoopRunEvent completion)
     {
         var source = current.Payload.Nodes[1];
-        var completed = GovernedLoopNodeExecutionEvidence.Create(
+        var evidence = completion.SequentialNodeEvidence!;
+        var completed = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            source.ActivationOrdinal,
             source.PlanOrdinal,
+            source.VisitOrdinal,
             source.NodeId,
             source.Descriptor,
             source.IncomingControlEdgeIds,
@@ -908,9 +971,17 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             1,
             start.EventId,
             completion.EventId,
-            completion.SequentialNodeEvidence!.OutcomeArtifactHash);
-        var exit = GovernedLoopNodeExecutionEvidence.Create(
+            evidence.OutcomeArtifactHash,
+            source.CycleId,
+            source.CycleIteration,
+            evidence.ControlOutcome,
+            evidence.SelectedControlEdgeIds,
+            evidence.SkippedControlEdgeIds,
+            source.JoinArrivals);
+        var exit = GovernedLoopNodeExecutionEvidence.CreateActivation(
             2,
+            2,
+            1,
             "exit",
             new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
             source.OutgoingControlEdgeIds,

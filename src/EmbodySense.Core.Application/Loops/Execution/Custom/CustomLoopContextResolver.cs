@@ -1,3 +1,4 @@
+using System.Text.Json;
 using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
@@ -7,6 +8,10 @@ using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
+using EmbodySense.Core.Common.Loops.Sequential;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
@@ -41,6 +46,73 @@ public sealed class CustomLoopContextResolver
 
         var policy = ResolvePolicy(step.ContextPolicy, run.AdmittedDefinition.ContextDefaults.Inference);
         return Resolve(run, step.Id, step.Instruction, policy, isExit: false, effectiveToolAssignments);
+    }
+
+    /// <summary>Resolves a canonical graph inference from only its exact activation-scoped Data and Context bindings.</summary>
+    public CustomLoopContextAssembly ResolveCanonicalInference(
+        CustomLoopRunRecord run,
+        CustomLoopInferenceStep step,
+        GovernedLoopNodeExecutionEvidence activation,
+        IReadOnlyList<GovernedLoopTypedBindingValue> bindings,
+        IReadOnlyList<CustomLoopToolAssignment> effectiveToolAssignments)
+    {
+        ArgumentNullException.ThrowIfNull(run);
+        ArgumentNullException.ThrowIfNull(step);
+        ArgumentNullException.ThrowIfNull(activation);
+        ArgumentNullException.ThrowIfNull(bindings);
+        ArgumentNullException.ThrowIfNull(effectiveToolAssignments);
+
+        if (run.SequentialInvocationSnapshot is not { } invocation
+            || !GovernedLoopSequentialContractValidator.Validate(invocation).IsValid
+            || !CustomLoopContextSnapshotHash.Matches(run.ContextSnapshot)
+            || invocation.ContextCapturedAtUtc != run.ContextSnapshot.CapturedAtUtc
+            || !invocation.ContextManifest.SequenceEqual(run.ContextSnapshot.SourceManifest)
+            || !string.Equals(step.Id, activation.NodeId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Canonical inference invocation context is absent, substituted, or not bound to the exact activation.");
+        }
+
+        var requestBindings = bindings.Where(binding => binding.BindingKind == GovernedLoopBindingKind.Data
+            && string.Equals(binding.TargetNodeId, activation.NodeId, StringComparison.Ordinal)
+            && string.Equals(binding.TargetPortId, "request", StringComparison.Ordinal)).ToArray();
+        var contextBindings = bindings.Where(binding => binding.BindingKind == GovernedLoopBindingKind.Context
+            && string.Equals(binding.SourcePortId, "invocation-context", StringComparison.Ordinal)
+            && string.Equals(binding.TargetNodeId, activation.NodeId, StringComparison.Ordinal)
+            && string.Equals(binding.TargetPortId, "invocation-context", StringComparison.Ordinal)).ToArray();
+        if (bindings.Count != 2 || requestBindings.Length != 1 || contextBindings.Length != 1)
+        {
+            throw new InvalidOperationException("Canonical inference requires exactly one declared request binding and one trigger invocation-context binding.");
+        }
+
+        var request = JsonSerializer.Deserialize<string>(requestBindings[0].Value.CanonicalValueJson);
+        var invocationHash = JsonSerializer.Deserialize<string>(contextBindings[0].Value.CanonicalValueJson);
+        if (request is null || !string.Equals(invocationHash, invocation.ContentHash, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Canonical inference binding values do not authenticate the exact request and immutable invocation snapshot.");
+        }
+
+        var policy = ResolvePolicy(step.ContextPolicy, run.AdmittedDefinition.ContextDefaults.Inference);
+        var messages = new List<LlmMessage>();
+        var blocks = new List<CustomLoopContextBlock>();
+        var trustedInstructions = new List<EmbodySenseTrustedInstruction>();
+        var governance = EmbodySenseDeveloperInstructions.Capture(MapToolAssignments(effectiveToolAssignments));
+        AddIncluded(blocks, CustomLoopContextSource.HarnessGovernance, "harness-governance", LlmMessageRole.System, governance.Content, sourceVersion: governance.Version);
+        AddWorkspaceContext(run, policy, messages, blocks, trustedInstructions);
+        AddConversation(run, policy, messages, blocks);
+
+        var assignedTools = effectiveToolAssignments.Count == 0
+            ? "none"
+            : string.Join(", ", effectiveToolAssignments.Select(value => value.ToString().ToLowerInvariant()));
+        var metadata = $"Loop: {run.LoopId}{Environment.NewLine}Run: {run.Id}{Environment.NewLine}Role: {run.AdmittedDefinition.RoleId}{Environment.NewLine}Activation: {activation.ActivationOrdinal}{Environment.NewLine}Visit: {activation.VisitOrdinal}{Environment.NewLine}Cycle: {activation.CycleId ?? "none"}{Environment.NewLine}Cycle iteration: {activation.CycleIteration?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none"}{Environment.NewLine}Node: {step.Id}{Environment.NewLine}Tools: {assignedTools}";
+        AddIncluded(messages, blocks, CustomLoopContextSource.RunMetadata, "run-metadata", LlmMessageRole.User, metadata);
+        trustedInstructions.Add(new EmbodySenseTrustedInstruction(step.Id, step.Instruction));
+        AddIncluded(blocks, CustomLoopContextSource.NodeInstruction, step.Id, LlmMessageRole.System, step.Instruction);
+        AddIncluded(messages, blocks, CustomLoopContextSource.TriggerPrompt, $"binding-{requestBindings[0].BindingId}", LlmMessageRole.User, $"[EmbodySense untrusted exact graph-bound request]{Environment.NewLine}{request}");
+        messages.Add(LlmMessage.User("Execute the trusted canonical node instruction using only the exact graph-bound request and immutable invocation context above."));
+        return new CustomLoopContextAssembly(
+            new LlmInferenceRequest(messages, instructionContext: new LlmInferenceInstructionContext(governance, trustedInstructions, preserveExactLogicalContext: true)),
+            blocks.ToArray(),
+            policy.ContextOut);
     }
 
     /// <summary>

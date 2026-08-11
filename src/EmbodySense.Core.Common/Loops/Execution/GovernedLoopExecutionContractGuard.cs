@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 
 namespace EmbodySense.Core.Common.Loops.Execution;
 
@@ -201,9 +202,10 @@ internal static class GovernedLoopExecutionContractGuard
                 }
 
                 var source = nodes[arrival.SourceActivationOrdinal];
-                if (!source.SelectedControlEdgeIds.Contains(arrival.ControlEdgeId, StringComparer.Ordinal))
+                if (source.Status != GovernedLoopNodeExecutionStatus.Completed
+                    || !source.SelectedControlEdgeIds.Contains(arrival.ControlEdgeId, StringComparer.Ordinal))
                 {
-                    throw new ArgumentException("Join arrivals must identify a control edge selected by their exact source activation.", parameterName);
+                    throw new ArgumentException("Join arrivals must identify a control edge selected by an exact completed source activation.", parameterName);
                 }
             }
         }

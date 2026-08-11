@@ -77,7 +77,7 @@ public static class GovernedLoopExecutionStateMatrix
     /// <summary>Determines whether bounded node evidence matches an aggregate frontier posture.</summary>
     /// <param name="status">The aggregate frontier posture.</param>
     /// <param name="nodes">The retained node evidence.</param>
-    /// <returns><see langword="true"/> when the aggregate posture honestly describes the nodes. Aggregate review may retain unchanged Ready work only when no node is Running.</returns>
+    /// <returns><see langword="true"/> when the aggregate posture honestly describes the nodes. Aggregate review may retain unchanged Ready work only when no activation is Running.</returns>
     public static bool IsFrontierShapeValid(GovernedLoopFrontierStatus status, IReadOnlyList<GovernedLoopNodeExecutionEvidence>? nodes)
     {
         if (!IsSupported(status)
