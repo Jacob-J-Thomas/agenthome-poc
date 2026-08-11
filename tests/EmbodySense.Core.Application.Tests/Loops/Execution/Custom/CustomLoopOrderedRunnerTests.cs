@@ -752,6 +752,18 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public Task Canonical_retained_pure_rejection_accepts_request_and_cancel_terminal_conflict_successor()
+        => AssertRetainedPureRejectionCancellationChainAsync(includePause: false, includeTerminalWarning: false);
+
+    [Fact]
+    public Task Canonical_retained_pure_rejection_accepts_pause_request_cancel_terminal_conflict_successor()
+        => AssertRetainedPureRejectionCancellationChainAsync(includePause: true, includeTerminalWarning: false);
+
+    [Fact]
+    public Task Canonical_retained_pure_rejection_accepts_warned_pause_request_cancel_terminal_conflict_successor()
+        => AssertRetainedPureRejectionCancellationChainAsync(includePause: true, includeTerminalWarning: true);
+
+    [Fact]
     public async Task Canonical_conversation_publication_supplies_exact_success_exit_proof_and_crosses_the_boundary_once()
     {
         var admitted = Run(
@@ -5547,6 +5559,201 @@ public sealed class CustomLoopOrderedRunnerTests
 
         Assert.Empty(executor.Requests);
         return Assert.IsType<CustomLoopRunRecord>(retained);
+    }
+
+    private static async Task AssertRetainedPureRejectionCancellationChainAsync(bool includePause, bool includeTerminalWarning)
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact(role));
+        var retained = await CapturePureRejectionAsync(context, "identity");
+        var durableRejection = Assert.Single(retained.Events, item => IsPureRejection(item, "identity"));
+        var resumable = ResumeReady(retained, $"resume-rejection-chain-{includePause}-{includeTerminalWarning}".ToLowerInvariant());
+        var store = new FakeRunStore(resumable);
+        var injected = false;
+        store.RawConflictSuccessorFactory = (current, candidate) =>
+        {
+            if (injected || candidate.Status != CustomLoopRunStatus.Failed)
+            {
+                return null;
+            }
+
+            injected = true;
+            return CreatePureCancellationTerminalSuccessor(current, includePause, includeTerminalWarning);
+        };
+        var executor = new QueueExecutor();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.ResumeAsync(new GovernedLoopSequentialOrderedResumeRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            resumable.LifecycleVersion,
+            resumable.Events[^1].EventId,
+            AuditSchema.Actors.Web));
+
+        Assert.True(injected);
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Null(result.Run.FailureCode);
+        Assert.Null(result.Run.FailureDetail);
+        Assert.Empty(executor.Requests);
+        var reconciledRejection = Assert.Single(result.Run.Events, item => IsPureRejection(item, "identity"));
+        Assert.Equal(durableRejection.EventId, reconciledRejection.EventId);
+        Assert.Equal(durableRejection.SequentialNodeEvidence!.EvidenceHash, reconciledRejection.SequentialNodeEvidence!.EvidenceHash);
+        Assert.Equal(includePause ? 1 : 0, result.Run.Events.Count(item => string.Equals(item.EventId, "pause-before-concurrent-cancel", StringComparison.Ordinal)));
+        Assert.Single(result.Run.Events, item => string.Equals(item.EventId, "concurrent-cancel-requested", StringComparison.Ordinal));
+        Assert.Single(result.Run.Events, item => string.Equals(item.EventId, "concurrent-cancelled", StringComparison.Ordinal));
+        Assert.Equal(includeTerminalWarning ? 1 : 0, result.Run.Events.Count(item => item.Kind == CustomLoopRunEventKind.IntegrityWarning));
+        Assert.Equal(includeTerminalWarning ? CustomLoopRunEventKind.IntegrityWarning : CustomLoopRunEventKind.LifecycleChanged, result.Run.Events[^1].Kind);
+        Assert.True(CustomLoopRunValidator.Validate(result.Run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(result.Run).Errors));
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    private static CustomLoopRunRecord CreatePureCancellationTerminalSuccessor(
+        CustomLoopRunRecord current,
+        bool includePause,
+        bool includeTerminalWarning)
+    {
+        var predecessor = current;
+        if (includePause)
+        {
+            predecessor = CreatePureControlSuccessor(
+                predecessor,
+                CustomLoopRunStatus.PauseRequested,
+                "pause-before-concurrent-cancel",
+                "Pause was requested while another executor retained the deterministic rejection.",
+                predecessor.UpdatedAtUtc.AddSeconds(1));
+        }
+
+        var cancelRequested = CreatePureControlSuccessor(
+            predecessor,
+            CustomLoopRunStatus.CancelRequested,
+            "concurrent-cancel-requested",
+            "Cancellation was requested after the deterministic rejection became durable.",
+            predecessor.UpdatedAtUtc.AddSeconds(1));
+        var cancelledAt = cancelRequested.UpdatedAtUtc.AddSeconds(1);
+        var cancelledEvent = new CustomLoopRunEvent(
+            cancelRequested.Events[^1].Sequence + 1,
+            "concurrent-cancelled",
+            cancelledAt,
+            CustomLoopRunEventKind.LifecycleChanged,
+            null,
+            null,
+            null,
+            "Durable cancellation rejected the canonical node before provider invocation.",
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+        var frontier = GovernedLoopSequentialFrontierMachine.CancelCurrent(
+            cancelRequested.Frontier,
+            cancelRequested.SequentialAdapterBinding,
+            cancelledAt);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, frontier.Status);
+        var accumulatedMilliseconds = cancelRequested.ExecutionClock.AccumulatedRunningMilliseconds;
+        if (cancelRequested.ExecutionClock.ActiveSinceUtc is { } activeSince)
+        {
+            accumulatedMilliseconds = checked(accumulatedMilliseconds + Math.Max(0, (long)(cancelledAt - activeSince).TotalMilliseconds));
+        }
+
+        var cancelled = cancelRequested with
+        {
+            LifecycleVersion = cancelRequested.LifecycleVersion + 1,
+            Status = CustomLoopRunStatus.Cancelled,
+            UpdatedAtUtc = cancelledAt,
+            CompletedAtUtc = cancelledAt,
+            ExecutionClock = new CustomLoopExecutionClock(Math.Min(accumulatedMilliseconds, CustomLoopLimits.MaxRunExecutionMilliseconds), null),
+            Events = [.. cancelRequested.Events, cancelledEvent],
+            FinalOutput = null,
+            FailureCode = null,
+            FailureDetail = null,
+            Frontier = frontier.Frontier,
+        };
+        var terminalValidation = CustomLoopRunValidator.ValidateUpdate(cancelRequested, cancelled);
+        Assert.True(terminalValidation.IsValid, string.Join(Environment.NewLine, terminalValidation.Errors));
+        if (!includeTerminalWarning)
+        {
+            return cancelled;
+        }
+
+        var warning = new CustomLoopRunEvent(
+            cancelled.Events[^1].Sequence + 1,
+            "concurrent-cancel-audit-warning",
+            cancelledAt.AddSeconds(1),
+            CustomLoopRunEventKind.IntegrityWarning,
+            null,
+            null,
+            null,
+            "The truthful Cancelled terminal trace is durable, but its append-once terminal audit was unavailable.",
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+        var warningValidation = CustomLoopRunValidator.ValidateTerminalIntegrityWarningAppend(cancelled, warning);
+        Assert.True(warningValidation.IsValid, string.Join(Environment.NewLine, warningValidation.Errors));
+        return cancelled with
+        {
+            LifecycleVersion = cancelled.LifecycleVersion + 1,
+            UpdatedAtUtc = warning.TimestampUtc,
+            Events = [.. cancelled.Events, warning],
+        };
+    }
+
+    private static CustomLoopRunRecord CreatePureControlSuccessor(
+        CustomLoopRunRecord current,
+        CustomLoopRunStatus status,
+        string eventId,
+        string detail,
+        DateTimeOffset timestamp)
+    {
+        var lifecycle = new CustomLoopRunEvent(
+            current.Events[^1].Sequence + 1,
+            eventId,
+            timestamp,
+            CustomLoopRunEventKind.LifecycleChanged,
+            null,
+            null,
+            null,
+            detail,
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            ControlExpectedLifecycleVersion: current.LifecycleVersion);
+        var successor = current with
+        {
+            LifecycleVersion = current.LifecycleVersion + 1,
+            Status = status,
+            UpdatedAtUtc = timestamp,
+            Events = [.. current.Events, lifecycle],
+        };
+        var validation = CustomLoopRunValidator.ValidateUpdate(current, successor);
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+        return successor;
     }
 
     private static CustomLoopRunRecord SubstitutePureTraceAtSameVersion(
