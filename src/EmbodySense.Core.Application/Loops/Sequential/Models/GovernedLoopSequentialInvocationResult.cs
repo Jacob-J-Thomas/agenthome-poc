@@ -8,7 +8,7 @@ namespace EmbodySense.Core.Application.Loops.Sequential.Models;
 /// <param name="Status">The closed coordination status.</param>
 /// <param name="Admission">The canonical admission result when admission was attempted.</param>
 /// <param name="Materialization">The durable run materialization result when admission succeeded.</param>
-/// <param name="Execution">The ordered-runtime result only when first dispatch was permitted.</param>
+/// <param name="Execution">The ordered-runtime result when first dispatch was permitted or an exact Completed replay reconciled its durable grant-completion boundary.</param>
 /// <param name="Run">The latest authenticated run known to the coordinator.</param>
 /// <param name="Detail">A bounded non-secret diagnostic.</param>
 public sealed record GovernedLoopSequentialInvocationResult(

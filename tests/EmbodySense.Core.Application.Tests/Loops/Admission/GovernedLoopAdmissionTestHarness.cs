@@ -34,7 +34,12 @@ internal sealed class GovernedLoopAdmissionTestHarness :
 {
     private int _fenceDepth;
 
-    private GovernedLoopAdmissionTestHarness(bool includeCapability, DateTimeOffset? roleRecordedAtUtc)
+    private GovernedLoopAdmissionTestHarness(
+        bool includeCapability,
+        DateTimeOffset? roleRecordedAtUtc,
+        AuthorityGrantCompletionConstraintKind completionConstraint,
+        DateTimeOffset? grantEffectiveAtUtc,
+        DateTimeOffset? grantExpiresAtUtc)
     {
         var role = AuthorityGrantApplicationTestFixture.Role(capabilityIds: includeCapability ? null : []);
         Role = roleRecordedAtUtc is null
@@ -61,7 +66,13 @@ internal sealed class GovernedLoopAdmissionTestHarness :
                 AuthorityGrantApplicationTestFixture.ProfileHash(profile)),
             RolePin,
             Publication);
-        Grant = AuthorityGrantApplicationTestFixture.Grant(binding: binding, ceiling: EffectiveCeiling);
+        Grant = AuthorityGrantApplicationTestFixture.Grant(
+            binding: binding,
+            ceiling: EffectiveCeiling,
+            boundary: AuthorityGrantApplicationTestFixture.Boundary(
+                effective: grantEffectiveAtUtc,
+                expires: grantExpiresAtUtc,
+                completionConstraint: completionConstraint));
         GrantReference = new AuthorityGrantReference(Grant.GrantId, Grant.Revision, Grant.ContentHash);
         Request = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(
             GovernedLoopAdmissionRequest.CurrentSchemaVersion,
@@ -101,8 +112,11 @@ internal sealed class GovernedLoopAdmissionTestHarness :
 
     internal static GovernedLoopAdmissionTestHarness Create(
         bool includeCapability = false,
-        DateTimeOffset? roleRecordedAtUtc = null)
-        => new(includeCapability, roleRecordedAtUtc);
+        DateTimeOffset? roleRecordedAtUtc = null,
+        AuthorityGrantCompletionConstraintKind completionConstraint = AuthorityGrantCompletionConstraintKind.None,
+        DateTimeOffset? grantEffectiveAtUtc = null,
+        DateTimeOffset? grantExpiresAtUtc = null)
+        => new(includeCapability, roleRecordedAtUtc, completionConstraint, grantEffectiveAtUtc, grantExpiresAtUtc);
 
     internal ContextualRoleRevision Role { get; }
 
