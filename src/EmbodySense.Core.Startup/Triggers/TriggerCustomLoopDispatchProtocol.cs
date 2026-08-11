@@ -2,6 +2,7 @@ using System.Text;
 using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Triggers.Models;
@@ -23,6 +24,11 @@ public static class TriggerCustomLoopDispatchProtocol
     {
         ArgumentNullException.ThrowIfNull(envelope);
         ArgumentNullException.ThrowIfNull(intent);
+        if (!TriggerDispatchOperationId.IsValid(intent.OperationId))
+        {
+            return new TriggerCustomLoopDispatchPreparation(null, null, new TriggerWorkerDispatchResult(TriggerDispatchOutcome.NeedsReview, "The durable trigger dispatch intent has a malformed operation identity and cannot be invoked."));
+        }
+
         var payload = envelope.Payload.GetInlinePayload();
         if (payload is null)
         {
@@ -53,6 +59,11 @@ public static class TriggerCustomLoopDispatchProtocol
         ArgumentNullException.ThrowIfNull(envelope);
         ArgumentNullException.ThrowIfNull(intent);
         ArgumentNullException.ThrowIfNull(response);
+        if (!TriggerDispatchOperationId.IsValid(intent.OperationId))
+        {
+            return new TriggerWorkerDispatchResult(TriggerDispatchOutcome.NeedsReview, "The durable trigger dispatch intent has a malformed operation identity and no runtime response can be trusted for it.");
+        }
+
         if (_admittedStatuses.Contains(response.AdmissionStatus))
         {
             return MapAdmitted(envelope, intent, response);

@@ -428,10 +428,13 @@ public sealed class AgentRuntimeFactory
                 governedGraphStore,
                 governedOrderedRuntime,
                 legacyRunner);
+            var originAwareResumeExecutor = new CustomLoopOriginAwareResumeExecutor(
+                customRunStore,
+                governedResumeExecutor);
             var lifecycleCancellationSignal = new CustomLoopExecutionCancellationSignalGroup(
                 legacyRunner,
                 governedRunner);
-            var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, governedResumeExecutor, legacyInferenceExecutor, lifecycleCancellationSignal, auditLog, customExecutionGate, receiptRetention: customControlOperations, surface: runtimeSurface.SurfaceId.Id);
+            var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, originAwareResumeExecutor, legacyInferenceExecutor, lifecycleCancellationSignal, auditLog, customExecutionGate, receiptRetention: customControlOperations, surface: runtimeSurface.SurfaceId.Id);
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);
             var customLoops = new CustomLoopRuntimeFacade(
                 customDefinitionStore,

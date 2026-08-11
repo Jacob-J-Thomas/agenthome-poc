@@ -12,6 +12,7 @@ using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Triggers;
@@ -132,13 +133,25 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     /// proved. Unsupported run-discovery schemas fail closed with explicit cleanup guidance.
     /// </remarks>
     public Task<LoopRunInvocationResponse> InvokeAsync(LoopRunInvocationInput input, CancellationToken cancellationToken)
-        => InvokeAuthorizedAsync(input, _actor, _surface, _currentRoleId, _humanInvocationRunner, cancellationToken);
+    {
+        if (input is not null && TriggerDispatchOperationId.IsValid(input.OperationId))
+        {
+            return Task.FromResult(Invalid("The trigger-worker operation identity namespace is reserved for authenticated trigger dispatch."));
+        }
+
+        return InvokeAuthorizedAsync(input!, _actor, _surface, _currentRoleId, _humanInvocationRunner, cancellationToken);
+    }
 
     async Task<LoopRunInvocationResponse> ITriggerCustomLoopInvoker.InvokeAsync(LoopRunInvocationInput input, TriggerActorContext actorContext, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(actorContext);
+        if (input is not null && !TriggerDispatchOperationId.IsValid(input.OperationId))
+        {
+            return Invalid("Authenticated trigger dispatch requires the exact trigger-worker operation identity shape.");
+        }
+
         return await InvokeAuthorizedAsync(
-            input,
+            input!,
             actorContext.ActorId.Value,
             actorContext.SurfaceId,
             actorContext.RoleId,

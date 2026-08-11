@@ -22,7 +22,7 @@ public static class TriggerWorkerRequestHash
         }
 
         var canonical = string.Join('\n', deliveryId.Value, leaseGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        return "trigger-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+        return TriggerDispatchOperationId.Prefix + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 
     /// <summary>Computes a lowercase SHA-256 request binding without granting dispatch authority.</summary>
