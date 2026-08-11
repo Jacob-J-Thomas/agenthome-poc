@@ -31,7 +31,7 @@ internal static class GovernedLoopSequentialApplicationTestFixture
         };
         nodes.AddRange(inferenceIds.Select((id, index) => inferenceDescriptor is null
             ? Inference(id, $"Execute bounded inference step {index + 1}.")
-            : Node(id, inferenceDescriptor(index))));
+            : Inference(id, $"Execute bounded inference step {index + 1}.") with { Descriptor = inferenceDescriptor(index) }));
         nodes.Add(Exit("exit"));
 
         var executionOrder = new[] { "trigger" }.Concat(inferenceIds).Append("exit").ToArray();
@@ -92,7 +92,14 @@ internal static class GovernedLoopSequentialApplicationTestFixture
     }
 
     internal static GovernedLoopNodeDefinition Node(string id, GovernedLoopNodeDescriptor descriptor)
-        => new(id, descriptor, [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
+        => new(
+            id,
+            descriptor,
+            descriptor == GovernedLoopSequentialNodeDescriptors.SuccessExit
+                ? [Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)]
+                : [],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
 
     internal static GovernedLoopNodeDefinition Trigger(string id)
         => new(
