@@ -7,6 +7,7 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
@@ -353,6 +354,15 @@ public sealed class CustomLoopLifecycleService
         if (run.Status != CustomLoopRunStatus.Paused)
         {
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, $"Explicit Resume is allowed only from Paused, not {run.Status}.");
+        }
+
+        if (run.SequentialAdapterBinding is not null && run.Frontier?.Payload.Status == GovernedLoopFrontierStatus.ReviewBlocked)
+        {
+            const string Detail = "Explicit Resume found a canonical ReviewBlocked frontier. The run requires operator review and no provider request was dispatched.";
+            var quarantined = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, Detail);
+            var quarantinedRun = quarantined.Run ?? quarantined.CurrentRun ?? run;
+            var status = quarantined.Run is null ? quarantined.Status : CustomLoopControlStatus.NeedsReview;
+            return await CompleteAsync(operation, status, quarantinedRun, quarantined.AuditRecorded, quarantined.Detail);
         }
 
         if (!CustomLoopRunValidator.HasCompleteAdmissionAudit(run))

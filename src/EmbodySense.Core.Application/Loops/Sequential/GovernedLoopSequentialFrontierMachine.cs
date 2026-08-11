@@ -78,18 +78,9 @@ public static class GovernedLoopSequentialFrontierMachine
         GovernedLoopSequentialAdapterBinding? binding,
         GovernedLoopSequentialPlan? plan)
     {
-        if (frontier is null
+        if (!ValidateBoundPrefix(frontier, binding)
             || !MatchesPlanBinding(binding, plan)
-            || !GovernedLoopFrontierContractValidator.Validate(frontier).IsValid
-            || !GovernedLoopFrontierContractHash.Matches(frontier)
-            || frontier.SchemaVersion != 1
-            || !string.Equals(frontier.WorkspaceId, binding!.WorkspaceId, StringComparison.Ordinal)
-            || !Equals(frontier.Binding, binding.ExecutionBinding)
-            || !string.Equals(frontier.GraphArtifactHash, binding.GraphArtifactHash, StringComparison.Ordinal)
-            || !string.Equals(frontier.GraphLayoutHash, binding.GraphLayoutHash, StringComparison.Ordinal)
-            || !string.Equals(frontier.AdmissionReceiptHash, binding.AdmissionReceiptHash, StringComparison.Ordinal)
-            || frontier.Payload.ConcurrencyCeiling != ConcurrencyCeiling
-            || frontier.Payload.Nodes.Count is < 2
+            || frontier!.Payload.Nodes.Count is < 2
             || frontier.Payload.Nodes.Count > plan!.Nodes.Count)
         {
             return false;
@@ -124,6 +115,113 @@ public static class GovernedLoopSequentialFrontierMachine
             GovernedLoopFrontierStatus.Cancelled => true,
             _ => false,
         };
+    }
+
+    /// <summary>Fails the exact reached Ready or Running node without exposing any later admitted node.</summary>
+    /// <remarks>This terminal-only operation authenticates the bound reached prefix. It intentionally cannot select or advance work without the immutable plan.</remarks>
+    public static GovernedLoopSequentialFrontierTransitionResult FailCurrent(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        string? attemptOperationId,
+        string? outcomeEvidenceId,
+        string? outcomeEvidenceHash,
+        DateTimeOffset updatedAtUtc)
+        => ResolveCurrentTerminal(
+            frontier,
+            binding,
+            GovernedLoopNodeExecutionStatus.Failed,
+            attemptOperationId,
+            outcomeEvidenceId,
+            outcomeEvidenceHash,
+            updatedAtUtc);
+
+    /// <summary>Claims the exact already-reached Ready node as Running for terminal review preparation without selecting unreached work.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult StartCurrent(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        string? attemptOperationId,
+        DateTimeOffset updatedAtUtc)
+    {
+        if (!ValidateBoundPrefix(frontier, binding)
+            || frontier!.Payload.Status != GovernedLoopFrontierStatus.Active
+            || frontier.Payload.Nodes[^1].Status != GovernedLoopNodeExecutionStatus.Ready)
+        {
+            return Invalid("Only the exact reached Ready node of a valid active bound frontier can be claimed.");
+        }
+
+        try
+        {
+            var current = frontier.Payload.Nodes[^1];
+            var replacement = GovernedLoopNodeExecutionEvidence.Create(
+                current.PlanOrdinal,
+                current.NodeId,
+                current.Descriptor,
+                current.IncomingControlEdgeIds,
+                current.OutgoingControlEdgeIds,
+                GovernedLoopNodeExecutionStatus.Running,
+                1,
+                attemptOperationId);
+            var successor = CreatePosture(
+                binding!,
+                checked(frontier.Payload.FrontierVersion + 1),
+                GovernedLoopFrontierStatus.Active,
+                frontier.Payload.Nodes.Take(frontier.Payload.Nodes.Count - 1).Append(replacement),
+                updatedAtUtc);
+            return GovernedLoopExecutionValidator.ValidateTransition(frontier, successor).IsValid
+                ? Applied(successor, "The exact reached Ready node entered Running for a durable terminal-review boundary.")
+                : Invalid("The bound Ready-to-Running successor violates the frontier transition contract.");
+        }
+        catch (Exception exception) when (IsContractFailure(exception))
+        {
+            return Invalid($"The bound Ready-to-Running transition was rejected by its bounded contract: {exception.GetType().Name}.");
+        }
+    }
+
+    /// <summary>Blocks the exact reached Running attempt on review without redispatching or exposing a later node.</summary>
+    /// <remarks>This terminal-only operation authenticates the bound reached prefix. It intentionally cannot select or advance work without the immutable plan.</remarks>
+    public static GovernedLoopSequentialFrontierTransitionResult ReviewBlockCurrent(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        string? outcomeEvidenceId,
+        string? outcomeEvidenceHash,
+        DateTimeOffset updatedAtUtc)
+        => ResolveCurrentTerminal(
+            frontier,
+            binding,
+            GovernedLoopNodeExecutionStatus.ReviewBlocked,
+            null,
+            outcomeEvidenceId,
+            outcomeEvidenceHash,
+            updatedAtUtc);
+
+    /// <summary>Cancels one exact bound reached prefix without needing unreached plan nodes.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult CancelCurrent(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        DateTimeOffset updatedAtUtc)
+    {
+        if (!ValidateBoundPrefix(frontier, binding)
+            || frontier!.Payload.Status is GovernedLoopFrontierStatus.Completed or GovernedLoopFrontierStatus.Failed or GovernedLoopFrontierStatus.Cancelled)
+        {
+            return Invalid("Only a valid nonterminal bound canonical frontier can be cancelled.");
+        }
+
+        try
+        {
+            var successor = CreatePosture(
+                binding!,
+                checked(frontier.Payload.FrontierVersion + 1),
+                GovernedLoopFrontierStatus.Cancelled,
+                frontier.Payload.Nodes,
+                updatedAtUtc);
+            return GovernedLoopExecutionValidator.ValidateTransition(frontier, successor).IsValid
+                ? Applied(successor, "The bound canonical frontier retained its reached prefix and entered Cancelled.")
+                : Invalid("The bound canonical cancellation violates the frontier transition contract.");
+        }
+        catch (Exception exception) when (IsContractFailure(exception))
+        {
+            return Invalid($"The bound canonical cancellation was rejected by its bounded contract: {exception.GetType().Name}.");
+        }
     }
 
     /// <summary>Selects the one deterministic Ready node or identifies the one Running node that only reconciliation may continue.</summary>
@@ -271,21 +369,71 @@ public static class GovernedLoopSequentialFrontierMachine
             return Invalid("Only a valid nonterminal canonical frontier can be cancelled.");
         }
 
+        var cancelled = CancelCurrent(frontier, binding, updatedAtUtc);
+        return cancelled.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied
+            && Validate(cancelled.Frontier, binding, plan)
+            ? cancelled
+            : Invalid(cancelled.Detail);
+    }
+
+    private static GovernedLoopSequentialFrontierTransitionResult ResolveCurrentTerminal(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopNodeExecutionStatus resolution,
+        string? attemptOperationId,
+        string? outcomeEvidenceId,
+        string? outcomeEvidenceHash,
+        DateTimeOffset updatedAtUtc)
+    {
+        if (!ValidateBoundPrefix(frontier, binding)
+            || frontier!.Payload.Status is not (GovernedLoopFrontierStatus.Active or GovernedLoopFrontierStatus.ReviewBlocked))
+        {
+            return Invalid("Only a valid active bound canonical frontier can enter a terminal node posture.");
+        }
+
+        var current = frontier.Payload.Nodes[^1];
+        var permitted = resolution switch
+        {
+            GovernedLoopNodeExecutionStatus.Failed => current.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.ReviewBlocked,
+            GovernedLoopNodeExecutionStatus.ReviewBlocked => frontier.Payload.Status == GovernedLoopFrontierStatus.Active && current.Status == GovernedLoopNodeExecutionStatus.Running,
+            _ => false,
+        };
+        if (!permitted)
+        {
+            return Invalid("The reached canonical node cannot enter the requested terminal posture.");
+        }
+
         try
         {
+            var attempt = current.Status == GovernedLoopNodeExecutionStatus.Ready ? 1 : current.Attempt;
+            var operationId = current.Status == GovernedLoopNodeExecutionStatus.Ready ? attemptOperationId : current.AttemptOperationId;
+            var replacement = GovernedLoopNodeExecutionEvidence.Create(
+                current.PlanOrdinal,
+                current.NodeId,
+                current.Descriptor,
+                current.IncomingControlEdgeIds,
+                current.OutgoingControlEdgeIds,
+                resolution,
+                attempt,
+                operationId,
+                outcomeEvidenceId,
+                outcomeEvidenceHash);
+            var aggregate = resolution == GovernedLoopNodeExecutionStatus.Failed
+                ? GovernedLoopFrontierStatus.Failed
+                : GovernedLoopFrontierStatus.ReviewBlocked;
             var successor = CreatePosture(
                 binding!,
                 checked(frontier.Payload.FrontierVersion + 1),
-                GovernedLoopFrontierStatus.Cancelled,
-                frontier.Payload.Nodes,
+                aggregate,
+                frontier.Payload.Nodes.Take(frontier.Payload.Nodes.Count - 1).Append(replacement),
                 updatedAtUtc);
-            return TransitionIsValid(frontier, successor, binding, plan)
-                ? Applied(successor, "The canonical frontier retained its reached prefix and entered Cancelled.")
-                : Invalid("The cancellation successor violates the exact canonical frontier transition contract.");
+            return GovernedLoopExecutionValidator.ValidateTransition(frontier, successor).IsValid
+                ? Applied(successor, "The exact bound reached node entered its durable terminal posture.")
+                : Invalid("The bound terminal node successor violates the frontier transition contract.");
         }
         catch (Exception exception) when (IsContractFailure(exception))
         {
-            return Invalid($"The canonical cancellation transition was rejected by its bounded contract: {exception.GetType().Name}.");
+            return Invalid($"The bound terminal node transition was rejected by its bounded contract: {exception.GetType().Name}.");
         }
     }
 
@@ -429,6 +577,37 @@ public static class GovernedLoopSequentialFrontierMachine
             && string.Equals(plan.GraphLayoutHash, binding.GraphLayoutHash, StringComparison.Ordinal)
             && plan.Nodes.Count >= 2
             && plan.Nodes.Select((node, ordinal) => node.Ordinal == ordinal).All(matches => matches);
+
+    private static bool ValidateBoundPrefix(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding)
+    {
+        if (frontier is null
+            || binding is null
+            || !GovernedLoopSequentialContractValidator.Validate(binding).IsValid
+            || !GovernedLoopFrontierContractValidator.Validate(frontier).IsValid
+            || !GovernedLoopFrontierContractHash.Matches(frontier)
+            || frontier.SchemaVersion != 1
+            || !string.Equals(frontier.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            || !Equals(frontier.Binding, binding.ExecutionBinding)
+            || !string.Equals(frontier.GraphArtifactHash, binding.GraphArtifactHash, StringComparison.Ordinal)
+            || !string.Equals(frontier.GraphLayoutHash, binding.GraphLayoutHash, StringComparison.Ordinal)
+            || !string.Equals(frontier.AdmissionReceiptHash, binding.AdmissionReceiptHash, StringComparison.Ordinal)
+            || frontier.Payload.ConcurrencyCeiling != ConcurrencyCeiling
+            || frontier.Payload.Nodes.Count < 2
+            || frontier.Payload.Nodes.Select((node, ordinal) => node.PlanOrdinal == ordinal).Any(matches => !matches))
+        {
+            return false;
+        }
+
+        var reached = frontier.Payload.Nodes;
+        return reached[0].Status == GovernedLoopNodeExecutionStatus.Completed
+            && reached[0].Attempt == 1
+            && reached[0].AttemptOperationId is not null
+            && reached[0].OutcomeEvidenceId is not null
+            && reached[0].OutcomeEvidenceHash is not null
+            && reached.Take(reached.Count - 1).All(node => node.Status == GovernedLoopNodeExecutionStatus.Completed);
+    }
 
     private static bool MatchesPlanNode(GovernedLoopNodeExecutionEvidence reached, GovernedLoopSequentialPlanNode planned)
         => reached.SchemaVersion == 1

@@ -159,6 +159,11 @@ public sealed class GovernedLoopSequentialResumeExecutor : ICustomLoopResumeExec
             return Invalid(run, "Canonical resume could not rebuild the exact admitted run anchor and deterministic plan.");
         }
 
+        if (!GovernedLoopSequentialFrontierMachine.Validate(run.Frontier, binding, planResult.Plan))
+        {
+            return Invalid(run, "Canonical resume requires one hash-valid durable frontier matching the exact admitted plan; missing, stale, corrupt, or substituted progress is nondispatchable.");
+        }
+
         return await _orderedRuntime.ResumeAsync(
             new GovernedLoopSequentialOrderedResumeRequest(
                 GovernedLoopSequentialOrderedResumeRequest.CurrentSchemaVersion,
