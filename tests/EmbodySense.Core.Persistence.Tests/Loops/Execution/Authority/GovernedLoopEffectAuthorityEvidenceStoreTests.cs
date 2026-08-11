@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
@@ -589,6 +591,95 @@ public sealed class GovernedLoopEffectAuthorityEvidenceStoreTests
         Assert.Equal(
             GovernedLoopEffectAuthorityUsageStoreStatus.GrantCompleted,
             (await store.CompleteCompletionAsync(other)).Status);
+    }
+
+    [Fact]
+    public async Task Cross_generation_completion_conflicts_without_mutating_the_pending_claim()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths, new TestCapabilityLifecycleTrustProvider());
+        var firstGeneration = Completion(executionGeneration: 1);
+
+        Assert.Equal(
+            GovernedLoopEffectAuthorityUsageStoreStatus.CompletionPending,
+            (await store.BeginCompletionAsync(firstGeneration)).Status);
+        var pendingEvidence = await File.ReadAllTextAsync(PrimaryPath(paths));
+        var laterGeneration = firstGeneration with
+        {
+            ExecutionGeneration = 2,
+            EvaluatedAtUtc = firstGeneration.EvaluatedAtUtc.AddSeconds(1),
+        };
+
+        var conflict = await store.CompleteCompletionAsync(laterGeneration);
+
+        Assert.Equal(GovernedLoopEffectAuthorityUsageStoreStatus.Conflict, conflict.Status);
+        Assert.Equal(pendingEvidence, await File.ReadAllTextAsync(PrimaryPath(paths)));
+        Assert.DoesNotContain("\"executionGeneration\": 2", pendingEvidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Exact_same_generation_completion_replays_are_idempotent_without_evidence_mutation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths, new TestCapabilityLifecycleTrustProvider());
+        var completion = Completion(executionGeneration: 7);
+
+        Assert.Equal(
+            GovernedLoopEffectAuthorityUsageStoreStatus.CompletionPending,
+            (await store.BeginCompletionAsync(completion)).Status);
+        var pendingEvidence = await File.ReadAllTextAsync(PrimaryPath(paths));
+        Assert.Equal(
+            GovernedLoopEffectAuthorityUsageStoreStatus.CompletionAlreadyPending,
+            (await store.BeginCompletionAsync(completion with { EvaluatedAtUtc = completion.EvaluatedAtUtc.AddSeconds(1) })).Status);
+        Assert.Equal(pendingEvidence, await File.ReadAllTextAsync(PrimaryPath(paths)));
+
+        Assert.Equal(
+            GovernedLoopEffectAuthorityUsageStoreStatus.CompletionCompleted,
+            (await store.CompleteCompletionAsync(completion with { EvaluatedAtUtc = completion.EvaluatedAtUtc.AddSeconds(2) })).Status);
+        var completedEvidence = await File.ReadAllTextAsync(PrimaryPath(paths));
+        Assert.Equal(
+            GovernedLoopEffectAuthorityUsageStoreStatus.CompletionAlreadyCompleted,
+            (await store.CompleteCompletionAsync(completion with { EvaluatedAtUtc = completion.EvaluatedAtUtc.AddSeconds(3) })).Status);
+        Assert.Equal(completedEvidence, await File.ReadAllTextAsync(PrimaryPath(paths)));
+    }
+
+    [Fact]
+    public async Task Authenticated_completed_claim_with_a_substituted_execution_generation_is_quarantined()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var completion = Completion(executionGeneration: 1);
+        var originalTrust = new TestCapabilityLifecycleTrustProvider();
+        var store = Store(paths, originalTrust);
+        Assert.Equal(
+            GovernedLoopEffectAuthorityUsageStoreStatus.CompletionPending,
+            (await store.BeginCompletionAsync(completion)).Status);
+        Assert.Equal(
+            GovernedLoopEffectAuthorityUsageStoreStatus.CompletionCompleted,
+            (await store.CompleteCompletionAsync(completion)).Status);
+
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(PrimaryPath(paths)))!.AsObject();
+        var claims = document["completionClaims"]!.AsArray();
+        Assert.Equal(2, claims.Count);
+        claims[1]!["executionGeneration"] = completion.ExecutionGeneration + 1;
+        document["contentDigest"] = string.Empty;
+        document["authenticationTag"] = string.Empty;
+        var digest = Hash(document.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        var workspaceIdentity = document["workspaceIdentity"]!.GetValue<string>();
+        var generation = document["generation"]!.GetValue<long>();
+        var substitutedTrust = new TestCapabilityLifecycleTrustProvider();
+        document["contentDigest"] = digest;
+        document["authenticationTag"] = await substitutedTrust.AuthenticateArtifactAsync(workspaceIdentity, generation, digest);
+        var substituted = document.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }) + "\n";
+        await File.WriteAllTextAsync(PrimaryPath(paths), substituted);
+        _ = await substitutedTrust.InitializeAsync(workspaceIdentity, generation, digest);
+
+        var result = await Store(paths, substitutedTrust).CompleteCompletionAsync(completion);
+
+        Assert.Equal(GovernedLoopEffectAuthorityUsageStoreStatus.Unavailable, result.Status);
+        Assert.Equal(substituted, await File.ReadAllTextAsync(PrimaryPath(paths)));
     }
 
     [Theory]
@@ -1211,7 +1302,7 @@ public sealed class GovernedLoopEffectAuthorityEvidenceStoreTests
             GovernedLoopEffectAuthorityTestFixture.EvaluatedAtUtc);
     }
 
-    private static GovernedLoopEffectAuthorityCompletionUsageRequest Completion()
+    private static GovernedLoopEffectAuthorityCompletionUsageRequest Completion(long executionGeneration = 1)
     {
         var decision = Decision("completion-fixture");
         return new GovernedLoopEffectAuthorityCompletionUsageRequest(
@@ -1219,7 +1310,7 @@ public sealed class GovernedLoopEffectAuthorityEvidenceStoreTests
             decision.AdmittedAuthority.Grant,
             decision.AdmissionReceiptHash,
             decision.RunId,
-            decision.ExecutionGeneration,
+            executionGeneration,
             "run-completion-one",
             GovernedLoopEffectAuthorityTestFixture.EvaluatedAtUtc);
     }
