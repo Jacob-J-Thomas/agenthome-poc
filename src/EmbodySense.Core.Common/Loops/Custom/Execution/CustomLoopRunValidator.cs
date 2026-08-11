@@ -17,6 +17,8 @@ namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 /// </summary>
 public static class CustomLoopRunValidator
 {
+    private const string SequentialModelInferenceCapabilityId = "org.embodysense/model-inference";
+
     /// <summary>
     /// Validates the complete persisted shape and cross-field invariants of a custom-loop run.
     /// </summary>
@@ -280,6 +282,10 @@ public static class CustomLoopRunValidator
         {
             Add(errors, "invalid_capability_admission", "capabilityAdmission", capabilityError);
         }
+        else if (run.SequentialInvocationSnapshot is not null && run.SequentialAdapterBinding is not null)
+        {
+            ValidateSequentialCapabilityAdmission(run, errors);
+        }
         else if (run.AdmittedDefinition is not null && !string.Equals(run.CapabilityAdmission.RequirementsHash, GetRequirementsHash(run.AdmittedDefinition), StringComparison.Ordinal))
         {
             Add(errors, "capability_admission_definition_mismatch", "capabilityAdmission.requirementsHash", "Admitted capability evidence must bind the admitted definition's exact requirements.");
@@ -379,6 +385,27 @@ public static class CustomLoopRunValidator
             || !snapshot.ContextManifest.SequenceEqual(run.ContextSnapshot.SourceManifest))
         {
             Add(errors, "sequential_invocation_projection_mismatch", "sequentialInvocationSnapshot", "The sequential invocation snapshot must exactly match the legacy adapter's admitted prompt, model, conversation, and context projection.");
+        }
+    }
+
+    private static void ValidateSequentialCapabilityAdmission(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
+    {
+        var binding = run.SequentialAdapterBinding!;
+        var capabilityAdmission = run.CapabilityAdmission;
+        var expectedGraphChecksum = "sha256:" + binding.GraphArtifactHash;
+        if (!string.Equals(capabilityAdmission.Requirements.Artifact.Checksum?.Value, expectedGraphChecksum, StringComparison.Ordinal))
+        {
+            Add(errors, "sequential_capability_graph_artifact_mismatch", "capabilityAdmission.requirements.artifact.checksum", "Canonical sequential capability evidence must bind the adapter's exact graph artifact hash.");
+        }
+
+        var selectedRootIdentities = capabilityAdmission.Evidence
+            .Where(item => item.SubjectId.Equals(capabilityAdmission.Requirements.SubjectId)
+                && string.Equals(item.Outcome, "Selected", StringComparison.Ordinal))
+            .Select(item => item.SelectedIdentity!.Id.Value)
+            .ToHashSet(StringComparer.Ordinal);
+        if (selectedRootIdentities.Count != 1 || !selectedRootIdentities.Contains(SequentialModelInferenceCapabilityId))
+        {
+            Add(errors, "sequential_capability_identity_mismatch", "capabilityAdmission.evidence", "Canonical sequential execution requires exactly the admitted model-inference root capability identity.");
         }
     }
 

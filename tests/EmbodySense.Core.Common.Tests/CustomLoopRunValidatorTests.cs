@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Governance.Tools.Models;
@@ -14,6 +16,8 @@ namespace EmbodySense.Core.Common.Tests;
 
 public sealed class CustomLoopRunValidatorTests
 {
+    private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+
     private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
 
     [Fact]
@@ -40,6 +44,63 @@ public sealed class CustomLoopRunValidatorTests
             }],
         };
         AssertCodes(CustomLoopRunValidator.Validate(substitutedRun), "invalid_sequential_node_evidence");
+    }
+
+    [Fact]
+    public void Sequential_capability_admission_binds_the_graph_artifact_and_exact_model_inference_root()
+    {
+        var run = CreateSequentialRun();
+
+        var validation = CustomLoopRunValidator.Validate(run);
+
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+        Assert.NotEqual(GetRequirementsHash(run.AdmittedDefinition), run.CapabilityAdmission.RequirementsHash);
+        Assert.Equal("sha256:" + run.SequentialAdapterBinding!.GraphArtifactHash, run.CapabilityAdmission.Requirements.Artifact.Checksum?.Value);
+        Assert.Equal(
+            [ModelInferenceCapabilityId],
+            run.CapabilityAdmission.Evidence
+                .Where(item => item.SubjectId.Equals(run.CapabilityAdmission.Requirements.SubjectId) && item.Outcome == "Selected")
+                .Select(item => item.SelectedIdentity!.Id.Value));
+
+        var legacy = CreateRun();
+        var sequentialAdmissionOnLegacyRun = CustomLoopAdmissionRequestHash.Apply(legacy with { CapabilityAdmission = run.CapabilityAdmission });
+        AssertCodes(CustomLoopRunValidator.Validate(sequentialAdmissionOnLegacyRun), "capability_admission_definition_mismatch");
+    }
+
+    [Fact]
+    public void Sequential_capability_admission_rejects_self_consistent_graph_or_root_identity_substitution()
+    {
+        var run = CreateSequentialRun();
+        var substitutedGraph = CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            CapabilityAdmission = CreateSequentialCapabilityAdmission(run.SequentialAdapterBinding!, ModelInferenceCapabilityId, new string('9', 64)),
+        });
+        var conversationTurnSubstitution = CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            CapabilityAdmission = CreateSequentialCapabilityAdmission(run.SequentialAdapterBinding!, "org.embodysense/conversation-turn"),
+        });
+
+        Assert.Null(CapabilityAdmissionSnapshotValidator.Validate(substitutedGraph.CapabilityAdmission));
+        Assert.Null(CapabilityAdmissionSnapshotValidator.Validate(conversationTurnSubstitution.CapabilityAdmission));
+        AssertCodes(CustomLoopRunValidator.Validate(substitutedGraph), "sequential_capability_graph_artifact_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(conversationTurnSubstitution), "sequential_capability_identity_mismatch");
+    }
+
+    [Fact]
+    public void Sequential_capability_admission_rejects_malformed_hash_and_resolution_evidence_before_specific_binding_checks()
+    {
+        var run = CreateSequentialRun();
+        var forgedHash = CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            CapabilityAdmission = run.CapabilityAdmission with { RequirementsHash = "sha256:" + new string('9', 64) },
+        });
+        var missingRootEvidence = CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            CapabilityAdmission = run.CapabilityAdmission with { Evidence = [] },
+        });
+
+        AssertCodes(CustomLoopRunValidator.Validate(forgedHash), "invalid_capability_admission");
+        AssertCodes(CustomLoopRunValidator.Validate(missingRootEvidence), "invalid_capability_admission");
     }
 
     [Fact]
@@ -644,12 +705,39 @@ public sealed class CustomLoopRunValidatorTests
             1,
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed);
+        var capabilityAdmission = CreateSequentialCapabilityAdmission(binding, ModelInferenceCapabilityId);
         return CustomLoopAdmissionRequestHash.Apply(run with
         {
+            CapabilityAdmission = capabilityAdmission,
             SequentialInvocationSnapshot = invocation,
             SequentialAdapterBinding = binding,
             Events = [admitted],
         });
+    }
+
+    private static CapabilityAdmissionSnapshot CreateSequentialCapabilityAdmission(
+        GovernedLoopSequentialAdapterBinding binding,
+        string capabilityId,
+        string? graphArtifactHash = null)
+    {
+        Assert.True(CapabilityId.TryParse("org.embodysense/loop-" + binding.GraphArtifactHash[..32], out var subject, out _));
+        Assert.True(CapabilityId.TryParse(capabilityId, out var dependency, out _));
+        Assert.True(CapabilityVersionRange.TryParse("*", out var compatibleVersions, out _));
+        Assert.True(CapabilityIntegrityDigest.TryParse("sha256:" + (graphArtifactHash ?? binding.GraphArtifactHash), out var checksum, out _));
+        var requirements = new CapabilityDependencyManifest(
+            CapabilityDependencyManifest.CurrentSchemaVersion,
+            CapabilityDependencyManifestKind.LoopPackage,
+            subject!,
+            [new CapabilityDependency(dependency!, compatibleVersions!)],
+            [],
+            new CapabilityDependencyArtifactMetadata(checksum, null));
+        return TestCapabilityAdmissionFactory.Create(requirements, _timestamp);
+    }
+
+    private static string GetRequirementsHash(CustomLoopDefinition definition)
+    {
+        Assert.True(CapabilityDependencyManifestHash.TryCompute(definition.CapabilityRequirements, out var hash, out _));
+        return hash!.Value;
     }
 
     private static CustomLoopRunEvent WithSequentialEvidence(
