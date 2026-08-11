@@ -95,6 +95,7 @@ public sealed class GovernedLoopToolActuationAuthorityBoundaryTests
 
         await Assert.ThrowsAsync<ToolActuationAuthorityProtocolException>(() => CreateBoundary(effect, fixture).ExecuteAsync(
             fixture.ToolRequest,
+            Path.GetFullPath(fixture.ToolRequest.TargetPath),
             (_, _) => Task.FromResult(++callbackCount)));
 
         Assert.Equal(0, callbackCount);

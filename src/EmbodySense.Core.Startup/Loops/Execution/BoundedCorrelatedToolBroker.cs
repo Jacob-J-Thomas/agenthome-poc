@@ -186,7 +186,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
             return await DenyAuthorityAsync(correlatedRequest, authority, resolvedTarget, requestOrdinal, cancellationToken);
         }
 
-        var intake = await EvaluateIntakeAuthorityAsync(correlatedRequest, cancellationToken);
+        var intake = await EvaluateIntakeAuthorityAsync(correlatedRequest, resolvedTarget, cancellationToken);
         if (intake.Decision!.Disposition == GovernedLoopEffectAuthorityDisposition.Deny)
         {
             var detail = $"Current governed-loop authority denied the exact workspace-tool intake ({intake.Decision.Reason.ToString().ToLowerInvariant()}).";
@@ -205,6 +205,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
 
     private async Task<GovernedLoopEffectAuthorityExecutionResult<bool>> EvaluateIntakeAuthorityAsync(
         ToolRequest request,
+        string resolvedTarget,
         CancellationToken cancellationToken)
     {
         var authorityRequest = WorkspaceToolEffectAuthorityRequestFactory.Create(
@@ -215,6 +216,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
             _attempt.Attempt,
             _attempt.AttemptCorrelationId,
             request,
+            resolvedTarget,
             GovernedLoopEffectBoundaryKind.WorkspaceToolIntake);
         var callbackOpen = 1;
         var callbackCount = 0;

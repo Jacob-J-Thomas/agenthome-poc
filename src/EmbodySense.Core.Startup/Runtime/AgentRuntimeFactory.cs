@@ -350,6 +350,7 @@ public sealed class AgentRuntimeFactory
                 governedGrantResolver,
                 capabilityAdmission,
                 governedEffectAuthorityEvidence,
+                governedEffectAuthorityEvidence,
                 capabilityAuthority);
             var governedPublicationAuthority = new GovernedLoopConversationPublicationAuthorityBoundaryProvider(
                 governedEffectAuthority);
