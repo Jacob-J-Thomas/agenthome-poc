@@ -65,21 +65,4 @@ internal static class WorkspaceInitializationCompletion
         }
     }
 
-    public static bool RequiresExplicitCleanup(string path)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        try
-        {
-            if (Directory.Exists(path))
-            {
-                return true;
-            }
-
-            return File.Exists(path) && OperatingSystem.IsWindows() && File.GetAttributes(path).HasFlag(FileAttributes.ReadOnly);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            return true;
-        }
-    }
 }

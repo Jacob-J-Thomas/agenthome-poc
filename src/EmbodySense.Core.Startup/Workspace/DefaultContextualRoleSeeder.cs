@@ -80,24 +80,48 @@ public sealed class DefaultContextualRoleSeeder : IDefaultContextualRoleSeeder
         ArgumentNullException.ThrowIfNull(paths);
         var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
         var expected = CreateRevision(workspaceId);
-        var source = await new WorkspaceContextualRoleInstructionSourceProbe(paths).ProbeAsync(expected.InstructionSource, cancellationToken);
-        using var store = new ContextualRoleRevisionStore(paths, workspaceId);
-        var revisionRead = await store.ReadAsync(new ContextualRoleRevisionReadRequest(expected.Identity), cancellationToken);
-        var lifecycleRead = await store.ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest(RoleId), cancellationToken);
-        var confirmedSource = await new WorkspaceContextualRoleInstructionSourceProbe(paths).ProbeAsync(expected.InstructionSource, cancellationToken);
-        if (source.Status != ContextualRoleInstructionSourceProbeStatus.Ready
-            || confirmedSource.Status != ContextualRoleInstructionSourceProbeStatus.Ready
-            || revisionRead.Status != ContextualRoleRevisionReadStatus.Found
-            || revisionRead.Disposition != ContextualRoleRevisionDisposition.Active
-            || !Matches(expected, revisionRead.Revision)
-            || lifecycleRead.Status != ContextualRoleLifecycleReadStatus.Found
-            || lifecycleRead.Snapshot is not { State: ContextualRoleLifecycleState.Active } lifecycle
-            || lifecycle.CurrentIdentity != expected.Identity)
+        if (!await IsReadyAsync(paths, cancellationToken))
         {
             throw new InvalidOperationException("The persisted default contextual role could not be re-read as the exact active revision; workspace initialization failed closed.");
         }
 
         return new ContextualRoleRevisionPin(expected.Identity, expected.ContentHash);
+    }
+
+    internal static bool IsReady(WorkspacePaths paths)
+        => IsReadyAsync(paths, CancellationToken.None).GetAwaiter().GetResult();
+
+    internal static async Task<bool> IsReadyAsync(WorkspacePaths paths, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+            var expected = CreateRevision(workspaceId);
+            var sourceProbe = new WorkspaceContextualRoleInstructionSourceProbe(paths);
+            var source = await sourceProbe.ProbeAsync(expected.InstructionSource, cancellationToken);
+            using var store = new ContextualRoleRevisionStore(paths, workspaceId);
+            var revisionRead = await store.ReadAsync(new ContextualRoleRevisionReadRequest(expected.Identity), cancellationToken);
+            var lifecycleRead = await store.ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest(RoleId), cancellationToken);
+            var confirmedSource = await sourceProbe.ProbeAsync(expected.InstructionSource, cancellationToken);
+            return source.Status == ContextualRoleInstructionSourceProbeStatus.Ready
+                && confirmedSource.Status == ContextualRoleInstructionSourceProbeStatus.Ready
+                && revisionRead.Status == ContextualRoleRevisionReadStatus.Found
+                && revisionRead.Disposition == ContextualRoleRevisionDisposition.Active
+                && Matches(expected, revisionRead.Revision)
+                && lifecycleRead.Status == ContextualRoleLifecycleReadStatus.Found
+                && lifecycleRead.Snapshot is { State: ContextualRoleLifecycleState.Active } lifecycle
+                && lifecycle.CurrentIdentity == expected.Identity;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or FormatException)
+        {
+            return false;
+        }
     }
 
     internal static ContextualRoleRevision CreateRevision(string workspaceId)

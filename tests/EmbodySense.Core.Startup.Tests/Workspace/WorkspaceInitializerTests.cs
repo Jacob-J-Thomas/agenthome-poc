@@ -203,12 +203,13 @@ public sealed class WorkspaceInitializerTests
     }
 
     [Fact]
-    public async Task InitializeAsync_never_backfills_or_resurrects_a_role_in_an_existing_completed_agent_home()
+    public async Task InitializeAsync_revalidates_a_valid_existing_workspace_without_reseeding_its_role()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
-        Directory.Delete(Path.Combine(paths.AgentPath, "contextual-roles"), recursive: true);
+        var roleStorePath = Path.Combine(paths.AgentPath, "contextual-roles");
+        var roleStoreBefore = DefaultContextualRoleEvidenceTestSupport.SnapshotFiles(roleStorePath);
         var roleSeeder = new RecordingRoleSeeder();
         var initializer = new WorkspaceInitializer(
             new WorkspaceScaffolder(),
@@ -218,8 +219,67 @@ public sealed class WorkspaceInitializerTests
         await initializer.InitializeAsync(workspace.RootPath);
 
         Assert.Equal(0, roleSeeder.CallCount);
+        AssertSnapshotsEqual(roleStoreBefore, DefaultContextualRoleEvidenceTestSupport.SnapshotFiles(roleStorePath));
+        var status = new WorkspaceStatusReader().Read(workspace.RootPath);
+        Assert.True(status.IsInitialized);
+        Assert.False(status.RequiresExplicitCleanup);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("corrupt")]
+    [InlineData("substituted")]
+    [InlineData("inactive")]
+    [InlineData("wrong-workspace")]
+    [InlineData("source-ineligible")]
+    public async Task InitializeAsync_refuses_damaged_role_evidence_without_backfill_resurrection_or_mutation(string damage)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await DefaultContextualRoleEvidenceTestSupport.DamageAsync(workspace, damage);
+        var workspaceBefore = DefaultContextualRoleEvidenceTestSupport.SnapshotFiles(workspace.RootPath);
+        var serverStateBefore = DefaultContextualRoleEvidenceTestSupport.SnapshotFiles(workspace.ServerStatePath);
+        var roleSeeder = new RecordingRoleSeeder();
+        var initializer = new WorkspaceInitializer(
+            new WorkspaceScaffolder(),
+            new BuiltInCapabilityCatalogSeeder(new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath)),
+            roleSeeder);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.InitializeAsync(workspace.RootPath));
+
+        Assert.Contains("Remove .agent explicitly before reinitializing", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, roleSeeder.CallCount);
+        AssertSnapshotsEqual(workspaceBefore, DefaultContextualRoleEvidenceTestSupport.SnapshotFiles(workspace.RootPath));
+        AssertSnapshotsEqual(serverStateBefore, DefaultContextualRoleEvidenceTestSupport.SnapshotFiles(workspace.ServerStatePath));
+        var status = new WorkspaceStatusReader().Read(workspace.RootPath);
+        Assert.False(status.IsInitialized);
+        Assert.True(status.RequiresExplicitCleanup);
+        Assert.True(File.Exists(paths.WorkspaceInitializationMarkerPath));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_reproves_the_exact_role_after_existing_workspace_work_and_before_rewriting_completion()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var roleSeeder = new RecordingRoleSeeder();
+        var initializer = new WorkspaceInitializer(
+            new WorkspaceScaffolder(),
+            new BuiltInCapabilityCatalogSeeder(new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath)),
+            roleSeeder,
+            new ConcurrentRoleRemovalObserver());
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.InitializeAsync(workspace.RootPath));
+
+        Assert.Contains("could not be re-read as the exact active revision", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, roleSeeder.CallCount);
         Assert.False(Directory.Exists(Path.Combine(paths.AgentPath, "contextual-roles")));
-        Assert.True(paths.IsInitialized);
+        Assert.False(File.Exists(paths.WorkspaceInitializationMarkerPath));
+        var status = new WorkspaceStatusReader().Read(workspace.RootPath);
+        Assert.False(status.IsInitialized);
+        Assert.True(status.RequiresExplicitCleanup);
     }
 
     [Fact]
@@ -476,6 +536,26 @@ public sealed class WorkspaceInitializerTests
             Assert.False(hadValidCompletionMarker);
             Directory.CreateDirectory(paths.AgentPath);
             return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class ConcurrentRoleRemovalObserver : IWorkspaceInitializationBoundaryObserver
+    {
+        public ValueTask OnFreshnessCapturedAsync(WorkspacePaths paths, bool wasFreshAgentHome, bool hadValidCompletionMarker, CancellationToken cancellationToken = default)
+        {
+            Assert.False(wasFreshAgentHome);
+            Assert.True(hadValidCompletionMarker);
+            Directory.Delete(Path.Combine(paths.AgentPath, "contextual-roles"), recursive: true);
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private static void AssertSnapshotsEqual(IReadOnlyDictionary<string, string> expected, IReadOnlyDictionary<string, string> actual)
+    {
+        Assert.Equal(expected.Keys, actual.Keys);
+        foreach (var path in expected.Keys)
+        {
+            Assert.Equal(expected[path], actual[path]);
         }
     }
 }

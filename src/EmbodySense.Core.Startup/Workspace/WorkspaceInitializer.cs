@@ -128,6 +128,11 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
             throw new InvalidOperationException("The workspace contains a partial or invalid .agent initialization. Remove .agent explicitly before reinitializing; automatic backfill is not allowed.");
         }
 
+        if (!wasFreshAgentHome && !await DefaultContextualRoleSeeder.IsReadyAsync(paths, cancellationToken))
+        {
+            throw new InvalidOperationException("The completed workspace does not retain the exact active default contextual role. Remove .agent explicitly before reinitializing; automatic backfill or resurrection is not allowed.");
+        }
+
         if (_boundaryObserver is { } observer)
         {
             await observer.OnFreshnessCapturedAsync(paths, wasFreshAgentHome, hadValidCompletionMarker, cancellationToken);
@@ -149,9 +154,9 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
         if (wasFreshAgentHome)
         {
             await _roleSeeder.SeedAsync(paths, cancellationToken);
-            await DefaultContextualRoleSeeder.VerifyAsync(paths, cancellationToken);
         }
 
+        await DefaultContextualRoleSeeder.VerifyAsync(paths, cancellationToken);
         await WorkspaceInitializationCompletion.WriteAsync(paths.WorkspaceInitializationMarkerPath, cancellationToken);
     }
 
