@@ -260,13 +260,14 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
         var seedReceipt = Assert.IsType<GovernedLoopAdmissionReceipt>(seedOutcome.Receipt);
         var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(owningRole: seedReceipt.Intent.Role);
         var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, artifact.RevisionArtifact.Revision, "publish-sequential", Hash('7'));
-        var invocationContext = CustomLoopContextSnapshot.CreateEmpty(GovernedLoopSequentialApplicationTestFixture.Now);
+        var contextCapturedAtUtc = invocationCapturedAtUtc ?? GovernedLoopSequentialApplicationTestFixture.Now;
+        var invocationContext = CustomLoopContextSnapshot.CreateEmpty(contextCapturedAtUtc);
         var invocation = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
             1,
             "Execute the exact admitted request.",
             new CustomLoopModelSnapshot("provider", "model"),
             new CustomLoopConversationReference("conversation-1", "version-1", GovernedLoopSequentialApplicationTestFixture.Now.AddMinutes(-1)),
-            invocationCapturedAtUtc ?? GovernedLoopSequentialApplicationTestFixture.Now,
+            contextCapturedAtUtc,
             invocationContext.SourceManifest,
             string.Empty));
         var request = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(
