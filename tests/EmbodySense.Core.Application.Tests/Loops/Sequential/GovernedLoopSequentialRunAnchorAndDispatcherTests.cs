@@ -19,6 +19,30 @@ namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
 {
     [Fact]
+    public async Task Durable_common_and_application_terminal_evidence_use_one_payload_bound_hash()
+    {
+        var context = await ContextAsync();
+        var node = context.Plan.Nodes[1];
+        var receipt = Evidence(context, node, GovernedLoopSequentialNodeHandlerResultStatus.Completed);
+        var durable = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
+            CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            receipt.WorkspaceId,
+            receipt.RunId,
+            receipt.Revision,
+            receipt.ExecutionGeneration,
+            receipt.NodeId,
+            receipt.Attempt,
+            CustomLoopSequentialNodeDisposition.Completed,
+            receipt.OutcomeArtifactHash,
+            string.Empty));
+
+        Assert.Equal(receipt.EvidenceHash, durable.EvidenceHash);
+        Assert.NotEqual(receipt.EvidenceHash, RehashEvidence(receipt with { OutcomeArtifactHash = Hash('e') }).EvidenceHash);
+        Assert.False(GovernedLoopSequentialNodeEvidenceHash.Matches(receipt with { OutcomeArtifactHash = Hash('d') }));
+    }
+
+    [Fact]
     public async Task Guard_issues_anchor_only_when_every_exact_coordinate_composes()
     {
         var context = await ContextAsync();
@@ -366,6 +390,7 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             node.NodeId,
             1,
             disposition,
+            Hash('f'),
             string.Empty));
     }
 

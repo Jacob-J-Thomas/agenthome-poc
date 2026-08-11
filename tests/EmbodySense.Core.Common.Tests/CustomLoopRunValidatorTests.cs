@@ -4,6 +4,10 @@ using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Sequential;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Common.Tests;
@@ -11,6 +15,32 @@ namespace EmbodySense.Core.Common.Tests;
 public sealed class CustomLoopRunValidatorTests
 {
     private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
+
+    [Fact]
+    public void Sequential_trigger_evidence_is_payload_bound_and_required_to_match_exact_run_coordinates()
+    {
+        var run = CreateSequentialRun();
+
+        Assert.True(CustomLoopRunValidator.Validate(run).IsValid);
+        Assert.NotNull(run.Events[0].SequentialNodeEvidence);
+        Assert.True(CustomLoopSequentialOutcomeArtifactHash.Matches(run.Events[0]));
+        Assert.True(CustomLoopSequentialNodeEvidenceHash.Matches(run.Events[0].SequentialNodeEvidence));
+
+        var substitutedPayload = run with
+        {
+            Events = [run.Events[0] with { Detail = "Substituted trigger evidence." }],
+        };
+        AssertCodes(CustomLoopRunValidator.Validate(substitutedPayload), "invalid_sequential_node_evidence");
+
+        var substitutedRun = run with
+        {
+            Events = [run.Events[0] with
+            {
+                SequentialNodeEvidence = run.Events[0].SequentialNodeEvidence! with { RunId = "run-other" },
+            }],
+        };
+        AssertCodes(CustomLoopRunValidator.Validate(substitutedRun), "invalid_sequential_node_evidence");
+    }
 
     [Fact]
     public void Validate_accepts_a_complete_admitted_trace_and_hashes_exact_content()
@@ -581,6 +611,68 @@ public sealed class CustomLoopRunValidatorTests
             CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp)
         };
         return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static CustomLoopRunRecord CreateSequentialRun()
+    {
+        var run = CreateRun();
+        var invocation = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
+            GovernedLoopSequentialInvocationSnapshot.CurrentSchemaVersion,
+            run.TriggerPrompt,
+            run.ModelSnapshot,
+            run.InvokingConversation,
+            run.ContextSnapshot.CapturedAtUtc,
+            run.ContextSnapshot.SourceManifest,
+            string.Empty));
+        var revision = GovernedLoopRevisionReference.Create(1, "graph-alpha", "revision-alpha", new string('a', 64));
+        var execution = GovernedLoopExecutionBinding.Create(1, run.Id, revision, 1);
+        var binding = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
+            GovernedLoopSequentialAdapterBinding.CurrentSchemaVersion,
+            "workspace-sha256:" + new string('b', 64),
+            execution,
+            run.AdmissionOperationId,
+            new string('c', 64),
+            new string('d', 64),
+            invocation.ContentHash,
+            new string('e', 64),
+            new string('f', 64),
+            string.Empty));
+        var admitted = WithSequentialEvidence(
+            run.Events[0],
+            binding,
+            "trigger-node",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        return CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            SequentialInvocationSnapshot = invocation,
+            SequentialAdapterBinding = binding,
+            Events = [admitted],
+        });
+    }
+
+    private static CustomLoopRunEvent WithSequentialEvidence(
+        CustomLoopRunEvent runEvent,
+        GovernedLoopSequentialAdapterBinding binding,
+        string nodeId,
+        int attempt,
+        CustomLoopSequentialNodeEvidenceKind kind,
+        CustomLoopSequentialNodeDisposition disposition)
+    {
+        var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
+            CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
+            kind,
+            binding.WorkspaceId,
+            binding.ExecutionBinding.RunId,
+            binding.ExecutionBinding.Revision,
+            binding.ExecutionBinding.ExecutionGeneration,
+            nodeId,
+            attempt,
+            disposition,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
+            string.Empty));
+        return runEvent with { SequentialNodeEvidence = evidence };
     }
 
     private static CustomLoopToolAuthoritySnapshot Authority(CustomLoopToolAssignment[] effectiveAssignments)
