@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Loops.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
@@ -1469,8 +1470,46 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             run.FailureCode,
             run.FailureDetail)
         {
+            Frontier = run.Frontier is null ? null : Map(run.Frontier),
             ConversationPublicationDispositions = LoopRunConversationPublicationDispositionProjector.Project(run)
         };
+    }
+
+    private static LoopRunFrontierSnapshot Map(GovernedLoopFrontierPosture frontier)
+    {
+        var revision = frontier.Binding.Revision;
+        return new LoopRunFrontierSnapshot(
+            frontier.SchemaVersion,
+            frontier.WorkspaceId,
+            new LoopRunFrontierBindingSnapshot(
+                frontier.Binding.SchemaVersion,
+                frontier.Binding.RunId,
+                revision.GraphId,
+                revision.RevisionId,
+                revision.ExecutableHash,
+                frontier.Binding.ExecutionGeneration),
+            frontier.GraphArtifactHash,
+            frontier.GraphLayoutHash,
+            frontier.AdmissionReceiptHash,
+            frontier.Payload.FrontierVersion,
+            frontier.Payload.ConcurrencyCeiling,
+            frontier.Payload.Status.ToString(),
+            frontier.Payload.UpdatedAtUtc,
+            frontier.Payload.ContentHash,
+            frontier.Payload.Nodes.Select(node => new LoopRunFrontierNodeSnapshot(
+                node.SchemaVersion,
+                node.PlanOrdinal,
+                node.NodeId,
+                node.Descriptor.Kind.ToString(),
+                node.Descriptor.TypeId,
+                node.Descriptor.Version,
+                node.IncomingControlEdgeIds.ToArray(),
+                node.OutgoingControlEdgeIds.ToArray(),
+                node.Status.ToString(),
+                node.Attempt,
+                node.AttemptOperationId,
+                node.OutcomeEvidenceId,
+                node.OutcomeEvidenceHash)).ToArray());
     }
 
     private static LoopRunMessageSnapshot Map(CustomLoopMessageSnapshot message)
