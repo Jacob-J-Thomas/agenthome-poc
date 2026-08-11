@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
+using System.Text.Json.Serialization;
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 /// <summary>
@@ -50,4 +51,9 @@ public sealed record CustomLoopRunEvent(
     CustomLoopToolAuthoritySnapshot? ToolAuthority = null,
     CustomLoopToolTraceEvidence? ToolEvidence = null,
     int? TraceReservationUtf8Bytes = null,
-    int? ControlExpectedLifecycleVersion = null);
+    int? ControlExpectedLifecycleVersion = null)
+{
+    /// <summary>Gets exact canonical sequential-node dispatch or outcome evidence, or null for legacy-only events.</summary>
+    [JsonRequired]
+    public CustomLoopSequentialNodeEvidence? SequentialNodeEvidence { get; init; }
+}

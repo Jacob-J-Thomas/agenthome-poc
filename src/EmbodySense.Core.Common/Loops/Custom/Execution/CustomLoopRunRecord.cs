@@ -2,6 +2,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 
@@ -63,6 +64,14 @@ public sealed record CustomLoopRunRecord(
 
     /// <summary>Gets the immutable exact capability resolution admitted for this run.</summary>
     public CapabilityAdmissionSnapshot CapabilityAdmission { get; init; } = null!;
+
+    /// <summary>Gets the exact bounded invocation payload copied from the pre-admission operation, or null for the fenced legacy path.</summary>
+    [JsonRequired]
+    public GovernedLoopSequentialInvocationSnapshot? SequentialInvocationSnapshot { get; init; }
+
+    /// <summary>Gets the exact canonical admission and graph binding, or null for the fenced legacy path.</summary>
+    [JsonRequired]
+    public GovernedLoopSequentialAdapterBinding? SequentialAdapterBinding { get; init; }
 
     /// <summary>
     /// Gets a value indicating whether the lifecycle has reached a terminal status.

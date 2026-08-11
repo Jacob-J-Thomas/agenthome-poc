@@ -31,6 +31,7 @@ public static class GovernedLoopSequentialNodeEvidenceHash
         writer.WriteString("nodeId", receipt.NodeId);
         writer.WriteNumber("attempt", receipt.Attempt);
         writer.WriteString("disposition", ToCanonical(receipt.Disposition));
+        writer.WriteString("outcomeArtifactHash", receipt.OutcomeArtifactHash);
         writer.WriteEndObject();
         writer.Flush();
         return Convert.ToHexString(SHA256.HashData(buffer.WrittenSpan)).ToLowerInvariant();
@@ -43,8 +44,7 @@ public static class GovernedLoopSequentialNodeEvidenceHash
     /// <summary>Returns whether the declared digest matches every exact receipt coordinate.</summary>
     public static bool Matches(GovernedLoopSequentialNodeEvidenceReceipt? receipt)
     {
-        if (receipt?.EvidenceHash is not { Length: 64 }
-            || receipt.EvidenceHash.Any(character => character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+        if (receipt is null || !IsHash(receipt.EvidenceHash) || !IsHash(receipt.OutcomeArtifactHash))
         {
             return false;
         }
@@ -58,6 +58,10 @@ public static class GovernedLoopSequentialNodeEvidenceHash
             return false;
         }
     }
+
+    private static bool IsHash(string? value)
+        => value is { Length: 64 }
+            && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static string ToCanonical(GovernedLoopSequentialNodeEvidenceKind kind)
         => kind switch

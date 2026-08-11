@@ -12,6 +12,7 @@ namespace EmbodySense.Core.Application.Loops.Sequential.Models;
 /// <param name="NodeId">The exact builder-selected node identity.</param>
 /// <param name="Attempt">The positive bounded node attempt.</param>
 /// <param name="Disposition">The exact handler disposition proved by the evidence.</param>
+/// <param name="OutcomeArtifactHash">The exact digest of the authenticated durable outcome event.</param>
 /// <param name="EvidenceHash">The canonical hash over every preceding field.</param>
 public sealed record GovernedLoopSequentialNodeEvidenceReceipt(
     int SchemaVersion,
@@ -23,6 +24,7 @@ public sealed record GovernedLoopSequentialNodeEvidenceReceipt(
     string NodeId,
     int Attempt,
     GovernedLoopSequentialNodeHandlerResultStatus Disposition,
+    string OutcomeArtifactHash,
     string EvidenceHash)
 {
     /// <summary>Gets the only supported experimental receipt schema version.</summary>
