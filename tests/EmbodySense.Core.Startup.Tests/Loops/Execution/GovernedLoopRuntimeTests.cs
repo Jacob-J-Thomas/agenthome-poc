@@ -26,6 +26,7 @@ using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -81,6 +82,9 @@ internal static class GovernedLoopRuntimeTests
             Assert.NotNull(durableRun.SequentialAdapterBinding);
             Assert.NotNull(durableRun.SequentialInvocationSnapshot);
             Assert.Equal(input.OperationId, durableRun.SequentialAdapterBinding!.AdmissionOperationId);
+            AssertFrontierProjection(
+                Assert.IsType<LoopRunFrontierSnapshot>(executed.Run.Frontier),
+                Assert.IsType<GovernedLoopFrontierPosture>(durableRun.Frontier));
 
             await using var competingGate = new CustomLoopWorkspaceExecutionGate(fixture.Paths);
             using var competingLease = Assert.IsAssignableFrom<IDisposable>(
@@ -439,6 +443,45 @@ internal static class GovernedLoopRuntimeTests
     {
         var events = await new AuditLog(paths).ReadTailAsync(1_000);
         Assert.DoesNotContain(events, item => item.Action == AuditSchema.Actions.ToolExecute);
+    }
+
+    private static void AssertFrontierProjection(
+        LoopRunFrontierSnapshot snapshot,
+        GovernedLoopFrontierPosture frontier)
+    {
+        Assert.Equal(frontier.SchemaVersion, snapshot.SchemaVersion);
+        Assert.Equal(frontier.WorkspaceId, snapshot.WorkspaceId);
+        Assert.Equal(frontier.Binding.SchemaVersion, snapshot.Binding.SchemaVersion);
+        Assert.Equal(frontier.Binding.RunId, snapshot.Binding.RunId);
+        Assert.Equal(frontier.Binding.Revision.GraphId, snapshot.Binding.GraphId);
+        Assert.Equal(frontier.Binding.Revision.RevisionId, snapshot.Binding.RevisionId);
+        Assert.Equal(frontier.Binding.Revision.ExecutableHash, snapshot.Binding.ExecutableHash);
+        Assert.Equal(frontier.Binding.ExecutionGeneration, snapshot.Binding.ExecutionGeneration);
+        Assert.Equal(frontier.GraphArtifactHash, snapshot.GraphArtifactHash);
+        Assert.Equal(frontier.GraphLayoutHash, snapshot.GraphLayoutHash);
+        Assert.Equal(frontier.AdmissionReceiptHash, snapshot.AdmissionReceiptHash);
+        Assert.Equal(frontier.Payload.FrontierVersion, snapshot.FrontierVersion);
+        Assert.Equal(frontier.Payload.ConcurrencyCeiling, snapshot.ConcurrencyCeiling);
+        Assert.Equal(frontier.Payload.Status.ToString(), snapshot.Status);
+        Assert.Equal(frontier.Payload.UpdatedAtUtc, snapshot.UpdatedAtUtc);
+        Assert.Equal(frontier.Payload.ContentHash, snapshot.ContentHash);
+        Assert.Equal(frontier.Payload.Nodes.Count, snapshot.Nodes.Count);
+        foreach (var (expected, actual) in frontier.Payload.Nodes.Zip(snapshot.Nodes))
+        {
+            Assert.Equal(expected.SchemaVersion, actual.SchemaVersion);
+            Assert.Equal(expected.PlanOrdinal, actual.PlanOrdinal);
+            Assert.Equal(expected.NodeId, actual.NodeId);
+            Assert.Equal(expected.Descriptor.Kind.ToString(), actual.Kind);
+            Assert.Equal(expected.Descriptor.TypeId, actual.TypeId);
+            Assert.Equal(expected.Descriptor.Version, actual.DescriptorVersion);
+            Assert.Equal(expected.IncomingControlEdgeIds, actual.IncomingControlEdgeIds);
+            Assert.Equal(expected.OutgoingControlEdgeIds, actual.OutgoingControlEdgeIds);
+            Assert.Equal(expected.Status.ToString(), actual.Status);
+            Assert.Equal(expected.Attempt, actual.Attempt);
+            Assert.Equal(expected.AttemptOperationId, actual.AttemptOperationId);
+            Assert.Equal(expected.OutcomeEvidenceId, actual.OutcomeEvidenceId);
+            Assert.Equal(expected.OutcomeEvidenceHash, actual.OutcomeEvidenceHash);
+        }
     }
 
     private static string Hash64(char value) => new(value, 64);
