@@ -265,6 +265,38 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
     }
 
     [Fact]
+    public async Task Current_grant_narrowing_below_the_effect_dimensions_is_durably_denied()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        var resolution = fixture.Resolution with
+        {
+            EffectiveCeiling = fixture.Request.RequiredAuthority with { MaxTargetCount = 0 },
+        };
+        var capabilities = new StubEffectCapabilityAdmissionService
+        {
+            Result = new CapabilityRevalidationResult(
+                true,
+                [fixture.RequiredPin],
+                "The required capability pin remains current, but target authority was narrowed.",
+                CapabilityRevalidationStatus.Active),
+        };
+        var commits = 0;
+
+        var result = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = resolution },
+            capabilities,
+            new RecordingEffectAuthorityEvidenceStore()).ExecuteAsync(
+                fixture.Request,
+                _ => Task.FromResult(++commits));
+
+        Assert.False(result.CommitInvoked);
+        Assert.Equal(0, commits);
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.Decided, result.Status);
+        Assert.Equal(GovernedLoopEffectAuthorityDisposition.Deny, result.Decision?.Disposition);
+        Assert.Equal(GovernedLoopEffectAuthorityReason.EffectOutsideCeiling, result.Decision?.Reason);
+    }
+
+    [Fact]
     public void Stopped_exception_preserves_the_exact_boundary_posture()
     {
         var exception = new GovernedLoopEffectAuthorityStoppedException(

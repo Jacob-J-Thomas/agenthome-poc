@@ -341,6 +341,11 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
             return (GovernedLoopEffectAuthorityDisposition.Deny, GovernedLoopEffectAuthorityReason.CapabilityInactive);
         }
 
+        if (!IsEqualOrNarrow(request.RequiredAuthority, current.Ceiling))
+        {
+            return (GovernedLoopEffectAuthorityDisposition.Deny, GovernedLoopEffectAuthorityReason.EffectOutsideCeiling);
+        }
+
         return (GovernedLoopEffectAuthorityDisposition.Direct, IsExactCurrent(request, current) ? GovernedLoopEffectAuthorityReason.ActiveExact : GovernedLoopEffectAuthorityReason.ActiveNarrowed);
     }
 
