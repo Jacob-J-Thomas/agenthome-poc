@@ -158,6 +158,17 @@ public sealed class GovernedLoopAdmissionServiceConsistencyTests
         Assert.Equal(GovernedLoopAdmissionStatus.Ambiguous, zeroResult.Status);
         Assert.Null(zeroResult.Outcome);
 
+        var missingProof = GovernedLoopAdmissionTestHarness.Create();
+        missingProof.CommitResults.Enqueue(new GovernedLoopAdmissionStoreCommitResult(
+            GovernedLoopAdmissionStoreCommitStatus.OperationConflict,
+            2,
+            null));
+
+        var missingProofResult = await missingProof.CreateService().AdmitAsync(missingProof.Request);
+
+        Assert.Equal(GovernedLoopAdmissionStatus.Ambiguous, missingProofResult.Status);
+        Assert.Null(missingProofResult.Outcome);
+
         var seed = GovernedLoopAdmissionTestHarness.Create();
         var admitted = Assert.IsType<GovernedLoopAdmissionTerminalOutcome>((await seed.CreateService().AdmitAsync(seed.Request)).Outcome);
         var sameRequest = GovernedLoopAdmissionTestHarness.Create();

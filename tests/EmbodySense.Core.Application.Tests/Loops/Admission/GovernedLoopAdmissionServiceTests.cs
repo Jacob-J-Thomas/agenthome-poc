@@ -570,7 +570,7 @@ public sealed class GovernedLoopAdmissionServiceTests
 
             Assert.Equal(GovernedLoopAdmissionStatus.Ambiguous, result.Status);
             Assert.Null(result.Outcome);
-            Assert.Equal(1, harness.GrantReadCount);
+            Assert.Equal(ReferenceEquals(harness, provenanceFuture) ? 0 : 1, harness.GrantReadCount);
             Assert.Equal(0, harness.CapabilityAdmissionCount);
             Assert.Equal(0, harness.RunIdentityGenerationCount);
             Assert.Equal(0, harness.CommitCount);

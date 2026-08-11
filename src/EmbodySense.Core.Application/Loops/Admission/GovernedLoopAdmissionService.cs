@@ -180,10 +180,21 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         cancellationToken.ThrowIfCancellationRequested();
         if (role.Status != AuthorityGrantDependencyStatus.Active)
         {
-            return await MapRoleFailureAsync(request, intent, role, storeGeneration, cancellationToken).ConfigureAwait(false);
+            return await MapRoleFailureAsync(
+                request,
+                intent,
+                artifact.RevisionArtifact.CreatedAtUtc,
+                role,
+                storeGeneration,
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (!IsExactActiveRole(role, intent.Role))
+        {
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+        }
+
+        if (role.Revision!.Provenance.RecordedAtUtc > role.Lifecycle!.UpdatedAtUtc)
         {
             return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
         }
@@ -192,7 +203,14 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         cancellationToken.ThrowIfCancellationRequested();
         if (grant.Status != AuthorityGrantResolutionStatus.Active)
         {
-            return await MapGrantFailureAsync(request, intent, grant, storeGeneration, cancellationToken).ConfigureAwait(false);
+            return await MapGrantFailureAsync(
+                request,
+                intent,
+                artifact.RevisionArtifact.CreatedAtUtc,
+                role,
+                grant,
+                storeGeneration,
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (!IsExactActiveGrant(grant, request.AuthorityGrant))
@@ -501,7 +519,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
 
                     if (commit.Outcome is null)
                     {
-                        return Result(GovernedLoopAdmissionStatus.Conflict, request);
+                        return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
                     }
 
                     var conflict = ClassifyCommittedOutcome(request, commit.Outcome);
@@ -772,6 +790,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
     private async Task<GovernedLoopAdmissionResult> MapRoleFailureAsync(
         GovernedLoopAdmissionRequest request,
         GovernedLoopAdmissionIntent intent,
+        DateTimeOffset artifactCreatedAtUtc,
         AuthorityGrantRoleResolution role,
         long storeGeneration,
         CancellationToken cancellationToken)
@@ -795,12 +814,20 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         };
         if (code != GovernedLoopAdmissionFailureCode.None)
         {
+            if (!TryGetLatestEvidenceTime(
+                    out var evidenceAtUtc,
+                    artifactCreatedAtUtc,
+                    role.Lifecycle?.UpdatedAtUtc ?? role.Revision?.Provenance.RecordedAtUtc))
+            {
+                return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+            }
+
             return await CommitDefinitiveFailureAsync(
                 request,
                 intent,
                 code,
                 storeGeneration,
-                role.Lifecycle?.UpdatedAtUtc ?? role.Revision?.Provenance.RecordedAtUtc ?? default,
+                evidenceAtUtc,
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -812,6 +839,8 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
     private async Task<GovernedLoopAdmissionResult> MapGrantFailureAsync(
         GovernedLoopAdmissionRequest request,
         GovernedLoopAdmissionIntent intent,
+        DateTimeOffset artifactCreatedAtUtc,
+        AuthorityGrantRoleResolution role,
         AuthorityGrantResolution resolution,
         long storeGeneration,
         CancellationToken cancellationToken)
@@ -826,12 +855,23 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         };
         if (code != GovernedLoopAdmissionFailureCode.None)
         {
+            if (!TryGetLatestEvidenceTime(
+                    out var evidenceAtUtc,
+                    artifactCreatedAtUtc,
+                    role.Revision!.Provenance.RecordedAtUtc,
+                    role.Lifecycle!.UpdatedAtUtc,
+                    resolution.Grant?.RecordedAtUtc,
+                    resolution.EvaluatedAtUtc == default ? null : resolution.EvaluatedAtUtc))
+            {
+                return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+            }
+
             return await CommitDefinitiveFailureAsync(
                 request,
                 intent,
                 code,
                 storeGeneration,
-                resolution.EvaluatedAtUtc,
+                evidenceAtUtc,
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -1116,6 +1156,33 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         {
             return false;
         }
+    }
+
+    private static bool TryGetLatestEvidenceTime(
+        out DateTimeOffset latestTimeUtc,
+        params DateTimeOffset?[] times)
+    {
+        latestTimeUtc = default;
+        foreach (var time in times)
+        {
+            if (time is not { } value)
+            {
+                continue;
+            }
+
+            if (!IsTrustedUtc(value))
+            {
+                latestTimeUtc = default;
+                return false;
+            }
+
+            if (value > latestTimeUtc)
+            {
+                latestTimeUtc = value;
+            }
+        }
+
+        return latestTimeUtc != default;
     }
 
     private static bool IsValidRequest(GovernedLoopAdmissionRequest? request)

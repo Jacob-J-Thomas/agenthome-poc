@@ -68,6 +68,45 @@ public sealed class GovernedLoopAdmissionServiceRejectionTests
     }
 
     [Fact]
+    public async Task Future_graph_artifact_never_becomes_permanent_role_rejection()
+    {
+        var harness = GovernedLoopAdmissionTestHarness.Create();
+        var source = harness.Artifact.RevisionArtifact;
+        var revisionArtifact = GovernedLoopRevisionArtifactFactory.Create(
+            source.SchemaVersion,
+            source.Revision,
+            source.PredecessorRevision,
+            source.RollbackSourcePublication,
+            source.CreationOperationId,
+            source.CreatedByActorId,
+            AuthorityGrantApplicationTestFixture.Now.AddMinutes(2));
+        var artifact = GovernedLoopGraphRevisionArtifactFactory.Create(
+            harness.Artifact.SchemaVersion,
+            revisionArtifact,
+            harness.Artifact.Graph);
+        harness.GraphReadResult = new EmbodySense.Core.Application.Loops.GraphAuthoring.Models.GovernedLoopGraphRevisionArtifactReadResult(
+            EmbodySense.Core.Application.Loops.Revisions.Models.GovernedLoopRevisionStoreReadStatus.Ready,
+            1,
+            artifact);
+        harness.BindingResolution = harness.BindingResolution with { Artifact = artifact };
+        harness.RoleResolution = harness.RoleResolution with
+        {
+            Status = AuthorityGrantDependencyStatus.Disabled,
+            Lifecycle = Assert.IsType<ContextualRoleLifecycleSnapshot>(harness.RoleResolution.Lifecycle) with
+            {
+                State = ContextualRoleLifecycleState.Disabled,
+            },
+            SourceStatus = ContextualRoleInstructionSourceProbeStatus.Ineligible,
+        };
+
+        var result = await harness.CreateService().AdmitAsync(harness.Request);
+
+        Assert.Equal(GovernedLoopAdmissionStatus.Ambiguous, result.Status);
+        Assert.Null(result.Outcome);
+        Assert.Equal(0, harness.CommitCount);
+    }
+
+    [Fact]
     public async Task Exact_active_grant_bound_to_another_role_commits_durable_role_mismatch()
     {
         var harness = GovernedLoopAdmissionTestHarness.Create();
@@ -386,6 +425,26 @@ public sealed class GovernedLoopAdmissionServiceRejectionTests
 
         Assert.Equal(GovernedLoopAdmissionStatus.Ambiguous, result.Status);
         Assert.Null(result.Outcome);
+        Assert.Equal(0, harness.CommitCount);
+    }
+
+    [Fact]
+    public async Task Grant_rejection_never_commits_from_temporally_incoherent_active_role_evidence()
+    {
+        var harness = GovernedLoopAdmissionTestHarness.Create(
+            roleRecordedAtUtc: AuthorityGrantApplicationTestFixture.Now.AddMinutes(-5));
+        var lifecycle = Assert.IsType<ContextualRoleLifecycleSnapshot>(harness.RoleResolution.Lifecycle);
+        Assert.True(harness.Role.Provenance.RecordedAtUtc > lifecycle.UpdatedAtUtc);
+        var request = BindGrantStatus(
+            harness,
+            AuthorityGrantResolutionStatus.Suspended,
+            AuthorityGrantLifecycleStatus.Suspended);
+
+        var result = await harness.CreateService().AdmitAsync(request);
+
+        Assert.Equal(GovernedLoopAdmissionStatus.Ambiguous, result.Status);
+        Assert.Null(result.Outcome);
+        Assert.Equal(0, harness.GrantReadCount);
         Assert.Equal(0, harness.CommitCount);
     }
 
