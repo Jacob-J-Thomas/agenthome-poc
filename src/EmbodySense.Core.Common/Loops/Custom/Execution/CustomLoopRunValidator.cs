@@ -633,6 +633,13 @@ public static class CustomLoopRunValidator
             return;
         }
 
+        if (run.SequentialInvocationSnapshot is not null
+            && run.SequentialAdapterBinding is not null
+            && run.Events[0]?.SequentialNodeEvidence is null)
+        {
+            Add(errors, "sequential_trigger_evidence_required", "events[0].sequentialNodeEvidence", "Canonical sequential materialization requires the initial admitted event to retain its exact completed Manual Trigger evidence.");
+        }
+
         if (run.Events.Length > CustomLoopLimits.MaxTraceEventsPerRun)
         {
             Add(errors, "too_many_trace_events", "events", $"A run trace cannot retain more than {CustomLoopLimits.MaxTraceEventsPerRun} events.");
@@ -867,6 +874,8 @@ public static class CustomLoopRunValidator
             Add(errors, "sequential_node_evidence_binding_mismatch", $"{field}.sequentialNodeEvidence", "Sequential node evidence must match the exact run binding and containing event attempt.");
         }
 
+        ValidateSequentialNodeCoordinates(item, evidence, field, run, errors);
+
         var key = (evidence.NodeId, evidence.Attempt);
         if (evidence.Kind == CustomLoopSequentialNodeEvidenceKind.DispatchStarted)
         {
@@ -919,6 +928,34 @@ public static class CustomLoopRunValidator
         else if (!starts.Contains(key))
         {
             Add(errors, "sequential_dispatch_marker_required", $"{field}.sequentialNodeEvidence", "Terminal provider-node evidence requires an earlier exact dispatch-start marker for the same canonical attempt.");
+        }
+    }
+
+    private static void ValidateSequentialNodeCoordinates(
+        CustomLoopRunEvent item,
+        CustomLoopSequentialNodeEvidence evidence,
+        string field,
+        CustomLoopRunRecord run,
+        List<CustomLoopValidationError> errors)
+    {
+        if (item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed)
+        {
+            var isAdmittedInferenceStep = run.AdmittedDefinition?.InferenceSteps?.Any(step => string.Equals(step.Id, item.StepId, StringComparison.Ordinal)) == true;
+            if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal) || !isAdmittedInferenceStep)
+            {
+                Add(errors, "sequential_inference_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential inference evidence must identify the containing event's exact admitted legacy inference-step id.");
+            }
+        }
+        else if (item.Kind is CustomLoopRunEventKind.ExitDecisionStarted or CustomLoopRunEventKind.ExitDecisionCompleted)
+        {
+            if (!string.Equals(item.StepId, "exit", StringComparison.Ordinal))
+            {
+                Add(errors, "sequential_exit_step_mismatch", $"{field}.stepId", "Sequential Exit-decision evidence requires the reserved legacy adapter step id 'exit'.");
+            }
+        }
+        else if (item.Kind == CustomLoopRunEventKind.Admitted && (item.Iteration is not null || item.StepId is not null || item.Attempt is not null))
+        {
+            Add(errors, "sequential_trigger_coordinates_mismatch", field, "The admitted Manual Trigger outcome cannot carry legacy iteration, step, or attempt coordinates.");
         }
     }
 
