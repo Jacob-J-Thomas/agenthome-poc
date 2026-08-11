@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 
@@ -23,11 +24,21 @@ public sealed class GovernedLoopAdmissionCapabilitySnapshotTests
             [],
             GovernedLoopAdmissionTestFixture.CapabilityAdmittedAtUtc);
         var inconsistent = empty with { Evidence = [populated.Evidence[0]] };
+        var requiredWithoutProof = populated with { Pins = [], Evidence = [] };
 
         Assert.Null(CapabilityAdmissionSnapshotValidator.Validate(empty));
         Assert.NotNull(CapabilityAdmissionSnapshotValidator.Validate(inconsistent));
+        Assert.NotNull(CapabilityAdmissionSnapshotValidator.Validate(requiredWithoutProof));
 
-        var authority = GovernedLoopAdmissionTestFixture.EffectiveAuthority() with { Capabilities = [] };
+        var populatedAuthority = GovernedLoopAdmissionTestFixture.EffectiveAuthority();
+        var authority = new AuthorityCeiling(
+            [],
+            populatedAuthority.DataClasses,
+            populatedAuthority.MaxTargetCount,
+            populatedAuthority.MaxSideEffectClass,
+            populatedAuthority.AllowsRecurrence,
+            populatedAuthority.AllowsExternalPublication,
+            populatedAuthority.AllowsIrreversibleAction);
         var evidence = GovernedLoopAdmissionTestFixture.Evidence(
             intent,
             effectiveAuthority: authority,
@@ -36,6 +47,42 @@ public sealed class GovernedLoopAdmissionCapabilitySnapshotTests
         Assert.True(GovernedLoopAdmissionValidator.Validate(evidence, intent).IsValid);
         Assert.True(GovernedLoopAdmissionContractHash.Matches(evidence));
         Assert.Throws<ArgumentException>(() => GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(inconsistent));
+    }
+
+    [Fact]
+    public void Optional_only_omission_is_a_valid_zero_pin_resolution_proof()
+    {
+        var populated = GovernedLoopAdmissionTestFixture.CapabilityAdmission();
+        var optionalDependency = populated.Requirements.Required[0];
+        var optionalManifest = populated.Requirements with
+        {
+            Required = [],
+            Optional = [optionalDependency]
+        };
+        Assert.True(CapabilityDependencyManifestHash.TryCompute(optionalManifest, out var manifestHash, out _));
+        var omission = populated.Evidence[0] with
+        {
+            SubjectId = optionalManifest.SubjectId,
+            DependencyId = optionalDependency.CapabilityId,
+            CompatibleVersionRange = optionalDependency.CompatibleVersionRange,
+            IsOptional = true,
+            Outcome = "OmittedOptional",
+            SelectedIdentity = null,
+            Detail = "The optional capability was omitted without granting authority."
+        };
+        var snapshot = new CapabilityAdmissionSnapshot(
+            CapabilityAdmissionSnapshot.CurrentSchemaVersion,
+            GovernedLoopAdmissionTestFixture.WorkspaceId,
+            optionalManifest,
+            manifestHash!.Value,
+            [],
+            [omission],
+            GovernedLoopAdmissionTestFixture.CapabilityAdmittedAtUtc);
+
+        Assert.Null(CapabilityAdmissionSnapshotValidator.Validate(snapshot));
+        Assert.Equal(
+            GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(snapshot),
+            GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(snapshot with { }));
     }
 
     [Fact]
