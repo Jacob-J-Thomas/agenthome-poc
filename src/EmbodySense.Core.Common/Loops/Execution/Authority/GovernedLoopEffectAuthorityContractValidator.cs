@@ -333,6 +333,17 @@ public static class GovernedLoopEffectAuthorityContractValidator
             Add(errors, GovernedLoopEffectAuthorityValidationErrorCode.CapabilityMismatch, "$.admittedAuthority.capabilityPins");
         }
 
+        if (decision.CurrentAuthority is { } current
+            && current.ObservedCapabilityPins.Any(observed =>
+            {
+                var admitted = decision.AdmittedAuthority.CapabilityPins.FirstOrDefault(
+                    pin => pin.DescriptorIdentity.Id.Equals(observed.DescriptorIdentity.Id));
+                return admitted is null || Equals(admitted, observed);
+            }))
+        {
+            Add(errors, GovernedLoopEffectAuthorityValidationErrorCode.CapabilityMismatch, "$.currentAuthority.observedCapabilityPins");
+        }
+
         if (!IsEqualOrNarrow(decision.RequiredAuthority, decision.AdmittedAuthority.Ceiling))
         {
             Add(errors, GovernedLoopEffectAuthorityValidationErrorCode.AuthorityWidening, "$.requiredAuthority");

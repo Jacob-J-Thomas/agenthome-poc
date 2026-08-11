@@ -61,6 +61,56 @@ public sealed class GovernedLoopEffectAuthorityContractTests
     }
 
     [Fact]
+    public void Current_observations_must_be_drifted_versions_of_admitted_capabilities()
+    {
+        var requiredPin = GovernedLoopEffectAuthorityTestFixture.Pin(0);
+        var unrelatedPin = GovernedLoopEffectAuthorityTestFixture.Pin(1);
+        var admittedCeiling = AuthorityGrantTestFixture.Ceiling(
+            capabilities: [requiredPin.DescriptorIdentity, unrelatedPin.DescriptorIdentity],
+            maxTargetCount: 2);
+        var admitted = GovernedLoopEffectAuthorityTestFixture.Proof(
+            ceiling: admittedCeiling,
+            pins: [requiredPin, unrelatedPin]);
+        var required = GovernedLoopEffectAuthorityTestFixture.RequiredCeiling(requiredPin);
+
+        GovernedLoopEffectAuthorityDecision DecisionWithObservation(CapabilityAdmissionPin observation, bool applyHash = false)
+        {
+            var current = GovernedLoopEffectAuthorityTestFixture.CopyProof(
+                admitted,
+                pins: [requiredPin],
+                observedPins: [observation]);
+            var candidate = GovernedLoopEffectAuthorityTestFixture.Decision(
+                admitted,
+                current,
+                requiredAuthority: required,
+                effectiveAuthority: required,
+                requiredPins: [requiredPin],
+                reason: GovernedLoopEffectAuthorityReason.ActiveNarrowed,
+                applyHash: false);
+            return applyHash
+                ? GovernedLoopEffectAuthorityContractHash.Apply(candidate)
+                : candidate with { ContentHash = GovernedLoopEffectAuthorityTestFixture.Hash('f') };
+        }
+
+        var unchangedObservation = DecisionWithObservation(unrelatedPin);
+        var unadmittedObservation = DecisionWithObservation(unrelatedPin with
+        {
+            DescriptorIdentity = AuthorityGrantTestFixture.Capability("org.embodysense/workspace/unadmitted")
+        });
+        var driftedObservation = DecisionWithObservation(
+            unrelatedPin with { SafeDescription = unrelatedPin.SafeDescription + " Drift." },
+            applyHash: true);
+
+        Assert.Contains(
+            GovernedLoopEffectAuthorityContractValidator.Validate(unchangedObservation).Errors,
+            error => error.Path == "$.currentAuthority.observedCapabilityPins");
+        Assert.Contains(
+            GovernedLoopEffectAuthorityContractValidator.Validate(unadmittedObservation).Errors,
+            error => error.Path == "$.currentAuthority.observedCapabilityPins");
+        Assert.True(GovernedLoopEffectAuthorityContractValidator.Validate(driftedObservation).IsValid);
+    }
+
+    [Fact]
     public void Null_unknown_schema_identity_bounds_hash_and_time_fail_closed()
     {
         var valid = GovernedLoopEffectAuthorityTestFixture.Decision();
