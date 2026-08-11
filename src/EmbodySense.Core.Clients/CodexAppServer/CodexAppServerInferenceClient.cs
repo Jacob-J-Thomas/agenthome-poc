@@ -81,7 +81,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
         CancellationToken cancellationToken = default)
     {
-        return GenerateAsync(request, responseChunkHandler, cancellationToken, providerRequestStarting: null);
+        return GenerateAsync(request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary: null);
     }
 
     /// <inheritdoc />
@@ -89,7 +89,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler,
         CancellationToken cancellationToken,
-        Func<CancellationToken, Task>? providerRequestStarting)
+        InferenceProviderTransportCommitBoundary? providerTransportCommitBoundary)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -113,18 +113,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
                     ["text"] = userText
                 }
             }
-            }, cancellationToken, async token =>
-            {
-                if (providerRequestStarting is not null)
-                {
-                    await providerRequestStarting(token);
-                }
-                else
-                {
-                    _providerRequestStarted?.Invoke();
-                }
-            });
-            if (providerRequestStarting is not null)
+            }, cancellationToken, providerTransportCommitBoundary ?? CommitLegacyProviderWriteAsync);
+            if (providerTransportCommitBoundary is not null)
             {
                 _providerRequestStarted?.Invoke();
             }
@@ -432,14 +422,14 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         int requestId,
         JsonObject parameters,
         CancellationToken cancellationToken,
-        Func<CancellationToken, Task>? beforeTransportWrite = null)
+        InferenceProviderTransportCommitBoundary? transportCommitBoundary = null)
     {
         await SendAsync(new JsonObject
         {
             ["id"] = requestId,
             ["method"] = method,
             ["params"] = parameters
-        }, cancellationToken, beforeTransportWrite);
+        }, cancellationToken, transportCommitBoundary);
     }
 
     private async Task SendNotificationAsync(string method, JsonObject parameters, CancellationToken cancellationToken)
@@ -451,18 +441,54 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         }, cancellationToken);
     }
 
-    private async Task SendAsync(JsonObject message, CancellationToken cancellationToken, Func<CancellationToken, Task>? beforeTransportWrite = null)
+    private async Task SendAsync(JsonObject message, CancellationToken cancellationToken, InferenceProviderTransportCommitBoundary? transportCommitBoundary = null)
     {
         var transport = GetTransport();
-        if (beforeTransportWrite is not null)
+        var line = message.ToJsonString();
+        if (transportCommitBoundary is not null)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await beforeTransportWrite(CancellationToken.None);
-            await WriteAfterDispatchCheckpointAsync(transport, message.ToJsonString(), cancellationToken);
+            var commitCount = 0;
+            try
+            {
+                await transportCommitBoundary(
+                    async token =>
+                    {
+                        if (Interlocked.Increment(ref commitCount) != 1)
+                        {
+                            throw new InvalidOperationException("The provider transport commit callback may be invoked at most once.");
+                        }
+
+                        await WriteAfterDispatchCheckpointAsync(transport, line, token);
+                    },
+                    cancellationToken);
+            }
+            catch
+            {
+                if (Volatile.Read(ref commitCount) > 0)
+                {
+                    AbandonAmbiguousTransport(transport);
+                }
+
+                throw;
+            }
+
+            if (Volatile.Read(ref commitCount) != 1)
+            {
+                throw new InvalidOperationException("The provider transport commit boundary returned without invoking its write callback.");
+            }
+
             return;
         }
 
-        await transport.WriteLineAsync(message.ToJsonString(), cancellationToken);
+        await transport.WriteLineAsync(line, cancellationToken);
+    }
+
+    private async Task CommitLegacyProviderWriteAsync(Func<CancellationToken, Task> commitTransportWrite, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _providerRequestStarted?.Invoke();
+        await commitTransportWrite(cancellationToken);
     }
 
     private async Task WriteAfterDispatchCheckpointAsync(ICodexAppServerTransport transport, string line, CancellationToken callerCancellationToken)
