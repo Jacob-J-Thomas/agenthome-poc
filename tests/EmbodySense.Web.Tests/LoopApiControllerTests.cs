@@ -38,9 +38,12 @@ public sealed class LoopApiControllerTests
             var uninitializedCreate = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "create-before-init", definition = CreateFirstSaveDefinition() });
             var initialized = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { });
             var catalogResponse = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
-            var catalog = (await catalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(_jsonOptions))!;
+            var catalogJson = await catalogResponse.Content.ReadAsStringAsync();
+            var catalog = JsonSerializer.Deserialize<LoopAuthoringCatalog>(catalogJson, _jsonOptions)!;
             var systemGet = await SendAsync(client, HttpMethod.Get, "/api/loops/default-conversation", token);
             var systemJson = await systemGet.Content.ReadAsStringAsync();
+            using var catalogDocument = JsonDocument.Parse(catalogJson);
+            using var systemDocument = JsonDocument.Parse(systemJson);
             var systemDefinition = JsonSerializer.Deserialize<SystemLoopDefinitionSnapshot>(systemJson, _jsonOptions)!;
             var canonicalSystemDefinition = LoopDefinition.CreateDefaultConversation();
             var malformedGet = await SendAsync(client, HttpMethod.Get, "/api/loops/INVALID%20ID", token);
@@ -70,6 +73,14 @@ public sealed class LoopApiControllerTests
             Assert.Equal("gpt-test", catalog.RuntimeModel.Model);
             Assert.Equal(HttpStatusCode.OK, systemGet.StatusCode);
             Assert.True(systemGet.Headers.CacheControl?.NoStore == true);
+            var catalogSystem = catalogDocument.RootElement.GetProperty("systemDefault");
+            Assert.True(catalogSystem.TryGetProperty("owningRole", out _));
+            Assert.False(catalogSystem.TryGetProperty("roleId", out _));
+            Assert.True(systemDocument.RootElement.TryGetProperty("owningRole", out var owningRole));
+            Assert.False(systemDocument.RootElement.TryGetProperty("roleId", out _));
+            Assert.Equal("default-assistant", owningRole.GetProperty("identity").GetProperty("roleId").GetString());
+            Assert.Equal(1, owningRole.GetProperty("identity").GetProperty("revision").GetInt32());
+            Assert.Equal(64, owningRole.GetProperty("contentHash").GetString()!.Length);
             Assert.Equal(LoopTrigger.HumanMessage, systemDefinition.Trigger);
             Assert.Equal(LoopMemoryScope.WorkspaceStartupContext, systemDefinition.MemoryScope);
             Assert.Equal(LoopEditMode.SystemLocked, systemDefinition.EditMode);

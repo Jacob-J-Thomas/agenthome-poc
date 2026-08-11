@@ -7,7 +7,12 @@ using EmbodySense.Core.Application.Loops.Authoring;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.ContextualRoles.Models;
+using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Persistence.Audit;
+using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Startup.Loops.Execution;
@@ -78,11 +83,11 @@ public sealed class LoopAuthoringFacade
     /// <returns>A task whose result is the complete authoring catalog for the system role.</returns>
     public async Task<LoopAuthoringCatalog> GetCatalogAsync(CancellationToken cancellationToken = default)
     {
-        var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
+        var (systemDefinition, owningRole) = await GetSystemAuthorityAsync(cancellationToken);
         var definitions = await _service.ListAsync(systemDefinition.RoleId, cancellationToken);
         return new LoopAuthoringCatalog(
             systemDefinition.RoleId,
-            MapSystemDefinition(systemDefinition),
+            MapSystemDefinition(systemDefinition, owningRole),
             definitions.Select(Map).ToArray(),
             CreateDraftTemplate(systemDefinition.RoleId),
             CreateLimits(),
@@ -97,7 +102,7 @@ public sealed class LoopAuthoringFacade
     /// <returns>A task whose result is the definition, or null when no definition is visible to the current role.</returns>
     public async Task<LoopDefinitionSnapshot?> GetAsync(string loopId, CancellationToken cancellationToken = default)
     {
-        var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
+        var (systemDefinition, _) = await GetSystemAuthorityAsync(cancellationToken);
         var definition = await _service.GetAsync(loopId, systemDefinition.RoleId, cancellationToken);
         return definition is null ? null : Map(definition);
     }
@@ -110,7 +115,7 @@ public sealed class LoopAuthoringFacade
     /// <returns>A task whose result reports commit status, the created definition, validation, conflict, and audit detail.</returns>
     public async Task<LoopAuthoringResponse> CreateAsync(string operationId, CancellationToken cancellationToken = default)
     {
-        var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
+        var (systemDefinition, _) = await GetSystemAuthorityAsync(cancellationToken);
         return Map(await _service.CreateAsync(systemDefinition.RoleId, operationId, _actor, cancellationToken));
     }
 
@@ -125,7 +130,7 @@ public sealed class LoopAuthoringFacade
     {
         ArgumentNullException.ThrowIfNull(input);
 
-        var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
+        var (systemDefinition, _) = await GetSystemAuthorityAsync(cancellationToken);
         var currentRoleCeiling = CustomLoopToolAuthorityProvider.ResolveCurrentRoleCeiling(systemDefinition);
         var result = await _service.CreateAsync(systemDefinition.RoleId, operationId, _actor, MapDefinitionInput(input), currentRoleCeiling, cancellationToken);
         return Map(result);
@@ -144,7 +149,7 @@ public sealed class LoopAuthoringFacade
     {
         ArgumentNullException.ThrowIfNull(input);
 
-        var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
+        var (systemDefinition, _) = await GetSystemAuthorityAsync(cancellationToken);
         var currentRoleCeiling = CustomLoopToolAuthorityProvider.ResolveCurrentRoleCeiling(systemDefinition);
         var result = await _service.UpdateAsync(loopId, expectedDefinitionVersion, systemDefinition.RoleId, operationId, _actor, MapDefinitionInput(input), currentRoleCeiling, cancellationToken);
         return Map(result);
@@ -160,29 +165,74 @@ public sealed class LoopAuthoringFacade
     /// <returns>A task whose result distinguishes deletion, replay, conflict, rejection, and audit-warning outcomes.</returns>
     public async Task<LoopAuthoringResponse> DeleteAsync(string loopId, int expectedDefinitionVersion, string operationId, CancellationToken cancellationToken = default)
     {
-        var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
+        var (systemDefinition, _) = await GetSystemAuthorityAsync(cancellationToken);
         return Map(await _service.DeleteAsync(loopId, expectedDefinitionVersion, systemDefinition.RoleId, operationId, _actor, cancellationToken));
     }
 
-    private async Task<LoopDefinition> GetSystemDefinitionAsync(CancellationToken cancellationToken)
+    private async Task<(LoopDefinition Definition, ContextualRoleRevisionPin OwningRole)> GetSystemAuthorityAsync(CancellationToken cancellationToken)
     {
         var definition = await _systemDefinitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation, cancellationToken);
-        if (definition is not null)
+        if (definition is null)
         {
-            if (!string.Equals(definition.Id, BuiltInLoopIds.DefaultConversation, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException("The persisted default conversation authority definition has a substituted identity; loop authoring failed closed.");
-            }
-
-            return definition;
+            throw new InvalidOperationException("The workspace is missing its default conversation authority definition in persistence; loop authoring failed closed.");
         }
 
-        if (_paths?.IsInitialized == true)
+        if (!string.Equals(definition.Id, BuiltInLoopIds.DefaultConversation, StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("The initialized workspace is missing its default conversation authority definition; loop authoring failed closed.");
+            throw new InvalidOperationException("The persisted default conversation authority definition has a substituted identity; loop authoring failed closed.");
         }
 
-        return LoopDefinition.CreateDefaultConversation();
+        if (!string.Equals(definition.RoleId, DefaultContextualRoleSeeder.RoleId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The persisted default conversation authority definition names a substituted contextual role; loop authoring failed closed.");
+        }
+
+        if (_paths is null)
+        {
+            throw new InvalidOperationException("The default contextual-role workspace binding is unavailable; loop authoring failed closed.");
+        }
+
+        var workspaceId = CapabilityWorkspaceScopeId.Create(_paths.RootPath);
+        var expectedIdentity = new ContextualRoleRevisionIdentity(DefaultContextualRoleSeeder.RoleId, DefaultContextualRoleSeeder.Revision);
+        var expectedRevision = DefaultContextualRoleSeeder.CreateRevision(workspaceId);
+        using var store = new ContextualRoleRevisionStore(_paths, workspaceId);
+        var lifecycleRead = await store.ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest(expectedIdentity.RoleId), cancellationToken);
+        if (lifecycleRead.Status != ContextualRoleLifecycleReadStatus.Found
+            || lifecycleRead.Snapshot is not { State: ContextualRoleLifecycleState.Active } lifecycle
+            || lifecycle.CurrentIdentity != expectedIdentity)
+        {
+            throw new InvalidOperationException("The exact active default contextual-role lifecycle could not be proved; loop authoring failed closed.");
+        }
+
+        var revisionRead = await store.ReadAsync(new ContextualRoleRevisionReadRequest(expectedIdentity), cancellationToken);
+        if (revisionRead.Status != ContextualRoleRevisionReadStatus.Found
+            || revisionRead.Disposition != ContextualRoleRevisionDisposition.Active
+            || revisionRead.Revision is not { } revision
+            || !DefaultContextualRoleSeeder.Matches(expectedRevision, revision))
+        {
+            throw new InvalidOperationException("The exact published default contextual-role revision could not be proved; loop authoring failed closed.");
+        }
+
+        var sourceRead = await new WorkspaceContextualRoleInstructionSourceProbe(_paths).ProbeAsync(revision.InstructionSource, cancellationToken);
+        if (sourceRead.Status != ContextualRoleInstructionSourceProbeStatus.Ready)
+        {
+            throw new InvalidOperationException("The exact default contextual-role instruction source is unavailable or substituted; loop authoring failed closed.");
+        }
+
+        var confirmedLifecycle = await store.ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest(expectedIdentity.RoleId), cancellationToken);
+        var confirmedRevision = await store.ReadAsync(new ContextualRoleRevisionReadRequest(expectedIdentity), cancellationToken);
+        var confirmedSource = await new WorkspaceContextualRoleInstructionSourceProbe(_paths).ProbeAsync(revision.InstructionSource, cancellationToken);
+        if (confirmedLifecycle.Status != ContextualRoleLifecycleReadStatus.Found
+            || confirmedLifecycle.Snapshot != lifecycle
+            || confirmedRevision.Status != ContextualRoleRevisionReadStatus.Found
+            || confirmedRevision.Disposition != ContextualRoleRevisionDisposition.Active
+            || confirmedSource.Status != ContextualRoleInstructionSourceProbeStatus.Ready
+            || !DefaultContextualRoleSeeder.Matches(revision, confirmedRevision.Revision))
+        {
+            throw new InvalidOperationException("The default contextual-role evidence changed while it was being projected; loop authoring failed closed.");
+        }
+
+        return (definition, new ContextualRoleRevisionPin(expectedIdentity, revision.ContentHash));
     }
 
     private static LoopAuthoringLimits CreateLimits()
@@ -277,7 +327,7 @@ public sealed class LoopAuthoringFacade
             definition.LastMutationOperationId);
     }
 
-    private static SystemLoopDefinitionSnapshot MapSystemDefinition(LoopDefinition definition)
+    private static SystemLoopDefinitionSnapshot MapSystemDefinition(LoopDefinition definition, ContextualRoleRevisionPin owningRole)
     {
         var graph = definition.Graph;
         var executionBlocker = DefaultConversationLoopGraphContract.GetExecutionBlocker(definition);
@@ -290,7 +340,7 @@ public sealed class LoopAuthoringFacade
             definition.Id,
             definition.DisplayName,
             definition.Description,
-            definition.RoleId,
+            owningRole,
             definition.Trigger,
             definition.MemoryScope,
             definition.CapabilityIds.ToArray(),

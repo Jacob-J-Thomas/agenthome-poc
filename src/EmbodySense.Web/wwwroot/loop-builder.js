@@ -1220,6 +1220,14 @@ function applyDefinition(definition) {
   historicalLoopId = null;
   currentDefinition = definition;
   draft = definition ? clone(definition) : null;
+  if (draft?.id === "default-conversation") {
+    const pinnedRoleId = draft.owningRole?.identity?.roleId;
+    if (typeof pinnedRoleId !== "string" || !pinnedRoleId)
+      throw new Error(
+        "The system loop is missing its exact owning-role revision pin.",
+      );
+    draft.roleId = pinnedRoleId;
+  }
   const initialNodeId = definition?.graph?.entryNodeId ?? "trigger";
   selectedNodeId = initialNodeId;
   lastSelectedNodeId = initialNodeId;
@@ -2431,7 +2439,7 @@ function renderRunEvidence() {
   );
   appendEvidenceSection(
     "Role and authority",
-    definition.roleId,
+    definitionRoleId(definition),
     definition.toolAssignments.length
       ? definition.toolAssignments.join(" · ")
       : "No model-facing tools assigned",
@@ -2684,7 +2692,7 @@ function appendRunProgressEvidence(run, definition) {
   appendEvidenceSection(
     "Status and checkpoint",
     `${formatStatus(run.status)} · ${current}`,
-    `run ${run.id}\nloop ${run.loopId} · role ${definition.roleId} · ${run.surface} surface\nlifecycle version ${run.lifecycleVersion}\nexecution ${deadlineText}\nnext proved boundary ${nextStep}\niteration ${checkpoint?.iteration ?? "unknown"} · accepted repeats ${checkpoint?.acceptedRepeatCount ?? "unknown"} · tool requests ${checkpoint?.toolRequestsUsed ?? "unknown"}\nlast committed sequence ${checkpoint?.lastCommittedSequence ?? "none"} · latest event ${latest?.sequence ?? "none"} ${latest?.kind ? formatStatus(latest.kind) : ""}\npending approvals visible to this connection ${elements.approvals.children.length}`,
+    `run ${run.id}\nloop ${run.loopId} · role ${definitionRoleId(definition)} · ${run.surface} surface\nlifecycle version ${run.lifecycleVersion}\nexecution ${deadlineText}\nnext proved boundary ${nextStep}\niteration ${checkpoint?.iteration ?? "unknown"} · accepted repeats ${checkpoint?.acceptedRepeatCount ?? "unknown"} · tool requests ${checkpoint?.toolRequestsUsed ?? "unknown"}\nlast committed sequence ${checkpoint?.lastCommittedSequence ?? "none"} · latest event ${latest?.sequence ?? "none"} ${latest?.kind ? formatStatus(latest.kind) : ""}\npending approvals visible to this connection ${elements.approvals.children.length}`,
   );
 }
 
@@ -2732,6 +2740,12 @@ function evidenceSection(label) {
   const container = node("section", "evidence-section");
   container.append(node("div", "evidence-label", label));
   return container;
+}
+
+function definitionRoleId(definition) {
+  return (
+    definition?.roleId ?? definition?.owningRole?.identity?.roleId ?? "unknown"
+  );
 }
 
 function renderList() {

@@ -8879,7 +8879,11 @@ function createCatalog() {
       id: "default-conversation",
       displayName: "Default conversation",
       description: "System-managed conversation loop.",
-      roleId: "default",
+      owningRole: {
+        identity: { roleId: "default", revision: 1 },
+        contentHash:
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
       trigger: "human-message",
       memoryScope: "workspace-startup-context",
       capabilityIds: [

@@ -19,8 +19,8 @@
         <mxCell id="help" value="help / no args&lt;br&gt;HelpCommand.PrintRoot()&lt;br&gt;return 0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FAFC;strokeColor=#718096;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="350" y="130" width="210" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="init" value="init [root]&lt;br&gt;WorkspaceInitializer.InitializeAsync(root)&lt;br&gt;WorkspaceDefaults supplies dirs and seed files&lt;br&gt;Append workspace.init audit event" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="1">
-          <mxGeometry x="350" y="235" width="270" height="115" as="geometry" />
+        <mxCell id="init" value="init [root]&lt;br&gt;Read-only freshness + exact marker preflight&lt;br&gt;Partial/concurrent .agent fails closed&lt;br&gt;Scaffold ROLE.md, then persist + verify exact default-assistant revision 1&lt;br&gt;Write completion marker last" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="350" y="225" width="300" height="135" as="geometry" />
         </mxCell>
         <mxCell id="status" value="status [root]&lt;br&gt;WorkspacePaths + ToolPermissionService&lt;br&gt;Print initialized state, audit path,&lt;br&gt;permissions defaults, read/write dirs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="350" y="385" width="270" height="105" as="geometry" />

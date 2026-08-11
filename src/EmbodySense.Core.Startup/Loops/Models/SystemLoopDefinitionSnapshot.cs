@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Models;
 
 namespace EmbodySense.Core.Startup.Loops.Models;
@@ -14,7 +15,7 @@ namespace EmbodySense.Core.Startup.Loops.Models;
 /// <param name="Id">The stable loop identifier.</param>
 /// <param name="DisplayName">The human-readable loop name.</param>
 /// <param name="Description">The human-readable loop purpose.</param>
-/// <param name="RoleId">The contextual role that owns the loop.</param>
+/// <param name="OwningRole">The exact persisted contextual-role revision that owns the loop.</param>
 /// <param name="Trigger">The implemented trigger policy.</param>
 /// <param name="MemoryScope">The implemented memory and startup-context scope.</param>
 /// <param name="CapabilityIds">The loop-scoped capability identifiers.</param>
@@ -29,7 +30,7 @@ public sealed record SystemLoopDefinitionSnapshot(
     string Id,
     string DisplayName,
     string Description,
-    string RoleId,
+    ContextualRoleRevisionPin OwningRole,
     LoopTrigger Trigger,
     LoopMemoryScope MemoryScope,
     IReadOnlyList<string> CapabilityIds,

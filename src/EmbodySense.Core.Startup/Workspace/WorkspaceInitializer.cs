@@ -18,6 +18,8 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
 {
     private readonly WorkspaceScaffolder _scaffolder;
     private readonly BuiltInCapabilityCatalogSeeder _capabilitySeeder;
+    private readonly IDefaultContextualRoleSeeder _roleSeeder;
+    private readonly IWorkspaceInitializationBoundaryObserver? _boundaryObserver;
     private readonly string _actor;
 
     /// <summary>
@@ -49,13 +51,32 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
     /// <param name="capabilitySeeder">The Startup-owned built-in capability seeder.</param>
     /// <param name="actor">The nonblank actor recorded for successful initialization.</param>
     public WorkspaceInitializer(WorkspaceScaffolder scaffolder, BuiltInCapabilityCatalogSeeder capabilitySeeder, string actor = WorkspaceActors.Web)
+        : this(scaffolder, capabilitySeeder, new DefaultContextualRoleSeeder(), null, actor)
+    {
+    }
+
+    /// <summary>Creates an initializer over explicit persistence, seeding, and pre-mutation observation components.</summary>
+    /// <param name="scaffolder">The persistence component that performs ordered scaffold writes.</param>
+    /// <param name="capabilitySeeder">The Startup-owned built-in capability seeder.</param>
+    /// <param name="roleSeeder">The Startup-owned default contextual-role seeder.</param>
+    /// <param name="boundaryObserver">An optional observer invoked after the read-only freshness decision and before mutation.</param>
+    /// <param name="actor">The nonblank actor recorded for successful initialization.</param>
+    public WorkspaceInitializer(
+        WorkspaceScaffolder scaffolder,
+        BuiltInCapabilityCatalogSeeder capabilitySeeder,
+        IDefaultContextualRoleSeeder roleSeeder,
+        IWorkspaceInitializationBoundaryObserver? boundaryObserver = null,
+        string actor = WorkspaceActors.Web)
     {
         ArgumentNullException.ThrowIfNull(scaffolder);
         ArgumentNullException.ThrowIfNull(capabilitySeeder);
+        ArgumentNullException.ThrowIfNull(roleSeeder);
         ArgumentException.ThrowIfNullOrWhiteSpace(actor);
 
         _scaffolder = scaffolder;
         _capabilitySeeder = capabilitySeeder;
+        _roleSeeder = roleSeeder;
+        _boundaryObserver = boundaryObserver;
         _actor = actor;
     }
 
@@ -99,13 +120,59 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
         var paths = new WorkspacePaths(rootPath);
         cancellationToken.ThrowIfCancellationRequested();
         _capabilitySeeder.RequireDisjointTrustRoot(paths.RootPath);
+        var wasFreshAgentHome = !Directory.Exists(paths.AgentPath) && !File.Exists(paths.AgentPath);
+        var hadValidCompletionMarker = !wasFreshAgentHome
+            && WorkspaceInitializationCompletion.IsValid(paths.WorkspaceInitializationMarkerPath);
+        if (!wasFreshAgentHome && !hadValidCompletionMarker)
+        {
+            throw new InvalidOperationException("The workspace contains a partial or invalid .agent initialization. Remove .agent explicitly before reinitializing; automatic backfill is not allowed.");
+        }
+
+        if (_boundaryObserver is { } observer)
+        {
+            await observer.OnFreshnessCapturedAsync(paths, wasFreshAgentHome, hadValidCompletionMarker, cancellationToken);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
         Directory.CreateDirectory(paths.RootPath);
-        if (Directory.Exists(paths.AgentPath))
+        if (wasFreshAgentHome)
+        {
+            ClaimFreshAgentHome(paths);
+        }
+        else
         {
             File.Delete(paths.WorkspaceInitializationMarkerPath);
         }
+
         await _capabilitySeeder.SeedAsync(paths, cancellationToken);
         await _scaffolder.ApplyAsync(paths, WorkspaceDefaults.GetDirectories(paths), WorkspaceDefaults.GetSeedFiles(paths), _actor, cancellationToken);
+        if (wasFreshAgentHome)
+        {
+            await _roleSeeder.SeedAsync(paths, cancellationToken);
+            await DefaultContextualRoleSeeder.VerifyAsync(paths, cancellationToken);
+        }
+
         await WorkspaceInitializationCompletion.WriteAsync(paths.WorkspaceInitializationMarkerPath, cancellationToken);
+    }
+
+    private static void ClaimFreshAgentHome(WorkspacePaths paths)
+    {
+        var claimPath = Path.Combine(paths.RootPath, $".agent-initialization-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(claimPath);
+        try
+        {
+            Directory.Move(claimPath, paths.AgentPath);
+        }
+        catch (IOException exception) when (Directory.Exists(paths.AgentPath) || File.Exists(paths.AgentPath))
+        {
+            throw new InvalidOperationException("The .agent directory appeared after the fresh-workspace decision; initialization failed closed without backfilling concurrent state.", exception);
+        }
+        finally
+        {
+            if (Directory.Exists(claimPath))
+            {
+                Directory.Delete(claimPath);
+            }
+        }
     }
 }
