@@ -181,7 +181,7 @@ internal static class AuthorityGrantApplicationTestFixture
         var revision = new AuthorityProfileRevisionEvidence(profile, hash, operationId, Now.AddMinutes(-30));
         var receipt = new AuthorityProfileOperationReceipt(
             operationId,
-            Hash64('4'),
+            IntegrityHash('4'),
             profile.Revision.Value == 1 ? AuthorityProfileMutationKind.Create : AuthorityProfileMutationKind.Revise,
             AuthorityProfileMutationStatus.Applied,
             profile.ProfileId,
@@ -196,7 +196,7 @@ internal static class AuthorityGrantApplicationTestFixture
             tombstone = new AuthorityProfileTombstone("tombstone-profile", Actor(), Purpose(), Now.AddMinutes(-20));
             operations.Add(new AuthorityProfileOperationReceipt(
                 tombstone.OperationId,
-                Hash64('5'),
+                IntegrityHash('5'),
                 AuthorityProfileMutationKind.Tombstone,
                 AuthorityProfileMutationStatus.Applied,
                 profile.ProfileId,
@@ -367,4 +367,6 @@ internal static class AuthorityGrantApplicationTestFixture
     }
 
     internal static string Hash64(char value) => new(value, 64);
+
+    internal static string IntegrityHash(char value) => "sha256:" + Hash64(value);
 }

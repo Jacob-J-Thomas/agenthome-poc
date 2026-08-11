@@ -60,8 +60,26 @@ internal sealed class CustomLoopRuntimeContext
     /// conversation version. Divergence fails before an admission snapshot is returned.
     /// </remarks>
     public async Task<CustomLoopRuntimeContextCapture> CaptureAsync(bool includeInvokingConversation, CancellationToken cancellationToken)
+        => await CaptureAsync(includeInvokingConversation, _timeProvider.GetUtcNow().ToUniversalTime(), cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Captures context at one caller-pinned UTC instant so an unbound durable invocation can reproduce its exact
+    /// immutable snapshot after a crash without treating mutable context as interchangeable.
+    /// </summary>
+    /// <param name="includeInvokingConversation">Whether logical conversation content is admitted rather than represented as omitted evidence.</param>
+    /// <param name="capturedAtUtc">The durable UTC instant already bound to the invocation Begin receipt.</param>
+    /// <param name="cancellationToken">The token used to cancel document and coordinated conversation reads.</param>
+    /// <returns>A task whose result contains the hashed context snapshot and immutable conversation reference.</returns>
+    public async Task<CustomLoopRuntimeContextCapture> CaptureAsync(
+        bool includeInvokingConversation,
+        DateTimeOffset capturedAtUtc,
+        CancellationToken cancellationToken)
     {
-        var capturedAtUtc = _timeProvider.GetUtcNow().ToUniversalTime();
+        if (capturedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("The pinned context-capture instant must be UTC.", nameof(capturedAtUtc));
+        }
+
         var documents = await _workspaceContextStore.LoadDocumentsAsync(_paths, cancellationToken);
         ConversationMemorySnapshot persistedConversation;
         LlmMessage[] logicalMessages;

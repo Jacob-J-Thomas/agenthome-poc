@@ -2228,8 +2228,15 @@ public sealed class CustomLoopRunStore :
         }
 
         var maximumAttempts = CustomLoopLimits.GetMaximumModelAttempts(run.AdmittedDefinition.InferenceSteps.Length, run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations);
-        var startedAttempts = run.Events.Count(item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted);
-        if (startedAttempts > maximumAttempts)
+        var canonicalExitStarts = run.Events.Count(IsCanonicalDeterministicExitStart);
+        if (canonicalExitStarts > 1)
+        {
+            throw new FormatException("A schema-1 sequential run can retain only one deterministic canonical Exit dispatch marker.");
+        }
+
+        var startedModelAttempts = run.Events.Count(item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
+            - canonicalExitStarts;
+        if (startedModelAttempts > maximumAttempts)
         {
             throw new FormatException("The run contains more provider-attempt starts than its admitted traversal can execute.");
         }
@@ -2250,6 +2257,20 @@ public sealed class CustomLoopRunStore :
             + remainingControlReserve
             + CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes);
     }
+
+    private static bool IsCanonicalDeterministicExitStart(CustomLoopRunEvent item)
+        => item is
+        {
+            Kind: CustomLoopRunEventKind.ExitDecisionStarted,
+            StepId: "exit",
+            Attempt: 1,
+            SequentialNodeEvidence:
+            {
+                SchemaVersion: CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
+                Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+                Disposition: CustomLoopSequentialNodeDisposition.Unknown,
+            },
+        };
 
     private static int GetToolEvidencePhaseUtf8Bytes(CustomLoopToolTraceEvidence evidence)
     {
