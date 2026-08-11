@@ -53,6 +53,12 @@ public static class GovernedLoopSequentialRunAnchorGuard
         var receipt = admissionReceipt!;
         var invocation = invocationSnapshot!;
         var artifact = graphArtifact!;
+        if (invocation.ContextCapturedAtUtc > receipt.Evidence.EvaluatedAtUtc
+            || invocation.ContextCapturedAtUtc > receipt.RecordedAtUtc)
+        {
+            return Failure(GovernedLoopSequentialRunAnchorStatus.AdmissionCausalityMismatch);
+        }
+
         if (!string.Equals(binding.WorkspaceId, receipt.Intent.WorkspaceId, StringComparison.Ordinal))
         {
             return Failure(GovernedLoopSequentialRunAnchorStatus.WorkspaceMismatch);
@@ -152,9 +158,11 @@ public static class GovernedLoopSequentialRunAnchorGuard
     }
 
     private static bool IsToken(string? value, int maximum)
-        => !string.IsNullOrWhiteSpace(value)
+        => !string.IsNullOrEmpty(value)
             && value.Length <= maximum
-            && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '_');
+            && value[0] is >= 'a' and <= 'z' or >= '0' and <= '9'
+            && value[^1] is >= 'a' and <= 'z' or >= '0' and <= '9'
+            && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '_' or '.');
 
     private static bool IsHash(string? value)
         => value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');

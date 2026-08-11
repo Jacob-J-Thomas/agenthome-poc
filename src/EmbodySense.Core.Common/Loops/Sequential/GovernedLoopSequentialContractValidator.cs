@@ -1,6 +1,7 @@
 using System.Text;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
@@ -56,7 +57,7 @@ public static class GovernedLoopSequentialContractValidator
         ValidateModel(snapshot.ModelSnapshot, errors);
         ValidateConversation(snapshot.InvokingConversation, snapshot.ContextCapturedAtUtc, errors);
         ValidateUtc(snapshot.ContextCapturedAtUtc, "$.contextCapturedAtUtc", errors);
-        ValidateContext(snapshot.ContextManifest, snapshot.ContextCapturedAtUtc, errors);
+        ValidateContext(snapshot.ContextManifest, snapshot.InvokingConversation, snapshot.ContextCapturedAtUtc, errors);
         if (validateContentHash)
         {
             ValidateHash(snapshot.ContentHash, "$.contentHash", errors);
@@ -126,7 +127,11 @@ public static class GovernedLoopSequentialContractValidator
             return;
         }
 
-        ValidateText(conversation.ConversationId, "$.invokingConversation.conversationId", GovernedLoopSequentialContractLimits.MaxReferenceCharacters, required: true, errors);
+        if (!CustomLoopArtifactIdentifier.IsValid(conversation.ConversationId))
+        {
+            Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidIdentity, "$.invokingConversation.conversationId");
+        }
+
         ValidateText(conversation.CapturedVersion, "$.invokingConversation.capturedVersion", GovernedLoopSequentialContractLimits.MaxReferenceCharacters, required: true, errors);
         ValidateUtc(conversation.CapturedAtUtc, "$.invokingConversation.capturedAtUtc", errors);
         if (IsUtc(conversation.CapturedAtUtc) && IsUtc(contextCapturedAtUtc) && conversation.CapturedAtUtc > contextCapturedAtUtc)
@@ -137,6 +142,7 @@ public static class GovernedLoopSequentialContractValidator
 
     private static void ValidateContext(
         IReadOnlyList<CustomLoopContextManifestSource>? manifest,
+        CustomLoopConversationReference? invokingConversation,
         DateTimeOffset capturedAtUtc,
         List<GovernedLoopSequentialValidationError> errors)
     {
@@ -156,6 +162,22 @@ public static class GovernedLoopSequentialContractValidator
         {
             Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.contextManifest");
         }
+
+        if (manifest.Count > 7 && invokingConversation is null)
+        {
+            Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.invokingConversation");
+        }
+
+        var workspaceSources = new[]
+        {
+            (Id: "nearest-agents", PathSuffix: "AGENTS.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "role", PathSuffix: ".agent/ROLE.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "soul", PathSuffix: ".agent/SOUL.md", Source: CustomLoopContextSource.AgentIdentity, Provenance: CustomLoopContextProvenance.WorkspaceAgentIdentityFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "personality", PathSuffix: ".agent/PERSONALITY.md", Source: CustomLoopContextSource.AgentIdentity, Provenance: CustomLoopContextProvenance.WorkspaceAgentIdentityFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "context", PathSuffix: ".agent/CONTEXT.md", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User),
+            (Id: "memory", PathSuffix: ".agent/MEMORY.md", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User),
+            (Id: "models", PathSuffix: ".agent/models.json", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User),
+        };
 
         long totalCharacters = 0;
         long conversationCharacters = 0;
@@ -195,6 +217,32 @@ public static class GovernedLoopSequentialContractValidator
             if (!string.IsNullOrEmpty(source.SourceId) && !sourceIds.Add(source.SourceId))
             {
                 Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidComposition, $"{path}.sourceId");
+            }
+
+            if (index < workspaceSources.Length)
+            {
+                var expected = workspaceSources[index];
+                if (!string.Equals(source.SourceId, expected.Id, StringComparison.Ordinal)
+                    || !HasPathSuffix(source.SourcePath, expected.PathSuffix)
+                    || source.SourceType != expected.Source
+                    || source.Provenance != expected.Provenance
+                    || source.TrustClass != expected.Trust
+                    || source.Role != expected.Role)
+                {
+                    Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidComposition, path);
+                }
+
+                if (source.UsedCharacterCount > CustomLoopLimits.MaxInstructionCharacters)
+                {
+                    Add(errors, GovernedLoopSequentialValidationErrorCode.CollectionTooLarge, $"{path}.usedCharacterCount");
+                }
+            }
+            else if (source.SourceType != CustomLoopContextSource.InvokingConversation
+                || source.Provenance != CustomLoopContextProvenance.LogicalConversation
+                || source.TrustClass != CustomLoopContextTrustClass.UntrustedData
+                || source.Role != LlmMessageRole.User)
+            {
+                Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidComposition, path);
             }
 
             ValidateUtc(source.CapturedAtUtc, $"{path}.capturedAtUtc", errors);
@@ -260,9 +308,11 @@ public static class GovernedLoopSequentialContractValidator
 
     private static void ValidateToken(string? value, string path, List<GovernedLoopSequentialValidationError> errors)
     {
-        if (string.IsNullOrWhiteSpace(value)
+        if (string.IsNullOrEmpty(value)
             || value.Length > GovernedLoopSequentialContractLimits.MaxIdentifierCharacters
-            || value.Any(character => character is not (>= 'a' and <= 'z') and not (>= '0' and <= '9') and not '-' and not '_'))
+            || value[0] is not (>= 'a' and <= 'z') and not (>= '0' and <= '9')
+            || value[^1] is not (>= 'a' and <= 'z') and not (>= '0' and <= '9')
+            || value.Any(character => character is not (>= 'a' and <= 'z') and not (>= '0' and <= '9') and not '-' and not '_' and not '.'))
         {
             Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidIdentity, path);
         }
@@ -352,6 +402,9 @@ public static class GovernedLoopSequentialContractValidator
             && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static bool IsUtc(DateTimeOffset value) => value != default && value.Offset == TimeSpan.Zero;
+
+    private static bool HasPathSuffix(string? path, string expectedSuffix)
+        => path?.Replace('\\', '/').EndsWith(expectedSuffix, StringComparison.Ordinal) == true;
 
     private static GovernedLoopSequentialValidationResult Result(IEnumerable<GovernedLoopSequentialValidationError> errors)
         => GovernedLoopSequentialValidationResult.FromErrors(errors);

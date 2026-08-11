@@ -77,6 +77,17 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
     }
 
     [Fact]
+    public async Task Guard_rejects_a_self_consistent_invocation_captured_after_admission_evaluation()
+    {
+        var context = await ContextAsync(GovernedLoopSequentialApplicationTestFixture.Now.AddTicks(1));
+
+        Assert.True(GovernedLoopSequentialContractValidator.Validate(context.Invocation).IsValid);
+        Assert.True(GovernedLoopAdmissionValidator.Validate(context.Receipt).IsValid);
+        Assert.Equal(GovernedLoopSequentialRunAnchorStatus.AdmissionCausalityMismatch, context.AnchorResult.Status);
+        Assert.Null(context.AnchorResult.Anchor);
+    }
+
+    [Fact]
     public void Registry_rejects_null_duplicate_oversized_and_unsupported_handler_sets()
     {
         var trigger = new TestHandler(GovernedLoopSequentialNodeDescriptors.ManualTrigger);
@@ -88,6 +99,16 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
         Assert.Throws<ArgumentException>(() => new GovernedLoopSequentialNodeHandlerRegistry([trigger, trigger]));
         Assert.Throws<ArgumentException>(() => new GovernedLoopSequentialNodeHandlerRegistry([unsupported]));
         Assert.Throws<ArgumentException>(() => new GovernedLoopSequentialNodeHandlerRegistry([trigger, inference, exit, trigger]));
+    }
+
+    [Fact]
+    public void Dispatcher_requires_both_exact_registry_and_retained_evidence_ports()
+    {
+        var registry = new GovernedLoopSequentialNodeHandlerRegistry([]);
+        var source = new TestEvidenceSource(null);
+
+        Assert.Throws<ArgumentNullException>(() => new GovernedLoopSequentialNodeDispatcher(null!, source));
+        Assert.Throws<ArgumentNullException>(() => new GovernedLoopSequentialNodeDispatcher(registry, null!));
     }
 
     [Fact]
@@ -113,19 +134,69 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
         GovernedLoopSequentialNodeDispatchStatus expectedStatus)
     {
         var context = await ContextAsync();
+        var evidence = Evidence(context, context.Plan.Nodes[1], handlerStatus);
         var handler = new TestHandler(GovernedLoopSequentialNodeDescriptors.ProviderInference)
         {
-            Result = new GovernedLoopSequentialNodeHandlerResult(handlerStatus, Hash('9')),
+            Result = new GovernedLoopSequentialNodeHandlerResult(handlerStatus, evidence.EvidenceHash),
         };
-        var dispatcher = new GovernedLoopSequentialNodeDispatcher(new GovernedLoopSequentialNodeHandlerRegistry([handler]));
+        var evidenceSource = new TestEvidenceSource(evidence);
+        var dispatcher = new GovernedLoopSequentialNodeDispatcher(new GovernedLoopSequentialNodeHandlerRegistry([handler]), evidenceSource);
         var request = DispatchRequest(context, context.Plan.Nodes[1]);
 
         var result = await dispatcher.DispatchAsync(request);
 
         Assert.Equal(expectedStatus, result.Status);
-        Assert.Equal(Hash('9'), result.EvidenceHash);
+        Assert.Equal(evidence.EvidenceHash, result.EvidenceHash);
         Assert.Equal(1, handler.CallCount);
         Assert.Same(request, handler.LastRequest);
+        Assert.Equal(1, evidenceSource.CallCount);
+        Assert.Equal(evidence.EvidenceHash, evidenceSource.LastEvidenceHash);
+        Assert.Equal(CancellationToken.None, evidenceSource.LastCancellationToken);
+    }
+
+    [Fact]
+    public async Task Dispatcher_rejects_absent_malformed_or_causally_substituted_retained_evidence()
+    {
+        var context = await ContextAsync();
+        var node = context.Plan.Nodes[1];
+        var valid = Evidence(context, node, GovernedLoopSequentialNodeHandlerResultStatus.Completed);
+        var otherRevision = GovernedLoopRevisionReference.Create(
+            valid.Revision.SchemaVersion,
+            valid.Revision.GraphId,
+            "revision-other",
+            valid.Revision.ExecutableHash);
+        var substitutions = new GovernedLoopSequentialNodeEvidenceReceipt?[]
+        {
+            null,
+            valid with { SchemaVersion = 2 },
+            RehashEvidence(valid with { Kind = GovernedLoopSequentialNodeEvidenceKind.DefinitiveRejection }),
+            RehashEvidence(valid with { WorkspaceId = WorkspaceId('b') }),
+            RehashEvidence(valid with { RunId = "run-other" }),
+            RehashEvidence(valid with { Revision = otherRevision }),
+            RehashEvidence(valid with { ExecutionGeneration = 2 }),
+            RehashEvidence(valid with { NodeId = "node-other" }),
+            RehashEvidence(valid with { Attempt = 2 }),
+            RehashEvidence(valid with { Disposition = GovernedLoopSequentialNodeHandlerResultStatus.Rejected }),
+            valid with { EvidenceHash = Hash('f') },
+        };
+        var handler = new TestHandler(GovernedLoopSequentialNodeDescriptors.ProviderInference)
+        {
+            Result = new GovernedLoopSequentialNodeHandlerResult(GovernedLoopSequentialNodeHandlerResultStatus.Completed, valid.EvidenceHash),
+        };
+
+        foreach (var substitution in substitutions)
+        {
+            var source = new TestEvidenceSource(substitution);
+            var dispatcher = new GovernedLoopSequentialNodeDispatcher(new GovernedLoopSequentialNodeHandlerRegistry([handler]), source);
+
+            var result = await dispatcher.DispatchAsync(DispatchRequest(context, node));
+
+            Assert.Equal(GovernedLoopSequentialNodeDispatchStatus.InvalidHandlerResult, result.Status);
+            Assert.Null(result.EvidenceHash);
+            Assert.Equal(1, source.CallCount);
+        }
+
+        Assert.Equal(substitutions.Length, handler.CallCount);
     }
 
     [Fact]
@@ -134,7 +205,7 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
         var context = await ContextAsync();
         var handler = new TestHandler(GovernedLoopSequentialNodeDescriptors.ProviderInference);
         var registry = new GovernedLoopSequentialNodeHandlerRegistry([handler]);
-        var dispatcher = new GovernedLoopSequentialNodeDispatcher(registry);
+        var dispatcher = new GovernedLoopSequentialNodeDispatcher(registry, new TestEvidenceSource(null));
         var secondPlan = Assert.IsType<GovernedLoopSequentialPlan>(GovernedLoopSequentialPlanBuilder.Build(context.Artifact).Plan);
         var substitutedNode = DispatchRequest(context, secondPlan.Nodes[1]);
 
@@ -152,12 +223,13 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
     {
         var context = await ContextAsync();
         var node = context.Plan.Nodes[1];
-        var missing = new GovernedLoopSequentialNodeDispatcher(new GovernedLoopSequentialNodeHandlerRegistry([]));
+        var source = new TestEvidenceSource(null);
+        var missing = new GovernedLoopSequentialNodeDispatcher(new GovernedLoopSequentialNodeHandlerRegistry([]), source);
         var invalidHandler = new TestHandler(GovernedLoopSequentialNodeDescriptors.ProviderInference)
         {
             Result = new GovernedLoopSequentialNodeHandlerResult(GovernedLoopSequentialNodeHandlerResultStatus.Unknown, "bad"),
         };
-        var invalidResultDispatcher = new GovernedLoopSequentialNodeDispatcher(new GovernedLoopSequentialNodeHandlerRegistry([invalidHandler]));
+        var invalidResultDispatcher = new GovernedLoopSequentialNodeDispatcher(new GovernedLoopSequentialNodeHandlerRegistry([invalidHandler]), source);
 
         Assert.Equal(GovernedLoopSequentialNodeDispatchStatus.UnsupportedDescriptor, (await missing.DispatchAsync(DispatchRequest(context, node))).Status);
         Assert.Equal(GovernedLoopSequentialNodeDispatchStatus.InvalidRequest, (await invalidResultDispatcher.DispatchAsync(DispatchRequest(context, node) with { Attempt = 0 })).Status);
@@ -165,6 +237,7 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
         Assert.Equal(GovernedLoopSequentialNodeDispatchStatus.InvalidRequest, (await invalidResultDispatcher.DispatchAsync(null)).Status);
         Assert.Equal(GovernedLoopSequentialNodeDispatchStatus.InvalidHandlerResult, (await invalidResultDispatcher.DispatchAsync(DispatchRequest(context, node))).Status);
         Assert.Equal(1, invalidHandler.CallCount);
+        Assert.Equal(0, source.CallCount);
     }
 
     [Fact]
@@ -172,7 +245,7 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
     {
         var context = await ContextAsync();
         var handler = new TestHandler(GovernedLoopSequentialNodeDescriptors.ProviderInference);
-        var dispatcher = new GovernedLoopSequentialNodeDispatcher(new GovernedLoopSequentialNodeHandlerRegistry([handler]));
+        var dispatcher = new GovernedLoopSequentialNodeDispatcher(new GovernedLoopSequentialNodeHandlerRegistry([handler]), new TestEvidenceSource(null));
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 
@@ -180,7 +253,7 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
         Assert.Equal(0, handler.CallCount);
     }
 
-    private static async Task<TestContext> ContextAsync()
+    private static async Task<TestContext> ContextAsync(DateTimeOffset? invocationCapturedAtUtc = null)
     {
         var seedHarness = GovernedLoopAdmissionTestHarness.Create();
         var seedOutcome = Assert.IsType<GovernedLoopAdmissionTerminalOutcome>((await seedHarness.CreateService().AdmitAsync(seedHarness.Request)).Outcome);
@@ -193,7 +266,7 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             "Execute the exact admitted request.",
             new CustomLoopModelSnapshot("provider", "model"),
             new CustomLoopConversationReference("conversation-1", "version-1", GovernedLoopSequentialApplicationTestFixture.Now.AddMinutes(-1)),
-            GovernedLoopSequentialApplicationTestFixture.Now,
+            invocationCapturedAtUtc ?? GovernedLoopSequentialApplicationTestFixture.Now,
             invocationContext.SourceManifest,
             string.Empty));
         var request = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(
@@ -276,6 +349,37 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             source.GraphLayoutHash,
             string.Empty));
 
+    private static GovernedLoopSequentialNodeEvidenceReceipt Evidence(
+        TestContext context,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopSequentialNodeHandlerResultStatus disposition)
+    {
+        var binding = context.AdapterBinding;
+        return GovernedLoopSequentialNodeEvidenceHash.Apply(new GovernedLoopSequentialNodeEvidenceReceipt(
+            1,
+            EvidenceKind(disposition),
+            binding.WorkspaceId,
+            binding.ExecutionBinding.RunId,
+            binding.ExecutionBinding.Revision,
+            binding.ExecutionBinding.ExecutionGeneration,
+            node.NodeId,
+            1,
+            disposition,
+            string.Empty));
+    }
+
+    private static GovernedLoopSequentialNodeEvidenceReceipt RehashEvidence(GovernedLoopSequentialNodeEvidenceReceipt evidence)
+        => GovernedLoopSequentialNodeEvidenceHash.Apply(evidence with { EvidenceHash = string.Empty });
+
+    private static GovernedLoopSequentialNodeEvidenceKind EvidenceKind(GovernedLoopSequentialNodeHandlerResultStatus disposition)
+        => disposition switch
+        {
+            GovernedLoopSequentialNodeHandlerResultStatus.Completed => GovernedLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            GovernedLoopSequentialNodeHandlerResultStatus.Rejected => GovernedLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview => GovernedLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            _ => GovernedLoopSequentialNodeEvidenceKind.Unknown,
+        };
+
     private static string WorkspaceId(char value) => "workspace-sha256:" + Hash(value);
 
     private static string Hash(char value) => GovernedLoopSequentialApplicationTestFixture.Hash(value);
@@ -307,6 +411,25 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             CallCount++;
             LastRequest = request;
             return Task.FromResult(Result);
+        }
+    }
+
+    private sealed class TestEvidenceSource(GovernedLoopSequentialNodeEvidenceReceipt? evidence) : IGovernedLoopSequentialNodeEvidenceSource
+    {
+        public int CallCount { get; private set; }
+
+        public CancellationToken LastCancellationToken { get; private set; }
+
+        public string? LastEvidenceHash { get; private set; }
+
+        public Task<GovernedLoopSequentialNodeEvidenceReceipt?> ResolveAsync(
+            string evidenceHash,
+            CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            LastEvidenceHash = evidenceHash;
+            LastCancellationToken = cancellationToken;
+            return Task.FromResult(evidence);
         }
     }
 }

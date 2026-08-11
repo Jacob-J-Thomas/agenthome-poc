@@ -13,4 +13,6 @@ public enum GovernedLoopSequentialPlanBuildStatus
     UnsupportedDescriptor,
     /// <summary>The graph is not the supported manual-trigger, one-to-five inference, successful-exit line.</summary>
     UnsupportedTopology,
+    /// <summary>The graph does not match the exact first-wave node, port, parameter, authority, binding, schema, and output contract.</summary>
+    UnsupportedContract,
 }

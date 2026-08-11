@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -110,6 +112,228 @@ public sealed class GovernedLoopSequentialContractTests
         Assert.Contains(result.Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidHash && error.Path == "$.admissionReceiptHash");
     }
 
+    [Fact]
+    public void Workspace_manifest_preserves_the_exact_seven_source_trust_classifications()
+    {
+        var valid = Snapshot();
+        var substitutions = new Func<CustomLoopContextManifestSource, CustomLoopContextManifestSource>[]
+        {
+            source => source with { SourceId = "other" },
+            source => source with { SourcePath = "workspace/OTHER.md" },
+            source => source with { SourceType = CustomLoopContextSource.ContextualState },
+            source => source with { Provenance = CustomLoopContextProvenance.LogicalConversation },
+            source => source with { TrustClass = CustomLoopContextTrustClass.UntrustedData },
+            source => source with { Role = LlmMessageRole.User },
+        };
+
+        foreach (var substitute in substitutions)
+        {
+            var manifest = valid.ContextManifest.ToArray();
+            manifest[0] = substitute(manifest[0]);
+            var candidate = CopySnapshot(valid, contextManifest: manifest);
+
+            Assert.Contains(GovernedLoopSequentialContractValidator.Validate(candidate).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidComposition && error.Path == "$.contextManifest[0]");
+            Assert.Throws<ArgumentException>(() => GovernedLoopSequentialContractHash.Compute(candidate));
+        }
+    }
+
+    [Fact]
+    public void Context_tail_is_only_untrusted_logical_conversation_data_and_requires_a_conversation_reference()
+    {
+        var valid = Snapshot();
+        var tail = new CustomLoopContextManifestSource(
+            8,
+            CustomLoopContextSource.InvokingConversation,
+            "conversation-message-1",
+            "conversation/conversation-1/version-1/message-1",
+            CustomLoopContextProvenance.LogicalConversation,
+            CustomLoopContextTrustClass.UntrustedData,
+            LlmMessageRole.User,
+            "Hello.",
+            CustomLoopTraceContentHash.Compute("Hello."),
+            6,
+            6,
+            false,
+            null,
+            null,
+            _capturedAtUtc);
+        var manifest = valid.ContextManifest.Append(tail).ToArray();
+        var accepted = GovernedLoopSequentialContractHash.Apply(CopySnapshot(valid, contextManifest: manifest) with { ContentHash = string.Empty });
+        var elevated = manifest.ToArray();
+        elevated[^1] = elevated[^1] with { TrustClass = CustomLoopContextTrustClass.TrustedInstruction, Role = LlmMessageRole.System };
+        var elevatedCandidate = CopySnapshot(valid, contextManifest: elevated);
+        var missingReference = new GovernedLoopSequentialInvocationSnapshot(
+            valid.SchemaVersion,
+            valid.TriggerPrompt,
+            valid.ModelSnapshot,
+            null,
+            valid.ContextCapturedAtUtc,
+            manifest,
+            valid.ContentHash);
+
+        Assert.True(GovernedLoopSequentialContractValidator.Validate(accepted).IsValid);
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(elevatedCandidate).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidComposition && error.Path == "$.contextManifest[7]");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(missingReference).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidComposition && error.Path == "$.invokingConversation");
+    }
+
+    [Fact]
+    public void Workspace_context_source_cannot_exceed_the_ordered_runtime_instruction_bound()
+    {
+        var valid = Snapshot();
+        var content = new string('x', CustomLoopLimits.MaxInstructionCharacters + 1);
+        var manifest = valid.ContextManifest.ToArray();
+        manifest[0] = manifest[0] with
+        {
+            Content = content,
+            ContentHash = CustomLoopTraceContentHash.Compute(content),
+            OriginalCharacterCount = content.Length,
+            UsedCharacterCount = content.Length,
+            OmissionReason = null,
+        };
+        var candidate = CopySnapshot(valid, contextManifest: manifest);
+
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(candidate).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.CollectionTooLarge && error.Path == "$.contextManifest[0].usedCharacterCount");
+    }
+
+    [Theory]
+    [InlineData("bad/id")]
+    [InlineData("-conversation")]
+    [InlineData("conversation-")]
+    [InlineData("con")]
+    public void Conversation_identity_matches_the_existing_artifact_identifier_contract(string conversationId)
+    {
+        var valid = Snapshot();
+        var candidate = CopySnapshot(valid, conversation: valid.InvokingConversation! with { ConversationId = conversationId });
+
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(candidate).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidIdentity && error.Path == "$.invokingConversation.conversationId");
+    }
+
+    [Fact]
+    public void Admission_operation_token_matches_upstream_dot_and_boundary_rules()
+    {
+        var valid = AdapterBinding();
+        var dotted = GovernedLoopSequentialContractHash.Apply(CopyBinding(valid, valid.ExecutionBinding, "admit.loop_1-step"));
+
+        Assert.True(GovernedLoopSequentialContractValidator.Validate(dotted).IsValid);
+        foreach (var invalid in new[] { "-admit", "_admit", ".admit", "admit-", "admit_", "admit." })
+        {
+            var candidate = CopyBinding(valid, valid.ExecutionBinding, invalid);
+            Assert.Contains(GovernedLoopSequentialContractValidator.Validate(candidate).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidIdentity && error.Path == "$.admissionOperationId");
+        }
+    }
+
+    [Fact]
+    public void Public_validation_reports_null_nested_required_hash_and_timestamp_failures_without_throwing()
+    {
+        var validSnapshot = Snapshot();
+        var validBinding = AdapterBinding();
+        var missingSnapshotValues = new GovernedLoopSequentialInvocationSnapshot(1, "Prompt.", null!, null, default, null!, Hash('f'));
+        var missingBindingValues = new GovernedLoopSequentialAdapterBinding(1, validBinding.WorkspaceId, null!, "admit-1", Hash('1'), Hash('2'), Hash('3'), Hash('4'), Hash('5'), Hash('6'));
+        var futureConversation = CopySnapshot(validSnapshot, conversation: validSnapshot.InvokingConversation! with { CapturedAtUtc = validSnapshot.ContextCapturedAtUtc.AddSeconds(1) });
+
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate((GovernedLoopSequentialInvocationSnapshot?)null).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.Required && error.Path == "$");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate((GovernedLoopSequentialAdapterBinding?)null).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.Required && error.Path == "$");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(missingSnapshotValues).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.Required && error.Path == "$.modelSnapshot");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(missingSnapshotValues).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.Required && error.Path == "$.contextManifest");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(missingSnapshotValues).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidTimestamp && error.Path == "$.contextCapturedAtUtc");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(missingBindingValues).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidComposition && error.Path == "$.executionBinding");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(futureConversation).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidTimestamp && error.Path == "$.invokingConversation.capturedAtUtc");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(validSnapshot with { ContentHash = Hash('f') }).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.HashMismatch && error.Path == "$.contentHash");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(validBinding with { ContentHash = Hash('f') }).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.HashMismatch && error.Path == "$.contentHash");
+        Assert.False(GovernedLoopSequentialContractHash.Matches(validSnapshot with { ContentHash = "bad" }));
+        Assert.False(GovernedLoopSequentialContractHash.Matches(validBinding with { ContentHash = "bad" }));
+        Assert.False(GovernedLoopSequentialContractHash.Matches(missingSnapshotValues));
+    }
+
+    [Fact]
+    public void Context_manifest_rejects_null_order_enum_duplicate_time_count_omission_and_truncation_substitutions()
+    {
+        var valid = Snapshot();
+        var candidates = new List<(GovernedLoopSequentialInvocationSnapshot Snapshot, GovernedLoopSequentialValidationErrorCode Code, string Path)>();
+        var nullSource = valid.ContextManifest.ToArray();
+        nullSource[0] = null!;
+        candidates.Add((CopySnapshot(valid, contextManifest: nullSource), GovernedLoopSequentialValidationErrorCode.Required, "$.contextManifest[0]"));
+        var wrongOrder = valid.ContextManifest.ToArray();
+        wrongOrder[0] = wrongOrder[0] with { Order = 2 };
+        candidates.Add((CopySnapshot(valid, contextManifest: wrongOrder), GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.contextManifest[0].order"));
+        var undefined = valid.ContextManifest.ToArray();
+        undefined[0] = undefined[0] with { SourceType = CustomLoopContextSource.Unknown };
+        candidates.Add((CopySnapshot(valid, contextManifest: undefined), GovernedLoopSequentialValidationErrorCode.InvalidEnumeration, "$.contextManifest[0].sourceType"));
+        var duplicate = valid.ContextManifest.ToArray();
+        duplicate[1] = duplicate[1] with { SourceId = duplicate[0].SourceId };
+        candidates.Add((CopySnapshot(valid, contextManifest: duplicate), GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.contextManifest[1].sourceId"));
+        var wrongTime = valid.ContextManifest.ToArray();
+        wrongTime[0] = wrongTime[0] with { CapturedAtUtc = _capturedAtUtc.AddSeconds(1) };
+        candidates.Add((CopySnapshot(valid, contextManifest: wrongTime), GovernedLoopSequentialValidationErrorCode.InvalidTimestamp, "$.contextManifest[0].capturedAtUtc"));
+        var wrongCount = valid.ContextManifest.ToArray();
+        wrongCount[0] = wrongCount[0] with { OriginalCharacterCount = -1 };
+        candidates.Add((CopySnapshot(valid, contextManifest: wrongCount), GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.contextManifest[0].usedCharacterCount"));
+        var invalidOmission = valid.ContextManifest.ToArray();
+        invalidOmission[0] = invalidOmission[0] with { Content = "x", ContentHash = CustomLoopTraceContentHash.Compute("x"), OriginalCharacterCount = 1, UsedCharacterCount = 1 };
+        candidates.Add((CopySnapshot(valid, contextManifest: invalidOmission), GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.contextManifest[0]"));
+        var invalidTruncation = valid.ContextManifest.ToArray();
+        invalidTruncation[0] = invalidTruncation[0] with { Content = "x", ContentHash = CustomLoopTraceContentHash.Compute("x"), OriginalCharacterCount = 2, UsedCharacterCount = 1, OmissionReason = null };
+        candidates.Add((CopySnapshot(valid, contextManifest: invalidTruncation), GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.contextManifest[0]"));
+
+        foreach (var candidate in candidates)
+        {
+            Assert.Contains(GovernedLoopSequentialContractValidator.Validate(candidate.Snapshot).Errors, error => error.Code == candidate.Code && error.Path == candidate.Path);
+        }
+    }
+
+    [Fact]
+    public void Conversation_manifest_enforces_aggregate_source_omission_and_character_bounds()
+    {
+        var valid = Snapshot();
+        var omittedTail = ConversationSource(8, "omitted-1", string.Empty, "History omitted.");
+        var secondOmittedTail = ConversationSource(9, "omitted-2", string.Empty, "More history omitted.");
+        var twoOmissions = CopySnapshot(valid, contextManifest: valid.ContextManifest.Concat([omittedTail, secondOmittedTail]).ToArray());
+        var largeContent = new string('x', GovernedLoopSequentialContractLimits.MaxContextCharacters / 2 + 1);
+        var tooManyCharacters = CopySnapshot(valid, contextManifest: valid.ContextManifest.Concat([
+            ConversationSource(8, "large-1", largeContent, null),
+            ConversationSource(9, "large-2", largeContent, null),
+        ]).ToArray());
+        var tooManySources = CopySnapshot(valid, contextManifest: valid.ContextManifest.Concat(
+            Enumerable.Range(1, GovernedLoopSequentialContractLimits.MaxInvokingConversationSources + 1)
+                .Select(index => ConversationSource(index + 7, $"message-{index:D3}", "x", null))).ToArray());
+
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(twoOmissions).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.CollectionTooLarge && error.Path == "$.contextManifest");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(tooManyCharacters).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.CollectionTooLarge && error.Path == "$.contextManifest");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(tooManySources).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.CollectionTooLarge && error.Path == "$.contextManifest");
+    }
+
+    [Fact]
+    public void Optional_model_conversation_and_valid_unicode_paths_remain_canonical()
+    {
+        var valid = Snapshot();
+        var withoutOptionals = new GovernedLoopSequentialInvocationSnapshot(
+            1,
+            "Prompt \U0001F642",
+            new CustomLoopModelSnapshot("provider", null),
+            null,
+            valid.ContextCapturedAtUtc,
+            valid.ContextManifest,
+            string.Empty);
+        var applied = GovernedLoopSequentialContractHash.Apply(withoutOptionals);
+
+        Assert.True(GovernedLoopSequentialContractValidator.Validate(applied).IsValid);
+        Assert.False(GovernedLoopSequentialContractValidator.Validate(applied with { TriggerPrompt = "bad\udc00" }).IsValid);
+    }
+
+    [Fact]
+    public void Validation_errors_have_stable_public_value_semantics()
+    {
+        var first = Assert.Single(GovernedLoopSequentialContractValidator.Validate((GovernedLoopSequentialInvocationSnapshot?)null).Errors);
+        var second = Assert.Single(GovernedLoopSequentialContractValidator.Validate((GovernedLoopSequentialInvocationSnapshot?)null).Errors);
+
+        Assert.Equal(first, second);
+        Assert.True(first.Equals(second));
+        Assert.True(first.Equals((object)second));
+        Assert.False(first.Equals((GovernedLoopSequentialValidationError?)null));
+        Assert.Equal(first.GetHashCode(), second.GetHashCode());
+        Assert.Equal("Required at $", first.ToString());
+    }
+
     private static GovernedLoopSequentialInvocationSnapshot Snapshot()
     {
         var context = CustomLoopContextSnapshot.CreateEmpty(_capturedAtUtc);
@@ -159,18 +383,41 @@ public sealed class GovernedLoopSequentialContractTests
 
     private static GovernedLoopSequentialAdapterBinding CopyBinding(
         GovernedLoopSequentialAdapterBinding source,
-        GovernedLoopExecutionBinding execution)
+        GovernedLoopExecutionBinding execution,
+        string? operationId = null)
         => new(
             source.SchemaVersion,
             source.WorkspaceId,
             execution,
-            source.AdmissionOperationId,
+            operationId ?? source.AdmissionOperationId,
             source.AdmissionReceiptHash,
             source.AdmissionRequestHash,
             source.InvocationPayloadHash,
             source.GraphArtifactHash,
             source.GraphLayoutHash,
             source.ContentHash);
+
+    private static CustomLoopContextManifestSource ConversationSource(
+        int order,
+        string sourceId,
+        string content,
+        string? omissionReason)
+        => new(
+            order,
+            CustomLoopContextSource.InvokingConversation,
+            sourceId,
+            $"conversation/conversation-1/version-1/{sourceId}",
+            CustomLoopContextProvenance.LogicalConversation,
+            CustomLoopContextTrustClass.UntrustedData,
+            LlmMessageRole.User,
+            content,
+            CustomLoopTraceContentHash.Compute(content),
+            content.Length,
+            content.Length,
+            false,
+            null,
+            omissionReason,
+            _capturedAtUtc);
 
     private static string WorkspaceId(char value) => "workspace-sha256:" + Hash(value);
 

@@ -15,6 +15,8 @@ public enum GovernedLoopSequentialRunAnchorStatus
     InvalidAdmissionReceipt,
     /// <summary>The invocation snapshot is invalid.</summary>
     InvalidInvocationSnapshot,
+    /// <summary>The invocation snapshot was captured after the trusted admission evaluation or recording time.</summary>
+    AdmissionCausalityMismatch,
     /// <summary>The graph artifact is invalid.</summary>
     InvalidGraphArtifact,
     /// <summary>The workspace coordinate was substituted.</summary>

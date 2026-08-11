@@ -79,6 +79,75 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
     }
 
     [Fact]
+    public void Missing_or_substituted_first_wave_node_contracts_fail_closed()
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.LinearArtifact().Graph;
+        var inference = source.Nodes.Single(node => node.Descriptor == GovernedLoopSequentialNodeDescriptors.ProviderInference);
+        var missingInstruction = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { Parameters = new Dictionary<string, string>() } : node).ToArray());
+        var emptyInstruction = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { Parameters = new Dictionary<string, string> { ["instruction"] = string.Empty } } : node).ToArray());
+        var missingAuthority = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([]) } : node).ToArray());
+        var substitutedAuthority = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(["org.embodysense/workspace-read"]) } : node).ToArray(),
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, "org.embodysense/workspace-read"]));
+        var missingContextPort = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { Ports = node.Ports.Where(port => port.Id != "invocation-context").ToArray() } : node).ToArray(),
+            bindings: source.Bindings.Where(binding => binding.Kind != GovernedLoopBindingKind.Context).ToArray());
+        var extraPort = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == inference.Id
+                ? node with { Ports = [.. node.Ports, GovernedLoopSequentialApplicationTestFixture.Port("debug", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, required: false)] }
+                : node).ToArray());
+
+        foreach (var artifact in new[] { missingInstruction, emptyInstruction, missingAuthority, substitutedAuthority, missingContextPort, extraPort })
+        {
+            var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
+
+            Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, result.Status);
+            Assert.Equal("$.graph.nodes", result.FailurePath);
+            Assert.Null(result.Plan);
+        }
+    }
+
+    [Fact]
+    public void Substituted_schema_binding_and_output_contracts_fail_closed()
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(2).Graph;
+        var secondInference = source.Nodes.Single(node => node.Id == "infer-02");
+        var bypassedDataChain = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            bindings: source.Bindings.Select(binding => binding.ToNodeId == secondInference.Id && binding.ToPortId == "request"
+                ? binding with { FromNodeId = "trigger", FromPortId = "request" }
+                : binding).ToArray());
+        var substitutedOutput = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            outputContract: new GovernedLoopOutputContract(
+                "Return a substituted source.",
+                [new GovernedLoopOutputDefinition("result", "text", secondInference.Id, "result", true)]));
+        var renamedSchema = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node with { Ports = node.Ports.Select(port => port with { ValueSchemaId = "message" }).ToArray() }).ToArray(),
+            valueSchemas: [new GovernedLoopValueSchemaDefinition("message", GovernedLoopValueKind.Text, false)],
+            outputContract: new GovernedLoopOutputContract(
+                source.OutputContract.Summary,
+                [source.OutputContract.Outputs[0] with { ValueSchemaId = "message" }]));
+
+        Assert.Equal("$.graph.bindings", GovernedLoopSequentialPlanBuilder.Build(bypassedDataChain).FailurePath);
+        Assert.Equal("$.graph.outputContract", GovernedLoopSequentialPlanBuilder.Build(substitutedOutput).FailurePath);
+        Assert.Equal("$.graph.valueSchemas", GovernedLoopSequentialPlanBuilder.Build(renamedSchema).FailurePath);
+        Assert.All(
+            new[] { bypassedDataChain, substitutedOutput, renamedSchema },
+            artifact => Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, GovernedLoopSequentialPlanBuilder.Build(artifact).Status));
+    }
+
+    [Fact]
     public void Branch_join_and_cycle_shapes_fail_closed()
     {
         var nodes = new[]
@@ -86,7 +155,7 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
             GovernedLoopSequentialApplicationTestFixture.Node("trigger", GovernedLoopSequentialNodeDescriptors.ManualTrigger),
             GovernedLoopSequentialApplicationTestFixture.Node("infer-a", GovernedLoopSequentialNodeDescriptors.ProviderInference),
             GovernedLoopSequentialApplicationTestFixture.Node("infer-b", GovernedLoopSequentialNodeDescriptors.ProviderInference),
-            GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+            GovernedLoopSequentialApplicationTestFixture.Node("exit", GovernedLoopSequentialNodeDescriptors.SuccessExit),
         };
         var branch = GovernedLoopSequentialApplicationTestFixture.Artifact(
             nodes,
@@ -117,8 +186,8 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
         {
             GovernedLoopSequentialApplicationTestFixture.Node("trigger", GovernedLoopSequentialNodeDescriptors.ManualTrigger),
             GovernedLoopSequentialApplicationTestFixture.Node("infer", GovernedLoopSequentialNodeDescriptors.ProviderInference),
-            GovernedLoopSequentialApplicationTestFixture.Exit("exit-a"),
-            GovernedLoopSequentialApplicationTestFixture.Exit("exit-b"),
+            GovernedLoopSequentialApplicationTestFixture.Node("exit-a", GovernedLoopSequentialNodeDescriptors.SuccessExit),
+            GovernedLoopSequentialApplicationTestFixture.Node("exit-b", GovernedLoopSequentialNodeDescriptors.SuccessExit),
         };
         var extraTerminal = GovernedLoopSequentialApplicationTestFixture.Artifact(
             nodes,

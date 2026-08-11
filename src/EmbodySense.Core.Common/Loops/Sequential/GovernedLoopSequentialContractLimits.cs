@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Loops.Custom;
+
 namespace EmbodySense.Core.Common.Loops.Sequential;
 
 /// <summary>Defines finite schema-1 bounds for the sequential governed-loop hand-off contracts.</summary>
@@ -7,28 +9,28 @@ public static class GovernedLoopSequentialContractLimits
     public const int CurrentSchemaVersion = 1;
 
     /// <summary>Gets the maximum trigger-prompt character count.</summary>
-    public const int MaxTriggerPromptCharacters = 24_000;
+    public const int MaxTriggerPromptCharacters = CustomLoopLimits.MaxPresetPromptCharacters;
 
     /// <summary>Gets the maximum provider, model, conversation, or provenance-reference character count.</summary>
-    public const int MaxReferenceCharacters = 512;
+    public const int MaxReferenceCharacters = CustomLoopLimits.MaxTraceReferenceCharacters;
 
     /// <summary>Gets the maximum retained content characters for one context source.</summary>
-    public const int MaxContextSourceCharacters = 256_000;
+    public const int MaxContextSourceCharacters = CustomLoopLimits.MaxLogicalProviderRequestCharacters;
 
     /// <summary>Gets the maximum retained context characters across one invocation snapshot.</summary>
-    public const int MaxContextCharacters = 256_000;
+    public const int MaxContextCharacters = CustomLoopLimits.MaxLogicalProviderRequestCharacters;
 
     /// <summary>Gets the maximum truncation or omission reason character count.</summary>
-    public const int MaxReasonCharacters = 64_000;
+    public const int MaxReasonCharacters = CustomLoopLimits.MaxRunDetailCharacters;
 
     /// <summary>Gets the seven workspace sources plus bounded invoking-conversation sources and one aggregate omission.</summary>
-    public const int MaxContextSources = 392;
+    public const int MaxContextSources = 7 + CustomLoopLimits.MaxInvokingConversationEntries + 1;
 
     /// <summary>Gets the maximum number of included invoking-conversation sources.</summary>
-    public const int MaxInvokingConversationSources = 384;
+    public const int MaxInvokingConversationSources = CustomLoopLimits.MaxInvokingConversationEntries;
 
     /// <summary>Gets the maximum included invoking-conversation character count.</summary>
-    public const int MaxInvokingConversationCharacters = 24_000;
+    public const int MaxInvokingConversationCharacters = CustomLoopLimits.MaxInvokingConversationCharacters;
 
     /// <summary>Gets the maximum stable operation or run-anchor identifier length.</summary>
     public const int MaxIdentifierCharacters = 128;
