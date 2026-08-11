@@ -5620,7 +5620,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private async Task<RunAdvance> PauseAtBoundaryAsync(CustomLoopRunRecord run, string actor)
     {
         var lastEvent = run.Events.LastOrDefault();
-        if (lastEvent is null || lastEvent.Kind != CustomLoopRunEventKind.CheckpointCommitted || run.Checkpoint.LastCommittedSequence != lastEvent.Sequence)
+        var checkpointIsLastEvent = lastEvent is { Kind: CustomLoopRunEventKind.CheckpointCommitted }
+            && run.Checkpoint.LastCommittedSequence == lastEvent.Sequence;
+        if (!checkpointIsLastEvent && !HasCommittedUndispatchedPauseBoundary(run))
         {
             var boundary = await CommitCheckpointAsync(run, run.Checkpoint, "Pause boundary checkpoint committed before entering Paused.");
             if (boundary.Terminal is not null)
@@ -5670,6 +5672,22 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         return new RunAdvance(persisted.Run, Result(CustomLoopOrderedRunStatus.Paused, persisted.Run, "The run is Paused at a committed checkpoint; no later attempt was dispatched."));
+    }
+
+    private static bool HasCommittedUndispatchedPauseBoundary(CustomLoopRunRecord run)
+    {
+        var checkpointSequence = run.Checkpoint.LastCommittedSequence;
+        if (checkpointSequence <= 0
+            || checkpointSequence > run.Events.Length
+            || run.Events[(int)checkpointSequence - 1].Kind != CustomLoopRunEventKind.CheckpointCommitted
+            || run.Frontier?.Payload.Nodes.Any(node => node.Status == GovernedLoopNodeExecutionStatus.Running) == true)
+        {
+            return false;
+        }
+
+        return run.Events
+            .Skip((int)checkpointSequence)
+            .All(item => item.Kind == CustomLoopRunEventKind.LifecycleChanged);
     }
 
     private static GovernedLoopFrontierPosture? ProjectPausedFrontier(CustomLoopRunRecord run, CustomLoopRunEvent lifecycle)

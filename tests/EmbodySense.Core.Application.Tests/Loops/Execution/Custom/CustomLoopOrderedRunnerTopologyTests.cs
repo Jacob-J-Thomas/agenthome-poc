@@ -131,6 +131,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
         var lifecycle = Lifecycle(store, runner, audit);
         CustomLoopControlResult? control = null;
         GovernedLoopNodeExecutionEvidence[]? readyBeforeControl = null;
+        long? checkpointSequenceBeforeControl = null;
         var injected = false;
         store.AfterUpdate = async candidate =>
         {
@@ -148,6 +149,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
             injected = true;
             readyBeforeControl = ready;
+            checkpointSequenceBeforeControl = candidate.Checkpoint.LastCommittedSequence;
             control = cancel
                 ? await lifecycle.CancelAsync(new CustomLoopCancelRequest(candidate.Id, candidate.LifecycleVersion, "cancel-multi-ready-frontier", AuditSchema.Actors.Web))
                 : await lifecycle.PauseAsync(new CustomLoopPauseRequest(candidate.Id, candidate.LifecycleVersion, "pause-multi-ready-frontier", AuditSchema.Actors.Web));
@@ -182,6 +184,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             Assert.Null(node.AttemptOperationId);
         });
         Assert.Equal(["infer-01"], executor.Requests.Select(request => request.StepId));
+        Assert.Equal(checkpointSequenceBeforeControl, result.Run.Checkpoint.LastCommittedSequence);
+        Assert.Equal(CustomLoopRunEventKind.CheckpointCommitted, result.Run.Events[(int)result.Run.Checkpoint.LastCommittedSequence - 1].Kind);
         Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted && item.StepId is "branch-a" or "branch-b");
         Assert.Empty(store.ValidationFailures);
     }
