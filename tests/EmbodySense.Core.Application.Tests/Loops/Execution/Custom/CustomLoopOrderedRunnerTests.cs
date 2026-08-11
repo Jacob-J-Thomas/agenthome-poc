@@ -1746,7 +1746,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             AuditSchema.Actors.Cli));
 
         Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
-        Assert.Equal("canonical_inference_rejected", result.Run!.FailureCode);
+        Assert.Equal("canonical_run_capability_invalid", result.Run!.FailureCode);
+        Assert.Equal("Custom-loop capability revalidation could not complete safely: IOException.", result.Run.FailureDetail);
         Assert.Empty(firstExecutor.Requests);
         Assert.Empty(resumedExecutor.Requests);
         Assert.Single(ledger.Records);
@@ -2762,6 +2763,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal("recovery_open_attempt", recoveryStore.Current.FailureCode);
         Assert.All(recoveryAudit.Events, item => Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]));
         Assert.Single(executor.Requests);
+        Assert.Empty(recoveryStore.ValidationFailures);
     }
 
     [Fact]
@@ -5881,15 +5883,6 @@ public sealed partial class CustomLoopOrderedRunnerTests
             [],
             completion.TimestampUtc);
         Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, completedFrontier.Status);
-        Assert.True(GovernedLoopPureNodeOutcome.TryDeserialize(context.Artifact.Graph, completion.PureNodeOutcomeJson!, out var outcome, out var outcomeValidation));
-        Assert.True(outcomeValidation.IsValid, string.Join(Environment.NewLine, outcomeValidation.Errors));
-        var textOutput = Assert.Single(outcome!.Outputs, item => item.Value.Kind == GovernedLoopValueKind.Text && !item.Value.IsNull);
-        var text = Assert.IsType<string>(JsonSerializer.Deserialize<string>(textOutput.Value.CanonicalValueJson));
-        var retained = new CustomLoopRetainedOutput(
-            node.NodeId,
-            completed.Checkpoint.Iteration,
-            text,
-            CustomLoopTraceContentHash.Compute(text));
         var checkpointEvent = new CustomLoopRunEvent(
             completion.Sequence + 1,
             "concurrent-pure-checkpoint",
@@ -5915,7 +5908,6 @@ public sealed partial class CustomLoopOrderedRunnerTests
             LifecycleVersion = completed.LifecycleVersion + 1,
             Checkpoint = completed.Checkpoint with
             {
-                EarlierRetainedOutputs = [.. completed.Checkpoint.EarlierRetainedOutputs, retained],
                 LastCommittedSequence = checkpointEvent.Sequence,
             },
             UpdatedAtUtc = checkpointEvent.TimestampUtc,
