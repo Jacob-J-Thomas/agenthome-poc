@@ -23,6 +23,25 @@ $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
 $maximumArtifactStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunArtifactMaximumShapeTests.Adversarial_maximum_transition_reservations_and_canonical_order_checks_remain_bounded"
 $deletionCapacityStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTraceRetentionStoreTests.Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible"
+$persistenceCoveragePhaseTimeoutSeconds = 1560
+$persistenceCoverageShards = @(
+    [pscustomobject]@{
+        Name = "graph-authoring"
+        Filter = "(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring)&(VerificationTier!=Stress)"
+    }
+    [pscustomobject]@{
+        Name = "governance"
+        Filter = "((FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Audit)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Authority)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Capabilities)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.ContextualRoles)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Credentials)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.HumanInput)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.ToolResults))&(VerificationTier!=Stress)"
+    }
+    [pscustomobject]@{
+        Name = "loops-triggers"
+        Filter = "((FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Triggers))&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring)&(VerificationTier!=Stress)"
+    }
+    [pscustomobject]@{
+        Name = "remainder"
+        Filter = "(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Triggers)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Audit)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Authority)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Capabilities)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.ContextualRoles)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Credentials)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.HumanInput)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.ToolResults)&(VerificationTier!=Stress)"
+    }
+)
 
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 Reset-VerificationPhaseState
@@ -59,10 +78,13 @@ function Assert-CoverageReportProduced {
         [System.IO.FileInfo]$TestProject,
 
         [Parameter(Mandatory = $true)]
-        [DateTime]$MinimumWriteTimeUtc
+        [DateTime]$MinimumWriteTimeUtc,
+
+        [string]$SearchRoot
     )
 
-    $coverageReport = Get-ChildItem -Path (Join-Path $TestProject.DirectoryName "TestResults") -Recurse -Filter "coverage.cobertura.xml" -ErrorAction SilentlyContinue |
+    $coverageSearchRoot = if ([string]::IsNullOrWhiteSpace($SearchRoot)) { Join-Path $TestProject.DirectoryName "TestResults" } else { $SearchRoot }
+    $coverageReport = Get-ChildItem -Path $coverageSearchRoot -Recurse -Filter "coverage.cobertura.xml" -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTimeUtc -ge $MinimumWriteTimeUtc } |
         Sort-Object LastWriteTimeUtc -Descending |
         Select-Object -First 1
@@ -225,29 +247,33 @@ try {
     if (-not $SkipCoverage) {
         $coverageStartedUtc = [DateTime]::UtcNow
         $testProjects | ForEach-Object {
-            $filter = if ($_.Name -eq "EmbodySense.E2ETests.csproj") { "(FullyQualifiedName!~BrowserFlowTests)&(VerificationTier!=Stress)" } else { "VerificationTier!=Stress" }
-            $testArguments = @("test", $_.FullName, "-c", $Configuration, "--no-build", "--no-restore", "--settings", $pullRequestRunSettingsPath, "--collect:XPlat Code Coverage", "--filter", $filter, "/p:RestoreIgnoreFailedSources=true")
             if ($_.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") {
-                $testArguments += @("--logger", "console;verbosity=detailed")
-            }
-
-            $previousCoverageChildAssemblyDirectory = $env:EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY
-            try {
-                if ($_.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") {
+                $previousCoverageChildAssemblyDirectory = $env:EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY
+                try {
                     $env:EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = New-CoverageChildProcessAssemblyCopy -TestProject $_ -BuildConfiguration $Configuration
+                    $persistenceCoverageResultsRoot = Join-Path $_.DirectoryName "TestResults\CoverageShards"
+                    foreach ($shard in $persistenceCoverageShards) {
+                        $shardStartedUtc = [DateTime]::UtcNow
+                        $shardResultsPath = Join-Path $persistenceCoverageResultsRoot $shard.Name
+                        $testArguments = @("test", $_.FullName, "-c", $Configuration, "--no-build", "--no-restore", "--settings", $pullRequestRunSettingsPath, "--collect:XPlat Code Coverage", "--filter", $shard.Filter, "--logger", "console;verbosity=detailed", "--results-directory", $shardResultsPath, "/p:RestoreIgnoreFailedSources=true")
+                        Invoke-CheckedNativePhase -Name "coverage-$($_.BaseName)-$($shard.Name)" -FileName "dotnet" -Arguments $testArguments -TimeoutSeconds $persistenceCoveragePhaseTimeoutSeconds
+                        Assert-CoverageReportProduced -TestProject $_ -MinimumWriteTimeUtc $shardStartedUtc -SearchRoot $shardResultsPath
+                    }
                 }
-
-                $coveragePhaseTimeoutSeconds = if ($_.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") { 1560 } else { 900 }
-                Invoke-CheckedNativePhase -Name "coverage-$($_.BaseName)" -FileName "dotnet" -Arguments $testArguments -TimeoutSeconds $coveragePhaseTimeoutSeconds
-                Assert-CoverageReportProduced -TestProject $_ -MinimumWriteTimeUtc $coverageStartedUtc
+                finally {
+                    if ($null -eq $previousCoverageChildAssemblyDirectory) {
+                        Remove-Item Env:\EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY -ErrorAction SilentlyContinue
+                    }
+                    else {
+                        $env:EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $previousCoverageChildAssemblyDirectory
+                    }
+                }
             }
-            finally {
-                if ($null -eq $previousCoverageChildAssemblyDirectory) {
-                    Remove-Item Env:\EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY -ErrorAction SilentlyContinue
-                }
-                else {
-                    $env:EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $previousCoverageChildAssemblyDirectory
-                }
+            else {
+                $filter = if ($_.Name -eq "EmbodySense.E2ETests.csproj") { "(FullyQualifiedName!~BrowserFlowTests)&(VerificationTier!=Stress)" } else { "VerificationTier!=Stress" }
+                $testArguments = @("test", $_.FullName, "-c", $Configuration, "--no-build", "--no-restore", "--settings", $pullRequestRunSettingsPath, "--collect:XPlat Code Coverage", "--filter", $filter, "/p:RestoreIgnoreFailedSources=true")
+                Invoke-CheckedNativePhase -Name "coverage-$($_.BaseName)" -FileName "dotnet" -Arguments $testArguments -TimeoutSeconds 900
+                Assert-CoverageReportProduced -TestProject $_ -MinimumWriteTimeUtc $coverageStartedUtc
             }
         }
 

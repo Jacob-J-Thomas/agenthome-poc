@@ -14,6 +14,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
     private readonly ICapabilityCatalogDurabilityBarrier _durabilityBarrier;
     private readonly ICapabilityCatalogPathObserver? _pathObserver;
     private FileStream? _lock;
+    private string? _lockPath;
 
     private CapabilityCatalogPathSession(string root, StringComparison comparison, Dictionary<string, SafeFileHandle> directories, List<SafeFileHandle> ownedDirectories, ICapabilityCatalogDurabilityBarrier durabilityBarrier, ICapabilityCatalogPathObserver? pathObserver)
     {
@@ -96,6 +97,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             _lock = CapabilityCatalogNativeFileSystem.TryAcquireExclusiveLock(safePath, parent, name);
             if (_lock is not null)
             {
+                _lockPath = safePath;
                 return true;
             }
 
@@ -112,6 +114,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
     {
         _lock?.Dispose();
         _lock = null;
+        _lockPath = null;
     }
 
     public bool DirectoryExists(string path)
@@ -241,8 +244,19 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             }
             else
             {
-                using var file = OpenRegularFile(Path.Combine(safePath, entry.Name), directory, entry.Name, FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new IOException("A staged artifact file disappeared during bound enumeration.");
-                CapabilityCatalogNativeFileSystem.RequireSingleLink(file, entry.Name);
+                var entryPath = Path.Combine(safePath, entry.Name);
+                if (OperatingSystem.IsWindows()
+                    && _lock is not null
+                    && string.Equals(entryPath, _lockPath, _comparison))
+                {
+                    // Windows cannot reopen a FileShare.None lock, so its retained handle is the exact binding proof.
+                    CapabilityCatalogNativeFileSystem.RequireSingleLink(_lock.SafeFileHandle, entry.Name);
+                }
+                else
+                {
+                    using var file = OpenRegularFile(entryPath, directory, entry.Name, FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new IOException("A staged artifact file disappeared during bound enumeration.");
+                    CapabilityCatalogNativeFileSystem.RequireSingleLink(file, entry.Name);
+                }
             }
             results.Add(entry);
         }
@@ -578,7 +592,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
 
     public void Dispose()
     {
-        _lock?.Dispose();
+        ReleaseLock();
         for (var index = _ownedDirectories.Count - 1; index >= 0; index--)
         {
             _ownedDirectories[index].Dispose();
