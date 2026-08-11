@@ -922,6 +922,76 @@ public sealed class CodexAppServerInferenceTests
     }
 
     [Fact]
+    public async Task GenerateAsync_rejects_a_caught_second_turn_write_and_quarantines_the_ambiguous_transport()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""));
+        await using var client = CreateRawClient(transport);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            async (commitTransportWrite, token) =>
+            {
+                await commitTransportWrite(token);
+                try
+                {
+                    await commitTransportWrite(token);
+                }
+                catch (InvalidOperationException)
+                {
+                }
+            }));
+
+        await transport.DisposedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("at most once", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, transport.Writes.Count(IsTurnStart));
+        Assert.True(transport.Disposed);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_a_boundary_that_returns_before_its_turn_write_completes()
+    {
+        var writeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""))
+        {
+            WriteOverride = (line, _) =>
+            {
+                if (!IsTurnStart(line))
+                {
+                    return Task.CompletedTask;
+                }
+
+                writeStarted.TrySetResult();
+                return releaseWrite.Task;
+            }
+        };
+        await using var client = CreateRawClient(transport);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            (commitTransportWrite, token) =>
+            {
+                _ = commitTransportWrite(token);
+                return Task.CompletedTask;
+            }));
+
+        await writeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseWrite.TrySetResult();
+        await transport.DisposedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("before its write callback completed", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, transport.Writes.Count(IsTurnStart));
+        Assert.True(transport.Disposed);
+    }
+
+    [Fact]
     public async Task GenerateAsync_reports_missing_thread_ids()
     {
         var transport = new ScriptedAppServerTransport(

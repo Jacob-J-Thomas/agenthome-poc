@@ -449,17 +449,33 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         {
             cancellationToken.ThrowIfCancellationRequested();
             var commitCount = 0;
+            var commitCompleted = 0;
+            var commitSucceeded = 0;
+            var boundaryOpen = 1;
             try
             {
                 await transportCommitBoundary(
                     async token =>
                     {
+                        if (Volatile.Read(ref boundaryOpen) == 0)
+                        {
+                            throw new InvalidOperationException("The provider transport commit callback cannot be invoked after its boundary returns.");
+                        }
+
                         if (Interlocked.Increment(ref commitCount) != 1)
                         {
                             throw new InvalidOperationException("The provider transport commit callback may be invoked at most once.");
                         }
 
-                        await WriteAfterDispatchCheckpointAsync(transport, line, token);
+                        try
+                        {
+                            await WriteAfterDispatchCheckpointAsync(transport, line, token);
+                            Volatile.Write(ref commitSucceeded, 1);
+                        }
+                        finally
+                        {
+                            Volatile.Write(ref commitCompleted, 1);
+                        }
                     },
                     cancellationToken);
             }
@@ -472,10 +488,33 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
                 throw;
             }
+            finally
+            {
+                Volatile.Write(ref boundaryOpen, 0);
+            }
 
-            if (Volatile.Read(ref commitCount) != 1)
+            var observedCommitCount = Volatile.Read(ref commitCount);
+            if (observedCommitCount == 0)
             {
                 throw new InvalidOperationException("The provider transport commit boundary returned without invoking its write callback.");
+            }
+
+            if (observedCommitCount != 1)
+            {
+                AbandonAmbiguousTransport(transport);
+                throw new InvalidOperationException("The provider transport commit callback may be invoked at most once.");
+            }
+
+            if (Volatile.Read(ref commitCompleted) == 0)
+            {
+                AbandonAmbiguousTransport(transport);
+                throw new InvalidOperationException("The provider transport commit boundary returned before its write callback completed.");
+            }
+
+            if (Volatile.Read(ref commitSucceeded) == 0)
+            {
+                AbandonAmbiguousTransport(transport);
+                throw new InvalidOperationException("The provider transport commit boundary suppressed a failed transport write.");
             }
 
             return;
