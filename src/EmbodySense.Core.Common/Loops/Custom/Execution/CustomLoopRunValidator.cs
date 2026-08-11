@@ -533,10 +533,16 @@ public static class CustomLoopRunValidator
         {
             GovernedLoopNodeExecutionStatus.Completed => kind == CustomLoopSequentialNodeEvidenceKind.CompletedOutcome && disposition == CustomLoopSequentialNodeDisposition.Completed,
             GovernedLoopNodeExecutionStatus.Failed => kind == CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection && disposition == CustomLoopSequentialNodeDisposition.Rejected,
-            GovernedLoopNodeExecutionStatus.ReviewBlocked => kind == CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention && disposition == CustomLoopSequentialNodeDisposition.NeedsReview,
+            GovernedLoopNodeExecutionStatus.ReviewBlocked => IsClosedSequentialOutcome(kind, disposition),
             _ => false,
         };
     }
+
+    private static bool IsClosedSequentialOutcome(CustomLoopSequentialNodeEvidenceKind kind, CustomLoopSequentialNodeDisposition disposition)
+        => (kind, disposition) is
+            (CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed)
+            or (CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected)
+            or (CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention, CustomLoopSequentialNodeDisposition.NeedsReview);
 
     private static void ValidateExecutionFrontierUpdate(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
     {
