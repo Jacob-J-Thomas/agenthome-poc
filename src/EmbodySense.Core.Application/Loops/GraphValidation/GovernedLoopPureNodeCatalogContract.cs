@@ -41,8 +41,7 @@ public static class GovernedLoopPureNodeCatalogContract
                 port.ValueSchemaId,
                 schemas,
                 new HashSet<string>(StringComparer.Ordinal),
-                1,
-                rejectFormats: false)))
+                1)))
         {
             return false;
         }
@@ -63,8 +62,7 @@ public static class GovernedLoopPureNodeCatalogContract
                     input.ValueSchemaId,
                     schemas,
                     new HashSet<string>(StringComparer.Ordinal),
-                    1,
-                    rejectFormats: true),
+                    1),
             GovernedLoopPureNodeVocabulary.CanonicalEquality => IsExactEquality(node, schemas, result),
             GovernedLoopPureNodeVocabulary.InclusiveIntegerRange or GovernedLoopPureNodeVocabulary.InclusiveNumberRange
                 => IsNonNullable(input, schemas) && IsNonNullable(result, schemas) && HasOrderedRange(node),
@@ -196,8 +194,7 @@ public static class GovernedLoopPureNodeCatalogContract
         string schemaId,
         IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas,
         HashSet<string> active,
-        int depth,
-        bool rejectFormats)
+        int depth)
     {
         if (depth > CustomLoopLimits.MaxGraphTypedValueDepth
             || !schemas.TryGetValue(schemaId, out var schema)
@@ -206,10 +203,10 @@ public static class GovernedLoopPureNodeCatalogContract
             return false;
         }
 
-        var valid = (!rejectFormats || schema.Format is null)
+        var valid = schema.Format is null
             && (schema.Kind != GovernedLoopValueKind.Array
                 || schema.ElementSchemaId is not null
-                && HasSupportedSchemaTree(schema.ElementSchemaId, schemas, active, depth + 1, rejectFormats));
+                && HasSupportedSchemaTree(schema.ElementSchemaId, schemas, active, depth + 1));
         active.Remove(schema.Id);
         return valid;
     }

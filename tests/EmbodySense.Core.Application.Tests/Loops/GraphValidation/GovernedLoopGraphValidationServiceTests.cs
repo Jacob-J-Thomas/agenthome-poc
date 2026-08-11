@@ -1182,6 +1182,12 @@ public sealed class GovernedLoopGraphValidationServiceTests
                 ? schema with { Nullable = true }
                 : schema).ToArray(),
         };
+        var formattedIdentity = mixed with
+        {
+            ValueSchemas = mixed.ValueSchemas!.Select(schema => string.Equals(schema!.Id, "text", StringComparison.Ordinal)
+                ? schema with { Format = "formatted-text" }
+                : schema).ToArray(),
+        };
 
         return
         [
@@ -1193,6 +1199,8 @@ public sealed class GovernedLoopGraphValidationServiceTests
             ("schema conformance with a cyclic array schema", "schema-check", CandidateFromGraph(GovernedLoopPureSchemaAdmissionTestFixture.SchemaConformanceArtifact(cycle: true).Graph)),
             ("ordered concat with a formatted array", "concat", CandidateFromGraph(GovernedLoopPureSchemaAdmissionTestFixture.ConcatArtifact(formatArray: true).Graph)),
             ("ordered concat with a formatted array element", "concat", CandidateFromGraph(GovernedLoopPureSchemaAdmissionTestFixture.ConcatArtifact(formatElement: true).Graph)),
+            ("ordered concat with a formatted output", "concat", CandidateFromGraph(GovernedLoopPureSchemaAdmissionTestFixture.ConcatArtifact(formatOutput: true).Graph)),
+            ("identity with a formatted value schema", "identity", formattedIdentity),
             ("validator with reversed bounds", "validate-length", reversedLength),
             ("validator with nullable input", "validate-length", nullableLength),
         ];

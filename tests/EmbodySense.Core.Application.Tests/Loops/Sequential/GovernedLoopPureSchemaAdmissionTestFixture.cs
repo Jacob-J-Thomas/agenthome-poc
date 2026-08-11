@@ -113,7 +113,8 @@ internal static class GovernedLoopPureSchemaAdmissionTestFixture
 
     internal static GovernedLoopGraphRevisionArtifact ConcatArtifact(
         bool formatArray = false,
-        bool formatElement = false)
+        bool formatElement = false,
+        bool formatOutput = false)
     {
         var trigger = GovernedLoopSequentialApplicationTestFixture.Trigger("trigger") with
         {
@@ -151,7 +152,7 @@ internal static class GovernedLoopPureSchemaAdmissionTestFixture
             [
                 new GovernedLoopValueSchemaDefinition("element", GovernedLoopValueKind.Text, false, Format: formatElement ? "formatted-element" : null),
                 new GovernedLoopValueSchemaDefinition("items", GovernedLoopValueKind.Array, false, Format: formatArray ? "formatted-array" : null, ElementSchemaId: "element"),
-                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
+                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false, Format: formatOutput ? "formatted-output" : null),
             ]);
     }
 }
