@@ -31,6 +31,7 @@ using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
@@ -130,6 +131,121 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal("final outcome", publication.CanonicalOutput);
         Assert.True(Array.FindIndex(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted && item.StepId == "infer-01")
             < Array.FindIndex(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted && item.Detail.Contains("infer-01", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task Canonical_conversation_publication_supplies_exact_success_exit_proof_and_crosses_the_boundary_once()
+    {
+        var admitted = Run(
+            SequentialDefinition(includeConversation: true),
+            new CustomLoopConversationReference("conversation-one", "version-one", _now));
+        var context = await SequentialContextAsync(admitted);
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("governed publication"));
+        var publisher = new RecordingPublisher();
+        var authority = new RecordingPublicationAuthorityBoundaryProvider(PublicationAuthorityBehavior.Direct);
+        var runtime = Runner(
+            store,
+            executor,
+            publisher,
+            conversationPublicationAuthorityBoundaryProvider: authority);
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(runtime, evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Completed, result.Status);
+        var proof = Assert.Single(authority.Requests);
+        Assert.Equal(context.Anchor.AdapterBinding.AdmissionReceipt, proof.AdmissionReceipt);
+        Assert.Equal(context.Anchor.AdapterBinding.ExecutionBinding, proof.ExecutionBinding);
+        Assert.Equal(context.Artifact, proof.GraphArtifact);
+        Assert.Equal("exit", proof.NodeId);
+        Assert.Equal(1, proof.NodeAttempt);
+        var publication = Assert.Single(publisher.Requests);
+        Assert.Equal(proof.PublicationOperationId, publication.OperationId);
+        Assert.NotNull(publication.AppendCommitBoundary);
+        Assert.Equal("exit", publication.StepId);
+        Assert.Equal(1, publisher.AppendCount);
+        Assert.Single(result.Run!.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublished);
+    }
+
+    [Fact]
+    public async Task Canonical_conversation_publication_without_composed_authority_stops_before_publisher_or_append()
+    {
+        var admitted = Run(
+            SequentialDefinition(includeConversation: true),
+            new CustomLoopConversationReference("conversation-one", "version-one", _now));
+        var context = await SequentialContextAsync(admitted);
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("must not publish"));
+        var publisher = new RecordingPublisher();
+        var runtime = new CustomLoopOrderedRunner(
+            store,
+            new CustomLoopContextResolver(),
+            executor,
+            publisher,
+            new RecordingAuditLog(),
+            new TestAuthorityProvider(),
+            new FixedTimeProvider(_now),
+            capabilityAdmissionService: new TestCapabilityAdmissionService());
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(runtime, evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal("canonical_publication_authority_unavailable", result.Run!.FailureCode);
+        Assert.Empty(publisher.Requests);
+        Assert.Equal(0, publisher.AppendCount);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublicationStarted);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublished);
+    }
+
+    [Theory]
+    [InlineData(PublicationAuthorityBehavior.DefinitiveDeny)]
+    [InlineData(PublicationAuthorityBehavior.DefinitiveDenyReplay)]
+    public async Task Exact_new_or_replayed_durable_publication_deny_fails_without_append_or_fabricated_outcome(
+        PublicationAuthorityBehavior behavior)
+    {
+        var result = await RunWithPublicationAuthorityAsync(behavior);
+
+        AssertValidAuthorityDecision(result.Authority.LastDecision);
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Result.Status);
+        Assert.Equal("conversation_publication_authority_denied", result.Result.Run!.FailureCode);
+        Assert.Single(result.Publisher.Requests);
+        Assert.Equal(0, result.Publisher.AppendCount);
+        Assert.DoesNotContain(result.Result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublished);
+    }
+
+    [Theory]
+    [InlineData(PublicationAuthorityBehavior.Pause)]
+    [InlineData(PublicationAuthorityBehavior.Replay)]
+    [InlineData(PublicationAuthorityBehavior.Malformed)]
+    public async Task Non_definitive_publication_authority_stops_require_review_without_append_or_fabricated_outcome(
+        PublicationAuthorityBehavior behavior)
+    {
+        var result = await RunWithPublicationAuthorityAsync(behavior);
+
+        if (behavior is PublicationAuthorityBehavior.Pause or PublicationAuthorityBehavior.Replay)
+        {
+            AssertValidAuthorityDecision(result.Authority.LastDecision);
+        }
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Result.Status);
+        Assert.Equal("conversation_publication_authority_stopped", result.Result.Run!.FailureCode);
+        Assert.Single(result.Publisher.Requests);
+        Assert.Equal(0, result.Publisher.AppendCount);
+        Assert.DoesNotContain(result.Result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublished);
     }
 
     [Fact]
@@ -384,6 +500,38 @@ public sealed class CustomLoopOrderedRunnerTests
             Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
             Disposition: CustomLoopSequentialNodeDisposition.Rejected,
         });
+    }
+
+    [Fact]
+    public async Task Canonical_exact_replayed_effect_authority_denial_remains_definitive_without_provider_dispatch()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var store = new FakeRunStore(context.Run);
+        var firstObservation = DefinitiveEffectAuthorityDeny(context);
+        var replay = new GovernedLoopEffectAuthorityStoppedException(
+            "The exact durable deny was already present.",
+            GovernedLoopEffectAuthorityExecutionStatus.Decided,
+            GovernedLoopEffectAuthorityEvidenceStoreStatus.AlreadyPresent,
+            firstObservation.Decision);
+        var executor = new QueueExecutor(replay)
+        {
+            MarkProviderRequestStarted = false,
+        };
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal("effect_authority_denied", result.Run!.FailureCode);
+        Assert.False(result.ProviderWasInvoked);
+        Assert.Equal(0, result.Run.Checkpoint.NextStepIndex);
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Rejected, evidence.Requests[^1].Disposition);
     }
 
     [Fact]
@@ -3483,9 +3631,64 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.DoesNotContain(store.ValidationFailures, error => error.Code == "too_many_trace_events");
     }
 
-    private static CustomLoopOrderedRunner Runner(FakeRunStore store, QueueExecutor executor, RecordingPublisher? publisher = null, RecordingAuditLog? audit = null, ICustomLoopToolAuthorityProvider? authorityProvider = null, TimeProvider? timeProvider = null, ICapabilityAdmissionService? capabilityAdmissionService = null)
+    private static CustomLoopOrderedRunner Runner(
+        FakeRunStore store,
+        QueueExecutor executor,
+        RecordingPublisher? publisher = null,
+        RecordingAuditLog? audit = null,
+        ICustomLoopToolAuthorityProvider? authorityProvider = null,
+        TimeProvider? timeProvider = null,
+        ICapabilityAdmissionService? capabilityAdmissionService = null,
+        IGovernedLoopConversationPublicationAuthorityBoundaryProvider? conversationPublicationAuthorityBoundaryProvider = null)
     {
-        return new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, publisher ?? new RecordingPublisher(), audit ?? new RecordingAuditLog(), authorityProvider ?? new TestAuthorityProvider(), timeProvider ?? new FixedTimeProvider(_now), capabilityAdmissionService: capabilityAdmissionService ?? new TestCapabilityAdmissionService());
+        return new CustomLoopOrderedRunner(
+            store,
+            new CustomLoopContextResolver(),
+            executor,
+            publisher ?? new RecordingPublisher(),
+            audit ?? new RecordingAuditLog(),
+            authorityProvider ?? new TestAuthorityProvider(),
+            timeProvider ?? new FixedTimeProvider(_now),
+            capabilityAdmissionService: capabilityAdmissionService ?? new TestCapabilityAdmissionService(),
+            conversationPublicationAuthorityBoundaryProvider: conversationPublicationAuthorityBoundaryProvider ?? new DirectPublicationAuthorityBoundaryProvider());
+    }
+
+    private static async Task<(
+        CustomLoopOrderedRunResult Result,
+        RecordingPublisher Publisher,
+        RecordingPublicationAuthorityBoundaryProvider Authority)> RunWithPublicationAuthorityAsync(
+        PublicationAuthorityBehavior behavior)
+    {
+        var admitted = Run(
+            SequentialDefinition(includeConversation: true),
+            new CustomLoopConversationReference("conversation-one", "version-one", _now));
+        var context = await SequentialContextAsync(admitted);
+        var store = new FakeRunStore(context.Run);
+        var publisher = new RecordingPublisher();
+        var authority = new RecordingPublicationAuthorityBoundaryProvider(behavior);
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(
+                store,
+                new QueueExecutor(Result("governed publication")),
+                publisher,
+                conversationPublicationAuthorityBoundaryProvider: authority),
+            evidence,
+            evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+        return (result, publisher, authority);
+    }
+
+    private static void AssertValidAuthorityDecision(GovernedLoopEffectAuthorityDecision? decision)
+    {
+        var validation = GovernedLoopEffectAuthorityContractValidator.Validate(decision);
+        Assert.True(validation.IsValid, string.Join(", ", validation.Errors));
     }
 
     private static CustomLoopDefinition SequentialDefinition(
@@ -3566,6 +3769,14 @@ public sealed class CustomLoopOrderedRunnerTests
         {
             WorkspaceScopeId = intent.WorkspaceId,
         };
+        var effectiveAuthority = new AuthorityCeiling(
+            capabilityAdmission.Pins.Select(item => item.DescriptorIdentity).ToArray(),
+            seedReceipt.Evidence.EffectiveAuthority.DataClasses,
+            1,
+            CapabilitySideEffectClass.None,
+            false,
+            true,
+            false);
         var admissionEvidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
             1,
             GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
@@ -3576,9 +3787,9 @@ public sealed class CustomLoopOrderedRunnerTests
                 GovernedLoopSequentialApplicationTestFixture.Now.AddHours(1),
                 seedReceipt.Evidence.GrantBoundary.CompletionConstraint),
             seedReceipt.Evidence.GrantDependencyEvidenceHash,
-            seedReceipt.Evidence.EffectiveAuthority,
+            effectiveAuthority,
             capabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, seedReceipt.Evidence.EffectiveAuthority, capabilityAdmission),
+            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilityAdmission),
             GovernedLoopSequentialApplicationTestFixture.Now,
             string.Empty));
         var receipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
@@ -4631,6 +4842,8 @@ public sealed class CustomLoopOrderedRunnerTests
     {
         public List<CustomLoopConversationPublicationRequest> Requests { get; } = [];
 
+        public int AppendCount { get; private set; }
+
         public Func<CustomLoopConversationPublicationRequest, Task>? BeforePublish { get; set; }
 
         public CustomLoopConversationPublicationResult? NextResult { get; set; }
@@ -4647,10 +4860,178 @@ public sealed class CustomLoopOrderedRunnerTests
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            request.AppendStarted?.Invoke();
+            if (request.AppendCommitBoundary is { } boundary)
+            {
+                await boundary(
+                    token =>
+                    {
+                        token.ThrowIfCancellationRequested();
+                        request.AppendStarted?.Invoke();
+                        AppendCount++;
+                        return Task.CompletedTask;
+                    },
+                    cancellationToken);
+            }
+            else
+            {
+                request.AppendStarted?.Invoke();
+                AppendCount++;
+            }
 
             return ReturnNull ? null! : NextResult ?? new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Published, request.OperationId, "Published.");
         }
+    }
+
+    private sealed class DirectPublicationAuthorityBoundaryProvider : IGovernedLoopConversationPublicationAuthorityBoundaryProvider
+    {
+        public ConversationPublicationCommitBoundary CreateCommitBoundary(
+            GovernedLoopConversationPublicationAuthorityRequest request)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+            return (commitAppend, cancellationToken) => commitAppend(cancellationToken);
+        }
+    }
+
+    private sealed class RecordingPublicationAuthorityBoundaryProvider(PublicationAuthorityBehavior behavior)
+        : IGovernedLoopConversationPublicationAuthorityBoundaryProvider
+    {
+        public List<GovernedLoopConversationPublicationAuthorityRequest> Requests { get; } = [];
+
+        public GovernedLoopEffectAuthorityDecision? LastDecision { get; private set; }
+
+        public ConversationPublicationCommitBoundary CreateCommitBoundary(
+            GovernedLoopConversationPublicationAuthorityRequest request)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+            Requests.Add(request);
+            return async (commitAppend, cancellationToken) =>
+            {
+                ArgumentNullException.ThrowIfNull(commitAppend);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (behavior == PublicationAuthorityBehavior.Direct)
+                {
+                    await commitAppend(cancellationToken);
+                    return;
+                }
+
+                throw behavior switch
+                {
+                    PublicationAuthorityBehavior.DefinitiveDeny => Stopped(
+                        request,
+                        GovernedLoopEffectAuthorityExecutionStatus.Decided,
+                        GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
+                        Decision(request, GovernedLoopEffectAuthorityDisposition.Deny, GovernedLoopEffectAuthorityReason.GrantRevoked)),
+                    PublicationAuthorityBehavior.DefinitiveDenyReplay => Stopped(
+                        request,
+                        GovernedLoopEffectAuthorityExecutionStatus.Decided,
+                        GovernedLoopEffectAuthorityEvidenceStoreStatus.AlreadyPresent,
+                        Decision(request, GovernedLoopEffectAuthorityDisposition.Deny, GovernedLoopEffectAuthorityReason.GrantRevoked)),
+                    PublicationAuthorityBehavior.Pause => Stopped(
+                        request,
+                        GovernedLoopEffectAuthorityExecutionStatus.Decided,
+                        GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
+                        Decision(request, GovernedLoopEffectAuthorityDisposition.Pause, GovernedLoopEffectAuthorityReason.EvidenceAmbiguous)),
+                    PublicationAuthorityBehavior.Replay => Stopped(
+                        request,
+                        GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected,
+                        GovernedLoopEffectAuthorityEvidenceStoreStatus.AlreadyPresent,
+                        Decision(request, GovernedLoopEffectAuthorityDisposition.Pause, GovernedLoopEffectAuthorityReason.EvidenceAmbiguous)),
+                    PublicationAuthorityBehavior.Malformed => Stopped(
+                        request,
+                        GovernedLoopEffectAuthorityExecutionStatus.Decided,
+                        GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
+                        null),
+                    _ => new InvalidOperationException("Unsupported publication-authority behavior."),
+                };
+            };
+        }
+
+        private static GovernedLoopEffectAuthorityStoppedException Stopped(
+            GovernedLoopConversationPublicationAuthorityRequest request,
+            GovernedLoopEffectAuthorityExecutionStatus executionStatus,
+            GovernedLoopEffectAuthorityEvidenceStoreStatus evidenceStatus,
+            GovernedLoopEffectAuthorityDecision? decision)
+            => new(
+                $"Publication authority stopped {request.PublicationOperationId} before append.",
+                executionStatus,
+                evidenceStatus,
+                decision);
+
+        private GovernedLoopEffectAuthorityDecision Decision(
+            GovernedLoopConversationPublicationAuthorityRequest request,
+            GovernedLoopEffectAuthorityDisposition disposition,
+            GovernedLoopEffectAuthorityReason reason)
+        {
+            var receipt = request.AdmissionReceipt;
+            var conversationPin = receipt.Evidence.CapabilityAdmission.Pins.Single(
+                item => string.Equals(
+                    item.DescriptorIdentity.Id.Value,
+                    GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId,
+                    StringComparison.Ordinal));
+            var requiredAuthority = new AuthorityCeiling(
+                [conversationPin.DescriptorIdentity],
+                receipt.Evidence.EffectiveAuthority.DataClasses,
+                1,
+                CapabilitySideEffectClass.None,
+                false,
+                true,
+                false);
+            var admitted = new GovernedLoopEffectAuthorityProof(
+                GovernedLoopEffectAuthorityProof.CurrentSchemaVersion,
+                receipt.Intent.AuthorityGrant,
+                new AuthorityGrantBinding(receipt.Evidence.GrantProfile, receipt.Intent.Role, receipt.Intent.Publication),
+                AuthorityGrantLifecycleStatus.Active,
+                GovernedLoopEffectAuthorityGrantPosture.Active,
+                receipt.Evidence.GrantBoundary,
+                receipt.Evidence.EffectiveAuthority,
+                receipt.Evidence.CapabilityAdmission.Pins,
+                [],
+                receipt.Evidence.GrantDependencyEvidenceHash);
+            var current = disposition == GovernedLoopEffectAuthorityDisposition.Deny
+                ? new GovernedLoopEffectAuthorityProof(
+                    admitted.SchemaVersion,
+                    admitted.Grant,
+                    admitted.Binding,
+                    AuthorityGrantLifecycleStatus.Revoked,
+                    GovernedLoopEffectAuthorityGrantPosture.Revoked,
+                    admitted.Boundary,
+                    admitted.Ceiling,
+                    [],
+                    [],
+                    admitted.DependencyEvidenceHash)
+                : admitted;
+            var decision = GovernedLoopEffectAuthorityContractHash.Apply(new GovernedLoopEffectAuthorityDecision(
+                GovernedLoopEffectAuthorityDecision.CurrentSchemaVersion,
+                request.ExecutionBinding.RunId,
+                request.ExecutionBinding.ExecutionGeneration,
+                request.NodeId,
+                request.NodeAttempt,
+                "conversation-publication-test-authority",
+                request.PublicationOperationId,
+                GovernedLoopEffectBoundaryKind.ConversationPublication,
+                receipt.ContentHash,
+                admitted,
+                current,
+                requiredAuthority,
+                AuthorityCeilingIntersection.EmptyCeiling(),
+                [conversationPin],
+                disposition,
+                reason,
+                receipt.RecordedAtUtc,
+                string.Empty));
+            LastDecision = decision;
+            return decision;
+        }
+    }
+
+    public enum PublicationAuthorityBehavior
+    {
+        Direct,
+        DefinitiveDeny,
+        DefinitiveDenyReplay,
+        Pause,
+        Replay,
+        Malformed,
     }
 
     private sealed class ThrowingOnRevalidationCapabilityAdmissionService(int throwOnRevalidation) : ICapabilityAdmissionService
