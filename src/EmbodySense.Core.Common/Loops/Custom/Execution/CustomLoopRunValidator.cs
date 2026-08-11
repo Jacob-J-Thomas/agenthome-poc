@@ -1391,11 +1391,11 @@ public static class CustomLoopRunValidator
         CustomLoopSequentialNodeEvidence evidence)
     {
         return terminalIndex > 0 && events.Take(terminalIndex).Any(candidate => candidate is
-            {
-                Kind: CustomLoopRunEventKind.NodeAttemptStarted,
-                TraceReservationUtf8Bytes: CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
-                SequentialNodeEvidence: { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted } start,
-            }
+        {
+            Kind: CustomLoopRunEventKind.NodeAttemptStarted,
+            TraceReservationUtf8Bytes: CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
+            SequentialNodeEvidence: { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted } start,
+        }
             && string.Equals(start.NodeId, evidence.NodeId, StringComparison.Ordinal)
             && start.Attempt == evidence.Attempt);
     }
@@ -1865,15 +1865,15 @@ public static class CustomLoopRunValidator
         }
 
         return run.Events?.Any(item => item is
+        {
+            Kind: CustomLoopRunEventKind.NodeAttemptCompleted,
+            PureNodeOutcomeJson: not null,
+            SequentialNodeEvidence:
             {
-                Kind: CustomLoopRunEventKind.NodeAttemptCompleted,
-                PureNodeOutcomeJson: not null,
-                SequentialNodeEvidence:
-                {
-                    Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
-                    Disposition: CustomLoopSequentialNodeDisposition.Completed,
-                } evidence,
-            }
+                Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                Disposition: CustomLoopSequentialNodeDisposition.Completed,
+            } evidence,
+        }
             && string.Equals(item.StepId, stepId, StringComparison.Ordinal)
             && string.Equals(evidence.NodeId, stepId, StringComparison.Ordinal)
             && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
