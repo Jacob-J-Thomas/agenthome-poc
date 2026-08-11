@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Application.Tests.Loops.GraphValidation;
@@ -47,6 +48,13 @@ public sealed class GovernedLoopTopologyNodeCatalogContractTests
             Assert.False(duration.Required);
             Assert.Equal(GovernedLoopParameterValueKind.Integer, iterations.ValueKind);
             Assert.Equal(GovernedLoopParameterValueKind.Integer, duration.ValueKind);
+            Assert.Equal(
+                new GovernedLoopNodeResourceBudget(
+                    1,
+                    CustomLoopLimits.MaxGraphNodePayloadCharacters,
+                    CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation,
+                    0),
+                descriptor.ResourceBudget);
         });
     }
 
@@ -65,6 +73,13 @@ public sealed class GovernedLoopTopologyNodeCatalogContractTests
         Assert.Empty(descriptor.Ports);
         Assert.Empty(descriptor.Parameters);
         Assert.False(descriptor.AllowsCycle);
+        Assert.Equal(
+            new GovernedLoopNodeResourceBudget(
+                1,
+                0,
+                CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation,
+                0),
+            descriptor.ResourceBudget);
     }
 
     [Fact]

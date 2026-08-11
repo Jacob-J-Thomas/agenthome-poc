@@ -136,7 +136,7 @@ public static class GovernedLoopTopologyNodeCatalogContract
             Array.AsReadOnly(new[] { input }),
             Array.AsReadOnly(parameters.Concat(CycleBudgetParameters()).OrderBy(parameter => parameter.Id, StringComparer.Ordinal).ToArray()),
             _noCapabilities,
-            new GovernedLoopNodeResourceBudget(1, CustomLoopLimits.MaxGraphNodePayloadCharacters, 1, 0));
+            new GovernedLoopNodeResourceBudget(1, CustomLoopLimits.MaxGraphNodePayloadCharacters, CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation, 0));
 
     private static GovernedLoopNodeCatalogDescriptor Join(string typeId, GovernedLoopJoinPolicy joinPolicy)
         => new(
@@ -155,7 +155,7 @@ public static class GovernedLoopTopologyNodeCatalogContract
             Array.Empty<GovernedLoopCatalogPortContract>(),
             Array.Empty<GovernedLoopCatalogParameterContract>(),
             _noCapabilities,
-            new GovernedLoopNodeResourceBudget(1, 0, 1, 0));
+            new GovernedLoopNodeResourceBudget(1, 0, CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation, 0));
 
     private static GovernedLoopCatalogPortContract Input(string id, GovernedLoopValueKindSet kinds)
         => new(id, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, kinds, Required: true);

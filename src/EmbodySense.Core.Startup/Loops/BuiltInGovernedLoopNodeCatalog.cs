@@ -73,7 +73,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                 }),
                 Array.Empty<GovernedLoopCatalogParameterContract>(),
                 Array.Empty<string>(),
-                ActivationBudget()),
+                ActivationBudget(evidenceItems: 1)),
             new GovernedLoopNodeCatalogDescriptor(
                 GovernedLoopSequentialNodeDescriptors.ProviderInference,
                 IsAdvertised: true,
@@ -100,7 +100,9 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                     CycleParameter(GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter, CustomLoopLimits.MaxGraphCycleMilliseconds),
                 }.OrderBy(item => item.Id, StringComparer.Ordinal).ToArray()),
                 Array.AsReadOnly(new[] { ModelInferenceCapabilityId }),
-                ActivationBudget(ProviderTransportResourceUnitsPerActivation)),
+                ActivationBudget(
+                    CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation,
+                    ProviderTransportResourceUnitsPerActivation)),
             new GovernedLoopNodeCatalogDescriptor(
                 GovernedLoopSequentialNodeDescriptors.SuccessExit,
                 IsAdvertised: true,
@@ -121,7 +123,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                 }),
                 Array.Empty<GovernedLoopCatalogParameterContract>(),
                 Array.AsReadOnly(new[] { ConversationTurnCapabilityId }),
-                ActivationBudget()),
+                ActivationBudget(CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation)),
         });
 
     private static GovernedLoopCatalogPortContract Port(
@@ -152,11 +154,11 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             MaximumInteger: maximum,
             Array.Empty<string>());
 
-    private static GovernedLoopNodeResourceBudget ActivationBudget(int resourceUnits = 0)
+    private static GovernedLoopNodeResourceBudget ActivationBudget(int evidenceItems, int resourceUnits = 0)
         => new(
             Attempts: 1,
             PayloadCharacters: 0,
-            EvidenceItems: 1,
+            EvidenceItems: evidenceItems,
             ResourceUnits: resourceUnits);
 
     private static string DescriptorKey(GovernedLoopNodeCatalogDescriptor descriptor)
