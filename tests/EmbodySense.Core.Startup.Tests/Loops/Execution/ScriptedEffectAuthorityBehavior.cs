@@ -10,4 +10,6 @@ public enum ScriptedEffectAuthorityBehavior
     ReplayAmbiguous,
     DoubleCallback,
     LateCallback,
+    NullResult,
+    MalformedResult,
 }
