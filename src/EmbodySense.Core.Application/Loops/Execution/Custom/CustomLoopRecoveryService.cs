@@ -94,6 +94,7 @@ public sealed class CustomLoopRecoveryService
                 CustomLoopRunStatus.Paused when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
                 CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
                 CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested => CustomLoopRunStatus.Paused,
+                CustomLoopRunStatus.CancelRequested when hasRestartSafePureAttempt => CustomLoopRunStatus.NeedsReview,
                 CustomLoopRunStatus.CancelRequested when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
                 CustomLoopRunStatus.CancelRequested => CustomLoopRunStatus.Cancelled,
                 _ => CustomLoopRunStatus.Unknown
@@ -107,6 +108,7 @@ public sealed class CustomLoopRecoveryService
         var detail = (run.Status, target) switch
         {
             (_, CustomLoopRunStatus.NeedsReview) when !admissionAuditComplete => "Restart recovery found no valid durable admission-audit completion marker; execution is permanently stopped for review.",
+            (CustomLoopRunStatus.CancelRequested, CustomLoopRunStatus.NeedsReview) when hasRestartSafePureAttempt => "Restart recovery found cancellation over an unadopted deterministic pure-node attempt; operator reconciliation is required before any terminal disposition.",
             (CustomLoopRunStatus.Admitted, CustomLoopRunStatus.Paused) => "Restart recovery parked the admitted run at Paused without dispatch.",
             (_, CustomLoopRunStatus.NeedsReview) => "Restart recovery found an unresolved effectful or unauthenticated canonical attempt after the last committed checkpoint; execution remains stopped for review.",
             (_, CustomLoopRunStatus.Paused) when hasRestartSafePureAttempt => "Restart recovery parked an authenticated deterministic pure-node attempt for explicit resume without evaluating it.",
@@ -114,7 +116,11 @@ public sealed class CustomLoopRecoveryService
             _ => "Restart recovery parked the interrupted run at its last proved checkpoint without dispatch."
         };
         var now = Now(run);
-        var failureCode = !admissionAuditComplete ? "recovery_incomplete_admission_audit" : target == CustomLoopRunStatus.NeedsReview ? "recovery_open_attempt" : null;
+        var failureCode = !admissionAuditComplete
+            ? "recovery_incomplete_admission_audit"
+            : target == CustomLoopRunStatus.NeedsReview && run.Status == CustomLoopRunStatus.CancelRequested && hasRestartSafePureAttempt
+                ? "recovery_pure_cancellation_reconciliation_required"
+                : target == CustomLoopRunStatus.NeedsReview ? "recovery_open_attempt" : null;
         var candidate = CreateCandidate(run, target, failureCode, detail, now);
         var metadata = RecoveryMetadata(run, candidate, hasOpenAttempt, hasRestartSafePureAttempt, admissionAuditComplete);
 
@@ -306,7 +312,7 @@ public sealed class CustomLoopRecoveryService
                 && !IsRestartSafePureAttemptStart(run, exactStarts[0]);
     }
 
-    private static bool HasRestartSafePureAttemptSinceCheckpoint(CustomLoopRunRecord run)
+    internal static bool HasRestartSafePureAttemptSinceCheckpoint(CustomLoopRunRecord run)
         => run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence && IsRestartSafePureAttemptStart(run, item));
 
     private static bool IsRestartSafePureAttemptStart(CustomLoopRunRecord run, CustomLoopRunEvent item)
