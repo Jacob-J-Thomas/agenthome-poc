@@ -8,6 +8,8 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
@@ -229,37 +231,84 @@ public sealed class CustomLoopRecoveryService
                 Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
                 Disposition: CustomLoopSequentialNodeDisposition.Unknown,
             } dispatch
+            || started.Kind is not (CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
+            || started.Iteration is not > 0
+            || started.Attempt != dispatch.Attempt
+            || run.SequentialAdapterBinding is not { } binding
+            || !SequentialBindingMatchesRun(dispatch, run, binding)
             || !CustomLoopSequentialNodeEvidenceHash.Matches(dispatch)
-            || !CustomLoopSequentialOutcomeArtifactHash.Matches(started))
+            || !CustomLoopSequentialOutcomeArtifactHash.Matches(started)
+            || !StartedAttemptMatchesFrontier(run, started, dispatch))
         {
             return false;
         }
 
-        return run.Events.Any(item => item.Sequence > started.Sequence
+        var terminals = run.Events.Where(item => item.Sequence > started.Sequence
             && item.SequentialNodeEvidence is { } outcome
             && item.Iteration == started.Iteration
             && string.Equals(item.StepId, started.StepId, StringComparison.Ordinal)
             && item.Attempt == started.Attempt
+            && SameSequentialBinding(outcome, dispatch)
             && string.Equals(outcome.NodeId, dispatch.NodeId, StringComparison.Ordinal)
             && outcome.Attempt == dispatch.Attempt
-            && IsResolvedSequentialOutcome(outcome)
+            && IsResolvedSequentialOutcome(item.Kind, outcome)
             && CustomLoopSequentialNodeEvidenceHash.Matches(outcome)
-            && CustomLoopSequentialOutcomeArtifactHash.Matches(item));
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(item))
+            .Take(2)
+            .ToArray();
+        return terminals.Length == 1;
     }
 
-    private static bool IsResolvedSequentialOutcome(CustomLoopSequentialNodeEvidence evidence)
+    private static bool StartedAttemptMatchesFrontier(
+        CustomLoopRunRecord run,
+        CustomLoopRunEvent started,
+        CustomLoopSequentialNodeEvidence dispatch)
     {
-        return evidence is
+        var matchingNodes = run.Frontier?.Payload.Nodes.Where(node => node is
         {
-            Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
-            Disposition: CustomLoopSequentialNodeDisposition.Completed,
+            Attempt: { } attempt,
+            AttemptOperationId: { } attemptOperationId,
         }
-            or
-        {
-            Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
-            Disposition: CustomLoopSequentialNodeDisposition.Rejected,
-        };
+            && attempt == dispatch.Attempt
+            && started.Attempt == attempt
+            && string.Equals(attemptOperationId, started.EventId, StringComparison.Ordinal)
+            && string.Equals(node.NodeId, dispatch.NodeId, StringComparison.Ordinal)
+            && string.Equals(
+                started.StepId,
+                node.Descriptor.Kind == GovernedLoopNodeKind.Exit ? "exit" : node.NodeId,
+                StringComparison.Ordinal))
+            .Take(2)
+            .ToArray() ?? [];
+        return matchingNodes.Length == 1;
     }
+
+    private static bool SequentialBindingMatchesRun(
+        CustomLoopSequentialNodeEvidence evidence,
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialAdapterBinding binding)
+        => string.Equals(evidence.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(evidence.RunId, run.Id, StringComparison.Ordinal)
+            && Equals(evidence.Revision, binding.ExecutionBinding.Revision)
+            && evidence.ExecutionGeneration == binding.ExecutionBinding.ExecutionGeneration;
+
+    private static bool SameSequentialBinding(
+        CustomLoopSequentialNodeEvidence candidate,
+        CustomLoopSequentialNodeEvidence expected)
+        => string.Equals(candidate.WorkspaceId, expected.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(candidate.RunId, expected.RunId, StringComparison.Ordinal)
+            && Equals(candidate.Revision, expected.Revision)
+            && candidate.ExecutionGeneration == expected.ExecutionGeneration;
+
+    private static bool IsResolvedSequentialOutcome(
+        CustomLoopRunEventKind eventKind,
+        CustomLoopSequentialNodeEvidence evidence)
+        => (eventKind, evidence.Kind, evidence.Disposition) is
+            (CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.ExitDecisionCompleted,
+                CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                CustomLoopSequentialNodeDisposition.Completed)
+            or (CustomLoopRunEventKind.NodeAttemptFailed,
+                CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+                CustomLoopSequentialNodeDisposition.Rejected);
 
     private static CustomLoopExecutionClock StopAtLastDurableUpdate(CustomLoopExecutionClock clock, DateTimeOffset durableStop)
     {

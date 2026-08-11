@@ -8,6 +8,7 @@ using EmbodySense.Core.Common.Inference.Models;
 using static EmbodySense.Core.Common.Loops.Custom.Execution.CustomLoopRunValidationRules;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Sequential;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
@@ -464,7 +465,7 @@ public static class CustomLoopRunValidator
             Add(errors, "execution_frontier_timestamp_mismatch", "frontier.payload.updatedAtUtc", "The durable execution frontier timestamp must be within the retained run interval.");
         }
 
-        if (!FrontierMatchesRunLifecycle(run.Status, frontier))
+        if (!FrontierMatchesRunLifecycle(run, frontier))
         {
             Add(errors, "execution_frontier_lifecycle_mismatch", "frontier.payload.status", "The durable execution frontier must honestly match the retained run lifecycle.");
         }
@@ -569,15 +570,18 @@ public static class CustomLoopRunValidator
         }
     }
 
-    private static bool FrontierMatchesRunLifecycle(CustomLoopRunStatus status, GovernedLoopFrontierPosture frontier)
+    private static bool FrontierMatchesRunLifecycle(CustomLoopRunRecord run, GovernedLoopFrontierPosture frontier)
     {
+        var status = run.Status;
         var frontierStatus = frontier.Payload.Status;
         return status switch
         {
             CustomLoopRunStatus.Admitted or CustomLoopRunStatus.Running => frontierStatus == GovernedLoopFrontierStatus.Active,
             CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.CancelRequested => frontierStatus is GovernedLoopFrontierStatus.Active or GovernedLoopFrontierStatus.Waiting or GovernedLoopFrontierStatus.ReviewBlocked,
             CustomLoopRunStatus.Paused => frontierStatus is GovernedLoopFrontierStatus.Waiting or GovernedLoopFrontierStatus.ReviewBlocked
-                || frontierStatus == GovernedLoopFrontierStatus.Active && frontier.Payload.Nodes.All(node => node.Status != GovernedLoopNodeExecutionStatus.Running),
+                || frontierStatus == GovernedLoopFrontierStatus.Active
+                    && (frontier.Payload.Nodes.All(node => node.Status != GovernedLoopNodeExecutionStatus.Running)
+                        || AllRunningAttemptsHaveAuthenticatedTerminals(run, frontier)),
             CustomLoopRunStatus.Completed => frontierStatus == GovernedLoopFrontierStatus.Completed,
             CustomLoopRunStatus.Failed => frontierStatus == GovernedLoopFrontierStatus.Failed,
             CustomLoopRunStatus.Cancelled => frontierStatus == GovernedLoopFrontierStatus.Cancelled,
@@ -585,6 +589,107 @@ public static class CustomLoopRunValidator
             _ => false,
         };
     }
+
+    private static bool AllRunningAttemptsHaveAuthenticatedTerminals(CustomLoopRunRecord run, GovernedLoopFrontierPosture frontier)
+    {
+        var runningNodes = frontier.Payload.Nodes
+            .Where(node => node.Status == GovernedLoopNodeExecutionStatus.Running)
+            .ToArray();
+        return runningNodes.Length > 0
+            && runningNodes.All(node => HasAuthenticatedTerminalRunningAttempt(run, node));
+    }
+
+    private static bool HasAuthenticatedTerminalRunningAttempt(CustomLoopRunRecord run, GovernedLoopNodeExecutionEvidence node)
+    {
+        var starts = ExactRunningAttemptStarts(run, node).Take(2).ToArray();
+        if (starts.Length != 1 || starts[0].SequentialNodeEvidence is not { } dispatch)
+        {
+            return false;
+        }
+
+        var started = starts[0];
+        var terminals = run.Events.Where(item => item.Sequence > started.Sequence
+            && item.SequentialNodeEvidence is { } outcome
+            && item.Iteration == started.Iteration
+            && string.Equals(item.StepId, started.StepId, StringComparison.Ordinal)
+            && item.Attempt == started.Attempt
+            && SameSequentialBinding(outcome, dispatch)
+            && string.Equals(outcome.NodeId, dispatch.NodeId, StringComparison.Ordinal)
+            && outcome.Attempt == dispatch.Attempt
+            && IsResolvedSequentialOutcome(item.Kind, outcome)
+            && CustomLoopSequentialNodeEvidenceHash.Matches(outcome)
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(item))
+            .Take(2)
+            .ToArray();
+        return terminals.Length == 1;
+    }
+
+    private static IEnumerable<CustomLoopRunEvent> ExactRunningAttemptStarts(
+        CustomLoopRunRecord run,
+        GovernedLoopNodeExecutionEvidence node)
+    {
+        if (node is not
+            {
+                Status: GovernedLoopNodeExecutionStatus.Running,
+                Attempt: { } attempt,
+                AttemptOperationId: { } attemptOperationId,
+            }
+            || run.SequentialAdapterBinding is not { } binding)
+        {
+            return [];
+        }
+
+        return run.Events.Where(item => item.Sequence > run.Checkpoint.LastCommittedSequence
+            && item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted
+            && item.Iteration is > 0
+            && item.Attempt == attempt
+            && string.Equals(item.EventId, attemptOperationId, StringComparison.Ordinal)
+            && StepIdMatchesNode(item.StepId, node)
+            && item.SequentialNodeEvidence is
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+                Disposition: CustomLoopSequentialNodeDisposition.Unknown,
+            } evidence
+            && string.Equals(evidence.NodeId, node.NodeId, StringComparison.Ordinal)
+            && evidence.Attempt == attempt
+            && SequentialBindingMatchesRun(evidence, run, binding)
+            && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(item));
+    }
+
+    private static bool StepIdMatchesNode(string? stepId, GovernedLoopNodeExecutionEvidence node)
+        => string.Equals(
+            stepId,
+            node.Descriptor.Kind == GovernedLoopNodeKind.Exit ? "exit" : node.NodeId,
+            StringComparison.Ordinal);
+
+    private static bool SequentialBindingMatchesRun(
+        CustomLoopSequentialNodeEvidence evidence,
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialAdapterBinding binding)
+        => string.Equals(evidence.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(evidence.RunId, run.Id, StringComparison.Ordinal)
+            && Equals(evidence.Revision, binding.ExecutionBinding.Revision)
+            && evidence.ExecutionGeneration == binding.ExecutionBinding.ExecutionGeneration;
+
+    private static bool SameSequentialBinding(
+        CustomLoopSequentialNodeEvidence candidate,
+        CustomLoopSequentialNodeEvidence expected)
+        => string.Equals(candidate.WorkspaceId, expected.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(candidate.RunId, expected.RunId, StringComparison.Ordinal)
+            && Equals(candidate.Revision, expected.Revision)
+            && candidate.ExecutionGeneration == expected.ExecutionGeneration;
+
+    private static bool IsResolvedSequentialOutcome(
+        CustomLoopRunEventKind eventKind,
+        CustomLoopSequentialNodeEvidence evidence)
+        => (eventKind, evidence.Kind, evidence.Disposition) is
+            (CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.ExitDecisionCompleted,
+                CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                CustomLoopSequentialNodeDisposition.Completed)
+            or (CustomLoopRunEventKind.NodeAttemptFailed,
+                CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+                CustomLoopSequentialNodeDisposition.Rejected);
 
     private static void ValidateSequentialCapabilityAdmission(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
     {

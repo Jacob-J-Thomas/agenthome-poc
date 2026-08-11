@@ -319,6 +319,93 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
+    public void Paused_active_frontier_requires_an_exact_authenticated_terminal_for_its_running_attempt()
+    {
+        var running = CreateRunningSequentialRun(CreateSequentialRun());
+        var pausedSeed = Advance(running, CustomLoopRunStatus.Paused);
+        var terminal = SequentialEvent(
+            running.Events.Length + 1L,
+            "inference-complete",
+            CustomLoopRunEventKind.NodeAttemptCompleted,
+            running.SequentialAdapterBinding!,
+            "step-1",
+            "step-1",
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed,
+            pausedSeed.UpdatedAtUtc);
+        var lifecycle = pausedSeed.Events[^1] with
+        {
+            Sequence = terminal.Sequence + 1,
+            EventId = "event-paused-after-retained-terminal",
+        };
+        var valid = pausedSeed with { Events = [.. running.Events, terminal, lifecycle] };
+
+        Assert.True(CustomLoopRunValidator.Validate(valid).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(valid).Errors));
+
+        var startIndex = Array.FindIndex(valid.Events, item => item.SequentialNodeEvidence is
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            NodeId: "step-1",
+        });
+        var substitutedStart = WithSequentialEvidence(
+            valid.Events[startIndex] with { EventId = "substituted-start", SequentialNodeEvidence = null },
+            valid.SequentialAdapterBinding!,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var substitutedStartStep = WithSequentialEvidence(
+            valid.Events[startIndex] with { StepId = "other-step", SequentialNodeEvidence = null },
+            valid.SequentialAdapterBinding!,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var terminalIndex = valid.Events.Length - 2;
+        var substitutedIteration = WithSequentialEvidence(
+            valid.Events[terminalIndex] with { Iteration = 2, SequentialNodeEvidence = null },
+            valid.SequentialAdapterBinding!,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var substitutedStep = WithSequentialEvidence(
+            valid.Events[terminalIndex] with { StepId = "other-step", SequentialNodeEvidence = null },
+            valid.SequentialAdapterBinding!,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var substitutedAttempt = WithSequentialEvidence(
+            valid.Events[terminalIndex] with { Attempt = 2, SequentialNodeEvidence = null },
+            valid.SequentialAdapterBinding!,
+            "step-1",
+            2,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var tamperedTerminal = valid.Events[terminalIndex] with { Detail = "tampered without rehash" };
+
+        foreach (var malformed in new[]
+        {
+            valid with { Events = ReplaceEvent(valid.Events, startIndex, substitutedStart) },
+            valid with
+            {
+                Events = ReplaceEvent(
+                    ReplaceEvent(valid.Events, startIndex, substitutedStartStep),
+                    terminalIndex,
+                    substitutedStep),
+            },
+            valid with { Events = ReplaceEvent(valid.Events, terminalIndex, substitutedIteration) },
+            valid with { Events = ReplaceEvent(valid.Events, terminalIndex, substitutedStep) },
+            valid with { Events = ReplaceEvent(valid.Events, terminalIndex, substitutedAttempt) },
+            valid with { Events = ReplaceEvent(valid.Events, terminalIndex, tamperedTerminal) },
+        })
+        {
+            AssertCodes(CustomLoopRunValidator.Validate(malformed), "execution_frontier_lifecycle_mismatch");
+        }
+    }
+
+    [Fact]
     public void Needs_review_frontier_may_retain_each_exact_closed_terminal_disposition()
     {
         var cases = new[]
@@ -1277,7 +1364,12 @@ public sealed class CustomLoopRunValidatorTests
         return runningSeed with
         {
             Events = [.. admitted.Events, dispatch, lifecycle],
-            Frontier = TransitionInferenceFrontier(admitted.Frontier!, GovernedLoopFrontierStatus.Active, GovernedLoopNodeExecutionStatus.Running, runningSeed.UpdatedAtUtc),
+            Frontier = TransitionInferenceFrontier(
+                admitted.Frontier!,
+                GovernedLoopFrontierStatus.Active,
+                GovernedLoopNodeExecutionStatus.Running,
+                runningSeed.UpdatedAtUtc,
+                attemptOperationId: dispatch.EventId),
         };
     }
 
@@ -1317,7 +1409,8 @@ public sealed class CustomLoopRunValidatorTests
         GovernedLoopFrontierStatus frontierStatus,
         GovernedLoopNodeExecutionStatus nodeStatus,
         DateTimeOffset updatedAtUtc,
-        CustomLoopRunEvent? outcomeEvent = null)
+        CustomLoopRunEvent? outcomeEvent = null,
+        string? attemptOperationId = null)
     {
         var currentNode = current.Payload.Nodes[1];
         var hasAttempt = nodeStatus is not (GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Skipped);
@@ -1336,7 +1429,7 @@ public sealed class CustomLoopRunValidatorTests
                     currentNode.OutgoingControlEdgeIds,
                     nodeStatus,
                     hasAttempt ? 1 : null,
-                    hasAttempt ? "attempt-step-1-1" : null,
+                    hasAttempt ? attemptOperationId ?? currentNode.AttemptOperationId ?? "attempt-step-1-1" : null,
                     outcomeEvent?.EventId,
                     outcomeEvent?.SequentialNodeEvidence?.OutcomeArtifactHash),
             ],
@@ -1349,6 +1442,16 @@ public sealed class CustomLoopRunValidatorTests
             current.GraphLayoutHash,
             current.AdmissionReceiptHash,
             payload);
+    }
+
+    private static CustomLoopRunEvent[] ReplaceEvent(
+        IReadOnlyList<CustomLoopRunEvent> events,
+        int index,
+        CustomLoopRunEvent replacement)
+    {
+        var result = events.ToArray();
+        result[index] = replacement;
+        return result;
     }
 
     private static GovernedLoopSequentialAdapterBinding WithCapabilityAdmission(

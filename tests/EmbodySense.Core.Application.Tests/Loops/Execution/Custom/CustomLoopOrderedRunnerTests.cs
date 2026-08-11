@@ -1827,8 +1827,11 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Empty(executor.Requests);
     }
 
-    [Fact]
-    public async Task Restart_recovery_quarantines_a_canonical_terminal_with_substituted_iteration_coordinates()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Restart_recovery_quarantines_a_canonical_terminal_with_substituted_attempt_coordinates(
+        bool substituteStartOperationId)
     {
         var context = await SequentialContextAsync(Run(SequentialDefinition()));
         CustomLoopRunRecord? retainedOutcome = null;
@@ -1858,18 +1861,31 @@ public sealed class CustomLoopOrderedRunnerTests
         var events = interrupted.Events.ToArray();
         var terminalIndex = Array.FindIndex(events, item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome }
             && string.Equals(item.StepId, "infer-01", StringComparison.Ordinal));
-        var terminal = events[terminalIndex];
-        var substituted = terminal with { Iteration = terminal.Iteration!.Value + 1 };
-        var terminalEvidence = terminal.SequentialNodeEvidence!;
+        var substitutedIndex = terminalIndex;
+        var source = events[terminalIndex];
+        if (substituteStartOperationId)
+        {
+            substitutedIndex = Array.FindIndex(events, item => item.SequentialNodeEvidence is
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+                NodeId: "infer-01",
+            });
+            source = events[substitutedIndex];
+        }
+
+        var substituted = substituteStartOperationId
+            ? source with { EventId = source.EventId + "-substituted" }
+            : source with { Iteration = source.Iteration!.Value + 1 };
+        var sourceEvidence = source.SequentialNodeEvidence!;
         substituted = substituted with
         {
-            SequentialNodeEvidence = CustomLoopSequentialNodeEvidenceHash.Apply(terminalEvidence with
+            SequentialNodeEvidence = CustomLoopSequentialNodeEvidenceHash.Apply(sourceEvidence with
             {
                 OutcomeArtifactHash = CustomLoopSequentialOutcomeArtifactHash.Compute(substituted),
                 EvidenceHash = string.Empty,
             }),
         };
-        events[terminalIndex] = substituted;
+        events[substitutedIndex] = substituted;
         var malformed = interrupted with { Events = events };
         var validation = CustomLoopRunValidator.Validate(malformed);
         Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
