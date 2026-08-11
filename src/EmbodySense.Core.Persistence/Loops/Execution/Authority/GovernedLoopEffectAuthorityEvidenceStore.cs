@@ -549,6 +549,7 @@ public sealed class GovernedLoopEffectAuthorityEvidenceStore : IGovernedLoopEffe
         => SameGrant(claim.Grant, request.Grant)
             && string.Equals(claim.AdmissionReceiptHash, request.AdmissionReceiptHash, StringComparison.Ordinal)
             && string.Equals(claim.RunId, request.RunId, StringComparison.Ordinal)
+            && claim.ExecutionGeneration == request.ExecutionGeneration
             && string.Equals(claim.CompletionOperationId, request.CompletionOperationId, StringComparison.Ordinal);
 
     private static bool SameCompletionIdentity(
@@ -557,6 +558,7 @@ public sealed class GovernedLoopEffectAuthorityEvidenceStore : IGovernedLoopEffe
         => SameGrant(left.Grant, right.Grant)
             && string.Equals(left.AdmissionReceiptHash, right.AdmissionReceiptHash, StringComparison.Ordinal)
             && string.Equals(left.RunId, right.RunId, StringComparison.Ordinal)
+            && left.ExecutionGeneration == right.ExecutionGeneration
             && string.Equals(left.CompletionOperationId, right.CompletionOperationId, StringComparison.Ordinal);
 
     private static bool SameGrant(AuthorityGrantReference left, AuthorityGrantReference right)
