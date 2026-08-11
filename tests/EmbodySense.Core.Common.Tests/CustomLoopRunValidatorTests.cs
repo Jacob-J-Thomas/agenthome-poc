@@ -51,6 +51,60 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
+    public void Exact_durable_event_prefix_accepts_an_unchanged_record_and_a_valid_later_successor()
+    {
+        var prefix = CreateSequentialRun();
+        var later = CreateRunningSequentialRun(prefix);
+
+        Assert.True(CustomLoopRunValidator.Validate(prefix).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(prefix).Errors));
+        Assert.True(CustomLoopRunValidator.Validate(later).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(later).Errors));
+        Assert.True(CustomLoopRunValidator.HasExactDurableEventPrefix(prefix, prefix));
+        Assert.True(CustomLoopRunValidator.HasExactDurableEventPrefix(prefix, later));
+    }
+
+    [Fact]
+    public void Exact_durable_event_prefix_rejects_substitution_regression_invalid_shapes_and_admission_drift()
+    {
+        var prefix = CreateSequentialRun();
+        var later = CreateRunningSequentialRun(prefix);
+        var substitutedTrigger = WithSequentialEvidence(
+            later.Events[0] with { Detail = "A valid later record substituted its durable trigger prefix." },
+            later.SequentialAdapterBinding!,
+            "trigger-node",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var substituted = later with
+        {
+            Events = [substitutedTrigger, .. later.Events.Skip(1)],
+            Frontier = ReplaceTriggerOutcome(
+                later.Frontier!,
+                substitutedTrigger.EventId,
+                substitutedTrigger.SequentialNodeEvidence!.OutcomeArtifactHash),
+        };
+        var invalidPrefix = prefix with { Events = [] };
+        var divergentSameVersionPrefix = prefix with
+        {
+            LifecycleVersion = later.LifecycleVersion,
+            UpdatedAtUtc = later.UpdatedAtUtc,
+        };
+        var originalAdmission = CreateRun();
+        var driftedAdmission = CreateRun(loopId: "loop-beta");
+
+        Assert.True(CustomLoopRunValidator.Validate(substituted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(substituted).Errors));
+        Assert.True(CustomLoopRunValidator.Validate(divergentSameVersionPrefix).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(divergentSameVersionPrefix).Errors));
+        Assert.True(CustomLoopRunValidator.Validate(originalAdmission).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(originalAdmission).Errors));
+        Assert.True(CustomLoopRunValidator.Validate(driftedAdmission).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(driftedAdmission).Errors));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(prefix, substituted));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(later, prefix));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(divergentSameVersionPrefix, later));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(invalidPrefix, later));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(originalAdmission, driftedAdmission));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(null, later));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(prefix, null));
+    }
+
+    [Fact]
     public void Sequential_trigger_evidence_is_payload_bound_and_required_to_match_exact_run_coordinates()
     {
         var run = CreateSequentialRun();
