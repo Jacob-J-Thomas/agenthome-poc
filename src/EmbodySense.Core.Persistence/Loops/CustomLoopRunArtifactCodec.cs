@@ -15,6 +15,7 @@ using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Persistence.Loops.Admission;
 using EmbodySense.Core.Persistence.Loops.Models;
 using EmbodySense.Core.Persistence.Loops.Revisions;
+using EmbodySense.Core.Persistence.Loops.Execution;
 using EmbodySense.Core.Persistence.HumanInput.Requests.Serialization;
 
 namespace EmbodySense.Core.Persistence.Loops;
@@ -61,6 +62,7 @@ internal static class CustomLoopRunArtifactCodec
             new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false),
             new GovernedLoopRevisionReferenceJsonConverter(),
             new GovernedLoopExecutionBindingJsonConverter(),
+            new GovernedLoopFrontierPostureJsonConverter(),
             new AuthorityActorIdJsonConverter(),
             new AuthorityGrantIdJsonConverter(),
             new AuthorityGrantRevisionJsonConverter(),

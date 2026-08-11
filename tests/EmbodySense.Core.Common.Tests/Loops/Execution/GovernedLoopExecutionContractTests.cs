@@ -64,6 +64,55 @@ public sealed class GovernedLoopExecutionContractTests
         Assert.False(GovernedLoopExecutionStateMatrix.IsEffectTransitionAllowed(GovernedLoopEffectPhase.Committed, GovernedLoopEffectPhase.DispatchBoundaryReached));
     }
 
+    [Fact]
+    public void Bound_frontier_coordinate_factory_preserves_validation_hashing_and_defensive_copies()
+    {
+        var binding = Binding();
+        var ready = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready);
+        GovernedLoopNodeExecutionEvidence[] source = [ready];
+
+        var frontier = GovernedLoopFrontierPosture.Create(
+            binding,
+            GovernedLoopExecutionTestFixture.WorkspaceId,
+            new string('b', 64),
+            new string('c', 64),
+            new string('d', 64),
+            1,
+            GovernedLoopExecutionLimits.Schema1ConcurrencyCeiling,
+            GovernedLoopFrontierStatus.Active,
+            source,
+            _updatedAtUtc,
+            string.Empty);
+        source[0] = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Running);
+
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, frontier.Payload.Nodes[0].Status);
+        Assert.True(GovernedLoopFrontierContractHash.Matches(frontier));
+        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPosture.Create(
+            binding,
+            frontier.WorkspaceId,
+            frontier.GraphArtifactHash,
+            frontier.GraphLayoutHash,
+            frontier.AdmissionReceiptHash,
+            frontier.Payload.FrontierVersion,
+            frontier.Payload.ConcurrencyCeiling,
+            frontier.Payload.Status,
+            frontier.Payload.Nodes,
+            frontier.Payload.UpdatedAtUtc,
+            new string('9', 64)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => GovernedLoopFrontierPosture.Create(
+            binding,
+            frontier.WorkspaceId,
+            frontier.GraphArtifactHash,
+            frontier.GraphLayoutHash,
+            frontier.AdmissionReceiptHash,
+            frontier.Payload.FrontierVersion,
+            2,
+            frontier.Payload.Status,
+            frontier.Payload.Nodes,
+            frontier.Payload.UpdatedAtUtc,
+            frontier.Payload.ContentHash));
+    }
+
     private static GovernedLoopExecutionBinding Binding(long generation = 1)
     {
         var revision = GovernedLoopRevisionReference.Create(1, "graph", "revision-1", new string('a', 64));
