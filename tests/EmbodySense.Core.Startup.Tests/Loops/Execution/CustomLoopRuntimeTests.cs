@@ -816,7 +816,7 @@ public sealed class CustomLoopRuntimeTests
     }
 
     [Fact]
-    public async Task Conversation_publication_recognizes_the_exact_expected_prefix_plus_one_output_as_already_published()
+    public async Task Conversation_publication_rejects_matching_content_without_the_exact_publication_identity()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -835,11 +835,12 @@ public sealed class CustomLoopRuntimeTests
 
         Assert.Equal("CommandHandled", history.Status.ToString());
         Assert.Equal("CommandHandled", loaded.Status.ToString());
-        Assert.Equal("Completed", response.ExecutionStatus);
+        Assert.Equal("Failed", response.ExecutionStatus);
         Assert.Equal(expectedOutput, response.Run!.FinalOutput);
-        Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.Detail.Contains("already committed", StringComparison.Ordinal));
+        Assert.Equal("conversation_publication_failed", response.Run.FailureCode);
+        Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.PublishedToInvokingConversation == false);
         var disposition = Assert.Single(response.Run.ConversationPublicationDispositions);
-        Assert.Equal("AlreadyPublished", disposition.Disposition);
+        Assert.Equal("DefinitelyFailed", disposition.Disposition);
         Assert.True(disposition.IsDefinite);
         Assert.Collection(persistedConversation, message => Assert.Equal(expectedOutput, message.Content));
     }
