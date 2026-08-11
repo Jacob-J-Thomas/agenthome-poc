@@ -16,6 +16,7 @@ internal sealed class TestCapabilityLifecycleTrustProvider : ICapabilityCatalogT
     }
 
     internal Action<CancellationToken>? BeforeRead { get; set; }
+    internal Action<CapabilityCatalogTrustState>? AfterInitialize { get; set; }
     public int MaximumAuthenticationTagUtf8Bytes => _maximumAuthenticationTagUtf8Bytes;
 
     public void RequireDisjointWorkspace(string workspaceRootPath)
@@ -37,6 +38,7 @@ internal sealed class TestCapabilityLifecycleTrustProvider : ICapabilityCatalogT
             state = new CapabilityCatalogTrustState(workspaceIdentity, generation, contentDigest, null, null);
             _states.Add(workspaceIdentity, state);
         }
+        AfterInitialize?.Invoke(state);
         return Task.FromResult(state);
     }
 

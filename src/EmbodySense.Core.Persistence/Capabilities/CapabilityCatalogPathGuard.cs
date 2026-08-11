@@ -18,7 +18,7 @@ internal sealed class CapabilityCatalogPathGuard
         _pathObserver = pathObserver;
     }
 
-    public async Task<CapabilityCatalogPathSession?> TryAcquireExclusiveSessionAsync(string lockPath, bool createRoot, CancellationToken cancellationToken)
+    public async Task<CapabilityCatalogPathSession?> TryAcquireExclusiveSessionAsync(string lockPath, bool createRoot, CancellationToken cancellationToken, bool createLockParent = true)
     {
         var session = CapabilityCatalogPathSession.Open(_root, _comparison, createRoot, _durabilityBarrier, _pathObserver);
         if (session is null)
@@ -28,7 +28,11 @@ internal sealed class CapabilityCatalogPathGuard
 
         try
         {
-            await session.AcquireLockAsync(lockPath, cancellationToken);
+            if (!await session.TryAcquireLockAsync(lockPath, createLockParent, cancellationToken))
+            {
+                await session.DisposeAsync();
+                return null;
+            }
             return session;
         }
         catch

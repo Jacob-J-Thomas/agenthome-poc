@@ -14,6 +14,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
     private readonly ICapabilityCatalogDurabilityBarrier _durabilityBarrier;
     private readonly ICapabilityCatalogPathObserver? _pathObserver;
     private FileStream? _lock;
+    private string? _lockPath;
 
     private CapabilityCatalogPathSession(string root, StringComparison comparison, Dictionary<string, SafeFileHandle> directories, List<SafeFileHandle> ownedDirectories, ICapabilityCatalogDurabilityBarrier durabilityBarrier, ICapabilityCatalogPathObserver? pathObserver)
     {
@@ -80,11 +81,15 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         }
     }
 
-    public async Task AcquireLockAsync(string path, CancellationToken cancellationToken)
+    public async Task<bool> TryAcquireLockAsync(string path, bool createParent, CancellationToken cancellationToken)
     {
         var safePath = RequireContained(path);
         var parentPath = Path.GetDirectoryName(safePath) ?? throw new IOException("Capability catalog lock has no parent directory.");
-        var parent = GetDirectory(parentPath, create: true) ?? throw new IOException("Capability catalog lock parent is unavailable.");
+        var parent = GetDirectory(parentPath, create: createParent);
+        if (parent is null)
+        {
+            return false;
+        }
         var name = Path.GetFileName(safePath);
         for (var attempt = 0; attempt < 250; attempt++)
         {
@@ -92,7 +97,8 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             _lock = CapabilityCatalogNativeFileSystem.TryAcquireExclusiveLock(safePath, parent, name);
             if (_lock is not null)
             {
-                return;
+                _lockPath = safePath;
+                return true;
             }
 
             if (attempt < 249)
@@ -108,6 +114,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
     {
         _lock?.Dispose();
         _lock = null;
+        _lockPath = null;
     }
 
     public bool DirectoryExists(string path)
@@ -237,8 +244,19 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             }
             else
             {
-                using var file = OpenRegularFile(Path.Combine(safePath, entry.Name), directory, entry.Name, FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new IOException("A staged artifact file disappeared during bound enumeration.");
-                CapabilityCatalogNativeFileSystem.RequireSingleLink(file, entry.Name);
+                var entryPath = Path.Combine(safePath, entry.Name);
+                if (OperatingSystem.IsWindows()
+                    && _lock is not null
+                    && string.Equals(entryPath, _lockPath, _comparison))
+                {
+                    // Windows cannot reopen a FileShare.None lock, so its retained handle is the exact binding proof.
+                    CapabilityCatalogNativeFileSystem.RequireSingleLink(_lock.SafeFileHandle, entry.Name);
+                }
+                else
+                {
+                    using var file = OpenRegularFile(entryPath, directory, entry.Name, FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new IOException("A staged artifact file disappeared during bound enumeration.");
+                    CapabilityCatalogNativeFileSystem.RequireSingleLink(file, entry.Name);
+                }
             }
             results.Add(entry);
         }
@@ -284,7 +302,11 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
     {
         var safePath = RequireContained(path);
         var parentPath = Path.GetDirectoryName(safePath)!;
-        var parent = GetDirectory(parentPath, create: false) ?? throw new DirectoryNotFoundException("Capability catalog artifact parent is unavailable.");
+        var parent = GetDirectory(parentPath, create: false);
+        if (parent is null)
+        {
+            throw new DirectoryNotFoundException("Capability catalog artifact parent is unavailable.");
+        }
         EnsurePhysicalDirectoryBinding(parentPath);
         var handle = OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new FileNotFoundException("Capability catalog artifact is missing.", safePath);
         CapabilityCatalogNativeFileSystem.RequireSingleLink(handle, Path.GetFileName(safePath));
@@ -317,7 +339,16 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
     {
         var safePath = RequireContained(path);
         var parentPath = Path.GetDirectoryName(safePath)!;
-        var parent = GetDirectory(parentPath, create: false) ?? throw new DirectoryNotFoundException("Capability catalog artifact parent is unavailable.");
+        var parent = GetDirectory(parentPath, create: false);
+        if (parent is null)
+        {
+            if (missingIsNull)
+            {
+                return null;
+            }
+
+            throw new DirectoryNotFoundException("Capability catalog artifact parent is unavailable.");
+        }
         if (requireStableBinding)
         {
             EnsurePhysicalDirectoryBinding(parentPath);
@@ -398,6 +429,117 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         }
     }
 
+    public async Task<bool> WriteBytesImmutablyAsync(string path, byte[] content, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        var safePath = RequireContained(path);
+        var parentPath = Path.GetDirectoryName(safePath)!;
+        var parent = GetDirectory(parentPath, create: true) ?? throw new IOException("Capability catalog immutable-artifact parent could not be prepared safely.");
+        var destinationName = Path.GetFileName(safePath);
+        var existing = await TryReadAllBytesBoundAsync(safePath, content.Length, cancellationToken);
+        if (existing is not null)
+        {
+            if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(existing, content))
+            {
+                throw new IOException("Capability catalog immutable-artifact identity is already bound to different bytes.");
+            }
+            await _durabilityBarrier.FlushAfterRenameAsync(safePath, parent);
+            return false;
+        }
+
+        var contentDigest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(content)).ToLowerInvariant();
+        var readyName = $".{destinationName}.{contentDigest}.ready";
+        var readyPath = Path.Combine(parentPath, readyName);
+        var writingName = $".{destinationName}.{Guid.NewGuid():N}.writing";
+        var writingPath = Path.Combine(parentPath, writingName);
+        var ownsWriting = false;
+        var mayCleanupReady = false;
+        try
+        {
+            var ready = await TryReadAllBytesBoundAsync(readyPath, content.Length, cancellationToken);
+            if (ready is null)
+            {
+                var handle = OpenRegularFile(writingPath, parent, writingName, FileMode.CreateNew, FileAccess.Write, FileShare.None, writeThrough: true) ?? throw new IOException("Capability catalog immutable-artifact writing stage could not be created safely.");
+                ownsWriting = true;
+                await using (var stream = new FileStream(handle, FileAccess.Write, 16 * 1024, isAsync: false))
+                {
+                    await stream.WriteAsync(content, cancellationToken);
+                    await stream.FlushAsync(cancellationToken);
+                    CapabilityCatalogNativeFileSystem.FlushToDisk(stream);
+                }
+
+                if (CapabilityCatalogNativeFileSystem.TryMoveFileNoReplace(writingPath, readyPath, parent, writingName, readyName))
+                {
+                    ownsWriting = false;
+                    mayCleanupReady = true;
+                    await _durabilityBarrier.FlushAfterRenameAsync(readyPath, parent);
+                    ready = await ReadAllBytesAsync(readyPath, content.Length, allowEmpty: content.Length == 0, missingIsNull: false, cancellationToken, requireStableBinding: true);
+                    if (ready is null || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(ready, content))
+                    {
+                        throw new IOException("Capability catalog immutable-artifact ready stage changed after retained-handle publication.");
+                    }
+                }
+                else
+                {
+                    ready = await ReadAllBytesAsync(readyPath, content.Length, allowEmpty: content.Length == 0, missingIsNull: false, cancellationToken, requireStableBinding: true);
+                    if (ready is null || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(ready, content))
+                    {
+                        throw new IOException("Capability catalog immutable-artifact ready stage is bound to different bytes.");
+                    }
+                    mayCleanupReady = true;
+                }
+            }
+            else
+            {
+                if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(ready, content))
+                {
+                    throw new IOException("Capability catalog immutable-artifact ready stage is bound to different bytes.");
+                }
+                mayCleanupReady = true;
+            }
+
+            if (CapabilityCatalogNativeFileSystem.TryMoveFileNoReplace(readyPath, safePath, parent, readyName, destinationName))
+            {
+                mayCleanupReady = false;
+                try
+                {
+                    var published = await ReadAllBytesAsync(safePath, content.Length, allowEmpty: content.Length == 0, missingIsNull: false, cancellationToken, requireStableBinding: true);
+                    if (published is null || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(published, content))
+                    {
+                        throw new IOException("Capability catalog immutable artifact changed during retained-handle publication.");
+                    }
+                }
+                catch
+                {
+                    CapabilityCatalogNativeFileSystem.DeleteFileIfPresent(safePath, parent, destinationName);
+                    throw;
+                }
+                await _durabilityBarrier.FlushAfterRenameAsync(safePath, parent);
+                return true;
+            }
+
+            existing = await ReadAllBytesAsync(safePath, content.Length, allowEmpty: content.Length == 0, missingIsNull: false, cancellationToken, requireStableBinding: true);
+            if (existing is null || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(existing, content))
+            {
+                throw new IOException("Capability catalog immutable-artifact identity is already bound to different bytes.");
+            }
+
+            await _durabilityBarrier.FlushAfterRenameAsync(safePath, parent);
+            return false;
+        }
+        finally
+        {
+            if (ownsWriting)
+            {
+                CapabilityCatalogNativeFileSystem.DeleteFileIfPresent(writingPath, parent, writingName);
+            }
+            if (mayCleanupReady)
+            {
+                CapabilityCatalogNativeFileSystem.DeleteFileIfPresent(readyPath, parent, readyName);
+            }
+        }
+    }
+
     public IReadOnlyList<(string Name, long Length)> EnumerateRegularFiles(string path, int maximumEntries, long maximumBytes)
     {
         if (maximumEntries < 0 || maximumBytes < 0)
@@ -430,6 +572,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             var fullPath = Path.Combine(safePath, name);
             var handle = OpenRegularFile(fullPath, directory, name, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, writeThrough: false) ?? throw new IOException("A capability catalog trust-root entry disappeared during bounded enumeration.");
             using var stream = new FileStream(handle, FileAccess.Read, 1, isAsync: false);
+            CapabilityCatalogNativeFileSystem.RequireSingleLink(stream.SafeFileHandle, name);
             if (stream.Length > maximumBytes - totalBytes)
             {
                 throw new IOException("The bounded capability catalog trust-root byte quota is exhausted.");
@@ -449,7 +592,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
 
     public void Dispose()
     {
-        _lock?.Dispose();
+        ReleaseLock();
         for (var index = _ownedDirectories.Count - 1; index >= 0; index--)
         {
             _ownedDirectories[index].Dispose();
