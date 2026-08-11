@@ -872,7 +872,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal("CommandHandled", history.Status.ToString());
         Assert.Equal("CommandHandled", loaded.Status.ToString());
         Assert.Equal("Failed", response.ExecutionStatus);
-        Assert.Equal(expectedOutput, response.Run!.FinalOutput);
+        Assert.Null(response.Run!.FinalOutput);
         Assert.Equal("conversation_publication_failed", response.Run.FailureCode);
         Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.PublishedToInvokingConversation == false);
         var disposition = Assert.Single(response.Run.ConversationPublicationDispositions);
