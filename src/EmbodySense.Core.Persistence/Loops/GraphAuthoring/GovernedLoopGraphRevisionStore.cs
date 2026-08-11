@@ -283,6 +283,10 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
                 WorkspaceIdentity(session),
                 shape.IntentIds,
                 cancellationToken);
+            await RequireRetainedOperationIntentsAsync(
+                session,
+                lifecycle.Snapshot,
+                cancellationToken);
             var artifact = await LoadArtifactAsync(session, lifecycleArtifact, cancellationToken);
             return new GovernedLoopGraphRevisionArtifactReadResult(
                 artifact is null
@@ -602,6 +606,7 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
         GovernedLoopRevisionStoreSnapshot lifecycle,
         CancellationToken cancellationToken)
     {
+        await RequireRetainedOperationIntentsAsync(session, lifecycle, cancellationToken);
         var artifacts = new List<GovernedLoopGraphRevisionArtifact>(lifecycle.Artifacts.Count);
         foreach (var lifecycleArtifact in lifecycle.Artifacts)
         {
@@ -611,6 +616,26 @@ public sealed class GovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionS
         }
 
         return new GovernedLoopGraphRevisionSnapshot(lifecycle, Array.AsReadOnly(artifacts.ToArray()));
+    }
+
+    private async Task RequireRetainedOperationIntentsAsync(
+        CapabilityCatalogPathSession session,
+        GovernedLoopRevisionStoreSnapshot lifecycle,
+        CancellationToken cancellationToken)
+    {
+        var operationIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var operation in lifecycle.Operations)
+        {
+            if (operation is null || !operationIds.Add(operation.OperationId))
+            {
+                throw new FormatException("The visible lifecycle operation set contains a missing or duplicate operation identity.");
+            }
+
+            var intent = await LoadIntentAsync(session, operation.OperationId, cancellationToken);
+            _ = TerminalOperation(
+                intent,
+                new GovernedLoopRevisionStoredOperation(lifecycle.Head.GraphId, operation));
+        }
     }
 
     private async Task<GovernedLoopGraphRevisionArtifact?> LoadArtifactAsync(
