@@ -36,6 +36,7 @@ public sealed class ConversationPublicationEffectAuthorityRequestFactoryTests
         Assert.False(request.RequiredAuthority.AllowsRecurrence);
         Assert.True(request.RequiredAuthority.AllowsExternalPublication);
         Assert.False(request.RequiredAuthority.AllowsIrreversibleAction);
+        Assert.Matches("^[0-9a-f]{64}$", request.TargetFingerprint);
     }
 
     [Fact]
@@ -47,12 +48,14 @@ public sealed class ConversationPublicationEffectAuthorityRequestFactoryTests
         Assert.Equal(first.EffectOperationId, Create(fixture).EffectOperationId);
         Assert.NotEqual(first.EffectOperationId, Create(fixture, nodeAttempt: 3).EffectOperationId);
         Assert.NotEqual(first.EffectOperationId, Create(fixture, publicationOperationId: "conversation-publication-2").EffectOperationId);
-        Assert.NotEqual(
-            first.EffectOperationId,
-            Create(ConversationPublicationAuthorityTestFixture.Create(runId: "run-publication-2")).EffectOperationId);
-        Assert.NotEqual(
-            first.EffectOperationId,
-            Create(ConversationPublicationAuthorityTestFixture.Create(revisionId: "revision-2")).EffectOperationId);
+        var otherRun = Create(ConversationPublicationAuthorityTestFixture.Create(runId: "run-publication-2"));
+        var otherRevision = Create(ConversationPublicationAuthorityTestFixture.Create(revisionId: "revision-2"));
+        Assert.NotEqual(first.EffectOperationId, otherRun.EffectOperationId);
+        Assert.NotEqual(first.EffectOperationId, otherRevision.EffectOperationId);
+        Assert.NotEqual(first.TargetFingerprint, otherRun.TargetFingerprint);
+        Assert.Equal(first.TargetFingerprint, Create(fixture, nodeAttempt: 3).TargetFingerprint);
+        Assert.Equal(first.TargetFingerprint, Create(fixture, publicationOperationId: "conversation-publication-2").TargetFingerprint);
+        Assert.Equal(first.TargetFingerprint, otherRevision.TargetFingerprint);
     }
 
     [Fact]

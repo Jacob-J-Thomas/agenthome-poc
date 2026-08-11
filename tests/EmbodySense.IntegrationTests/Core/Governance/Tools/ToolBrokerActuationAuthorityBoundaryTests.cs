@@ -193,9 +193,10 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
 
         public Task? IncompleteCallback { get; private set; }
 
-        public async Task<ToolActuationAuthorityExecution> ExecuteAsync<TResult>(ToolRequest request, Func<ToolActuationAuthorityExecution, CancellationToken, Task<TResult>> executeActuatorAsync, CancellationToken cancellationToken = default)
+        public async Task<ToolActuationAuthorityExecution> ExecuteAsync<TResult>(ToolRequest request, string resolvedTargetPath, Func<ToolActuationAuthorityExecution, CancellationToken, Task<TResult>> executeActuatorAsync, CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(request);
+            ArgumentException.ThrowIfNullOrWhiteSpace(resolvedTargetPath);
             ArgumentNullException.ThrowIfNull(executeActuatorAsync);
             if (precondition is not null && !precondition())
             {

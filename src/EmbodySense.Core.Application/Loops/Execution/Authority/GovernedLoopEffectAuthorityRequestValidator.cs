@@ -64,6 +64,7 @@ internal static class GovernedLoopEffectAuthorityRequestValidator
 
         var admitted = request.AdmissionReceipt.Evidence;
         if (!BoundaryMatchesNode(request.BoundaryKind, node, request.RequiredCapabilityPins)
+            || !TargetFingerprintMatchesBoundary(request.BoundaryKind, request.TargetFingerprint)
             || !IsEqualOrNarrow(request.RequiredAuthority, admitted.EffectiveAuthority)
             || !PinsExactlyDescribeRequiredAuthority(request.RequiredCapabilityPins, request.RequiredAuthority.Capabilities)
             || request.RequiredCapabilityPins.Any(required => !admitted.CapabilityAdmission.Pins.Contains(required))
@@ -113,6 +114,17 @@ internal static class GovernedLoopEffectAuthorityRequestValidator
 
     private static bool RequiresOnly(IReadOnlyList<CapabilityAdmissionPin> pins, string capabilityId)
         => pins.Count == 1 && string.Equals(pins[0].DescriptorIdentity.Id.Value, capabilityId, StringComparison.Ordinal);
+
+    private static bool TargetFingerprintMatchesBoundary(GovernedLoopEffectBoundaryKind boundaryKind, string? targetFingerprint)
+    {
+        var targetBoundary = boundaryKind is GovernedLoopEffectBoundaryKind.WorkspaceToolIntake
+            or GovernedLoopEffectBoundaryKind.WorkspaceActuation
+            or GovernedLoopEffectBoundaryKind.ConversationPublication;
+        return targetBoundary
+            ? targetFingerprint is { Length: GovernedLoopEffectAuthorityContractLimits.Sha256HexCharacters }
+                && targetFingerprint.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f')
+            : targetFingerprint is null;
+    }
 
     private static bool IsIdentifier(string? value)
         => CustomLoopArtifactIdentifier.IsValid(value, GovernedLoopEffectAuthorityContractLimits.MaxIdentifierCharacters);

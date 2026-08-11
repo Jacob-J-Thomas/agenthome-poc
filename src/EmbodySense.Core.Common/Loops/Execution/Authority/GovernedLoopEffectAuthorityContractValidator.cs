@@ -133,7 +133,8 @@ public static class GovernedLoopEffectAuthorityContractValidator
                 or GovernedLoopEffectAuthorityGrantPosture.ProfileUnavailable
                 or GovernedLoopEffectAuthorityGrantPosture.RoleUnavailable
                 or GovernedLoopEffectAuthorityGrantPosture.LoopUnavailable
-                or GovernedLoopEffectAuthorityGrantPosture.CeilingExceeded => proof.GrantStatus == AuthorityGrantLifecycleStatus.Active,
+                or GovernedLoopEffectAuthorityGrantPosture.CeilingExceeded
+                or GovernedLoopEffectAuthorityGrantPosture.Completed => proof.GrantStatus == AuthorityGrantLifecycleStatus.Active,
             GovernedLoopEffectAuthorityGrantPosture.Suspended => proof.GrantStatus == AuthorityGrantLifecycleStatus.Suspended,
             GovernedLoopEffectAuthorityGrantPosture.Revoked => proof.GrantStatus == AuthorityGrantLifecycleStatus.Revoked,
             GovernedLoopEffectAuthorityGrantPosture.Expired => proof.GrantStatus is AuthorityGrantLifecycleStatus.Active or AuthorityGrantLifecycleStatus.Expired,
@@ -531,6 +532,8 @@ public static class GovernedLoopEffectAuthorityContractValidator
             GovernedLoopEffectAuthorityReason.GrantExpired => current.GrantPosture == GovernedLoopEffectAuthorityGrantPosture.Expired
                 && (current.GrantStatus == AuthorityGrantLifecycleStatus.Expired
                     || current.Boundary.ExpiresAtUtc is { } expiry && expiry <= decision.EvaluatedAtUtc),
+            GovernedLoopEffectAuthorityReason.GrantCompleted => current.GrantPosture == GovernedLoopEffectAuthorityGrantPosture.Completed
+                && current.Boundary.CompletionConstraint == AuthorityGrantCompletionConstraintKind.FirstBoundRunCompletion,
             GovernedLoopEffectAuthorityReason.GrantStale => current.GrantPosture == GovernedLoopEffectAuthorityGrantPosture.Stale
                 && !Equals(current.Grant, admitted.Grant),
             GovernedLoopEffectAuthorityReason.ProfileUnavailable => current.GrantPosture == GovernedLoopEffectAuthorityGrantPosture.ProfileUnavailable,
@@ -571,6 +574,7 @@ public static class GovernedLoopEffectAuthorityContractValidator
             GovernedLoopEffectAuthorityGrantPosture.RoleUnavailable => GovernedLoopEffectAuthorityReason.RoleUnavailable,
             GovernedLoopEffectAuthorityGrantPosture.LoopUnavailable => GovernedLoopEffectAuthorityReason.LoopUnavailable,
             GovernedLoopEffectAuthorityGrantPosture.CeilingExceeded => GovernedLoopEffectAuthorityReason.CeilingExceeded,
+            GovernedLoopEffectAuthorityGrantPosture.Completed => GovernedLoopEffectAuthorityReason.GrantCompleted,
             _ => (GovernedLoopEffectAuthorityReason?)null
         };
         if (postureReason is not null)

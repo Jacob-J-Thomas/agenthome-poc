@@ -54,10 +54,12 @@ public sealed class GovernedLoopToolActuationAuthorityBoundary : IToolActuationA
     /// <inheritdoc />
     public async Task<ToolActuationAuthorityExecution> ExecuteAsync<TResult>(
         ToolRequest request,
+        string resolvedTargetPath,
         Func<ToolActuationAuthorityExecution, CancellationToken, Task<TResult>> executeActuatorAsync,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resolvedTargetPath);
         ArgumentNullException.ThrowIfNull(executeActuatorAsync);
         var effectRequest = WorkspaceToolEffectAuthorityRequestFactory.Create(
             _admissionReceipt,
@@ -67,6 +69,7 @@ public sealed class GovernedLoopToolActuationAuthorityBoundary : IToolActuationA
             _nodeAttempt,
             _serverCorrelationId,
             request,
+            resolvedTargetPath,
             GovernedLoopEffectBoundaryKind.WorkspaceActuation);
         var direct = new ToolActuationAuthorityExecution(
             ToolActuationAuthorityDisposition.Direct,

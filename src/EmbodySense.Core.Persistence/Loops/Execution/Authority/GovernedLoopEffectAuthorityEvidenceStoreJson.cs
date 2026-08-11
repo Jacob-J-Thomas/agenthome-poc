@@ -4,13 +4,19 @@ namespace EmbodySense.Core.Persistence.Loops.Execution.Authority;
 
 internal static class GovernedLoopEffectAuthorityEvidenceStoreJson
 {
-    public static bool IsStrictBoundedDocument(JsonElement root, int maximumDecisions)
+    public static bool IsStrictBoundedDocument(JsonElement root, int maximumDecisions, int maximumTargetReservations, int maximumCompletionClaims)
     {
         return root.ValueKind == JsonValueKind.Object
             && !HasDuplicateProperties(root)
             && root.TryGetProperty("decisions", out var decisions)
             && decisions.ValueKind == JsonValueKind.Array
-            && decisions.GetArrayLength() <= maximumDecisions;
+            && decisions.GetArrayLength() <= maximumDecisions
+            && root.TryGetProperty("targetReservations", out var targetReservations)
+            && targetReservations.ValueKind == JsonValueKind.Array
+            && targetReservations.GetArrayLength() <= maximumTargetReservations
+            && root.TryGetProperty("completionClaims", out var completionClaims)
+            && completionClaims.ValueKind == JsonValueKind.Array
+            && completionClaims.GetArrayLength() <= maximumCompletionClaims;
     }
 
     private static bool HasDuplicateProperties(JsonElement element)

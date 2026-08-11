@@ -18,6 +18,7 @@ namespace EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 /// <param name="BoundaryKind">The exact irreversible-commit boundary being evaluated.</param>
 /// <param name="RequiredAuthority">The complete non-granting authority required by only this effect.</param>
 /// <param name="RequiredCapabilityPins">The exact admitted capability pins required by only this effect.</param>
+/// <param name="TargetFingerprint">The optional SHA-256 identity of the stable server-owned effect target; workspace intake and actuation share a resolved-path identity, while publication uses immutable invocation evidence.</param>
 public sealed record GovernedLoopEffectAuthorityRequest(
     GovernedLoopAdmissionReceipt AdmissionReceipt,
     GovernedLoopExecutionBinding ExecutionBinding,
@@ -28,7 +29,8 @@ public sealed record GovernedLoopEffectAuthorityRequest(
     string CorrelationId,
     GovernedLoopEffectBoundaryKind BoundaryKind,
     AuthorityCeiling RequiredAuthority,
-    IReadOnlyList<CapabilityAdmissionPin> RequiredCapabilityPins)
+    IReadOnlyList<CapabilityAdmissionPin> RequiredCapabilityPins,
+    string? TargetFingerprint = null)
 {
     /// <summary>Gets a defensive copy of the effect-local non-granting authority requirement.</summary>
     public AuthorityCeiling RequiredAuthority { get; } = RequiredAuthority is null

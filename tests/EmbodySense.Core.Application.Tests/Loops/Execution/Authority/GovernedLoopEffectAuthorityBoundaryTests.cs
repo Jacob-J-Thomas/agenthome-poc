@@ -1,6 +1,7 @@
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
+using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Application.Tests.Loops.Sequential;
@@ -352,6 +353,60 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         Assert.Equal(GovernedLoopEffectAuthorityReason.EffectOutsideCeiling, result.Decision?.Reason);
     }
 
+    [Theory]
+    [InlineData(GovernedLoopEffectAuthorityUsageStoreStatus.TargetLimitExceeded, GovernedLoopEffectAuthorityDisposition.Deny, GovernedLoopEffectAuthorityReason.EffectOutsideCeiling)]
+    [InlineData(GovernedLoopEffectAuthorityUsageStoreStatus.GrantCompleted, GovernedLoopEffectAuthorityDisposition.Deny, GovernedLoopEffectAuthorityReason.GrantCompleted)]
+    [InlineData(GovernedLoopEffectAuthorityUsageStoreStatus.Unavailable, GovernedLoopEffectAuthorityDisposition.Pause, GovernedLoopEffectAuthorityReason.EvidenceUnavailable)]
+    [InlineData(GovernedLoopEffectAuthorityUsageStoreStatus.Ambiguous, GovernedLoopEffectAuthorityDisposition.Pause, GovernedLoopEffectAuthorityReason.EvidenceAmbiguous)]
+    [InlineData(GovernedLoopEffectAuthorityUsageStoreStatus.Conflict, GovernedLoopEffectAuthorityDisposition.Pause, GovernedLoopEffectAuthorityReason.EvidenceConflict)]
+    public async Task Nonrenewable_usage_posture_is_durable_and_stops_workspace_actuation(
+        GovernedLoopEffectAuthorityUsageStoreStatus usageStatus,
+        GovernedLoopEffectAuthorityDisposition expectedDisposition,
+        GovernedLoopEffectAuthorityReason expectedReason)
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create(
+            toolEnabledProvider: true,
+            completionConstraint: AuthorityGrantCompletionConstraintKind.FirstBoundRunCompletion);
+        var request = WorkspaceRequest(fixture.Request);
+        var capabilities = new StubEffectCapabilityAdmissionService
+        {
+            Result = new CapabilityRevalidationResult(
+                true,
+                fixture.Request.AdmissionReceipt.Evidence.CapabilityAdmission.Pins,
+                "Every admitted pin is current.",
+                CapabilityRevalidationStatus.Active),
+        };
+        var usage = new RecordingEffectAuthorityUsageStore { ReserveStatus = usageStatus };
+        var commits = 0;
+
+        var result = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
+            capabilities,
+            new RecordingEffectAuthorityEvidenceStore(),
+            usage: usage).ExecuteAsync(request, _ => Task.FromResult(++commits));
+
+        Assert.False(result.CommitInvoked);
+        Assert.Equal(0, commits);
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.Decided, result.Status);
+        Assert.Equal(expectedDisposition, result.Decision?.Disposition);
+        Assert.Equal(expectedReason, result.Decision?.Reason);
+        Assert.True(GovernedLoopEffectAuthorityContractValidator.Validate(result.Decision).IsValid);
+        var reservation = Assert.Single(usage.Reservations);
+        Assert.Equal(request.AdmissionReceipt.ContentHash, reservation.AdmissionReceiptHash);
+        Assert.Equal(request.ExecutionBinding.RunId, reservation.RunId);
+        Assert.Equal(request.TargetFingerprint, reservation.TargetFingerprint);
+        Assert.Equal(request.AdmissionReceipt.Intent.AuthorityGrant, reservation.Grant);
+        if (usageStatus == GovernedLoopEffectAuthorityUsageStoreStatus.TargetLimitExceeded)
+        {
+            Assert.Equal(0, result.Decision?.CurrentAuthority?.Ceiling.MaxTargetCount);
+        }
+
+        if (usageStatus == GovernedLoopEffectAuthorityUsageStoreStatus.GrantCompleted)
+        {
+            Assert.Equal(GovernedLoopEffectAuthorityGrantPosture.Completed, result.Decision?.CurrentAuthority?.GrantPosture);
+        }
+    }
+
     [Fact]
     public async Task Expiry_while_direct_evidence_is_appending_stops_before_the_effect_callback()
     {
@@ -580,6 +635,45 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         StubEffectCapabilityAdmissionService capabilities,
         RecordingEffectAuthorityEvidenceStore evidence,
         RecordingEffectAuthorityTransaction? transaction = null,
-        TimeProvider? timeProvider = null)
-        => new(grant, capabilities, evidence, transaction ?? new RecordingEffectAuthorityTransaction(), timeProvider ?? new FixedEffectAuthorityTimeProvider(GovernedLoopEffectAuthorityTestFixture.Now));
+        TimeProvider? timeProvider = null,
+        RecordingEffectAuthorityUsageStore? usage = null)
+    {
+        var authorityTransaction = transaction ?? new RecordingEffectAuthorityTransaction();
+        return new(
+            grant,
+            capabilities,
+            evidence,
+            usage ?? new RecordingEffectAuthorityUsageStore(),
+            authorityTransaction,
+            timeProvider ?? new FixedEffectAuthorityTimeProvider(GovernedLoopEffectAuthorityTestFixture.Now));
+    }
+
+    private static GovernedLoopEffectAuthorityRequest WorkspaceRequest(GovernedLoopEffectAuthorityRequest providerRequest)
+    {
+        var workspacePin = providerRequest.AdmissionReceipt.Evidence.CapabilityAdmission.Pins.Single(pin =>
+            string.Equals(
+                pin.DescriptorIdentity.Id.Value,
+                GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId,
+                StringComparison.Ordinal));
+        var admitted = providerRequest.AdmissionReceipt.Evidence.EffectiveAuthority;
+        return new GovernedLoopEffectAuthorityRequest(
+            providerRequest.AdmissionReceipt,
+            providerRequest.ExecutionBinding,
+            providerRequest.GraphArtifact,
+            providerRequest.NodeId,
+            providerRequest.NodeAttempt,
+            "workspace-effect-1",
+            "workspace-correlation-1",
+            GovernedLoopEffectBoundaryKind.WorkspaceActuation,
+            new AuthorityCeiling(
+                [workspacePin.DescriptorIdentity],
+                admitted.DataClasses,
+                1,
+                EmbodySense.Core.Common.Capabilities.Models.CapabilitySideEffectClass.ReadOnly,
+                false,
+                false,
+                false),
+            [workspacePin],
+            new string('f', 64));
+    }
 }

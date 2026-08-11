@@ -338,6 +338,36 @@ public sealed class GovernedLoopEffectAuthorityContractTests
         Assert.False(GovernedLoopEffectAuthorityContractValidator.Validate(valid with { Reason = GovernedLoopEffectAuthorityReason.BindingMismatch }).IsValid);
     }
 
+    [Fact]
+    public void Durable_first_bound_run_completion_has_one_exact_nonrenewable_deny_posture()
+    {
+        var boundary = AuthorityGrantTestFixture.Boundary(
+            completionConstraint: AuthorityGrantCompletionConstraintKind.FirstBoundRunCompletion);
+        var admitted = GovernedLoopEffectAuthorityTestFixture.Proof(boundary: boundary);
+        var current = GovernedLoopEffectAuthorityTestFixture.Proof(
+            grantPosture: GovernedLoopEffectAuthorityGrantPosture.Completed,
+            grant: admitted.Grant,
+            binding: admitted.Binding,
+            boundary: boundary,
+            ceiling: admitted.Ceiling,
+            pins: admitted.CapabilityPins,
+            omitDependencyEvidenceHash: true);
+        var valid = GovernedLoopEffectAuthorityTestFixture.Decision(
+            admitted,
+            current,
+            disposition: GovernedLoopEffectAuthorityDisposition.Deny,
+            reason: GovernedLoopEffectAuthorityReason.GrantCompleted);
+
+        Assert.True(GovernedLoopEffectAuthorityContractValidator.Validate(valid).IsValid);
+        Assert.False(GovernedLoopEffectAuthorityContractValidator.Validate(valid with { Reason = GovernedLoopEffectAuthorityReason.GrantExpired }).IsValid);
+        Assert.False(GovernedLoopEffectAuthorityContractValidator.Validate(
+            GovernedLoopEffectAuthorityTestFixture.CopyDecision(
+                valid,
+                current: GovernedLoopEffectAuthorityTestFixture.CopyProof(
+                    current,
+                    boundary: AuthorityGrantTestFixture.Boundary(completionConstraint: AuthorityGrantCompletionConstraintKind.None)))).IsValid);
+    }
+
     [Theory]
     [InlineData(GovernedLoopEffectAuthorityGrantPosture.ProfileUnavailable, GovernedLoopEffectAuthorityReason.ProfileUnavailable)]
     [InlineData(GovernedLoopEffectAuthorityGrantPosture.RoleUnavailable, GovernedLoopEffectAuthorityReason.RoleUnavailable)]

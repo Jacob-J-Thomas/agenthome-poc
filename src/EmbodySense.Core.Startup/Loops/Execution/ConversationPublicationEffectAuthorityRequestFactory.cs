@@ -113,7 +113,8 @@ public static class ConversationPublicationEffectAuthorityRequestFactory
             publicationOperationId,
             GovernedLoopEffectBoundaryKind.ConversationPublication,
             requiredAuthority,
-            conversationPins);
+            conversationPins,
+            targetFingerprint);
     }
 
     private static void ValidateRetainedEvidence(

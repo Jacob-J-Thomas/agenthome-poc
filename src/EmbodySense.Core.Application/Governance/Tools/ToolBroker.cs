@@ -181,7 +181,7 @@ public sealed class ToolBroker : IToolBroker
         {
             authorityExecution = _actuationAuthorityBoundary is null
                 ? await ExecuteWithoutDynamicBoundaryAsync(request, actuation, cancellationToken)
-                : await _actuationAuthorityBoundary.ExecuteAsync(request, actuation.ExecuteAsync, cancellationToken);
+                : await _actuationAuthorityBoundary.ExecuteAsync(request, check.ResolvedPath, actuation.ExecuteAsync, cancellationToken);
         }
         finally
         {

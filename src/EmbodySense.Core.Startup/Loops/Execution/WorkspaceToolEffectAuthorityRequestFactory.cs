@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
+using EmbodySense.Core.Common;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
@@ -35,6 +36,7 @@ public static class WorkspaceToolEffectAuthorityRequestFactory
     /// <param name="nodeAttempt">The exact positive node-attempt number.</param>
     /// <param name="serverCorrelationId">The exact attempt-local server correlation identity.</param>
     /// <param name="toolRequest">The bounded, correlated, read-only workspace request.</param>
+    /// <param name="resolvedTargetPath">The server-resolved, normalized absolute workspace target produced before this boundary.</param>
     /// <param name="boundaryKind">The workspace-tool intake or final workspace-actuation boundary.</param>
     /// <returns>A request containing the exact admitted workspace-command pin and a non-granting one-target read-only ceiling.</returns>
     /// <exception cref="ArgumentNullException">Thrown when a required evidence object is null.</exception>
@@ -48,12 +50,14 @@ public static class WorkspaceToolEffectAuthorityRequestFactory
         int nodeAttempt,
         string serverCorrelationId,
         ToolRequest toolRequest,
+        string resolvedTargetPath,
         GovernedLoopEffectBoundaryKind boundaryKind)
     {
         ArgumentNullException.ThrowIfNull(admissionReceipt);
         ArgumentNullException.ThrowIfNull(executionBinding);
         ArgumentNullException.ThrowIfNull(graphArtifact);
         ArgumentNullException.ThrowIfNull(toolRequest);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resolvedTargetPath);
 
         if (boundaryKind is not (GovernedLoopEffectBoundaryKind.WorkspaceToolIntake or GovernedLoopEffectBoundaryKind.WorkspaceActuation))
         {
@@ -89,7 +93,9 @@ public static class WorkspaceToolEffectAuthorityRequestFactory
             throw new ArgumentException("The admitted authority cannot be widened to one read-only workspace target.", nameof(admissionReceipt));
         }
 
-        var requestFingerprint = ComputeRequestFingerprint(toolRequest, executionBinding, nodeId, nodeAttempt, serverCorrelationId);
+        var canonicalTargetPath = RequireServerResolvedTarget(resolvedTargetPath);
+        var targetFingerprint = ComputeTargetFingerprint(canonicalTargetPath);
+        var requestFingerprint = ComputeRequestFingerprint(toolRequest, canonicalTargetPath, executionBinding, nodeId, nodeAttempt, serverCorrelationId);
         var requiredAuthority = new AuthorityCeiling(
             [workspacePins[0].DescriptorIdentity],
             admittedAuthority.DataClasses.ToArray(),
@@ -123,7 +129,8 @@ public static class WorkspaceToolEffectAuthorityRequestFactory
             serverCorrelationId,
             boundaryKind,
             requiredAuthority,
-            workspacePins);
+            workspacePins,
+            targetFingerprint);
     }
 
     private static void ValidateRetainedEvidence(
@@ -153,6 +160,7 @@ public static class WorkspaceToolEffectAuthorityRequestFactory
 
     private static string ComputeRequestFingerprint(
         ToolRequest request,
+        string canonicalTargetPath,
         GovernedLoopExecutionBinding binding,
         string nodeId,
         int nodeAttempt,
@@ -181,7 +189,7 @@ public static class WorkspaceToolEffectAuthorityRequestFactory
         var canonical = new StringBuilder(CustomLoopLimits.MaxGovernedToolArgumentCharacters * 3);
         Append(canonical, RequestFingerprintDomain);
         Append(canonical, ((int)request.Command).ToString(CultureInfo.InvariantCulture));
-        Append(canonical, request.TargetPath);
+        Append(canonical, canonicalTargetPath);
         Append(canonical, request.Content);
         Append(canonical, request.Pattern);
         Append(canonical, request.CorrelationId);
@@ -202,6 +210,37 @@ public static class WorkspaceToolEffectAuthorityRequestFactory
         }
 
         return Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    }
+
+    private static string RequireServerResolvedTarget(string resolvedTargetPath)
+    {
+        RequireBounded(resolvedTargetPath, nameof(resolvedTargetPath), CustomLoopLimits.MaxGovernedToolTargetCharacters, required: true);
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(resolvedTargetPath);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new ArgumentException("The workspace target was not a valid server-resolved absolute path.", nameof(resolvedTargetPath), exception);
+        }
+
+        if (!Path.IsPathFullyQualified(resolvedTargetPath)
+            || !string.Equals(fullPath, resolvedTargetPath, FileSystemPathComparer.GetPathComparison()))
+        {
+            throw new ArgumentException("The workspace target must be the exact normalized absolute path resolved by the server.", nameof(resolvedTargetPath));
+        }
+
+        var canonical = Path.TrimEndingDirectorySeparator(fullPath);
+        return OperatingSystem.IsWindows() ? canonical.ToUpperInvariant() : canonical;
+    }
+
+    private static string ComputeTargetFingerprint(string canonicalTargetPath)
+    {
+        var canonical = new StringBuilder(canonicalTargetPath.Length + 64);
+        Append(canonical, "embodysense-workspace-target-v1");
+        Append(canonical, canonicalTargetPath);
+        return Convert.ToHexString(SHA256.HashData(_strictUtf8.GetBytes(canonical.ToString()))).ToLowerInvariant();
     }
 
     private static void AppendAuditCorrelation(StringBuilder canonical, ToolAuditCorrelation? correlation)

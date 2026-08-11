@@ -79,5 +79,8 @@ public enum GovernedLoopEffectAuthorityReason
     EvidenceAmbiguous = 25,
 
     /// <summary>The authority decision append encountered an optimistic concurrency conflict.</summary>
-    EvidenceConflict = 26
+    EvidenceConflict = 26,
+
+    /// <summary>The grant is ineffective because its first exact bound-run completion claim was durably consumed.</summary>
+    GrantCompleted = 27
 }

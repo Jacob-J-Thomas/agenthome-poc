@@ -25,9 +25,10 @@ internal static class GovernedLoopEffectAuthorityTestFixture
         AuthorityGrantResolution Resolution,
         CapabilityAdmissionPin RequiredPin,
         CapabilityAdmissionPin? UnrelatedPin) Create(
-            bool includeUnrelatedCapability = false,
-            bool toolEnabledProvider = false,
-            bool includeUnrelatedAuthorityDimensions = false)
+        bool includeUnrelatedCapability = false,
+        bool toolEnabledProvider = false,
+        bool includeUnrelatedAuthorityDimensions = false,
+        AuthorityGrantCompletionConstraintKind completionConstraint = AuthorityGrantCompletionConstraintKind.None)
     {
         var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(allowWorkspaceTools: toolEnabledProvider);
         var requiredIdentity = AuthorityGrantApplicationTestFixture.Capability(GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId);
@@ -69,7 +70,7 @@ internal static class GovernedLoopEffectAuthorityTestFixture
         var grant = AuthorityGrantApplicationTestFixture.Grant(
             binding: binding,
             ceiling: admittedCeiling,
-            boundary: AuthorityGrantApplicationTestFixture.Boundary(Now.AddHours(-1), Now.AddHours(1)),
+            boundary: AuthorityGrantApplicationTestFixture.Boundary(Now.AddHours(-1), Now.AddHours(1), completionConstraint),
             recordedAtUtc: Now.AddMinutes(-5));
         var grantReference = new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);
         var intent = new GovernedLoopAdmissionIntent(

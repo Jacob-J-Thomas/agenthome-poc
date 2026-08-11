@@ -18,6 +18,7 @@ public sealed class GovernedLoopToolActuationAuthorityBoundaryTests
 
         var result = await boundary.ExecuteAsync(
             fixture.ToolRequest,
+            Path.GetFullPath(fixture.ToolRequest.TargetPath),
             (execution, _) =>
             {
                 callbackCount++;
@@ -47,6 +48,7 @@ public sealed class GovernedLoopToolActuationAuthorityBoundaryTests
 
         var result = await CreateBoundary(effect, fixture).ExecuteAsync(
             fixture.ToolRequest,
+            Path.GetFullPath(fixture.ToolRequest.TargetPath),
             (_, _) => Task.FromResult(++callbackCount));
 
         Assert.Equal(expected, result.Disposition);
@@ -68,6 +70,7 @@ public sealed class GovernedLoopToolActuationAuthorityBoundaryTests
 
         var result = await CreateBoundary(effect, fixture).ExecuteAsync(
             fixture.ToolRequest,
+            Path.GetFullPath(fixture.ToolRequest.TargetPath),
             (_, _) => Task.FromResult(++callbackCount));
 
         Assert.Equal(ToolActuationAuthorityDisposition.Ambiguous, result.Disposition);
@@ -107,6 +110,7 @@ public sealed class GovernedLoopToolActuationAuthorityBoundaryTests
 
         await Assert.ThrowsAsync<ToolActuationAuthorityProtocolException>(() => CreateBoundary(effect, fixture).ExecuteAsync(
             fixture.ToolRequest,
+            Path.GetFullPath(fixture.ToolRequest.TargetPath),
             (_, _) => Task.FromResult(++callbackCount)));
 
         Assert.Equal(1, callbackCount);
@@ -121,6 +125,7 @@ public sealed class GovernedLoopToolActuationAuthorityBoundaryTests
         var callbackCount = 0;
         var result = await CreateBoundary(effect, fixture).ExecuteAsync(
             fixture.ToolRequest,
+            Path.GetFullPath(fixture.ToolRequest.TargetPath),
             (_, _) => Task.FromResult(++callbackCount));
 
         Assert.Equal(ToolActuationAuthorityDisposition.ReviewRequired, result.Disposition);
@@ -138,6 +143,7 @@ public sealed class GovernedLoopToolActuationAuthorityBoundaryTests
 
         var thrown = await Assert.ThrowsAsync<ToolActuationAuthorityProtocolException>(() => CreateBoundary(effect, fixture).ExecuteAsync<bool>(
             fixture.ToolRequest,
+            Path.GetFullPath(fixture.ToolRequest.TargetPath),
             (_, _) => Task.FromException<bool>(violation)));
 
         Assert.Same(violation, thrown);

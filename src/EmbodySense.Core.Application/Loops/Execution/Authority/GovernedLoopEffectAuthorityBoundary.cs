@@ -4,6 +4,8 @@ using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
+using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
+using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
@@ -22,6 +24,7 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
     private readonly IAuthorityGrantResolver _grantResolver;
     private readonly ICapabilityAdmissionService _capabilityAdmissionService;
     private readonly IGovernedLoopEffectAuthorityEvidenceStore _evidenceStore;
+    private readonly IGovernedLoopEffectAuthorityUsageStore _usageStore;
     private readonly ICapabilityAuthorityTransaction _authorityTransaction;
     private readonly TimeProvider _timeProvider;
 
@@ -29,18 +32,21 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
     /// <param name="grantResolver">The exact immutable grant resolver.</param>
     /// <param name="capabilityAdmissionService">The immutable capability-pin revalidator.</param>
     /// <param name="evidenceStore">The append-only authority-decision store.</param>
+    /// <param name="usageStore">The authenticated non-renewable target and completion ledger.</param>
     /// <param name="authorityTransaction">The shared reentrant workspace authority fence.</param>
     /// <param name="timeProvider">The optional trusted UTC clock shared with authority composition.</param>
     public GovernedLoopEffectAuthorityBoundary(
         IAuthorityGrantResolver grantResolver,
         ICapabilityAdmissionService capabilityAdmissionService,
         IGovernedLoopEffectAuthorityEvidenceStore evidenceStore,
+        IGovernedLoopEffectAuthorityUsageStore usageStore,
         ICapabilityAuthorityTransaction authorityTransaction,
         TimeProvider? timeProvider = null)
     {
         _grantResolver = grantResolver ?? throw new ArgumentNullException(nameof(grantResolver));
         _capabilityAdmissionService = capabilityAdmissionService ?? throw new ArgumentNullException(nameof(capabilityAdmissionService));
         _evidenceStore = evidenceStore ?? throw new ArgumentNullException(nameof(evidenceStore));
+        _usageStore = usageStore ?? throw new ArgumentNullException(nameof(usageStore));
         _authorityTransaction = authorityTransaction ?? throw new ArgumentNullException(nameof(authorityTransaction));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -126,6 +132,12 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
             else
             {
                 var (disposition, reason) = CapabilityDisposition(request, capability, currentGrantProof);
+                if (disposition == GovernedLoopEffectAuthorityDisposition.Direct)
+                {
+                    var usage = await ReserveUsageAsync(request, admitted, currentGrantProof, evaluatedAtUtc, cancellationToken).ConfigureAwait(false);
+                    (currentGrantProof, disposition, reason) = ApplyUsagePosture(currentGrantProof, reason, usage);
+                }
+
                 decision = CreateDecision(request, admitted, currentGrantProof, disposition, reason, evaluatedAtUtc);
             }
         }
@@ -369,6 +381,68 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
         return (GovernedLoopEffectAuthorityDisposition.Direct, IsExactCurrent(request, current) ? GovernedLoopEffectAuthorityReason.ActiveExact : GovernedLoopEffectAuthorityReason.ActiveNarrowed);
     }
 
+    private async Task<GovernedLoopEffectAuthorityUsageStoreResult> ReserveUsageAsync(
+        GovernedLoopEffectAuthorityRequest request,
+        GovernedLoopEffectAuthorityProof admitted,
+        GovernedLoopEffectAuthorityProof current,
+        DateTimeOffset evaluatedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        var usageRequest = new GovernedLoopEffectAuthorityUsageRequest(
+            GovernedLoopEffectAuthorityUsageRequest.CurrentSchemaVersion,
+            admitted.Grant,
+            admitted.Boundary.CompletionConstraint,
+            request.AdmissionReceipt.ContentHash,
+            request.ExecutionBinding.RunId,
+            request.ExecutionBinding.ExecutionGeneration,
+            request.NodeId,
+            request.NodeAttempt,
+            request.EffectOperationId,
+            request.BoundaryKind,
+            current.Ceiling.MaxTargetCount,
+            request.TargetFingerprint,
+            evaluatedAtUtc);
+        try
+        {
+            return await _usageStore.ReserveAsync(usageRequest, cancellationToken).ConfigureAwait(false)
+                ?? new GovernedLoopEffectAuthorityUsageStoreResult(GovernedLoopEffectAuthorityUsageStoreStatus.Ambiguous);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return new GovernedLoopEffectAuthorityUsageStoreResult(GovernedLoopEffectAuthorityUsageStoreStatus.Unavailable);
+        }
+    }
+
+    private static (
+        GovernedLoopEffectAuthorityProof Proof,
+        GovernedLoopEffectAuthorityDisposition Disposition,
+        GovernedLoopEffectAuthorityReason Reason) ApplyUsagePosture(
+            GovernedLoopEffectAuthorityProof current,
+            GovernedLoopEffectAuthorityReason directReason,
+            GovernedLoopEffectAuthorityUsageStoreResult usage)
+    {
+        return usage.Status switch
+        {
+            GovernedLoopEffectAuthorityUsageStoreStatus.Allowed
+                or GovernedLoopEffectAuthorityUsageStoreStatus.TargetReserved
+                or GovernedLoopEffectAuthorityUsageStoreStatus.TargetAlreadyReserved
+                => (current, GovernedLoopEffectAuthorityDisposition.Direct, directReason),
+            GovernedLoopEffectAuthorityUsageStoreStatus.TargetLimitExceeded
+                => (ReplaceTargetCount(current, 0), GovernedLoopEffectAuthorityDisposition.Deny, GovernedLoopEffectAuthorityReason.EffectOutsideCeiling),
+            GovernedLoopEffectAuthorityUsageStoreStatus.GrantCompleted
+                => (ReplaceGrantPosture(current, GovernedLoopEffectAuthorityGrantPosture.Completed), GovernedLoopEffectAuthorityDisposition.Deny, GovernedLoopEffectAuthorityReason.GrantCompleted),
+            GovernedLoopEffectAuthorityUsageStoreStatus.Unavailable
+                => (current, GovernedLoopEffectAuthorityDisposition.Pause, GovernedLoopEffectAuthorityReason.EvidenceUnavailable),
+            GovernedLoopEffectAuthorityUsageStoreStatus.Conflict
+                => (current, GovernedLoopEffectAuthorityDisposition.Pause, GovernedLoopEffectAuthorityReason.EvidenceConflict),
+            _ => (current, GovernedLoopEffectAuthorityDisposition.Pause, GovernedLoopEffectAuthorityReason.EvidenceAmbiguous),
+        };
+    }
+
     private static bool IsExactCurrent(GovernedLoopEffectAuthorityRequest request, GovernedLoopEffectAuthorityProof current)
         => AuthorityCeilingSubset.IsEqual(current.Ceiling, request.AdmissionReceipt.Evidence.EffectiveAuthority)
             && current.CapabilityPins.Count == request.AdmissionReceipt.Evidence.CapabilityAdmission.Pins.Count
@@ -596,6 +670,28 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
             proof.CapabilityPins,
             proof.ObservedCapabilityPins,
             null);
+
+    private static GovernedLoopEffectAuthorityProof ReplaceTargetCount(
+        GovernedLoopEffectAuthorityProof proof,
+        int maxTargetCount)
+        => new(
+            proof.SchemaVersion,
+            proof.Grant,
+            proof.Binding,
+            proof.GrantStatus,
+            proof.GrantPosture,
+            proof.Boundary,
+            new AuthorityCeiling(
+                proof.Ceiling.Capabilities,
+                proof.Ceiling.DataClasses,
+                maxTargetCount,
+                proof.Ceiling.MaxSideEffectClass,
+                proof.Ceiling.AllowsRecurrence,
+                proof.Ceiling.AllowsExternalPublication,
+                proof.Ceiling.AllowsIrreversibleAction),
+            proof.CapabilityPins,
+            proof.ObservedCapabilityPins,
+            proof.DependencyEvidenceHash);
 
     private static GovernedLoopEffectAuthorityExecutionResult<TResult> Result<TResult>(
         GovernedLoopEffectAuthorityExecutionStatus status,
