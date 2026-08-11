@@ -108,7 +108,7 @@ public sealed class AuthorityGrantResolver : IAuthorityGrantResolver
 
         if (!AuthorityGrantStoreSnapshotGuard.Matches(reference, snapshot!.CurrentGrant))
         {
-            return Result(AuthorityGrantResolutionStatus.Stale, reference, grant);
+            return Result(AuthorityGrantResolutionStatus.Stale, reference, grant, currentGrant: snapshot.CurrentGrant);
         }
 
         var now = UtcNow();
@@ -157,7 +157,7 @@ public sealed class AuthorityGrantResolver : IAuthorityGrantResolver
             return Result(Map(dependencies.FailureCode), reference, grant, now);
         }
 
-        return new AuthorityGrantResolution(AuthorityGrantResolutionStatus.Active, reference, grant, grant.RequestedCeiling, dependencies.EvidenceHash, now);
+        return new AuthorityGrantResolution(AuthorityGrantResolutionStatus.Active, reference, grant, grant.RequestedCeiling, dependencies.EvidenceHash, now, grant);
     }
 
     private DateTimeOffset UtcNow()
@@ -186,8 +186,9 @@ public sealed class AuthorityGrantResolver : IAuthorityGrantResolver
         AuthorityGrantResolutionStatus status,
         AuthorityGrantReference? reference,
         AuthorityGrant? grant = null,
-        DateTimeOffset evaluatedAtUtc = default)
-        => new(status, reference, grant, AuthorityCeilingIntersection.EmptyCeiling(), string.Empty, evaluatedAtUtc);
+        DateTimeOffset evaluatedAtUtc = default,
+        AuthorityGrant? currentGrant = null)
+        => new(status, reference, grant, AuthorityCeilingIntersection.EmptyCeiling(), string.Empty, evaluatedAtUtc, currentGrant ?? (status == AuthorityGrantResolutionStatus.Stale ? null : grant));
 
     private static bool IsValidReference(AuthorityGrantReference? reference)
         => reference?.GrantId is not null
