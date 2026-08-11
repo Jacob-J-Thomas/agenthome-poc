@@ -14,28 +14,3 @@ public sealed record LoopRunFrontierSnapshot(
     DateTimeOffset UpdatedAtUtc,
     string ContentHash,
     IReadOnlyList<LoopRunFrontierNodeSnapshot> Nodes);
-
-/// <summary>Projects the immutable run, revision, and execution-generation coordinates of a frontier.</summary>
-public sealed record LoopRunFrontierBindingSnapshot(
-    int SchemaVersion,
-    string RunId,
-    string GraphId,
-    string RevisionId,
-    string ExecutableHash,
-    long ExecutionGeneration);
-
-/// <summary>Projects one reached node's immutable plan coordinates and durable posture.</summary>
-public sealed record LoopRunFrontierNodeSnapshot(
-    int SchemaVersion,
-    int PlanOrdinal,
-    string NodeId,
-    string Kind,
-    string TypeId,
-    int DescriptorVersion,
-    IReadOnlyList<string> IncomingControlEdgeIds,
-    IReadOnlyList<string> OutgoingControlEdgeIds,
-    string Status,
-    int? Attempt,
-    string? AttemptOperationId,
-    string? OutcomeEvidenceId,
-    string? OutcomeEvidenceHash);
