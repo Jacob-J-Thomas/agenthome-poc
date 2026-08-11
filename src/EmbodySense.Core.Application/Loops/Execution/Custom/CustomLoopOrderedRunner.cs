@@ -237,6 +237,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                         request.Actor,
                         new SequentialNodeExecutionContext(
                             sequentialContext.Anchor.AdapterBinding,
+                            sequentialContext.Artifact,
                             inferenceNode,
                             1,
                             sequentialContext.AllowedCapabilityIds,
@@ -760,7 +761,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             dispatchState,
             cancellationToken,
             deferCheckpoint: true,
-            new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, node, attempt, context.AllowedCapabilityIds, context.AuditRecorder));
+            new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, context.Artifact, node, attempt, context.AllowedCapabilityIds, context.AuditRecorder));
     }
 
     private async Task<CustomLoopOrderedRunResult> DispatchAndAdvanceSequentialExitAsync(
@@ -836,7 +837,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 actor,
                 detail,
                 cancellationToken,
-                new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, node, attempt, context.AllowedCapabilityIds, context.AuditRecorder));
+                new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, context.Artifact, node, attempt, context.AllowedCapabilityIds, context.AuditRecorder));
         }
 
         if (completed.ExitDecision != CustomLoopExitDecision.Complete || run.Checkpoint.CurrentIterationResult is null)
@@ -1178,7 +1179,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             assembly.Request,
             authority)
         {
-            CapabilityAdmission = run.CapabilityAdmission
+            CapabilityAdmission = sequentialNode?.Binding.AdmissionReceipt.Evidence.CapabilityAdmission ?? run.CapabilityAdmission,
+            AdmissionReceipt = sequentialNode?.Binding.AdmissionReceipt,
+            ExecutionBinding = sequentialNode?.Binding.ExecutionBinding,
+            GraphArtifact = sequentialNode?.Artifact
         };
 
         CustomLoopInferenceAttemptResult result;
@@ -3874,6 +3878,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private sealed record SequentialNodeExecutionContext(
         GovernedLoopSequentialAdapterBinding Binding,
+        GovernedLoopGraphRevisionArtifact Artifact,
         GovernedLoopSequentialPlanNode Node,
         int Attempt,
         IReadOnlyList<CapabilityId> AllowedCapabilityIds,
