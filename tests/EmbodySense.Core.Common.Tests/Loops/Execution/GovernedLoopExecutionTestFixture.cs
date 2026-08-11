@@ -6,6 +6,8 @@ namespace EmbodySense.Core.Common.Tests.Loops.Execution;
 
 internal static class GovernedLoopExecutionTestFixture
 {
+    internal const string WorkspaceId = "workspace-sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
     internal static DateTimeOffset CreatedAtUtc { get; } = new(2026, 8, 10, 1, 0, 0, TimeSpan.Zero);
 
     internal static DateTimeOffset UpdatedAtUtc { get; } = CreatedAtUtc.AddMinutes(1);
@@ -23,17 +25,47 @@ internal static class GovernedLoopExecutionTestFixture
         return GovernedLoopRunLifecycle.Create(binding, GovernedLoopRunLifecyclePayload.Create(1, version, status, CreatedAtUtc, updated, terminal));
     }
 
-    internal static GovernedLoopNodeExecutionEvidence Node(GovernedLoopNodeExecutionStatus status, string nodeId = "infer", string? outcomeEvidenceId = null, IEnumerable<string>? incomingEdgeIds = null, int? attempt = null)
+    internal static GovernedLoopNodeExecutionEvidence Node(
+        GovernedLoopNodeExecutionStatus status,
+        string nodeId = "infer",
+        string? outcomeEvidenceId = null,
+        IEnumerable<string>? incomingEdgeIds = null,
+        int? attempt = null,
+        int planOrdinal = 0,
+        IEnumerable<string>? outgoingEdgeIds = null,
+        GovernedLoopNodeDescriptor? descriptor = null,
+        string? attemptOperationId = null,
+        string? outcomeEvidenceHash = null)
     {
         var selectedAttempt = attempt ?? (status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Skipped ? null : 1);
-        var selectedOutcome = outcomeEvidenceId ?? (status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed ? "node-outcome" : null);
-        return GovernedLoopNodeExecutionEvidence.Create(nodeId, incomingEdgeIds ?? ["edge-trigger-infer"], selectedAttempt, status, selectedOutcome);
+        var selectedOperation = attemptOperationId ?? (selectedAttempt is null ? null : $"attempt-{nodeId}-{selectedAttempt}");
+        var selectedOutcome = outcomeEvidenceId ?? (status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed ? "node-outcome" : status == GovernedLoopNodeExecutionStatus.Skipped ? "skip-evidence" : null);
+        var selectedOutcomeHash = outcomeEvidenceHash ?? (selectedOutcome is null ? null : new string('f', 64));
+        return GovernedLoopNodeExecutionEvidence.Create(
+            planOrdinal,
+            nodeId,
+            descriptor ?? new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
+            incomingEdgeIds ?? ["edge-trigger-infer"],
+            outgoingEdgeIds ?? [],
+            status,
+            selectedAttempt,
+            selectedOperation,
+            selectedOutcome,
+            selectedOutcomeHash);
     }
 
     internal static GovernedLoopFrontierPosture Frontier(GovernedLoopExecutionBinding binding, GovernedLoopFrontierStatus status, long version = 1, IEnumerable<GovernedLoopNodeExecutionEvidence>? nodes = null, DateTimeOffset? updatedAtUtc = null)
     {
         var selectedNodes = nodes ?? [Node(NodeStatusFor(status))];
-        return GovernedLoopFrontierPosture.Create(binding, GovernedLoopFrontierPayload.Create(1, version, status, selectedNodes, updatedAtUtc ?? UpdatedAtUtc));
+        var payload = GovernedLoopFrontierPayload.Create(
+            1,
+            version,
+            GovernedLoopExecutionLimits.Schema1ConcurrencyCeiling,
+            status,
+            selectedNodes,
+            updatedAtUtc ?? UpdatedAtUtc,
+            string.Empty);
+        return GovernedLoopFrontierPosture.Create(binding, WorkspaceId, new string('b', 64), new string('c', 64), new string('d', 64), payload);
     }
 
     internal static GovernedLoopEffectPayload Effect(

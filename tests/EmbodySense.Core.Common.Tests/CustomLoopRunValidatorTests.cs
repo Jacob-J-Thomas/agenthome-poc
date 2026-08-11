@@ -10,6 +10,7 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
@@ -250,6 +251,186 @@ public sealed class CustomLoopRunValidatorTests
 
         AssertCodes(CustomLoopRunValidator.Validate(missingTriggerEvidence), "sequential_trigger_evidence_required");
         Assert.True(CustomLoopRunValidator.Validate(CreateRun()).IsValid);
+    }
+
+    [Fact]
+    public void Sequential_frontier_is_required_exactly_bound_and_excluded_from_the_admission_hash()
+    {
+        var run = CreateSequentialRun();
+        var withoutFrontier = run with { Frontier = null };
+        var legacyWithFrontier = CreateRun() with { Frontier = run.Frontier };
+        var source = run.Frontier!;
+        var unhashedPayload = GovernedLoopFrontierPayload.Create(
+            source.Payload.SchemaVersion,
+            source.Payload.FrontierVersion,
+            source.Payload.ConcurrencyCeiling,
+            source.Payload.Status,
+            source.Payload.Nodes,
+            source.Payload.UpdatedAtUtc,
+            string.Empty);
+        var substitutedWorkspace = run with
+        {
+            Frontier = GovernedLoopFrontierPosture.Create(
+                source.Binding,
+                "workspace-sha256:" + new string('9', 64),
+                source.GraphArtifactHash,
+                source.GraphLayoutHash,
+                source.AdmissionReceiptHash,
+                unhashedPayload),
+        };
+
+        Assert.True(CustomLoopRunValidator.Validate(run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(run).Errors));
+        AssertCodes(CustomLoopRunValidator.Validate(withoutFrontier), "execution_frontier_required");
+        AssertCodes(CustomLoopRunValidator.Validate(legacyWithFrontier), "execution_frontier_binding_required");
+        AssertCodes(CustomLoopRunValidator.Validate(substitutedWorkspace), "execution_frontier_binding_mismatch");
+        Assert.Equal(CustomLoopAdmissionRequestHash.Compute(run), CustomLoopAdmissionRequestHash.Compute(withoutFrontier));
+    }
+
+    [Fact]
+    public void Sequential_frontier_update_requires_stable_presence_or_one_exact_legal_successor()
+    {
+        var current = CreateSequentialRun();
+        var running = CreateRunningSequentialRun(current);
+        var unchanged = running with { Frontier = current.Frontier };
+        var removed = running with { Frontier = null };
+        var skippedPayload = GovernedLoopFrontierPayload.Create(
+            1,
+            3,
+            running.Frontier!.Payload.ConcurrencyCeiling,
+            running.Frontier.Payload.Status,
+            running.Frontier.Payload.Nodes,
+            running.Frontier.Payload.UpdatedAtUtc,
+            string.Empty);
+        var skippedVersion = running with
+        {
+            Frontier = GovernedLoopFrontierPosture.Create(
+                running.Frontier.Binding,
+                running.Frontier.WorkspaceId,
+                running.Frontier.GraphArtifactHash,
+                running.Frontier.GraphLayoutHash,
+                running.Frontier.AdmissionReceiptHash,
+                skippedPayload),
+        };
+
+        Assert.True(CustomLoopRunValidator.ValidateUpdate(current, running).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.ValidateUpdate(current, running).Errors));
+        Assert.True(CustomLoopRunValidator.ValidateUpdate(current, unchanged).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.ValidateUpdate(current, unchanged).Errors));
+        AssertCodes(CustomLoopRunValidator.ValidateUpdate(current, removed), "execution_frontier_required", "execution_frontier_presence_changed");
+        AssertCodes(CustomLoopRunValidator.ValidateUpdate(current, skippedVersion), "invalid_execution_frontier_transition");
+    }
+
+    [Fact]
+    public void Needs_review_requires_an_attention_frontier_that_may_retain_exact_outcome_evidence()
+    {
+        var admitted = CreateSequentialRun();
+        var running = CreateRunningSequentialRun(admitted);
+        var reviewBaseSeed = Advance(running, CustomLoopRunStatus.NeedsReview);
+        var reviewEvidence = SequentialEvent(
+            running.Events.Length + 1L,
+            "review-outcome",
+            CustomLoopRunEventKind.NodeAttemptFailed,
+            running.SequentialAdapterBinding!,
+            "step-1",
+            "step-1",
+            CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            CustomLoopSequentialNodeDisposition.NeedsReview,
+            reviewBaseSeed.UpdatedAtUtc);
+        var reviewLifecycle = reviewBaseSeed.Events[^1] with
+        {
+            Sequence = reviewEvidence.Sequence + 1,
+            EventId = "event-review-lifecycle",
+        };
+        var reviewBase = reviewBaseSeed with { Events = [.. running.Events, reviewEvidence, reviewLifecycle] };
+        var review = reviewBase with
+        {
+            Frontier = TransitionInferenceFrontier(running.Frontier!, GovernedLoopFrontierStatus.ReviewBlocked, GovernedLoopNodeExecutionStatus.ReviewBlocked, reviewBase.UpdatedAtUtc, reviewEvidence),
+        };
+        var hiddenAttention = reviewBase with
+        {
+            Frontier = TransitionInferenceFrontier(running.Frontier!, GovernedLoopFrontierStatus.Completed, GovernedLoopNodeExecutionStatus.Completed, reviewBase.UpdatedAtUtc, reviewEvidence),
+        };
+
+        Assert.True(CustomLoopRunValidator.ValidateUpdate(running, review).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.ValidateUpdate(running, review).Errors));
+        AssertCodes(CustomLoopRunValidator.Validate(hiddenAttention), "execution_frontier_lifecycle_mismatch");
+    }
+
+    [Fact]
+    public void Frontier_outcomes_require_the_exact_retained_event_node_attempt_hash_and_disposition()
+    {
+        var run = CreateSequentialRun();
+        var trigger = run.Frontier!.Payload.Nodes[0];
+        var missing = run with { Frontier = ReplaceTriggerOutcome(run.Frontier, "missing-event", trigger.OutcomeEvidenceHash!) };
+        var mismatchedHash = run with { Frontier = ReplaceTriggerOutcome(run.Frontier, trigger.OutcomeEvidenceId!, new string('8', 64)) };
+        var wrongNodeEvent = WithSequentialEvidence(
+            run.Events[0] with { SequentialNodeEvidence = null },
+            run.SequentialAdapterBinding!,
+            "other-trigger",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var wrongAttemptEvent = WithSequentialEvidence(
+            run.Events[0] with { SequentialNodeEvidence = null },
+            run.SequentialAdapterBinding!,
+            "trigger-node",
+            2,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var wrongNode = run with
+        {
+            Events = [wrongNodeEvent],
+            Frontier = CreateInitialFrontier(run.SequentialAdapterBinding!, wrongNodeEvent),
+        };
+        var wrongAttempt = run with
+        {
+            Events = [wrongAttemptEvent],
+            Frontier = CreateInitialFrontier(run.SequentialAdapterBinding!, wrongAttemptEvent),
+        };
+        var nullEvents = run with { Events = null! };
+
+        AssertCodes(CustomLoopRunValidator.Validate(missing), "execution_frontier_outcome_evidence_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(mismatchedHash), "execution_frontier_outcome_evidence_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(wrongNode), "execution_frontier_outcome_evidence_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(wrongAttempt), "execution_frontier_outcome_evidence_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(nullEvents), "execution_frontier_outcome_evidence_mismatch", "events_required");
+    }
+
+    [Fact]
+    public void Skipped_frontier_node_references_the_exact_completed_governing_control_outcome()
+    {
+        var run = CreateSequentialRun();
+        var skipped = run with { Frontier = CreateSkippedFrontier(run) };
+        var trigger = skipped.Frontier!.Payload.Nodes[0];
+        var disconnectedTrigger = GovernedLoopNodeExecutionEvidence.Create(
+            trigger.PlanOrdinal,
+            trigger.NodeId,
+            trigger.Descriptor,
+            trigger.IncomingControlEdgeIds,
+            [],
+            trigger.Status,
+            trigger.Attempt,
+            trigger.AttemptOperationId,
+            trigger.OutcomeEvidenceId,
+            trigger.OutcomeEvidenceHash);
+        var disconnectedPayload = GovernedLoopFrontierPayload.Create(
+            1,
+            skipped.Frontier.Payload.FrontierVersion,
+            skipped.Frontier.Payload.ConcurrencyCeiling,
+            skipped.Frontier.Payload.Status,
+            [disconnectedTrigger, .. skipped.Frontier.Payload.Nodes.Skip(1)],
+            skipped.Frontier.Payload.UpdatedAtUtc,
+            string.Empty);
+        var disconnected = skipped with
+        {
+            Frontier = GovernedLoopFrontierPosture.Create(
+                skipped.Frontier.Binding,
+                skipped.Frontier.WorkspaceId,
+                skipped.Frontier.GraphArtifactHash,
+                skipped.Frontier.GraphLayoutHash,
+                skipped.Frontier.AdmissionReceiptHash,
+                disconnectedPayload),
+        };
+
+        Assert.True(CustomLoopRunValidator.Validate(skipped).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(skipped).Errors));
+        AssertCodes(CustomLoopRunValidator.Validate(disconnected), "execution_frontier_outcome_evidence_mismatch");
     }
 
     [Fact]
@@ -869,11 +1050,13 @@ public sealed class CustomLoopRunValidatorTests
             1,
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed);
+        var frontier = CreateInitialFrontier(binding, admitted);
         return CustomLoopAdmissionRequestHash.Apply(run with
         {
             CapabilityAdmission = capabilityAdmission,
             SequentialInvocationSnapshot = invocation,
             SequentialAdapterBinding = binding,
+            Frontier = frontier,
             Events = [admitted],
         });
     }
@@ -928,7 +1111,199 @@ public sealed class CustomLoopRunValidatorTests
             AdmittedDefinition = definition,
             CapabilityAdmission = capabilityAdmission,
             SequentialAdapterBinding = binding,
+            Frontier = RebindFrontier(run.Frontier!, binding),
         });
+    }
+
+    private static GovernedLoopFrontierPosture CreateInitialFrontier(GovernedLoopSequentialAdapterBinding binding, CustomLoopRunEvent admitted)
+    {
+        const string ControlEdgeId = "edge-trigger-node-step-1";
+        var trigger = GovernedLoopNodeExecutionEvidence.Create(
+            0,
+            "trigger-node",
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Trigger, "manual-trigger", 1),
+            [],
+            [ControlEdgeId],
+            GovernedLoopNodeExecutionStatus.Completed,
+            1,
+            "attempt-trigger-node-1",
+            admitted.EventId,
+            admitted.SequentialNodeEvidence!.OutcomeArtifactHash);
+        var inference = GovernedLoopNodeExecutionEvidence.Create(
+            1,
+            "step-1",
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
+            [ControlEdgeId],
+            [],
+            GovernedLoopNodeExecutionStatus.Ready);
+        var payload = GovernedLoopFrontierPayload.Create(
+            1,
+            1,
+            GovernedLoopExecutionLimits.Schema1ConcurrencyCeiling,
+            GovernedLoopFrontierStatus.Active,
+            [trigger, inference],
+            admitted.TimestampUtc,
+            string.Empty);
+        return GovernedLoopFrontierPosture.Create(
+            binding.ExecutionBinding,
+            binding.WorkspaceId,
+            binding.GraphArtifactHash,
+            binding.GraphLayoutHash,
+            binding.AdmissionReceiptHash,
+            payload);
+    }
+
+    private static GovernedLoopFrontierPosture CreateSkippedFrontier(CustomLoopRunRecord run)
+    {
+        const string ExitEdgeId = "edge-step-1-exit";
+        var current = run.Frontier!;
+        var trigger = current.Payload.Nodes[0];
+        var inference = current.Payload.Nodes[1];
+        var skipped = GovernedLoopNodeExecutionEvidence.Create(
+            inference.PlanOrdinal,
+            inference.NodeId,
+            inference.Descriptor,
+            inference.IncomingControlEdgeIds,
+            [ExitEdgeId],
+            GovernedLoopNodeExecutionStatus.Skipped,
+            outcomeEvidenceId: trigger.OutcomeEvidenceId,
+            outcomeEvidenceHash: trigger.OutcomeEvidenceHash);
+        var exit = GovernedLoopNodeExecutionEvidence.Create(
+            2,
+            "exit",
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
+            [ExitEdgeId],
+            [],
+            GovernedLoopNodeExecutionStatus.Ready);
+        var payload = GovernedLoopFrontierPayload.Create(
+            current.Payload.SchemaVersion,
+            current.Payload.FrontierVersion,
+            current.Payload.ConcurrencyCeiling,
+            GovernedLoopFrontierStatus.Active,
+            [trigger, skipped, exit],
+            current.Payload.UpdatedAtUtc,
+            string.Empty);
+        return GovernedLoopFrontierPosture.Create(
+            current.Binding,
+            current.WorkspaceId,
+            current.GraphArtifactHash,
+            current.GraphLayoutHash,
+            current.AdmissionReceiptHash,
+            payload);
+    }
+
+    private static GovernedLoopFrontierPosture RebindFrontier(GovernedLoopFrontierPosture frontier, GovernedLoopSequentialAdapterBinding binding)
+    {
+        var payload = GovernedLoopFrontierPayload.Create(
+            frontier.Payload.SchemaVersion,
+            frontier.Payload.FrontierVersion,
+            frontier.Payload.ConcurrencyCeiling,
+            frontier.Payload.Status,
+            frontier.Payload.Nodes,
+            frontier.Payload.UpdatedAtUtc,
+            string.Empty);
+        return GovernedLoopFrontierPosture.Create(
+            binding.ExecutionBinding,
+            binding.WorkspaceId,
+            binding.GraphArtifactHash,
+            binding.GraphLayoutHash,
+            binding.AdmissionReceiptHash,
+            payload);
+    }
+
+    private static CustomLoopRunRecord CreateRunningSequentialRun(CustomLoopRunRecord admitted)
+    {
+        var runningSeed = Advance(admitted, CustomLoopRunStatus.Running);
+        var dispatch = SequentialEvent(
+            admitted.Events.Length + 1L,
+            "inference-start",
+            CustomLoopRunEventKind.NodeAttemptStarted,
+            admitted.SequentialAdapterBinding!,
+            "step-1",
+            "step-1",
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown,
+            runningSeed.UpdatedAtUtc);
+        var lifecycle = runningSeed.Events[^1] with
+        {
+            Sequence = dispatch.Sequence + 1,
+            EventId = "event-running-lifecycle",
+        };
+        return runningSeed with
+        {
+            Events = [.. admitted.Events, dispatch, lifecycle],
+            Frontier = TransitionInferenceFrontier(admitted.Frontier!, GovernedLoopFrontierStatus.Active, GovernedLoopNodeExecutionStatus.Running, runningSeed.UpdatedAtUtc),
+        };
+    }
+
+    private static GovernedLoopFrontierPosture ReplaceTriggerOutcome(GovernedLoopFrontierPosture current, string outcomeEvidenceId, string outcomeEvidenceHash)
+    {
+        var trigger = current.Payload.Nodes[0];
+        var replacement = GovernedLoopNodeExecutionEvidence.Create(
+            trigger.PlanOrdinal,
+            trigger.NodeId,
+            trigger.Descriptor,
+            trigger.IncomingControlEdgeIds,
+            trigger.OutgoingControlEdgeIds,
+            trigger.Status,
+            trigger.Attempt,
+            trigger.AttemptOperationId,
+            outcomeEvidenceId,
+            outcomeEvidenceHash);
+        var payload = GovernedLoopFrontierPayload.Create(
+            current.Payload.SchemaVersion,
+            current.Payload.FrontierVersion,
+            current.Payload.ConcurrencyCeiling,
+            current.Payload.Status,
+            [replacement, .. current.Payload.Nodes.Skip(1)],
+            current.Payload.UpdatedAtUtc,
+            string.Empty);
+        return GovernedLoopFrontierPosture.Create(
+            current.Binding,
+            current.WorkspaceId,
+            current.GraphArtifactHash,
+            current.GraphLayoutHash,
+            current.AdmissionReceiptHash,
+            payload);
+    }
+
+    private static GovernedLoopFrontierPosture TransitionInferenceFrontier(
+        GovernedLoopFrontierPosture current,
+        GovernedLoopFrontierStatus frontierStatus,
+        GovernedLoopNodeExecutionStatus nodeStatus,
+        DateTimeOffset updatedAtUtc,
+        CustomLoopRunEvent? outcomeEvent = null)
+    {
+        var currentNode = current.Payload.Nodes[1];
+        var hasAttempt = nodeStatus is not (GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Skipped);
+        var payload = GovernedLoopFrontierPayload.Create(
+            1,
+            current.Payload.FrontierVersion + 1,
+            current.Payload.ConcurrencyCeiling,
+            frontierStatus,
+            [
+                current.Payload.Nodes[0],
+                GovernedLoopNodeExecutionEvidence.Create(
+                    currentNode.PlanOrdinal,
+                    currentNode.NodeId,
+                    currentNode.Descriptor,
+                    currentNode.IncomingControlEdgeIds,
+                    currentNode.OutgoingControlEdgeIds,
+                    nodeStatus,
+                    hasAttempt ? 1 : null,
+                    hasAttempt ? "attempt-step-1-1" : null,
+                    outcomeEvent?.EventId,
+                    outcomeEvent?.SequentialNodeEvidence?.OutcomeArtifactHash),
+            ],
+            updatedAtUtc,
+            string.Empty);
+        return GovernedLoopFrontierPosture.Create(
+            current.Binding,
+            current.WorkspaceId,
+            current.GraphArtifactHash,
+            current.GraphLayoutHash,
+            current.AdmissionReceiptHash,
+            payload);
     }
 
     private static GovernedLoopSequentialAdapterBinding WithCapabilityAdmission(
@@ -1001,9 +1376,10 @@ public sealed class CustomLoopRunValidatorTests
         string nodeId,
         string stepId,
         CustomLoopSequentialNodeEvidenceKind evidenceKind,
-        CustomLoopSequentialNodeDisposition disposition)
+        CustomLoopSequentialNodeDisposition disposition,
+        DateTimeOffset? timestamp = null)
     {
-        var runEvent = Event(sequence, eventId, eventKind, iteration: 1, attempt: 1) with
+        var runEvent = Event(sequence, eventId, eventKind, iteration: 1, attempt: 1, timestamp: timestamp) with
         {
             StepId = stepId,
             ExitDecision = eventKind == CustomLoopRunEventKind.ExitDecisionCompleted ? CustomLoopExitDecision.Complete : null,

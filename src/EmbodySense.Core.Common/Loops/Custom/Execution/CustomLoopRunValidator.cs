@@ -9,6 +9,8 @@ using static EmbodySense.Core.Common.Loops.Custom.Execution.CustomLoopRunValidat
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Admission;
+using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 using System.Text.Json;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
@@ -126,6 +128,7 @@ public static class CustomLoopRunValidator
         }
 
         ValidateImmutableAdmission(current, candidate, errors);
+        ValidateExecutionFrontierUpdate(current, candidate, errors);
         ValidateLifecycleTransition(current, candidate, errors);
         ValidateAppendOnlyEvents(current, candidate, errors);
         ValidateAppendedControlOwnership(current, candidate, errors);
@@ -309,6 +312,7 @@ public static class CustomLoopRunValidator
         }
 
         ValidateSequentialAdmission(run, errors);
+        ValidateExecutionFrontier(run, errors);
 
         if (run.ModelSnapshot is null)
         {
@@ -418,6 +422,162 @@ public static class CustomLoopRunValidator
         {
             Add(errors, "sequential_invocation_projection_mismatch", "sequentialInvocationSnapshot", "The sequential invocation snapshot must exactly match the legacy adapter's admitted prompt, model, conversation, and context projection.");
         }
+    }
+
+    private static void ValidateExecutionFrontier(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
+    {
+        if (run.Frontier is not { } frontier)
+        {
+            if (run.SequentialInvocationSnapshot is not null || run.SequentialAdapterBinding is not null)
+            {
+                Add(errors, "execution_frontier_required", "frontier", "A canonical sequential run requires its exact durable execution frontier.");
+            }
+
+            return;
+        }
+
+        var frontierValidation = GovernedLoopFrontierContractValidator.Validate(frontier);
+        foreach (var error in frontierValidation.Errors)
+        {
+            Add(errors, "invalid_execution_frontier", "frontier" + error.Path.TrimStart('$'), "The durable execution frontier is malformed or does not match its retained content hash.");
+        }
+
+        if (run.SequentialAdapterBinding is not { } binding)
+        {
+            Add(errors, "execution_frontier_binding_required", "frontier", "A durable execution frontier requires the exact canonical sequential adapter binding.");
+            return;
+        }
+
+        if (!Equals(frontier.Binding, binding.ExecutionBinding)
+            || !string.Equals(frontier.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(frontier.GraphArtifactHash, binding.GraphArtifactHash, StringComparison.Ordinal)
+            || !string.Equals(frontier.GraphLayoutHash, binding.GraphLayoutHash, StringComparison.Ordinal)
+            || !string.Equals(frontier.AdmissionReceiptHash, binding.AdmissionReceiptHash, StringComparison.Ordinal))
+        {
+            Add(errors, "execution_frontier_binding_mismatch", "frontier", "The durable execution frontier must bind the run's exact workspace, execution, graph, layout, and admission receipt coordinates.");
+        }
+
+        ValidateFrontierOutcomeEvidence(run, frontier, errors);
+
+        if (frontier.Payload.UpdatedAtUtc < run.CreatedAtUtc || frontier.Payload.UpdatedAtUtc > run.UpdatedAtUtc)
+        {
+            Add(errors, "execution_frontier_timestamp_mismatch", "frontier.payload.updatedAtUtc", "The durable execution frontier timestamp must be within the retained run interval.");
+        }
+
+        if (!FrontierMatchesRunLifecycle(run.Status, frontier))
+        {
+            Add(errors, "execution_frontier_lifecycle_mismatch", "frontier.payload.status", "The durable execution frontier must honestly match the retained run lifecycle.");
+        }
+    }
+
+    private static void ValidateFrontierOutcomeEvidence(CustomLoopRunRecord run, GovernedLoopFrontierPosture frontier, List<CustomLoopValidationError> errors)
+    {
+        var runEvents = run.Events ?? [];
+        for (var nodeIndex = 0; nodeIndex < frontier.Payload.Nodes.Count; nodeIndex++)
+        {
+            var node = frontier.Payload.Nodes[nodeIndex];
+            if (node.OutcomeEvidenceId is not { } outcomeEvidenceId)
+            {
+                continue;
+            }
+
+            var matchingEvents = runEvents
+                .Where(item => item is not null && string.Equals(item.EventId, outcomeEvidenceId, StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            var evidence = matchingEvents.Length == 1 ? matchingEvents[0].SequentialNodeEvidence : null;
+            var compatible = evidence is not null
+                && CustomLoopSequentialOutcomeArtifactHash.Matches(matchingEvents[0])
+                && string.Equals(evidence.OutcomeArtifactHash, node.OutcomeEvidenceHash, StringComparison.Ordinal)
+                && (node.Status == GovernedLoopNodeExecutionStatus.Skipped
+                    ? IsSkippedFrontierEvidenceCompatible(frontier, node, matchingEvents[0], evidence)
+                    : string.Equals(evidence.NodeId, node.NodeId, StringComparison.Ordinal)
+                        && node.Attempt == evidence.Attempt
+                        && IsFrontierOutcomeDispositionCompatible(node.Status, evidence.Kind, evidence.Disposition));
+            if (!compatible)
+            {
+                Add(errors, "execution_frontier_outcome_evidence_mismatch", $"frontier.payload.nodes[{nodeIndex}].outcomeEvidenceId", "Committed frontier outcome evidence must identify one exact retained run event for the same node, attempt, artifact hash, and disposition.");
+            }
+        }
+    }
+
+    private static bool IsSkippedFrontierEvidenceCompatible(
+        GovernedLoopFrontierPosture frontier,
+        GovernedLoopNodeExecutionEvidence skipped,
+        CustomLoopRunEvent governingEvent,
+        CustomLoopSequentialNodeEvidence governingEvidence)
+    {
+        var governingNode = frontier.Payload.Nodes.FirstOrDefault(candidate =>
+            string.Equals(candidate.NodeId, governingEvidence.NodeId, StringComparison.Ordinal));
+        return governingEvidence.Kind == CustomLoopSequentialNodeEvidenceKind.CompletedOutcome
+            && governingEvidence.Disposition == CustomLoopSequentialNodeDisposition.Completed
+            && governingNode is
+            {
+                Status: GovernedLoopNodeExecutionStatus.Completed,
+                OutcomeEvidenceId: not null,
+                OutcomeEvidenceHash: not null,
+            }
+            && governingNode.Attempt == governingEvidence.Attempt
+            && governingNode.PlanOrdinal < skipped.PlanOrdinal
+            && string.Equals(governingNode.OutcomeEvidenceId, governingEvent.EventId, StringComparison.Ordinal)
+            && string.Equals(governingNode.OutcomeEvidenceHash, governingEvidence.OutcomeArtifactHash, StringComparison.Ordinal)
+            && governingNode.OutgoingControlEdgeIds.Intersect(skipped.IncomingControlEdgeIds, StringComparer.Ordinal).Any();
+    }
+
+    private static bool IsFrontierOutcomeDispositionCompatible(
+        GovernedLoopNodeExecutionStatus status,
+        CustomLoopSequentialNodeEvidenceKind kind,
+        CustomLoopSequentialNodeDisposition disposition)
+    {
+        return status switch
+        {
+            GovernedLoopNodeExecutionStatus.Completed => kind == CustomLoopSequentialNodeEvidenceKind.CompletedOutcome && disposition == CustomLoopSequentialNodeDisposition.Completed,
+            GovernedLoopNodeExecutionStatus.Failed => kind == CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection && disposition == CustomLoopSequentialNodeDisposition.Rejected,
+            GovernedLoopNodeExecutionStatus.ReviewBlocked => kind == CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention && disposition == CustomLoopSequentialNodeDisposition.NeedsReview,
+            _ => false,
+        };
+    }
+
+    private static void ValidateExecutionFrontierUpdate(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
+    {
+        if ((current.Frontier is null) != (candidate.Frontier is null))
+        {
+            Add(errors, "execution_frontier_presence_changed", "frontier", "A run update cannot add or remove its durable execution-frontier plane.");
+            return;
+        }
+
+        if (current.Frontier is not { } currentFrontier || candidate.Frontier is not { } candidateFrontier)
+        {
+            return;
+        }
+
+        if (string.Equals(currentFrontier.Payload.ContentHash, candidateFrontier.Payload.ContentHash, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var transition = GovernedLoopExecutionValidator.ValidateTransition(currentFrontier, candidateFrontier);
+        foreach (var error in transition.Errors)
+        {
+            Add(errors, "invalid_execution_frontier_transition", "frontier" + error.Path.TrimStart('$'), "The durable execution frontier is not the exact legal successor of the retained frontier.");
+        }
+    }
+
+    private static bool FrontierMatchesRunLifecycle(CustomLoopRunStatus status, GovernedLoopFrontierPosture frontier)
+    {
+        var frontierStatus = frontier.Payload.Status;
+        return status switch
+        {
+            CustomLoopRunStatus.Admitted or CustomLoopRunStatus.Running => frontierStatus == GovernedLoopFrontierStatus.Active,
+            CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.CancelRequested => frontierStatus is GovernedLoopFrontierStatus.Active or GovernedLoopFrontierStatus.Waiting or GovernedLoopFrontierStatus.ReviewBlocked,
+            CustomLoopRunStatus.Paused => frontierStatus is GovernedLoopFrontierStatus.Waiting or GovernedLoopFrontierStatus.ReviewBlocked
+                || frontierStatus == GovernedLoopFrontierStatus.Active && frontier.Payload.Nodes.All(node => node.Status != GovernedLoopNodeExecutionStatus.Running),
+            CustomLoopRunStatus.Completed => frontierStatus == GovernedLoopFrontierStatus.Completed,
+            CustomLoopRunStatus.Failed => frontierStatus == GovernedLoopFrontierStatus.Failed,
+            CustomLoopRunStatus.Cancelled => frontierStatus == GovernedLoopFrontierStatus.Cancelled,
+            CustomLoopRunStatus.NeedsReview => frontierStatus == GovernedLoopFrontierStatus.ReviewBlocked,
+            _ => false,
+        };
     }
 
     private static void ValidateSequentialCapabilityAdmission(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)

@@ -14,7 +14,7 @@ public sealed class GovernedLoopExecutionConstructionTests
 
         Assert.Throws<ArgumentException>(() => GovernedLoopExecutionBinding.Create(2, "run-1", revision, 1));
         Assert.Throws<ArgumentException>(() => GovernedLoopRunLifecyclePayload.Create(2, 1, GovernedLoopRunStatus.Running, GovernedLoopExecutionTestFixture.CreatedAtUtc, GovernedLoopExecutionTestFixture.UpdatedAtUtc, null));
-        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPayload.Create(2, 1, GovernedLoopFrontierStatus.Active, [GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready)], GovernedLoopExecutionTestFixture.UpdatedAtUtc));
+        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPayload.Create(2, 1, 1, GovernedLoopFrontierStatus.Active, [GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready)], GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty));
         Assert.Throws<ArgumentException>(() => GovernedLoopEffectPayload.Create(2, "effect", "operation", 1, GovernedLoopEffectOrigin.Provider, "infer", new string('a', 64), GovernedLoopEffectPhase.IntentPrepared, GovernedLoopEffectOutcome.None, GovernedLoopEffectEvidenceStatus.Pending, null, null, GovernedLoopExecutionTestFixture.UpdatedAtUtc));
         Assert.Throws<ArgumentException>(() => GovernedLoopProjectionPayload.Create(2, "projection", "operation", GovernedLoopProjectionClass.LocalRuntime, GovernedLoopProjectionStatus.Pending, "source", null, null, null, null, GovernedLoopExecutionTestFixture.UpdatedAtUtc));
         var lifecycle = GovernedLoopExecutionTestFixture.Lifecycle(binding, GovernedLoopRunStatus.Running);
@@ -40,19 +40,31 @@ public sealed class GovernedLoopExecutionConstructionTests
     }
 
     [Theory]
-    [InlineData(GovernedLoopNodeExecutionStatus.Ready, null, null, true)]
-    [InlineData(GovernedLoopNodeExecutionStatus.Ready, 1, null, false)]
-    [InlineData(GovernedLoopNodeExecutionStatus.Skipped, null, null, true)]
-    [InlineData(GovernedLoopNodeExecutionStatus.Skipped, null, "skip-evidence", true)]
-    [InlineData(GovernedLoopNodeExecutionStatus.Running, 1, null, true)]
-    [InlineData(GovernedLoopNodeExecutionStatus.Running, 1, "outcome", false)]
-    [InlineData(GovernedLoopNodeExecutionStatus.Completed, 1, "outcome", true)]
-    [InlineData(GovernedLoopNodeExecutionStatus.Completed, 1, null, false)]
-    [InlineData(GovernedLoopNodeExecutionStatus.Failed, 1, "outcome", true)]
-    [InlineData(GovernedLoopNodeExecutionStatus.ReviewBlocked, 1, null, true)]
-    public void Node_attempt_and_outcome_shape_is_closed(GovernedLoopNodeExecutionStatus status, int? attempt, string? outcomeEvidenceId, bool expected)
+    [InlineData(GovernedLoopNodeExecutionStatus.Ready, null, false, null, false, true)]
+    [InlineData(GovernedLoopNodeExecutionStatus.Ready, 1, true, null, false, false)]
+    [InlineData(GovernedLoopNodeExecutionStatus.Skipped, null, false, null, false, false)]
+    [InlineData(GovernedLoopNodeExecutionStatus.Skipped, null, false, "skip-evidence", true, true)]
+    [InlineData(GovernedLoopNodeExecutionStatus.Running, 1, true, null, false, true)]
+    [InlineData(GovernedLoopNodeExecutionStatus.Running, 1, true, "outcome", true, false)]
+    [InlineData(GovernedLoopNodeExecutionStatus.Completed, 1, true, "outcome", true, true)]
+    [InlineData(GovernedLoopNodeExecutionStatus.Completed, 1, true, null, false, false)]
+    [InlineData(GovernedLoopNodeExecutionStatus.Failed, 1, true, "outcome", true, true)]
+    [InlineData(GovernedLoopNodeExecutionStatus.ReviewBlocked, 1, true, null, false, true)]
+    [InlineData(GovernedLoopNodeExecutionStatus.ReviewBlocked, 1, true, "outcome", true, true)]
+    [InlineData(GovernedLoopNodeExecutionStatus.ReviewBlocked, 1, false, null, false, false)]
+    public void Node_attempt_and_outcome_shape_is_closed(GovernedLoopNodeExecutionStatus status, int? attempt, bool hasAttemptOperation, string? outcomeEvidenceId, bool hasOutcomeEvidenceHash, bool expected)
     {
-        var action = () => GovernedLoopNodeExecutionEvidence.Create("infer", ["edge"], attempt, status, outcomeEvidenceId);
+        var action = () => GovernedLoopNodeExecutionEvidence.Create(
+            0,
+            "infer",
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
+            ["edge"],
+            [],
+            status,
+            attempt,
+            hasAttemptOperation ? "attempt-infer-1" : null,
+            outcomeEvidenceId,
+            hasOutcomeEvidenceHash ? new string('f', 64) : null);
 
         if (expected)
         {
@@ -68,20 +80,37 @@ public sealed class GovernedLoopExecutionConstructionTests
     public void Immutable_collections_are_defensive_and_require_sorted_unique_inputs()
     {
         var edges = new[] { "edge-a", "edge-b" };
-        var node = GovernedLoopNodeExecutionEvidence.Create("infer", edges, 1, GovernedLoopNodeExecutionStatus.Running, null);
+        var node = CreateNode(GovernedLoopNodeExecutionStatus.Running, incomingEdgeIds: edges);
         edges[0] = "changed";
-        Assert.Equal(["edge-a", "edge-b"], node.IncomingEdgeIds);
-        Assert.Throws<ArgumentException>(() => GovernedLoopNodeExecutionEvidence.Create("infer", ["edge-b", "edge-a"], 1, GovernedLoopNodeExecutionStatus.Running, null));
-        Assert.Throws<ArgumentException>(() => GovernedLoopNodeExecutionEvidence.Create("infer", ["edge-a", "edge-a"], 1, GovernedLoopNodeExecutionStatus.Running, null));
+        Assert.Equal(["edge-a", "edge-b"], node.IncomingControlEdgeIds);
+        Assert.Throws<ArgumentException>(() => CreateNode(GovernedLoopNodeExecutionStatus.Running, incomingEdgeIds: ["edge-b", "edge-a"]));
+        Assert.Throws<ArgumentException>(() => CreateNode(GovernedLoopNodeExecutionStatus.Running, incomingEdgeIds: ["edge-a", "edge-a"]));
 
-        var nodes = new[] { GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "a"), GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "b") };
-        var frontier = GovernedLoopFrontierPayload.Create(1, 1, GovernedLoopFrontierStatus.Active, nodes, GovernedLoopExecutionTestFixture.UpdatedAtUtc);
-        nodes[0] = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "changed");
+        var nodes = new[]
+        {
+            GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Completed, "a"),
+            GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "b", planOrdinal: 1)
+        };
+        var frontier = GovernedLoopFrontierPayload.Create(1, 1, 1, GovernedLoopFrontierStatus.Active, nodes, GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty);
+        nodes[0] = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Completed, "changed");
         Assert.Equal("a", frontier.Nodes[0].NodeId);
-        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPayload.Create(1, 1, GovernedLoopFrontierStatus.Active, frontier.Nodes.Reverse(), GovernedLoopExecutionTestFixture.UpdatedAtUtc));
-        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPayload.Create(1, 1, GovernedLoopFrontierStatus.Unknown, [node], GovernedLoopExecutionTestFixture.UpdatedAtUtc));
-        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPayload.Create(1, 1, GovernedLoopFrontierStatus.Completed, [node], GovernedLoopExecutionTestFixture.UpdatedAtUtc));
+        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPayload.Create(1, 1, 1, GovernedLoopFrontierStatus.Active, frontier.Nodes.Reverse(), GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty));
+        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPayload.Create(1, 1, 1, GovernedLoopFrontierStatus.Unknown, [node], GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty));
+        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPayload.Create(1, 1, 1, GovernedLoopFrontierStatus.Completed, [node], GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty));
         Assert.Equal(1, frontier.SchemaVersion);
+    }
+
+    [Fact]
+    public void Frontier_factory_rejects_duplicate_node_identity_and_schema_one_concurrency_overflow()
+    {
+        var completed = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Completed, "same");
+        var duplicate = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "same", planOrdinal: 1);
+        var readyA = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "a");
+        var readyB = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "b", planOrdinal: 1);
+
+        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPayload.Create(1, 1, 1, GovernedLoopFrontierStatus.Active, [completed, duplicate], GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty));
+        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPayload.Create(1, 1, 1, GovernedLoopFrontierStatus.Active, [readyA, readyB], GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty));
+        Assert.Throws<ArgumentOutOfRangeException>(() => GovernedLoopFrontierPayload.Create(1, 1, 2, GovernedLoopFrontierStatus.Active, [readyA], GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty));
     }
 
     [Theory]
@@ -189,9 +218,9 @@ public sealed class GovernedLoopExecutionConstructionTests
         return surface switch
         {
             "runId" => GovernedLoopExecutionBinding.Create(1, malformed, revision, 1),
-            "nodeId" => GovernedLoopNodeExecutionEvidence.Create(malformed, ["edge"], 1, GovernedLoopNodeExecutionStatus.Running, null),
-            "edgeId" => GovernedLoopNodeExecutionEvidence.Create("node", [malformed], 1, GovernedLoopNodeExecutionStatus.Running, null),
-            "outcomeEvidenceId" => GovernedLoopNodeExecutionEvidence.Create("node", ["edge"], 1, GovernedLoopNodeExecutionStatus.Completed, malformed),
+            "nodeId" => CreateNode(GovernedLoopNodeExecutionStatus.Running, malformed),
+            "edgeId" => CreateNode(GovernedLoopNodeExecutionStatus.Running, incomingEdgeIds: [malformed]),
+            "outcomeEvidenceId" => CreateNode(GovernedLoopNodeExecutionStatus.Completed, outcomeEvidenceId: malformed),
             "effectId" => CreateEffect(effectId: malformed),
             "operationId" => CreateEffect(operationId: malformed),
             "originNodeId" => CreateEffect(originNodeId: malformed),
@@ -205,6 +234,27 @@ public sealed class GovernedLoopExecutionConstructionTests
             "projectionReconciliationEvidenceId" => CreateProjection(projectionClass: GovernedLoopProjectionClass.Surface, status: GovernedLoopProjectionStatus.Reconciled, expectedVersion: "etag", reconciliationEvidenceId: malformed),
             _ => throw new ArgumentOutOfRangeException(nameof(surface))
         };
+    }
+
+    private static GovernedLoopNodeExecutionEvidence CreateNode(
+        GovernedLoopNodeExecutionStatus status,
+        string nodeId = "infer",
+        IEnumerable<string>? incomingEdgeIds = null,
+        string? outcomeEvidenceId = null)
+    {
+        var hasAttempt = status is not (GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Skipped);
+        var selectedOutcome = outcomeEvidenceId ?? (status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed ? "outcome" : null);
+        return GovernedLoopNodeExecutionEvidence.Create(
+            0,
+            nodeId,
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
+            incomingEdgeIds ?? ["edge"],
+            [],
+            status,
+            hasAttempt ? 1 : null,
+            hasAttempt ? "attempt-infer-1" : null,
+            selectedOutcome,
+            selectedOutcome is null ? null : new string('f', 64));
     }
 
     private static GovernedLoopEffectPayload CreateEffect(
