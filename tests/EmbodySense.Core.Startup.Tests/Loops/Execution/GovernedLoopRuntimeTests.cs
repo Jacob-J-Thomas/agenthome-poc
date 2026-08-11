@@ -27,6 +27,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -223,10 +224,12 @@ internal static class GovernedLoopRuntimeTests
                 LlmMessage.User("interleaving durable conversation message"));
             fixture.ReleaseProvider();
 
-            var failed = await invocation;
-            Assert.Equal("Failed", failed.ExecutionStatus);
-            Assert.Equal(CustomLoopRunStatus.Failed.ToString(), failed.Run?.Status);
-            Assert.Equal("conversation_publication_failed", failed.Run?.FailureCode);
+            var review = await invocation;
+            Assert.Equal("NeedsReview", review.ExecutionStatus);
+            Assert.Equal(CustomLoopRunStatus.NeedsReview.ToString(), review.Run?.Status);
+            Assert.Equal("conversation_publication_failed", review.Run?.FailureCode);
+            Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked.ToString(), review.Run?.Frontier?.Status);
+            Assert.NotNull(review.Run?.Frontier?.Nodes[^1].OutcomeEvidenceId);
             Assert.Equal(1, fixture.ProviderAttempts);
         }
 
