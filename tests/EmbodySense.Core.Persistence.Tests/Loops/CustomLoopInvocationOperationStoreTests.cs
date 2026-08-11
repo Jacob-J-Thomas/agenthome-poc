@@ -5,6 +5,10 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Sequential;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Tests.Support;
@@ -14,6 +18,234 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 public sealed class CustomLoopInvocationOperationStoreTests
 {
     private static readonly DateTimeOffset _timestamp = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task Sequential_snapshot_is_bound_before_admission_and_replays_exactly_after_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var pending = Pending("invoke-sequential-snapshot", "exact prompt");
+        var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
+        var snapshot = SequentialSnapshot(pending, context);
+        var bound = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = new string('b', CustomLoopLimits.Sha256HexCharacters),
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context),
+            SequentialInvocationSnapshot = snapshot,
+        };
+        var store = new CustomLoopInvocationOperationStore(paths);
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(bound)).Status);
+        var restarted = new CustomLoopInvocationOperationStore(paths);
+        var loaded = Assert.IsType<CustomLoopInvocationOperation>(await restarted.GetAsync(pending.OperationId));
+        Assert.Equal(snapshot.ContentHash, loaded.SequentialInvocationSnapshot?.ContentHash);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, (await restarted.BindAsync(bound)).Status);
+
+        var laterContext = CustomLoopContextSnapshot.CreateEmpty(_timestamp.AddSeconds(1));
+        var substituted = bound with
+        {
+            UpdatedAtUtc = _timestamp.AddSeconds(2),
+            SequentialInvocationSnapshot = SequentialSnapshot(pending, laterContext),
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, (await restarted.BindAsync(substituted)).Status);
+    }
+
+    [Fact]
+    public async Task Sequential_snapshot_property_is_required_even_when_legacy_value_is_null()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var pending = Pending("invoke-required-sequential-shape", "prompt");
+        var store = new CustomLoopInvocationOperationStore(paths);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
+        var json = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        Assert.True(json.Remove("sequentialInvocationSnapshot"));
+        await File.WriteAllTextAsync(path, json.ToJsonString());
+
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopInvocationOperationStore(paths).GetAsync(pending.OperationId));
+    }
+
+    [Fact]
+    public async Task Sequential_snapshot_conversation_binding_is_exact_in_both_directions()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
+        var pending = Pending("invoke-sequential-conversation", "exact prompt");
+        var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
+        var exact = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = new string('b', CustomLoopLimits.Sha256HexCharacters),
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context),
+            SequentialInvocationSnapshot = SequentialSnapshot(pending, context),
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+
+        var originalSnapshot = exact.SequentialInvocationSnapshot!;
+        var snapshotWithoutConversation = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
+            originalSnapshot.SchemaVersion,
+            originalSnapshot.TriggerPrompt,
+            originalSnapshot.ModelSnapshot,
+            null,
+            originalSnapshot.ContextCapturedAtUtc,
+            originalSnapshot.ContextManifest,
+            string.Empty));
+        await Assert.ThrowsAsync<FormatException>(() => store.BindAsync(exact with { SequentialInvocationSnapshot = snapshotWithoutConversation }));
+        await Assert.ThrowsAsync<FormatException>(() => store.BindAsync(exact with { InvokingConversationId = null }));
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(exact)).Status);
+    }
+
+    [Fact]
+    public async Task Sequential_snapshot_without_conversation_completes_and_replays_after_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var pending = Pending("invoke-sequential-no-conversation", "exact prompt");
+        var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
+        var snapshot = SequentialSnapshot(pending, context, includeConversation: false);
+        var bound = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = null,
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context),
+            SequentialInvocationSnapshot = snapshot,
+        };
+        var store = new CustomLoopInvocationOperationStore(paths);
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(bound)).Status);
+        var completed = bound with
+        {
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Admitted,
+            AdmissionStatus = CustomLoopAdmissionStatusNames.Admitted,
+            RunId = "run-sequential-no-conversation",
+            Detail = "The canonical sequential invocation was admitted without a conversation binding.",
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(completed)).Status);
+
+        var restarted = new CustomLoopInvocationOperationStore(paths);
+        var loaded = Assert.IsType<CustomLoopInvocationOperation>(await restarted.GetAsync(pending.OperationId));
+        Assert.Null(loaded.InvokingConversationId);
+        Assert.Null(loaded.SequentialInvocationSnapshot?.InvokingConversation);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, (await restarted.CompleteAsync(completed)).Status);
+    }
+
+    [Fact]
+    public async Task Sequential_snapshot_without_conversation_rejects_both_substitution_directions_and_legacy_null_binding()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
+        var pending = Pending("invoke-sequential-no-conversation-substitution", "exact prompt");
+        var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
+        var snapshot = SequentialSnapshot(pending, context, includeConversation: false);
+        var bound = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = null,
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context),
+            SequentialInvocationSnapshot = snapshot,
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+
+        await Assert.ThrowsAsync<FormatException>(() => store.BindAsync(bound with
+        {
+            SequentialInvocationSnapshot = SequentialSnapshot(pending, context),
+        }));
+        await Assert.ThrowsAsync<FormatException>(() => store.BindAsync(bound with
+        {
+            InvokingConversationId = new string('b', CustomLoopLimits.Sha256HexCharacters),
+        }));
+        await Assert.ThrowsAsync<FormatException>(() => store.BindAsync(bound with
+        {
+            SequentialInvocationSnapshot = null,
+        }));
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(bound)).Status);
+    }
+
+    [Fact]
+    public async Task Sequential_captured_context_not_found_terminalizes_and_replays_after_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var pending = Pending("invoke-sequential-captured-not-found", "exact prompt");
+        var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
+        var captured = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = new string('b', CustomLoopLimits.Sha256HexCharacters),
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context),
+            SequentialInvocationSnapshot = SequentialSnapshot(pending, context),
+        };
+        var store = new CustomLoopInvocationOperationStore(paths);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(captured)).Status);
+
+        var notFound = captured with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContextNotFound,
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
+            Detail = "The definition disappeared after canonical context capture.",
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(notFound)).Status);
+        var completed = notFound with
+        {
+            UpdatedAtUtc = _timestamp.AddSeconds(2),
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Rejected,
+            AdmissionStatus = CustomLoopAdmissionStatusNames.NotFound,
+            Detail = "The captured canonical invocation was rejected because its definition was not found.",
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(completed)).Status);
+
+        var restarted = new CustomLoopInvocationOperationStore(paths);
+        var loaded = Assert.IsType<CustomLoopInvocationOperation>(await restarted.GetAsync(pending.OperationId));
+        Assert.Equal(CustomLoopInvocationBindingState.CapturedContextNotFound, loaded.BindingState);
+        Assert.Equal(captured.SequentialInvocationSnapshot?.ContentHash, loaded.SequentialInvocationSnapshot?.ContentHash);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, (await restarted.CompleteAsync(completed)).Status);
+    }
+
+    [Fact]
+    public async Task Semantically_valid_maximum_snapshot_that_exceeds_the_receipt_limit_is_refused_without_mutation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var pending = Pending("invoke-sequential-oversize", "exact prompt");
+        var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
+        var snapshot = SequentialSnapshot(pending, context);
+        var oversizedReason = new string('\u00e9', CustomLoopLimits.MaxRunDetailCharacters);
+        var oversized = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
+            snapshot.SchemaVersion,
+            snapshot.TriggerPrompt,
+            snapshot.ModelSnapshot,
+            snapshot.InvokingConversation,
+            snapshot.ContextCapturedAtUtc,
+            snapshot.ContextManifest.Select(source => source with { OmissionReason = oversizedReason }).ToArray(),
+            string.Empty));
+        Assert.True(GovernedLoopSequentialContractValidator.Validate(oversized).IsValid);
+        var bound = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = new string('b', CustomLoopLimits.Sha256HexCharacters),
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(new CustomLoopContextSnapshot(
+                CustomLoopContextSnapshot.CurrentSchemaVersion,
+                oversized.ContextCapturedAtUtc,
+                oversized.ContextManifest.ToArray(),
+                string.Empty)),
+            SequentialInvocationSnapshot = oversized,
+        };
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        await Assert.ThrowsAsync<ArgumentException>(() => store.BindAsync(bound));
+        var retained = Assert.IsType<CustomLoopInvocationOperation>(await store.GetAsync(pending.OperationId));
+        Assert.Equal(CustomLoopInvocationBindingState.Unbound, retained.BindingState);
+        Assert.Null(retained.SequentialInvocationSnapshot);
+    }
 
     [Fact]
     public async Task Pending_receipt_binds_context_once_and_conflicts_on_a_different_conversation()
@@ -1021,6 +1253,22 @@ public sealed class CustomLoopInvocationOperationStoreTests
             RunId = "run-admitted",
             Detail = "The run was admitted."
         };
+    }
+
+    private static GovernedLoopSequentialInvocationSnapshot SequentialSnapshot(
+        CustomLoopInvocationOperation pending,
+        CustomLoopContextSnapshot context,
+        bool includeConversation = true)
+    {
+        var snapshot = new GovernedLoopSequentialInvocationSnapshot(
+            GovernedLoopSequentialInvocationSnapshot.CurrentSchemaVersion,
+            "exact prompt",
+            new EmbodySense.Core.Common.Loops.Models.Custom.Execution.CustomLoopModelSnapshot(pending.Provider, pending.Model),
+            includeConversation ? new CustomLoopConversationReference(new string('b', CustomLoopLimits.Sha256HexCharacters), "version-1", context.CapturedAtUtc) : null,
+            context.CapturedAtUtc,
+            context.SourceManifest,
+            string.Empty);
+        return GovernedLoopSequentialContractHash.Apply(snapshot);
     }
 
     private sealed class MutableTimeProvider(DateTimeOffset utcNow) : TimeProvider

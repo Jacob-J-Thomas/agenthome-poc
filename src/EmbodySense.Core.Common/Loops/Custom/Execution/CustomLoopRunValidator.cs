@@ -17,7 +17,23 @@ namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 /// </summary>
 public static class CustomLoopRunValidator
 {
-    private const string SequentialModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private static readonly string[] _sequentialToolFreeCapabilityRootIds =
+    [
+        "org.embodysense/conversation-turn",
+        "org.embodysense/model-inference",
+    ];
+    private static readonly string[] _sequentialToolEnabledCapabilityRootIds =
+    [
+        "org.embodysense/conversation-turn",
+        "org.embodysense/model-inference",
+        "org.embodysense/workspace-command",
+    ];
+    private static readonly CustomLoopToolAssignment[] _sequentialToolEnabledAssignments =
+    [
+        CustomLoopToolAssignment.List,
+        CustomLoopToolAssignment.Read,
+        CustomLoopToolAssignment.Search,
+    ];
 
     /// <summary>
     /// Validates the complete persisted shape and cross-field invariants of a custom-loop run.
@@ -392,6 +408,22 @@ public static class CustomLoopRunValidator
     {
         var binding = run.SequentialAdapterBinding!;
         var capabilityAdmission = run.CapabilityAdmission;
+        var toolAssignments = run.AdmittedDefinition?.ToolAssignments;
+        string[] expectedRootIdentities;
+        if (toolAssignments is { Length: 0 })
+        {
+            expectedRootIdentities = _sequentialToolFreeCapabilityRootIds;
+        }
+        else if (toolAssignments is not null && toolAssignments.SequenceEqual(_sequentialToolEnabledAssignments))
+        {
+            expectedRootIdentities = _sequentialToolEnabledCapabilityRootIds;
+        }
+        else
+        {
+            Add(errors, "sequential_tool_assignment_mismatch", "admittedDefinition.toolAssignments", "Canonical sequential execution supports either no tools or exactly the ordered List, Read, and Search assignment catalog.");
+            return;
+        }
+
         var expectedGraphChecksum = "sha256:" + binding.GraphArtifactHash;
         if (!string.Equals(capabilityAdmission.Requirements.Artifact.Checksum?.Value, expectedGraphChecksum, StringComparison.Ordinal))
         {
@@ -401,11 +433,12 @@ public static class CustomLoopRunValidator
         var selectedRootIdentities = capabilityAdmission.Evidence
             .Where(item => item.SubjectId.Equals(capabilityAdmission.Requirements.SubjectId)
                 && string.Equals(item.Outcome, "Selected", StringComparison.Ordinal))
-            .Select(item => item.SelectedIdentity!.Id.Value)
-            .ToHashSet(StringComparer.Ordinal);
-        if (selectedRootIdentities.Count != 1 || !selectedRootIdentities.Contains(SequentialModelInferenceCapabilityId))
+            .Select(item => item.SelectedIdentity?.Id.Value ?? string.Empty)
+            .OrderBy(value => value, StringComparer.Ordinal)
+            .ToArray();
+        if (!selectedRootIdentities.SequenceEqual(expectedRootIdentities, StringComparer.Ordinal))
         {
-            Add(errors, "sequential_capability_identity_mismatch", "capabilityAdmission.evidence", "Canonical sequential execution requires exactly the admitted model-inference root capability identity.");
+            Add(errors, "sequential_capability_identity_mismatch", "capabilityAdmission.evidence", "Canonical sequential execution requires exactly the sorted roots derived from its closed tool-free or List/Read/Search assignment shape.");
         }
     }
 

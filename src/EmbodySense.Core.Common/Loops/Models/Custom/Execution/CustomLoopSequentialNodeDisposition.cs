@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Common.Loops.Custom.Execution;
+namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 /// <summary>Identifies the durable outcome disposition of one canonical sequential node attempt.</summary>
 public enum CustomLoopSequentialNodeDisposition
