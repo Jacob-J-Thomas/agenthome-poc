@@ -30,6 +30,27 @@ public sealed class CustomLoopRunValidatorTests
     private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
 
     [Fact]
+    public void Same_durable_version_requires_every_valid_field_event_and_frontier_hash_to_match()
+    {
+        var run = CreateSequentialRun();
+        var exactCopy = run with
+        {
+            Events = run.Events.Select(item => item with { ContextBlocks = [.. item.ContextBlocks] }).ToArray(),
+        };
+        var substitutedEvent = run with
+        {
+            Events = [run.Events[0] with { Detail = "Substituted same-version evidence." }],
+        };
+        var substitutedFrontier = WithPureFrontier(run, "transform-1");
+
+        Assert.True(CustomLoopRunValidator.HasSameDurableVersion(run, exactCopy));
+        Assert.False(CustomLoopRunValidator.HasSameDurableVersion(run, substitutedEvent));
+        Assert.True(CustomLoopRunValidator.Validate(substitutedFrontier).IsValid);
+        Assert.False(CustomLoopRunValidator.HasSameDurableVersion(run, substitutedFrontier));
+        Assert.False(CustomLoopRunValidator.HasSameDurableVersion(run, run with { UpdatedAtUtc = run.UpdatedAtUtc.AddTicks(1) }));
+    }
+
+    [Fact]
     public void Sequential_trigger_evidence_is_payload_bound_and_required_to_match_exact_run_coordinates()
     {
         var run = CreateSequentialRun();

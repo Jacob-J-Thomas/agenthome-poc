@@ -148,6 +148,51 @@ public static class CustomLoopRunValidator
     }
 
     /// <summary>
+    /// Determines whether two valid run records represent the exact same durable lifecycle version.
+    /// </summary>
+    /// <param name="expected">The previously authenticated durable record.</param>
+    /// <param name="actual">The freshly loaded record.</param>
+    /// <returns><see langword="true"/> only when every persisted field and append-only event is unchanged.</returns>
+    public static bool HasSameDurableVersion(CustomLoopRunRecord? expected, CustomLoopRunRecord? actual)
+    {
+        if (expected is null
+            || actual is null
+            || !Validate(expected).IsValid
+            || !Validate(actual).IsValid
+            || expected.LifecycleVersion != actual.LifecycleVersion
+            || expected.Status != actual.Status
+            || expected.UpdatedAtUtc != actual.UpdatedAtUtc
+            || expected.CompletedAtUtc != actual.CompletedAtUtc
+            || !Equals(expected.ExecutionClock, actual.ExecutionClock)
+            || !CheckpointsEqual(expected.Checkpoint, actual.Checkpoint)
+            || expected.Events.Length != actual.Events.Length
+            || !string.Equals(expected.FinalOutput, actual.FinalOutput, StringComparison.Ordinal)
+            || !string.Equals(expected.FailureCode, actual.FailureCode, StringComparison.Ordinal)
+            || !string.Equals(expected.FailureDetail, actual.FailureDetail, StringComparison.Ordinal)
+            || !FrontiersEqual(expected.Frontier, actual.Frontier))
+        {
+            return false;
+        }
+
+        var immutableErrors = new List<CustomLoopValidationError>();
+        ValidateImmutableAdmission(expected, actual, immutableErrors);
+        if (immutableErrors.Count != 0)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < expected.Events.Length; index++)
+        {
+            if (!EventsEqual(expected.Events[index], actual.Events[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Validates the one narrowly permitted post-terminal integrity-warning append.
     /// </summary>
     /// <param name="current">The terminal persisted run.</param>
@@ -2219,6 +2264,46 @@ public static class CustomLoopRunValidator
             && left.SourceManifest is not null
             && right.SourceManifest is not null
             && left.SourceManifest.SequenceEqual(right.SourceManifest);
+    }
+
+    private static bool CheckpointsEqual(CustomLoopRunCheckpoint? left, CustomLoopRunCheckpoint? right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        return left is not null
+            && right is not null
+            && left.Iteration == right.Iteration
+            && left.NextStepIndex == right.NextStepIndex
+            && left.AcceptedRepeatCount == right.AcceptedRepeatCount
+            && left.PendingExitDecision == right.PendingExitDecision
+            && left.EarlierRetainedOutputs is not null
+            && right.EarlierRetainedOutputs is not null
+            && left.EarlierRetainedOutputs.SequenceEqual(right.EarlierRetainedOutputs)
+            && Equals(left.PreviousIterationResult, right.PreviousIterationResult)
+            && Equals(left.CurrentIterationResult, right.CurrentIterationResult)
+            && left.ToolRequestsUsed == right.ToolRequestsUsed
+            && left.LastCommittedSequence == right.LastCommittedSequence;
+    }
+
+    private static bool FrontiersEqual(GovernedLoopFrontierPosture? left, GovernedLoopFrontierPosture? right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        return left is not null
+            && right is not null
+            && left.SchemaVersion == right.SchemaVersion
+            && string.Equals(left.WorkspaceId, right.WorkspaceId, StringComparison.Ordinal)
+            && Equals(left.Binding, right.Binding)
+            && string.Equals(left.GraphArtifactHash, right.GraphArtifactHash, StringComparison.Ordinal)
+            && string.Equals(left.GraphLayoutHash, right.GraphLayoutHash, StringComparison.Ordinal)
+            && string.Equals(left.AdmissionReceiptHash, right.AdmissionReceiptHash, StringComparison.Ordinal)
+            && string.Equals(left.Payload.ContentHash, right.Payload.ContentHash, StringComparison.Ordinal);
     }
 
 }

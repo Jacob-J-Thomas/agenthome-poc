@@ -2054,20 +2054,28 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NotFound, null, "The pure-node terminal lifecycle conflicted and the durable run disappeared."));
             }
 
-            var latestFailure = latest.Events.SingleOrDefault(item => string.Equals(item.EventId, durableFailure.EventId, StringComparison.Ordinal));
-            var sameFailure = latestFailure is not null
-                && string.Equals(latestFailure.EventId, durableFailure.EventId, StringComparison.Ordinal)
-                && string.Equals(latestFailure.SequentialNodeEvidence?.EvidenceHash, durableFailure.SequentialNodeEvidence?.EvidenceHash, StringComparison.Ordinal)
-                && CustomLoopSequentialOutcomeArtifactHash.Matches(latestFailure);
-            if (!sameFailure)
+            if (!HasExactRetainedPureRejection(latest, durableFailure))
             {
                 return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, latest, "The pure-node terminal lifecycle lost its exact durable rejection evidence."));
             }
 
             if (latest.IsTerminal)
             {
+                if (TryGetAcceptedPureCancellationTerminalSuccessor(run, latest, durableFailure, out var cancellationLifecycle))
+                {
+                    var cancellation = await CompleteTerminalLifecycleAuditAsync(
+                        latest,
+                        actor,
+                        CustomLoopRunStatus.Cancelled,
+                        null,
+                        cancellationLifecycle!.Detail,
+                        cancellationLifecycle);
+                    return new RunAdvance(cancellation.Run, cancellation);
+                }
+
                 var lifecycle = GetCanonicalTerminalLifecycleEvent(latest);
                 var exactTerminal = lifecycle is not null
+                    && CustomLoopRunValidator.Validate(latest).IsValid
                     && latest.Status == terminalStatus
                     && (terminalStatus != CustomLoopRunStatus.Failed
                         || string.Equals(latest.FailureCode, terminalFailureCode, StringComparison.Ordinal)
@@ -2148,8 +2156,19 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NotFound, null, "The pure-node cancellation request conflicted and the durable run disappeared."));
             }
 
-            var sameFailure = latest.Events.Any(item => string.Equals(item.EventId, durableFailure.EventId, StringComparison.Ordinal)
-                && string.Equals(item.SequentialNodeEvidence?.EvidenceHash, durableFailure.SequentialNodeEvidence?.EvidenceHash, StringComparison.Ordinal));
+            var sameFailure = HasExactRetainedPureRejection(latest, durableFailure);
+            if (sameFailure && TryGetAcceptedPureCancellationTerminalSuccessor(run, latest, durableFailure, out var cancellationLifecycle))
+            {
+                var cancellation = await CompleteTerminalLifecycleAuditAsync(
+                    latest,
+                    actor,
+                    CustomLoopRunStatus.Cancelled,
+                    null,
+                    cancellationLifecycle!.Detail,
+                    cancellationLifecycle);
+                return new RunAdvance(cancellation.Run, cancellation);
+            }
+
             var successorValidation = CustomLoopRunValidator.ValidateUpdate(run, latest);
             if (!sameFailure || !successorValidation.IsValid || !IsAcceptedPureControlSuccessor(run, latest))
             {
@@ -4635,6 +4654,77 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 or (CustomLoopRunStatus.PauseRequested, CustomLoopRunStatus.CancelRequested);
     }
 
+    private static bool TryGetAcceptedPureCancellationTerminalSuccessor(
+        CustomLoopRunRecord current,
+        CustomLoopRunRecord latest,
+        CustomLoopRunEvent durableFailure,
+        out CustomLoopRunEvent? terminalLifecycle)
+    {
+        terminalLifecycle = null;
+        if (latest.Status != CustomLoopRunStatus.Cancelled
+            || !latest.IsTerminal
+            || !HasExactRetainedPureRejection(latest, durableFailure)
+            || !CustomLoopRunValidator.Validate(latest).IsValid)
+        {
+            return false;
+        }
+
+        var appended = latest.Events.Skip(current.Events.Length).ToArray();
+        if (appended.Length == 1 && current.Status == CustomLoopRunStatus.CancelRequested)
+        {
+            if (!CustomLoopRunValidator.ValidateUpdate(current, latest).IsValid
+                || appended[0].Kind != CustomLoopRunEventKind.LifecycleChanged)
+            {
+                return false;
+            }
+        }
+        else if (appended.Length == 2
+            && current.Status is CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested)
+        {
+            var cancellationRequested = current with
+            {
+                LifecycleVersion = checked(current.LifecycleVersion + 1),
+                Status = CustomLoopRunStatus.CancelRequested,
+                UpdatedAtUtc = appended[0].TimestampUtc,
+                Events = [.. current.Events, appended[0]],
+            };
+            if (appended.Any(item => item.Kind != CustomLoopRunEventKind.LifecycleChanged)
+                || !CustomLoopRunValidator.ValidateUpdate(current, cancellationRequested).IsValid
+                || !CustomLoopRunValidator.ValidateUpdate(cancellationRequested, latest).IsValid)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            return false;
+        }
+
+        terminalLifecycle = GetCanonicalTerminalLifecycleEvent(latest);
+        return terminalLifecycle is not null
+            && terminalLifecycle.Sequence == latest.Events.Length
+            && latest.CompletedAtUtc == terminalLifecycle.TimestampUtc;
+    }
+
+    private static bool HasExactRetainedPureRejection(CustomLoopRunRecord run, CustomLoopRunEvent durableFailure)
+    {
+        var matches = run.Events.Where(item => string.Equals(item.EventId, durableFailure.EventId, StringComparison.Ordinal)).ToArray();
+        return matches.Length == 1
+            && matches[0].SequentialNodeEvidence is
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+                Disposition: CustomLoopSequentialNodeDisposition.Rejected,
+            } evidence
+            && durableFailure.SequentialNodeEvidence is
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+                Disposition: CustomLoopSequentialNodeDisposition.Rejected,
+            } expectedEvidence
+            && string.Equals(evidence.EvidenceHash, expectedEvidence.EvidenceHash, StringComparison.Ordinal)
+            && string.Equals(evidence.OutcomeArtifactHash, expectedEvidence.OutcomeArtifactHash, StringComparison.Ordinal)
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(matches[0]);
+    }
+
     private static bool CheckpointsEqual(CustomLoopRunCheckpoint left, CustomLoopRunCheckpoint right)
     {
         return left.Iteration == right.Iteration
@@ -6066,12 +6156,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     }
 
     private static bool DurableTraceVersionMatches(CustomLoopRunRecord expected, CustomLoopRunRecord actual)
-    {
-        return expected.LifecycleVersion == actual.LifecycleVersion
-            && expected.Status == actual.Status
-            && CheckpointsEqual(expected.Checkpoint, actual.Checkpoint)
-            && expected.Events.Select(item => item.EventId).SequenceEqual(actual.Events.Select(item => item.EventId));
-    }
+        => CustomLoopRunValidator.HasSameDurableVersion(expected, actual);
 
     private static CustomLoopExecutionClock AdvanceClock(CustomLoopExecutionClock clock, DateTimeOffset now, bool terminal)
     {
