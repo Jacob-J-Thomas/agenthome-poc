@@ -724,10 +724,10 @@ public sealed class CustomLoopLifecycleServiceTests
     [InlineData(CustomLoopOrderedRunStatus.Cancelled, CustomLoopControlStatus.Cancelled)]
     [InlineData(CustomLoopOrderedRunStatus.Paused, CustomLoopControlStatus.Paused)]
     [InlineData(CustomLoopOrderedRunStatus.NeedsReview, CustomLoopControlStatus.NeedsReview)]
-    [InlineData(CustomLoopOrderedRunStatus.Conflict, CustomLoopControlStatus.Conflict)]
-    [InlineData(CustomLoopOrderedRunStatus.NotFound, CustomLoopControlStatus.NotFound)]
-    [InlineData(CustomLoopOrderedRunStatus.InvalidState, CustomLoopControlStatus.InvalidState)]
-    [InlineData(CustomLoopOrderedRunStatus.Failed, CustomLoopControlStatus.Failed)]
+    [InlineData(CustomLoopOrderedRunStatus.Conflict, CustomLoopControlStatus.NeedsReview)]
+    [InlineData(CustomLoopOrderedRunStatus.NotFound, CustomLoopControlStatus.NeedsReview)]
+    [InlineData(CustomLoopOrderedRunStatus.InvalidState, CustomLoopControlStatus.NeedsReview)]
+    [InlineData(CustomLoopOrderedRunStatus.Failed, CustomLoopControlStatus.NeedsReview)]
     public async Task Resume_maps_ordered_runner_outcomes(CustomLoopOrderedRunStatus orderedStatus, CustomLoopControlStatus expected)
     {
         var run = Run($"run-resume-{orderedStatus.ToString().ToLowerInvariant()}", CustomLoopRunStatus.Paused);
@@ -776,6 +776,30 @@ public sealed class CustomLoopLifecycleServiceTests
         var receipt = await operations.GetAsync("resume-executor-failure");
         Assert.Equal(CustomLoopControlOperationState.Complete, receipt!.State);
         Assert.Equal(CustomLoopControlStatus.Resumed, receipt.Outcome);
+    }
+
+    [Fact]
+    public async Task Resume_non_dispatchable_stale_executor_snapshot_cannot_leave_authoritative_run_running()
+    {
+        var paused = Run("run-resume-stale-executor", CustomLoopRunStatus.Paused);
+        var store = new MultiRunStore([paused]);
+        var executor = new NoopResumeExecutor(CustomLoopOrderedRunStatus.InvalidState, resultRun: paused);
+        var service = new CustomLoopLifecycleService(
+            store,
+            new InMemoryOperationStore(),
+            executor,
+            new RecordingModelAvailability(),
+            new RecordingCancellationSignal(),
+            new RecordingAuditLog(),
+            new TestExecutionGate(),
+            new FixedTimeProvider(_now.AddSeconds(3)));
+
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(paused.Id, paused.LifecycleVersion, "resume-stale-executor", AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store[paused.Id].Status);
+        Assert.Equal("lifecycle_control_failed", store[paused.Id].FailureCode);
+        Assert.Single(executor.Requests);
     }
 
     [Fact]
@@ -1457,7 +1481,7 @@ public sealed class CustomLoopLifecycleServiceTests
         public Task<CustomLoopReceiptOperationLookupResult> LookupOperationAsync(string operationId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 
-    private sealed class NoopResumeExecutor(CustomLoopOrderedRunStatus status = CustomLoopOrderedRunStatus.Completed, Exception? exception = null, Action<CustomLoopResumeExecutionRequest>? beforeResult = null) : ICustomLoopResumeExecutor
+    private sealed class NoopResumeExecutor(CustomLoopOrderedRunStatus status = CustomLoopOrderedRunStatus.Completed, Exception? exception = null, Action<CustomLoopResumeExecutionRequest>? beforeResult = null, CustomLoopRunRecord? resultRun = null) : ICustomLoopResumeExecutor
     {
         public List<CustomLoopResumeExecutionRequest> Requests { get; } = [];
 
@@ -1470,7 +1494,7 @@ public sealed class CustomLoopLifecycleServiceTests
                 throw exception;
             }
 
-            return Task.FromResult(new CustomLoopOrderedRunResult(status, null, "Mapped ordered result."));
+            return Task.FromResult(new CustomLoopOrderedRunResult(status, resultRun, "Mapped ordered result."));
         }
     }
 
