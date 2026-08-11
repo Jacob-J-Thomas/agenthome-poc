@@ -24,6 +24,9 @@ public enum GovernedLoopAdmissionStatus
     /// <summary>No durable intent began because a required exact dependency was unavailable.</summary>
     Unavailable = 6,
 
+    /// <summary>The configured bounded admission retention limit was exceeded without committing an outcome.</summary>
+    LimitExceeded = 7,
+
     /// <summary>Available evidence cannot prove one safe admission outcome.</summary>
-    Ambiguous = 7
+    Ambiguous = 8
 }

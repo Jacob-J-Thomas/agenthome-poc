@@ -21,6 +21,9 @@ public enum GovernedLoopAdmissionStoreCommitStatus
     /// <summary>No durable intent began because the store was unavailable.</summary>
     Unavailable = 5,
 
+    /// <summary>The configured bounded outcome count or byte limit was exceeded without committing an outcome.</summary>
+    LimitExceeded = 6,
+
     /// <summary>Available evidence cannot prove whether the exact outcome committed.</summary>
-    Ambiguous = 6
+    Ambiguous = 7
 }
