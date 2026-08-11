@@ -2,6 +2,8 @@ using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
+using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence;
+using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;

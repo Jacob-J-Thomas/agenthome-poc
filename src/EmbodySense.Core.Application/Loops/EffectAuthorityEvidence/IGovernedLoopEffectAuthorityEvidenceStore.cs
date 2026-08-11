@@ -1,7 +1,7 @@
-using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
+using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 
-namespace EmbodySense.Core.Application.Loops.Execution.Authority;
+namespace EmbodySense.Core.Application.Loops.EffectAuthorityEvidence;
 
 /// <summary>Appends immutable effect-authority decisions before any protected continuation may cross its boundary.</summary>
 public interface IGovernedLoopEffectAuthorityEvidenceStore
