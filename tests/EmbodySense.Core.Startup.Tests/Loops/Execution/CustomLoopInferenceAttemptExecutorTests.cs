@@ -192,6 +192,104 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_uses_legacy_dispatch_only_for_an_all_null_canonical_proof_without_a_governed_boundary()
+    {
+        using var workspace = new TestWorkspace();
+        var factoryCalls = 0;
+        var providerStarts = 0;
+        var providerWrites = 0;
+        var executor = new CustomLoopInferenceAttemptExecutor(
+            CreateOptions(workspace),
+            (IToolApprovalPrompt)new RecordingApprovalPrompt(),
+            new TestAuthorityProvider(),
+            new NullEvidenceSink(),
+            new TestCapabilityAdmissionService(),
+            (_, broker) =>
+            {
+                factoryCalls++;
+                Assert.Null(broker);
+                return new AsyncFakeInferenceClient(
+                    broker,
+                    (_, _, _) =>
+                    {
+                        providerWrites++;
+                        Assert.Equal(1, providerStarts);
+                        return Task.FromResult(Response("legacy-completed"));
+                    });
+            },
+            capabilityAuthorityTransaction: null,
+            effectAuthorityBoundary: null);
+        var canonical = CreateRequest();
+        var legacy = canonical with
+        {
+            AdmissionReceipt = null,
+            ExecutionBinding = null,
+            GraphArtifact = null,
+        };
+
+        var result = await executor.ExecuteAsync(legacy, providerRequestStarted: () => providerStarts++);
+
+        Assert.Equal("legacy-completed", result.OutputText);
+        Assert.Equal(1, factoryCalls);
+        Assert.Equal(1, providerStarts);
+        Assert.Equal(1, providerWrites);
+
+        var partial = legacy with { AdmissionReceipt = canonical.AdmissionReceipt };
+        var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() =>
+            executor.ExecuteAsync(partial, providerRequestStarted: () => providerStarts++));
+
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.InvalidRequest, exception.ExecutionStatus);
+        Assert.Equal(GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown, exception.EvidenceStatus);
+        Assert.Equal(1, factoryCalls);
+        Assert.Equal(1, providerStarts);
+        Assert.Equal(1, providerWrites);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_legacy_dispatch_retains_tool_revalidation_without_crossing_canonical_authority()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "legacy-note.txt"), "legacy bounded content");
+        var executor = new CustomLoopInferenceAttemptExecutor(
+            CreateOptions(workspace),
+            (IToolApprovalPrompt)new RecordingApprovalPrompt(),
+            new TestAuthorityProvider(),
+            new NullEvidenceSink(),
+            new TestCapabilityAdmissionService(),
+            (_, broker) => new AsyncFakeInferenceClient(
+                broker,
+                async (availableBroker, _, cancellationToken) =>
+                {
+                    var result = await Assert.IsAssignableFrom<IToolBroker>(availableBroker).ExecuteAsync(
+                        new ToolRequest(
+                            ToolCommand.Read,
+                            Path.Combine("system", "legacy-note.txt"),
+                            CorrelationId: "legacy-read-one"),
+                        cancellationToken);
+                    Assert.Equal(ToolExecutionOutcome.Succeeded, result.Outcome);
+                    Assert.Contains("legacy bounded content", result.OutputText, StringComparison.Ordinal);
+                    return Response("legacy-tool-completed");
+                }),
+            capabilityAuthorityTransaction: null,
+            effectAuthorityBoundary: null);
+        var canonical = CreateRequest(
+            allowTools: true,
+            assignments: [CustomLoopToolAssignment.Read]);
+        var legacy = canonical with
+        {
+            AdmissionReceipt = null,
+            ExecutionBinding = null,
+            GraphArtifact = null,
+        };
+
+        var result = await executor.ExecuteAsync(legacy);
+
+        Assert.Equal("legacy-tool-completed", result.OutputText);
+        Assert.Equal(1, result.ToolRequestsConsumed);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_rejects_canonical_proof_when_no_fresh_authority_boundary_was_composed()
     {
         using var workspace = new TestWorkspace();

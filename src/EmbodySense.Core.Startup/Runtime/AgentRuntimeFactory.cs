@@ -322,6 +322,22 @@ public sealed class AgentRuntimeFactory
             var customAdmission = new CustomLoopAdmissionService(customDefinitionStore, customRunStore, auditLog, customToolAuthority, capabilityAdmission);
             var customRuntimeContext = new CustomLoopRuntimeContext(paths, conversationState, conversationMemory);
             var customPublisher = new CurrentConversationLoopPublisher(conversationState, conversationMemory, _conversationPublicationObserver);
+            var legacyInferenceExecutor = new CustomLoopInferenceAttemptExecutor(
+                effectiveOptions,
+                _approvalPrompt,
+                customToolAuthority,
+                customToolEvidence,
+                capabilityAdmission,
+                capabilityAuthorityTransaction: capabilityAuthority);
+            var legacyRunner = new CustomLoopOrderedRunner(
+                customRunStore,
+                new CustomLoopContextResolver(),
+                legacyInferenceExecutor,
+                customPublisher,
+                auditLog,
+                customToolAuthority,
+                attemptCancellationBroker: customExecutionGate,
+                capabilityAdmissionService: capabilityAdmission);
             _capabilityTrustProvider.RequireDisjointWorkspace(paths.RootPath);
             var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
             var governedRevisionStore = new GovernedLoopRevisionLifecycleStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
@@ -359,7 +375,7 @@ public sealed class AgentRuntimeFactory
             var governedPublicationAuthority = new GovernedLoopConversationPublicationAuthorityBoundaryProvider(
                 governedEffectAuthority);
             var governedToolAuthority = new GovernedLoopReadOnlyWorkspaceToolAdapter();
-            var customInferenceExecutor = new CustomLoopInferenceAttemptExecutor(
+            var governedInferenceExecutor = new CustomLoopInferenceAttemptExecutor(
                 effectiveOptions,
                 _approvalPrompt,
                 governedToolAuthority,
@@ -367,10 +383,10 @@ public sealed class AgentRuntimeFactory
                 capabilityAdmission,
                 capabilityAuthorityTransaction: capabilityAuthority,
                 effectAuthorityBoundary: governedEffectAuthority);
-            var customRunner = new CustomLoopOrderedRunner(
+            var governedRunner = new CustomLoopOrderedRunner(
                 customRunStore,
                 new CustomLoopContextResolver(),
-                customInferenceExecutor,
+                governedInferenceExecutor,
                 customPublisher,
                 auditLog,
                 governedToolAuthority,
@@ -390,7 +406,7 @@ public sealed class AgentRuntimeFactory
                 capabilityAuthority,
                 new GovernedLoopAdmissionRunIdentityGenerator());
             var governedOrderedRuntime = new GovernedLoopSequentialOrderedRuntimeAdapter(
-                customRunner,
+                governedRunner,
                 customRunStore,
                 customRunStore,
                 auditLog);
@@ -411,8 +427,8 @@ public sealed class AgentRuntimeFactory
                 governedAdmissionStore,
                 governedGraphStore,
                 governedOrderedRuntime,
-                customRunner);
-            var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, governedResumeExecutor, customInferenceExecutor, customRunner, auditLog, customExecutionGate, receiptRetention: customControlOperations, surface: runtimeSurface.SurfaceId.Id);
+                legacyRunner);
+            var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, governedResumeExecutor, legacyInferenceExecutor, legacyRunner, auditLog, customExecutionGate, receiptRetention: customControlOperations, surface: runtimeSurface.SurfaceId.Id);
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);
             var customLoops = new CustomLoopRuntimeFacade(
                 customDefinitionStore,
@@ -424,7 +440,7 @@ public sealed class AgentRuntimeFactory
                 customAdmission,
                 recovery,
                 customLifecycle,
-                customRunner,
+                legacyRunner,
                 customRuntimeContext,
                 customExecutionAvailable,
                 customExecutionReacquisitionAllowed,
