@@ -209,7 +209,7 @@ public static class GovernedLoopSequentialPlanBuilder
         {
             if (schema.Kind is GovernedLoopValueKind.Unknown or GovernedLoopValueKind.Binary
                 || schema.Format is not null
-                || !SchemaTreeIsBounded(schema, schemas, new HashSet<string>(StringComparer.Ordinal), 0))
+                || !SchemaTreeIsBounded(schema, schemas, new HashSet<string>(StringComparer.Ordinal), 1))
             {
                 return false;
             }

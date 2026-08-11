@@ -195,6 +195,20 @@ public sealed class GovernedLoopGraphValidationServiceTests
         }
     }
 
+    [Theory]
+    [InlineData(CustomLoopLimits.MaxGraphTypedValueDepth - 1, false)]
+    [InlineData(CustomLoopLimits.MaxGraphTypedValueDepth, true)]
+    public async Task ValidateAlignsPureSchemaTreeDepthWithMaterializableTypedValues(int arrayCount, bool expectRejection)
+    {
+        var candidate = CandidateFromGraph(GovernedLoopPureSchemaAdmissionTestFixture.SchemaConformanceDepthArtifact(arrayCount).Graph);
+
+        var result = await Service(ExactPureCatalog(candidate)).ValidateAsync(candidate);
+
+        Assert.Equal(
+            expectRejection,
+            result.Errors.Any(error => error.Code == "node.pure-schema-contract.incompatible" && error.Element.Id == "schema-check"));
+    }
+
     [Fact]
     public async Task ValidateRejectsIncompleteBranchOutcomes()
     {

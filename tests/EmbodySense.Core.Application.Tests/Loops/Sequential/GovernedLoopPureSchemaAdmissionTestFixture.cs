@@ -8,6 +8,40 @@ namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 
 internal static class GovernedLoopPureSchemaAdmissionTestFixture
 {
+    internal static IReadOnlyList<GovernedLoopValueSchemaDefinition> DeepArraySchemas(int arrayCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(arrayCount);
+        var schemas = Enumerable.Range(0, arrayCount)
+            .Select(index => new GovernedLoopValueSchemaDefinition(
+                $"deep-array-{index}",
+                GovernedLoopValueKind.Array,
+                false,
+                ElementSchemaId: index == arrayCount - 1 ? "deep-leaf" : $"deep-array-{index + 1}"))
+            .Append(new GovernedLoopValueSchemaDefinition("deep-leaf", GovernedLoopValueKind.Text, false))
+            .ToArray();
+        return Array.AsReadOnly(schemas);
+    }
+
+    internal static GovernedLoopGraphRevisionArtifact SchemaConformanceDepthArtifact(int arrayCount)
+    {
+        var source = SchemaConformanceArtifact().Graph;
+        var schemas = DeepArraySchemas(arrayCount);
+        var rootSchemaId = schemas[0].Id;
+        return GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node with
+            {
+                Ports = node.Ports.Select(port => string.Equals(port.ValueSchemaId, "input", StringComparison.Ordinal)
+                    ? port with { ValueSchemaId = rootSchemaId }
+                    : port).ToArray(),
+            }).ToArray(),
+            valueSchemas:
+            [
+                .. source.ValueSchemas.Where(schema => !string.Equals(schema.Id, "input", StringComparison.Ordinal)),
+                .. schemas,
+            ]);
+    }
+
     internal static GovernedLoopGraphRevisionArtifact SchemaConformanceArtifact(
         bool formatRoot = false,
         bool formatElement = false,

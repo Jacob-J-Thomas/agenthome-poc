@@ -370,7 +370,7 @@ public sealed class GovernedLoopGraphValidationService
                 GovernedLoopGraphElementKind.Node,
                 node.Id,
                 $"graph.nodes[{node.Id}]",
-                "The pure-node schema relationships, nullability, element schema, or ordered bounds conflict with the exact executable descriptor semantics.");
+                "The pure-node schema relationships, bounded topology, nullability, element schema, or ordered bounds conflict with the exact executable descriptor semantics.");
         }
     }
 

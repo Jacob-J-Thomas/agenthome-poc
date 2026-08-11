@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
 
@@ -200,6 +201,36 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
         Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, result.Status);
         Assert.Null(result.Plan);
         Assert.Equal("$.graph.valueSchemas", result.FailurePath);
+    }
+
+    [Fact]
+    public void Schema_tree_depth_matches_the_materializable_typed_value_boundary()
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact().Graph;
+        var accepted = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            valueSchemas:
+            [
+                .. source.ValueSchemas,
+                .. GovernedLoopPureSchemaAdmissionTestFixture.DeepArraySchemas(CustomLoopLimits.MaxGraphTypedValueDepth - 1),
+            ]);
+        var rejected = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            valueSchemas:
+            [
+                .. source.ValueSchemas,
+                .. GovernedLoopPureSchemaAdmissionTestFixture.DeepArraySchemas(CustomLoopLimits.MaxGraphTypedValueDepth),
+            ]);
+
+        var acceptedResult = GovernedLoopSequentialPlanBuilder.Build(accepted);
+        var rejectedResult = GovernedLoopSequentialPlanBuilder.Build(rejected);
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, acceptedResult.Status);
+        Assert.NotNull(acceptedResult.Plan);
+        Assert.Null(acceptedResult.FailurePath);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, rejectedResult.Status);
+        Assert.Null(rejectedResult.Plan);
+        Assert.Equal("$.graph.valueSchemas", rejectedResult.FailurePath);
     }
 
     [Theory]

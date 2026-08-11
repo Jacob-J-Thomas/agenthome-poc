@@ -37,6 +37,16 @@ public static class GovernedLoopPureNodeCatalogContract
         GovernedLoopNodeDefinition node,
         IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas)
     {
+        if (node.Ports.Any(port => !HasSupportedSchemaTree(
+                port.ValueSchemaId,
+                schemas,
+                new HashSet<string>(StringComparer.Ordinal),
+                1,
+                rejectFormats: false)))
+        {
+            return false;
+        }
+
         var input = InputPort(node, GovernedLoopPureNodeVocabulary.InputPort);
         var output = OutputPort(node, GovernedLoopPureNodeVocabulary.OutputPort);
         var result = OutputPort(node, GovernedLoopPureNodeVocabulary.ResultPort);
@@ -49,7 +59,12 @@ public static class GovernedLoopPureNodeCatalogContract
             GovernedLoopPureNodeVocabulary.OrderedTextConcat => IsExactConcat(node, schemas, output),
             GovernedLoopPureNodeVocabulary.SchemaConformance => input is not null
                 && IsNonNullable(result, schemas)
-                && HasNoDeclaredFormat(input.ValueSchemaId, schemas, new HashSet<string>(StringComparer.Ordinal)),
+                && HasSupportedSchemaTree(
+                    input.ValueSchemaId,
+                    schemas,
+                    new HashSet<string>(StringComparer.Ordinal),
+                    1,
+                    rejectFormats: true),
             GovernedLoopPureNodeVocabulary.CanonicalEquality => IsExactEquality(node, schemas, result),
             GovernedLoopPureNodeVocabulary.InclusiveIntegerRange or GovernedLoopPureNodeVocabulary.InclusiveNumberRange
                 => IsNonNullable(input, schemas) && IsNonNullable(result, schemas) && HasOrderedRange(node),
@@ -177,20 +192,24 @@ public static class GovernedLoopPureNodeCatalogContract
             && IsNonNullable(output, schemas);
     }
 
-    private static bool HasNoDeclaredFormat(
+    private static bool HasSupportedSchemaTree(
         string schemaId,
         IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas,
-        HashSet<string> active)
+        HashSet<string> active,
+        int depth,
+        bool rejectFormats)
     {
-        if (!schemas.TryGetValue(schemaId, out var schema) || !active.Add(schema.Id))
+        if (depth > CustomLoopLimits.MaxGraphTypedValueDepth
+            || !schemas.TryGetValue(schemaId, out var schema)
+            || !active.Add(schema.Id))
         {
             return false;
         }
 
-        var valid = schema.Format is null
+        var valid = (!rejectFormats || schema.Format is null)
             && (schema.Kind != GovernedLoopValueKind.Array
                 || schema.ElementSchemaId is not null
-                && HasNoDeclaredFormat(schema.ElementSchemaId, schemas, active));
+                && HasSupportedSchemaTree(schema.ElementSchemaId, schemas, active, depth + 1, rejectFormats));
         active.Remove(schema.Id);
         return valid;
     }
