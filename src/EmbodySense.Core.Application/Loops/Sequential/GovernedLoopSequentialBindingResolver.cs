@@ -76,7 +76,11 @@ public static class GovernedLoopSequentialBindingResolver
             }
         }
 
-        return GovernedLoopSequentialBindingResolutionResult.Resolved(inputs.ToArray());
+        return new GovernedLoopSequentialBindingResolutionResult(
+            true,
+            Array.AsReadOnly(inputs.ToArray()),
+            null,
+            null);
     }
 
     private static bool TryResolveSourceValue(
@@ -222,5 +226,5 @@ public static class GovernedLoopSequentialBindingResolver
     }
 
     private static GovernedLoopSequentialBindingResolutionResult Rejected(string code, string path)
-        => GovernedLoopSequentialBindingResolutionResult.Rejected(code, path);
+        => new(false, Array.Empty<GovernedLoopTypedBindingValue>(), code, path);
 }
