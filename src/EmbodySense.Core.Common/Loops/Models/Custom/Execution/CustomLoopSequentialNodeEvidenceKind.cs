@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Common.Loops.Custom.Execution;
+namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 /// <summary>Classifies durable canonical sequential-node attempt evidence.</summary>
 public enum CustomLoopSequentialNodeEvidenceKind

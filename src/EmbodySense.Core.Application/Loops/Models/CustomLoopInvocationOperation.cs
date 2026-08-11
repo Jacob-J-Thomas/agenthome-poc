@@ -1,4 +1,6 @@
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
+using System.Text.Json.Serialization;
 
 namespace EmbodySense.Core.Application.Loops.Models;
 
@@ -57,4 +59,8 @@ public sealed record CustomLoopInvocationOperation(
     /// Identifies the current schema version custom loop invocation operation.
     /// </summary>
     public const int CurrentSchemaVersion = 1;
+
+    /// <summary>Gets the exact bounded invocation payload frozen before canonical admission, or null for the fenced legacy path.</summary>
+    [JsonRequired]
+    public GovernedLoopSequentialInvocationSnapshot? SequentialInvocationSnapshot { get; init; }
 }

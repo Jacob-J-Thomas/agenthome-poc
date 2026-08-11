@@ -1,6 +1,6 @@
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
-namespace EmbodySense.Core.Common.Loops.Custom.Execution;
+namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 /// <summary>Retains exact bounded canonical-node dispatch or outcome evidence in the authoritative custom-run event stream.</summary>
 /// <param name="SchemaVersion">The evidence schema version, which must be 1.</param>

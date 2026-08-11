@@ -8,8 +8,13 @@ using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using EmbodySense.Core.Common.Governance.Tools.Models;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Persistence.Loops.Admission;
 using EmbodySense.Core.Persistence.Loops.Models;
+using EmbodySense.Core.Persistence.Loops.Revisions;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
@@ -50,7 +55,12 @@ internal static class CustomLoopRunArtifactCodec
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         WriteIndented = false,
         MaxDepth = CustomLoopJsonDepthPolicy.CanonicalRunArtifactMaximumDepth,
-        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
+        Converters =
+        {
+            new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false),
+            new GovernedLoopRevisionReferenceJsonConverter(),
+            new GovernedLoopExecutionBindingJsonConverter(),
+        }
     };
 
     /// <summary>
@@ -325,6 +335,19 @@ internal static class CustomLoopRunArtifactCodec
 
         Content(run.FinalOutput);
         Content(run.FailureDetail);
+        if (run.SequentialInvocationSnapshot is { } sequentialInvocation)
+        {
+            Content(sequentialInvocation.TriggerPrompt);
+            foreach (var source in sequentialInvocation.ContextManifest)
+            {
+                Content(source.SourceId);
+                Content(source.SourcePath);
+                Content(source.Content);
+                Content(source.TruncationReason);
+                Content(source.OmissionReason);
+            }
+        }
+
         if (nextContent != contentEntries.Count)
         {
             throw new FormatException("The content table contains an unreferenced or noncanonical entry.");
@@ -402,6 +425,19 @@ internal static class CustomLoopRunArtifactCodec
             return;
         }
 
+        if (projectedType == typeof(GovernedLoopExecutionBinding))
+        {
+            ValidateExactPropertyOrder(owner, "schemaVersion", "runId", "revision", "executionGeneration");
+            ValidateProjectionPropertyOrder(owner["revision"], typeof(GovernedLoopRevisionReference));
+            return;
+        }
+
+        if (projectedType == typeof(GovernedLoopRevisionReference))
+        {
+            ValidateExactPropertyOrder(owner, "schemaVersion", "graphId", "revisionId", "executableHash");
+            return;
+        }
+
         var typeInfo = _jsonOptions.GetTypeInfo(projectedType);
         if (typeInfo.Kind != JsonTypeInfoKind.Object)
         {
@@ -433,6 +469,15 @@ internal static class CustomLoopRunArtifactCodec
         if (hasActual)
         {
             throw new FormatException($"The projected `{projectedType.Name}` fields are not in canonical serializer order.");
+        }
+    }
+
+    private static void ValidateExactPropertyOrder(JsonObject owner, params string[] expectedNames)
+    {
+        var actualNames = owner.Select(property => property.Key).ToArray();
+        if (!actualNames.SequenceEqual(expectedNames, StringComparer.Ordinal))
+        {
+            throw new FormatException($"The projected fields are not in canonical serializer order for `{string.Join(".`, `", expectedNames)}`.");
         }
     }
 
@@ -559,6 +604,11 @@ internal static class CustomLoopRunArtifactCodec
         CompactToolEvidence(projection, run.Events, contents, blocks, authorities, requests);
         ReferenceIdentifierProperty(projection, "finalOutput");
         ReferenceIdentifierProperty(projection, "failureDetail");
+        if (projection["sequentialInvocationSnapshot"] is JsonObject sequentialInvocation)
+        {
+            ProjectPreparedSequentialInvocation(sequentialInvocation);
+        }
+
         return projection;
     }
 
@@ -592,6 +642,9 @@ internal static class CustomLoopRunArtifactCodec
         };
         var knownRequests = new HashSet<(int RequestOrdinal, string RequestCorrelationId)>();
         var events = run.Events.Select(item => PrepareEventForProjection(item, contents, knownRequests)).ToArray();
+        var finalOutput = ReferenceIdentifier(run.FinalOutput, contents);
+        var failureDetail = ReferenceIdentifier(run.FailureDetail, contents);
+        var sequentialInvocation = PrepareSequentialInvocationForProjection(run.SequentialInvocationSnapshot, contents);
         return run with
         {
             AdmittedDefinition = definition,
@@ -599,9 +652,36 @@ internal static class CustomLoopRunArtifactCodec
             ContextSnapshot = contextSnapshot,
             Checkpoint = checkpoint,
             Events = events,
-            FinalOutput = ReferenceIdentifier(run.FinalOutput, contents),
-            FailureDetail = ReferenceIdentifier(run.FailureDetail, contents)
+            FinalOutput = finalOutput,
+            FailureDetail = failureDetail,
+            SequentialInvocationSnapshot = sequentialInvocation,
         };
+    }
+
+    private static GovernedLoopSequentialInvocationSnapshot? PrepareSequentialInvocationForProjection(
+        GovernedLoopSequentialInvocationSnapshot? snapshot,
+        ContentRegistry contents)
+    {
+        if (snapshot is null)
+        {
+            return null;
+        }
+
+        return new GovernedLoopSequentialInvocationSnapshot(
+            snapshot.SchemaVersion,
+            contents.Reference(snapshot.TriggerPrompt),
+            snapshot.ModelSnapshot,
+            snapshot.InvokingConversation,
+            snapshot.ContextCapturedAtUtc,
+            snapshot.ContextManifest.Select(source => source with
+            {
+                SourceId = contents.Reference(source.SourceId),
+                SourcePath = contents.Reference(source.SourcePath),
+                Content = contents.Reference(source.Content),
+                TruncationReason = ReferenceIdentifier(source.TruncationReason, contents),
+                OmissionReason = ReferenceIdentifier(source.OmissionReason, contents),
+            }).ToArray(),
+            snapshot.ContentHash);
     }
 
     private static CustomLoopRetainedOutput? PrepareRetainedOutput(CustomLoopRetainedOutput? output, ContentRegistry contents)
@@ -679,6 +759,20 @@ internal static class CustomLoopRunArtifactCodec
         foreach (var item in RequireArray(snapshot, "sourceManifest"))
         {
             var source = item?.AsObject() ?? throw new FormatException("Context-manifest projection entries must be objects.");
+            ReferenceIdentifierProperty(source, "sourceId");
+            ReferenceIdentifierProperty(source, "sourcePath");
+            ReferenceIdentifierProperty(source, "content");
+            ReferenceIdentifierProperty(source, "truncationReason");
+            ReferenceIdentifierProperty(source, "omissionReason");
+        }
+    }
+
+    private static void ProjectPreparedSequentialInvocation(JsonObject snapshot)
+    {
+        ReferenceIdentifierProperty(snapshot, "triggerPrompt");
+        foreach (var item in RequireArray(snapshot, "contextManifest"))
+        {
+            var source = item?.AsObject() ?? throw new FormatException("Sequential context-manifest projection entries must be objects.");
             ReferenceIdentifierProperty(source, "sourceId");
             ReferenceIdentifierProperty(source, "sourcePath");
             ReferenceIdentifierProperty(source, "content");

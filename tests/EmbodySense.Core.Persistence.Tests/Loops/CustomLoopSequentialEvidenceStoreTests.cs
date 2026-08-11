@@ -1,0 +1,719 @@
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json.Nodes;
+using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Application.Loops.Admission;
+using EmbodySense.Core.Application.Loops.Admission.Models;
+using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Loops.Admission;
+using EmbodySense.Core.Common.Loops.Admission.Models;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Revisions;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Loops.Sequential;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Tests.Authority.Grants;
+using EmbodySense.Core.Common.Tests.Loops.Admission;
+using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Tests.Support;
+
+namespace EmbodySense.Core.Persistence.Tests.Loops;
+
+public sealed class CustomLoopSequentialEvidenceStoreTests
+{
+    private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
+    private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const string CrossProcessWorkspaceVariable = "EMBODYSENSE_SEQUENTIAL_EVIDENCE_WORKSPACE";
+    private const string CrossProcessEvidenceHashVariable = "EMBODYSENSE_SEQUENTIAL_EVIDENCE_HASH";
+    private const string CrossProcessResultVariable = "EMBODYSENSE_SEQUENTIAL_EVIDENCE_RESULT";
+    private static readonly DateTimeOffset _timestamp = new(2026, 8, 10, 11, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task Canonical_trigger_outcome_round_trips_and_recorder_replays_without_mutation()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+
+        using var restarted = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        var loaded = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(context.Run.Id));
+        Assert.Equal(context.Invocation.ContentHash, loaded.SequentialInvocationSnapshot?.ContentHash);
+        Assert.Equal(context.Binding.ContentHash, loaded.SequentialAdapterBinding?.ContentHash);
+        Assert.Equal(context.Run.Events[0].SequentialNodeEvidence, loaded.Events[0].SequentialNodeEvidence);
+        var evidence = Assert.IsType<CustomLoopSequentialNodeEvidence>(loaded.Events[0].SequentialNodeEvidence);
+        Assert.Equal(evidence.EvidenceHash, (await restarted.ResolveAsync(evidence.EvidenceHash))?.EvidenceHash);
+        var runSource = (IGovernedLoopSequentialRunEvidenceSource)restarted;
+        var runEvidence = Assert.IsType<GovernedLoopSequentialRunEvidence>(await runSource.ResolveAsync(context.Run.Id));
+        Assert.NotSame(loaded.SequentialAdapterBinding, runEvidence.AdapterBinding);
+        Assert.NotSame(loaded.SequentialInvocationSnapshot, runEvidence.InvocationSnapshot);
+        Assert.NotSame(loaded.SequentialAdapterBinding!.ExecutionBinding, runEvidence.AdapterBinding.ExecutionBinding);
+        Assert.NotSame(loaded.SequentialInvocationSnapshot!.ContextManifest, runEvidence.InvocationSnapshot.ContextManifest);
+        Assert.Equal(context.Binding.ContentHash, runEvidence.AdapterBinding.ContentHash);
+        Assert.Equal(context.Invocation.ContentHash, runEvidence.InvocationSnapshot.ContentHash);
+        Assert.True(GovernedLoopSequentialContractValidator.Validate(runEvidence.AdapterBinding).IsValid);
+        Assert.True(GovernedLoopSequentialContractValidator.Validate(runEvidence.InvocationSnapshot).IsValid);
+
+        var request = OrderedRequest(context, context.Plan.Nodes[0], loaded.Events[0]);
+        var first = await restarted.RetainAsync(request);
+        var replay = await restarted.RetainAsync(request);
+        var afterReplay = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(context.Run.Id));
+
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Completed, first.Status);
+        Assert.Equal(evidence.EvidenceHash, first.EvidenceHash);
+        Assert.Equal(first, replay);
+        Assert.Equal(loaded.LifecycleVersion, afterReplay.LifecycleVersion);
+        Assert.Equal(loaded.Events, afterReplay.Events);
+    }
+
+    [Fact]
+    public async Task Canonical_evidence_resolves_after_an_external_process_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+        }
+
+        var resultPath = Path.Combine(workspace.RootPath, "cross-process-evidence-result.txt");
+        using var process = StartCrossProcessResolver(
+            workspace.RootPath,
+            context.Run.Events[0].SequentialNodeEvidence!.EvidenceHash,
+            resultPath);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await process.WaitForExitAsync(timeout.Token);
+        var output = await process.StandardOutput.ReadToEndAsync(timeout.Token);
+        var error = await process.StandardError.ReadToEndAsync(timeout.Token);
+
+        Assert.True(process.ExitCode == 0, $"Child exit {process.ExitCode}.{Environment.NewLine}{output}{Environment.NewLine}{error}");
+        Assert.Equal("resolved", await File.ReadAllTextAsync(resultPath, timeout.Token));
+    }
+
+    [Fact]
+    public async Task Cross_process_restart_resolves_canonical_evidence_child()
+    {
+        var workspaceRoot = Environment.GetEnvironmentVariable(CrossProcessWorkspaceVariable);
+        var evidenceHash = Environment.GetEnvironmentVariable(CrossProcessEvidenceHashVariable);
+        var resultPath = Environment.GetEnvironmentVariable(CrossProcessResultVariable);
+        if (workspaceRoot is null || evidenceHash is null || resultPath is null)
+        {
+            return;
+        }
+
+        using var store = new CustomLoopRunStore(new WorkspacePaths(workspaceRoot));
+        var receipt = Assert.IsType<GovernedLoopSequentialNodeEvidenceReceipt>(await store.ResolveAsync(evidenceHash));
+        var runEvidence = Assert.IsType<GovernedLoopSequentialRunEvidence>(
+            await ((IGovernedLoopSequentialRunEvidenceSource)store).ResolveAsync(receipt.RunId));
+        Assert.Equal(receipt.RunId, runEvidence.AdapterBinding.ExecutionBinding.RunId);
+        Assert.Equal(runEvidence.InvocationSnapshot.ContentHash, runEvidence.AdapterBinding.InvocationPayloadHash);
+        await File.WriteAllTextAsync(resultPath, "resolved");
+    }
+
+    [Fact]
+    public async Task Recorder_rejects_untrusted_ordered_coordinates_without_rewriting_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+        var request = OrderedRequest(context, context.Plan.Nodes[0], context.Run.Events[0]);
+        var substitutions = new[]
+        {
+            request with { OrderedLifecycleVersion = 2 },
+            request with { OrderedEventSequence = 2 },
+            request with { OrderedEventId = "event-other" },
+            request with { Disposition = GovernedLoopSequentialNodeHandlerResultStatus.Rejected },
+            request with { Dispatch = request.Dispatch with { Attempt = 2 } },
+            request with { Dispatch = request.Dispatch with { Node = context.Plan.Nodes[1] } },
+        };
+
+        foreach (var substitution in substitutions)
+        {
+            await Assert.ThrowsAsync<FormatException>(() => store.RetainAsync(substitution));
+        }
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RetainAsync(request with { SchemaVersion = 2 }));
+        var loaded = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(context.Run.Id));
+        Assert.Equal(context.Run.LifecycleVersion, loaded.LifecycleVersion);
+        Assert.Equal(context.Run.Events.Length, loaded.Events.Length);
+        Assert.Equal(context.Run.Events[0].EventId, loaded.Events[0].EventId);
+        Assert.Equal(context.Run.Events[0].SequentialNodeEvidence, loaded.Events[0].SequentialNodeEvidence);
+    }
+
+    [Fact]
+    public async Task Recorder_replays_immutable_terminal_evidence_after_a_later_lifecycle_append()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+        var lifecycleEvent = Event(2, "event-running", CustomLoopRunEventKind.LifecycleChanged);
+        var running = context.Run with
+        {
+            LifecycleVersion = 2,
+            Status = CustomLoopRunStatus.Running,
+            UpdatedAtUtc = _timestamp.AddMinutes(1),
+            ExecutionClock = new CustomLoopExecutionClock(0, _timestamp.AddMinutes(1)),
+            Events = [.. context.Run.Events, lifecycleEvent],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, 1)).Status);
+
+        var original = OrderedRequest(context, context.Plan.Nodes[0], context.Run.Events[0]);
+        var replay = await store.RetainAsync(original);
+        Assert.Equal(context.Run.Events[0].SequentialNodeEvidence?.EvidenceHash, replay.EvidenceHash);
+        await Assert.ThrowsAsync<FormatException>(() => store.RetainAsync(original with { OrderedLifecycleVersion = 3 }));
+        var loaded = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(context.Run.Id));
+        Assert.Equal(2, loaded.LifecycleVersion);
+        Assert.Equal(lifecycleEvent.EventId, loaded.Events[^1].EventId);
+    }
+
+    [Fact]
+    public async Task Evidence_sources_fail_closed_for_invalid_missing_and_legacy_coordinates()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        var runSource = (IGovernedLoopSequentialRunEvidenceSource)store;
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ResolveAsync("not-a-hash"));
+        Assert.Null(await store.ResolveAsync(Hash('8')));
+        Assert.Null(await runSource.ResolveAsync("run-missing"));
+        await Assert.ThrowsAsync<FormatException>(() => store.RetainAsync(OrderedRequest(context, context.Plan.Nodes[0], context.Run.Events[0])));
+
+        var capabilityAdmission = TestCapabilityAdmissionFactory.Create(context.Run.AdmittedDefinition.CapabilityRequirements, _timestamp);
+        var legacy = CustomLoopAdmissionRequestHash.Apply(context.Run with
+        {
+            CapabilityAdmission = capabilityAdmission,
+            SequentialInvocationSnapshot = null,
+            SequentialAdapterBinding = null,
+            Events = [context.Run.Events[0] with { SequentialNodeEvidence = null }],
+        });
+        Assert.True(CustomLoopRunValidator.Validate(legacy).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(legacy).Errors));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(legacy)).Status);
+        Assert.Null(await runSource.ResolveAsync(legacy.Id));
+    }
+
+    [Fact]
+    public void Sequential_converter_backed_coordinates_require_canonical_nested_property_order()
+    {
+        var context = CreateContext();
+        var bindingRoot = JsonNode.Parse(CustomLoopRunArtifactSerializer.Serialize(context.Run))!.AsObject();
+        var binding = bindingRoot["run"]!["sequentialAdapterBinding"]!["executionBinding"]!.AsObject();
+        bindingRoot["run"]!["sequentialAdapterBinding"]!["executionBinding"] = ReverseProperties(binding);
+        AssertCanonicalOrderRejected(bindingRoot);
+
+        var evidenceRoot = JsonNode.Parse(CustomLoopRunArtifactSerializer.Serialize(context.Run))!.AsObject();
+        var revision = evidenceRoot["run"]!["events"]![0]!["sequentialNodeEvidence"]!["revision"]!.AsObject();
+        evidenceRoot["run"]!["events"]![0]!["sequentialNodeEvidence"]!["revision"] = ReverseProperties(revision);
+        AssertCanonicalOrderRejected(evidenceRoot);
+    }
+
+    [Fact]
+    public async Task Store_rejects_missing_or_payload_substituted_trigger_outcome()
+    {
+        using var missingWorkspace = new TestWorkspace();
+        var context = CreateContext();
+        var missing = CustomLoopAdmissionRequestHash.Apply(context.Run with
+        {
+            Events = [context.Run.Events[0] with { SequentialNodeEvidence = null }],
+        });
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(new WorkspacePaths(missingWorkspace.RootPath)).CreateAsync(missing));
+
+        using var substitutedWorkspace = new TestWorkspace();
+        var substituted = CustomLoopAdmissionRequestHash.Apply(context.Run with
+        {
+            Events = [context.Run.Events[0] with { Detail = "Substituted after its exact outcome digest was computed." }],
+        });
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(new WorkspacePaths(substitutedWorkspace.RootPath)).CreateAsync(substituted));
+    }
+
+    [Fact]
+    public async Task Dispatch_start_is_not_terminal_evidence_and_checkpoint_cannot_advance_without_an_outcome()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+        var start = WithEvidence(
+            Event(2, "event-inference-start", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 1),
+            context.Binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var started = context.Run with
+        {
+            LifecycleVersion = 2,
+            UpdatedAtUtc = _timestamp.AddMinutes(1),
+            Events = [.. context.Run.Events, start],
+        };
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(started, 1)).Status);
+        Assert.Null(await store.ResolveAsync(start.SequentialNodeEvidence!.EvidenceHash));
+
+        var checkpointWithoutOutcome = started with
+        {
+            LifecycleVersion = 3,
+            UpdatedAtUtc = _timestamp.AddMinutes(2),
+            Checkpoint = started.Checkpoint with { NextStepIndex = 1, LastCommittedSequence = 2 },
+        };
+        await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(checkpointWithoutOutcome, 2));
+    }
+
+    [Fact]
+    public async Task Store_rejects_duplicate_terminal_evidence_for_one_node_attempt()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+        var start = WithEvidence(
+            Event(2, "event-inference-start", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 1),
+            context.Binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var started = context.Run with
+        {
+            LifecycleVersion = 2,
+            UpdatedAtUtc = _timestamp.AddMinutes(1),
+            Events = [.. context.Run.Events, start],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(started, 1)).Status);
+        var first = WithEvidence(
+            Event(3, "event-inference-completed", CustomLoopRunEventKind.NodeAttemptCompleted, "step-1", 1),
+            context.Binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var duplicate = WithEvidence(
+            Event(4, "event-inference-completed-again", CustomLoopRunEventKind.NodeAttemptCompleted, "step-1", 1),
+            context.Binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var invalid = started with
+        {
+            LifecycleVersion = 3,
+            UpdatedAtUtc = _timestamp.AddMinutes(3),
+            Events = [.. started.Events, first, duplicate],
+        };
+
+        await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(invalid, 2));
+        var loaded = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(context.Run.Id));
+        Assert.Equal(2, loaded.LifecycleVersion);
+        Assert.Equal(2, loaded.Events.Length);
+    }
+
+    [Fact]
+    public async Task Persisted_marker_digest_substitution_fails_closed_after_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+        }
+
+        var evidence = context.Run.Events[0].SequentialNodeEvidence!;
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, context.Run.LoopId, context.Run.Id + ".json");
+        var persisted = await File.ReadAllTextAsync(artifactPath);
+        var substituted = persisted.Replace(evidence.EvidenceHash, Hash('9'), StringComparison.Ordinal);
+        Assert.NotEqual(persisted, substituted);
+        await File.WriteAllTextAsync(artifactPath, substituted);
+
+        using var restarted = new CustomLoopRunStore(paths);
+        await Assert.ThrowsAsync<FormatException>(() => restarted.GetAsync(context.Run.Id));
+        await Assert.ThrowsAsync<FormatException>(() => restarted.ResolveAsync(evidence.EvidenceHash));
+    }
+
+    [Fact]
+    public async Task Concurrent_terminal_outcomes_have_one_cas_winner_and_one_resolvable_receipt()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var firstStore = new CustomLoopRunStore(paths);
+        using var secondStore = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await firstStore.CreateAsync(context.Run)).Status);
+        var start = WithEvidence(
+            Event(2, "event-inference-start", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 1),
+            context.Binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var started = context.Run with
+        {
+            LifecycleVersion = 2,
+            UpdatedAtUtc = _timestamp.AddMinutes(1),
+            Events = [.. context.Run.Events, start],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await firstStore.UpdateAsync(started, 1)).Status);
+
+        var completedEvent = WithEvidence(
+            Event(3, "event-inference-completed", CustomLoopRunEventKind.NodeAttemptCompleted, "step-1", 1),
+            context.Binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var rejectedEvent = WithEvidence(
+            Event(3, "event-inference-rejected", CustomLoopRunEventKind.NodeAttemptFailed, "step-1", 1),
+            context.Binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            CustomLoopSequentialNodeDisposition.Rejected);
+        var completed = started with
+        {
+            LifecycleVersion = 3,
+            UpdatedAtUtc = _timestamp.AddMinutes(2),
+            Events = [.. started.Events, completedEvent],
+        };
+        var rejected = started with
+        {
+            LifecycleVersion = 3,
+            UpdatedAtUtc = _timestamp.AddMinutes(2),
+            Events = [.. started.Events, rejectedEvent],
+        };
+
+        var results = await Task.WhenAll(firstStore.UpdateAsync(completed, 2), secondStore.UpdateAsync(rejected, 2));
+        Assert.Single(results, result => result.Status == CustomLoopRunStoreStatus.Updated);
+        Assert.Single(results, result => result.Status == CustomLoopRunStoreStatus.Conflict);
+        var winner = Assert.IsType<CustomLoopRunRecord>((await firstStore.GetAsync(context.Run.Id)));
+        var terminal = Assert.IsType<CustomLoopSequentialNodeEvidence>(winner.Events[^1].SequentialNodeEvidence);
+        Assert.Equal(terminal.EvidenceHash, (await secondStore.ResolveAsync(terminal.EvidenceHash))?.EvidenceHash);
+        var loserHash = winner.Events[^1].EventId == completedEvent.EventId
+            ? rejectedEvent.SequentialNodeEvidence!.EvidenceHash
+            : completedEvent.SequentialNodeEvidence!.EvidenceHash;
+        Assert.Null(await secondStore.ResolveAsync(loserHash));
+    }
+
+    private static SequentialContext CreateContext()
+    {
+        var graph = LinearGraph();
+        var revisionArtifact = GovernedLoopRevisionArtifactFactory.Create(
+            1,
+            graph.RevisionReference,
+            null,
+            null,
+            "create-sequential",
+            "user-owner",
+            _timestamp);
+        var artifact = GovernedLoopGraphRevisionArtifactFactory.Create(1, revisionArtifact, graph);
+        var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, graph.RevisionReference, "publish-sequential", Hash('7'));
+        var invocationContext = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
+        var invocation = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
+            1,
+            "Execute the exact admitted request.",
+            new CustomLoopModelSnapshot("provider", "model"),
+            null,
+            _timestamp,
+            invocationContext.SourceManifest,
+            string.Empty));
+        var grant = AuthorityGrantTestFixture.Grant();
+        var grantReference = new EmbodySense.Core.Common.Authority.Grants.Models.AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);
+        var request = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(
+            1,
+            "admit-sequential",
+            invocation.ContentHash,
+            string.Empty,
+            publication,
+            grantReference,
+            AuthorityGrantTestFixture.Actor("user-owner"),
+            "web"));
+        var intent = new GovernedLoopAdmissionIntent(
+            1,
+            GovernedLoopAdmissionTestFixture.WorkspaceId,
+            request.OperationId,
+            request.RequestHash,
+            publication,
+            grantReference,
+            graph.OwningRole,
+            request.ActorId,
+            request.Surface,
+            artifact.ArtifactHash,
+            artifact.LayoutHash);
+        var execution = GovernedLoopExecutionBinding.Create(1, "run-sequential", graph.RevisionReference, 1);
+        var capabilityAdmission = SequentialCapabilityAdmission(artifact.ArtifactHash);
+        var effectiveAuthority = GovernedLoopAdmissionTestFixture.EffectiveAuthority();
+        var admissionEvidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
+            1,
+            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+            execution,
+            effectiveAuthority,
+            capabilityAdmission,
+            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilityAdmission),
+            _timestamp.AddMinutes(1),
+            string.Empty));
+        var receipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
+            1,
+            intent,
+            admissionEvidence,
+            _timestamp.AddMinutes(2),
+            string.Empty));
+        Assert.True(GovernedLoopAdmissionValidator.Validate(receipt).IsValid);
+        var binding = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
+            1,
+            intent.WorkspaceId,
+            execution,
+            request.OperationId,
+            receipt.ContentHash,
+            request.RequestHash,
+            invocation.ContentHash,
+            artifact.ArtifactHash,
+            artifact.LayoutHash,
+            string.Empty));
+        var anchorResult = GovernedLoopSequentialRunAnchorGuard.Create(binding, request, receipt, invocation, artifact);
+        var anchor = Assert.IsType<GovernedLoopSequentialRunAnchor>(anchorResult.Anchor);
+        var plan = Assert.IsType<GovernedLoopSequentialPlan>(GovernedLoopSequentialPlanBuilder.Build(artifact).Plan);
+
+        var definition = CustomLoopDefinition.CreateSeed("sequential-loop", "default-role", "step-1", "create-loop", _timestamp);
+        var admitted = WithEvidence(
+            Event(1, "event-admitted", CustomLoopRunEventKind.Admitted),
+            binding,
+            "trigger",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var run = new CustomLoopRunRecord(
+            1,
+            execution.RunId,
+            definition.Id,
+            1,
+            CustomLoopRunStatus.Admitted,
+            _timestamp,
+            _timestamp,
+            null,
+            "web",
+            invocation.ModelSnapshot,
+            binding.AdmissionOperationId,
+            "embodysense.web",
+            string.Empty,
+            definition,
+            invocation.TriggerPrompt,
+            null,
+            invocationContext,
+            CustomLoopExecutionClock.NotStarted(),
+            CustomLoopRunCheckpoint.Start(),
+            [admitted],
+            null,
+            null,
+            null)
+        {
+            CapabilityAdmission = capabilityAdmission,
+            SequentialInvocationSnapshot = invocation,
+            SequentialAdapterBinding = binding,
+        };
+        run = CustomLoopAdmissionRequestHash.Apply(run);
+        Assert.True(CustomLoopRunValidator.Validate(run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(run).Errors));
+        return new SequentialContext(run, invocation, binding, anchor, plan);
+    }
+
+    private static GovernedLoopGraphDefinition LinearGraph()
+    {
+        var role = new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("sequential-role", 1), Hash('a'));
+        var nodes = new[]
+        {
+            new GovernedLoopNodeDefinition(
+                "trigger",
+                GovernedLoopSequentialNodeDescriptors.ManualTrigger,
+                [Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context)],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>()),
+            new GovernedLoopNodeDefinition(
+                "step-1",
+                GovernedLoopSequentialNodeDescriptors.ProviderInference,
+                [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
+                new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
+            new GovernedLoopNodeDefinition(
+                "exit",
+                GovernedLoopSequentialNodeDescriptors.SuccessExit,
+                [Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]),
+                new Dictionary<string, string>()),
+        };
+        var edges = new[]
+        {
+            new GovernedLoopControlEdgeDefinition("trigger-to-step", "trigger", "step-1", GovernedLoopControlCondition.Always),
+            new GovernedLoopControlEdgeDefinition("step-to-exit", "step-1", "exit", GovernedLoopControlCondition.Success),
+        };
+        var bindings = new[]
+        {
+            new GovernedLoopBindingDefinition("data-to-step", GovernedLoopBindingKind.Data, "trigger", "request", "step-1", "request"),
+            new GovernedLoopBindingDefinition("context-to-step", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "step-1", "invocation-context"),
+            new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, "step-1", "result", "exit", "result"),
+        };
+        return GovernedLoopGraphDefinition.Create(
+            1,
+            "sequential-loop",
+            "revision-1",
+            "Execute one exact supported sequential governed graph.",
+            role,
+            "trigger",
+            ["exit"],
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
+            [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
+            nodes,
+            edges,
+            bindings,
+            new GovernedLoopOutputContract("Return the exact bounded result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
+            new GovernedLoopDisplayMetadata(
+                "Sequential loop",
+                "Display metadata is not execution order.",
+                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()));
+    }
+
+    private static CapabilityAdmissionSnapshot SequentialCapabilityAdmission(string graphArtifactHash)
+    {
+        Assert.True(CapabilityId.TryParse("org.embodysense/loop-sequential", out var subject, out _));
+        Assert.True(CapabilityId.TryParse(ConversationTurnCapabilityId, out var conversationTurn, out _));
+        Assert.True(CapabilityId.TryParse(ModelInferenceCapabilityId, out var modelInference, out _));
+        Assert.True(CapabilityVersionRange.TryParse("*", out var versions, out _));
+        Assert.True(CapabilityIntegrityDigest.TryParse("sha256:" + graphArtifactHash, out var checksum, out _));
+        var requirements = new CapabilityDependencyManifest(
+            1,
+            CapabilityDependencyManifestKind.LoopPackage,
+            subject!,
+            [new CapabilityDependency(conversationTurn!, versions!), new CapabilityDependency(modelInference!, versions!)],
+            [],
+            new CapabilityDependencyArtifactMetadata(checksum, null));
+        return TestCapabilityAdmissionFactory.Create(requirements, _timestamp);
+    }
+
+    private static GovernedLoopPortDefinition Port(string id, GovernedLoopPortDirection direction, GovernedLoopBindingKind kind)
+        => new(id, direction, kind, "text", true);
+
+    private static CustomLoopRunEvent Event(
+        long sequence,
+        string eventId,
+        CustomLoopRunEventKind kind,
+        string? stepId = null,
+        int? attempt = null)
+        => new(
+            sequence,
+            eventId,
+            _timestamp.AddMinutes(sequence - 1),
+            kind,
+            stepId is null ? null : 1,
+            stepId,
+            attempt,
+            kind.ToString(),
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            TraceReservationUtf8Bytes: kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted
+                ? CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes
+                : null);
+
+    private static CustomLoopRunEvent WithEvidence(
+        CustomLoopRunEvent runEvent,
+        GovernedLoopSequentialAdapterBinding binding,
+        string nodeId,
+        int attempt,
+        CustomLoopSequentialNodeEvidenceKind kind,
+        CustomLoopSequentialNodeDisposition disposition)
+    {
+        var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
+            1,
+            kind,
+            binding.WorkspaceId,
+            binding.ExecutionBinding.RunId,
+            binding.ExecutionBinding.Revision,
+            binding.ExecutionBinding.ExecutionGeneration,
+            nodeId,
+            attempt,
+            disposition,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
+            string.Empty));
+        return runEvent with { SequentialNodeEvidence = evidence };
+    }
+
+    private static GovernedLoopSequentialOrderedNodeEvidenceRequest OrderedRequest(
+        SequentialContext context,
+        GovernedLoopSequentialPlanNode node,
+        CustomLoopRunEvent runEvent)
+        => new(
+            1,
+            new GovernedLoopSequentialNodeDispatchRequest(1, context.Anchor, context.Plan, node, 1),
+            GovernedLoopSequentialNodeHandlerResultStatus.Completed,
+            context.Run.LifecycleVersion,
+            runEvent.Sequence,
+            runEvent.EventId);
+
+    private static Process StartCrossProcessResolver(string workspaceRoot, string evidenceHash, string resultPath)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "dotnet",
+            WorkingDirectory = Path.GetTempPath(),
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
+            startInfo,
+            typeof(CustomLoopSequentialEvidenceStoreTests).Assembly.Location,
+            "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopSequentialEvidenceStoreTests.Cross_process_restart_resolves_canonical_evidence_child");
+        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
+        startInfo.Environment[CrossProcessWorkspaceVariable] = workspaceRoot;
+        startInfo.Environment[CrossProcessEvidenceHashVariable] = evidenceHash;
+        startInfo.Environment[CrossProcessResultVariable] = resultPath;
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("The cross-process sequential-evidence resolver did not start.");
+    }
+
+    private static JsonObject ReverseProperties(JsonObject value)
+    {
+        var reordered = new JsonObject();
+        foreach (var property in value.Reverse())
+        {
+            reordered[property.Key] = property.Value?.DeepClone();
+        }
+
+        return reordered;
+    }
+
+    private static void AssertCanonicalOrderRejected(JsonObject root)
+    {
+        var exception = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(root.ToJsonString() + "\n")));
+        Assert.Contains("not in canonical serializer order", exception.Message, StringComparison.Ordinal);
+    }
+
+    private static string Hash(char value) => new(value, 64);
+
+    private sealed record SequentialContext(
+        CustomLoopRunRecord Run,
+        GovernedLoopSequentialInvocationSnapshot Invocation,
+        GovernedLoopSequentialAdapterBinding Binding,
+        GovernedLoopSequentialRunAnchor Anchor,
+        GovernedLoopSequentialPlan Plan);
+}
