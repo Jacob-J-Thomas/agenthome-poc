@@ -51,7 +51,7 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
     public async Task Canonical_resume_rebuilds_only_the_exact_receipt_pinned_artifact_and_forwards_lifecycle_coordinates()
     {
         var context = await ContextAsync();
-        var run = Run(context.Binding.ExecutionBinding.RunId, context.Binding, context.Invocation);
+        var run = Run(context.Binding.ExecutionBinding.RunId, context.Binding, context.Invocation, context.Plan);
         var runStore = new TestRunStore(run);
         var evidence = new TestRunEvidenceSource(new GovernedLoopSequentialRunEvidence(context.Binding, context.Invocation));
         var runtime = new RecordingOrderedRuntime();
@@ -98,7 +98,7 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
 
         var otherArtifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(2, owningRole: context.Artifact.Graph.OwningRole);
         context.Store.GraphReadResult = new GovernedLoopGraphRevisionArtifactReadResult(GovernedLoopRevisionStoreReadStatus.Ready, 2, otherArtifact);
-        var exact = Run(context.Binding.ExecutionBinding.RunId, context.Binding, context.Invocation);
+        var exact = Run(context.Binding.ExecutionBinding.RunId, context.Binding, context.Invocation, context.Plan);
         var substitutedService = new GovernedLoopSequentialResumeExecutor(
             new TestRunStore(exact),
             new TestRunEvidenceSource(new GovernedLoopSequentialRunEvidence(context.Binding, context.Invocation)),
@@ -118,7 +118,7 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
     public async Task Canonical_resume_preserves_cancellation_during_the_first_durable_read()
     {
         var context = await ContextAsync();
-        var runStore = new TestRunStore(Run(context.Binding.ExecutionBinding.RunId, context.Binding, context.Invocation));
+        var runStore = new TestRunStore(Run(context.Binding.ExecutionBinding.RunId, context.Binding, context.Invocation, context.Plan));
         var service = new GovernedLoopSequentialResumeExecutor(
             runStore,
             new TestRunEvidenceSource(null),
@@ -212,13 +212,15 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
         Assert.True(GovernedLoopAdmissionValidator.Validate(outcome).IsValid);
         store.StoreReadResult = new GovernedLoopAdmissionStoreReadResult(GovernedLoopAdmissionStoreReadStatus.Found, 2, outcome);
         store.GraphReadResult = new GovernedLoopGraphRevisionArtifactReadResult(GovernedLoopRevisionStoreReadStatus.Ready, 2, artifact);
-        return new TestContext(store, artifact, binding, invocation);
+        var plan = Assert.IsType<GovernedLoopSequentialPlan>(GovernedLoopSequentialPlanBuilder.Build(artifact).Plan);
+        return new TestContext(store, artifact, binding, invocation, plan);
     }
 
     private static CustomLoopRunRecord Run(
         string runId,
         GovernedLoopSequentialAdapterBinding? binding,
-        GovernedLoopSequentialInvocationSnapshot? invocation)
+        GovernedLoopSequentialInvocationSnapshot? invocation,
+        GovernedLoopSequentialPlan? plan = null)
     {
         var definition = CustomLoopDefinition.CreateSeed("sequential-loop", "sequential-role", "infer-01", "create-test-run", _now);
         return new CustomLoopRunRecord(
@@ -248,6 +250,15 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
         {
             SequentialAdapterBinding = binding,
             SequentialInvocationSnapshot = invocation,
+            Frontier = binding is not null && plan is not null
+                ? Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Initialize(
+                    binding,
+                    plan,
+                    "event-trigger",
+                    "event-trigger",
+                    new string('a', 64),
+                    _now).Frontier)
+                : null,
         };
     }
 
@@ -255,7 +266,8 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
         GovernedLoopAdmissionTestHarness Store,
         GovernedLoopGraphRevisionArtifact Artifact,
         GovernedLoopSequentialAdapterBinding Binding,
-        GovernedLoopSequentialInvocationSnapshot Invocation);
+        GovernedLoopSequentialInvocationSnapshot Invocation,
+        GovernedLoopSequentialPlan Plan);
 
     private sealed class TestRunStore(CustomLoopRunRecord? run) : ICustomLoopRunStore
     {

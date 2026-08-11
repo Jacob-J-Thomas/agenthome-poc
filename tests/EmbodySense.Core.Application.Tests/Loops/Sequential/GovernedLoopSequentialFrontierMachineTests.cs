@@ -268,6 +268,48 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             _startedAtUtc.AddSeconds(2)).Status);
     }
 
+    [Fact]
+    public async Task Bound_prefix_terminalization_never_selects_or_exposes_unreached_work()
+    {
+        var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync(inferenceCount: 3);
+        var initial = Frontier(Initialize(context));
+
+        var failed = Frontier(GovernedLoopSequentialFrontierMachine.FailCurrent(
+            initial,
+            context.AdapterBinding,
+            "event-pre-dispatch-failure",
+            "event-pre-dispatch-failure",
+            Hash('f'),
+            _startedAtUtc.AddSeconds(1)));
+
+        Assert.Equal(GovernedLoopFrontierStatus.Failed, failed.Payload.Status);
+        Assert.Equal(2, failed.Payload.Nodes.Count);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Failed, failed.Payload.Nodes[^1].Status);
+        Assert.Equal("event-pre-dispatch-failure", failed.Payload.Nodes[^1].AttemptOperationId);
+        Assert.Equal("event-pre-dispatch-failure", failed.Payload.Nodes[^1].OutcomeEvidenceId);
+
+        var running = Frontier(GovernedLoopSequentialFrontierMachine.Start(
+            initial,
+            context.AdapterBinding,
+            context.Plan,
+            context.Plan.Nodes[1],
+            1,
+            "attempt-open",
+            _startedAtUtc.AddSeconds(1)));
+        var review = Frontier(GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(
+            running,
+            context.AdapterBinding,
+            "event-review",
+            Hash('e'),
+            _startedAtUtc.AddSeconds(2)));
+
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, review.Payload.Status);
+        Assert.Equal(2, review.Payload.Nodes.Count);
+        Assert.Equal("attempt-open", review.Payload.Nodes[^1].AttemptOperationId);
+        Assert.Equal("event-review", review.Payload.Nodes[^1].OutcomeEvidenceId);
+        Assert.True(GovernedLoopFrontierContractHash.Matches(review));
+    }
+
     private static GovernedLoopSequentialFrontierTransitionResult Initialize(GovernedLoopSequentialRunMaterializerTests.TestContext context)
         => GovernedLoopSequentialFrontierMachine.Initialize(
             context.AdapterBinding,
@@ -279,7 +321,7 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
 
     private static GovernedLoopFrontierPosture Frontier(GovernedLoopSequentialFrontierTransitionResult result)
     {
-        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, result.Status);
+        Assert.True(result.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied, result.Detail);
         return Assert.IsType<GovernedLoopFrontierPosture>(result.Frontier);
     }
 
