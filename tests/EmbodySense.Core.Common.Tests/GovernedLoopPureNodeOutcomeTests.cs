@@ -169,6 +169,34 @@ public sealed class GovernedLoopPureNodeOutcomeTests
     }
 
     [Fact]
+    public void Schema_conformance_attests_admitted_structure_and_rejects_unimplemented_formats()
+    {
+        var structural = Validate(
+            GovernedLoopPureNodeVocabulary.SchemaConformance,
+            [(GovernedLoopPureNodeVocabulary.InputPort, "array", Value(GovernedLoopValueKind.Array, "[\"admitted\"]"))]);
+        Assert.True(GovernedLoopPureNodeEvaluator.TryEvaluate(structural.Graph, "pure", structural.Inputs, out var output, out var evidence, out _));
+        Assert.Equal("true", output.Value.CanonicalValueJson);
+        Assert.True(evidence!.Passed);
+        Assert.Empty(evidence.Observations);
+
+        var formattedSchemas = new[]
+        {
+            new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, false),
+            new GovernedLoopValueSchemaDefinition("formatted", GovernedLoopValueKind.Text, false, Format: "uri"),
+            new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)
+        };
+        var formatted = PureGraph(
+            GovernedLoopNodeKind.Validate,
+            GovernedLoopPureNodeVocabulary.SchemaConformance,
+            [(GovernedLoopPureNodeVocabulary.InputPort, "formatted")],
+            GovernedLoopPureNodeVocabulary.ResultPort,
+            "boolean",
+            valueSchemas: formattedSchemas);
+        var formattedInput = GovernedLoopTypedBindingValue.Create(formatted, "binding-input", Value(GovernedLoopValueKind.Text, "\"https://example.test\""));
+        AssertEvaluateCode(formatted, [formattedInput], "pure-node.schema-unsupported");
+    }
+
+    [Fact]
     public void Structured_selection_honors_rfc6901_escaping_array_indexes_and_missing_paths()
     {
         var escaped = Transform(

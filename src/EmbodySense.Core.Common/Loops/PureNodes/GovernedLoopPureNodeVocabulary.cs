@@ -13,7 +13,7 @@ public static class GovernedLoopPureNodeVocabulary
     public const string StructuredSelect = "structured-select";
     /// <summary>The exact bounded ordered text-concatenation transform descriptor.</summary>
     public const string OrderedTextConcat = "ordered-text-concat";
-    /// <summary>The exact declared-schema conformance validator descriptor.</summary>
+    /// <summary>The exact structural-schema attestation descriptor for already admitted typed bindings.</summary>
     public const string SchemaConformance = "schema-conformance";
     /// <summary>The exact canonical equality validator descriptor.</summary>
     public const string CanonicalEquality = "canonical-equality";

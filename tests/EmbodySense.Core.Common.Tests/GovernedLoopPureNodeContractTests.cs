@@ -59,6 +59,8 @@ public sealed class GovernedLoopPureNodeContractTests
         Assert.Throws<ArgumentException>(() => GovernedLoopValueKindSet.Create([GovernedLoopValueKind.Text, GovernedLoopValueKind.Text]));
         Assert.Throws<ArgumentException>(() => GovernedLoopValueKindSet.Create([GovernedLoopValueKind.Unknown]));
         Assert.Throws<ArgumentException>(() => GovernedLoopValueKindSet.Create([(GovernedLoopValueKind)99]));
+        Assert.Throws<ArgumentException>(() => GovernedLoopValueKindSet.Create(InfiniteKinds()));
+        Assert.Throws<ArgumentException>(() => GovernedLoopValueKindSet.Create(ThrowingKinds()));
     }
 
     [Fact]
@@ -168,6 +170,20 @@ public sealed class GovernedLoopPureNodeContractTests
             yield return GovernedLoopValidationObservation.Create($"code-{index}", $"/{index}");
             index++;
         }
+    }
+
+    private static IEnumerable<GovernedLoopValueKind> InfiniteKinds()
+    {
+        while (true)
+        {
+            yield return GovernedLoopValueKind.Text;
+        }
+    }
+
+    private static IEnumerable<GovernedLoopValueKind> ThrowingKinds()
+    {
+        yield return GovernedLoopValueKind.Text;
+        throw new IOException("Injected enumeration failure.");
     }
 
     private static IEnumerable<GovernedLoopValidationObservation> ThrowingObservations(GovernedLoopValidationObservation observation)

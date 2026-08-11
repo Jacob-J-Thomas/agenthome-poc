@@ -24,8 +24,17 @@ public sealed class GovernedLoopValueKindSet : IEquatable<GovernedLoopValueKindS
     public static GovernedLoopValueKindSet Create(IEnumerable<GovernedLoopValueKind> kinds)
     {
         ArgumentNullException.ThrowIfNull(kinds);
-        var values = kinds.ToArray();
         var maximum = Enum.GetValues<GovernedLoopValueKind>().Count(value => value != GovernedLoopValueKind.Unknown);
+        GovernedLoopValueKind[] values;
+        try
+        {
+            values = kinds.Take(maximum + 1).ToArray();
+        }
+        catch (Exception exception) when (exception is not (StackOverflowException or OutOfMemoryException))
+        {
+            throw new ArgumentException("Value-kind sets must be inspectable within the bounded contract.", nameof(kinds), exception);
+        }
+
         if (values.Length < 1 || values.Length > maximum || values.Any(value => !Enum.IsDefined(value) || value == GovernedLoopValueKind.Unknown) || values.Distinct().Count() != values.Length)
         {
             throw new ArgumentException("Value-kind sets must be non-empty, bounded, unique, and fully defined.", nameof(kinds));
