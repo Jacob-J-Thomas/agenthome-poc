@@ -63,7 +63,7 @@ internal static class GovernedLoopEffectAuthorityRequestValidator
         }
 
         var admitted = request.AdmissionReceipt.Evidence;
-        if (!BoundaryMatchesNode(request.BoundaryKind, node.Descriptor, request.RequiredCapabilityPins)
+        if (!BoundaryMatchesNode(request.BoundaryKind, node, request.RequiredCapabilityPins)
             || !IsEqualOrNarrow(request.RequiredAuthority, admitted.EffectiveAuthority)
             || !PinsExactlyDescribeRequiredAuthority(request.RequiredCapabilityPins, request.RequiredAuthority.Capabilities)
             || request.RequiredCapabilityPins.Any(required => !admitted.CapabilityAdmission.Pins.Contains(required))
@@ -77,19 +77,38 @@ internal static class GovernedLoopEffectAuthorityRequestValidator
 
     private static bool BoundaryMatchesNode(
         GovernedLoopEffectBoundaryKind boundaryKind,
-        EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeDescriptor descriptor,
+        EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeDefinition node,
         IReadOnlyList<CapabilityAdmissionPin> pins)
     {
         return boundaryKind switch
         {
-            GovernedLoopEffectBoundaryKind.ProviderTransport => Equals(descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference)
-                && RequiresOnly(pins, ModelInferenceCapabilityId),
-            GovernedLoopEffectBoundaryKind.WorkspaceToolIntake or GovernedLoopEffectBoundaryKind.WorkspaceActuation => Equals(descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference)
+            GovernedLoopEffectBoundaryKind.ProviderTransport => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference)
+                && RequiresProviderCapabilities(node.AuthorityCeiling.CapabilityIds, pins),
+            GovernedLoopEffectBoundaryKind.WorkspaceToolIntake or GovernedLoopEffectBoundaryKind.WorkspaceActuation => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference)
                 && RequiresOnly(pins, WorkspaceCommandCapabilityId),
-            GovernedLoopEffectBoundaryKind.ConversationPublication => Equals(descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit)
+            GovernedLoopEffectBoundaryKind.ConversationPublication => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit)
                 && RequiresOnly(pins, ConversationTurnCapabilityId),
             _ => false,
         };
+    }
+
+    private static bool RequiresProviderCapabilities(
+        IReadOnlyList<string> nodeCapabilities,
+        IReadOnlyList<CapabilityAdmissionPin> pins)
+    {
+        var toolEnabled = nodeCapabilities.Contains(WorkspaceCommandCapabilityId, StringComparer.Ordinal);
+        if (!nodeCapabilities.Contains(ModelInferenceCapabilityId, StringComparer.Ordinal)
+            || nodeCapabilities.Any(value => !string.Equals(value, ModelInferenceCapabilityId, StringComparison.Ordinal)
+                && !string.Equals(value, WorkspaceCommandCapabilityId, StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        var required = toolEnabled
+            ? new[] { ModelInferenceCapabilityId, WorkspaceCommandCapabilityId }
+            : [ModelInferenceCapabilityId];
+        return pins.Count == required.Length
+            && pins.Select(pin => pin.DescriptorIdentity.Id.Value).ToHashSet(StringComparer.Ordinal).SetEquals(required);
     }
 
     private static bool RequiresOnly(IReadOnlyList<CapabilityAdmissionPin> pins, string capabilityId)

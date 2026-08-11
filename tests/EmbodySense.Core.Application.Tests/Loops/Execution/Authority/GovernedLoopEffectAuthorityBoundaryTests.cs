@@ -3,7 +3,9 @@ using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
+using EmbodySense.Core.Application.Tests.Loops.Sequential;
 using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Loops.Execution.Authority;
 using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 
@@ -180,7 +182,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
     public async Task Unrelated_missing_or_inactive_pin_narrows_current_proof_without_stopping_the_required_effect(
         CapabilityRevalidationStatus status)
     {
-        var fixture = GovernedLoopEffectAuthorityTestFixture.Create(includeUnrelatedWorkspaceCapability: true);
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create(includeUnrelatedCapability: true);
         var capabilities = new StubEffectCapabilityAdmissionService
         {
             Result = new CapabilityRevalidationResult(
@@ -209,7 +211,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
     [Fact]
     public async Task Unrelated_drift_is_retained_as_evidence_without_stopping_the_required_effect()
     {
-        var fixture = GovernedLoopEffectAuthorityTestFixture.Create(includeUnrelatedWorkspaceCapability: true);
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create(includeUnrelatedCapability: true);
         var unrelated = Assert.IsType<EmbodySense.Core.Common.Capabilities.Models.CapabilityAdmissionPin>(fixture.UnrelatedPin);
         var driftedIdentity = unrelated.DescriptorIdentity with
         {
@@ -243,7 +245,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
     [Fact]
     public async Task Current_grant_narrowing_of_an_unrelated_capability_does_not_stop_the_required_effect()
     {
-        var fixture = GovernedLoopEffectAuthorityTestFixture.Create(includeUnrelatedWorkspaceCapability: true);
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create(includeUnrelatedCapability: true);
         var resolution = fixture.Resolution with { EffectiveCeiling = fixture.Request.RequiredAuthority };
         var capabilities = new StubEffectCapabilityAdmissionService
         {
@@ -263,6 +265,59 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         Assert.Equal(GovernedLoopEffectAuthorityDisposition.Direct, result.Decision?.Disposition);
         Assert.Equal(GovernedLoopEffectAuthorityReason.ActiveNarrowed, result.Decision?.Reason);
         Assert.Equal(fixture.RequiredPin, Assert.Single(result.Decision!.CurrentAuthority!.CapabilityPins));
+    }
+
+    [Fact]
+    public async Task Provider_effect_ignores_unrelated_authority_dimensions_but_retains_exact_data_class_requirements()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create(includeUnrelatedAuthorityDimensions: true);
+        var currentCeiling = fixture.Resolution.EffectiveCeiling with
+        {
+            MaxTargetCount = 1,
+            MaxSideEffectClass = EmbodySense.Core.Common.Capabilities.Models.CapabilitySideEffectClass.None,
+            AllowsRecurrence = false,
+            AllowsExternalPublication = false,
+            AllowsIrreversibleAction = false,
+        };
+        var capabilities = new StubEffectCapabilityAdmissionService
+        {
+            Result = new CapabilityRevalidationResult(
+                true,
+                fixture.Request.AdmissionReceipt.Evidence.CapabilityAdmission.Pins,
+                "Every exact provider pin remains current.",
+                CapabilityRevalidationStatus.Active),
+        };
+
+        var direct = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution with { EffectiveCeiling = currentCeiling } },
+            capabilities,
+            new RecordingEffectAuthorityEvidenceStore()).ExecuteAsync(fixture.Request, _ => Task.FromResult("committed"));
+        var withoutRequiredDataClasses = new AuthorityCeiling(
+            currentCeiling.Capabilities,
+            [],
+            currentCeiling.MaxTargetCount,
+            currentCeiling.MaxSideEffectClass,
+            currentCeiling.AllowsRecurrence,
+            currentCeiling.AllowsExternalPublication,
+            currentCeiling.AllowsIrreversibleAction);
+        var dataClassNarrowed = await Boundary(
+            new StubEffectAuthorityGrantResolver
+            {
+                Resolution = fixture.Resolution with { EffectiveCeiling = withoutRequiredDataClasses },
+            },
+            capabilities,
+            new RecordingEffectAuthorityEvidenceStore()).ExecuteAsync(fixture.Request with { EffectOperationId = "provider-data-class-check" }, _ => Task.FromResult("must-not-commit"));
+
+        Assert.True(direct.CommitInvoked);
+        Assert.Equal(GovernedLoopEffectAuthorityDisposition.Direct, direct.Decision?.Disposition);
+        Assert.Equal(GovernedLoopEffectAuthorityReason.ActiveNarrowed, direct.Decision?.Reason);
+        Assert.Equal(1, fixture.Request.RequiredAuthority.MaxTargetCount);
+        Assert.False(fixture.Request.RequiredAuthority.AllowsRecurrence);
+        Assert.False(fixture.Request.RequiredAuthority.AllowsExternalPublication);
+        Assert.False(fixture.Request.RequiredAuthority.AllowsIrreversibleAction);
+        Assert.False(dataClassNarrowed.CommitInvoked);
+        Assert.Equal(GovernedLoopEffectAuthorityDisposition.Deny, dataClassNarrowed.Decision?.Disposition);
+        Assert.Equal(GovernedLoopEffectAuthorityReason.EffectOutsideCeiling, dataClassNarrowed.Decision?.Reason);
     }
 
     [Fact]
@@ -468,6 +523,56 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         Assert.Equal(0, grant.Calls);
         Assert.Equal(0, capabilities.Calls);
         Assert.Empty(evidence.Decisions);
+    }
+
+    [Fact]
+    public async Task Tool_enabled_provider_transport_requires_both_model_and_workspace_capability_pins()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create(toolEnabledProvider: true);
+        var capabilities = new StubEffectCapabilityAdmissionService
+        {
+            Result = new CapabilityRevalidationResult(true, fixture.Request.RequiredCapabilityPins, "Both provider requirements are current.", CapabilityRevalidationStatus.Active),
+        };
+        var direct = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
+            capabilities,
+            new RecordingEffectAuthorityEvidenceStore()).ExecuteAsync(fixture.Request, _ => Task.FromResult(true));
+
+        Assert.True(direct.CommitInvoked);
+        Assert.Equal(
+            [
+                GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId,
+                GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId,
+            ],
+            fixture.Request.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity.Id.Value));
+
+        var admitted = fixture.Request.RequiredAuthority;
+        var modelOnlyPin = fixture.Request.RequiredCapabilityPins[0];
+        var modelOnly = new GovernedLoopEffectAuthorityRequest(
+            fixture.Request.AdmissionReceipt,
+            fixture.Request.ExecutionBinding,
+            fixture.Request.GraphArtifact,
+            fixture.Request.NodeId,
+            fixture.Request.NodeAttempt,
+            fixture.Request.EffectOperationId,
+            fixture.Request.CorrelationId,
+            fixture.Request.BoundaryKind,
+            new AuthorityCeiling(
+                [modelOnlyPin.DescriptorIdentity],
+                admitted.DataClasses,
+                admitted.MaxTargetCount,
+                admitted.MaxSideEffectClass,
+                admitted.AllowsRecurrence,
+                admitted.AllowsExternalPublication,
+                admitted.AllowsIrreversibleAction),
+            [modelOnlyPin]);
+        var invalid = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
+            new StubEffectCapabilityAdmissionService(),
+            new RecordingEffectAuthorityEvidenceStore()).ExecuteAsync(modelOnly, _ => Task.FromResult(true));
+
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.InvalidRequest, invalid.Status);
+        Assert.False(invalid.CommitInvoked);
     }
 
     private static GovernedLoopEffectAuthorityBoundary Boundary(

@@ -105,6 +105,14 @@ public sealed class CustomLoopOrderedRunnerTests
 
         Assert.True(result.Status == CustomLoopOrderedRunStatus.Completed, result.Detail);
         Assert.Equal(["infer-01", "infer-02"], executor.Requests.Select(item => item.StepId));
+        Assert.All(executor.Requests, request =>
+        {
+            Assert.Equal(context.Anchor.AdapterBinding.AdmissionReceipt.ContentHash, request.AdmissionReceipt?.ContentHash);
+            Assert.Equal(context.Anchor.AdapterBinding.ExecutionBinding, request.ExecutionBinding);
+            Assert.Equal(context.Artifact.ArtifactHash, request.GraphArtifact?.ArtifactHash);
+            Assert.Equal(context.Artifact.LayoutHash, request.GraphArtifact?.LayoutHash);
+            Assert.Equal(context.Anchor.AdapterBinding.AdmissionReceipt.Evidence.CapabilityAdmission, request.CapabilityAdmission);
+        });
         Assert.Equal(["trigger", "infer-01", "infer-02", "exit"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
         Assert.Equal([0, 0, 1, 2], evidence.NextStepIndicesAtRetention);
         Assert.NotEqual(admitted.AdmissionRequestHash, context.Anchor.AdapterBinding.AdmissionRequestHash);

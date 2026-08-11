@@ -10,6 +10,8 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Execution.Authority;
+using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
@@ -18,6 +20,7 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
@@ -48,7 +51,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             });
 
         var first = await executor.ExecuteAsync(CreateRequest());
-        var second = await executor.ExecuteAsync(CreateRequest() with { Attempt = 2, AttemptCorrelationId = "attempt-2" });
+        var second = await executor.ExecuteAsync(CreateRequest(attempt: 2, attemptCorrelationId: "attempt-2"));
 
         Assert.Equal(2, clients.Count);
         Assert.NotSame(clients[0], clients[1]);
@@ -65,22 +68,360 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_keeps_exit_attempts_toolless()
+    public async Task ExecuteAsync_rejects_exit_attempts_before_constructing_provider_transport()
     {
         using var workspace = new TestWorkspace();
-        IToolBroker? observedBroker = null;
+        var factoryCalls = 0;
         var executor = CreateExecutor(workspace, (_, _, _) => Task.FromResult(Response()),
             (options, broker, behavior) =>
             {
-                observedBroker = broker;
+                factoryCalls++;
                 return new AsyncFakeInferenceClient(broker, behavior);
             });
         var request = CreateRequest() with { StepId = "exit", IsExit = true };
 
-        var result = await executor.ExecuteAsync(request);
+        var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() => executor.ExecuteAsync(request));
 
-        Assert.Null(observedBroker);
-        Assert.Equal(0, result.ToolRequestsConsumed);
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.InvalidRequest, exception.ExecutionStatus);
+        Assert.Equal(0, factoryCalls);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_fences_the_exact_server_derived_provider_operation_through_the_public_authority_boundary()
+    {
+        using var workspace = new TestWorkspace();
+        var boundary = new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.Direct);
+        var transportWrites = 0;
+        var providerStarts = 0;
+        var executor = CreateExecutor(
+            workspace,
+            (_, _, _) =>
+            {
+                transportWrites++;
+                return Task.FromResult(Response());
+            },
+            effectAuthorityBoundary: boundary);
+        var request = CreateRequest();
+
+        var result = await executor.ExecuteAsync(request, providerRequestStarted: () => providerStarts++);
+
+        Assert.Equal("done", result.OutputText);
+        var authorityRequest = Assert.Single(boundary.Requests);
+        Assert.Equal(request.RunId, authorityRequest.ExecutionBinding.RunId);
+        Assert.Equal(request.StepId, authorityRequest.NodeId);
+        Assert.Equal(request.Attempt, authorityRequest.NodeAttempt);
+        Assert.Equal(request.AttemptCorrelationId, authorityRequest.CorrelationId);
+        Assert.Equal(CanonicalInferenceAuthorityTestData.ProviderOperationId(request), authorityRequest.EffectOperationId);
+        Assert.Equal(GovernedLoopEffectBoundaryKind.ProviderTransport, authorityRequest.BoundaryKind);
+        Assert.Equal(
+            [CanonicalInferenceAuthorityTestData.ModelInferenceCapabilityId],
+            authorityRequest.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity.Id.Value));
+        Assert.Equal(authorityRequest.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity), authorityRequest.RequiredAuthority.Capabilities);
+        Assert.Equal(1, boundary.CommitInvocations);
+        Assert.Equal(1, transportWrites);
+        Assert.Equal(1, providerStarts);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_requires_model_and_workspace_pins_only_for_the_exact_tool_enabled_provider_node()
+    {
+        using var workspace = new TestWorkspace();
+        var boundary = new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.Direct);
+        var executor = CreateExecutor(
+            workspace,
+            (_, _, _) => Task.FromResult(Response()),
+            effectAuthorityBoundary: boundary);
+
+        await executor.ExecuteAsync(CreateRequest(
+            allowTools: true,
+            assignments: [CustomLoopToolAssignment.Read]));
+
+        var authorityRequest = Assert.Single(boundary.Requests);
+        Assert.Equal(
+            [
+                CanonicalInferenceAuthorityTestData.ModelInferenceCapabilityId,
+                CanonicalInferenceAuthorityTestData.WorkspaceCommandCapabilityId,
+            ],
+            authorityRequest.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity.Id.Value));
+        Assert.Equal(authorityRequest.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity), authorityRequest.RequiredAuthority.Capabilities);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_rejects_missing_partial_and_substituted_canonical_proof_before_transport_construction()
+    {
+        using var workspace = new TestWorkspace();
+        var factoryCalls = 0;
+        var boundary = new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.Direct);
+        var executor = CreateInjectedExecutor(
+            CreateOptions(workspace),
+            new RecordingApprovalPrompt(),
+            (_, _) =>
+            {
+                factoryCalls++;
+                return new AsyncFakeInferenceClient(null, (_, _, _) => Task.FromResult(Response()));
+            },
+            boundary);
+        var valid = CreateRequest();
+        var substitutedArtifact = CreateRequest(
+            allowTools: true,
+            assignments: [CustomLoopToolAssignment.Read]).GraphArtifact;
+        var candidates = new[]
+        {
+            valid with { AdmissionReceipt = null, ExecutionBinding = null, GraphArtifact = null },
+            valid with { ExecutionBinding = null, GraphArtifact = null },
+            valid with { GraphArtifact = substitutedArtifact },
+            valid with { AllowTools = true, AdmittedToolAssignments = [CustomLoopToolAssignment.Read] },
+        };
+
+        foreach (var candidate in candidates)
+        {
+            var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() => executor.ExecuteAsync(candidate));
+            Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.InvalidRequest, exception.ExecutionStatus);
+            Assert.Equal(GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown, exception.EvidenceStatus);
+            Assert.Null(exception.Decision);
+        }
+
+        Assert.Equal(0, factoryCalls);
+        Assert.Empty(boundary.Requests);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_rejects_canonical_proof_when_no_fresh_authority_boundary_was_composed()
+    {
+        using var workspace = new TestWorkspace();
+        var factoryCalls = 0;
+        var executor = new CustomLoopInferenceAttemptExecutor(
+            CreateOptions(workspace),
+            (IToolApprovalPrompt)new RecordingApprovalPrompt(),
+            new TestAuthorityProvider(),
+            new NullEvidenceSink(),
+            new TestCapabilityAdmissionService(),
+            (_, _) =>
+            {
+                factoryCalls++;
+                return new AsyncFakeInferenceClient(null, (_, _, _) => Task.FromResult(Response()));
+            },
+            capabilityAuthorityTransaction: null,
+            effectAuthorityBoundary: null);
+
+        var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() => executor.ExecuteAsync(CreateRequest()));
+
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable, exception.ExecutionStatus);
+        Assert.Equal(GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown, exception.EvidenceStatus);
+        Assert.Null(exception.Decision);
+        Assert.Equal(0, factoryCalls);
+    }
+
+    [Theory]
+    [InlineData(EffectBoundaryBehavior.Deny, GovernedLoopEffectAuthorityExecutionStatus.Decided, GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended, GovernedLoopEffectAuthorityDisposition.Deny)]
+    [InlineData(EffectBoundaryBehavior.Pause, GovernedLoopEffectAuthorityExecutionStatus.Decided, GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended, GovernedLoopEffectAuthorityDisposition.Pause)]
+    [InlineData(EffectBoundaryBehavior.Ambiguous, GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected, GovernedLoopEffectAuthorityEvidenceStoreStatus.Ambiguous, GovernedLoopEffectAuthorityDisposition.Pause)]
+    public async Task ExecuteAsync_propagates_typed_stopped_dispositions_without_provider_transport(
+        EffectBoundaryBehavior behavior,
+        GovernedLoopEffectAuthorityExecutionStatus expectedStatus,
+        GovernedLoopEffectAuthorityEvidenceStoreStatus expectedEvidence,
+        GovernedLoopEffectAuthorityDisposition expectedDisposition)
+    {
+        using var workspace = new TestWorkspace();
+        var transportWrites = 0;
+        var providerStarts = 0;
+        var boundary = new RecordingEffectAuthorityBoundary(behavior);
+        var executor = CreateExecutor(
+            workspace,
+            (_, _, _) =>
+            {
+                transportWrites++;
+                return Task.FromResult(Response());
+            },
+            effectAuthorityBoundary: boundary);
+
+        var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() =>
+            executor.ExecuteAsync(CreateRequest(), providerRequestStarted: () => providerStarts++));
+
+        Assert.Equal(expectedStatus, exception.ExecutionStatus);
+        Assert.Equal(expectedEvidence, exception.EvidenceStatus);
+        Assert.Equal(expectedDisposition, Assert.IsType<GovernedLoopEffectAuthorityDecision>(exception.Decision).Disposition);
+        Assert.Equal(0, boundary.CommitInvocations);
+        Assert.Equal(0, transportWrites);
+        Assert.Equal(0, providerStarts);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_authority_race_stops_after_client_creation_without_crossing_provider_transport()
+    {
+        using var workspace = new TestWorkspace();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var transportWrites = 0;
+        var clientConstructions = 0;
+        var boundary = new RecordingEffectAuthorityBoundary(
+            EffectBoundaryBehavior.Pause,
+            async cancellationToken =>
+            {
+                entered.TrySetResult();
+                await release.Task.WaitAsync(cancellationToken);
+            });
+        var executor = CreateExecutor(
+            workspace,
+            (_, _, _) =>
+            {
+                transportWrites++;
+                return Task.FromResult(Response());
+            },
+            (options, broker, behavior) =>
+            {
+                clientConstructions++;
+                return new AsyncFakeInferenceClient(broker, behavior);
+            },
+            effectAuthorityBoundary: boundary);
+
+        var execution = executor.ExecuteAsync(CreateRequest());
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, clientConstructions);
+        release.TrySetResult();
+        var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() => execution);
+
+        Assert.Equal(GovernedLoopEffectAuthorityDisposition.Pause, Assert.IsType<GovernedLoopEffectAuthorityDecision>(exception.Decision).Disposition);
+        Assert.Equal(0, boundary.CommitInvocations);
+        Assert.Equal(0, transportWrites);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_hostile_double_commit_cannot_duplicate_the_provider_transport_callback()
+    {
+        using var workspace = new TestWorkspace();
+        var transportWrites = 0;
+        var providerStarts = 0;
+        var boundary = new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.DoubleCommit);
+        var executor = CreateExecutor(
+            workspace,
+            (_, _, _) =>
+            {
+                transportWrites++;
+                return Task.FromResult(Response());
+            },
+            effectAuthorityBoundary: boundary);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            executor.ExecuteAsync(CreateRequest(), providerRequestStarted: () => providerStarts++));
+
+        Assert.Contains("exactly once", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(2, boundary.CommitInvocations);
+        Assert.Equal(1, transportWrites);
+        Assert.Equal(1, providerStarts);
+    }
+
+    [Theory]
+    [InlineData(EffectBoundaryBehavior.NullResult)]
+    [InlineData(EffectBoundaryBehavior.MalformedResult)]
+    public async Task ExecuteAsync_rejects_missing_or_malformed_boundary_results_without_provider_transport(
+        EffectBoundaryBehavior behavior)
+    {
+        using var workspace = new TestWorkspace();
+        var transportWrites = 0;
+        var providerStarts = 0;
+        var boundary = new RecordingEffectAuthorityBoundary(behavior);
+        var executor = CreateExecutor(
+            workspace,
+            (_, _, _) =>
+            {
+                transportWrites++;
+                return Task.FromResult(Response());
+            },
+            effectAuthorityBoundary: boundary);
+
+        var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() =>
+            executor.ExecuteAsync(CreateRequest(), providerRequestStarted: () => providerStarts++));
+
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable, exception.ExecutionStatus);
+        Assert.Equal(GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown, exception.EvidenceStatus);
+        Assert.Null(exception.Decision);
+        Assert.Equal(0, boundary.CommitInvocations);
+        Assert.Equal(0, transportWrites);
+        Assert.Equal(0, providerStarts);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_rejects_a_valid_stopped_decision_for_a_different_exact_request()
+    {
+        using var workspace = new TestWorkspace();
+        var transportWrites = 0;
+        var boundary = new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.MismatchedPause);
+        var executor = CreateExecutor(
+            workspace,
+            (_, _, _) =>
+            {
+                transportWrites++;
+                return Task.FromResult(Response());
+            },
+            effectAuthorityBoundary: boundary);
+
+        var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() => executor.ExecuteAsync(CreateRequest()));
+
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable, exception.ExecutionStatus);
+        Assert.Equal(GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown, exception.EvidenceStatus);
+        Assert.Null(exception.Decision);
+        Assert.Equal(0, boundary.CommitInvocations);
+        Assert.Equal(0, transportWrites);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_boundary_return_before_unawaited_callback_cancels_transport_before_write()
+    {
+        using var workspace = new TestWorkspace();
+        var transportEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var transportWrites = 0;
+        var providerStarts = 0;
+        var boundary = new RecordingEffectAuthorityBoundary(
+            EffectBoundaryBehavior.ReturnBeforeCommitCompletes,
+            afterCommitStarted: cancellationToken => transportEntered.Task.WaitAsync(cancellationToken));
+        var executor = CreateExecutor(
+            workspace,
+            async (_, _, cancellationToken) =>
+            {
+                transportEntered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                transportWrites++;
+                return Response();
+            },
+            effectAuthorityBoundary: boundary);
+
+        var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() =>
+            executor.ExecuteAsync(CreateRequest(), providerRequestStarted: () => providerStarts++));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(boundary.AwaitPendingCommitAsync);
+
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable, exception.ExecutionStatus);
+        Assert.Null(exception.Decision);
+        Assert.Equal(1, boundary.CommitInvocations);
+        Assert.Equal(0, transportWrites);
+        Assert.Equal(1, providerStarts);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_callback_captured_until_after_boundary_return_cannot_cross_provider_transport()
+    {
+        using var workspace = new TestWorkspace();
+        var transportWrites = 0;
+        var providerStarts = 0;
+        var boundary = new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.CaptureCommit);
+        var executor = CreateExecutor(
+            workspace,
+            (_, _, _) =>
+            {
+                transportWrites++;
+                return Task.FromResult(Response());
+            },
+            effectAuthorityBoundary: boundary);
+
+        var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() =>
+            executor.ExecuteAsync(CreateRequest(), providerRequestStarted: () => providerStarts++));
+        var callbackException = await Assert.ThrowsAsync<InvalidOperationException>(boundary.InvokeCapturedCommitAsync);
+
+        Assert.Contains("only while its authority boundary is open", callbackException.Message, StringComparison.Ordinal);
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable, exception.ExecutionStatus);
+        Assert.Equal(1, boundary.CommitInvocations);
+        Assert.Equal(0, transportWrites);
+        Assert.Equal(0, providerStarts);
     }
 
     [Fact]
@@ -392,7 +733,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var store = new CustomLoopRunStore(paths);
         var admitted = await CreateAdmittedRunAsync(store);
         var evidenceSink = new CustomLoopRunToolEvidenceSink(store);
-        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        var executor = new CanonicalProofAttemptExecutor(CreateExecutor(workspace, async (broker, _, cancellationToken) =>
         {
             Assert.NotNull(broker);
             for (var ordinal = 1; ordinal <= CustomLoopLimits.MaxGovernedToolRequestsPerAttempt; ordinal++)
@@ -414,7 +755,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
                 Path.Combine("system", "repeated.txt"),
                 CorrelationId: "provider-reused-attempt-correlation"), cancellationToken);
             return Response();
-        }, evidenceSink: evidenceSink);
+        }, evidenceSink: evidenceSink));
         var runner = new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, new PublishedConversation(), new AuditLog(paths), new TestAuthorityProvider(), capabilityAdmissionService: new TestCapabilityAdmissionService());
 
         var execution = await runner.RunAsync(new CustomLoopOrderedRunRequest(admitted.Id, "web"));
@@ -465,7 +806,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
                 CorrelationId: "provider-reused-correlation"), cancellationToken);
             return Response();
         }, evidenceSink: evidenceSink);
-        var executor = new RunLimitAttemptExecutor(inner);
+        var executor = new CanonicalProofAttemptExecutor(new RunLimitAttemptExecutor(inner));
         var runner = new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, new PublishedConversation(), new AuditLog(paths), new TestAuthorityProvider(), capabilityAdmissionService: new TestCapabilityAdmissionService());
 
         var execution = await runner.RunAsync(new CustomLoopOrderedRunRequest(admitted.Id, "web"));
@@ -527,18 +868,29 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_disposes_the_transport_when_inference_throws()
+    public async Task ExecuteAsync_marks_provider_started_inside_authority_commit_and_disposes_when_transport_write_fails()
     {
         using var workspace = new TestWorkspace();
+        var boundary = new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.Direct);
+        var transportWriteAttempts = 0;
         AsyncFakeInferenceClient? client = null;
-        var executor = CreateExecutor(workspace, (_, _, _) => throw new IOException("provider exploded"),
-            (options, broker, behavior) => client = new AsyncFakeInferenceClient(broker, behavior));
+        var executor = CreateExecutor(
+            workspace,
+            (_, _, _) =>
+            {
+                transportWriteAttempts++;
+                throw new IOException("provider exploded");
+            },
+            (options, broker, behavior) => client = new AsyncFakeInferenceClient(broker, behavior),
+            effectAuthorityBoundary: boundary);
 
         var providerRequestStarted = false;
         var exception = await Assert.ThrowsAsync<IOException>(() => executor.ExecuteAsync(CreateRequest(), providerRequestStarted: () => providerRequestStarted = true));
 
         Assert.Equal("provider exploded", exception.Message);
         Assert.True(providerRequestStarted);
+        Assert.Equal(1, boundary.CommitInvocations);
+        Assert.Equal(1, transportWriteAttempts);
         Assert.NotNull(client);
         Assert.True(client.Disposed);
     }
@@ -719,7 +1071,8 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Func<LlmInferenceClientOptions, IToolBroker?, Func<IToolBroker?, LlmInferenceRequest, CancellationToken, Task<LlmInferenceResponse>>, ILlmInferenceClient>? factory = null,
         RecordingApprovalPrompt? approvalPrompt = null,
         ICustomLoopToolEvidenceSink? evidenceSink = null,
-        ICustomLoopToolAuthorityProvider? authorityProvider = null)
+        ICustomLoopToolAuthorityProvider? authorityProvider = null,
+        IGovernedLoopEffectAuthorityBoundary? effectAuthorityBoundary = null)
     {
         var effectivePrompt = approvalPrompt ?? new RecordingApprovalPrompt();
         return new CustomLoopInferenceAttemptExecutor(
@@ -728,15 +1081,26 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             authorityProvider ?? new TestAuthorityProvider(),
             evidenceSink ?? new NullEvidenceSink(),
             new TestCapabilityAdmissionService(),
-            (options, broker) => factory?.Invoke(options, broker, behavior) ?? new AsyncFakeInferenceClient(broker, behavior));
+            (options, broker) => factory?.Invoke(options, broker, behavior) ?? new AsyncFakeInferenceClient(broker, behavior),
+            capabilityAuthorityTransaction: null,
+            effectAuthorityBoundary: effectAuthorityBoundary ?? new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.Direct));
     }
 
     private static CustomLoopInferenceAttemptExecutor CreateInjectedExecutor(
         LlmInferenceClientOptions options,
         RecordingApprovalPrompt approvalPrompt,
-        CustomLoopInferenceClientFactory clientFactory)
+        CustomLoopInferenceClientFactory clientFactory,
+        IGovernedLoopEffectAuthorityBoundary? effectAuthorityBoundary = null)
     {
-        return new CustomLoopInferenceAttemptExecutor(options, (IToolApprovalPrompt)approvalPrompt, new TestAuthorityProvider(), new NullEvidenceSink(), new TestCapabilityAdmissionService(), clientFactory);
+        return new CustomLoopInferenceAttemptExecutor(
+            options,
+            (IToolApprovalPrompt)approvalPrompt,
+            new TestAuthorityProvider(),
+            new NullEvidenceSink(),
+            new TestCapabilityAdmissionService(),
+            clientFactory,
+            capabilityAuthorityTransaction: null,
+            effectAuthorityBoundary: effectAuthorityBoundary ?? new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.Direct));
     }
 
     private static LlmInferenceClientOptions CreateOptions(TestWorkspace workspace)
@@ -752,27 +1116,15 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
 
     private static CustomLoopInferenceAttemptRequest CreateRequest(
         bool allowTools = false,
-        IReadOnlyList<CustomLoopToolAssignment>? assignments = null)
+        IReadOnlyList<CustomLoopToolAssignment>? assignments = null,
+        int attempt = 1,
+        string? attemptCorrelationId = null)
     {
-        return new CustomLoopInferenceAttemptRequest(
-            "run-1",
-            "loop-1",
-            "role-1",
-            1,
-            DefinitionHash,
-            1,
-            "step-one",
-            1,
-            "attempt-1",
-            IsExit: false,
-            AllowTools: allowTools,
-            new CustomLoopModelSnapshot("openai", "pinned-model"),
-            assignments ?? [],
-            ToolRequestsUsedInRun: 0,
-            LlmInferenceRequest.FromUserText("prompt"))
-        {
-            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(LoopCapabilityRequirements.CreateCustomLoopManifest("loop-1", assignments ?? []))
-        };
+        return CanonicalInferenceAuthorityTestData.Request(
+            allowTools,
+            assignments,
+            attempt,
+            attemptCorrelationId);
     }
 
     private static async Task<CustomLoopRunRecord> CreateAdmittedRunAsync(CustomLoopRunStore store)
@@ -1052,6 +1404,34 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         }
     }
 
+    private sealed class CanonicalProofAttemptExecutor(ICustomLoopInferenceAttemptExecutor inner) : ICustomLoopInferenceAttemptExecutor
+    {
+        public Task<CustomLoopInferenceAttemptResult> ExecuteAsync(
+            CustomLoopInferenceAttemptRequest request,
+            CancellationToken cancellationToken = default,
+            Action? providerRequestStarted = null)
+        {
+            var canonical = CanonicalInferenceAuthorityTestData.Request(
+                request.AllowTools,
+                request.AdmittedToolAssignments,
+                request.Attempt,
+                request.AttemptCorrelationId,
+                request.RunId,
+                request.LoopId,
+                request.RoleId);
+            return inner.ExecuteAsync(
+                request with
+                {
+                    CapabilityAdmission = canonical.CapabilityAdmission,
+                    AdmissionReceipt = canonical.AdmissionReceipt,
+                    ExecutionBinding = canonical.ExecutionBinding,
+                    GraphArtifact = canonical.GraphArtifact,
+                },
+                cancellationToken,
+                providerRequestStarted);
+        }
+    }
+
     private sealed class PublishedConversation : ICustomLoopConversationPublisher
     {
         public Task<CustomLoopConversationPublicationResult> PublishAsync(CustomLoopConversationPublicationRequest request, CancellationToken cancellationToken = default)
@@ -1061,6 +1441,191 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         }
     }
 
+    public enum EffectBoundaryBehavior
+    {
+        Direct,
+        Deny,
+        Pause,
+        Ambiguous,
+        DoubleCommit,
+        NullResult,
+        MalformedResult,
+        MismatchedPause,
+        ReturnBeforeCommitCompletes,
+        CaptureCommit,
+    }
+
+    private sealed class RecordingEffectAuthorityBoundary(
+        EffectBoundaryBehavior behavior,
+        Func<CancellationToken, Task>? beforeDecision = null,
+        Func<CancellationToken, Task>? afterCommitStarted = null) : IGovernedLoopEffectAuthorityBoundary
+    {
+        private readonly object _gate = new();
+        private readonly List<GovernedLoopEffectAuthorityRequest> _requests = [];
+        private int _commitInvocations;
+        private Func<CancellationToken, Task>? _capturedCommit;
+        private Task? _pendingCommit;
+
+        public IReadOnlyList<GovernedLoopEffectAuthorityRequest> Requests
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _requests.ToArray();
+                }
+            }
+        }
+
+        public int CommitInvocations => Volatile.Read(ref _commitInvocations);
+
+        public Task InvokeCapturedCommitAsync()
+            => (_capturedCommit ?? throw new InvalidOperationException("No provider commit callback was captured."))(CancellationToken.None);
+
+        public Task AwaitPendingCommitAsync()
+            => _pendingCommit ?? throw new InvalidOperationException("No provider commit callback is pending.");
+
+        public async Task<GovernedLoopEffectAuthorityExecutionResult<TResult>> ExecuteAsync<TResult>(
+            GovernedLoopEffectAuthorityRequest request,
+            Func<CancellationToken, Task<TResult>> commit,
+            CancellationToken cancellationToken = default)
+        {
+            lock (_gate)
+            {
+                _requests.Add(request);
+            }
+
+            if (beforeDecision is not null)
+            {
+                await beforeDecision(cancellationToken);
+            }
+
+            switch (behavior)
+            {
+                case EffectBoundaryBehavior.Direct:
+                    {
+                        Interlocked.Increment(ref _commitInvocations);
+                        var result = await commit(cancellationToken);
+                        return new GovernedLoopEffectAuthorityExecutionResult<TResult>(
+                            GovernedLoopEffectAuthorityExecutionStatus.Decided,
+                            CanonicalInferenceAuthorityTestData.Decision(
+                                request,
+                                GovernedLoopEffectAuthorityDisposition.Direct,
+                                GovernedLoopEffectAuthorityReason.ActiveExact,
+                                includeCurrentProof: true),
+                            GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
+                            CommitInvoked: true,
+                            result,
+                            "The exact direct decision committed provider transport.");
+                    }
+                case EffectBoundaryBehavior.DoubleCommit:
+                    {
+                        Interlocked.Increment(ref _commitInvocations);
+                        _ = await commit(cancellationToken);
+                        Interlocked.Increment(ref _commitInvocations);
+                        _ = await commit(cancellationToken);
+                        throw new Xunit.Sdk.XunitException("The hostile second commit unexpectedly crossed the executor boundary.");
+                    }
+                case EffectBoundaryBehavior.Deny:
+                    return Stopped<TResult>(
+                        request,
+                        GovernedLoopEffectAuthorityExecutionStatus.Decided,
+                        GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
+                        GovernedLoopEffectAuthorityDisposition.Deny,
+                        GovernedLoopEffectAuthorityReason.InvalidRequest,
+                        includeCurrentProof: false,
+                        "The exact provider effect was denied.");
+                case EffectBoundaryBehavior.Pause:
+                    return Stopped<TResult>(
+                        request,
+                        GovernedLoopEffectAuthorityExecutionStatus.Decided,
+                        GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
+                        GovernedLoopEffectAuthorityDisposition.Pause,
+                        GovernedLoopEffectAuthorityReason.GrantUnavailable,
+                        includeCurrentProof: false,
+                        "The exact provider effect was paused.");
+                case EffectBoundaryBehavior.Ambiguous:
+                    return Stopped<TResult>(
+                        request,
+                        GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected,
+                        GovernedLoopEffectAuthorityEvidenceStoreStatus.Ambiguous,
+                        GovernedLoopEffectAuthorityDisposition.Pause,
+                        GovernedLoopEffectAuthorityReason.EvidenceAmbiguous,
+                        includeCurrentProof: true,
+                        "Provider authority evidence was ambiguous.");
+                case EffectBoundaryBehavior.NullResult:
+                    return null!;
+                case EffectBoundaryBehavior.MalformedResult:
+                    return new GovernedLoopEffectAuthorityExecutionResult<TResult>(
+                        (GovernedLoopEffectAuthorityExecutionStatus)999,
+                        Decision: null,
+                        (GovernedLoopEffectAuthorityEvidenceStoreStatus)999,
+                        CommitInvoked: false,
+                        Result: default,
+                        "A hostile boundary returned unsupported protocol values.");
+                case EffectBoundaryBehavior.MismatchedPause:
+                    return Stopped<TResult>(
+                        request with { CorrelationId = "substituted-correlation" },
+                        GovernedLoopEffectAuthorityExecutionStatus.Decided,
+                        GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
+                        GovernedLoopEffectAuthorityDisposition.Pause,
+                        GovernedLoopEffectAuthorityReason.GrantUnavailable,
+                        includeCurrentProof: false,
+                        "A canonical decision belongs to a different exact request.");
+                case EffectBoundaryBehavior.ReturnBeforeCommitCompletes:
+                    Interlocked.Increment(ref _commitInvocations);
+                    _pendingCommit = commit(cancellationToken);
+                    if (afterCommitStarted is not null)
+                    {
+                        await afterCommitStarted(cancellationToken);
+                    }
+
+                    return new GovernedLoopEffectAuthorityExecutionResult<TResult>(
+                        GovernedLoopEffectAuthorityExecutionStatus.Decided,
+                        CanonicalInferenceAuthorityTestData.Decision(
+                            request,
+                            GovernedLoopEffectAuthorityDisposition.Direct,
+                            GovernedLoopEffectAuthorityReason.ActiveExact,
+                            includeCurrentProof: true),
+                        GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
+                        CommitInvoked: true,
+                        Result: default,
+                        "The hostile boundary returned before its callback completed.");
+                case EffectBoundaryBehavior.CaptureCommit:
+                    _capturedCommit = async token =>
+                    {
+                        Interlocked.Increment(ref _commitInvocations);
+                        _ = await commit(token);
+                    };
+                    return new GovernedLoopEffectAuthorityExecutionResult<TResult>(
+                        GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable,
+                        Decision: null,
+                        GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown,
+                        CommitInvoked: false,
+                        Result: default,
+                        "The boundary returned before invoking its captured callback.");
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(behavior), behavior, "Unsupported test boundary behavior.");
+            }
+        }
+
+        private static GovernedLoopEffectAuthorityExecutionResult<TResult> Stopped<TResult>(
+            GovernedLoopEffectAuthorityRequest request,
+            GovernedLoopEffectAuthorityExecutionStatus status,
+            GovernedLoopEffectAuthorityEvidenceStoreStatus evidenceStatus,
+            GovernedLoopEffectAuthorityDisposition disposition,
+            GovernedLoopEffectAuthorityReason reason,
+            bool includeCurrentProof,
+            string detail)
+            => new(
+                status,
+                CanonicalInferenceAuthorityTestData.Decision(request, disposition, reason, includeCurrentProof),
+                evidenceStatus,
+                CommitInvoked: false,
+                Result: default,
+                detail);
+    }
+
     private sealed class ThrowingDisposeInferenceClient : ILlmInferenceClient, IAsyncDisposable
     {
         public bool DisposeAttempted { get; private set; }
@@ -1068,6 +1633,23 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         public Task<LlmInferenceResponse> GenerateAsync(LlmInferenceRequest request, Func<string, CancellationToken, Task>? responseChunkHandler = null, CancellationToken cancellationToken = default)
         {
             return Task.FromResult(Response("completed"));
+        }
+
+        public async Task<LlmInferenceResponse> GenerateAsync(
+            LlmInferenceRequest request,
+            Func<string, CancellationToken, Task>? responseChunkHandler,
+            CancellationToken cancellationToken,
+            InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
+        {
+            LlmInferenceResponse? response = null;
+            await providerTransportCommitBoundary(
+                token =>
+                {
+                    response = Response("completed");
+                    return Task.CompletedTask;
+                },
+                cancellationToken);
+            return Assert.IsType<LlmInferenceResponse>(response);
         }
 
         public ValueTask DisposeAsync()
@@ -1091,6 +1673,19 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             return behavior(broker, request, cancellationToken);
         }
 
+        public async Task<LlmInferenceResponse> GenerateAsync(
+            LlmInferenceRequest request,
+            Func<string, CancellationToken, Task>? responseChunkHandler,
+            CancellationToken cancellationToken,
+            InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
+        {
+            LlmInferenceResponse? response = null;
+            await providerTransportCommitBoundary(
+                async token => response = await behavior(broker, request, token),
+                cancellationToken);
+            return Assert.IsType<LlmInferenceResponse>(response);
+        }
+
         public ValueTask DisposeAsync()
         {
             Disposed = true;
@@ -1110,6 +1705,23 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             return Task.FromResult(Response());
         }
 
+        public async Task<LlmInferenceResponse> GenerateAsync(
+            LlmInferenceRequest request,
+            Func<string, CancellationToken, Task>? responseChunkHandler,
+            CancellationToken cancellationToken,
+            InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
+        {
+            LlmInferenceResponse? response = null;
+            await providerTransportCommitBoundary(
+                token =>
+                {
+                    response = Response();
+                    return Task.CompletedTask;
+                },
+                cancellationToken);
+            return Assert.IsType<LlmInferenceResponse>(response);
+        }
+
         public void Dispose()
         {
             Disposed = true;
@@ -1124,6 +1736,15 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             CancellationToken cancellationToken = default)
         {
             return Task.FromResult(Response());
+        }
+
+        public Task<LlmInferenceResponse> GenerateAsync(
+            LlmInferenceRequest request,
+            Func<string, CancellationToken, Task>? responseChunkHandler,
+            CancellationToken cancellationToken,
+            InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
+        {
+            throw new Xunit.Sdk.XunitException("A non-disposable provider transport must be rejected before its authority boundary is entered.");
         }
     }
 }

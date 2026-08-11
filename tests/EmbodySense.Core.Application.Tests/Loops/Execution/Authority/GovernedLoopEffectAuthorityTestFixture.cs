@@ -24,24 +24,38 @@ internal static class GovernedLoopEffectAuthorityTestFixture
         AuthorityGrant Grant,
         AuthorityGrantResolution Resolution,
         CapabilityAdmissionPin RequiredPin,
-        CapabilityAdmissionPin? UnrelatedPin) Create(bool includeUnrelatedWorkspaceCapability = false)
+        CapabilityAdmissionPin? UnrelatedPin) Create(
+            bool includeUnrelatedCapability = false,
+            bool toolEnabledProvider = false,
+            bool includeUnrelatedAuthorityDimensions = false)
     {
-        var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(allowWorkspaceTools: includeUnrelatedWorkspaceCapability);
+        var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(allowWorkspaceTools: toolEnabledProvider);
         var requiredIdentity = AuthorityGrantApplicationTestFixture.Capability(GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId);
         var admittedIdentities = new List<CapabilityDescriptorIdentity> { requiredIdentity };
-        if (includeUnrelatedWorkspaceCapability)
+        if (toolEnabledProvider)
         {
             admittedIdentities.Add(AuthorityGrantApplicationTestFixture.Capability(GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId));
         }
 
+        if (includeUnrelatedCapability)
+        {
+            admittedIdentities.Add(AuthorityGrantApplicationTestFixture.Capability(GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId));
+        }
+
         var admittedCeiling = AuthorityGrantApplicationTestFixture.Ceiling(
             capabilities: admittedIdentities,
-            maxTargets: 1,
-            sideEffect: includeUnrelatedWorkspaceCapability ? CapabilitySideEffectClass.LocalReversible : CapabilitySideEffectClass.ReadOnly);
+            maxTargets: includeUnrelatedAuthorityDimensions ? 3 : 1,
+            sideEffect: includeUnrelatedAuthorityDimensions
+                ? CapabilitySideEffectClass.Irreversible
+                : toolEnabledProvider ? CapabilitySideEffectClass.LocalReversible : CapabilitySideEffectClass.ReadOnly,
+            recurrence: includeUnrelatedAuthorityDimensions,
+            publication: includeUnrelatedAuthorityDimensions,
+            irreversible: includeUnrelatedAuthorityDimensions);
+        var requiredIdentities = toolEnabledProvider ? admittedIdentities.Take(2).ToArray() : [requiredIdentity];
         var requiredCeiling = AuthorityGrantApplicationTestFixture.Ceiling(
-            capabilities: [requiredIdentity],
+            capabilities: requiredIdentities,
             maxTargets: 1,
-            sideEffect: CapabilitySideEffectClass.ReadOnly);
+            sideEffect: toolEnabledProvider ? CapabilitySideEffectClass.ReadOnly : CapabilitySideEffectClass.None);
         var profile = AuthorityGrantApplicationTestFixture.Profile(ceiling: admittedCeiling);
         var profilePin = new AuthorityGrantProfilePin(
             new AuthorityProfileReference(profile.ProfileId, profile.Revision),
@@ -127,7 +141,7 @@ internal static class GovernedLoopEffectAuthorityTestFixture
             "provider-correlation-1",
             GovernedLoopEffectBoundaryKind.ProviderTransport,
             requiredCeiling,
-            [pins[0]]);
+            pins.Where(pin => requiredIdentities.Contains(pin.DescriptorIdentity)).ToArray());
         var resolution = new AuthorityGrantResolution(
             AuthorityGrantResolutionStatus.Active,
             grantReference,
@@ -136,7 +150,10 @@ internal static class GovernedLoopEffectAuthorityTestFixture
             dependencyHash,
             Now,
             grant);
-        return (request, grant, resolution, pins[0], includeUnrelatedWorkspaceCapability ? pins[1] : null);
+        var unrelatedPin = includeUnrelatedCapability
+            ? pins.Single(pin => string.Equals(pin.DescriptorIdentity.Id.Value, GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, StringComparison.Ordinal))
+            : null;
+        return (request, grant, resolution, pins[0], unrelatedPin);
     }
 
     internal static AuthorityGrantReference Reference(AuthorityGrant grant) => new(grant.GrantId, grant.Revision, grant.ContentHash);
