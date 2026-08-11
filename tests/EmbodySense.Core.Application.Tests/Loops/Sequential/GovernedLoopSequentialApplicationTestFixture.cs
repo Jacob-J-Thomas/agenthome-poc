@@ -9,6 +9,7 @@ namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 
 internal static class GovernedLoopSequentialApplicationTestFixture
 {
+    internal const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     internal const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
 
     internal static readonly DateTimeOffset Now = new(2026, 8, 10, 22, 0, 0, TimeSpan.Zero);
@@ -68,7 +69,7 @@ internal static class GovernedLoopSequentialApplicationTestFixture
         owningRole ??= new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("sequential-role", 1), Hash('a'));
         valueSchemas ??= [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)];
         outputContract ??= new GovernedLoopOutputContract("Return the exact bounded result.", [new GovernedLoopOutputDefinition("result", "text", terminalNodeIds[0], "published-result", true)]);
-        authorityCeiling ??= GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]);
+        authorityCeiling ??= GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId]);
         var graph = GovernedLoopGraphDefinition.Create(
             1,
             "sequential-loop",
@@ -132,7 +133,7 @@ internal static class GovernedLoopSequentialApplicationTestFixture
                 Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
                 Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
             ],
-            GovernedLoopAuthorityCeiling.Create([]),
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]),
             new Dictionary<string, string>());
 
     internal static GovernedLoopGraphRevisionArtifact Rebuild(
