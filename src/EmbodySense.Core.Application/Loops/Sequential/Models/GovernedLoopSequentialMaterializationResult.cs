@@ -11,10 +11,4 @@ public sealed record GovernedLoopSequentialMaterializationResult(
     GovernedLoopSequentialMaterializationStatus Status,
     CustomLoopRunRecord? Run,
     GovernedLoopSequentialRunAnchor? Anchor,
-    string Detail)
-{
-    /// <summary>Gets whether the exact run has a durable admission-audit boundary and may be considered for lifecycle-aware execution.</summary>
-    public bool IsReady => (Status is GovernedLoopSequentialMaterializationStatus.Ready or GovernedLoopSequentialMaterializationStatus.Replayed)
-        && Run is not null
-        && CustomLoopRunValidator.HasCompleteAdmissionAudit(Run);
-}
+    string Detail);

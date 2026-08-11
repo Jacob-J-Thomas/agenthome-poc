@@ -17,8 +17,4 @@ public sealed record GovernedLoopSequentialInvocationResult(
     GovernedLoopSequentialMaterializationResult? Materialization,
     CustomLoopOrderedRunResult? Execution,
     CustomLoopRunRecord? Run,
-    string Detail)
-{
-    /// <summary>Gets whether the ordered runtime reported that a provider call occurred.</summary>
-    public bool ProviderWasInvoked => Execution?.ProviderWasInvoked == true;
-}
+    string Detail);

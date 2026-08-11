@@ -378,7 +378,7 @@ internal sealed class GovernedLoopRuntimeFacade : IDisposable
             result.Admission?.Outcome?.Rejection?.FailureCode.ToString(),
             result.Materialization?.Status.ToString(),
             result.Execution?.Status.ToString(),
-            result.ProviderWasInvoked,
+            result.ProviderWasInvoked(),
             result.Run is null ? null : CustomLoopRuntimeFacade.Map(result.Run),
             result.Detail);
 

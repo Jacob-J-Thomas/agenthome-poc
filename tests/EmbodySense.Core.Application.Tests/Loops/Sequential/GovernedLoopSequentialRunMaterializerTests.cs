@@ -41,7 +41,7 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         var result = await materializer.MaterializeAsync(context.Request);
 
         Assert.Equal(GovernedLoopSequentialMaterializationStatus.Ready, result.Status);
-        Assert.True(result.IsReady);
+        Assert.True(result.IsReady());
         var run = Assert.IsType<CustomLoopRunRecord>(result.Run);
         Assert.Equal(context.Receipt.Evidence.Binding.RunId, run.Id);
         Assert.Equal(context.Invocation.InvokingConversation, run.InvokingConversation);
@@ -82,7 +82,7 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
 
         var result = await CreateMaterializer(new RecordingRunStore(), new RecordingAuditRecorder()).MaterializeAsync(context.Request);
 
-        Assert.True(result.IsReady);
+        Assert.True(result.IsReady());
         var run = Assert.IsType<CustomLoopRunRecord>(result.Run);
         Assert.Equal(
             ["org.embodysense/conversation-turn", "org.embodysense/model-inference", "org.embodysense/workspace-command"],
@@ -110,7 +110,7 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
 
         Assert.Equal(GovernedLoopSequentialMaterializationStatus.Ready, first.Status);
         Assert.Equal(GovernedLoopSequentialMaterializationStatus.Replayed, replay.Status);
-        Assert.True(replay.IsReady);
+        Assert.True(replay.IsReady());
         Assert.Same(first.Run, replay.Run);
         Assert.Equal(1, store.CreateCallCount);
         Assert.Equal(1, store.UpdateCallCount);
@@ -129,7 +129,7 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         var result = await materializer.MaterializeAsync(context.Request);
 
         Assert.Equal(GovernedLoopSequentialMaterializationStatus.Replayed, result.Status);
-        Assert.True(result.IsReady);
+        Assert.True(result.IsReady());
         Assert.Equal(1, store.CreateCallCount);
         Assert.Equal(1, store.UpdateCallCount);
         Assert.Single(audit.Events);
@@ -148,10 +148,10 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         var reconciled = await materializer.MaterializeAsync(context.Request);
 
         Assert.Equal(GovernedLoopSequentialMaterializationStatus.AuditUnavailable, uncertain.Status);
-        Assert.False(uncertain.IsReady);
+        Assert.False(uncertain.IsReady());
         Assert.Single(Assert.IsType<CustomLoopRunRecord>(uncertain.Run).Events);
         Assert.Equal(GovernedLoopSequentialMaterializationStatus.Replayed, reconciled.Status);
-        Assert.True(reconciled.IsReady);
+        Assert.True(reconciled.IsReady());
         Assert.Equal(2, audit.RecordAttemptCount);
         Assert.Single(audit.Events);
         Assert.Equal(1, store.CreateCallCount);
@@ -169,7 +169,7 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         var result = await materializer.MaterializeAsync(context.Request);
 
         Assert.Equal(GovernedLoopSequentialMaterializationStatus.Replayed, result.Status);
-        Assert.True(result.IsReady);
+        Assert.True(result.IsReady());
         Assert.Single(audit.Events);
         Assert.Equal(1, store.UpdateCallCount);
         Assert.True(CustomLoopRunValidator.HasCompleteAdmissionAudit(result.Run));
@@ -187,9 +187,9 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         var reconciled = await materializer.MaterializeAsync(context.Request);
 
         Assert.Equal(GovernedLoopSequentialMaterializationStatus.AuditUnavailable, blocked.Status);
-        Assert.False(blocked.IsReady);
+        Assert.False(blocked.IsReady());
         Assert.Equal(GovernedLoopSequentialMaterializationStatus.Replayed, reconciled.Status);
-        Assert.True(reconciled.IsReady);
+        Assert.True(reconciled.IsReady());
         Assert.Equal(2, audit.RecordAttemptCount);
         Assert.Equal(2, store.UpdateCallCount);
     }
@@ -208,7 +208,7 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         var result = await CreateMaterializer(store, audit).MaterializeAsync(context.Request);
 
         Assert.Equal(expectedStatus, result.Status);
-        Assert.False(result.IsReady);
+        Assert.False(result.IsReady());
         Assert.Single(Assert.IsType<CustomLoopRunRecord>(result.Run).Events);
         Assert.Equal(0, store.UpdateCallCount);
         Assert.Empty(audit.Events);
@@ -234,8 +234,8 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
 
         Assert.Equal(GovernedLoopSequentialMaterializationStatus.Unavailable, createResult.Status);
         Assert.Equal(GovernedLoopSequentialMaterializationStatus.AuditUnavailable, markerResult.Status);
-        Assert.False(createResult.IsReady);
-        Assert.False(markerResult.IsReady);
+        Assert.False(createResult.IsReady());
+        Assert.False(markerResult.IsReady());
     }
 
     [Fact]
@@ -245,12 +245,12 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         var substituted = await ContextAsync(surface: "cli");
         var store = new RecordingRunStore();
         var materializer = CreateMaterializer(store, new RecordingAuditRecorder());
-        Assert.True((await materializer.MaterializeAsync(original.Request)).IsReady);
+        Assert.True((await materializer.MaterializeAsync(original.Request)).IsReady());
 
         var result = await materializer.MaterializeAsync(substituted.Request);
 
         Assert.Equal(GovernedLoopSequentialMaterializationStatus.Conflict, result.Status);
-        Assert.False(result.IsReady);
+        Assert.False(result.IsReady());
         Assert.Equal(1, store.CreateCallCount);
     }
 
@@ -296,7 +296,7 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         var result = await CreateMaterializer(store, audit).MaterializeAsync(context.Request);
 
         Assert.Equal(expectedStatus, result.Status);
-        Assert.False(result.IsReady);
+        Assert.False(result.IsReady());
         Assert.Empty(audit.Events);
         Assert.Equal(0, store.UpdateCallCount);
     }
