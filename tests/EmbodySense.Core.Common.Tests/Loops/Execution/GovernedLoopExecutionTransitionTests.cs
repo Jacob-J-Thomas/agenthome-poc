@@ -143,6 +143,29 @@ public sealed class GovernedLoopExecutionTransitionTests
         Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(completed, GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready)));
     }
 
+    [Fact]
+    public void Frontier_transition_freezes_workspace_graph_layout_and_admission_coordinates()
+    {
+        var binding = GovernedLoopExecutionTestFixture.Binding();
+        var currentNode = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Running, incomingEdgeIds: ["edge-a"]);
+        var current = GovernedLoopExecutionTestFixture.Frontier(binding, GovernedLoopFrontierStatus.Active, 1, [currentNode]);
+        var waitingNode = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Waiting, incomingEdgeIds: ["edge-a"]);
+        var valid = GovernedLoopExecutionTestFixture.Frontier(binding, GovernedLoopFrontierStatus.Waiting, 2, [waitingNode], GovernedLoopExecutionTestFixture.UpdatedAtUtc.AddMinutes(1));
+        var payload = GovernedLoopFrontierPayload.Create(1, valid.Payload.FrontierVersion, valid.Payload.ConcurrencyCeiling, valid.Payload.Status, valid.Payload.Nodes, valid.Payload.UpdatedAtUtc, string.Empty);
+        GovernedLoopFrontierPosture[] substitutions =
+        [
+            GovernedLoopFrontierPosture.Create(binding, "workspace-sha256:" + new string('9', 64), valid.GraphArtifactHash, valid.GraphLayoutHash, valid.AdmissionReceiptHash, payload),
+            GovernedLoopFrontierPosture.Create(binding, valid.WorkspaceId, new string('9', 64), valid.GraphLayoutHash, valid.AdmissionReceiptHash, payload),
+            GovernedLoopFrontierPosture.Create(binding, valid.WorkspaceId, valid.GraphArtifactHash, new string('9', 64), valid.AdmissionReceiptHash, payload),
+            GovernedLoopFrontierPosture.Create(binding, valid.WorkspaceId, valid.GraphArtifactHash, valid.GraphLayoutHash, new string('9', 64), payload),
+        ];
+
+        Assert.True(GovernedLoopExecutionValidator.ValidateTransition(current, valid).IsValid);
+        Assert.All(substitutions, candidate => Assert.Contains(
+            GovernedLoopExecutionValidator.ValidateTransition(current, candidate).Errors,
+            error => error.Code == GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged));
+    }
+
     [Theory]
     [InlineData(GovernedLoopFrontierStatus.Active, GovernedLoopNodeExecutionStatus.Running)]
     [InlineData(GovernedLoopFrontierStatus.Waiting, GovernedLoopNodeExecutionStatus.Waiting)]
@@ -169,7 +192,7 @@ public sealed class GovernedLoopExecutionTransitionTests
             binding,
             GovernedLoopFrontierStatus.Cancelled,
             2,
-            [running, GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "b")],
+            [running, GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Completed, "b", planOrdinal: 1)],
             GovernedLoopExecutionTestFixture.UpdatedAtUtc.AddMinutes(1));
 
         Assert.Contains(GovernedLoopExecutionValidator.ValidateTransition(current, rewritten).Errors, error => error.Code == GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged);

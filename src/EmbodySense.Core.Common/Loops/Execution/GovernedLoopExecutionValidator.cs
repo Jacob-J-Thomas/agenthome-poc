@@ -254,7 +254,19 @@ public static class GovernedLoopExecutionValidator
             return Result(errors);
         }
 
+        AppendErrors(GovernedLoopFrontierContractValidator.Validate(next), errors);
         RequireSameBinding(current.Binding, next.Binding, "$frontier.binding", errors);
+        if (current.SchemaVersion != next.SchemaVersion
+            || !string.Equals(current.WorkspaceId, next.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(current.GraphArtifactHash, next.GraphArtifactHash, StringComparison.Ordinal)
+            || !string.Equals(current.GraphLayoutHash, next.GraphLayoutHash, StringComparison.Ordinal)
+            || !string.Equals(current.AdmissionReceiptHash, next.AdmissionReceiptHash, StringComparison.Ordinal)
+            || current.Payload.SchemaVersion != next.Payload.SchemaVersion
+            || current.Payload.ConcurrencyCeiling != next.Payload.ConcurrencyCeiling)
+        {
+            Add(errors, GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged, "$frontier");
+        }
+
         if (next.Payload.FrontierVersion != current.Payload.FrontierVersion + 1)
         {
             Add(errors, GovernedLoopExecutionValidationErrorCode.InvalidSuccessorVersion, "$frontier.payload.frontierVersion");
@@ -448,11 +460,18 @@ public static class GovernedLoopExecutionValidator
 
     private static bool SameFrontier(GovernedLoopFrontierPosture current, GovernedLoopFrontierPosture next)
     {
-        return Equals(current.Binding, next.Binding)
+        return current.SchemaVersion == next.SchemaVersion
+            && string.Equals(current.WorkspaceId, next.WorkspaceId, StringComparison.Ordinal)
+            && Equals(current.Binding, next.Binding)
+            && string.Equals(current.GraphArtifactHash, next.GraphArtifactHash, StringComparison.Ordinal)
+            && string.Equals(current.GraphLayoutHash, next.GraphLayoutHash, StringComparison.Ordinal)
+            && string.Equals(current.AdmissionReceiptHash, next.AdmissionReceiptHash, StringComparison.Ordinal)
             && current.Payload.SchemaVersion == next.Payload.SchemaVersion
             && current.Payload.FrontierVersion == next.Payload.FrontierVersion
+            && current.Payload.ConcurrencyCeiling == next.Payload.ConcurrencyCeiling
             && current.Payload.Status == next.Payload.Status
             && current.Payload.UpdatedAtUtc == next.Payload.UpdatedAtUtc
+            && string.Equals(current.Payload.ContentHash, next.Payload.ContentHash, StringComparison.Ordinal)
             && SameNodeCollection(current.Payload.Nodes, next.Payload.Nodes);
     }
 
