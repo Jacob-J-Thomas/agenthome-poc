@@ -889,10 +889,10 @@ public sealed class GovernedLoopRuntimeTests
                     .OrderBy(item => item.Id.Value, StringComparer.Ordinal)
                     .ToArray(),
                 [],
-                0,
+                1,
                 CapabilitySideEffectClass.None,
                 false,
-                false,
+                true,
                 false);
 
         private static AuthorityCeiling EmptyCeiling()
