@@ -117,6 +117,22 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
     }
 
     [Fact]
+    public void Extra_graph_wide_authority_fails_closed_even_when_every_node_contract_is_exact()
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.LinearArtifact().Graph;
+        var artifact = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create(
+                [GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, "org.embodysense/workspace-read"]));
+
+        var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, result.Status);
+        Assert.Equal("$.graph.authorityCeiling", result.FailurePath);
+        Assert.Null(result.Plan);
+    }
+
+    [Fact]
     public void Substituted_schema_binding_and_output_contracts_fail_closed()
     {
         var source = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(2).Graph;
