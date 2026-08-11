@@ -126,7 +126,7 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task Trigger_worker_admission_uses_exact_revalidated_trigger_identity_instead_of_retained_chat_identity()
+    public async Task Trigger_worker_retains_exact_revalidated_identity_but_refuses_ambient_default_role_authority()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -159,8 +159,17 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(CustomLoopDefinitionStoreStatus.Created, created.Status);
         Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, audited);
         Assert.Equal(TriggerQueueAdmissionStatus.Queued, admission.Status);
-        Assert.True(entry.State == "Dispatched", $"state={entry.State}; outcome={entry.DispatchOutcome}; detail={entry.DispatchDetail}");
-        var run = await runtime.GetCustomLoopRunAsync(entry.GovernedRunId!);
+        Assert.Equal("NeedsReview", entry.State);
+        Assert.Equal("NeedsReview", entry.DispatchOutcome);
+        Assert.Contains("ProviderDispatched=False", entry.DispatchDetail, StringComparison.Ordinal);
+        Assert.Null(entry.GovernedRunId);
+        var run = await new CustomLoopRunStore(paths).GetByAdmissionOperationAsync(entry.DispatchOperationId!);
+        Assert.NotNull(run);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, run.Status);
+        Assert.DoesNotContain(run.Events, runEvent => runEvent.Kind == CustomLoopRunEventKind.NodeAttemptCompleted);
+        Assert.DoesNotContain(run.Events, runEvent => runEvent.Kind is CustomLoopRunEventKind.ToolRequestReserved
+            or CustomLoopRunEventKind.ToolGovernanceDecided
+            or CustomLoopRunEventKind.ToolOutcomeObserved);
         Assert.Equal(exactTriggerActorContext.ActorId.Value, run!.AdmissionActor);
         Assert.Equal(exactTriggerActorContext.SurfaceId, run.Surface);
         Assert.Equal(exactTriggerActorContext.RoleId, run.AdmittedDefinition.RoleId);
