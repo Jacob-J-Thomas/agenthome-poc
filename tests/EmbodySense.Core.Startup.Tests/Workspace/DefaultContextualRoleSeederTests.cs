@@ -34,7 +34,7 @@ public sealed class DefaultContextualRoleSeederTests
         Assert.True(ContextualRoleRevisionContentHash.Matches(revision));
         Assert.Equal(ContextualRoleStatus.Published, revision.Status);
         Assert.Equal("embodysense-initializer", revision.Provenance.AuthorId);
-        Assert.Equal([workspaceId], revision.WorkspaceApplicability.WorkspaceIds);
+        Assert.Equal(workspaceId, Assert.Single(revision.WorkspaceApplicability.WorkspaceIds));
         Assert.Equal(ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, revision.InstructionSource.Kind);
         Assert.Equal("role", revision.InstructionSource.ReferenceId);
         Assert.Equal(ContextualRoleInstructionClassification.RoleInstruction, revision.InstructionSource.Classification);

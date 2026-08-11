@@ -194,7 +194,7 @@ public sealed class WorkspaceInitializerTests
         Assert.Equal(ContextualRoleRevisionReadStatus.Found, revisionRead.Status);
         Assert.Equal(ContextualRoleRevisionDisposition.Active, revisionRead.Disposition);
         Assert.Equal(ContextualRoleStatus.Published, revisionRead.Revision!.Status);
-        Assert.Equal([workspaceId], revisionRead.Revision.WorkspaceApplicability.WorkspaceIds);
+        Assert.Equal(workspaceId, Assert.Single(revisionRead.Revision.WorkspaceApplicability.WorkspaceIds));
         Assert.Equal(ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, revisionRead.Revision.InstructionSource.Kind);
         Assert.Equal("role", revisionRead.Revision.InstructionSource.ReferenceId);
         Assert.Equal(ContextualRoleLifecycleReadStatus.Found, lifecycleRead.Status);
