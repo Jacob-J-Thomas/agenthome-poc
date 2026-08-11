@@ -28,8 +28,31 @@ public static class CustomLoopSequentialNodeEvidenceHash
         writer.WriteString("executableHash", evidence.Revision.ExecutableHash);
         writer.WriteEndObject();
         writer.WriteNumber("executionGeneration", evidence.ExecutionGeneration);
+        writer.WriteNumber("activationOrdinal", evidence.ActivationOrdinal);
+        writer.WriteNumber("visitOrdinal", evidence.VisitOrdinal);
         writer.WriteString("nodeId", evidence.NodeId);
         writer.WriteNumber("attempt", evidence.Attempt);
+        writer.WriteString("cycleId", evidence.CycleId);
+        if (evidence.CycleIteration is { } cycleIteration)
+        {
+            writer.WriteNumber("cycleIteration", cycleIteration);
+        }
+        else
+        {
+            writer.WriteNull("cycleIteration");
+        }
+
+        if (evidence.ControlOutcome is { } controlOutcome)
+        {
+            writer.WriteString("controlOutcome", ToCanonical(controlOutcome));
+        }
+        else
+        {
+            writer.WriteNull("controlOutcome");
+        }
+
+        WriteIdentifiers(writer, "selectedControlEdgeIds", evidence.SelectedControlEdgeIds);
+        WriteIdentifiers(writer, "skippedControlEdgeIds", evidence.SkippedControlEdgeIds);
         writer.WriteString("disposition", ToCanonical(evidence.Disposition));
         writer.WriteString("outcomeArtifactHash", evidence.OutcomeArtifactHash);
         writer.WriteEndObject();
@@ -85,4 +108,30 @@ public static class CustomLoopSequentialNodeEvidenceHash
             CustomLoopSequentialNodeDisposition.NeedsReview => "needs-review",
             _ => throw new ArgumentOutOfRangeException(nameof(disposition)),
         };
+
+    private static string ToCanonical(GovernedLoopControlCondition condition)
+        => condition switch
+        {
+            GovernedLoopControlCondition.Always => "always",
+            GovernedLoopControlCondition.Success => "success",
+            GovernedLoopControlCondition.Failure => "failure",
+            GovernedLoopControlCondition.True => "true",
+            GovernedLoopControlCondition.False => "false",
+            GovernedLoopControlCondition.Timeout => "timeout",
+            GovernedLoopControlCondition.Approved => "approved",
+            GovernedLoopControlCondition.Rejected => "rejected",
+            _ => throw new ArgumentOutOfRangeException(nameof(condition)),
+        };
+
+    private static void WriteIdentifiers(Utf8JsonWriter writer, string propertyName, IEnumerable<string> values)
+    {
+        writer.WritePropertyName(propertyName);
+        writer.WriteStartArray();
+        foreach (var value in values)
+        {
+            writer.WriteStringValue(value);
+        }
+
+        writer.WriteEndArray();
+    }
 }
