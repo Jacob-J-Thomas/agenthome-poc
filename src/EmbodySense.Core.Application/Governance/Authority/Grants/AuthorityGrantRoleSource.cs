@@ -134,7 +134,11 @@ public sealed class AuthorityGrantRoleSource : IAuthorityGrantRoleSource
 
         if (lifecycleRead.Status == ContextualRoleLifecycleReadStatus.NotFound && lifecycleRead.Snapshot is null)
         {
-            return Result(AuthorityGrantDependencyStatus.NotFound, pin);
+            return Result(
+                revisionRead.Disposition == ContextualRoleRevisionDisposition.Replaced
+                    ? AuthorityGrantDependencyStatus.Ambiguous
+                    : AuthorityGrantDependencyStatus.NotFound,
+                pin);
         }
 
         if (lifecycleRead.Status == ContextualRoleLifecycleReadStatus.Unavailable && lifecycleRead.Snapshot is null)
@@ -150,9 +154,9 @@ public sealed class AuthorityGrantRoleSource : IAuthorityGrantRoleSource
 
         if (revisionRead.Disposition == ContextualRoleRevisionDisposition.Replaced)
         {
-            return Equals(lifecycle!.CurrentIdentity, pin.Identity)
-                ? Result(AuthorityGrantDependencyStatus.Ambiguous, pin)
-                : Resolved(AuthorityGrantDependencyStatus.Stale, pin, revision, lifecycle, ContextualRoleInstructionSourceProbeStatus.Unknown);
+            return lifecycle!.CurrentIdentity.Revision > pin.Identity.Revision
+                ? Resolved(AuthorityGrantDependencyStatus.Stale, pin, revision, lifecycle, ContextualRoleInstructionSourceProbeStatus.Unknown)
+                : Result(AuthorityGrantDependencyStatus.Ambiguous, pin);
         }
 
         if (!Equals(lifecycle!.CurrentIdentity, pin.Identity))

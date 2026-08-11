@@ -300,6 +300,40 @@ public sealed class AuthorityGrantDependencySourceTests
     }
 
     [Fact]
+    public async Task Role_source_rejects_missing_or_regressed_lifecycle_after_a_found_replaced_revision()
+    {
+        var role = ContextualRoleRevisionContentHash.Apply(AuthorityGrantApplicationTestFixture.Role() with
+        {
+            Identity = new ContextualRoleRevisionIdentity("reviewer", 2),
+        });
+        var pin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
+        var ports = new RolePorts
+        {
+            RevisionResult = new(ContextualRoleRevisionReadStatus.Found, role, ContextualRoleRevisionDisposition.Replaced, []),
+            LifecycleResult = new(ContextualRoleLifecycleReadStatus.NotFound, null),
+        };
+        var source = RoleSource(ports);
+
+        var missing = await source.ResolveAsync(pin);
+        ports.LifecycleResult = new(ContextualRoleLifecycleReadStatus.Found, AuthorityGrantApplicationTestFixture.RoleLifecycle(role) with
+        {
+            CurrentIdentity = new(role.Identity.RoleId, role.Identity.Revision - 1),
+            LastOperationId = "replace-role",
+            LastMutationKind = ContextualRoleRevisionMutationKind.Replace,
+        });
+        var regressed = await source.ResolveAsync(pin);
+
+        Assert.Equal(AuthorityGrantDependencyStatus.Ambiguous, missing.Status);
+        Assert.Equal(AuthorityGrantDependencyStatus.Ambiguous, regressed.Status);
+        Assert.Null(missing.Revision);
+        Assert.Null(missing.Lifecycle);
+        Assert.Null(regressed.Revision);
+        Assert.Null(regressed.Lifecycle);
+        Assert.Equal(2, ports.LifecycleReads);
+        Assert.Equal(0, ports.SourceReads);
+    }
+
+    [Fact]
     public async Task Role_source_requires_canonical_bounded_operation_evidence_and_exact_shapes()
     {
         var role = AuthorityGrantApplicationTestFixture.Role();
