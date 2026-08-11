@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
+using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Memory.Models;
 using System.Buffers;
 using System.Globalization;
@@ -124,6 +125,11 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
                         token);
                 },
                 cancellationToken);
+
+            if (commit.Failure is GovernedLoopEffectAuthorityStoppedException stopped)
+            {
+                throw stopped;
+            }
 
             if (commit.Status != ConversationPublicationCommitProtocolStatus.Completed)
             {
