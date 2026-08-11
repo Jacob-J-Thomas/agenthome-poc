@@ -473,19 +473,43 @@ internal static class GovernedLoopRuntimeTests
         foreach (var (expected, actual) in frontier.Payload.Nodes.Zip(snapshot.Nodes))
         {
             Assert.Equal(expected.SchemaVersion, actual.SchemaVersion);
+            Assert.Equal(expected.ActivationOrdinal, actual.ActivationOrdinal);
             Assert.Equal(expected.PlanOrdinal, actual.PlanOrdinal);
+            Assert.Equal(expected.VisitOrdinal, actual.VisitOrdinal);
             Assert.Equal(expected.NodeId, actual.NodeId);
             Assert.Equal(expected.Descriptor.Kind.ToString(), actual.Kind);
             Assert.Equal(expected.Descriptor.TypeId, actual.TypeId);
             Assert.Equal(expected.Descriptor.Version, actual.DescriptorVersion);
             Assert.Equal(expected.IncomingControlEdgeIds, actual.IncomingControlEdgeIds);
             Assert.Equal(expected.OutgoingControlEdgeIds, actual.OutgoingControlEdgeIds);
+            Assert.Equal(expected.CycleId, actual.CycleId);
+            Assert.Equal(expected.CycleIteration, actual.CycleIteration);
+            Assert.Equal(expected.ControlOutcome?.ToString(), actual.ControlOutcome);
+            Assert.Equal(expected.SelectedControlEdgeIds, actual.SelectedControlEdgeIds);
+            Assert.Equal(expected.SkippedControlEdgeIds, actual.SkippedControlEdgeIds);
+            Assert.Equal(expected.JoinArrivals.Count, actual.JoinArrivals.Count);
+            foreach (var (expectedArrival, actualArrival) in expected.JoinArrivals.Zip(actual.JoinArrivals))
+            {
+                Assert.Equal(expectedArrival.SchemaVersion, actualArrival.SchemaVersion);
+                Assert.Equal(expectedArrival.ControlEdgeId, actualArrival.ControlEdgeId);
+                Assert.Equal(expectedArrival.SourceActivationOrdinal, actualArrival.SourceActivationOrdinal);
+            }
+
             Assert.Equal(expected.Status.ToString(), actual.Status);
             Assert.Equal(expected.Attempt, actual.Attempt);
             Assert.Equal(expected.AttemptOperationId, actual.AttemptOperationId);
             Assert.Equal(expected.OutcomeEvidenceId, actual.OutcomeEvidenceId);
             Assert.Equal(expected.OutcomeEvidenceHash, actual.OutcomeEvidenceHash);
+
+            Assert.Throws<NotSupportedException>(() => ((IList<string>)actual.IncomingControlEdgeIds).Add("substituted-incoming"));
+            Assert.Throws<NotSupportedException>(() => ((IList<string>)actual.OutgoingControlEdgeIds).Add("substituted-outgoing"));
+            Assert.Throws<NotSupportedException>(() => ((IList<string>)actual.SelectedControlEdgeIds).Add("substituted-selected"));
+            Assert.Throws<NotSupportedException>(() => ((IList<string>)actual.SkippedControlEdgeIds).Add("substituted-skipped"));
+            Assert.Throws<NotSupportedException>(() => ((IList<LoopRunFrontierJoinArrivalSnapshot>)actual.JoinArrivals).Add(
+                new LoopRunFrontierJoinArrivalSnapshot(1, "substituted-arrival", 0)));
         }
+
+        Assert.Throws<NotSupportedException>(() => ((IList<LoopRunFrontierNodeSnapshot>)snapshot.Nodes).Add(snapshot.Nodes[0]));
     }
 
     private static string Hash64(char value) => new(value, 64);

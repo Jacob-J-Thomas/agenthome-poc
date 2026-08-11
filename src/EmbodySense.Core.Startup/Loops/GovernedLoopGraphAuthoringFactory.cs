@@ -12,6 +12,34 @@ namespace EmbodySense.Core.Startup.Loops;
 /// <summary>Composes canonical governed-loop graph authoring over one workspace authority boundary.</summary>
 public static class GovernedLoopGraphAuthoringFactory
 {
+    /// <summary>Creates workspace-bound graph authoring with the exact built-in executable-node catalog and production trust root.</summary>
+    /// <param name="paths">The initialized workspace paths.</param>
+    /// <param name="authorityProvider">The current role-authority snapshot provider.</param>
+    /// <param name="actorAuthorizer">The server-owned lifecycle actor authorizer.</param>
+    /// <param name="timeProvider">The trusted clock, or the system clock when omitted.</param>
+    /// <returns>The fully composed surface-neutral graph authoring service.</returns>
+    /// <remarks>
+    /// Composition is inert until the returned service receives an authoring request. The catalog is an immutable
+    /// composition of the Application-owned pure and topology contracts plus the exact runtime baseline descriptors.
+    /// </remarks>
+    public static GovernedLoopGraphAuthoringService Create(
+        WorkspacePaths paths,
+        IGovernedLoopAuthoritySnapshotProvider authorityProvider,
+        IGovernedLoopRevisionActorAuthorizer actorAuthorizer,
+        TimeProvider? timeProvider = null)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(authorityProvider);
+        ArgumentNullException.ThrowIfNull(actorAuthorizer);
+        return Create(
+            paths,
+            FileCapabilityCatalogTrustProvider.CreateDefault(),
+            new BuiltInGovernedLoopNodeCatalog(),
+            authorityProvider,
+            actorAuthorizer,
+            timeProvider);
+    }
+
     /// <summary>Creates workspace-bound graph authoring with the production server-owned trust root.</summary>
     /// <param name="paths">The initialized workspace paths.</param>
     /// <param name="nodeCatalog">The current exact executable-node catalog.</param>
@@ -35,6 +63,33 @@ public static class GovernedLoopGraphAuthoringFactory
             paths,
             FileCapabilityCatalogTrustProvider.CreateDefault(),
             nodeCatalog,
+            authorityProvider,
+            actorAuthorizer,
+            timeProvider);
+    }
+
+    /// <summary>Creates workspace-bound graph authoring with the exact built-in executable-node catalog and an explicit trust provider.</summary>
+    /// <param name="paths">The initialized workspace paths.</param>
+    /// <param name="trustProvider">The server-owned trust provider outside mutable workspace storage.</param>
+    /// <param name="authorityProvider">The current role-authority snapshot provider.</param>
+    /// <param name="actorAuthorizer">The server-owned lifecycle actor authorizer.</param>
+    /// <param name="timeProvider">The trusted clock, or the system clock when omitted.</param>
+    /// <returns>The fully composed surface-neutral graph authoring service.</returns>
+    public static GovernedLoopGraphAuthoringService Create(
+        WorkspacePaths paths,
+        ICapabilityCatalogTrustProvider trustProvider,
+        IGovernedLoopAuthoritySnapshotProvider authorityProvider,
+        IGovernedLoopRevisionActorAuthorizer actorAuthorizer,
+        TimeProvider? timeProvider = null)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(trustProvider);
+        ArgumentNullException.ThrowIfNull(authorityProvider);
+        ArgumentNullException.ThrowIfNull(actorAuthorizer);
+        return Create(
+            paths,
+            trustProvider,
+            new BuiltInGovernedLoopNodeCatalog(),
             authorityProvider,
             actorAuthorizer,
             timeProvider);

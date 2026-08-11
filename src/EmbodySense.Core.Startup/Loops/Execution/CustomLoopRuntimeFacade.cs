@@ -1496,20 +1496,33 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             frontier.Payload.Status.ToString(),
             frontier.Payload.UpdatedAtUtc,
             frontier.Payload.ContentHash,
-            frontier.Payload.Nodes.Select(node => new LoopRunFrontierNodeSnapshot(
+            Array.AsReadOnly(frontier.Payload.Nodes.Select(node => new LoopRunFrontierNodeSnapshot(
                 node.SchemaVersion,
                 node.PlanOrdinal,
                 node.NodeId,
                 node.Descriptor.Kind.ToString(),
                 node.Descriptor.TypeId,
                 node.Descriptor.Version,
-                node.IncomingControlEdgeIds.ToArray(),
-                node.OutgoingControlEdgeIds.ToArray(),
+                Array.AsReadOnly(node.IncomingControlEdgeIds.ToArray()),
+                Array.AsReadOnly(node.OutgoingControlEdgeIds.ToArray()),
                 node.Status.ToString(),
                 node.Attempt,
                 node.AttemptOperationId,
                 node.OutcomeEvidenceId,
-                node.OutcomeEvidenceHash)).ToArray());
+                node.OutcomeEvidenceHash)
+            {
+                ActivationOrdinal = node.ActivationOrdinal,
+                VisitOrdinal = node.VisitOrdinal,
+                CycleId = node.CycleId,
+                CycleIteration = node.CycleIteration,
+                ControlOutcome = node.ControlOutcome?.ToString(),
+                SelectedControlEdgeIds = Array.AsReadOnly(node.SelectedControlEdgeIds.ToArray()),
+                SkippedControlEdgeIds = Array.AsReadOnly(node.SkippedControlEdgeIds.ToArray()),
+                JoinArrivals = Array.AsReadOnly(node.JoinArrivals.Select(arrival => new LoopRunFrontierJoinArrivalSnapshot(
+                    arrival.SchemaVersion,
+                    arrival.ControlEdgeId,
+                    arrival.SourceActivationOrdinal)).ToArray()),
+            }).ToArray()));
     }
 
     private static LoopRunMessageSnapshot Map(CustomLoopMessageSnapshot message)

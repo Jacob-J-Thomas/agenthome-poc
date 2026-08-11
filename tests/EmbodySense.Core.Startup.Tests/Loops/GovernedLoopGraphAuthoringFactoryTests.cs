@@ -26,8 +26,9 @@ namespace EmbodySense.Core.Startup.Tests.Loops;
 
 public sealed class GovernedLoopGraphAuthoringFactoryTests
 {
-    private const string ModelInferenceCapabilityId = "org.embodysense/model/inference";
-    private const string WorkspaceReadCapabilityId = "org.embodysense/workspace/read";
+    private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
+    private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const string WorkspaceReadCapabilityId = "org.embodysense/workspace-read";
     private static readonly DateTimeOffset _now = DateTimeOffset.Parse("2026-08-10T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
     private static readonly string _workspaceId = "workspace-sha256:" + new string('a', ContextualRoleLimits.Sha256HexCharacters);
 
@@ -161,12 +162,153 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
 
         var service = GovernedLoopGraphAuthoringFactory.Create(
             paths,
-            new UnusedNodeCatalog(),
             new UnusedAuthorityProvider(),
             new UnusedActorAuthorizer());
 
         Assert.NotNull(service);
         Assert.False(Directory.Exists(paths.AgentPath));
+    }
+
+    [Fact]
+    public async Task Built_in_catalog_admits_representative_linear_pure_topology_and_bounded_cycle_graphs()
+    {
+        var candidates = new (string Name, GovernedLoopGraphCandidate Candidate)[]
+        {
+            ("linear", Candidate()),
+            ("transform", IdentityTransformCandidate()),
+            ("validate", SchemaConformanceCandidate()),
+            ("condition-join", ConditionJoinCandidate()),
+            ("bounded-cycle", BoundedCycleCandidate()),
+        };
+
+        foreach (var (name, candidate) in candidates)
+        {
+            var result = await AuthorWithBuiltInCatalogAsync(candidate);
+
+            Assert.True(
+                result.Status == GovernedLoopGraphAuthoringStatus.Committed,
+                $"The built-in catalog rejected the {name} graph:{Environment.NewLine}{string.Join(Environment.NewLine, result.GraphValidationErrors.Select(error => $"{error.Code}: {error.Element.Path}"))}");
+            Assert.Matches("^[0-9a-f]{64}$", result.GraphValidationEvidenceHash);
+        }
+    }
+
+    [Fact]
+    public async Task Built_in_catalog_snapshot_has_one_deterministic_full_contract_hash()
+    {
+        var first = await AuthorWithBuiltInCatalogAsync(Candidate());
+        var second = await AuthorWithBuiltInCatalogAsync(Candidate());
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, first.Status);
+        Assert.Equal(first.GraphValidationEvidenceHash, second.GraphValidationEvidenceHash);
+        Assert.Equal("c4f9605552bbdacfaf7cb49ce0eff286474620fa0919b2dd4bda691b8ee1b7a8", first.GraphValidationEvidenceHash);
+    }
+
+    [Fact]
+    public async Task Built_in_baseline_catalog_pins_ports_parameters_capabilities_and_zero_pricing()
+    {
+        var linear = Candidate();
+        var portMismatch = linear with
+        {
+            Nodes = linear.Nodes!.Select(node => node!.Id == "trigger"
+                ? node with
+                {
+                    Ports = node.Ports.Select(port => port.Id == "request" ? port with { Required = false } : port).ToArray(),
+                }
+                : node).ToArray(),
+        };
+        var missingInstruction = linear with
+        {
+            Nodes = linear.Nodes!.Select(node => node!.Id == "infer"
+                ? node with { Parameters = new Dictionary<string, string>() }
+                : node).ToArray(),
+        };
+        var missingExitCapability = linear with
+        {
+            Nodes = linear.Nodes!.Select(node => node!.Id == "exit"
+                ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([]) }
+                : node).ToArray(),
+        };
+
+        var portResult = await AuthorWithBuiltInCatalogAsync(portMismatch);
+        var parameterResult = await AuthorWithBuiltInCatalogAsync(missingInstruction);
+        var capabilityResult = await AuthorWithBuiltInCatalogAsync(missingExitCapability);
+        var zeroPricingResult = await AuthorWithBuiltInCatalogAsync(linear, Authority() with
+        {
+            MaxAttempts = 0,
+            MaxPayloadCharacters = 0,
+            MaxEvidenceItems = 0,
+            MaxResourceUnits = 0,
+        });
+
+        Assert.Contains(portResult.GraphValidationErrors, error => error.Code == "node.port-contract.incompatible" && error.Element.Id == "trigger.request");
+        Assert.Contains(parameterResult.GraphValidationErrors, error => error.Code == "node.parameter.required" && error.Element.Id == "infer");
+        Assert.Contains(capabilityResult.GraphValidationErrors, error => error.Code == "node.authority.missing-capability" && error.Element.Id == "exit");
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, zeroPricingResult.Status);
+    }
+
+    [Fact]
+    public async Task Built_in_topology_catalog_rejects_over_limit_cycle_budget()
+    {
+        var candidate = BoundedCycleCandidate();
+        candidate = candidate with
+        {
+            Nodes = candidate.Nodes!.Select(node => node!.Id == "condition"
+                ? node with
+                {
+                    Parameters = new Dictionary<string, string>(node.Parameters, StringComparer.Ordinal)
+                    {
+                        [GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter] =
+                            (CustomLoopLimits.MaxGraphCycleIterations + 1).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    },
+                }
+                : node).ToArray(),
+        };
+
+        var result = await AuthorWithBuiltInCatalogAsync(candidate);
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.ValidationRejected, result.Status);
+        Assert.Contains(result.GraphValidationErrors, error => error.Code == "node.parameter.incompatible" || error.Code == "node.cycle.iteration-budget");
+    }
+
+    [Fact]
+    public async Task Explicit_catalog_remains_authoritative_without_built_in_fallback()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var catalog = new RecordingNodeCatalog(new GovernedLoopNodeCatalogSnapshot(true, "explicit-empty-catalog", []));
+        var service = GovernedLoopGraphAuthoringFactory.Create(
+            paths,
+            new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath),
+            catalog,
+            new RecordingAuthorityProvider(Authority()),
+            new RecordingActorAuthorizer(),
+            new FixedTimeProvider(_now));
+
+        var result = await service.MutateAsync(CreateRequest(Candidate()));
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.ValidationRejected, result.Status);
+        Assert.Equal(1, catalog.Calls);
+        Assert.Contains(result.GraphValidationErrors, error => error.Code == "node.descriptor.not-advertised");
+    }
+
+    [Fact]
+    public async Task Built_in_catalog_composition_honors_pre_cancelled_authoring_without_resolving_authority()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var authority = new RecordingAuthorityProvider(Authority());
+        var service = GovernedLoopGraphAuthoringFactory.Create(
+            paths,
+            new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath),
+            authority,
+            new RecordingActorAuthorizer(),
+            new FixedTimeProvider(_now));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.MutateAsync(CreateRequest(Candidate()), cancellation.Token));
+
+        Assert.Equal(0, authority.Calls);
     }
 
     [Fact]
@@ -195,13 +337,208 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
         var authority = new UnusedAuthorityProvider();
         var authorizer = new UnusedActorAuthorizer();
 
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(null!, authority, authorizer));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(paths, null!, authorizer));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(paths, authority, null!));
         Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(null!, catalog, authority, authorizer));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(null!, trust, authority, authorizer));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(paths, trust, null!, authorizer));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(paths, trust, authority, null!));
         Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(null!, trust, catalog, authority, authorizer));
         Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(paths, null!, catalog, authority, authorizer));
         Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(paths, trust, null!, authority, authorizer));
         Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(paths, trust, catalog, null!, authorizer));
         Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphAuthoringFactory.Create(paths, trust, catalog, authority, null!));
     }
+
+    private static async Task<GovernedLoopGraphAuthoringResult> AuthorWithBuiltInCatalogAsync(
+        GovernedLoopGraphCandidate candidate,
+        GovernedLoopAuthoritySnapshot? authority = null)
+    {
+        using var workspace = new TestWorkspace();
+        var service = GovernedLoopGraphAuthoringFactory.Create(
+            new WorkspacePaths(workspace.RootPath),
+            new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath),
+            new RecordingAuthorityProvider(authority ?? Authority()),
+            new RecordingActorAuthorizer(),
+            new FixedTimeProvider(_now));
+        return await service.MutateAsync(CreateRequest(candidate));
+    }
+
+    private static GovernedLoopGraphAuthoringRequest CreateRequest(GovernedLoopGraphCandidate candidate)
+    {
+        var normalized = GovernedLoopGraphNormalizer.Normalize(candidate);
+        Assert.True(normalized.IsValid);
+        var reference = normalized.Graph!.RevisionReference;
+        return new GovernedLoopGraphAuthoringRequest(
+            1,
+            new GovernedLoopRevisionLifecycleRequest(
+                1,
+                $"create-{reference.GraphId}",
+                GovernedLoopRevisionOperationKind.CreateDraft,
+                reference.GraphId,
+                Actor(),
+                GovernedLoopRevisionLifecycleStatus.Unknown,
+                0,
+                null,
+                null,
+                reference,
+                null,
+                null),
+            candidate);
+    }
+
+    private static GovernedLoopGraphCandidate IdentityTransformCandidate()
+    {
+        var baseline = Nodes();
+        var identity = new GovernedLoopNodeDefinition(
+            "identity",
+            GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+            [
+                Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                Port(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        return GraphCandidate(
+            "identity-transform-loop",
+            [baseline[0], identity, baseline[1], baseline[2]],
+            [
+                new("trigger-to-identity", "trigger", "identity", GovernedLoopControlCondition.Always),
+                new("identity-to-infer", "identity", "infer", GovernedLoopControlCondition.Success),
+                new("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success),
+            ],
+            [
+                new("request-to-identity", GovernedLoopBindingKind.Data, "trigger", "request", "identity", GovernedLoopPureNodeVocabulary.InputPort),
+                new("identity-to-request", GovernedLoopBindingKind.Data, "identity", GovernedLoopPureNodeVocabulary.OutputPort, "infer", "request"),
+                new("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ],
+            [new("text", GovernedLoopValueKind.Text, false)]);
+    }
+
+    private static GovernedLoopGraphCandidate SchemaConformanceCandidate()
+    {
+        var baseline = Nodes();
+        var validation = new GovernedLoopNodeDefinition(
+            "schema-check",
+            GovernedLoopSequentialNodeDescriptors.SchemaConformance,
+            [
+                Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                Port(GovernedLoopPureNodeVocabulary.ResultPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "boolean"),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        return GraphCandidate(
+            "schema-conformance-loop",
+            [baseline[0], validation, baseline[1], baseline[2]],
+            [
+                new("trigger-to-schema", "trigger", "schema-check", GovernedLoopControlCondition.Always),
+                new("schema-to-infer", "schema-check", "infer", GovernedLoopControlCondition.Success),
+                new("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success),
+            ],
+            [
+                new("request-to-schema", GovernedLoopBindingKind.Data, "trigger", "request", "schema-check", GovernedLoopPureNodeVocabulary.InputPort),
+                new("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ],
+            [
+                new("boolean", GovernedLoopValueKind.Boolean, false),
+                new("text", GovernedLoopValueKind.Text, false),
+            ]);
+    }
+
+    private static GovernedLoopGraphCandidate ConditionJoinCandidate()
+    {
+        var baseline = Nodes();
+        var condition = new GovernedLoopNodeDefinition(
+            "condition",
+            GovernedLoopSequentialNodeDescriptors.ExactTextCondition,
+            [Port(GovernedLoopTopologyNodeVocabulary.ValuePort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data)],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string> { [GovernedLoopTopologyNodeVocabulary.ExpectedParameter] = "take-true" });
+        var join = new GovernedLoopNodeDefinition(
+            "join",
+            GovernedLoopSequentialNodeDescriptors.SelectedJoin,
+            [],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        return GraphCandidate(
+            "condition-join-loop",
+            [baseline[0], baseline[1], condition, join, baseline[2]],
+            [
+                new("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new("infer-to-condition", "infer", "condition", GovernedLoopControlCondition.Success),
+                new("condition-true-to-join", "condition", "join", GovernedLoopControlCondition.True),
+                new("condition-false-to-join", "condition", "join", GovernedLoopControlCondition.False),
+                new("join-to-exit", "join", "exit", GovernedLoopControlCondition.Success),
+            ],
+            [
+                new("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new("result-to-condition", GovernedLoopBindingKind.Data, "infer", "result", "condition", GovernedLoopTopologyNodeVocabulary.ValuePort),
+                new("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ],
+            [new("text", GovernedLoopValueKind.Text, false)]);
+    }
+
+    private static GovernedLoopGraphCandidate BoundedCycleCandidate()
+    {
+        var baseline = Nodes();
+        var condition = new GovernedLoopNodeDefinition(
+            "condition",
+            GovernedLoopSequentialNodeDescriptors.ExactTextCondition,
+            [Port(GovernedLoopTopologyNodeVocabulary.ValuePort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data)],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>
+            {
+                [GovernedLoopTopologyNodeVocabulary.ExpectedParameter] = "repeat",
+                [GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter] = "1",
+                [GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter] = "5000",
+            });
+        return GraphCandidate(
+            "bounded-cycle-loop",
+            [baseline[0], baseline[1], condition, baseline[2]],
+            [
+                new("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new("infer-to-condition", "infer", "condition", GovernedLoopControlCondition.Success),
+                new("condition-repeat", "condition", "condition", GovernedLoopControlCondition.True),
+                new("condition-exit", "condition", "exit", GovernedLoopControlCondition.False),
+            ],
+            [
+                new("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new("result-to-condition", GovernedLoopBindingKind.Data, "infer", "result", "condition", GovernedLoopTopologyNodeVocabulary.ValuePort),
+                new("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ],
+            [new("text", GovernedLoopValueKind.Text, false)]);
+    }
+
+    private static GovernedLoopGraphCandidate GraphCandidate(
+        string graphId,
+        IReadOnlyList<GovernedLoopNodeDefinition> nodes,
+        IReadOnlyList<GovernedLoopControlEdgeDefinition> edges,
+        IReadOnlyList<GovernedLoopBindingDefinition> bindings,
+        IReadOnlyList<GovernedLoopValueSchemaDefinition> schemas)
+        => new(
+            1,
+            graphId,
+            "revision-1",
+            "Exercise one exact built-in governed-loop catalog composition.",
+            RolePin(),
+            "trigger",
+            ["exit"],
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceReadCapabilityId]),
+            schemas.Cast<GovernedLoopValueSchemaDefinition?>().ToArray(),
+            nodes.Cast<GovernedLoopNodeDefinition?>().ToArray(),
+            edges.Cast<GovernedLoopControlEdgeDefinition?>().ToArray(),
+            bindings.Cast<GovernedLoopBindingDefinition?>().ToArray(),
+            new GovernedLoopOutputContract("Return the result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
+            new GovernedLoopDisplayMetadata(
+                graphId,
+                "Catalog composition test.",
+                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Exact catalog node.", index * 100, 0)).ToArray()));
 
     private static GovernedLoopGraphCandidate Candidate()
         => new(
@@ -212,7 +549,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
             RolePin(),
             "trigger",
             ["exit"],
-            GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId, WorkspaceReadCapabilityId]),
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceReadCapabilityId]),
             [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
             Nodes(),
             [
@@ -302,11 +639,15 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
         [
             new("trigger", new(GovernedLoopNodeKind.Trigger, "manual-trigger", 1), [Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>()),
             new("infer", new(GovernedLoopNodeKind.Inference, "provider-inference", 1), [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]), new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
-            new("exit", new(GovernedLoopNodeKind.Exit, "success-exit", 1), [Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>()),
+            new("exit", new(GovernedLoopNodeKind.Exit, "success-exit", 1), [Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]), new Dictionary<string, string>()),
         ];
 
-    private static GovernedLoopPortDefinition Port(string id, GovernedLoopPortDirection direction, GovernedLoopBindingKind kind)
-        => new(id, direction, kind, "text", true);
+    private static GovernedLoopPortDefinition Port(
+        string id,
+        GovernedLoopPortDirection direction,
+        GovernedLoopBindingKind kind,
+        string valueSchemaId = "text")
+        => new(id, direction, kind, valueSchemaId, true);
 
     private static GovernedLoopNodeCatalogSnapshot Catalog(GovernedLoopGraphCandidate candidate)
     {
@@ -404,7 +745,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
                 ContextualRoleInstructionSourceKind.RoleArtifact,
                 "researcher-source",
                 ContextualRoleInstructionClassification.RoleInstruction),
-            new ContextualRolePolicyMaxima(ImmutableArray.Create(ModelInferenceCapabilityId, WorkspaceReadCapabilityId)));
+            new ContextualRolePolicyMaxima(ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceReadCapabilityId)));
         return ContextualRoleRevisionContentHash.Apply(role);
     }
 
