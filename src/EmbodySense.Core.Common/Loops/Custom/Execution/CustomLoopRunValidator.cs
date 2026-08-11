@@ -776,7 +776,7 @@ public static class CustomLoopRunValidator
             ValidateOptionalText(item.ProviderResponseId, $"{field}.providerResponseId", CustomLoopLimits.MaxTraceReferenceCharacters, errors);
             ValidateToolAuthority(item.ToolAuthority, $"{field}.toolAuthority", run, errors);
             ValidateToolEvidence(item.ToolEvidence, $"{field}.toolEvidence", run, errors);
-            ValidateSequentialNodeEvidence(item, field, run, sequentialStarts, sequentialTerminals, latestSequentialAttempts, errors);
+            ValidateSequentialNodeEvidence(item, index, field, run, sequentialStarts, sequentialTerminals, latestSequentialAttempts, errors);
             ValidateTraceReservation(item, field, errors);
             var isToolEvent = item.Kind is CustomLoopRunEventKind.ToolRequestReserved or CustomLoopRunEventKind.ToolGovernanceDecided or CustomLoopRunEventKind.ToolOutcomeObserved or CustomLoopRunEventKind.ToolIntegrityFailed;
             if (isToolEvent && (item.ToolAuthority is null || item.ToolEvidence is null || !ToolAuthoritiesEqual(item.ToolAuthority, item.ToolEvidence.Authority)))
@@ -857,6 +857,7 @@ public static class CustomLoopRunValidator
 
     private static void ValidateSequentialNodeEvidence(
         CustomLoopRunEvent item,
+        int eventIndex,
         string field,
         CustomLoopRunRecord run,
         HashSet<(string NodeId, int Attempt)> starts,
@@ -907,7 +908,7 @@ public static class CustomLoopRunValidator
             Add(errors, "sequential_node_evidence_binding_mismatch", $"{field}.sequentialNodeEvidence", "Sequential node evidence must match the exact run binding and containing event attempt.");
         }
 
-        ValidateSequentialNodeCoordinates(item, evidence, field, run, errors);
+        ValidateSequentialNodeCoordinates(item, eventIndex, evidence, field, run, errors);
 
         var key = (evidence.NodeId, evidence.Attempt);
         if (evidence.Kind == CustomLoopSequentialNodeEvidenceKind.DispatchStarted)
@@ -966,15 +967,27 @@ public static class CustomLoopRunValidator
 
     private static void ValidateSequentialNodeCoordinates(
         CustomLoopRunEvent item,
+        int eventIndex,
         CustomLoopSequentialNodeEvidence evidence,
         string field,
         CustomLoopRunRecord run,
         List<CustomLoopValidationError> errors)
     {
-        if (item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed)
+        var isExitFailure = item.Kind == CustomLoopRunEventKind.NodeAttemptFailed
+            && HasPriorSequentialDispatch(run.Events, eventIndex, evidence, CustomLoopRunEventKind.ExitDecisionStarted);
+        if (isExitFailure)
+        {
+            if (!string.Equals(item.StepId, "exit", StringComparison.Ordinal))
+            {
+                Add(errors, "sequential_exit_step_mismatch", $"{field}.stepId", "Sequential Exit-decision evidence requires the reserved legacy adapter step id 'exit'.");
+            }
+        }
+        else if (item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed)
         {
             var isAdmittedInferenceStep = run.AdmittedDefinition?.InferenceSteps?.Any(step => string.Equals(step.Id, item.StepId, StringComparison.Ordinal)) == true;
-            if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal) || !isAdmittedInferenceStep)
+            if (string.Equals(item.StepId, "exit", StringComparison.Ordinal)
+                || !string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal)
+                || !isAdmittedInferenceStep)
             {
                 Add(errors, "sequential_inference_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential inference evidence must identify the containing event's exact admitted legacy inference-step id.");
             }
@@ -990,6 +1003,19 @@ public static class CustomLoopRunValidator
         {
             Add(errors, "sequential_trigger_coordinates_mismatch", field, "The admitted Manual Trigger outcome cannot carry legacy iteration, step, or attempt coordinates.");
         }
+    }
+
+    private static bool HasPriorSequentialDispatch(
+        IReadOnlyList<CustomLoopRunEvent> events,
+        int terminalIndex,
+        CustomLoopSequentialNodeEvidence evidence,
+        CustomLoopRunEventKind expectedStartKind)
+    {
+        return terminalIndex > 0 && events.Take(terminalIndex).Any(candidate => candidate is { Kind: var kind }
+            && kind == expectedStartKind
+            && candidate.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted } start
+            && string.Equals(start.NodeId, evidence.NodeId, StringComparison.Ordinal)
+            && start.Attempt == evidence.Attempt);
     }
 
     private static void ValidateIntegrityReservationScope(IReadOnlyList<CustomLoopRunEvent> events, List<CustomLoopValidationError> errors)
