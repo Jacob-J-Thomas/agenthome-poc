@@ -237,7 +237,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
                 detail: completedAdmission.Detail);
         }
 
-        if (run.IsTerminal)
+        if (run.IsTerminal && run.Status != CustomLoopRunStatus.Completed)
         {
             return Result(
                 GovernedLoopSequentialInvocationStatus.Terminal,
@@ -247,7 +247,8 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
                 detail: "The exact canonical run is already terminal; no ordered execution was repeated.");
         }
 
-        if (run.Status != CustomLoopRunStatus.Admitted || !CustomLoopRunValidator.ValidateForDispatch(run).IsValid)
+        if (run.Status is not (CustomLoopRunStatus.Admitted or CustomLoopRunStatus.Completed)
+            || run.Status == CustomLoopRunStatus.Admitted && !CustomLoopRunValidator.ValidateForDispatch(run).IsValid)
         {
             return Result(
                 GovernedLoopSequentialInvocationStatus.RecoveryRequired,
@@ -259,6 +260,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
 
         try
         {
+            var reconcilesCompletion = run.Status == CustomLoopRunStatus.Completed;
             var execution = await _orderedRuntime.RunAsync(
                 new GovernedLoopSequentialOrderedRunRequest(
                     GovernedLoopSequentialOrderedRunRequest.CurrentSchemaVersion,
@@ -268,7 +270,9 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
                     request.AdmissionRequest.ActorId.Value),
                 cancellationToken).ConfigureAwait(false);
             return Result(
-                GovernedLoopSequentialInvocationStatus.Executed,
+                reconcilesCompletion
+                    ? MapCompletedReconciliationStatus(execution.Status)
+                    : GovernedLoopSequentialInvocationStatus.Executed,
                 admission,
                 materialization,
                 execution,
@@ -613,6 +617,16 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
             GovernedLoopSequentialMaterializationStatus.AuditUnavailable => GovernedLoopSequentialInvocationStatus.AuditUnavailable,
             GovernedLoopSequentialMaterializationStatus.AuditConflict => GovernedLoopSequentialInvocationStatus.Conflict,
             _ => GovernedLoopSequentialInvocationStatus.Invalid,
+        };
+
+    private static GovernedLoopSequentialInvocationStatus MapCompletedReconciliationStatus(CustomLoopOrderedRunStatus status)
+        => status switch
+        {
+            CustomLoopOrderedRunStatus.Completed => GovernedLoopSequentialInvocationStatus.Terminal,
+            CustomLoopOrderedRunStatus.InvalidState => GovernedLoopSequentialInvocationStatus.Invalid,
+            CustomLoopOrderedRunStatus.Conflict => GovernedLoopSequentialInvocationStatus.Conflict,
+            CustomLoopOrderedRunStatus.NotFound => GovernedLoopSequentialInvocationStatus.NotFound,
+            _ => GovernedLoopSequentialInvocationStatus.RecoveryRequired,
         };
 
     private static GovernedLoopSequentialInvocationStatus MapOperationResolution(OperationResolutionStatus status)

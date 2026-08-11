@@ -23,6 +23,13 @@ public static class GovernedLoopSequentialAuditOperationId
         return Derive("governed-loop-sequential-node-outcome-audit-v1", evidenceHash);
     }
 
+    /// <summary>Derives a terminal-lifecycle-audit identity from the exact durable terminal event artifact.</summary>
+    public static string ForTerminalLifecycle(string terminalArtifactHash)
+    {
+        RequireHash(terminalArtifactHash, nameof(terminalArtifactHash));
+        return Derive("governed-loop-sequential-terminal-lifecycle-audit-v1", terminalArtifactHash);
+    }
+
     private static string Derive(params string[] values)
     {
         var canonical = string.Join('\n', values);
