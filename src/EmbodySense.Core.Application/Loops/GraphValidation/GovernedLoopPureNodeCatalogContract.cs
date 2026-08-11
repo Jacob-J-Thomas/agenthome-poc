@@ -149,7 +149,7 @@ public static class GovernedLoopPureNodeCatalogContract
             new GovernedLoopNodeResourceBudget(
                 Attempts: 1,
                 PayloadCharacters: CustomLoopLimits.MaxGraphNodePayloadCharacters,
-                EvidenceItems: 1,
+                EvidenceItems: CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation,
                 ResourceUnits: 0));
 
     private static GovernedLoopCatalogPortContract Input(string id, GovernedLoopValueKindSet kinds)

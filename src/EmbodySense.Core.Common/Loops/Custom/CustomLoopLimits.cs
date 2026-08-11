@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Governance.Tools;
+using EmbodySense.Core.Common.Loops.Execution;
 
 namespace EmbodySense.Core.Common.Loops.Custom;
 
@@ -96,6 +97,26 @@ public static class CustomLoopLimits
     /// Maximum abstract resource units declared by one node descriptor.
     /// </summary>
     public const int MaxGraphNodeResourceUnits = 100_000;
+    /// <summary>
+    /// Maximum sequential dispatch and terminal evidence records retained by one graph activation.
+    /// </summary>
+    public const int MaxGraphSequentialEvidenceItemsPerActivation = 2;
+    /// <summary>
+    /// Maximum graph-wide attempt envelope admitted for one run.
+    /// </summary>
+    public const int MaxGraphAggregateAttempts = MaxModelAttemptsPerRun;
+    /// <summary>
+    /// Maximum graph-wide payload-character envelope admitted across all retained activations.
+    /// </summary>
+    public const int MaxGraphAggregatePayloadCharacters = MaxGraphNodePayloadCharacters * GovernedLoopExecutionLimits.MaxFrontierNodes;
+    /// <summary>
+    /// Maximum graph-wide sequential-evidence envelope admitted across all retained activations.
+    /// </summary>
+    public const int MaxGraphAggregateEvidenceItems = MaxGraphSequentialEvidenceItemsPerActivation * GovernedLoopExecutionLimits.MaxFrontierNodes;
+    /// <summary>
+    /// Maximum graph-wide abstract resource-unit envelope admitted for one run.
+    /// </summary>
+    public const int MaxGraphAggregateResourceUnits = MaxGraphNodeResourceUnits;
     /// <summary>
     /// Maximum UTF-8 bytes in one canonical typed graph value envelope.
     /// </summary>

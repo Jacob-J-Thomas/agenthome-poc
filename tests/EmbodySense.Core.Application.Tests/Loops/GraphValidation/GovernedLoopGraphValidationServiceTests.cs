@@ -1029,6 +1029,37 @@ public sealed class GovernedLoopGraphValidationServiceTests
         Assert.Contains(authorityFailure.Errors, error => error.Code == "authority.unavailable");
     }
 
+    [Fact]
+    public async Task ValidatePinsFiniteGraphWideAuthorityAtEveryAggregateLimit()
+    {
+        var candidate = Candidate();
+        var descriptors = Descriptors(candidate);
+        var exact = Authority() with
+        {
+            MaxAttempts = CustomLoopLimits.MaxGraphAggregateAttempts,
+            MaxPayloadCharacters = CustomLoopLimits.MaxGraphAggregatePayloadCharacters,
+            MaxEvidenceItems = CustomLoopLimits.MaxGraphAggregateEvidenceItems,
+            MaxResourceUnits = CustomLoopLimits.MaxGraphAggregateResourceUnits,
+        };
+
+        var exactResult = await Service(descriptors, exact).ValidateAsync(candidate);
+        var overLimit = new[]
+        {
+            exact with { MaxAttempts = CustomLoopLimits.MaxGraphAggregateAttempts + 1 },
+            exact with { MaxPayloadCharacters = CustomLoopLimits.MaxGraphAggregatePayloadCharacters + 1 },
+            exact with { MaxEvidenceItems = CustomLoopLimits.MaxGraphAggregateEvidenceItems + 1 },
+            exact with { MaxResourceUnits = CustomLoopLimits.MaxGraphAggregateResourceUnits + 1 },
+        };
+
+        Assert.True(exactResult.IsValid);
+        foreach (var authority in overLimit)
+        {
+            var result = await Service(descriptors, authority).ValidateAsync(candidate);
+
+            Assert.Contains(result.Errors, error => error.Code == "authority.resource-limits.invalid");
+        }
+    }
+
     private static GovernedLoopGraphValidationService Service(IReadOnlyList<GovernedLoopNodeCatalogDescriptor> descriptors, GovernedLoopAuthoritySnapshot? authority = null)
     {
         return new GovernedLoopGraphValidationService(new FixedCatalog(new GovernedLoopNodeCatalogSnapshot(true, "catalog-1", descriptors)), new FixedAuthority(authority ?? Authority()));

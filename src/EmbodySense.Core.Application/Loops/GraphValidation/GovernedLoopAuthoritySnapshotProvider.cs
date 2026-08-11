@@ -52,10 +52,10 @@ public sealed class GovernedLoopAuthoritySnapshotProvider : IGovernedLoopAuthori
             resolution.WorkspaceId,
             resolution.SourceStatus,
             resolution.Revision!.PolicyMaxima.CapabilityIds,
-            CustomLoopLimits.MaxGraphNodeAttempts,
-            CustomLoopLimits.MaxGraphNodePayloadCharacters,
-            CustomLoopLimits.MaxGraphNodeEvidenceItems,
-            CustomLoopLimits.MaxGraphNodeResourceUnits);
+            CustomLoopLimits.MaxGraphAggregateAttempts,
+            CustomLoopLimits.MaxGraphAggregatePayloadCharacters,
+            CustomLoopLimits.MaxGraphAggregateEvidenceItems,
+            CustomLoopLimits.MaxGraphAggregateResourceUnits);
     }
 
     private static bool IsExactActive(AuthorityGrantRoleResolution? resolution, ContextualRoleRevisionPin? owningRole)

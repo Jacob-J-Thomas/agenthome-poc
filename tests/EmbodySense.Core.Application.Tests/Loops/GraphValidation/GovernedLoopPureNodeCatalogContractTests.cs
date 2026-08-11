@@ -36,7 +36,13 @@ public sealed class GovernedLoopPureNodeCatalogContractTests
             Assert.Null(descriptor.CycleIterationBudgetParameterId);
             Assert.Null(descriptor.CycleTimeBudgetMillisecondsParameterId);
             Assert.Empty(descriptor.RequiredCapabilityIds);
-            Assert.Equal(new GovernedLoopNodeResourceBudget(1, CustomLoopLimits.MaxGraphNodePayloadCharacters, 1, 0), descriptor.ResourceBudget);
+            Assert.Equal(
+                new GovernedLoopNodeResourceBudget(
+                    1,
+                    CustomLoopLimits.MaxGraphNodePayloadCharacters,
+                    CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation,
+                    0),
+                descriptor.ResourceBudget);
             Assert.All(descriptor.Ports, port =>
             {
                 Assert.Equal(GovernedLoopBindingKind.Data, port.BindingKind);

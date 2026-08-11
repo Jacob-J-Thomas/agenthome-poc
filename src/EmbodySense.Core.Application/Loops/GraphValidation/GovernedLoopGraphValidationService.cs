@@ -272,7 +272,7 @@ public sealed class GovernedLoopGraphValidationService
             Add(errors, "authority.snapshot.invalid", GovernedLoopGraphElementKind.Authority, snapshot.OwningRole.Identity.RoleId, "authority", "The authority snapshot capability maximum must exactly match the pinned contextual-role revision.");
         }
 
-        ValidateResourceBudget(new GovernedLoopNodeResourceBudget(snapshot.MaxAttempts, snapshot.MaxPayloadCharacters, snapshot.MaxEvidenceItems, snapshot.MaxResourceUnits), CustomLoopLimits.MaxGraphNodeAttempts, CustomLoopLimits.MaxGraphNodePayloadCharacters, CustomLoopLimits.MaxGraphNodeEvidenceItems, CustomLoopLimits.MaxGraphNodeResourceUnits, "authority.resource-limits.invalid", GovernedLoopGraphElementKind.Authority, snapshot.OwningRole?.Identity.RoleId, "authority.resourceLimits", errors);
+        ValidateResourceBudget(new GovernedLoopNodeResourceBudget(snapshot.MaxAttempts, snapshot.MaxPayloadCharacters, snapshot.MaxEvidenceItems, snapshot.MaxResourceUnits), CustomLoopLimits.MaxGraphAggregateAttempts, CustomLoopLimits.MaxGraphAggregatePayloadCharacters, CustomLoopLimits.MaxGraphAggregateEvidenceItems, CustomLoopLimits.MaxGraphAggregateResourceUnits, "authority.resource-limits.invalid", GovernedLoopGraphElementKind.Authority, snapshot.OwningRole?.Identity.RoleId, "authority.resourceLimits", errors);
     }
 
     private static void ValidateAuthority(GovernedLoopGraphDefinition graph, GovernedLoopAuthoritySnapshot authority, List<GovernedLoopGraphValidationError> errors)
