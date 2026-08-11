@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
@@ -18,6 +19,12 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 
 public sealed class CustomLoopFrontierStoreTests
 {
+    private const string CrashProbeCandidatePathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_FRONTIER_CRASH_CANDIDATE";
+    private const string CrashProbeLockPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_FRONTIER_CRASH_LOCK";
+    private const string CrashProbeReadyPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_FRONTIER_CRASH_READY";
+    private const string CrashProbeReleasePathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_FRONTIER_CRASH_RELEASE";
+    private const string CrashProbeStagingPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_FRONTIER_CRASH_STAGING";
+
     [Fact]
     public void Canonical_codec_round_trips_exact_frontier_and_explicit_legacy_null()
     {
@@ -318,6 +325,165 @@ public sealed class CustomLoopFrontierStoreTests
 
         await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync(context.Run.Id));
         Assert.Equal(corruptBytes, await File.ReadAllBytesAsync(artifactPath));
+    }
+
+    [Fact]
+    public async Task External_process_crash_before_rename_preserves_the_prior_atomic_frontier_and_cleans_only_the_orphan()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var context = CustomLoopSequentialEvidenceStoreTests.CreateContext();
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+        }
+
+        var active = await UpdateAndRestartAsync(paths, TransitionToRunning(context.Run, "event-running"), 1);
+        var running = await UpdateAndRestartAsync(paths, StartInference(active, context, "event-inference-start"), 2);
+        var inferenceCompletion = CreateSequentialEvent(
+            running.Events[^1].Sequence + 1,
+            "event-inference-completed",
+            CustomLoopRunEventKind.NodeAttemptCompleted,
+            context.Binding,
+            context.Plan.Nodes[1],
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed,
+            running.UpdatedAtUtc.AddMinutes(1));
+        var advanced = await UpdateAndRestartAsync(paths, CompleteInference(running, context, inferenceCompletion), 3);
+        var prior = await UpdateAndRestartAsync(paths, StartExit(advanced, context, "event-exit-start"), 4);
+        var candidate = CompleteExit(prior, context, "event-exit-completed-after-crash");
+        var validation = CustomLoopRunValidator.ValidateUpdate(prior, candidate);
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+
+        var candidateBytes = CustomLoopRunArtifactSerializer.Serialize(candidate);
+        var priorBytes = CustomLoopRunArtifactSerializer.Serialize(prior);
+        var candidatePath = workspace.File("frontier-crash-candidate.json");
+        var readyPath = workspace.File("frontier-crash-ready");
+        var releasePath = workspace.File("frontier-crash-release");
+        var runDirectory = Path.Combine(paths.CustomLoopRunsPath, prior.LoopId);
+        var canonicalPath = Path.Combine(runDirectory, prior.Id + ".json");
+        var stagingPath = Path.Combine(runDirectory, $".{prior.Id}.json.{Guid.NewGuid():N}.tmp");
+        var lockPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-runs.lock");
+        await File.WriteAllBytesAsync(candidatePath, candidateBytes);
+        Assert.Equal(priorBytes, await File.ReadAllBytesAsync(canonicalPath));
+
+        using var child = StartFrontierCrashProbe(lockPath, stagingPath, candidatePath, readyPath, releasePath);
+        var outputTask = child.StandardOutput.ReadToEndAsync();
+        var errorTask = child.StandardError.ReadToEndAsync();
+        try
+        {
+            await WaitForCrashProbeReadyAsync(
+                readyPath,
+                child,
+                outputTask,
+                errorTask,
+                TimeSpan.FromSeconds(30));
+            Assert.False(child.HasExited);
+            Assert.Equal(candidate.Frontier!.Payload.ContentHash, await File.ReadAllTextAsync(readyPath));
+            Assert.Equal(candidateBytes, await File.ReadAllBytesAsync(stagingPath));
+            Assert.Equal(priorBytes, await File.ReadAllBytesAsync(canonicalPath));
+
+            using (var contendingStore = new CustomLoopRunStore(paths))
+            using (var contention = new CancellationTokenSource(TimeSpan.FromMilliseconds(250)))
+            {
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                    () => contendingStore.GetTraceQuotaAsync(contention.Token));
+            }
+            Assert.True(File.Exists(stagingPath));
+            using (var lockFreeReader = new CustomLoopRunStore(paths))
+            {
+                Assert.Equal(priorBytes, CustomLoopRunArtifactSerializer.Serialize(
+                    Assert.IsType<CustomLoopRunRecord>(await lockFreeReader.GetAsync(prior.Id))));
+            }
+
+            child.Kill(entireProcessTree: true);
+            await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.NotEqual(0, child.ExitCode);
+            Assert.True(File.Exists(stagingPath));
+
+            using var restarted = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+            var beforeRecovery = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(prior.Id));
+            Assert.Equal(priorBytes, CustomLoopRunArtifactSerializer.Serialize(beforeRecovery));
+            Assert.Equal(1, (await restarted.GetTraceQuotaAsync()).RetainedTraceCount);
+            Assert.False(File.Exists(stagingPath));
+            Assert.Equal(candidateBytes, await File.ReadAllBytesAsync(candidatePath));
+            Assert.Equal(priorBytes, await File.ReadAllBytesAsync(canonicalPath));
+
+            var recovered = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(prior.Id));
+            Assert.Equal(prior.LifecycleVersion, recovered.LifecycleVersion);
+            Assert.Equal(prior.Checkpoint.LastCommittedSequence, recovered.Checkpoint.LastCommittedSequence);
+            Assert.Equal(prior.Frontier!.Payload.ContentHash, recovered.Frontier!.Payload.ContentHash);
+            Assert.Equal(prior.Events.Select(item => item.EventId), recovered.Events.Select(item => item.EventId));
+            Assert.DoesNotContain(recovered.Events, item =>
+                string.Equals(item.EventId, "event-exit-completed-after-crash", StringComparison.Ordinal));
+            Assert.Equal(GovernedLoopNodeExecutionStatus.Running, recovered.Frontier.Payload.Nodes[2].Status);
+            Assert.Equal(CustomLoopRunStatus.Running, recovered.Status);
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(releasePath, "release");
+            if (!child.HasExited)
+            {
+                child.Kill(entireProcessTree: true);
+                await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            }
+
+            _ = await outputTask;
+            _ = await errorTask;
+        }
+    }
+
+    [Fact]
+    public async Task External_process_crash_probe_child_stages_one_authenticated_successor_while_holding_the_mutation_lease()
+    {
+        var candidatePath = Environment.GetEnvironmentVariable(CrashProbeCandidatePathVariable);
+        if (string.IsNullOrWhiteSpace(candidatePath))
+        {
+            return;
+        }
+
+        var lockPath = RequireCrashProbePath(CrashProbeLockPathVariable);
+        var stagingPath = RequireCrashProbePath(CrashProbeStagingPathVariable);
+        var readyPath = RequireCrashProbePath(CrashProbeReadyPathVariable);
+        var releasePath = RequireCrashProbePath(CrashProbeReleasePathVariable);
+        var candidateBytes = await File.ReadAllBytesAsync(candidatePath);
+        var candidate = CustomLoopRunArtifactSerializer.Deserialize(candidateBytes);
+        Assert.Equal(candidateBytes, CustomLoopRunArtifactSerializer.Serialize(candidate));
+        var frontier = Assert.IsType<GovernedLoopFrontierPosture>(candidate.Frontier);
+        Assert.Equal(CustomLoopRunStatus.Completed, candidate.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Completed, frontier.Payload.Status);
+        Assert.Equal(CustomLoopRunEventKind.CheckpointCommitted, candidate.Events[^2].Kind);
+        Assert.Equal(CustomLoopRunEventKind.LifecycleChanged, candidate.Events[^1].Kind);
+        Assert.Equal(candidate.Events[^2].Sequence, candidate.Checkpoint.LastCommittedSequence);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(lockPath)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(stagingPath)!);
+        await using var lease = new FileStream(
+            lockPath,
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.None,
+            1,
+            FileOptions.WriteThrough);
+        await using (var staging = new FileStream(
+            stagingPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            4096,
+            FileOptions.Asynchronous | FileOptions.WriteThrough))
+        {
+            await staging.WriteAsync(candidateBytes);
+            await staging.FlushAsync();
+            staging.Flush(flushToDisk: true);
+        }
+
+        await File.WriteAllTextAsync(readyPath, frontier.Payload.ContentHash);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        while (!File.Exists(releasePath))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(15), timeout.Token);
+        }
     }
 
     private static CustomLoopRunRecord StartInference(
@@ -718,6 +884,73 @@ public sealed class CustomLoopFrontierStoreTests
             null,
             null,
             ControlExpectedLifecycleVersion: expectedLifecycleVersion);
+    }
+
+    private static Process StartFrontierCrashProbe(
+        string lockPath,
+        string stagingPath,
+        string candidatePath,
+        string readyPath,
+        string releasePath)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "dotnet",
+            WorkingDirectory = Path.GetTempPath(),
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+            startInfo,
+            typeof(CustomLoopFrontierStoreTests).Assembly.Location,
+            "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopFrontierStoreTests.External_process_crash_probe_child_stages_one_authenticated_successor_while_holding_the_mutation_lease");
+        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
+        startInfo.Environment[CrashProbeLockPathVariable] = lockPath;
+        startInfo.Environment[CrashProbeStagingPathVariable] = stagingPath;
+        startInfo.Environment[CrashProbeCandidatePathVariable] = candidatePath;
+        startInfo.Environment[CrashProbeReadyPathVariable] = readyPath;
+        startInfo.Environment[CrashProbeReleasePathVariable] = releasePath;
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("The frontier crash-probe child process did not start.");
+    }
+
+    private static async Task WaitForCrashProbeReadyAsync(
+        string readyPath,
+        Process process,
+        Task<string> outputTask,
+        Task<string> errorTask,
+        TimeSpan timeout)
+    {
+        var wait = Stopwatch.StartNew();
+        while (!File.Exists(readyPath))
+        {
+            if (process.HasExited)
+            {
+                throw new InvalidOperationException(
+                    $"The frontier crash-probe child exited before staging its successor with code {process.ExitCode}."
+                    + $"{Environment.NewLine}{await outputTask}{Environment.NewLine}{await errorTask}");
+            }
+
+            if (wait.Elapsed >= timeout)
+            {
+                throw new TimeoutException("The frontier crash-probe child did not stage its successor within the bounded wait.");
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(15));
+        }
+    }
+
+    private static string RequireCrashProbePath(string variable)
+    {
+        var value = Environment.GetEnvironmentVariable(variable)
+            ?? throw new InvalidOperationException($"The frontier crash-probe path `{variable}` is required.");
+        if (!Path.IsPathFullyQualified(value))
+        {
+            throw new InvalidOperationException($"The frontier crash-probe path `{variable}` must be fully qualified.");
+        }
+
+        return value;
     }
 
     private static CustomLoopRunRecord Deserialize(JsonObject root)
