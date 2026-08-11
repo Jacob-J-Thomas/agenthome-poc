@@ -19,5 +19,7 @@ public enum ScriptedConversationPublicationAuthorityBehavior
     NullResult,
     MalformedResult,
     MismatchedDecision,
+    MismatchedOperationDecision,
+    ForgedAdmittedProofDecision,
     SwallowCallbackFailure,
 }

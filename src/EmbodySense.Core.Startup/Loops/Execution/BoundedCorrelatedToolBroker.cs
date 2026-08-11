@@ -268,7 +268,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         if (result.Status == GovernedLoopEffectAuthorityExecutionStatus.Decided)
         {
             if (result.Decision is null
-                || !DecisionExactlyMatchesRequest(result.Decision, request)
+                || !GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(result.Decision, request)
                 || result.EvidenceStatus != GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended)
             {
                 throw AuthorityProtocolStopped("A decided workspace-tool intake did not carry exact newly appended authority evidence.");
@@ -307,7 +307,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         if (result.Status == GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected)
         {
             if (result.EvidenceStatus == GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown
-                || result.Decision is not null && !DecisionExactlyMatchesRequest(result.Decision, request))
+                || result.Decision is not null && !GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(result.Decision, request))
             {
                 throw AuthorityProtocolStopped("An evidence-rejected workspace-tool intake carried malformed or mismatched evidence.");
             }
@@ -316,23 +316,6 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         }
 
         throw AuthorityProtocolStopped("The workspace-tool intake boundary returned an unsupported execution status.");
-    }
-
-    private static bool DecisionExactlyMatchesRequest(
-        GovernedLoopEffectAuthorityDecision decision,
-        GovernedLoopEffectAuthorityRequest request)
-    {
-        return GovernedLoopEffectAuthorityContractValidator.Validate(decision).IsValid
-            && string.Equals(decision.RunId, request.ExecutionBinding.RunId, StringComparison.Ordinal)
-            && decision.ExecutionGeneration == request.ExecutionBinding.ExecutionGeneration
-            && string.Equals(decision.NodeId, request.NodeId, StringComparison.Ordinal)
-            && decision.NodeAttempt == request.NodeAttempt
-            && string.Equals(decision.EffectOperationId, request.EffectOperationId, StringComparison.Ordinal)
-            && string.Equals(decision.CorrelationId, request.CorrelationId, StringComparison.Ordinal)
-            && decision.BoundaryKind == request.BoundaryKind
-            && string.Equals(decision.AdmissionReceiptHash, request.AdmissionReceipt.ContentHash, StringComparison.Ordinal)
-            && AuthorityCeilingSubset.IsEqual(decision.RequiredAuthority, request.RequiredAuthority)
-            && decision.RequiredCapabilityPins.SequenceEqual(request.RequiredCapabilityPins);
     }
 
     private static GovernedLoopEffectAuthorityStoppedException Stopped(GovernedLoopEffectAuthorityExecutionResult<bool> result)

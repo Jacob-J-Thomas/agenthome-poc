@@ -47,6 +47,16 @@ internal sealed class ScriptedGovernedLoopEffectAuthorityBoundary(ScriptedEffect
                 CommitInvoked: false,
                 Result: default,
                 "The scripted boundary returned malformed protocol values."),
+            ScriptedEffectAuthorityBehavior.MismatchedOperation => Stopped<TResult>(
+                HostileEffectAuthorityDecisionFactory.ForDifferentOperation(Decision(
+                    request,
+                    GovernedLoopEffectAuthorityDisposition.Pause,
+                    GovernedLoopEffectAuthorityReason.EvidenceAmbiguous))),
+            ScriptedEffectAuthorityBehavior.ForgedAdmittedProof => Stopped<TResult>(
+                HostileEffectAuthorityDecisionFactory.WithForgedAdmittedProof(Decision(
+                    request,
+                    GovernedLoopEffectAuthorityDisposition.Pause,
+                    GovernedLoopEffectAuthorityReason.EvidenceAmbiguous))),
             _ => throw new InvalidOperationException("Unsupported scripted effect-authority behavior."),
         };
     }
@@ -120,6 +130,16 @@ internal sealed class ScriptedGovernedLoopEffectAuthorityBoundary(ScriptedEffect
             false,
             default,
             "The durable decision stopped the effect.");
+
+    private static GovernedLoopEffectAuthorityExecutionResult<TResult> Stopped<TResult>(
+        GovernedLoopEffectAuthorityDecision decision)
+        => new(
+            GovernedLoopEffectAuthorityExecutionStatus.Decided,
+            decision,
+            GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
+            false,
+            default,
+            "A structurally valid decision did not belong to the exact protected effect.");
 
     private static GovernedLoopEffectAuthorityExecutionResult<TResult> Unresolved<TResult>(GovernedLoopEffectAuthorityExecutionStatus status)
         => new(status, null, GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown, false, default, "Authority could not be resolved.");

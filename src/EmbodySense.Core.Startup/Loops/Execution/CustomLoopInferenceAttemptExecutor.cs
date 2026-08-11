@@ -467,7 +467,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             var observedCommitCount = Volatile.Read(ref commitCount);
             var observedCommitCompleted = Volatile.Read(ref commitCompleted);
             if (result.Status == GovernedLoopEffectAuthorityExecutionStatus.Decided
-                && DecisionExactlyMatchesRequest(result.Decision, authorityRequest)
+                && GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(result.Decision, authorityRequest)
                 && result.Decision!.Disposition == GovernedLoopEffectAuthorityDisposition.Direct
                 && result.EvidenceStatus == GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended
                 && result.CommitInvoked
@@ -498,7 +498,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             return false;
         }
 
-        var exactDecision = result.Decision is not null && DecisionExactlyMatchesRequest(result.Decision, request);
+        var exactDecision = GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(result.Decision, request);
         return result.Status switch
         {
             GovernedLoopEffectAuthorityExecutionStatus.InvalidRequest
@@ -514,38 +514,6 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
                     or GovernedLoopEffectAuthorityEvidenceStoreStatus.AlreadyPresent,
             _ => false,
         };
-    }
-
-    private static bool DecisionExactlyMatchesRequest(
-        GovernedLoopEffectAuthorityDecision? decision,
-        GovernedLoopEffectAuthorityRequest request)
-    {
-        if (decision is null || !GovernedLoopEffectAuthorityContractValidator.Validate(decision).IsValid)
-        {
-            return false;
-        }
-
-        var receipt = request.AdmissionReceipt;
-        var admitted = decision.AdmittedAuthority;
-        return string.Equals(decision.RunId, request.ExecutionBinding.RunId, StringComparison.Ordinal)
-            && decision.ExecutionGeneration == request.ExecutionBinding.ExecutionGeneration
-            && string.Equals(decision.NodeId, request.NodeId, StringComparison.Ordinal)
-            && decision.NodeAttempt == request.NodeAttempt
-            && string.Equals(decision.EffectOperationId, request.EffectOperationId, StringComparison.Ordinal)
-            && string.Equals(decision.CorrelationId, request.CorrelationId, StringComparison.Ordinal)
-            && decision.BoundaryKind == request.BoundaryKind
-            && string.Equals(decision.AdmissionReceiptHash, receipt.ContentHash, StringComparison.Ordinal)
-            && AuthorityCeilingSubset.IsEqual(decision.RequiredAuthority, request.RequiredAuthority)
-            && decision.RequiredCapabilityPins.SequenceEqual(request.RequiredCapabilityPins)
-            && Equals(admitted.Grant, receipt.Intent.AuthorityGrant)
-            && Equals(admitted.Binding.Profile, receipt.Evidence.GrantProfile)
-            && Equals(admitted.Binding.Role, receipt.Intent.Role)
-            && Equals(admitted.Binding.Loop, receipt.Intent.Publication)
-            && Equals(admitted.Boundary, receipt.Evidence.GrantBoundary)
-            && AuthorityCeilingSubset.IsEqual(admitted.Ceiling, receipt.Evidence.EffectiveAuthority)
-            && admitted.CapabilityPins.SequenceEqual(receipt.Evidence.CapabilityAdmission.Pins)
-            && admitted.ObservedCapabilityPins.Count == 0
-            && string.Equals(admitted.DependencyEvidenceHash, receipt.Evidence.GrantDependencyEvidenceHash, StringComparison.Ordinal);
     }
 
     private static GovernedLoopEffectAuthorityStoppedException AuthorityProtocolStopped()

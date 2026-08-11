@@ -213,7 +213,7 @@ public sealed class GovernedLoopConversationPublicationCommitBoundary
             if (result.Decision is null
                 || result.EvidenceStatus is not (GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended
                     or GovernedLoopEffectAuthorityEvidenceStoreStatus.AlreadyPresent)
-                || !IsExactDecision(result.Decision))
+                || !GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(result.Decision, _request))
             {
                 throw Protocol("A decided governed effect did not carry exact durable authority evidence for this conversation publication.");
             }
@@ -259,7 +259,7 @@ public sealed class GovernedLoopConversationPublicationCommitBoundary
         {
             if (result.EvidenceStatus == GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown
                 || result.Decision is null
-                || !IsExactDecision(result.Decision)
+                || !GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(result.Decision, _request)
                 || result.Decision.Disposition == GovernedLoopEffectAuthorityDisposition.Direct
                 || callbackCount != 0
                 || result.CommitInvoked
@@ -272,21 +272,6 @@ public sealed class GovernedLoopConversationPublicationCommitBoundary
         }
 
         throw Protocol("The governed effect boundary returned an unsupported conversation-publication execution status.");
-    }
-
-    private bool IsExactDecision(GovernedLoopEffectAuthorityDecision decision)
-    {
-        return GovernedLoopEffectAuthorityContractValidator.Validate(decision).IsValid
-            && string.Equals(decision.RunId, _request.ExecutionBinding.RunId, StringComparison.Ordinal)
-            && decision.ExecutionGeneration == _request.ExecutionBinding.ExecutionGeneration
-            && string.Equals(decision.NodeId, _request.NodeId, StringComparison.Ordinal)
-            && decision.NodeAttempt == _request.NodeAttempt
-            && string.Equals(decision.EffectOperationId, _request.EffectOperationId, StringComparison.Ordinal)
-            && string.Equals(decision.CorrelationId, _request.CorrelationId, StringComparison.Ordinal)
-            && decision.BoundaryKind == _request.BoundaryKind
-            && string.Equals(decision.AdmissionReceiptHash, _request.AdmissionReceipt.ContentHash, StringComparison.Ordinal)
-            && AuthorityCeilingSubset.IsEqual(decision.RequiredAuthority, _request.RequiredAuthority)
-            && decision.RequiredCapabilityPins.SequenceEqual(_request.RequiredCapabilityPins);
     }
 
     private static string CreateStoppedMessage(GovernedLoopEffectAuthorityExecutionResult<object> result)

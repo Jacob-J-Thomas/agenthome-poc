@@ -178,7 +178,7 @@ public sealed class GovernedLoopToolActuationAuthorityBoundary : IToolActuationA
         {
             if (result.Decision is null
                 || result.EvidenceStatus is not (GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended or GovernedLoopEffectAuthorityEvidenceStoreStatus.AlreadyPresent)
-                || !IsExactDecision(request, result.Decision))
+                || !GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(result.Decision, request))
             {
                 throw Protocol("A decided governed effect did not carry exact durable authority evidence for this workspace request.");
             }
@@ -213,7 +213,7 @@ public sealed class GovernedLoopToolActuationAuthorityBoundary : IToolActuationA
 
         if (result.Status == GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected)
         {
-            if (callbackCount != 0 || result.CommitInvoked || result.Result is not null || result.Decision is not null && !IsExactDecision(request, result.Decision))
+            if (callbackCount != 0 || result.CommitInvoked || result.Result is not null || result.Decision is not null && !GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(result.Decision, request))
             {
                 throw Protocol("An evidence-rejected governed effect result crossed or contradicted the workspace actuator boundary.");
             }
@@ -222,21 +222,6 @@ public sealed class GovernedLoopToolActuationAuthorityBoundary : IToolActuationA
         }
 
         throw Protocol("The governed effect boundary returned an unsupported execution status.");
-    }
-
-    private static bool IsExactDecision(GovernedLoopEffectAuthorityRequest request, GovernedLoopEffectAuthorityDecision decision)
-    {
-        return GovernedLoopEffectAuthorityContractValidator.Validate(decision).IsValid
-            && string.Equals(decision.RunId, request.ExecutionBinding.RunId, StringComparison.Ordinal)
-            && decision.ExecutionGeneration == request.ExecutionBinding.ExecutionGeneration
-            && string.Equals(decision.NodeId, request.NodeId, StringComparison.Ordinal)
-            && decision.NodeAttempt == request.NodeAttempt
-            && string.Equals(decision.EffectOperationId, request.EffectOperationId, StringComparison.Ordinal)
-            && string.Equals(decision.CorrelationId, request.CorrelationId, StringComparison.Ordinal)
-            && decision.BoundaryKind == request.BoundaryKind
-            && string.Equals(decision.AdmissionReceiptHash, request.AdmissionReceipt.ContentHash, StringComparison.Ordinal)
-            && AuthorityCeilingSubset.IsEqual(decision.RequiredAuthority, request.RequiredAuthority)
-            && decision.RequiredCapabilityPins.SequenceEqual(request.RequiredCapabilityPins);
     }
 
     private static IReadOnlyDictionary<string, object?> CreateMetadata(
