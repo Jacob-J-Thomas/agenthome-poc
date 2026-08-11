@@ -976,6 +976,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 && left.BindingState == CustomLoopInvocationBindingState.Unbound
                 && right.BindingState == CustomLoopInvocationBindingState.CapturedContext;
         return snapshotMatches
+            && string.Equals(left.SequentialAdmissionRequestHash, right.SequentialAdmissionRequestHash, StringComparison.Ordinal)
+            && string.Equals(left.SequentialArtifactHash, right.SequentialArtifactHash, StringComparison.Ordinal)
             && string.Equals(left.RequestHash, right.RequestHash, StringComparison.Ordinal)
             && string.Equals(left.OperationId, right.OperationId, StringComparison.Ordinal)
             && string.Equals(left.LoopId, right.LoopId, StringComparison.Ordinal)
@@ -1128,9 +1130,22 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
     private static bool ValidSequentialSnapshot(CustomLoopInvocationOperation operation)
     {
         var snapshot = operation.SequentialInvocationSnapshot;
+        var hasAdmissionRequestHash = IsHash(operation.SequentialAdmissionRequestHash);
+        var hasArtifactHash = IsHash(operation.SequentialArtifactHash);
+        if (operation.SequentialAdmissionRequestHash is null && operation.SequentialArtifactHash is null)
+        {
+            return snapshot is null;
+        }
+
+        if (!hasAdmissionRequestHash || !hasArtifactHash)
+        {
+            return false;
+        }
+
         if (snapshot is null)
         {
-            return true;
+            return operation.State == CustomLoopInvocationOperationState.Pending
+                && operation.BindingState == CustomLoopInvocationBindingState.Unbound;
         }
 
         if (operation.BindingState is not (CustomLoopInvocationBindingState.CapturedContext or CustomLoopInvocationBindingState.CapturedContextNotFound)

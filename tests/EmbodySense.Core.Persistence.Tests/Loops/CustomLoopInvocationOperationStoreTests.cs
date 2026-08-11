@@ -24,7 +24,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var pending = Pending("invoke-sequential-snapshot", "exact prompt");
+        var pending = SequentialPending("invoke-sequential-snapshot", "exact prompt");
         var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
         var snapshot = SequentialSnapshot(pending, context);
         var bound = pending with
@@ -40,6 +40,8 @@ public sealed class CustomLoopInvocationOperationStoreTests
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(bound)).Status);
         var restarted = new CustomLoopInvocationOperationStore(paths);
         var loaded = Assert.IsType<CustomLoopInvocationOperation>(await restarted.GetAsync(pending.OperationId));
+        Assert.Equal(pending.SequentialAdmissionRequestHash, loaded.SequentialAdmissionRequestHash);
+        Assert.Equal(pending.SequentialArtifactHash, loaded.SequentialArtifactHash);
         Assert.Equal(snapshot.ContentHash, loaded.SequentialInvocationSnapshot?.ContentHash);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, (await restarted.BindAsync(bound)).Status);
 
@@ -53,7 +55,125 @@ public sealed class CustomLoopInvocationOperationStoreTests
     }
 
     [Fact]
-    public async Task Sequential_snapshot_property_is_required_even_when_legacy_value_is_null()
+    public async Task Sequential_begin_identities_are_hash_bound_and_cannot_change_at_bind()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var pending = SequentialPending("invoke-sequential-begin-identity", "exact prompt");
+        var changedBegin = CustomLoopInvocationRequestHash.ApplySequential(pending with
+        {
+            SequentialArtifactHash = Hash('f'),
+        });
+        var store = new CustomLoopInvocationOperationStore(paths);
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, (await new CustomLoopInvocationOperationStore(paths).BeginAsync(pending)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, (await new CustomLoopInvocationOperationStore(paths).BeginAsync(changedBegin)).Status);
+
+        var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
+        var bound = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = Hash('b'),
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context),
+            SequentialInvocationSnapshot = SequentialSnapshot(pending, context),
+        };
+        var changedBind = CustomLoopInvocationRequestHash.ApplySequential(bound with
+        {
+            SequentialAdmissionRequestHash = Hash('f'),
+        });
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, (await store.BindAsync(changedBind)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(bound)).Status);
+        var restarted = Assert.IsType<CustomLoopInvocationOperation>(await new CustomLoopInvocationOperationStore(paths).GetAsync(pending.OperationId));
+        Assert.Equal(pending.SequentialAdmissionRequestHash, restarted.SequentialAdmissionRequestHash);
+        Assert.Equal(pending.SequentialArtifactHash, restarted.SequentialArtifactHash);
+    }
+
+    [Fact]
+    public async Task Sequential_state_shape_rejects_partial_identities_and_bound_operations_without_snapshot()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
+        var legacy = Pending("invoke-sequential-invalid-shapes", "exact prompt");
+        var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
+        var snapshot = SequentialSnapshot(legacy, context);
+
+        await Assert.ThrowsAsync<FormatException>(() => store.BeginAsync(legacy with
+        {
+            SequentialAdmissionRequestHash = Hash('d'),
+        }));
+        await Assert.ThrowsAsync<FormatException>(() => store.BeginAsync(legacy with
+        {
+            SequentialInvocationSnapshot = snapshot,
+        }));
+
+        var canonical = SequentialPending("invoke-sequential-bound-without-snapshot", "exact prompt");
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(canonical)).Status);
+        await Assert.ThrowsAsync<FormatException>(() => store.BindAsync(canonical with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = Hash('b'),
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context),
+        }));
+    }
+
+    [Fact]
+    public async Task Sequential_persisted_begin_identity_corruption_fails_closed()
+    {
+        var properties = new[]
+        {
+            (Name: "sequentialAdmissionRequestHash", OperationId: "invoke-corrupt-request-hash"),
+            (Name: "sequentialArtifactHash", OperationId: "invoke-corrupt-artifact-hash"),
+        };
+        foreach (var property in properties)
+        {
+            using var workspace = new TestWorkspace();
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var pending = SequentialPending(property.OperationId, "exact prompt");
+            Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await new CustomLoopInvocationOperationStore(paths).BeginAsync(pending)).Status);
+            var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
+            var json = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+            json[property.Name] = Hash('f');
+            await File.WriteAllTextAsync(path, json.ToJsonString());
+
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopInvocationOperationStore(paths).GetAsync(pending.OperationId));
+        }
+    }
+
+    [Fact]
+    public void Invocation_request_hash_preserves_legacy_bytes_and_domain_separates_sequential_identity()
+    {
+        var legacy = Pending("invoke-hash-legacy", "prompt");
+        var sequential = SequentialPending("invoke-hash-legacy", "prompt");
+        var direct = CustomLoopInvocationRequestHash.ComputeSequential(
+            sequential.OperationId,
+            sequential.LoopId,
+            sequential.ExpectedDefinitionVersion,
+            sequential.ExpectedDefinitionHash,
+            sequential.Actor,
+            sequential.Surface,
+            sequential.CurrentRoleId,
+            "prompt",
+            sequential.Provider,
+            sequential.Model,
+            sequential.SequentialAdmissionRequestHash!,
+            sequential.SequentialArtifactHash!);
+
+        Assert.Equal("aa4dc8f2e60a3efa9eb20761b4bb327a6b00b9c1f55a6b56db2e5ea393dacc3e", legacy.RequestHash);
+        Assert.True(CustomLoopInvocationRequestHash.Matches(legacy));
+        Assert.True(CustomLoopInvocationRequestHash.Matches(sequential));
+        Assert.Equal(direct, sequential.RequestHash);
+        Assert.NotEqual(legacy.RequestHash, sequential.RequestHash);
+        Assert.False(CustomLoopInvocationRequestHash.Matches(sequential with { SequentialArtifactHash = Hash('f') }));
+        Assert.Throws<ArgumentException>(() => CustomLoopInvocationRequestHash.ApplySequential(legacy));
+    }
+
+    [Theory]
+    [InlineData("sequentialAdmissionRequestHash")]
+    [InlineData("sequentialArtifactHash")]
+    [InlineData("sequentialInvocationSnapshot")]
+    public async Task Sequential_properties_are_required_even_when_legacy_values_are_null(string propertyName)
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -62,7 +182,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
         var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
         var json = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
-        Assert.True(json.Remove("sequentialInvocationSnapshot"));
+        Assert.True(json.Remove(propertyName));
         await File.WriteAllTextAsync(path, json.ToJsonString());
 
         await Assert.ThrowsAsync<FormatException>(() => new CustomLoopInvocationOperationStore(paths).GetAsync(pending.OperationId));
@@ -73,7 +193,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
     {
         using var workspace = new TestWorkspace();
         var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
-        var pending = Pending("invoke-sequential-conversation", "exact prompt");
+        var pending = SequentialPending("invoke-sequential-conversation", "exact prompt");
         var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
         var exact = pending with
         {
@@ -103,7 +223,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var pending = Pending("invoke-sequential-no-conversation", "exact prompt");
+        var pending = SequentialPending("invoke-sequential-no-conversation", "exact prompt");
         var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
         var snapshot = SequentialSnapshot(pending, context, includeConversation: false);
         var bound = pending with
@@ -132,6 +252,8 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var loaded = Assert.IsType<CustomLoopInvocationOperation>(await restarted.GetAsync(pending.OperationId));
         Assert.Null(loaded.InvokingConversationId);
         Assert.Null(loaded.SequentialInvocationSnapshot?.InvokingConversation);
+        Assert.Equal(pending.SequentialAdmissionRequestHash, loaded.SequentialAdmissionRequestHash);
+        Assert.Equal(pending.SequentialArtifactHash, loaded.SequentialArtifactHash);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, (await restarted.CompleteAsync(completed)).Status);
     }
 
@@ -140,7 +262,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
     {
         using var workspace = new TestWorkspace();
         var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
-        var pending = Pending("invoke-sequential-no-conversation-substitution", "exact prompt");
+        var pending = SequentialPending("invoke-sequential-no-conversation-substitution", "exact prompt");
         var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
         var snapshot = SequentialSnapshot(pending, context, includeConversation: false);
         var bound = pending with
@@ -172,7 +294,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var pending = Pending("invoke-sequential-captured-not-found", "exact prompt");
+        var pending = SequentialPending("invoke-sequential-captured-not-found", "exact prompt");
         var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
         var captured = pending with
         {
@@ -215,7 +337,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopInvocationOperationStore(paths);
-        var pending = Pending("invoke-sequential-oversize", "exact prompt");
+        var pending = SequentialPending("invoke-sequential-oversize", "exact prompt");
         var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
         var snapshot = SequentialSnapshot(pending, context);
         var oversizedReason = new string('\u00e9', CustomLoopLimits.MaxRunDetailCharacters);
@@ -1242,6 +1364,16 @@ public sealed class CustomLoopInvocationOperationStoreTests
             "The invocation is pending.");
     }
 
+    private static CustomLoopInvocationOperation SequentialPending(string operationId, string prompt)
+    {
+        var pending = Pending(operationId, prompt) with
+        {
+            SequentialAdmissionRequestHash = Hash('d'),
+            SequentialArtifactHash = Hash('e'),
+        };
+        return CustomLoopInvocationRequestHash.ApplySequential(pending);
+    }
+
     private static CustomLoopInvocationOperation CompletedAdmitted(CustomLoopInvocationOperation pending)
     {
         return pending with
@@ -1270,6 +1402,8 @@ public sealed class CustomLoopInvocationOperationStoreTests
             string.Empty);
         return GovernedLoopSequentialContractHash.Apply(snapshot);
     }
+
+    private static string Hash(char value) => new(value, CustomLoopLimits.Sha256HexCharacters);
 
     private sealed class MutableTimeProvider(DateTimeOffset utcNow) : TimeProvider
     {
