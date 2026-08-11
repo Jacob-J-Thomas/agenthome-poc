@@ -7,7 +7,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 /// Keeps two ordered runners under one lifecycle ownership lease while routing cross-process
 /// cancellation exactly once through their shared cancellation broker.
 /// </summary>
-internal sealed class CustomLoopExecutionCancellationSignalGroup : ICustomLoopExecutionCancellationSignal
+public sealed class CustomLoopExecutionCancellationSignalGroup : ICustomLoopExecutionCancellationSignal
 {
     private readonly ICustomLoopExecutionCancellationSignal _primary;
     private readonly ICustomLoopExecutionCancellationSignal _secondary;
