@@ -39,9 +39,9 @@ internal static class HumanInputRequestLifecycleTestData
             prompt,
             new HumanInputResponseSchema(HumanInputResponseKind.Text, 240, null, null, null),
             HumanInputPrivacyClass.Private,
-            [new HumanInputEligibleRespondent("user-one", routingReference)],
+            [new HumanInputEligibleRespondent("user-one", "respondent-one", routingReference)],
             new HumanInputTiming(requestedAtUtc ?? Now, expiresAtUtc ?? Now.AddHours(1)),
-            new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstEligibleResponse),
+            new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
             new HumanInputContinuationBinding(
                 HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly,
                 "node-one",

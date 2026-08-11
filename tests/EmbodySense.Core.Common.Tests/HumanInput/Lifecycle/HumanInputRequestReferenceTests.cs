@@ -54,7 +54,7 @@ public sealed class HumanInputRequestReferenceTests
         var request = HumanInputLifecycleTestData.Request(
             purpose: PurposeCanary,
             prompt: PromptCanary,
-            respondents: [new HumanInputEligibleRespondent("user-one", RouteCanary)]);
+            respondents: [new HumanInputEligibleRespondent("user-one", "role-one", RouteCanary)]);
 
         var text = request.ToString();
 

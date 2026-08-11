@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using EmbodySense.Core.Common.HumanInput.Models;
 
 namespace EmbodySense.Core.Common.HumanInput;
@@ -69,7 +70,9 @@ public static class HumanInputRequestSnapshot
 
         if (request.EligibleRespondents is { Length: > HumanInputLimits.MaxEligibleRespondents }
             || request.ResponseSchema?.Choices is { Length: > HumanInputLimits.MaxChoices }
-            || request.ResponseSchema?.StructuredFields is { Length: > HumanInputLimits.MaxStructuredFields })
+            || request.ResponseSchema?.StructuredFields is { Length: > HumanInputLimits.MaxStructuredFields }
+            || request.ResponsePolicy?.OrderedRoleIds is { IsDefault: true }
+            || request.ResponsePolicy?.OrderedRoleIds is { Length: > HumanInputLimits.MaxResponsePolicyRoles })
         {
             return false;
         }
@@ -102,11 +105,13 @@ public static class HumanInputRequestSnapshot
 
     private static HumanInputReferencePolicy? Snapshot(HumanInputReferencePolicy? value) => value is null ? null : new HumanInputReferencePolicy(value.Kind, value.MaxReferenceCharacters);
 
-    private static HumanInputEligibleRespondent[] Snapshot(HumanInputEligibleRespondent[]? values) => values?.Select(value => value is null ? null! : new HumanInputEligibleRespondent(value.RespondentId, value.RoutingReference)).ToArray()!;
+    private static HumanInputEligibleRespondent[] Snapshot(HumanInputEligibleRespondent[]? values) => values?.Select(value => value is null ? null! : new HumanInputEligibleRespondent(value.RespondentId, value.RespondentRoleId, value.RoutingReference)).ToArray()!;
 
     private static HumanInputTiming Snapshot(HumanInputTiming? value) => value is null ? null! : new HumanInputTiming(value.RequestedAtUtc, value.ExpiresAtUtc);
 
-    private static HumanInputResponsePolicy Snapshot(HumanInputResponsePolicy? value) => value is null ? null! : new HumanInputResponsePolicy(value.Kind);
+    private static HumanInputResponsePolicy Snapshot(HumanInputResponsePolicy? value) => value is null
+        ? null!
+        : new HumanInputResponsePolicy(value.Kind, value.RequiredResponseCount, value.OrderedRoleIds is { } roleIds ? roleIds.ToArray().ToImmutableArray() : null);
 
     private static HumanInputContinuationBinding Snapshot(HumanInputContinuationBinding? value) => value is null ? null! : new HumanInputContinuationBinding(value.Kind, value.NodeId, value.CheckpointId);
 }

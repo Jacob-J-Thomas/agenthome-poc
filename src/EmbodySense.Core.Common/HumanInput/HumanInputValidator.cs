@@ -40,10 +40,7 @@ public static class HumanInputValidator
 
         ValidateRespondents(request.EligibleRespondents, errors);
         ValidateTiming(request.Timing, errors);
-        if (request.ResponsePolicy is null || request.ResponsePolicy.Kind != HumanInputResponsePolicyKind.FirstEligibleResponse)
-        {
-            Add(errors, "unsupported_response_policy", "responsePolicy", "Schema 1 requires the explicit first-eligible-response policy.");
-        }
+        ValidateResponsePolicy(request.ResponsePolicy, request.EligibleRespondents, errors);
 
         ValidateContinuation(request.ContinuationBinding, request.Binding, errors);
         if (!IsSha256(request.RequestHash))
@@ -104,9 +101,10 @@ public static class HumanInputValidator
         }
 
         ValidateId(response.AuthenticatedActorRef, "authenticatedActorRef", errors);
-        if (!IsEligibleRespondent(request.EligibleRespondents, response.AuthenticatedActorRef))
+        ValidateId(response.RespondentRoleId, "respondentRoleId", errors);
+        if (!IsEligibleRespondent(request.EligibleRespondents, response.AuthenticatedActorRef, response.RespondentRoleId))
         {
-            Add(errors, "ineligible_respondent", "authenticatedActorRef", "Authenticated actor is not an explicit eligible respondent.");
+            Add(errors, "ineligible_respondent", "authenticatedActorRef", "Authenticated actor and role are not one exact eligible respondent binding.");
         }
 
         if (!IsUtc(response.SubmittedAtUtc) || request.Timing is null || response.SubmittedAtUtc < request.Timing.RequestedAtUtc || response.SubmittedAtUtc > request.Timing.ExpiresAtUtc)
@@ -162,6 +160,7 @@ public static class HumanInputValidator
             var respondentIdIsValid = HumanInputIdentifier.IsValid(respondent.RespondentId);
             var routeIsValid = HumanInputText.IsValid(respondent.RoutingReference, HumanInputLimits.MaxRoutingReferenceCharacters, true);
             ValidateId(respondent.RespondentId, $"{field}.respondentId", errors);
+            ValidateId(respondent.RespondentRoleId, $"{field}.respondentRoleId", errors);
             ValidateText(respondent.RoutingReference, $"{field}.routingReference", HumanInputLimits.MaxRoutingReferenceCharacters, true, errors);
             if (respondentIdIsValid && !respondentIds.Add(respondent.RespondentId))
             {
@@ -173,6 +172,100 @@ public static class HumanInputValidator
                 Add(errors, "ambiguous_recipient_route", $"{field}.routingReference", "Each eligible respondent requires one unique routing reference.");
             }
         }
+    }
+
+    private static void ValidateResponsePolicy(HumanInputResponsePolicy? policy, HumanInputEligibleRespondent[]? respondents, List<HumanInputValidationError> errors)
+    {
+        if (policy is null || !Enum.IsDefined(policy.Kind) || policy.Kind == HumanInputResponsePolicyKind.Unknown)
+        {
+            Add(errors, "unsupported_response_policy", "responsePolicy.kind", "A supported deterministic response policy is required.");
+            return;
+        }
+
+        var respondentCount = respondents is { Length: >= 1 and <= HumanInputLimits.MaxEligibleRespondents } ? respondents.Length : 0;
+        switch (policy.Kind)
+        {
+            case HumanInputResponsePolicyKind.FirstValid:
+                RequireAbsent(policy.RequiredResponseCount, "responsePolicy.requiredResponseCount", errors);
+                RequireAbsent(policy.OrderedRoleIds, "responsePolicy.orderedRoleIds", errors);
+                break;
+            case HumanInputResponsePolicyKind.Quorum:
+                if (policy.RequiredResponseCount is not { } quorum || quorum < 2 || quorum > respondentCount)
+                {
+                    Add(errors, "invalid_quorum_count", "responsePolicy.requiredResponseCount", "Quorum requires two through the exact eligible respondent count.");
+                }
+                RequireAbsent(policy.OrderedRoleIds, "responsePolicy.orderedRoleIds", errors);
+                break;
+            case HumanInputResponsePolicyKind.NamedRoles:
+                RequireAbsent(policy.RequiredResponseCount, "responsePolicy.requiredResponseCount", errors);
+                ValidateOrderedRoles(policy.OrderedRoleIds, respondents, requireUnambiguousRespondent: true, "required", errors);
+                break;
+            case HumanInputResponsePolicyKind.Merge:
+                var contributorCount = ValidateOrderedRoles(policy.OrderedRoleIds, respondents, requireUnambiguousRespondent: true, "contributor", errors);
+                if (policy.RequiredResponseCount is not { } threshold || threshold < 1 || threshold > contributorCount)
+                {
+                    Add(errors, "invalid_merge_count", "responsePolicy.requiredResponseCount", "Merge requires a positive threshold within its authored contributor-role list.");
+                }
+                break;
+            case HumanInputResponsePolicyKind.ManualSelection:
+                RequireAbsent(policy.RequiredResponseCount, "responsePolicy.requiredResponseCount", errors);
+                ValidateOrderedRoles(policy.OrderedRoleIds, respondents, requireUnambiguousRespondent: false, "selector", errors);
+                break;
+            default:
+                Add(errors, "unsupported_response_policy", "responsePolicy.kind", "A supported deterministic response policy is required.");
+                break;
+        }
+    }
+
+    private static int ValidateOrderedRoles(ImmutableArray<string>? roleIds, HumanInputEligibleRespondent[]? respondents, bool requireUnambiguousRespondent, string rolePurpose, List<HumanInputValidationError> errors)
+    {
+        if (roleIds is not { } roles || roles.IsDefault || roles.Length is < 1 or > HumanInputLimits.MaxResponsePolicyRoles)
+        {
+            Add(errors, "invalid_policy_roles", "responsePolicy.orderedRoleIds", $"A bounded non-empty authored {rolePurpose}-role list is required.");
+            return 0;
+        }
+
+        var unique = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < roles.Length; index++)
+        {
+            var roleId = roles[index];
+            var field = $"responsePolicy.orderedRoleIds[{index}]";
+            var isValid = HumanInputIdentifier.IsValid(roleId);
+            ValidateId(roleId, field, errors);
+            if (isValid && !unique.Add(roleId))
+            {
+                Add(errors, "duplicate_policy_role", field, "Authored response-policy roles must be unique.");
+            }
+
+            var matches = CountRespondentsForRole(respondents, roleId);
+            if (matches == 0 || requireUnambiguousRespondent && matches != 1)
+            {
+                Add(errors, "ineligible_policy_role", field, requireUnambiguousRespondent
+                    ? "The authored role must map to exactly one eligible respondent."
+                    : "The authored selector role must map to at least one eligible respondent.");
+            }
+        }
+
+        return roles.Length;
+    }
+
+    private static int CountRespondentsForRole(HumanInputEligibleRespondent[]? respondents, string? roleId)
+    {
+        if (respondents is null || respondents.Length > HumanInputLimits.MaxEligibleRespondents)
+        {
+            return 0;
+        }
+
+        var count = 0;
+        for (var index = 0; index < respondents.Length; index++)
+        {
+            if (respondents[index] is { } respondent && string.Equals(respondent.RespondentRoleId, roleId, StringComparison.Ordinal))
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private static void ValidateTiming(HumanInputTiming? timing, List<HumanInputValidationError> errors)
@@ -511,7 +604,7 @@ public static class HumanInputValidator
         return false;
     }
 
-    private static bool IsEligibleRespondent(HumanInputEligibleRespondent[]? respondents, string actorRef)
+    private static bool IsEligibleRespondent(HumanInputEligibleRespondent[]? respondents, string actorRef, string roleId)
     {
         if (respondents is null || respondents.Length is < 1 or > HumanInputLimits.MaxEligibleRespondents)
         {
@@ -520,7 +613,9 @@ public static class HumanInputValidator
 
         for (var index = 0; index < respondents.Length; index++)
         {
-            if (respondents[index] is { } respondent && string.Equals(respondent.RespondentId, actorRef, StringComparison.Ordinal))
+            if (respondents[index] is { } respondent
+                && string.Equals(respondent.RespondentId, actorRef, StringComparison.Ordinal)
+                && string.Equals(respondent.RespondentRoleId, roleId, StringComparison.Ordinal))
             {
                 return true;
             }

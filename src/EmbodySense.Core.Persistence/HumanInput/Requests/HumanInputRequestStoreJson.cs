@@ -1,6 +1,8 @@
 using System.Text.Json;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanInput.Responses.Models;
+using EmbodySense.Core.Persistence.HumanInput.Requests.Models;
 
 namespace EmbodySense.Core.Persistence.HumanInput.Requests;
 
@@ -8,15 +10,19 @@ internal static class HumanInputRequestStoreJson
 {
     private static readonly HashSet<string> _statuses = CanonicalTokens(HumanInputRequestLifecycleStatus.Unknown);
     private static readonly HashSet<string> _expectedStatuses = new(StringComparer.Ordinal) { "unknown", "pending" };
-    private static readonly HashSet<string> _outcomes = CanonicalTokens(HumanInputRequestLifecycleOperationOutcome.Unknown);
-    private static readonly HashSet<string> _failureCodes = CanonicalTokens(HumanInputRequestLifecycleOperationFailureCode.Unknown);
+    private static readonly HashSet<string> _outcomes = OutcomeTokens();
+    private static readonly HashSet<string> _failureCodes = FailureCodeTokens();
     private static readonly HashSet<string> _privacyClasses = CanonicalTokens(HumanInputPrivacyClass.Unknown);
     private static readonly HashSet<string> _kinds = KindTokens();
+    private static readonly HashSet<string> _families = CanonicalTokens(HumanInputRequestStoreOperationFamily.Unknown);
+    private static readonly HashSet<string> _policyKinds = CanonicalTokens(HumanInputResponsePolicyKind.Unknown);
 
     public static bool IsStrictBoundedDocument(
         JsonElement root,
         int maximumRequestVersions,
         int maximumHeads,
+        int maximumResponseArtifacts,
+        int maximumSelections,
         int maximumOperations)
     {
         if (root.ValueKind != JsonValueKind.Object
@@ -28,6 +34,8 @@ internal static class HumanInputRequestStoreJson
 
         return HasBoundedArray(root, "requestVersions", maximumRequestVersions)
             && HasBoundedArray(root, "heads", maximumHeads)
+            && HasBoundedArray(root, "responseArtifacts", maximumResponseArtifacts)
+            && HasBoundedArray(root, "selections", maximumSelections)
             && HasBoundedArray(root, "operations", maximumOperations);
     }
 
@@ -77,6 +85,8 @@ internal static class HumanInputRequestStoreJson
                     "failureCode" => _failureCodes,
                     "privacyClass" => _privacyClasses,
                     "kind" => _kinds,
+                    "family" => _families,
+                    "policyKind" => _policyKinds,
                     _ => null
                 };
                 if (allowed is not null
@@ -109,11 +119,26 @@ internal static class HumanInputRequestStoreJson
     private static HashSet<string> KindTokens()
     {
         var tokens = CanonicalTokens(HumanInputRequestLifecycleOperationKind.Unknown);
+        tokens.UnionWith(CanonicalTokens(HumanInputResponseOperationKind.Unknown));
         tokens.UnionWith(CanonicalTokens(HumanInputResponseKind.Unknown));
         tokens.UnionWith(CanonicalTokens(HumanInputStructuredFieldKind.Unknown));
         tokens.UnionWith(CanonicalTokens(HumanInputReferenceKind.Unknown));
         tokens.UnionWith(CanonicalTokens(HumanInputResponsePolicyKind.Unknown));
         tokens.UnionWith(CanonicalTokens(HumanInputContinuationPolicyKind.Unknown));
+        return tokens;
+    }
+
+    private static HashSet<string> OutcomeTokens()
+    {
+        var tokens = CanonicalTokens(HumanInputRequestLifecycleOperationOutcome.Unknown);
+        tokens.UnionWith(CanonicalTokens(HumanInputResponseOperationOutcome.Unknown));
+        return tokens;
+    }
+
+    private static HashSet<string> FailureCodeTokens()
+    {
+        var tokens = CanonicalTokens(HumanInputRequestLifecycleOperationFailureCode.Unknown);
+        tokens.UnionWith(CanonicalTokens(HumanInputResponseOperationFailureCode.Unknown));
         return tokens;
     }
 

@@ -15,6 +15,8 @@ public static class HumanInputLimits
     public const int MaxRoutingReferenceCharacters = 240;
     /// <summary>Maximum explicitly eligible respondents in one request.</summary>
     public const int MaxEligibleRespondents = 16;
+    /// <summary>Maximum authored respondent-role entries in one response policy.</summary>
+    public const int MaxResponsePolicyRoles = MaxEligibleRespondents;
     /// <summary>Maximum choices in a choice schema.</summary>
     public const int MaxChoices = 16;
     /// <summary>Maximum display characters in a choice.</summary>

@@ -175,6 +175,7 @@ public static class HumanInputRequestLifecycleCommandHash
         {
             writer.WriteStartObject();
             writer.WriteString("respondentId", respondent.RespondentId);
+            writer.WriteString("respondentRoleId", respondent.RespondentRoleId);
             writer.WriteString("routingReference", respondent.RoutingReference);
             writer.WriteEndObject();
         }
@@ -184,7 +185,24 @@ public static class HumanInputRequestLifecycleCommandHash
         writer.WriteString("requestedAtUtc", request.Timing.RequestedAtUtc);
         writer.WriteString("expiresAtUtc", request.Timing.ExpiresAtUtc);
         writer.WriteEndObject();
-        writer.WriteNumber("responsePolicy", (int)request.ResponsePolicy.Kind);
+        writer.WriteStartObject("responsePolicy");
+        writer.WriteNumber("kind", (int)request.ResponsePolicy.Kind);
+        WriteNullableNumber(writer, "requiredResponseCount", request.ResponsePolicy.RequiredResponseCount);
+        writer.WritePropertyName("orderedRoleIds");
+        if (request.ResponsePolicy.OrderedRoleIds is not { } orderedRoleIds)
+        {
+            writer.WriteNullValue();
+        }
+        else
+        {
+            writer.WriteStartArray();
+            foreach (var roleId in orderedRoleIds)
+            {
+                writer.WriteStringValue(roleId);
+            }
+            writer.WriteEndArray();
+        }
+        writer.WriteEndObject();
         writer.WriteStartObject("continuationBinding");
         writer.WriteNumber("kind", (int)request.ContinuationBinding.Kind);
         writer.WriteString("nodeId", request.ContinuationBinding.NodeId);

@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -5,11 +6,15 @@ using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.HumanInput.Lifecycle;
 using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
+using EmbodySense.Core.Application.HumanInput.Responses;
+using EmbodySense.Core.Application.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanInput.Responses;
+using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Capabilities.Models;
@@ -25,7 +30,7 @@ namespace EmbodySense.Core.Persistence.HumanInput.Requests;
 /// to the physical workspace. A pending direct successor can be finalized only by an exact operation retry. Recovered
 /// last-proved state is read-only and never becomes a mutation base.
 /// </remarks>
-public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
+public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore, IHumanInputResponseLifecycleStore
 {
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions(writeIndented: true);
     private static readonly JsonSerializerOptions _hashOptions = CreateJsonOptions(writeIndented: false);
@@ -195,6 +200,346 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
         }
     }
 
+    /// <inheritdoc />
+    async Task<HumanInputResponseLifecycleStoreReadResult> IHumanInputResponseLifecycleStore.ReadAsync(
+        HumanInputRequestReference request,
+        CancellationToken cancellationToken)
+    {
+        if (!HumanInputRequestLifecycleValidator.ValidateReference(request).IsValid)
+        {
+            return ResponseReadResult(HumanInputResponseLifecycleStoreReadStatus.Unavailable);
+        }
+
+        HumanInputResponseLifecycleStoreReadResult? completed = null;
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(
+                async token =>
+                {
+                    completed = await ReadResponseCoreAsync(request, token).ConfigureAwait(false);
+                    return completed;
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (completed is null && cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception) || exception is OperationCanceledException)
+        {
+            return completed ?? ResponseReadResult(HumanInputResponseLifecycleStoreReadStatus.Unavailable);
+        }
+    }
+
+    /// <inheritdoc />
+    async Task<HumanInputResponseLifecycleStoreReadResult> IHumanInputResponseLifecycleStore.ReadForMutationAsync(
+        string requestId,
+        string operationId,
+        string commandHash,
+        CancellationToken cancellationToken)
+    {
+        if (!HumanInputIdentifier.IsValid(requestId)
+            || !HumanInputIdentifier.IsValid(operationId, HumanInputRequestLifecycleContractLimits.MaxOperationIdCharacters)
+            || !IsHash(commandHash))
+        {
+            return ResponseReadResult(HumanInputResponseLifecycleStoreReadStatus.Unavailable);
+        }
+
+        var callbackEntered = false;
+        HumanInputResponseLifecycleStoreReadResult? completed = null;
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(
+                async token =>
+                {
+                    callbackEntered = true;
+                    completed = await ReadResponseForMutationCoreAsync(
+                        requestId,
+                        operationId,
+                        commandHash,
+                        token,
+                        cancellationToken).ConfigureAwait(false);
+                    return completed;
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (completed is null && cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception) || exception is OperationCanceledException)
+        {
+            return completed ?? ResponseReadResult(callbackEntered
+                ? HumanInputResponseLifecycleStoreReadStatus.Ambiguous
+                : HumanInputResponseLifecycleStoreReadStatus.Unavailable);
+        }
+    }
+
+    /// <inheritdoc />
+    async Task<HumanInputResponseLifecycleStoreCommitResult> IHumanInputResponseLifecycleStore.CommitAsync(
+        HumanInputResponseLifecycleStoreMutation mutation,
+        CancellationToken cancellationToken)
+    {
+        if (!TryCaptureResponseMutation(mutation, out var captured))
+        {
+            return ResponseCommitResult(HumanInputResponseLifecycleStoreCommitStatus.Unavailable);
+        }
+
+        var callbackEntered = false;
+        HumanInputResponseLifecycleStoreCommitResult? completed = null;
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(
+                async token =>
+                {
+                    callbackEntered = true;
+                    completed = await CommitResponseCoreAsync(captured!, token, cancellationToken).ConfigureAwait(false);
+                    return completed;
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (completed is null && cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception) || exception is OperationCanceledException)
+        {
+            return completed ?? ResponseCommitResult(callbackEntered
+                ? HumanInputResponseLifecycleStoreCommitStatus.Ambiguous
+                : HumanInputResponseLifecycleStoreCommitStatus.Unavailable);
+        }
+    }
+
+    private async Task<HumanInputResponseLifecycleStoreReadResult> ReadResponseCoreAsync(
+        HumanInputRequestReference request,
+        CancellationToken cancellationToken)
+    {
+        await using var session = await AcquireAsync(cancellationToken).ConfigureAwait(false);
+        var workspaceIdentity = WorkspaceIdentity(session);
+        var trust = await _trustProvider.ReadAsync(workspaceIdentity, cancellationToken).ConfigureAwait(false);
+        var loaded = await LoadAsync(session, workspaceIdentity, trust, cancellationToken).ConfigureAwait(false);
+        if (loaded.Disposition is HumanInputRequestLoadDisposition.Pending or HumanInputRequestLoadDisposition.Recovered)
+        {
+            return ResponseReadResult(HumanInputResponseLifecycleStoreReadStatus.Ambiguous);
+        }
+
+        if (loaded.Document is null)
+        {
+            return ResponseReadResult(HumanInputResponseLifecycleStoreReadStatus.Unavailable);
+        }
+
+        var snapshot = ResponseSnapshot(loaded.Document, request);
+        return new HumanInputResponseLifecycleStoreReadResult(
+            snapshot is null ? HumanInputResponseLifecycleStoreReadStatus.NotFound : HumanInputResponseLifecycleStoreReadStatus.Ready,
+            loaded.Document.Generation,
+            snapshot,
+            null);
+    }
+
+    private async Task<HumanInputResponseLifecycleStoreReadResult> ReadResponseForMutationCoreAsync(
+        string requestId,
+        string operationId,
+        string commandHash,
+        CancellationToken cancellationToken,
+        CancellationToken callerCancellationToken)
+    {
+        var outcomeMayHaveCommitted = false;
+        try
+        {
+            await using var session = await AcquireAsync(cancellationToken).ConfigureAwait(false);
+            var workspaceIdentity = WorkspaceIdentity(session);
+            var trust = await _trustProvider.ReadAsync(workspaceIdentity, cancellationToken).ConfigureAwait(false);
+            var loaded = await LoadAsync(session, workspaceIdentity, trust, cancellationToken).ConfigureAwait(false);
+            if (loaded.Disposition == HumanInputRequestLoadDisposition.Pending)
+            {
+                if (!PendingResponseMatches(loaded.Pending!, requestId, operationId, commandHash))
+                {
+                    return ResponseReadResult(HumanInputResponseLifecycleStoreReadStatus.Ambiguous);
+                }
+
+                outcomeMayHaveCommitted = true;
+                loaded = await FinalizePendingAsync(workspaceIdentity, trust!, loaded, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (loaded.Disposition == HumanInputRequestLoadDisposition.Recovered)
+            {
+                return ResponseReadResult(HumanInputResponseLifecycleStoreReadStatus.Ambiguous);
+            }
+
+            if (loaded.Document is null)
+            {
+                return ResponseReadResult(HumanInputResponseLifecycleStoreReadStatus.Unavailable);
+            }
+
+            var document = loaded.Document;
+            var currentSnapshot = ResponseSnapshot(document, requestId);
+            var envelope = FindOperationEnvelope(document, operationId);
+            if (envelope is null)
+            {
+                return new HumanInputResponseLifecycleStoreReadResult(
+                    currentSnapshot is null ? HumanInputResponseLifecycleStoreReadStatus.NotFound : HumanInputResponseLifecycleStoreReadStatus.Ready,
+                    document.Generation,
+                    currentSnapshot,
+                    null);
+            }
+
+            var operation = ResponseOperation(envelope);
+            var exact = operation is not null
+                && string.Equals(operation.RequestId, requestId, StringComparison.Ordinal)
+                && FixedHashEquals(operation.Evidence.CommandHash, commandHash);
+            var exactSnapshot = exact
+                ? ReplayResponseSnapshot(document, operation!.Evidence)
+                : currentSnapshot;
+            return new HumanInputResponseLifecycleStoreReadResult(
+                exact
+                    ? exactSnapshot is null ? HumanInputResponseLifecycleStoreReadStatus.NotFound : HumanInputResponseLifecycleStoreReadStatus.Ready
+                    : HumanInputResponseLifecycleStoreReadStatus.OperationConflict,
+                document.Generation,
+                exactSnapshot,
+                exact ? operation : null);
+        }
+        catch (OperationCanceledException) when (callerCancellationToken.IsCancellationRequested && !outcomeMayHaveCommitted)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception) || exception is OperationCanceledException)
+        {
+            return ResponseReadResult(outcomeMayHaveCommitted
+                ? HumanInputResponseLifecycleStoreReadStatus.Ambiguous
+                : HumanInputResponseLifecycleStoreReadStatus.Unavailable);
+        }
+    }
+
+    private async Task<HumanInputResponseLifecycleStoreCommitResult> CommitResponseCoreAsync(
+        HumanInputResponseLifecycleStoreMutation mutation,
+        CancellationToken cancellationToken,
+        CancellationToken callerCancellationToken)
+    {
+        var outcomeMayHaveCommitted = false;
+        try
+        {
+            await using var session = await AcquireAsync(cancellationToken).ConfigureAwait(false);
+            var workspaceIdentity = WorkspaceIdentity(session);
+            var trust = await _trustProvider.ReadAsync(workspaceIdentity, cancellationToken).ConfigureAwait(false);
+            var loaded = await LoadAsync(session, workspaceIdentity, trust, cancellationToken).ConfigureAwait(false);
+            if (loaded.Disposition == HumanInputRequestLoadDisposition.Pending)
+            {
+                var pending = loaded.Pending!;
+                if (!PendingResponseMatches(
+                        pending,
+                        mutation.Operation.Request.RequestId,
+                        mutation.Operation.OperationId,
+                        mutation.Operation.CommandHash))
+                {
+                    return ResponseCommitResult(HumanInputResponseLifecycleStoreCommitStatus.Ambiguous);
+                }
+
+                var evidenceMatches = ResponseEvidenceEquals(pending.Operations[^1].ResponseLifecycle!, mutation.Operation);
+                outcomeMayHaveCommitted = true;
+                loaded = await FinalizePendingAsync(workspaceIdentity, trust!, loaded, cancellationToken).ConfigureAwait(false);
+                return ResponseCommitProjection(
+                    evidenceMatches
+                        ? HumanInputResponseLifecycleStoreCommitStatus.Replayed
+                        : HumanInputResponseLifecycleStoreCommitStatus.OperationConflict,
+                    loaded.Document!,
+                    mutation.Operation.OperationId);
+            }
+
+            if (loaded.Disposition == HumanInputRequestLoadDisposition.Recovered)
+            {
+                return ResponseCommitResult(HumanInputResponseLifecycleStoreCommitStatus.Ambiguous);
+            }
+
+            if (loaded.Document is null)
+            {
+                return ResponseCommitResult(HumanInputResponseLifecycleStoreCommitStatus.Unavailable);
+            }
+
+            var current = loaded.Document;
+            var existingEnvelope = FindOperationEnvelope(current, mutation.Operation.OperationId);
+            if (existingEnvelope is not null)
+            {
+                var existing = ResponseOperation(existingEnvelope);
+                if (existing is not null && ResponseEvidenceEquals(existing.Evidence, mutation.Operation))
+                {
+                    return ResponseCommitProjection(HumanInputResponseLifecycleStoreCommitStatus.Replayed, current, mutation.Operation.OperationId);
+                }
+
+                var sameIntent = existing is not null
+                    && string.Equals(existing.RequestId, mutation.Operation.Request.RequestId, StringComparison.Ordinal)
+                    && FixedHashEquals(existing.Evidence.CommandHash, mutation.Operation.CommandHash);
+                return sameIntent
+                    ? ResponseCommitProjection(HumanInputResponseLifecycleStoreCommitStatus.OperationConflict, current, mutation.Operation.OperationId)
+                    : new HumanInputResponseLifecycleStoreCommitResult(
+                        HumanInputResponseLifecycleStoreCommitStatus.OperationConflict,
+                        current.Generation,
+                        null,
+                        ResponseSnapshot(current, mutation.Operation.Request.RequestId));
+            }
+
+            if (mutation.ExpectedStoreGeneration != current.Generation)
+            {
+                return new HumanInputResponseLifecycleStoreCommitResult(
+                    HumanInputResponseLifecycleStoreCommitStatus.StoreConflict,
+                    current.Generation,
+                    null,
+                    ResponseSnapshot(current, mutation.Operation.Request.RequestId));
+            }
+
+            if (WouldExceedResponseCountLimit(current, mutation))
+            {
+                return new HumanInputResponseLifecycleStoreCommitResult(
+                    HumanInputResponseLifecycleStoreCommitStatus.LimitExceeded,
+                    current.Generation,
+                    null,
+                    ResponseSnapshot(current, mutation.Operation.Request.RequestId));
+            }
+
+            if (!TryCreateResponseCandidate(current, mutation, workspaceIdentity, out var candidate)
+                || candidate is null)
+            {
+                return ResponseCommitResult(HumanInputResponseLifecycleStoreCommitStatus.Unavailable);
+            }
+
+            if (!HumanInputRequestStoreStateValidator.Validate(candidate, workspaceIdentity, _options)
+                || !HumanInputRequestStoreStateValidator.IsDirectSuccessor(current, candidate))
+            {
+                return ResponseCommitResult(HumanInputResponseLifecycleStoreCommitStatus.Unavailable);
+            }
+
+            if (WouldExceedArtifactLimit(candidate))
+            {
+                return new HumanInputResponseLifecycleStoreCommitResult(
+                    HumanInputResponseLifecycleStoreCommitStatus.LimitExceeded,
+                    current.Generation,
+                    null,
+                    ResponseSnapshot(current, mutation.Operation.Request.RequestId));
+            }
+
+            var committed = await PublishCandidateAsync(
+                session,
+                workspaceIdentity,
+                trust,
+                current,
+                candidate,
+                () => outcomeMayHaveCommitted = true,
+                cancellationToken).ConfigureAwait(false);
+            return committed is null
+                ? ResponseCommitResult(HumanInputResponseLifecycleStoreCommitStatus.Unavailable)
+                : ResponseCommitProjection(HumanInputResponseLifecycleStoreCommitStatus.Committed, committed, mutation.Operation.OperationId);
+        }
+        catch (OperationCanceledException) when (callerCancellationToken.IsCancellationRequested && !outcomeMayHaveCommitted)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception) || exception is OperationCanceledException)
+        {
+            return ResponseCommitResult(outcomeMayHaveCommitted
+                ? HumanInputResponseLifecycleStoreCommitStatus.Ambiguous
+                : HumanInputResponseLifecycleStoreCommitStatus.Unavailable);
+        }
+    }
+
     private async Task<HumanInputRequestLifecycleStoreReadResult> ReadCoreAsync(string requestId, CancellationToken cancellationToken)
     {
         await using var session = await AcquireAsync(cancellationToken).ConfigureAwait(false);
@@ -259,8 +604,8 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
             var document = loaded.Document;
             var primary = Snapshot(document, requestId);
             var requestedRelated = relatedRequestId is null ? null : Snapshot(document, relatedRequestId);
-            var operation = FindOperation(document, operationId);
-            if (operation is null)
+            var envelope = FindOperationEnvelope(document, operationId);
+            if (envelope is null)
             {
                 return new HumanInputRequestLifecycleStoreReadResult(
                     primary is null ? HumanInputRequestLifecycleStoreReadStatus.NotFound : HumanInputRequestLifecycleStoreReadStatus.Ready,
@@ -270,11 +615,13 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
                     null);
             }
 
-            var exact = string.Equals(operation.RequestId, requestId, StringComparison.Ordinal)
+            var operation = LifecycleOperation(envelope);
+            var exact = operation is not null
+                && string.Equals(operation.RequestId, requestId, StringComparison.Ordinal)
                 && string.Equals(operation.Evidence.RequestHash, requestHash, StringComparison.Ordinal)
                 && (relatedRequestId is null
                     || string.Equals(operation.Evidence.RelatedRequestId, relatedRequestId, StringComparison.Ordinal));
-            var related = exact && operation.Evidence.RelatedRequestId is { } relatedId
+            var related = exact && operation!.Evidence.RelatedRequestId is { } relatedId
                 ? Snapshot(document, relatedId)
                 : null;
             return new HumanInputRequestLifecycleStoreReadResult(
@@ -333,10 +680,11 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
             }
 
             var current = loaded.Document;
-            var existing = FindOperation(current, mutation.Operation.OperationId);
-            if (existing is not null)
+            var existingEnvelope = FindOperationEnvelope(current, mutation.Operation.OperationId);
+            if (existingEnvelope is not null)
             {
-                return Equals(existing.Evidence, mutation.Operation)
+                var existing = LifecycleOperation(existingEnvelope);
+                return existing is not null && Equals(existing.Evidence, mutation.Operation)
                     ? CommitProjection(HumanInputRequestLifecycleStoreCommitStatus.Replayed, current, mutation.Operation.OperationId)
                     : new HumanInputRequestLifecycleStoreCommitResult(
                         HumanInputRequestLifecycleStoreCommitStatus.OperationConflict,
@@ -383,40 +731,17 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
                     RelatedSnapshot(current, mutation.Operation));
             }
 
-            var currentDigest = ComputeContentDigest(current).Value;
-            if (trust is null)
-            {
-                trust = await _trustProvider.InitializeAsync(workspaceIdentity, current.Generation, currentDigest, cancellationToken).ConfigureAwait(false);
-                await ObserveAsync(HumanInputRequestPersistenceBoundary.TrustInitialized, cancellationToken).ConfigureAwait(false);
-            }
-
-            if (!MatchesCurrent(current with { ContentDigest = currentDigest }, trust))
-            {
-                return CommitResult(HumanInputRequestLifecycleStoreCommitStatus.Unavailable);
-            }
-
-            var proof = await SerializeAsync(workspaceIdentity, current, cancellationToken).ConfigureAwait(false);
-            var serializedCandidate = await SerializeAsync(workspaceIdentity, candidate, cancellationToken).ConfigureAwait(false);
-            await session.WriteTextAtomicallyAsync(_paths.ProofPath, proof.Json, cancellationToken).ConfigureAwait(false);
-            await ObserveAsync(HumanInputRequestPersistenceBoundary.ProofPublished, cancellationToken).ConfigureAwait(false);
-            outcomeMayHaveCommitted = true;
-            await session.WriteTextAtomicallyAsync(_paths.PrimaryPath, serializedCandidate.Json, cancellationToken).ConfigureAwait(false);
-            await ObserveAsync(HumanInputRequestPersistenceBoundary.PrimaryPublished, cancellationToken).ConfigureAwait(false);
-            var advanced = await _trustProvider.AdvanceAsync(
+            var committed = await PublishCandidateAsync(
+                session,
                 workspaceIdentity,
-                trust.CurrentGeneration,
-                trust.CurrentContentDigest,
-                candidate.Generation,
-                serializedCandidate.ContentDigest,
+                trust,
+                current,
+                candidate,
+                () => outcomeMayHaveCommitted = true,
                 cancellationToken).ConfigureAwait(false);
-            RequireExactAdvance(workspaceIdentity, trust, candidate.Generation, serializedCandidate.ContentDigest, advanced);
-            await ObserveAsync(HumanInputRequestPersistenceBoundary.TrustAdvanced, cancellationToken).ConfigureAwait(false);
-            var committed = candidate with
-            {
-                ContentDigest = serializedCandidate.ContentDigest,
-                AuthenticationTag = serializedCandidate.AuthenticationTag
-            };
-            return CommitProjection(HumanInputRequestLifecycleStoreCommitStatus.Committed, committed, mutation.Operation.OperationId);
+            return committed is null
+                ? CommitResult(HumanInputRequestLifecycleStoreCommitStatus.Unavailable)
+                : CommitProjection(HumanInputRequestLifecycleStoreCommitStatus.Committed, committed, mutation.Operation.OperationId);
         }
         catch (OperationCanceledException) when (callerCancellationToken.IsCancellationRequested && !outcomeMayHaveCommitted)
         {
@@ -428,6 +753,50 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
                 ? HumanInputRequestLifecycleStoreCommitStatus.Ambiguous
                 : HumanInputRequestLifecycleStoreCommitStatus.Unavailable);
         }
+    }
+
+    private async Task<HumanInputRequestStoreDocument?> PublishCandidateAsync(
+        CapabilityCatalogPathSession session,
+        string workspaceIdentity,
+        CapabilityCatalogTrustState? trust,
+        HumanInputRequestStoreDocument current,
+        HumanInputRequestStoreDocument candidate,
+        Action durableIntentBegan,
+        CancellationToken cancellationToken)
+    {
+        var currentDigest = ComputeContentDigest(current).Value;
+        if (trust is null)
+        {
+            trust = await _trustProvider.InitializeAsync(workspaceIdentity, current.Generation, currentDigest, cancellationToken).ConfigureAwait(false);
+            await ObserveAsync(HumanInputRequestPersistenceBoundary.TrustInitialized, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!MatchesCurrent(current with { ContentDigest = currentDigest }, trust))
+        {
+            return null;
+        }
+
+        var proof = await SerializeAsync(workspaceIdentity, current, cancellationToken).ConfigureAwait(false);
+        var serializedCandidate = await SerializeAsync(workspaceIdentity, candidate, cancellationToken).ConfigureAwait(false);
+        await session.WriteTextAtomicallyAsync(_paths.ProofPath, proof.Json, cancellationToken).ConfigureAwait(false);
+        await ObserveAsync(HumanInputRequestPersistenceBoundary.ProofPublished, cancellationToken).ConfigureAwait(false);
+        durableIntentBegan();
+        await session.WriteTextAtomicallyAsync(_paths.PrimaryPath, serializedCandidate.Json, cancellationToken).ConfigureAwait(false);
+        await ObserveAsync(HumanInputRequestPersistenceBoundary.PrimaryPublished, cancellationToken).ConfigureAwait(false);
+        var advanced = await _trustProvider.AdvanceAsync(
+            workspaceIdentity,
+            trust.CurrentGeneration,
+            trust.CurrentContentDigest,
+            candidate.Generation,
+            serializedCandidate.ContentDigest,
+            cancellationToken).ConfigureAwait(false);
+        RequireExactAdvance(workspaceIdentity, trust, candidate.Generation, serializedCandidate.ContentDigest, advanced);
+        await ObserveAsync(HumanInputRequestPersistenceBoundary.TrustAdvanced, cancellationToken).ConfigureAwait(false);
+        return candidate with
+        {
+            ContentDigest = serializedCandidate.ContentDigest,
+            AuthenticationTag = serializedCandidate.AuthenticationTag
+        };
     }
 
     private async Task<HumanInputRequestLoadResult> LoadAsync(
@@ -449,14 +818,14 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
         var primary = primaryExists
             ? await TryReadAsync(session, workspaceIdentity, _paths.PrimaryPath, cancellationToken).ConfigureAwait(false)
             : null;
-        var proof = proofExists
-            ? await TryReadAsync(session, workspaceIdentity, _paths.ProofPath, cancellationToken).ConfigureAwait(false)
-            : null;
         if (primary is not null && MatchesCurrent(primary, trust))
         {
             return new HumanInputRequestLoadResult(primary, null, HumanInputRequestLoadDisposition.Current);
         }
 
+        var proof = proofExists
+            ? await TryReadAsync(session, workspaceIdentity, _paths.ProofPath, cancellationToken).ConfigureAwait(false)
+            : null;
         var currentBase = proof is not null && MatchesCurrent(proof, trust)
             ? proof
             : !primaryExists && !proofExists && MatchesCurrent(empty, trust)
@@ -521,23 +890,35 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
                     json.RootElement,
                     _options.MaxRequestVersions,
                     _options.MaxRequests,
+                    _options.MaxResponseArtifacts,
+                    _options.MaxSelections,
                     _options.MaxOperations))
             {
                 return null;
             }
 
             var document = JsonSerializer.Deserialize<HumanInputRequestStoreDocument>(text, _jsonOptions);
-            if (!HumanInputRequestStoreStateValidator.Validate(document, workspaceIdentity, _options)
+            if (!HasSafeAuthenticationEnvelope(document, workspaceIdentity)
                 || string.IsNullOrEmpty(document!.AuthenticationTag)
                 || _strictUtf8.GetByteCount(document.AuthenticationTag) > _trustProvider.MaximumAuthenticationTagUtf8Bytes
                 || !CapabilityIntegrityDigest.TryParse(document.ContentDigest, out var digest, out _)
-                || !digest!.FixedTimeEquals(ComputeContentDigest(document))
+                || !TryComputeContentDigest(document, out var computedDigest)
+                || !digest!.FixedTimeEquals(computedDigest)
                 || !await _trustProvider.VerifyArtifactAsync(
                     workspaceIdentity,
                     document.Generation,
                     document.ContentDigest,
                     document.AuthenticationTag,
                     cancellationToken).ConfigureAwait(false))
+            {
+                return null;
+            }
+
+            if (_options.AuthenticatedArtifactObserver is { } observer)
+            {
+                await observer(cancellationToken).ConfigureAwait(false);
+            }
+            if (!HumanInputRequestStoreStateValidator.Validate(document, workspaceIdentity, _options))
             {
                 return null;
             }
@@ -559,6 +940,56 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
         catch (ArgumentException)
         {
             return null;
+        }
+    }
+
+    private bool HasSafeAuthenticationEnvelope(
+        HumanInputRequestStoreDocument? document,
+        string workspaceIdentity)
+        => document is not null
+            && document.SchemaVersion == HumanInputRequestStoreDocument.CurrentSchemaVersion
+            && string.Equals(document.WorkspaceIdentity, workspaceIdentity, StringComparison.Ordinal)
+            && document.Generation is >= 0 and <= HumanInputRequestLifecycleContractLimits.MaxOperationsPerStore
+            && document.RequestVersions is not null
+            && document.Heads is not null
+            && document.ResponseArtifacts is not null
+            && document.Selections is not null
+            && document.Operations is not null
+            && document.Generation == document.Operations.Count
+            && document.RequestVersions.Count <= _options.MaxRequestVersions
+            && document.Heads.Count <= _options.MaxRequests
+            && document.ResponseArtifacts.Count <= _options.MaxResponseArtifacts
+            && document.Selections.Count <= _options.MaxSelections
+            && document.Operations.Count <= _options.MaxOperations;
+
+    private static bool TryComputeContentDigest(
+        HumanInputRequestStoreDocument document,
+        out CapabilityIntegrityDigest? digest)
+    {
+        try
+        {
+            digest = ComputeContentDigest(document);
+            return true;
+        }
+        catch (JsonException)
+        {
+            digest = null;
+            return false;
+        }
+        catch (NotSupportedException)
+        {
+            digest = null;
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            digest = null;
+            return false;
+        }
+        catch (ArgumentException)
+        {
+            digest = null;
+            return false;
         }
     }
 
@@ -611,9 +1042,96 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
             checked(current.Generation + 1),
             requestVersions,
             heads,
-            current.Operations.Append(mutation.Operation).ToArray(),
+            current.ResponseArtifacts.ToArray(),
+            current.Selections.ToArray(),
+            current.Operations.Append(HumanInputRequestStoreOperationDocument.From(mutation.Operation)).ToArray(),
             string.Empty,
             string.Empty);
+    }
+
+    private static bool TryCreateResponseCandidate(
+        HumanInputRequestStoreDocument current,
+        HumanInputResponseLifecycleStoreMutation mutation,
+        string workspaceIdentity,
+        out HumanInputRequestStoreDocument? candidate)
+    {
+        candidate = null;
+        var request = FindRequest(current, mutation.Operation.Request);
+        if (request is null
+            && (mutation.ResponseToAppend is not null || mutation.SelectionToAppend is not null || mutation.RequestHeadToWrite is not null))
+        {
+            return false;
+        }
+
+        HumanInputResponseArtifact? response = null;
+        if (mutation.ResponseToAppend is not null
+            && (request is null
+                || !HumanInputResponseArtifactSnapshot.TryCapture(request, mutation.ResponseToAppend, out response, out _)
+                || response is null
+                || mutation.Operation.SubmittedResponse is null
+                || !mutation.Operation.SubmittedResponse.Matches(request, response)))
+        {
+            return false;
+        }
+
+        if (response is not null
+            && current.ResponseArtifacts.Any(existing =>
+                Equals(existing.Request, response.Request)
+                && string.Equals(existing.ResponseId, response.ResponseId, StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        var responses = response is null
+            ? current.ResponseArtifacts.ToArray()
+            : current.ResponseArtifacts.Append(response).ToArray();
+        var active = request is null ? [] : ActiveResponses(current, request).ToList();
+        if (response is not null)
+        {
+            active.Add(response);
+        }
+
+        HumanInputResponseSelection? selection = null;
+        if (mutation.SelectionToAppend is not null
+            && (request is null
+                || !HumanInputResponseSelectionSnapshot.TryCapture(request, mutation.SelectionToAppend, active, out selection, out _)
+                || selection is null
+                || mutation.Operation.Selection is null
+                || !mutation.Operation.Selection.Matches(selection)))
+        {
+            return false;
+        }
+
+        if (selection is not null
+            && current.Selections.Any(existing =>
+                Equals(existing.Request, selection.Request)
+                || string.Equals(existing.SelectionId, selection.SelectionId, StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        var heads = current.Heads.ToArray();
+        if (mutation.RequestHeadToWrite is { } head)
+        {
+            heads = current.Heads
+                .Where(existing => !string.Equals(existing.RequestId, head.RequestId, StringComparison.Ordinal))
+                .Append(head)
+                .OrderBy(existing => existing.RequestId, StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        candidate = new HumanInputRequestStoreDocument(
+            HumanInputRequestStoreDocument.CurrentSchemaVersion,
+            workspaceIdentity,
+            checked(current.Generation + 1),
+            current.RequestVersions.ToArray(),
+            heads,
+            responses,
+            selection is null ? current.Selections.ToArray() : current.Selections.Append(selection).ToArray(),
+            current.Operations.Append(HumanInputRequestStoreOperationDocument.From(mutation.Operation)).ToArray(),
+            string.Empty,
+            string.Empty);
+        return true;
     }
 
     private static bool TryCaptureMutation(
@@ -658,6 +1176,140 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
         return true;
     }
 
+    private static bool TryCaptureResponseMutation(
+        HumanInputResponseLifecycleStoreMutation? mutation,
+        out HumanInputResponseLifecycleStoreMutation? captured)
+    {
+        captured = null;
+        if (mutation is null
+            || mutation.ExpectedStoreGeneration is < 0 or > HumanInputRequestLifecycleContractLimits.MaxOperationsPerStore
+            || !HumanInputResponseContractValidator.ValidateEvidence(mutation.Operation).IsValid
+            || !HumanInputResponseEligibilityEvidenceHash.Matches(mutation.Operation))
+        {
+            return false;
+        }
+
+        if (!HumanInputResponseOperationEvidenceSnapshot.TryCapture(
+                mutation.Operation,
+                out var operation,
+                out _)
+            || operation is null)
+        {
+            return false;
+        }
+        var committed = operation.Outcome == HumanInputResponseOperationOutcome.Committed;
+        var appendsResponse = committed && operation.Kind == HumanInputResponseOperationKind.Submit;
+        var appendsSelection = committed && operation.Selection is not null;
+        HumanInputResponseArtifact? response = null;
+        HumanInputResponseSelection? selection = null;
+        if (mutation.ResponseToAppend is not null
+            && !TryCaptureResponseArtifact(mutation.ResponseToAppend, out response)
+            || mutation.SelectionToAppend is not null
+                && !TryCaptureResponseSelection(mutation.SelectionToAppend, out selection)
+            || appendsResponse != (response is not null)
+            || appendsSelection != (selection is not null)
+            || appendsSelection != (mutation.RequestHeadToWrite is not null)
+            || mutation.RequestHeadToWrite is not null && !Equals(mutation.RequestHeadToWrite, operation.ResultHead)
+            || response is not null && operation.SubmittedResponse is null
+            || selection is not null
+                && (operation.Selection is null || !operation.Selection.Matches(selection)))
+        {
+            return false;
+        }
+
+        captured = mutation with
+        {
+            Operation = operation,
+            ResponseToAppend = response,
+            SelectionToAppend = selection,
+            RequestHeadToWrite = mutation.RequestHeadToWrite is null ? null : operation.ResultHead
+        };
+        return true;
+    }
+
+    private static bool TryCaptureResponseArtifact(
+        HumanInputResponseArtifact artifact,
+        out HumanInputResponseArtifact? snapshot)
+    {
+        snapshot = null;
+        try
+        {
+            _ = HumanInputResponseArtifactHash.Compute(artifact);
+            var value = artifact.Value;
+            ImmutableArray<HumanInputStructuredFieldValue>? fields = value.StructuredFields is not { } source
+                ? null
+                : source.Select(field => field is null ? null! : field with { }).ToImmutableArray();
+            snapshot = artifact with
+            {
+                Request = artifact.Request with { },
+                Binding = artifact.Binding with { },
+                Value = value with
+                {
+                    StructuredFields = fields,
+                    Reference = value.Reference is null ? null : value.Reference with { }
+                }
+            };
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException
+            or InvalidOperationException
+            or IndexOutOfRangeException
+            or NullReferenceException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryCaptureResponseSelection(
+        HumanInputResponseSelection selection,
+        out HumanInputResponseSelection? snapshot)
+    {
+        snapshot = null;
+        try
+        {
+            _ = HumanInputResponseSelectionHash.Compute(selection);
+            snapshot = selection with
+            {
+                Request = selection.Request with { },
+                Responses = selection.Responses.Select(reference => reference is null
+                    ? null!
+                    : reference with { Request = reference.Request with { } }).ToImmutableArray()
+            };
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException
+            or InvalidOperationException
+            or IndexOutOfRangeException
+            or NullReferenceException)
+        {
+            return false;
+        }
+    }
+
+    private bool WouldExceedResponseCountLimit(
+        HumanInputRequestStoreDocument current,
+        HumanInputResponseLifecycleStoreMutation mutation)
+    {
+        if (current.Operations.Count >= _options.MaxOperations
+            || ClaimedResponseOperations(current, mutation.Operation.Request).Count()
+                >= _options.MaxResponseOperationsPerRequest)
+        {
+            return true;
+        }
+
+        if (mutation.ResponseToAppend is not null
+            && (current.ResponseArtifacts.Count >= _options.MaxResponseArtifacts
+                || current.ResponseArtifacts.Count(response => Equals(response.Request, mutation.Operation.Request))
+                    >= HumanInputResponseContractLimits.MaxResponsesPerRequest))
+        {
+            return true;
+        }
+
+        return mutation.SelectionToAppend is not null
+            && (current.Selections.Count >= _options.MaxSelections
+                || current.Selections.Any(selection => Equals(selection.Request, mutation.Operation.Request)));
+    }
+
     private bool WouldExceedCountLimit(
         HumanInputRequestStoreDocument current,
         HumanInputRequestLifecycleStoreMutation mutation)
@@ -675,20 +1327,16 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
             return true;
         }
 
-        var targetOperations = current.Operations.Count(operation =>
-            string.Equals(operation.TargetRequestId, mutation.Operation.TargetRequestId, StringComparison.Ordinal)
-            || string.Equals(operation.RelatedRequestId, mutation.Operation.TargetRequestId, StringComparison.Ordinal));
-        if (targetOperations >= HumanInputRequestLifecycleContractLimits.MaxOperationsPerRequest)
+        var targetOperations = current.Operations.Count(operation => LifecycleOperationTouchesRequest(operation, mutation.Operation.TargetRequestId));
+        if (targetOperations >= _options.MaxLifecycleOperationsPerRequest)
         {
             return true;
         }
 
         if (mutation.Operation.RelatedRequestId is { } related)
         {
-            var relatedOperations = current.Operations.Count(operation =>
-                string.Equals(operation.TargetRequestId, related, StringComparison.Ordinal)
-                || string.Equals(operation.RelatedRequestId, related, StringComparison.Ordinal));
-            if (relatedOperations >= HumanInputRequestLifecycleContractLimits.MaxOperationsPerRequest)
+            var relatedOperations = current.Operations.Count(operation => LifecycleOperationTouchesRequest(operation, related));
+            if (relatedOperations >= _options.MaxLifecycleOperationsPerRequest)
             {
                 return true;
             }
@@ -713,8 +1361,10 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
         string requestHash,
         string? relatedRequestId)
     {
-        var operation = pending.Operations[^1];
-        return string.Equals(operation.TargetRequestId, requestId, StringComparison.Ordinal)
+        var operation = pending.Operations[^1].RequestLifecycle;
+        return pending.Operations[^1].Family == HumanInputRequestStoreOperationFamily.RequestLifecycle
+            && operation is not null
+            && string.Equals(operation.TargetRequestId, requestId, StringComparison.Ordinal)
             && string.Equals(operation.OperationId, operationId, StringComparison.Ordinal)
             && string.Equals(operation.RequestHash, requestHash, StringComparison.Ordinal)
             && (relatedRequestId is null
@@ -726,7 +1376,8 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
         HumanInputRequestLifecycleStoreMutation mutation)
     {
         var operation = pending.Operations[^1];
-        if (!Equals(operation, mutation.Operation))
+        if (operation.Family != HumanInputRequestStoreOperationFamily.RequestLifecycle
+            || !Equals(operation.RequestLifecycle, mutation.Operation))
         {
             return false;
         }
@@ -741,6 +1392,21 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
                 || pending.Heads.Any(head => Equals(head, mutation.PrimaryHeadToWrite))
             && (mutation.SecondaryHeadToWrite is null
                 || pending.Heads.Any(head => Equals(head, mutation.SecondaryHeadToWrite)));
+    }
+
+    private static bool PendingResponseMatches(
+        HumanInputRequestStoreDocument pending,
+        string requestId,
+        string operationId,
+        string commandHash)
+    {
+        var envelope = pending.Operations[^1];
+        var operation = envelope.ResponseLifecycle;
+        return envelope.Family == HumanInputRequestStoreOperationFamily.ResponseLifecycle
+            && operation is not null
+            && string.Equals(operation.Request.RequestId, requestId, StringComparison.Ordinal)
+            && string.Equals(operation.OperationId, operationId, StringComparison.Ordinal)
+            && FixedHashEquals(operation.CommandHash, commandHash);
     }
 
     private async Task<HumanInputRequestSerializedDocument> SerializeAsync(
@@ -781,6 +1447,8 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
             [],
             [],
             [],
+            [],
+            [],
             string.Empty,
             string.Empty);
         return empty with { ContentDigest = ComputeContentDigest(empty).Value };
@@ -806,13 +1474,23 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
         }
 
         var operations = document.Operations
-            .Where(operation => string.Equals(operation.TargetRequestId, requestId, StringComparison.Ordinal)
-                || string.Equals(operation.RelatedRequestId, requestId, StringComparison.Ordinal))
+            .Select(operation => operation.RequestLifecycle)
+            .Where(operation => operation is not null
+                && (string.Equals(operation.TargetRequestId, requestId, StringComparison.Ordinal)
+                    || string.Equals(operation.RelatedRequestId, requestId, StringComparison.Ordinal)))
+            .Cast<HumanInputRequestLifecycleOperationEvidence>()
             .ToArray();
+        var answerOperation = document.Operations
+            .Select(operation => operation.ResponseLifecycle)
+            .SingleOrDefault(operation => operation is not null
+                && string.Equals(operation.Request.RequestId, requestId, StringComparison.Ordinal)
+                && operation.Selection is not null
+                && Equals(operation.ResultHead, head));
         return new HumanInputRequestLifecycleStoreSnapshot(
             head,
             Array.AsReadOnly(requests.ToArray()),
-            Array.AsReadOnly(operations));
+            Array.AsReadOnly(operations),
+            answerOperation);
     }
 
     private static HumanInputRequestLifecycleStoreSnapshot? RelatedSnapshot(
@@ -820,18 +1498,168 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
         HumanInputRequestLifecycleOperationEvidence operation)
         => operation.RelatedRequestId is { } related ? Snapshot(document, related) : null;
 
-    private static HumanInputRequestLifecycleStoredOperation? FindOperation(HumanInputRequestStoreDocument document, string operationId)
+    internal static HumanInputResponseLifecycleStoreSnapshot? ResponseSnapshot(
+        HumanInputRequestStoreDocument document,
+        string requestId)
     {
-        var evidence = document.Operations.SingleOrDefault(value => string.Equals(value.OperationId, operationId, StringComparison.Ordinal));
-        return evidence is null ? null : new HumanInputRequestLifecycleStoredOperation(evidence.TargetRequestId, evidence);
+        var head = document.Heads.SingleOrDefault(value => string.Equals(value.RequestId, requestId, StringComparison.Ordinal));
+        return head is null ? null : ResponseSnapshot(document, head.CurrentRequest);
     }
+
+    internal static HumanInputResponseLifecycleStoreSnapshot? ResponseSnapshot(
+        HumanInputRequestStoreDocument document,
+        HumanInputRequestReference requestReference)
+    {
+        var requestSnapshot = Snapshot(document, requestReference.RequestId);
+        if (requestSnapshot is null
+            || FindRequest(document, requestReference) is not { } request)
+        {
+            return null;
+        }
+
+        var responses = new List<HumanInputResponseArtifact>();
+        foreach (var source in document.ResponseArtifacts.Where(value => Equals(value.Request, requestReference)))
+        {
+            if (!HumanInputResponseArtifactSnapshot.TryCapture(request, source, out var captured, out _) || captured is null)
+            {
+                return null;
+            }
+            responses.Add(captured);
+        }
+
+        var operations = ClaimedResponseOperations(document, requestReference)
+            .Select(CaptureResponseEvidence)
+            .ToArray();
+        var active = ActiveResponses(document, request);
+        var sourceSelection = document.Selections.SingleOrDefault(value => Equals(value.Request, requestReference));
+        HumanInputResponseSelection? selection = null;
+        if (sourceSelection is not null
+            && (!HumanInputResponseSelectionSnapshot.TryCapture(request, sourceSelection, active, out selection, out _)
+                || selection is null))
+        {
+            return null;
+        }
+
+        return new HumanInputResponseLifecycleStoreSnapshot(
+            requestSnapshot,
+            requestReference,
+            Array.AsReadOnly(responses.ToArray()),
+            Array.AsReadOnly(operations),
+            selection);
+    }
+
+    private static IReadOnlyList<HumanInputResponseArtifact> ActiveResponses(
+        HumanInputRequestStoreDocument document,
+        HumanInputRequest request)
+    {
+        var retained = document.ResponseArtifacts
+            .Where(artifact => artifact.Request.Matches(request))
+            .ToDictionary(artifact => artifact.ResponseId, StringComparer.Ordinal);
+        var active = new List<HumanInputResponseArtifact>();
+        foreach (var operation in document.Operations.Select(value => value.ResponseLifecycle))
+        {
+            if (operation is null
+                || !operation.Request.Matches(request)
+                || operation.Outcome != HumanInputResponseOperationOutcome.Committed)
+            {
+                continue;
+            }
+
+            if (operation.Kind == HumanInputResponseOperationKind.Submit
+                && operation.SubmittedResponse is { } submitted
+                && retained.TryGetValue(submitted.ResponseId, out var artifact)
+                && submitted.Matches(request, artifact)
+                && active.All(value => !string.Equals(value.ResponseId, artifact.ResponseId, StringComparison.Ordinal)))
+            {
+                active.Add(artifact);
+            }
+            else if (operation.Kind == HumanInputResponseOperationKind.Withdraw
+                && operation.TargetResponses.Length == 1)
+            {
+                active.RemoveAll(value => string.Equals(value.ResponseId, operation.TargetResponses[0].ResponseId, StringComparison.Ordinal));
+            }
+        }
+
+        return Array.AsReadOnly(active.ToArray());
+    }
+
+    private static HumanInputRequest? FindRequest(
+        HumanInputRequestStoreDocument document,
+        HumanInputRequestReference reference)
+        => document.RequestVersions.SingleOrDefault(request => reference.Matches(request));
+
+    private static HumanInputRequestStoreOperationDocument? FindOperationEnvelope(HumanInputRequestStoreDocument document, string operationId)
+        => document.Operations.SingleOrDefault(value => string.Equals(value.OperationId, operationId, StringComparison.Ordinal));
+
+    private static HumanInputRequestLifecycleStoredOperation? LifecycleOperation(HumanInputRequestStoreOperationDocument envelope)
+        => envelope.RequestLifecycle is { } evidence
+            ? new HumanInputRequestLifecycleStoredOperation(evidence.TargetRequestId, evidence)
+            : null;
+
+    private static HumanInputResponseLifecycleStoredOperation? ResponseOperation(HumanInputRequestStoreOperationDocument envelope)
+        => envelope.ResponseLifecycle is { } evidence
+            ? new HumanInputResponseLifecycleStoredOperation(evidence.Request.RequestId, CaptureResponseEvidence(evidence))
+            : null;
+
+    private static HumanInputResponseOperationEvidence CaptureResponseEvidence(HumanInputResponseOperationEvidence evidence)
+        => HumanInputResponseOperationEvidenceSnapshot.TryCapture(evidence, out var snapshot, out _)
+            && snapshot is not null
+                ? snapshot
+                : throw new InvalidOperationException("Authenticated response evidence could not be captured.");
+
+    private static bool ResponseEvidenceEquals(
+        HumanInputResponseOperationEvidence left,
+        HumanInputResponseOperationEvidence right)
+        => Equals(
+                left with { AttemptedResponse = null, TargetResponses = default },
+                right with { AttemptedResponse = null, TargetResponses = default })
+            && ResponseArtifactEquals(left.AttemptedResponse, right.AttemptedResponse)
+            && !left.TargetResponses.IsDefault
+            && !right.TargetResponses.IsDefault
+            && left.TargetResponses.SequenceEqual(right.TargetResponses);
+
+    private static bool ResponseArtifactEquals(
+        HumanInputResponseArtifact? left,
+        HumanInputResponseArtifact? right)
+        => left is null || right is null
+            ? left is null && right is null
+            : left.SchemaVersion == right.SchemaVersion
+                && string.Equals(left.ResponseId, right.ResponseId, StringComparison.Ordinal)
+                && Equals(left.Request, right.Request)
+                && Equals(left.Binding, right.Binding)
+                && left.ActorId.Equals(right.ActorId)
+                && string.Equals(left.RespondentRoleId, right.RespondentRoleId, StringComparison.Ordinal)
+                && left.SubmittedAtUtc == right.SubmittedAtUtc
+                && left.PrivacyClass == right.PrivacyClass
+                && ResponseValueEquals(left.Value, right.Value)
+                && string.Equals(left.Explanation, right.Explanation, StringComparison.Ordinal)
+                && string.Equals(left.ValueHash, right.ValueHash, StringComparison.Ordinal)
+                && string.Equals(left.ResponseHash, right.ResponseHash, StringComparison.Ordinal);
+
+    private static bool ResponseValueEquals(HumanInputResponseValue left, HumanInputResponseValue right)
+        => left.Kind == right.Kind
+            && string.Equals(left.Text, right.Text, StringComparison.Ordinal)
+            && string.Equals(left.ChoiceId, right.ChoiceId, StringComparison.Ordinal)
+            && left.Confirmation == right.Confirmation
+            && NullableSequenceEqual(left.StructuredFields, right.StructuredFields)
+            && Equals(left.Reference, right.Reference);
+
+    private static bool NullableSequenceEqual<T>(
+        ImmutableArray<T>? left,
+        ImmutableArray<T>? right)
+        => left.HasValue == right.HasValue
+            && (!left.HasValue
+                || !left.Value.IsDefault
+                    && !right!.Value.IsDefault
+                    && left.Value.SequenceEqual(right.Value));
 
     private static HumanInputRequestLifecycleStoreCommitResult CommitProjection(
         HumanInputRequestLifecycleStoreCommitStatus status,
         HumanInputRequestStoreDocument document,
         string operationId)
     {
-        var operation = FindOperation(document, operationId);
+        var envelope = FindOperationEnvelope(document, operationId);
+        var operation = envelope is null ? null : LifecycleOperation(envelope);
         if (operation is null)
         {
             return CommitResult(HumanInputRequestLifecycleStoreCommitStatus.Ambiguous);
@@ -844,6 +1672,70 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
             Snapshot(document, operation.RequestId),
             RelatedSnapshot(document, operation.Evidence));
     }
+
+    private static HumanInputResponseLifecycleStoreCommitResult ResponseCommitProjection(
+        HumanInputResponseLifecycleStoreCommitStatus status,
+        HumanInputRequestStoreDocument document,
+        string operationId)
+    {
+        var envelope = FindOperationEnvelope(document, operationId);
+        var operation = envelope is null ? null : ResponseOperation(envelope);
+        if (operation is null)
+        {
+            return ResponseCommitResult(HumanInputResponseLifecycleStoreCommitStatus.Ambiguous);
+        }
+
+        return new HumanInputResponseLifecycleStoreCommitResult(
+            status,
+            document.Generation,
+            operation,
+            ReplayResponseSnapshot(document, operation.Evidence));
+    }
+
+    internal static HumanInputResponseLifecycleStoreSnapshot? ReplayResponseSnapshot(
+        HumanInputRequestStoreDocument document,
+        HumanInputResponseOperationEvidence operation)
+    {
+        if (operation.FailureCode == HumanInputResponseOperationFailureCode.RequestNotFound)
+        {
+            return null;
+        }
+
+        return ResponseSnapshot(document, operation.Request)
+            ?? (operation.FailureCode is HumanInputResponseOperationFailureCode.StaleResponse
+                    or HumanInputResponseOperationFailureCode.RequestTerminal
+                ? ResponseSnapshot(document, operation.Request.RequestId)
+                : null);
+    }
+
+    private static IEnumerable<HumanInputResponseOperationEvidence> ClaimedResponseOperations(
+        HumanInputRequestStoreDocument document,
+        HumanInputRequestReference request)
+    {
+        var claimed = new HashSet<HumanInputRequestReference>();
+        foreach (var envelope in document.Operations)
+        {
+            if (envelope.RequestLifecycle is
+                {
+                    Outcome: HumanInputRequestLifecycleOperationOutcome.Committed,
+                    CandidateRequest: { } candidate
+                })
+            {
+                claimed.Add(candidate);
+            }
+            else if (envelope.ResponseLifecycle is { } response
+                && claimed.Contains(response.Request)
+                && Equals(response.Request, request))
+            {
+                yield return response;
+            }
+        }
+    }
+
+    private static bool LifecycleOperationTouchesRequest(HumanInputRequestStoreOperationDocument operation, string requestId)
+        => operation.RequestLifecycle is { } lifecycle
+            && (string.Equals(lifecycle.TargetRequestId, requestId, StringComparison.Ordinal)
+                || string.Equals(lifecycle.RelatedRequestId, requestId, StringComparison.Ordinal));
 
     private async Task<CapabilityCatalogPathSession> AcquireAsync(CancellationToken cancellationToken)
         => await _pathGuard.TryAcquireExclusiveSessionAsync(_paths.LockPath, createRoot: false, cancellationToken).ConfigureAwait(false)
@@ -866,6 +1758,10 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
         if (options.MaxRequests is < 1 or > HumanInputRequestLifecycleContractLimits.MaxRequestsPerStore
             || options.MaxRequestVersions is < 1 or > HumanInputRequestLifecycleContractLimits.MaxRequestVersionsPerStore
             || options.MaxOperations is < 1 or > HumanInputRequestLifecycleContractLimits.MaxOperationsPerStore
+            || options.MaxLifecycleOperationsPerRequest is < 1 or > HumanInputRequestLifecycleContractLimits.MaxOperationsPerRequest
+            || options.MaxResponseOperationsPerRequest is < 1 or > HumanInputResponseContractLimits.MaxOperationsPerRequest
+            || options.MaxResponseArtifacts is < 1 or > HumanInputRequestLifecycleContractLimits.MaxRequestVersionsPerStore
+            || options.MaxSelections is < 1 or > HumanInputRequestLifecycleContractLimits.MaxRequestsPerStore
             || options.MaxArtifactUtf8Bytes is < 1 or > HumanInputRequestLifecycleContractLimits.MaxStoreDocumentUtf8Bytes)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "Human Input request store options must remain within schema-1 bounds.");
@@ -922,6 +1818,13 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
         => value is { Length: HumanInputRequestLifecycleContractLimits.Sha256HexCharacters }
             && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
+    private static bool FixedHashEquals(string? left, string? right)
+        => IsHash(left)
+            && IsHash(right)
+            && CryptographicOperations.FixedTimeEquals(
+                Encoding.ASCII.GetBytes(left!),
+                Encoding.ASCII.GetBytes(right!));
+
     private static bool HasUtf8Bom(IReadOnlyList<byte> bytes)
         => bytes.Count >= 3 && bytes[0] == 0xef && bytes[1] == 0xbb && bytes[2] == 0xbf;
 
@@ -930,6 +1833,12 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore
 
     private static HumanInputRequestLifecycleStoreCommitResult CommitResult(HumanInputRequestLifecycleStoreCommitStatus status)
         => new(status, 0, null, null, null);
+
+    private static HumanInputResponseLifecycleStoreReadResult ResponseReadResult(HumanInputResponseLifecycleStoreReadStatus status)
+        => new(status, 0, null, null);
+
+    private static HumanInputResponseLifecycleStoreCommitResult ResponseCommitResult(HumanInputResponseLifecycleStoreCommitStatus status)
+        => new(status, 0, null, null);
 
     private static bool IsAvailabilityFailure(Exception exception)
         => exception is IOException

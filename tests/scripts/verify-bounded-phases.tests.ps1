@@ -141,5 +141,7 @@ Assert-Contains -Actual $stressWorkflow -Expected "-Configuration Release" -Mess
 Assert-Contains -Actual $stressWorkflow -Expected "if: always()" -Message "Stress diagnostics must be retained on both success and failure."
 Assert-Contains -Actual $verifyWorkflow -Expected "-Configuration Release" -Message "Pull-request verification must explicitly use the canonical Release configuration."
 Assert-Contains -Actual $verifyWorkflow -Expected "./tests/scripts/verify-bounded-phases.tests.ps1" -Message "Pull-request verification must execute this contract harness."
+Assert-Contains -Actual $verifyWorkflow -Expected "./tests/scripts/verify-coverage.tests.ps1" -Message "Pull-request verification must exercise coverage aggregation contracts."
+Assert-Contains -Actual $stressWorkflow -Expected "./tests/scripts/verify-coverage.tests.ps1" -Message "Scheduled stress verification must exercise coverage aggregation contracts."
 
 Write-Output "Bounded verifier contract tests passed ($assertionCount assertions)."

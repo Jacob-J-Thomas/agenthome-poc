@@ -34,7 +34,6 @@ if ($coverageFiles.Count -eq 0) {
 }
 
 $failures = @()
-$packageLines = @{}
 $packageFileLines = @{}
 $sourceProjectDirectories = @{}
 Get-ChildItem -Path (Join-Path $repoRoot "src") -Directory -Recurse | Where-Object {
@@ -44,16 +43,13 @@ Get-ChildItem -Path (Join-Path $repoRoot "src") -Directory -Recurse | Where-Obje
 }
 $expectedPackages = @($sourceProjectDirectories.Keys | Sort-Object)
 
-function Get-CoverageLineKey {
+function Get-CoverageFileKey {
     param(
         [Parameter(Mandatory = $true)]
         [string]$PackageName,
 
         [Parameter(Mandatory = $true)]
-        [string]$FileName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$LineNumber
+        [string]$FileName
     )
 
     $directorySeparator = [IO.Path]::DirectorySeparatorChar
@@ -81,11 +77,11 @@ function Get-CoverageLineKey {
         $candidatePath = Join-Path $repoRoot $normalizedFileName
     }
 
-    return "{0}:{1}" -f [IO.Path]::GetFullPath($candidatePath).ToUpperInvariant(), $LineNumber
+    return [IO.Path]::GetFullPath($candidatePath).ToUpperInvariant()
 }
 
 foreach ($coverageFile in $coverageFiles) {
-    $coverage = [xml](Get-Content $coverageFile.FullName)
+    $coverage = [xml](Get-Content -Raw -LiteralPath $coverageFile.FullName)
 
     foreach ($package in $coverage.coverage.packages.package) {
         $packageName = [string]$package.name
@@ -94,29 +90,28 @@ foreach ($coverageFile in $coverageFiles) {
             continue
         }
 
-        if (-not $packageLines.ContainsKey($packageName)) {
-            $packageLines[$packageName] = @{}
+        if (-not $packageFileLines.ContainsKey($packageName)) {
             $packageFileLines[$packageName] = @{}
         }
 
+        $packageFiles = $packageFileLines[$packageName]
         foreach ($class in $package.classes.class) {
-            foreach ($line in $class.SelectNodes("lines/line")) {
-                $lineKey = Get-CoverageLineKey -PackageName $packageName -FileName $class.filename -LineNumber $line.number
-                $lineKeySeparatorIndex = $lineKey.LastIndexOf(":", [StringComparison]::Ordinal)
-                $fileKey = $lineKey.Substring(0, $lineKeySeparatorIndex)
-                $hits = [int]$line.hits
+            $classLines = $class.SelectNodes("lines/line")
+            if ($classLines.Count -eq 0) {
+                continue
+            }
 
-                if (-not $packageLines[$packageName].ContainsKey($lineKey) -or $hits -gt $packageLines[$packageName][$lineKey]) {
-                    $packageLines[$packageName][$lineKey] = $hits
-                }
+            $fileKey = Get-CoverageFileKey -PackageName $packageName -FileName $class.filename
+            if (-not $packageFiles.ContainsKey($fileKey)) {
+                $packageFiles[$fileKey] = @{}
+            }
 
-                if (-not $packageFileLines[$packageName].ContainsKey($fileKey)) {
-                    $packageFileLines[$packageName][$fileKey] = @{}
-                }
-
+            $fileLines = $packageFiles[$fileKey]
+            foreach ($line in $classLines) {
                 $lineNumber = [int]$line.number
-                if (-not $packageFileLines[$packageName][$fileKey].ContainsKey($lineNumber) -or $hits -gt $packageFileLines[$packageName][$fileKey][$lineNumber]) {
-                    $packageFileLines[$packageName][$fileKey][$lineNumber] = $hits
+                $hits = [int]$line.hits
+                if (-not $fileLines.ContainsKey($lineNumber) -or $hits -gt $fileLines[$lineNumber]) {
+                    $fileLines[$lineNumber] = $hits
                 }
             }
         }
@@ -124,27 +119,35 @@ foreach ($coverageFile in $coverageFiles) {
 }
 
 foreach ($expectedPackage in $expectedPackages) {
-    if (-not $packageLines.ContainsKey($expectedPackage)) {
+    if (-not $packageFileLines.ContainsKey($expectedPackage)) {
         $failures += "Coverage output did not include expected production package {0}" -f $expectedPackage
         continue
     }
 
-    $lines = $packageLines[$expectedPackage]
-    $lineCount = $lines.Count
+    $packageFiles = $packageFileLines[$expectedPackage]
+    $lineCount = 0
+    $coveredLineCount = 0
+    foreach ($fileLines in $packageFiles.Values) {
+        $lineCount += $fileLines.Count
+        foreach ($hits in $fileLines.Values) {
+            if ($hits -gt 0) {
+                $coveredLineCount++
+            }
+        }
+    }
 
     if ($lineCount -eq 0) {
         $failures += "Coverage output for {0} did not include executable lines" -f $expectedPackage
         continue
     }
 
-    $coveredLineCount = @($lines.Values | Where-Object { $_ -gt 0 }).Count
     $lineRate = $coveredLineCount / $lineCount
     $percent = [math]::Round($lineRate * 100, 2)
     Write-Output ("{0}: {1}%" -f $expectedPackage, $percent)
 
     if ($lineRate -lt $threshold) {
         $normalizedRepoRoot = [IO.Path]::GetFullPath($repoRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).ToUpperInvariant()
-        $packageFileLines[$expectedPackage].GetEnumerator() |
+        $packageFiles.GetEnumerator() |
             ForEach-Object {
                 $fileLineCount = $_.Value.Count
                 $fileCoveredLineCount = @($_.Value.Values | Where-Object { $_ -gt 0 }).Count

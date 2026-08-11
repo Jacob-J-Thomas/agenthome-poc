@@ -14,7 +14,7 @@ public sealed class HumanInputRequestSnapshotTests
         Assert.True(HumanInputRequestSnapshot.TryCapture(request, out var snapshot, out var validation));
         Assert.True(validation.IsValid);
 
-        request.EligibleRespondents[0] = new HumanInputEligibleRespondent("attacker", "hostile-route");
+        request.EligibleRespondents[0] = new HumanInputEligibleRespondent("attacker", "hostile-role", "hostile-route");
         request.ResponseSchema.StructuredFields![0] = new HumanInputStructuredFieldSchema("hostile", HumanInputStructuredFieldKind.Text, false, 1, null);
         request.ResponseSchema.StructuredFields[1].Choices![0] = new HumanInputChoice("hostile", "Hostile value");
 
@@ -43,7 +43,7 @@ public sealed class HumanInputRequestSnapshotTests
         var oversized = HumanInputLifecycleTestData.Request() with
         {
             EligibleRespondents = Enumerable.Range(0, HumanInputLimits.MaxEligibleRespondents + 1)
-                .Select(index => new HumanInputEligibleRespondent($"user-{index}", $"route-{index}"))
+                .Select(index => new HumanInputEligibleRespondent($"user-{index}", $"role-{index}", $"route-{index}"))
                 .ToArray()
         };
         Assert.False(HumanInputRequestSnapshot.TryCapture(oversized, out var rejected, out var oversizedValidation));

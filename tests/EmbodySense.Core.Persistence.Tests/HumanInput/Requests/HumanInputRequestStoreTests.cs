@@ -738,7 +738,7 @@ public sealed class HumanInputRequestStoreTests
         await Store(paths, trust).CommitAsync(CreateMutation());
         var pinned = await RewriteAuthenticatedAsync(paths, root =>
         {
-            var operation = root["operations"]!.AsArray()[0]!.AsObject();
+            var operation = root["operations"]!.AsArray()[0]!.AsObject()["requestLifecycle"]!.AsObject();
             switch (corruption)
             {
                 case "actor":

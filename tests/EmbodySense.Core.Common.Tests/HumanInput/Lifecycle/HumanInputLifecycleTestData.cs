@@ -4,6 +4,7 @@ using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanInput.Responses.Models;
 
 namespace EmbodySense.Core.Common.Tests.HumanInput.Lifecycle;
 
@@ -32,9 +33,9 @@ internal static class HumanInputLifecycleTestData
             prompt,
             schema ?? new HumanInputResponseSchema(HumanInputResponseKind.Text, 128, null, null, null),
             privacy,
-            respondents ?? [new HumanInputEligibleRespondent("user-one", "route-one")],
+            respondents ?? [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
             new HumanInputTiming(requestedAtUtc ?? Now, expiresAtUtc ?? Now.AddHours(1)),
-            new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstEligibleResponse),
+            new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
             new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, "node-one", "checkpoint-one"),
             string.Empty);
         return HumanInputRequestHash.Apply(request);
@@ -59,8 +60,8 @@ internal static class HumanInputLifecycleTestData
                 null),
             respondents:
             [
-                new HumanInputEligibleRespondent("user-one", "route-one"),
-                new HumanInputEligibleRespondent("user-two", "route-two")
+                new HumanInputEligibleRespondent("user-one", "role-one", "route-one"),
+                new HumanInputEligibleRespondent("user-two", "role-two", "route-two")
             ]);
     }
 
@@ -78,7 +79,8 @@ internal static class HumanInputLifecycleTestData
         string? supersedesRequestId = null,
         string? supersededByRequestId = null,
         string operationId = "operation-one",
-        DateTimeOffset? updatedAtUtc = null)
+        DateTimeOffset? updatedAtUtc = null,
+        HumanInputResponseSelectionReference? answerSelection = null)
         => new(
             1,
             request.RequestId,
@@ -89,7 +91,8 @@ internal static class HumanInputLifecycleTestData
             supersedesRequestId,
             supersededByRequestId,
             operationId,
-            updatedAtUtc ?? request.Timing.RequestedAtUtc);
+            updatedAtUtc ?? request.Timing.RequestedAtUtc,
+            answerSelection);
 
     internal static HumanInputRequestLifecycleOperationEvidence Evidence(
         HumanInputRequestLifecycleOperationKind kind,
@@ -143,7 +146,7 @@ internal static class HumanInputLifecycleTestData
         => Rehash(previous with
         {
             RequestVersionId = version,
-            EligibleRespondents = [new HumanInputEligibleRespondent("user-two", "route-two")]
+            EligibleRespondents = [new HumanInputEligibleRespondent("user-two", "role-two", "route-two")]
         });
 
     internal static HumanInputRequest Amended(HumanInputRequest previous, string version = "version-two")

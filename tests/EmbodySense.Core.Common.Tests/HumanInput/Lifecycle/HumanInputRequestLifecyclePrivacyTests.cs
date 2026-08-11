@@ -16,7 +16,7 @@ public sealed class HumanInputRequestLifecyclePrivacyTests
         {
             RequestVersionId = "version-two",
             Prompt = PromptCanary,
-            EligibleRespondents = [new HumanInputEligibleRespondent("user-two", RouteCanary)]
+            EligibleRespondents = [new HumanInputEligibleRespondent("user-two", "role-two", RouteCanary)]
         });
         var previousHead = HumanInputLifecycleTestData.Head(previous);
         var resultHead = HumanInputLifecycleTestData.Head(candidate, lifecycleVersion: 2, operationId: "operation-two", updatedAtUtc: HumanInputLifecycleTestData.Now.AddMinutes(1));
@@ -33,7 +33,7 @@ public sealed class HumanInputRequestLifecyclePrivacyTests
     [Fact]
     public void Lifecycle_evidence_carries_only_request_references_not_private_request_values()
     {
-        var request = HumanInputLifecycleTestData.Request(prompt: "private-prompt", respondents: [new("user-one", "private-route")]);
+        var request = HumanInputLifecycleTestData.Request(prompt: "private-prompt", respondents: [new("user-one", "role-one", "private-route")]);
         var previous = HumanInputLifecycleTestData.Head(request);
         var result = previous with { LifecycleVersion = 2, ReminderCount = 1, LastOperationId = "operation-two", UpdatedAtUtc = HumanInputLifecycleTestData.Now.AddMinutes(1) };
         var evidence = HumanInputLifecycleTestData.Evidence(HumanInputRequestLifecycleOperationKind.Remind, previous, result);

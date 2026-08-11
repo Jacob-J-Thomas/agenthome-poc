@@ -1,6 +1,6 @@
 namespace EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 
-/// <summary>Identifies the closed non-response lifecycle posture of a durable Human Input request.</summary>
+/// <summary>Identifies the closed lifecycle posture of a durable Human Input request.</summary>
 public enum HumanInputRequestLifecycleStatus
 {
     /// <summary>No supported posture was supplied.</summary>
@@ -14,5 +14,7 @@ public enum HumanInputRequestLifecycleStatus
     /// <summary>Trusted time passed the inclusive response endpoint and the request was explicitly expired.</summary>
     Expired = 4,
     /// <summary>A different exact request replaced this request while retaining an explicit lineage link.</summary>
-    Superseded = 5
+    Superseded = 5,
+    /// <summary>One exact immutable response selection satisfied the authored response policy.</summary>
+    Answered = 6
 }

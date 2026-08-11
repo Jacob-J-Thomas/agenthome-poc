@@ -18,7 +18,7 @@ public static class HumanInputRequestHash
     /// <param name="request">The request to serialize canonically.</param>
     /// <returns>A 64-character lowercase hexadecimal digest.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="request"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentException">Thrown before serialization when a request value or collection exceeds its declared maximum.</exception>
+    /// <exception cref="ArgumentException">Thrown before serialization when a request value is malformed or a collection exceeds its declared maximum.</exception>
     public static string Compute(HumanInputRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -55,7 +55,7 @@ public static class HumanInputRequestHash
             writer.WritePropertyName("timing");
             WriteTiming(writer, request.Timing);
             writer.WritePropertyName("responsePolicy");
-            writer.WriteNumberValue((int)(request.ResponsePolicy?.Kind ?? HumanInputResponsePolicyKind.Unknown));
+            WriteResponsePolicy(writer, request.ResponsePolicy);
             writer.WritePropertyName("continuationBinding");
             WriteContinuationBinding(writer, request.ContinuationBinding);
             writer.WriteEndObject();
@@ -70,7 +70,7 @@ public static class HumanInputRequestHash
     /// <param name="request">The request to hash.</param>
     /// <returns>A copy with <see cref="HumanInputRequest.RequestHash"/> set to <see cref="Compute"/>.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="request"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentException">Thrown before serialization when a request value or collection exceeds its declared maximum.</exception>
+    /// <exception cref="ArgumentException">Thrown before serialization when a request value is malformed or a collection exceeds its declared maximum.</exception>
     public static HumanInputRequest Apply(HumanInputRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -83,7 +83,7 @@ public static class HumanInputRequestHash
     /// <param name="request">The request to verify.</param>
     /// <returns><see langword="true"/> when the stored hash has equal length and fixed-time equality with the recomputed hash; otherwise, <see langword="false"/>.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="request"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentException">Thrown before serialization when a request value or collection exceeds its declared maximum.</exception>
+    /// <exception cref="ArgumentException">Thrown before serialization when a request value is malformed or a collection exceeds its declared maximum.</exception>
     public static bool Matches(HumanInputRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -115,6 +115,7 @@ public static class HumanInputRequestHash
             {
                 if (respondents[index] is { } respondent
                     && (!IsWithin(respondent.RespondentId, HumanInputLimits.MaxIdentifierCharacters)
+                        || !IsWithin(respondent.RespondentRoleId, HumanInputLimits.MaxIdentifierCharacters)
                         || !IsWithin(respondent.RoutingReference, HumanInputLimits.MaxRoutingReferenceCharacters)))
                 {
                     return false;
@@ -126,7 +127,8 @@ public static class HumanInputRequestHash
         if (!IsOptionalMaximumBounded(schema?.MaxTextCharacters, HumanInputLimits.MaxResponseTextCharacters)
             || !IsOptionalMaximumBounded(schema?.ReferencePolicy?.MaxReferenceCharacters, HumanInputLimits.MaxReferenceCharacters)
             || schema?.Choices is { Length: > HumanInputLimits.MaxChoices }
-            || schema?.StructuredFields is { Length: > HumanInputLimits.MaxStructuredFields })
+            || schema?.StructuredFields is { Length: > HumanInputLimits.MaxStructuredFields }
+            || !IsBoundedPolicy(request.ResponsePolicy))
         {
             return false;
         }
@@ -325,7 +327,68 @@ public static class HumanInputRequestHash
 
         writer.WriteStartObject();
         WriteString(writer, "respondentId", respondent.RespondentId);
+        WriteString(writer, "respondentRoleId", respondent.RespondentRoleId);
         WriteString(writer, "routingReference", respondent.RoutingReference);
+        writer.WriteEndObject();
+    }
+
+    private static bool IsBoundedPolicy(HumanInputResponsePolicy? policy)
+    {
+        if (policy?.OrderedRoleIds is not { } roleIds)
+        {
+            return true;
+        }
+
+        if (roleIds.IsDefault || roleIds.Length > HumanInputLimits.MaxResponsePolicyRoles)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < roleIds.Length; index++)
+        {
+            if (!HumanInputIdentifier.IsValid(roleIds[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void WriteResponsePolicy(Utf8JsonWriter writer, HumanInputResponsePolicy? policy)
+    {
+        if (policy is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStartObject();
+        writer.WriteNumber("kind", (int)policy.Kind);
+        if (policy.RequiredResponseCount is { } count)
+        {
+            writer.WriteNumber("requiredResponseCount", count);
+        }
+        else
+        {
+            writer.WriteNull("requiredResponseCount");
+        }
+
+        writer.WritePropertyName("orderedRoleIds");
+        if (policy.OrderedRoleIds is not { } roleIds)
+        {
+            writer.WriteNullValue();
+        }
+        else
+        {
+            writer.WriteStartArray();
+            foreach (var roleId in roleIds)
+            {
+                writer.WriteStringValue(roleId);
+            }
+            writer.WriteEndArray();
+        }
+
         writer.WriteEndObject();
     }
 

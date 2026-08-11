@@ -21,6 +21,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Test coverage aggregation contracts
+        shell: pwsh
+        run: ./tests/scripts/verify-coverage.tests.ps1
+
       - name: Test bounded verifier contracts
         shell: pwsh
         run: ./tests/scripts/verify-bounded-phases.tests.ps1

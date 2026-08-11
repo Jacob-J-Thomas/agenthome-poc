@@ -193,7 +193,7 @@ public sealed class HumanInputRequestStoreInvariantTests
         var operationIndex = appendTransition ? 1 : 0;
         var pinned = await RewriteAuthenticatedAsync(
             paths,
-            root => root["operations"]!.AsArray()[operationIndex]!.AsObject()["expectedLifecycleStatus"] = corruptedToken);
+            root => root["operations"]!.AsArray()[operationIndex]!.AsObject()["requestLifecycle"]!.AsObject()["expectedLifecycleStatus"] = corruptedToken);
 
         var read = await Store(paths, pinned).ReadAsync(created.Operation.TargetRequestId);
 
@@ -235,7 +235,7 @@ public sealed class HumanInputRequestStoreInvariantTests
             var candidate = Rehash(second.RequestToAppend! with
             {
                 RequestVersionId = "version-rerouted-two",
-                EligibleRespondents = [new HumanInputEligibleRespondent("user-three", "route-three")]
+                EligibleRespondents = [new HumanInputEligibleRespondent("user-three", "role-three", "route-three")]
             });
             second = ReplaceSingleRequestCandidate(second, candidate);
         }

@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
+using EmbodySense.Core.Common.HumanInput.Responses.Models;
 
 namespace EmbodySense.Core.Common.Tests.HumanInput.Lifecycle;
 
@@ -70,7 +71,10 @@ public sealed class HumanInputRequestLifecycleHeadTests
             var head = HumanInputLifecycleTestData.Head(
                 request,
                 status: status,
-                supersededByRequestId: status == HumanInputRequestLifecycleStatus.Superseded ? "request-two" : null);
+                supersededByRequestId: status == HumanInputRequestLifecycleStatus.Superseded ? "request-two" : null,
+                answerSelection: status == HumanInputRequestLifecycleStatus.Answered
+                    ? new HumanInputResponseSelectionReference(1, "selection-one", HumanInputLifecycleTestData.Reference(request), HumanInputLifecycleTestData.Hash('e'))
+                    : null);
             Assert.True(HumanInputRequestLifecycleValidator.ValidateHead(head).IsValid, status.ToString());
         }
     }
