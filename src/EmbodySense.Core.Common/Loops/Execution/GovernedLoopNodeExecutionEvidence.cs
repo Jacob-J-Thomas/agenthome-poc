@@ -215,7 +215,7 @@ public sealed record GovernedLoopNodeExecutionEvidence
             throw new ArgumentException("Selected or skipped routing evidence requires an exact committed control outcome.", nameof(controlOutcome));
         }
 
-        if (controlOutcome is not null && status is not (GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.Skipped))
+        if (controlOutcome is not null && status is not (GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked or GovernedLoopNodeExecutionStatus.Skipped))
         {
             throw new ArgumentException("Control routing cannot commit before the activation reaches a terminal node posture.", nameof(controlOutcome));
         }

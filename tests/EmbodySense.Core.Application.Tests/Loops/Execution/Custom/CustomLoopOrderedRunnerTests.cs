@@ -131,8 +131,8 @@ public sealed class CustomLoopOrderedRunnerTests
             Assert.Equal(context.Artifact.LayoutHash, request.GraphArtifact?.LayoutHash);
             Assert.Equal(context.Anchor.AdapterBinding.AdmissionReceipt.Evidence.CapabilityAdmission, request.CapabilityAdmission);
         });
-        Assert.Equal(["trigger", "infer-01", "infer-02", "exit"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
-        Assert.Equal([0, 0, 1, 2], evidence.NextStepIndicesAtRetention);
+        Assert.Equal(["infer-01", "infer-02", "exit"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.Equal([0, 1, 2], evidence.NextStepIndicesAtRetention);
         Assert.NotEqual(admitted.AdmissionRequestHash, context.Anchor.AdapterBinding.AdmissionRequestHash);
         Assert.Equal(2, result.Run!.Checkpoint.NextStepIndex);
         var publication = Assert.Single(publisher.Requests);
@@ -162,7 +162,7 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.True(result.Status == CustomLoopOrderedRunStatus.Completed, result.Detail);
         Assert.Equal("governed answer", result.Run!.FinalOutput);
         Assert.Equal(["infer"], executor.Requests.Select(item => item.StepId));
-        Assert.Equal(["trigger", "identity", "infer", "validate-length", "exit"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.Equal(["identity", "infer", "validate-length", "exit"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
         var pureStarts = result.Run.Events.Where(item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted
             && item.StepId is "identity" or "validate-length").ToArray();
         Assert.Equal(2, pureStarts.Length);
@@ -1914,7 +1914,7 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(GovernedLoopFrontierStatus.Failed, result.Run.Frontier!.Payload.Status);
         Assert.Single(executor.Requests);
         Assert.Empty(publisher.Requests);
-        Assert.Equal(["trigger", "infer-01", "exit"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.Equal(["infer-01", "exit"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
         Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Rejected, evidence.Requests[^1].Disposition);
         var rejection = Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is
         {
@@ -1978,7 +1978,7 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Equal(GovernedLoopFrontierStatus.Cancelled, result.Run.Frontier!.Payload.Status);
         Assert.Empty(executor.Requests);
-        Assert.Equal(["trigger"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.Empty(evidence.Requests);
         Assert.DoesNotContain(result.Run.Events, item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted });
     }
 
@@ -2543,11 +2543,16 @@ public sealed class CustomLoopOrderedRunnerTests
         var evidence = new SequentialEvidenceHarness(store, context.Evidence);
         var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(runner, evidence, evidence);
         CustomLoopControlResult? pause = null;
-        evidence.AfterRetain = async request =>
+        var injected = false;
+        store.AfterUpdate = async candidate =>
         {
-            if (request.Dispatch.Node.Descriptor.Kind == EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Trigger)
+            if (!injected
+                && candidate.Status == CustomLoopRunStatus.Running
+                && candidate.Frontier?.Payload.Nodes.Any(item => item.Status == GovernedLoopNodeExecutionStatus.Ready) == true
+                && !candidate.Events.Any(item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted }))
             {
-                pause = await lifecycle.PauseAsync(new CustomLoopPauseRequest(store.Current.Id, store.Current.LifecycleVersion, "pause-canonical-ready-boundary", AuditSchema.Actors.Web));
+                injected = true;
+                pause = await lifecycle.PauseAsync(new CustomLoopPauseRequest(candidate.Id, candidate.LifecycleVersion, "pause-canonical-ready-boundary", AuditSchema.Actors.Web));
             }
         };
 
@@ -2566,7 +2571,7 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Null(current.OutcomeEvidenceHash);
         Assert.Empty(executor.Requests);
         Assert.Equal(0, executor.ProviderRequestStartedCount);
-        Assert.Equal(["trigger"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.Empty(evidence.Requests);
         Assert.Empty(store.ValidationFailures);
     }
 
@@ -6020,13 +6025,18 @@ public sealed class CustomLoopOrderedRunnerTests
         var failureCode = Encoding.UTF8.GetString(Convert.FromBase64String(rejection.Detail[FailurePrefix.Length..separator]));
         var failureDetail = rejection.Detail[(separator + 1)..];
         var terminalAt = rejection.TimestampUtc.AddSeconds(1);
-        var running = Assert.IsType<GovernedLoopFrontierPosture>(rejected.Frontier).Payload.Nodes[^1];
+        var running = Assert.IsType<GovernedLoopFrontierPosture>(rejected.Frontier).Payload.Nodes.Single(item =>
+            item.Status == GovernedLoopNodeExecutionStatus.Running
+            && item.ActivationOrdinal == rejection.SequentialNodeEvidence!.ActivationOrdinal);
         var failedFrontier = GovernedLoopSequentialFrontierMachine.FailCurrent(
             rejected.Frontier,
             rejected.SequentialAdapterBinding,
             running.AttemptOperationId,
             rejection.EventId,
             rejection.SequentialNodeEvidence!.OutcomeArtifactHash,
+            rejection.SequentialNodeEvidence.ControlOutcome,
+            rejection.SequentialNodeEvidence.SelectedControlEdgeIds,
+            rejection.SequentialNodeEvidence.SkippedControlEdgeIds,
             terminalAt);
         Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, failedFrontier.Status);
         var terminalEvent = new CustomLoopRunEvent(
@@ -7062,15 +7072,19 @@ public sealed class CustomLoopOrderedRunnerTests
                 || !eventMatchesNode
                 || durable is null
                 || request.Disposition != expectedDisposition
+                || durable.ActivationOrdinal != dispatch.Activation.ActivationOrdinal
+                || durable.VisitOrdinal != dispatch.Activation.VisitOrdinal
                 || !string.Equals(durable.NodeId, dispatch.Node.NodeId, StringComparison.Ordinal)
                 || durable.Attempt != dispatch.Attempt
+                || !string.Equals(durable.CycleId, dispatch.Activation.CycleId, StringComparison.Ordinal)
+                || durable.CycleIteration != dispatch.Activation.CycleIteration
                 || !CustomLoopSequentialNodeEvidenceHash.Matches(durable)
                 || !CustomLoopSequentialOutcomeArtifactHash.Matches(orderedEvent))
             {
                 return new GovernedLoopSequentialNodeHandlerResult(GovernedLoopSequentialNodeHandlerResultStatus.Unknown, string.Empty);
             }
 
-            var identity = $"{binding.ExecutionBinding.RunId}/{binding.ExecutionBinding.ExecutionGeneration}/{dispatch.Node.NodeId}/{dispatch.Attempt}";
+            var identity = $"{binding.ExecutionBinding.RunId}/{binding.ExecutionBinding.ExecutionGeneration}/{dispatch.Activation.ActivationOrdinal}/{dispatch.Activation.VisitOrdinal}/{dispatch.Node.NodeId}/{dispatch.Activation.CycleId}/{dispatch.Activation.CycleIteration}/{dispatch.Attempt}";
             if (_identityEvents.TryGetValue(identity, out var prior)
                 && (!string.Equals(prior.EventId, orderedEvent!.EventId, StringComparison.Ordinal) || prior.Sequence != orderedEvent.Sequence))
             {

@@ -88,8 +88,8 @@ public sealed class GovernedLoopSequentialBindingResolverTests
 
         Assert.False(result.IsResolved);
         Assert.Empty(result.Inputs);
-        Assert.Equal("pure-node.source-evidence-invalid", result.FailureCode);
-        Assert.Equal("$.bindings[result-to-validation]", result.FailurePath);
+        Assert.Equal("pure-node.activation-invalid", result.FailureCode);
+        Assert.Equal("$.frontier", result.FailurePath);
     }
 
     [Theory]
@@ -484,8 +484,10 @@ public sealed class GovernedLoopSequentialBindingResolverTests
         var replacement = draft with { SequentialNodeEvidence = evidence };
         var frontier = Assert.IsType<GovernedLoopFrontierPosture>(run.Frontier);
         var nodes = frontier.Payload.Nodes.Select(node => string.Equals(node.NodeId, sourceNodeId, StringComparison.Ordinal)
-            ? GovernedLoopNodeExecutionEvidence.Create(
+            ? GovernedLoopNodeExecutionEvidence.CreateActivation(
+                node.ActivationOrdinal,
                 node.PlanOrdinal,
+                node.VisitOrdinal,
                 node.NodeId,
                 node.Descriptor,
                 node.IncomingControlEdgeIds,
@@ -494,7 +496,13 @@ public sealed class GovernedLoopSequentialBindingResolverTests
                 node.Attempt,
                 node.AttemptOperationId,
                 node.OutcomeEvidenceId,
-                evidence.OutcomeArtifactHash)
+                evidence.OutcomeArtifactHash,
+                node.CycleId,
+                node.CycleIteration,
+                node.ControlOutcome,
+                node.SelectedControlEdgeIds,
+                node.SkippedControlEdgeIds,
+                node.JoinArrivals)
             : node).ToArray();
         var reboundFrontier = GovernedLoopFrontierPosture.Create(
             frontier.Binding,

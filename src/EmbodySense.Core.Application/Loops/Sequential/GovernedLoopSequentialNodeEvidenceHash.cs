@@ -56,6 +56,8 @@ public static class GovernedLoopSequentialNodeEvidenceHash
 
         WriteIdentifiers(writer, "selectedControlEdgeIds", receipt.SelectedControlEdgeIds);
         WriteIdentifiers(writer, "skippedControlEdgeIds", receipt.SkippedControlEdgeIds);
+        writer.WriteNull("governingActivationOrdinal");
+        writer.WriteNull("governingControlEdgeId");
         writer.WriteString("disposition", ToCanonical(receipt.Disposition));
         writer.WriteString("outcomeArtifactHash", receipt.OutcomeArtifactHash);
         writer.WriteEndObject();

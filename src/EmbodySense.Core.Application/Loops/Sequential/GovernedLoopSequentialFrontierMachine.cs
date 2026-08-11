@@ -293,7 +293,30 @@ public static class GovernedLoopSequentialFrontierMachine
         string? outcomeEvidenceId,
         string? outcomeEvidenceHash,
         DateTimeOffset updatedAtUtc)
-        => ResolveCurrentTerminal(frontier, binding, GovernedLoopNodeExecutionStatus.Failed, attemptOperationId, outcomeEvidenceId, outcomeEvidenceHash, updatedAtUtc);
+        => ResolveCurrentTerminal(frontier, binding, GovernedLoopNodeExecutionStatus.Failed, attemptOperationId, outcomeEvidenceId, outcomeEvidenceHash, null, [], [], updatedAtUtc);
+
+    /// <summary>Fails the sole exact claimed activation while retaining its authenticated terminal route partition.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult FailCurrent(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        string? attemptOperationId,
+        string? outcomeEvidenceId,
+        string? outcomeEvidenceHash,
+        GovernedLoopControlCondition? controlOutcome,
+        IReadOnlyList<string>? selectedControlEdgeIds,
+        IReadOnlyList<string>? skippedControlEdgeIds,
+        DateTimeOffset updatedAtUtc)
+        => ResolveCurrentTerminal(
+            frontier,
+            binding,
+            GovernedLoopNodeExecutionStatus.Failed,
+            attemptOperationId,
+            outcomeEvidenceId,
+            outcomeEvidenceHash,
+            controlOutcome,
+            selectedControlEdgeIds,
+            skippedControlEdgeIds,
+            updatedAtUtc);
 
     /// <summary>Claims the sole exact Ready activation for a terminal-review boundary.</summary>
     public static GovernedLoopSequentialFrontierTransitionResult StartCurrent(
@@ -331,7 +354,61 @@ public static class GovernedLoopSequentialFrontierMachine
         string? outcomeEvidenceId,
         string? outcomeEvidenceHash,
         DateTimeOffset updatedAtUtc)
-        => ResolveCurrentTerminal(frontier, binding, GovernedLoopNodeExecutionStatus.ReviewBlocked, null, outcomeEvidenceId, outcomeEvidenceHash, updatedAtUtc);
+        => ResolveCurrentTerminal(frontier, binding, GovernedLoopNodeExecutionStatus.ReviewBlocked, null, outcomeEvidenceId, outcomeEvidenceHash, null, [], [], updatedAtUtc);
+
+    /// <summary>Blocks the sole exact claimed activation while retaining an already-authenticated terminal route partition.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult ReviewBlockCurrent(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        string? outcomeEvidenceId,
+        string? outcomeEvidenceHash,
+        GovernedLoopControlCondition? controlOutcome,
+        IReadOnlyList<string>? selectedControlEdgeIds,
+        IReadOnlyList<string>? skippedControlEdgeIds,
+        DateTimeOffset updatedAtUtc)
+        => ResolveCurrentTerminal(
+            frontier,
+            binding,
+            GovernedLoopNodeExecutionStatus.ReviewBlocked,
+            null,
+            outcomeEvidenceId,
+            outcomeEvidenceHash,
+            controlOutcome,
+            selectedControlEdgeIds,
+            skippedControlEdgeIds,
+            updatedAtUtc);
+
+    /// <summary>Blocks an undispatched aggregate frontier for review without claiming or rewriting any Ready activation.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult ReviewBlockAggregate(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        DateTimeOffset updatedAtUtc)
+    {
+        if (!ValidateBoundFrontier(frontier, binding)
+            || frontier!.Payload.Status != GovernedLoopFrontierStatus.Active
+            || frontier.Payload.Nodes.Any(node => node.Status == GovernedLoopNodeExecutionStatus.Running)
+            || frontier.Payload.Nodes.All(node => node.Status != GovernedLoopNodeExecutionStatus.Ready))
+        {
+            return Invalid("Only an active undispatched frontier with retained Ready work can enter aggregate review.");
+        }
+
+        try
+        {
+            var successor = CreatePosture(
+                binding!,
+                checked(frontier.Payload.FrontierVersion + 1),
+                GovernedLoopFrontierStatus.ReviewBlocked,
+                frontier.Payload.Nodes,
+                updatedAtUtc);
+            return GovernedLoopExecutionValidator.ValidateTransition(frontier, successor).IsValid
+                ? Applied(successor, "The undispatched activation history entered aggregate review without inventing a node attempt.")
+                : Invalid("The aggregate review successor violates the bound frontier transition contract.");
+        }
+        catch (Exception exception) when (IsContractFailure(exception))
+        {
+            return Invalid($"The aggregate review transition was rejected by its bounded contract: {exception.GetType().Name}.");
+        }
+    }
 
     /// <summary>Cancels an exact bound activation history without rewriting reached evidence.</summary>
     public static GovernedLoopSequentialFrontierTransitionResult CancelCurrent(
@@ -418,7 +495,13 @@ public static class GovernedLoopSequentialFrontierMachine
                 return Invalid("Review-blocked evidence cannot expose a control route or prune Ready activations.");
             }
         }
-        else if (controlOutcome is null || !TryResolveRoute(plan!, node!, controlOutcome.Value, out _, out _))
+        else if (controlOutcome is null || !TryResolveRoute(
+            plan!,
+            node!,
+            controlOutcome.Value,
+            out _,
+            out _,
+            allowUnroutedFailure: resolution == GovernedLoopNodeExecutionStatus.Failed))
         {
             return Invalid("A terminal completed or failed activation requires one exact admitted control route.");
         }
@@ -429,7 +512,13 @@ public static class GovernedLoopSequentialFrontierMachine
             var skippedEdges = Array.Empty<string>();
             if (controlOutcome is { } route)
             {
-                _ = TryResolveRoute(plan!, node!, route, out selectedEdges, out skippedEdges);
+                _ = TryResolveRoute(
+                    plan!,
+                    node!,
+                    route,
+                    out selectedEdges,
+                    out skippedEdges,
+                    allowUnroutedFailure: resolution == GovernedLoopNodeExecutionStatus.Failed);
             }
 
             var resolved = CopyActivation(activation!, resolution, attempt, attemptOperationId, outcomeEvidenceId, outcomeEvidenceHash, controlOutcome, selectedEdges, skippedEdges);
@@ -475,6 +564,9 @@ public static class GovernedLoopSequentialFrontierMachine
         string? attemptOperationId,
         string? outcomeEvidenceId,
         string? outcomeEvidenceHash,
+        GovernedLoopControlCondition? controlOutcome,
+        IReadOnlyList<string>? selectedControlEdgeIds,
+        IReadOnlyList<string>? skippedControlEdgeIds,
         DateTimeOffset updatedAtUtc)
     {
         if (!ValidateBoundFrontier(frontier, binding)
@@ -483,7 +575,10 @@ public static class GovernedLoopSequentialFrontierMachine
             return Invalid("Only a valid active bound frontier can enter a terminal posture.");
         }
 
-        var candidates = frontier.Payload.Nodes.Where(node => node.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.ReviewBlocked).ToArray();
+        var claimed = frontier.Payload.Nodes.Where(node => node.Status is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.ReviewBlocked).ToArray();
+        var candidates = claimed.Length == 0
+            ? frontier.Payload.Nodes.Where(node => node.Status == GovernedLoopNodeExecutionStatus.Ready).ToArray()
+            : claimed;
         if (candidates.Length != 1)
         {
             return Invalid("Terminal fallback cannot choose among multiple exact active activations.");
@@ -503,9 +598,21 @@ public static class GovernedLoopSequentialFrontierMachine
 
         try
         {
+            var selectedEdges = selectedControlEdgeIds?.ToArray() ?? [];
+            var skippedEdges = skippedControlEdgeIds?.ToArray() ?? [];
+            if (controlOutcome is GovernedLoopControlCondition.Unknown
+                || controlOutcome is { } suppliedOutcome && !Enum.IsDefined(suppliedOutcome)
+                || controlOutcome is null && (selectedEdges.Length != 0 || skippedEdges.Length != 0)
+                || controlOutcome is not null
+                    && (!selectedEdges.Concat(skippedEdges).Order(StringComparer.Ordinal).SequenceEqual(current.OutgoingControlEdgeIds, StringComparer.Ordinal)
+                        || selectedEdges.Intersect(skippedEdges, StringComparer.Ordinal).Any()))
+            {
+                return Invalid("Terminal fallback route evidence does not exactly partition the claimed activation's admitted outgoing edges.");
+            }
+
             var attempt = current.Status == GovernedLoopNodeExecutionStatus.Ready ? 1 : current.Attempt;
             var operationId = current.Status == GovernedLoopNodeExecutionStatus.Ready ? attemptOperationId : current.AttemptOperationId;
-            var replacement = CopyActivation(current, resolution, attempt, operationId, outcomeEvidenceId, outcomeEvidenceHash, null, [], []);
+            var replacement = CopyActivation(current, resolution, attempt, operationId, outcomeEvidenceId, outcomeEvidenceHash, controlOutcome, selectedEdges, skippedEdges);
             var aggregate = resolution == GovernedLoopNodeExecutionStatus.Failed ? GovernedLoopFrontierStatus.Failed : GovernedLoopFrontierStatus.ReviewBlocked;
             var successor = ReplaceActivation(frontier, binding!, replacement, aggregate, updatedAtUtc);
             return GovernedLoopExecutionValidator.ValidateTransition(frontier, successor).IsValid
@@ -845,7 +952,8 @@ public static class GovernedLoopSequentialFrontierMachine
         GovernedLoopSequentialPlanNode node,
         GovernedLoopControlCondition outcome,
         out string[] selected,
-        out string[] skipped)
+        out string[] skipped,
+        bool allowUnroutedFailure = false)
     {
         selected = [];
         skipped = [];
@@ -865,7 +973,9 @@ public static class GovernedLoopSequentialFrontierMachine
 
         selected = outgoing.Where(edge => edge.Condition == outcome).Select(edge => edge.Id).ToArray();
         skipped = outgoing.Where(edge => edge.Condition != outcome).Select(edge => edge.Id).ToArray();
-        return outgoing.Length == 0 || selected.Length > 0;
+        return outgoing.Length == 0
+            || selected.Length > 0
+            || allowUnroutedFailure && outcome == GovernedLoopControlCondition.Failure;
     }
 
     private static GovernedLoopNodeExecutionEvidence CreateActivation(
