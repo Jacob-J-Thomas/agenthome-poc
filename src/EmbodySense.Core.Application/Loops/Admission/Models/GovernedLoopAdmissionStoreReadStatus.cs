@@ -12,9 +12,12 @@ public enum GovernedLoopAdmissionStoreReadStatus
     /// <summary>The exact workspace and operation retain the returned immutable terminal outcome.</summary>
     Found = 2,
 
+    /// <summary>An authenticated direct successor retains the exact pending outcome and can finalize trust advancement.</summary>
+    Recoverable = 3,
+
     /// <summary>The store could not provide a trustworthy observation and published no durable intent.</summary>
-    Unavailable = 3,
+    Unavailable = 4,
 
     /// <summary>Available evidence cannot prove one consistent lookup result.</summary>
-    Ambiguous = 4
+    Ambiguous = 5
 }
