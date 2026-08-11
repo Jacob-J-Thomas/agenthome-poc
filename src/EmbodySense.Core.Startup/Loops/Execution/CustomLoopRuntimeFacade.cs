@@ -51,7 +51,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     /// <param name="definitionStore">The definition store.</param>
     /// <param name="runStore">The run store.</param>
     /// <param name="invocationOperationStore">The invocation operation store.</param>
-    /// <param name="invocationReceiptRetention">The invocation receipt retention.</param>
+    /// <param name="invocationReceiptWriter">The shared governed invocation receipt writer.</param>
     /// <param name="controlOperationStore">The control operation store.</param>
     /// <param name="executionGate">The execution gate.</param>
     /// <param name="admissionService">The admission service.</param>
@@ -71,7 +71,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         ICustomLoopDefinitionStore definitionStore,
         ICustomLoopRunStore runStore,
         ICustomLoopInvocationOperationStore invocationOperationStore,
-        CustomLoopInvocationReceiptRetentionService invocationReceiptRetention,
+        CustomLoopInvocationReceiptWriter invocationReceiptWriter,
         ICustomLoopControlOperationStore controlOperationStore,
         ICustomLoopWorkspaceExecutionGate executionGate,
         CustomLoopAdmissionService admissionService,
@@ -91,9 +91,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         _definitionStore = definitionStore ?? throw new ArgumentNullException(nameof(definitionStore));
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _invocationOperationStore = invocationOperationStore ?? throw new ArgumentNullException(nameof(invocationOperationStore));
-        _invocationReceiptWriter = new CustomLoopInvocationReceiptWriter(
-            _invocationOperationStore,
-            invocationReceiptRetention ?? throw new ArgumentNullException(nameof(invocationReceiptRetention)));
+        _invocationReceiptWriter = invocationReceiptWriter ?? throw new ArgumentNullException(nameof(invocationReceiptWriter));
         _controlOperationStore = controlOperationStore ?? throw new ArgumentNullException(nameof(controlOperationStore));
         _executionGate = executionGate ?? throw new ArgumentNullException(nameof(executionGate));
         _admissionService = admissionService ?? throw new ArgumentNullException(nameof(admissionService));
@@ -618,7 +616,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         _executionAvailabilityGate.Dispose();
     }
 
-    private async Task<CustomExecutionAvailability> EnsureCustomExecutionAvailableAsync(string actor, CancellationToken cancellationToken)
+    internal async Task<CustomExecutionAvailability> EnsureCustomExecutionAvailableAsync(string actor, CancellationToken cancellationToken)
     {
         if (Volatile.Read(ref _customExecutionAvailable))
         {
