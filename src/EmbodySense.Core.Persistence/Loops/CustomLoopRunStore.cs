@@ -12,7 +12,6 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention;
-using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -2264,15 +2263,12 @@ public sealed class CustomLoopRunStore :
         }
 
         var outstanding = CalculateOutstandingReservation(run);
-        var remainingPureNodeReserve = CalculateRemainingPureNodeReservation(run);
         var remainingControlReserve = CustomLoopLimits.MaxTraceControlReserveUtf8Bytes - checked(controlEventCount * CustomLoopLimits.MaxTraceControlEventUtf8Bytes);
-        // Pure nodes retain exact bounded outcome artifacts, so every selected-but-unfinished pure node must
-        // have capacity before execution. Future provider and tool effects remain independently gated before
-        // dispatch; workspace quota reserves the full per-run ceiling.
+        // Reserve evidence only for effects already open. Future pure-node, provider, and tool effects are
+        // independently capacity-gated before dispatch; workspace quota reserves the full per-run ceiling.
         return checked(
             persistedUtf8Bytes
             + outstanding.Utf8Bytes
-            + remainingPureNodeReserve
             + remainingControlReserve
             + CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes);
     }
@@ -2354,30 +2350,6 @@ public sealed class CustomLoopRunStore :
 
         var node = run.Frontier?.Payload.Nodes.FirstOrDefault(candidate => string.Equals(candidate.NodeId, nodeId, StringComparison.Ordinal));
         return node?.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate;
-    }
-
-    private static long CalculateRemainingPureNodeReservation(CustomLoopRunRecord run)
-    {
-        if (run.Frontier is not { } frontier)
-        {
-            return 0;
-        }
-
-        var openPureNodeIds = run.Events
-            .Where(item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted
-                && item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes
-                && IsPureNodeEvent(run, item)
-                && !run.Events.Any(candidate => candidate.Sequence > item.Sequence
-                    && candidate.Iteration == item.Iteration
-                    && string.Equals(candidate.StepId, item.StepId, StringComparison.Ordinal)
-                    && candidate.Attempt == item.Attempt
-                    && IsAttemptClosure(candidate)))
-            .Select(item => item.SequentialNodeEvidence!.NodeId)
-            .ToHashSet(StringComparer.Ordinal);
-        var unreserved = frontier.Payload.Nodes.Count(node => (node.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate)
-            && node.Status is not (GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Skipped or GovernedLoopNodeExecutionStatus.Failed)
-            && !openPureNodeIds.Contains(node.NodeId));
-        return checked((long)unreserved * CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes);
     }
 
     /// <summary>

@@ -249,10 +249,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         using var workspace = new TestWorkspace();
         var context = CreateContext();
         var pure = WithPureFrontier(context.Run);
-        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
-        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(pure)).Status);
-        Assert.True(await store.HasSufficientTraceCapacityForDispatchAsync(pure, 1));
-
+        var paths = new WorkspacePaths(workspace.RootPath);
         var start = PureEvent(2, "event-pure-start", CustomLoopRunEventKind.NodeAttemptStarted, context.Binding);
         Assert.Equal(CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes, start.TraceReservationUtf8Bytes);
         var started = pure with
@@ -262,34 +259,46 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             Frontier = StartPureFrontier(pure.Frontier!, start),
             Events = [.. pure.Events, start],
         };
-        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(started, 1)).Status);
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(pure)).Status);
+            Assert.True(await store.HasSufficientTraceCapacityForDispatchAsync(started, 1));
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(started, 1)).Status);
+        }
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var recovered = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(pure.Id));
+        Assert.Equal(CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes, recovered.Events[^1].TraceReservationUtf8Bytes);
+        Assert.True(await restarted.HasSufficientTraceCapacityForDispatchAsync(recovered, 2));
 
         var outcomeJson = "{\"payload\":\"" + new string('x', CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes * 2) + "\"}";
         var completion = PureEvent(3, "event-pure-complete", CustomLoopRunEventKind.NodeAttemptCompleted, context.Binding, outcomeJson);
-        var completed = started with
+        var completed = recovered with
         {
             LifecycleVersion = 3,
             UpdatedAtUtc = _timestamp.AddMinutes(2),
-            Frontier = CompletePureFrontier(started.Frontier!, start, completion),
-            Events = [.. started.Events, completion],
+            Frontier = CompletePureFrontier(recovered.Frontier!, start, completion),
+            Events = [.. recovered.Events, completion],
         };
-        var beforeBytes = CustomLoopRunArtifactSerializer.Serialize(started).LongLength;
+        var beforeBytes = CustomLoopRunArtifactSerializer.Serialize(recovered).LongLength;
         var afterBytes = CustomLoopRunArtifactSerializer.Serialize(completed).LongLength;
         Assert.True(afterBytes - beforeBytes > CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
         Assert.True(afterBytes - beforeBytes < CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes);
-        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, 2)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await restarted.UpdateAsync(completed, 2)).Status);
     }
 
     [Fact]
-    public async Task Store_rejects_when_remaining_pure_outcomes_exhaust_the_trace_ceiling()
+    public async Task Store_accepts_multiple_unfinished_pure_nodes_without_reserving_every_maximum_outcome()
     {
         using var workspace = new TestWorkspace();
         var context = CreateContext();
-        var overLimit = WithPendingPureFrontier(context.Run, 3);
+        var pending = WithPendingPureFrontier(context.Run, 3);
 
-        Assert.True(CustomLoopRunValidator.Validate(overLimit).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(overLimit).Errors));
-        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
-        Assert.Equal(CustomLoopRunStoreStatus.LimitExceeded, (await store.CreateAsync(overLimit)).Status);
+        Assert.True(CustomLoopRunValidator.Validate(pending).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(pending).Errors));
+        using var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(pending)).Status);
+        var retained = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(pending.Id));
+        Assert.Equal(3, retained.Frontier!.Payload.Nodes.Count(node => node.Descriptor.Kind == GovernedLoopNodeKind.Transform));
     }
 
     [Fact]
