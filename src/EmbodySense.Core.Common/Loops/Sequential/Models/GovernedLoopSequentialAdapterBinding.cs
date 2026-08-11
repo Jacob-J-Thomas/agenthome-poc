@@ -1,4 +1,6 @@
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Admission;
+using EmbodySense.Core.Common.Loops.Admission.Models;
 
 namespace EmbodySense.Core.Common.Loops.Sequential.Models;
 
@@ -7,6 +9,7 @@ namespace EmbodySense.Core.Common.Loops.Sequential.Models;
 /// <param name="WorkspaceId">The exact canonical workspace scope.</param>
 /// <param name="ExecutionBinding">The exact run, graph revision, and execution generation.</param>
 /// <param name="AdmissionOperationId">The exact admission idempotency operation.</param>
+/// <param name="AdmissionReceipt">The complete exact successful admission proof retained for crash-safe authority checks.</param>
 /// <param name="AdmissionReceiptHash">The exact successful admission-receipt hash.</param>
 /// <param name="AdmissionRequestHash">The exact caller-stable admission-request hash.</param>
 /// <param name="InvocationPayloadHash">The exact immutable invocation-snapshot hash.</param>
@@ -19,6 +22,7 @@ public sealed record GovernedLoopSequentialAdapterBinding(
     string WorkspaceId,
     GovernedLoopExecutionBinding ExecutionBinding,
     string AdmissionOperationId,
+    GovernedLoopAdmissionReceipt AdmissionReceipt,
     string AdmissionReceiptHash,
     string AdmissionRequestHash,
     string InvocationPayloadHash,
@@ -31,4 +35,7 @@ public sealed record GovernedLoopSequentialAdapterBinding(
 
     /// <summary>Gets a defensively copied exact execution binding.</summary>
     public GovernedLoopExecutionBinding ExecutionBinding { get; } = GovernedLoopSequentialContractCopy.Copy(ExecutionBinding);
+
+    /// <summary>Gets the defensively copied complete immutable admission receipt.</summary>
+    public GovernedLoopAdmissionReceipt AdmissionReceipt { get; } = GovernedLoopAdmissionContractCopy.Copy(AdmissionReceipt);
 }

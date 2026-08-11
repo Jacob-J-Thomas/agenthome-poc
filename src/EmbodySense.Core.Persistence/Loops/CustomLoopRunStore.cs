@@ -381,6 +381,7 @@ public sealed class CustomLoopRunStore :
             binding.WorkspaceId,
             binding.ExecutionBinding,
             binding.AdmissionOperationId,
+            binding.AdmissionReceipt,
             binding.AdmissionReceiptHash,
             binding.AdmissionRequestHash,
             binding.InvocationPayloadHash,

@@ -657,6 +657,7 @@ public sealed class GovernedLoopAdmissionStore : IGovernedLoopAdmissionStore
         options.Converters.Add(new AuthorityGrantRevisionJsonConverter());
         options.Converters.Add(new AuthorityProfileIdJsonConverter());
         options.Converters.Add(new AuthorityProfileRevisionJsonConverter());
+        options.Converters.Add(new AuthorityProfileHashJsonConverter());
         options.Converters.Add(new AuthorityBoundaryReceiptJsonConverter());
         options.Converters.Add(new CapabilityDataClassJsonConverter());
         return options;

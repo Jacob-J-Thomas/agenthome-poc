@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
@@ -55,6 +56,9 @@ public sealed class GovernedLoopAdmissionContractTests
             2,
             evidence.IntentHash,
             evidence.Binding,
+            evidence.GrantProfile,
+            evidence.GrantBoundary,
+            evidence.GrantDependencyEvidenceHash,
             evidence.EffectiveAuthority,
             evidence.CapabilityAdmission,
             evidence.References,
@@ -101,6 +105,12 @@ public sealed class GovernedLoopAdmissionContractTests
         GovernedLoopAdmissionEvidence[] invalid =
         [
             CopyEvidence(valid, omitBinding: true),
+            CopyEvidence(valid, omitGrantProfile: true),
+            CopyEvidence(valid, grantProfile: new AuthorityGrantProfilePin(null!, null!)),
+            CopyEvidence(valid, omitGrantBoundary: true),
+            CopyEvidence(valid, grantBoundary: new AuthorityGrantBoundary(default, null, AuthorityGrantCompletionConstraintKind.Unknown)),
+            CopyEvidence(valid, omitGrantDependencyEvidenceHash: true),
+            CopyEvidence(valid, grantDependencyEvidenceHash: GovernedLoopAdmissionTestFixture.Hash('A')),
             CopyEvidence(valid, omitEffectiveAuthority: true),
             CopyEvidence(valid, omitCapabilityAdmission: true),
             CopyEvidence(valid, omitReferences: true),
@@ -129,16 +139,26 @@ public sealed class GovernedLoopAdmissionContractTests
         };
         var futureCapability = GovernedLoopAdmissionTestFixture.CapabilityAdmission(
             GovernedLoopAdmissionTestFixture.EvaluatedAtUtc.AddSeconds(1));
+        var futureGrant = new AuthorityGrantBoundary(
+            GovernedLoopAdmissionTestFixture.EvaluatedAtUtc.AddSeconds(1),
+            null,
+            AuthorityGrantCompletionConstraintKind.None);
+        var expiredGrant = new AuthorityGrantBoundary(
+            GovernedLoopAdmissionTestFixture.EvaluatedAtUtc.AddMinutes(-2),
+            GovernedLoopAdmissionTestFixture.EvaluatedAtUtc,
+            AuthorityGrantCompletionConstraintKind.None);
 
         var revisionDrift = GovernedLoopAdmissionTestFixture.Evidence(intent, binding: mismatchedBinding);
         var workspaceDrift = GovernedLoopAdmissionTestFixture.Evidence(intent, capabilityAdmission: mismatchedWorkspace);
         var timeDrift = GovernedLoopAdmissionTestFixture.Evidence(intent, capabilityAdmission: futureCapability);
+        var notYetEffective = GovernedLoopAdmissionTestFixture.Evidence(intent, grantBoundary: futureGrant);
+        var expired = GovernedLoopAdmissionTestFixture.Evidence(intent, grantBoundary: expiredGrant);
         var intentDrift = GovernedLoopAdmissionTestFixture.Evidence(
             intent,
             intentHash: GovernedLoopAdmissionTestFixture.Hash('f'));
 
         Assert.All(
-            new[] { revisionDrift, workspaceDrift, timeDrift, intentDrift },
+            new[] { revisionDrift, workspaceDrift, timeDrift, notYetEffective, expired, intentDrift },
             candidate =>
             {
                 Assert.True(GovernedLoopAdmissionContractHash.Matches(candidate));
@@ -323,6 +343,9 @@ public sealed class GovernedLoopAdmissionContractTests
     private static GovernedLoopAdmissionEvidence CopyEvidence(
         GovernedLoopAdmissionEvidence value,
         GovernedLoopExecutionBinding? binding = default,
+        AuthorityGrantProfilePin? grantProfile = default,
+        AuthorityGrantBoundary? grantBoundary = default,
+        string? grantDependencyEvidenceHash = default,
         EmbodySense.Core.Common.Authority.Models.AuthorityCeiling? effectiveAuthority = default,
         CapabilityAdmissionSnapshot? capabilityAdmission = default,
         IReadOnlyList<GovernedLoopAdmissionEvidenceReference>? references = default,
@@ -330,6 +353,9 @@ public sealed class GovernedLoopAdmissionContractTests
         string? intentHash = default,
         string? contentHash = default,
         bool omitBinding = false,
+        bool omitGrantProfile = false,
+        bool omitGrantBoundary = false,
+        bool omitGrantDependencyEvidenceHash = false,
         bool omitEffectiveAuthority = false,
         bool omitCapabilityAdmission = false,
         bool omitReferences = false,
@@ -339,6 +365,9 @@ public sealed class GovernedLoopAdmissionContractTests
             value.SchemaVersion,
             omitIntentHash ? null! : intentHash ?? value.IntentHash,
             omitBinding ? null! : binding ?? value.Binding,
+            omitGrantProfile ? null! : grantProfile ?? value.GrantProfile,
+            omitGrantBoundary ? null! : grantBoundary ?? value.GrantBoundary,
+            omitGrantDependencyEvidenceHash ? null! : grantDependencyEvidenceHash ?? value.GrantDependencyEvidenceHash,
             omitEffectiveAuthority ? null! : effectiveAuthority ?? value.EffectiveAuthority,
             omitCapabilityAdmission ? null! : capabilityAdmission ?? value.CapabilityAdmission,
             omitReferences ? null! : references ?? value.References,

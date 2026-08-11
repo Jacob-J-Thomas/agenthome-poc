@@ -72,6 +72,7 @@ public static class GovernedLoopSequentialContractHash
         Append(canonical, binding.ExecutionBinding.Revision.ExecutableHash);
         Append(canonical, binding.ExecutionBinding.ExecutionGeneration);
         Append(canonical, binding.AdmissionOperationId);
+        Append(canonical, binding.AdmissionReceipt.ContentHash);
         Append(canonical, binding.AdmissionReceiptHash);
         Append(canonical, binding.AdmissionRequestHash);
         Append(canonical, binding.InvocationPayloadHash);

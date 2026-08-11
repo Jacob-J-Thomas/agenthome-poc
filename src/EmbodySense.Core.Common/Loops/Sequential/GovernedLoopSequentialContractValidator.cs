@@ -5,6 +5,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Loops.Admission;
 
 namespace EmbodySense.Core.Common.Loops.Sequential;
 
@@ -89,7 +90,30 @@ public static class GovernedLoopSequentialContractValidator
         }
 
         ValidateToken(binding.AdmissionOperationId, "$.admissionOperationId", errors);
+        var admissionReceiptIsValid = GovernedLoopAdmissionValidator.Validate(binding.AdmissionReceipt).IsValid;
+        if (!admissionReceiptIsValid)
+        {
+            Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.admissionReceipt");
+        }
+
         ValidateHash(binding.AdmissionReceiptHash, "$.admissionReceiptHash", errors);
+        if (binding.AdmissionReceipt is not null
+            && !string.Equals(binding.AdmissionReceiptHash, binding.AdmissionReceipt.ContentHash, StringComparison.Ordinal))
+        {
+            Add(errors, GovernedLoopSequentialValidationErrorCode.HashMismatch, "$.admissionReceiptHash");
+        }
+
+        if (admissionReceiptIsValid
+            && binding.AdmissionReceipt is { } receipt
+            && (!string.Equals(binding.WorkspaceId, receipt.Intent.WorkspaceId, StringComparison.Ordinal)
+                || !Equals(binding.ExecutionBinding, receipt.Evidence.Binding)
+                || !string.Equals(binding.AdmissionOperationId, receipt.Intent.OperationId, StringComparison.Ordinal)
+                || !string.Equals(binding.AdmissionRequestHash, receipt.Intent.RequestHash, StringComparison.Ordinal)
+                || !string.Equals(binding.GraphArtifactHash, receipt.Intent.GraphArtifactHash, StringComparison.Ordinal)
+                || !string.Equals(binding.GraphLayoutHash, receipt.Intent.GraphLayoutHash, StringComparison.Ordinal)))
+        {
+            Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.admissionReceipt");
+        }
         ValidateHash(binding.AdmissionRequestHash, "$.admissionRequestHash", errors);
         ValidateHash(binding.InvocationPayloadHash, "$.invocationPayloadHash", errors);
         ValidateHash(binding.GraphArtifactHash, "$.graphArtifactHash", errors);

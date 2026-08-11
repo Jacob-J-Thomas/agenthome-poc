@@ -343,6 +343,9 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
             context.Receipt.Evidence.SchemaVersion,
             context.Receipt.Evidence.IntentHash,
             context.Receipt.Evidence.Binding,
+            context.Receipt.Evidence.GrantProfile,
+            context.Receipt.Evidence.GrantBoundary,
+            context.Receipt.Evidence.GrantDependencyEvidenceHash,
             context.Receipt.Evidence.EffectiveAuthority,
             substitutedCapability,
             GovernedLoopAdmissionContractHash.CreateEvidenceReferences(

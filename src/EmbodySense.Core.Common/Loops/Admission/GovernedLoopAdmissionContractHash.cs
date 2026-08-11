@@ -50,6 +50,9 @@ public static class GovernedLoopAdmissionContractHash
         Append(canonical, evidence.SchemaVersion);
         Append(canonical, evidence.IntentHash);
         AppendBinding(canonical, evidence.Binding);
+        AppendGrantProfile(canonical, evidence.GrantProfile);
+        AppendGrantBoundary(canonical, evidence.GrantBoundary);
+        Append(canonical, evidence.GrantDependencyEvidenceHash);
         Append(canonical, ComputeAuthorityCeilingReferenceHash(evidence.EffectiveAuthority));
         Append(canonical, ComputeCapabilityAdmissionReferenceHash(evidence.CapabilityAdmission));
         AppendReferences(canonical, evidence.References);
@@ -391,6 +394,25 @@ public static class GovernedLoopAdmissionContractHash
         Append(canonical, binding.Revision.RevisionId);
         Append(canonical, binding.Revision.ExecutableHash);
         Append(canonical, binding.ExecutionGeneration);
+    }
+
+    private static void AppendGrantProfile(StringBuilder canonical, AuthorityGrantProfilePin profile)
+    {
+        Append(canonical, profile.Reference.ProfileId.Value);
+        Append(canonical, profile.Reference.Revision.Value);
+        Append(canonical, profile.ContentHash.Value);
+    }
+
+    private static void AppendGrantBoundary(StringBuilder canonical, AuthorityGrantBoundary boundary)
+    {
+        Append(canonical, boundary.EffectiveAtUtc);
+        Append(canonical, boundary.ExpiresAtUtc is not null);
+        if (boundary.ExpiresAtUtc is { } expiry)
+        {
+            Append(canonical, expiry);
+        }
+
+        Append(canonical, (int)boundary.CompletionConstraint);
     }
 
     private static void AppendReferences(StringBuilder canonical, IReadOnlyList<GovernedLoopAdmissionEvidenceReference> references)

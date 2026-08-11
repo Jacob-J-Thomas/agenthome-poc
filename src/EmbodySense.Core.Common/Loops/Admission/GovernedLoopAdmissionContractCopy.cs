@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
@@ -8,6 +9,18 @@ namespace EmbodySense.Core.Common.Loops.Admission;
 
 internal static class GovernedLoopAdmissionContractCopy
 {
+    internal static AuthorityGrantProfilePin Copy(AuthorityGrantProfilePin? value)
+        => value?.Reference?.ProfileId is null || value.Reference.Revision is null || value.ContentHash is null
+            ? null!
+            : new AuthorityGrantProfilePin(
+                new AuthorityProfileReference(value.Reference.ProfileId, value.Reference.Revision),
+                value.ContentHash);
+
+    internal static AuthorityGrantBoundary Copy(AuthorityGrantBoundary? value)
+        => value is null
+            ? null!
+            : new AuthorityGrantBoundary(value.EffectiveAtUtc, value.ExpiresAtUtc, value.CompletionConstraint);
+
     internal static AuthorityCeiling Copy(AuthorityCeiling? value)
         => value is null || value.Capabilities is null || value.DataClasses is null
             ? null!
@@ -72,6 +85,32 @@ internal static class GovernedLoopAdmissionContractCopy
 
     internal static IReadOnlyList<GovernedLoopAdmissionCapabilityDenialViolation> Copy(IReadOnlyList<GovernedLoopAdmissionCapabilityDenialViolation>? values)
         => values is null ? null! : Snapshot(values, GovernedLoopAdmissionLimits.MaxCapabilityDenialViolations);
+
+    internal static GovernedLoopAdmissionEvidence Copy(GovernedLoopAdmissionEvidence? value)
+        => value is null
+            ? null!
+            : new GovernedLoopAdmissionEvidence(
+                value.SchemaVersion,
+                value.IntentHash,
+                value.Binding,
+                value.GrantProfile,
+                value.GrantBoundary,
+                value.GrantDependencyEvidenceHash,
+                value.EffectiveAuthority,
+                value.CapabilityAdmission,
+                value.References,
+                value.EvaluatedAtUtc,
+                value.ContentHash);
+
+    internal static GovernedLoopAdmissionReceipt Copy(GovernedLoopAdmissionReceipt? value)
+        => value is null
+            ? null!
+            : new GovernedLoopAdmissionReceipt(
+                value.SchemaVersion,
+                value.Intent is null ? null! : value.Intent with { },
+                Copy(value.Evidence),
+                value.RecordedAtUtc,
+                value.ContentHash);
 
     private static IReadOnlyList<TValue> Snapshot<TValue>(IEnumerable<TValue> values, int maximum)
         => Array.AsReadOnly(values.Take(maximum + 1).ToArray());
