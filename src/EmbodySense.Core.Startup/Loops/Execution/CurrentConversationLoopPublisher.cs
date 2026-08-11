@@ -97,13 +97,9 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
                 return DefinitelyFailed(request, "The durable current conversation identity no longer matches the conversation admitted for this run.");
             }
 
-            var stateMessages = CustomLoopRuntimeContext.GetLogicalConversationMessages(_conversationState);
-            if (IsExpectedPrefixPlusOutput(stateMessages, request))
-            {
-                return await ReconcileAlreadyPublishedAsync(request, stateMessages, cancellationToken);
-            }
-
-            if (!MatchesExpectedPublicationPrefix(stateMessages, request))
+            var stateMessages = CustomLoopRuntimeContext.GetLogicalConversationMessages(_conversationState).ToArray();
+            var outputAlreadyProjected = IsExpectedPrefixPlusOutput(stateMessages, request);
+            if (!outputAlreadyProjected && !MatchesExpectedPublicationPrefix(stateMessages, request))
             {
                 return DefinitelyFailed(request, "The invoking conversation did not equal the immutable admission prefix plus this run's exact prior publications; publication was not attempted.");
             }
@@ -113,30 +109,66 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
                 return DefinitelyFailed(request, "The persisted conversation and active logical conversation differed before publication.");
             }
 
-            try
-            {
-                request.AppendStarted?.Invoke();
-                var appended = await _conversationMemory.TryAppendMessageAsync(persistedConversation.ConversationId, request.ConversationId, stateMessages, LlmMessage.Assistant(request.CanonicalOutput), cancellationToken);
-                if (!appended)
+            var expectedPrefix = outputAlreadyProjected ? stateMessages.Take(stateMessages.Length - 1).ToArray() : stateMessages;
+            var commitBoundary = request.AppendCommitBoundary ?? CommitAppendDirectlyAsync;
+            var commit = await ConversationPublicationCommitProtocol.ExecuteAsync(
+                commitBoundary,
+                async token =>
                 {
-                    return DefinitelyFailed(request, "The persisted invoking conversation changed at the atomic publication boundary; no custom-loop output was appended.");
-                }
-            }
-            catch (Exception exception)
+                    request.AppendStarted?.Invoke();
+                    return await _conversationMemory.TryPublishMessageAsync(
+                        persistedConversation.ConversationId,
+                        request.ConversationId,
+                        expectedPrefix,
+                        new ConversationMessagePublication(MessageId(request.OperationId), request.OperationId, LlmMessage.Assistant(request.CanonicalOutput)),
+                        token);
+                },
+                cancellationToken);
+
+            if (commit.Status != ConversationPublicationCommitProtocolStatus.Completed)
             {
-                return await ReconcileAppendExceptionAsync(request, stateMessages, exception);
+                if (commit.Status is ConversationPublicationCommitProtocolStatus.CallbackInvokedMultipleTimes or ConversationPublicationCommitProtocolStatus.CallbackIncomplete)
+                {
+                    return Uncertain(request, $"The conversation publication commit boundary violated its callback protocol ({commit.Status}); replay is required before projection.");
+                }
+
+                if (commit.Status == ConversationPublicationCommitProtocolStatus.BoundaryFailed
+                    && commit.Value is not null
+                    && commit.Value.Status is ConversationPublicationAppendStatus.Appended or ConversationPublicationAppendStatus.AlreadyPresent
+                    && IsExactAppendSnapshot(commit.Value.Snapshot, persistedConversation.ConversationId, request.ConversationId, expectedPrefix, request.CanonicalOutput))
+                {
+                    return Uncertain(request, $"The exact identity-bearing append completed, but its caller-owned boundary failed with {commit.Failure?.GetType().Name ?? "UnknownFailure"}; replay is required before projection.");
+                }
+
+                return await ReconcileAppendExceptionAsync(
+                    request,
+                    expectedPrefix,
+                    commit.Failure ?? new InvalidOperationException($"Conversation publication commit protocol stopped with {commit.Status}."));
             }
 
-            try
+            var appendResult = commit.Value!;
+            if (appendResult.Status == ConversationPublicationAppendStatus.Conflict)
+            {
+                return DefinitelyFailed(request, "The persisted invoking conversation changed at the atomic publication boundary; no custom-loop output was appended.");
+            }
+
+            if (appendResult.Status is not (ConversationPublicationAppendStatus.Appended or ConversationPublicationAppendStatus.AlreadyPresent))
+            {
+                return Uncertain(request, "The identity-bearing publication boundary returned an unsupported append status.");
+            }
+
+            var alreadyPublished = appendResult.Status == ConversationPublicationAppendStatus.AlreadyPresent;
+            if (!IsExactAppendSnapshot(appendResult.Snapshot, persistedConversation.ConversationId, request.ConversationId, expectedPrefix, request.CanonicalOutput))
+            {
+                return Uncertain(request, "The identity-bearing publication boundary returned a snapshot that did not prove the exact append outcome.");
+            }
+
+            if (!outputAlreadyProjected)
             {
                 _conversationState.AppendMessage(LlmMessage.Assistant(request.CanonicalOutput));
             }
-            catch (Exception exception)
-            {
-                return Uncertain(request, $"The durable append may have succeeded, but active conversation projection failed: {exception.GetType().Name}.");
-            }
 
-            return await VerifyPublishedAsync(request, stateMessages, cancellationToken, alreadyPublished: false);
+            return await VerifyPublishedAsync(request, expectedPrefix, cancellationToken, alreadyPublished);
         }
         finally
         {
@@ -144,23 +176,14 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
         }
     }
 
-    private async Task<CustomLoopConversationPublicationResult> ReconcileAlreadyPublishedAsync(CustomLoopConversationPublicationRequest request, IReadOnlyList<LlmMessage> stateMessages, CancellationToken cancellationToken)
+    private static Task CommitAppendDirectlyAsync(
+        Func<CancellationToken, Task> commitAppend,
+        CancellationToken cancellationToken)
     {
-        try
-        {
-            var persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
-            if (!string.Equals(persistedConversation.Version, request.ConversationId, StringComparison.Ordinal) || !MessagesEqual(persistedConversation.Messages, stateMessages))
-            {
-                return Uncertain(request, "The active conversation contains the canonical output, but durable conversation identity or state does not match it.");
-            }
-
-            return await CompleteVerifiedPublicationAsync(request, stateMessages.Count, alreadyPublished: true, cancellationToken);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            return Uncertain(request, $"The active conversation contains the canonical output, but durable state could not be verified: {exception.GetType().Name}.");
-        }
+        return commitAppend(cancellationToken);
     }
+
+    private static string MessageId(string operationId) => $"custom-loop-output-{operationId}";
 
     private async Task<CustomLoopConversationPublicationResult> ReconcileAppendExceptionAsync(CustomLoopConversationPublicationRequest request, IReadOnlyList<LlmMessage> expectedPrefix, Exception exception)
     {
@@ -178,13 +201,12 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
                 return DefinitelyFailed(request, $"Conversation append failed with {exception.GetType().Name}, and no append was observed.");
             }
 
-            if (!IsExpectedPrefixPlusOutput(persistedConversation.Messages, request))
+            if (!IsExactOutputShape(persistedConversation.Messages, expectedPrefix, request.CanonicalOutput))
             {
                 return Uncertain(request, $"Conversation append failed with {exception.GetType().Name}, and durable state no longer has a provable expected shape.");
             }
 
-            _conversationState.AppendMessage(LlmMessage.Assistant(request.CanonicalOutput));
-            return await VerifyPublishedAsync(request, expectedPrefix, reconciliation.Token, alreadyPublished: false);
+            return Uncertain(request, $"Conversation append failed with {exception.GetType().Name}; the expected content exists, but its exact publication identity could not be proven.");
         }
         catch (Exception reconciliationException)
         {
@@ -354,6 +376,25 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
     private static bool PrefixMatches(IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmMessage> expectedPrefix)
     {
         return messages.Count == expectedPrefix.Count + 1 && MessagesEqual(messages.Take(expectedPrefix.Count).ToArray(), expectedPrefix);
+    }
+
+    private static bool IsExactAppendSnapshot(
+        ConversationMemorySnapshot snapshot,
+        string expectedConversationId,
+        string expectedConversationVersion,
+        IReadOnlyList<LlmMessage> expectedPrefix,
+        string output)
+    {
+        return string.Equals(snapshot.ConversationId, expectedConversationId, StringComparison.Ordinal)
+            && string.Equals(snapshot.Version, expectedConversationVersion, StringComparison.Ordinal)
+            && IsExactOutputShape(snapshot.Messages, expectedPrefix, output);
+    }
+
+    private static bool IsExactOutputShape(IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmMessage> expectedPrefix, string output)
+    {
+        return PrefixMatches(messages, expectedPrefix)
+            && messages[^1].Role == LlmMessageRole.Assistant
+            && string.Equals(messages[^1].Content, output, StringComparison.Ordinal);
     }
 
     private static bool MessagesEqual(IReadOnlyList<LlmMessage> left, IReadOnlyList<LlmMessage> right)
