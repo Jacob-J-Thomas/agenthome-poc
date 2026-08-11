@@ -204,6 +204,22 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
+    public void Sequential_exit_rejection_is_classified_by_its_exact_prior_exit_dispatch()
+    {
+        var run = CreateSequentialRun();
+        var binding = run.SequentialAdapterBinding!;
+        var exitStart = SequentialEvent(2, "exit-start", CustomLoopRunEventKind.ExitDecisionStarted, binding, "canonical-exit-node", "exit", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var exitRejection = SequentialEvent(3, "exit-rejected", CustomLoopRunEventKind.NodeAttemptFailed, binding, "canonical-exit-node", "exit", CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected);
+        var valid = run with { Events = [run.Events[0], exitStart, exitRejection] };
+        Assert.True(CustomLoopRunValidator.Validate(valid).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(valid).Errors));
+
+        var substitutedStep = SequentialEvent(3, "exit-rejected", CustomLoopRunEventKind.NodeAttemptFailed, binding, "canonical-exit-node", "canonical-exit-node", CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected);
+        var inferenceStart = SequentialEvent(2, "inference-start", CustomLoopRunEventKind.NodeAttemptStarted, binding, "canonical-exit-node", "exit", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], exitStart, substitutedStep] }), "sequential_exit_step_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], inferenceStart, exitRejection] }), "sequential_inference_step_mismatch");
+    }
+
+    [Fact]
     public void Sequential_trigger_evidence_forbids_legacy_step_coordinates()
     {
         var run = CreateSequentialRun();
