@@ -16,7 +16,8 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 /// </summary>
 /// <remarks>
 /// Recovery distinguishes a checkpointed interruption from an open provider attempt. Open or incomplete admission evidence moves
-/// the run to review; recovery never assumes an external outcome and never resumes execution automatically.
+/// the run to review. An exact authenticated canonical completion or definitive rejection closes its matching attempt, but recovery
+/// only parks that evidence at Paused for a later explicit resume; it never advances a checkpoint or resumes execution automatically.
 /// </remarks>
 public sealed class CustomLoopRecoveryService
 {
@@ -216,7 +217,45 @@ public sealed class CustomLoopRecoveryService
 
     private static bool HasOpenAttemptSinceCheckpoint(CustomLoopRunRecord run)
     {
-        return run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence && item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted);
+        return run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence
+            && item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted
+            && !HasAuthenticatedTerminalSequentialOutcome(run, item));
+    }
+
+    private static bool HasAuthenticatedTerminalSequentialOutcome(CustomLoopRunRecord run, CustomLoopRunEvent started)
+    {
+        if (started.SequentialNodeEvidence is not
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+                Disposition: CustomLoopSequentialNodeDisposition.Unknown,
+            } dispatch
+            || !CustomLoopSequentialNodeEvidenceHash.Matches(dispatch)
+            || !CustomLoopSequentialOutcomeArtifactHash.Matches(started))
+        {
+            return false;
+        }
+
+        return run.Events.Any(item => item.Sequence > started.Sequence
+            && item.SequentialNodeEvidence is { } outcome
+            && string.Equals(outcome.NodeId, dispatch.NodeId, StringComparison.Ordinal)
+            && outcome.Attempt == dispatch.Attempt
+            && IsResolvedSequentialOutcome(outcome)
+            && CustomLoopSequentialNodeEvidenceHash.Matches(outcome)
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(item));
+    }
+
+    private static bool IsResolvedSequentialOutcome(CustomLoopSequentialNodeEvidence evidence)
+    {
+        return evidence is
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            Disposition: CustomLoopSequentialNodeDisposition.Completed,
+        }
+            or
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            Disposition: CustomLoopSequentialNodeDisposition.Rejected,
+        };
     }
 
     private static CustomLoopExecutionClock StopAtLastDurableUpdate(CustomLoopExecutionClock clock, DateTimeOffset durableStop)

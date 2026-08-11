@@ -78,6 +78,45 @@ public sealed class CustomLoopLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Restart_recovery_does_not_treat_a_legacy_terminal_event_as_authenticated_canonical_outcome_evidence()
+    {
+        var open = Run("run-legacy-terminal-evidence", CustomLoopRunStatus.Running, openAttempt: true);
+        var terminal = new CustomLoopRunEvent(
+            open.Events.Length + 1,
+            "legacy-attempt-failed",
+            open.UpdatedAtUtc,
+            CustomLoopRunEventKind.NodeAttemptFailed,
+            1,
+            "step-only",
+            1,
+            "Legacy attempt failed without canonical evidence.",
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            "provider",
+            "model",
+            "attempt-correlation",
+            null);
+        var interrupted = open with
+        {
+            LifecycleVersion = open.LifecycleVersion + 1,
+            Events = [.. open.Events, terminal],
+        };
+        Assert.True(CustomLoopRunValidator.Validate(interrupted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(interrupted).Errors));
+        var store = new MultiRunStore([interrupted]);
+
+        var result = Assert.Single(await new CustomLoopRecoveryService(store, new RecordingAuditLog(), new FixedTimeProvider(_now.AddMinutes(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store[interrupted.Id].Status);
+        Assert.Equal("recovery_open_attempt", store[interrupted.Id].FailureCode);
+    }
+
+    [Fact]
     public async Task Restart_recovery_attributes_each_multi_actor_run_to_its_retained_admission_actor()
     {
         var webRun = Run("run-web-actor", CustomLoopRunStatus.Running, admissionActor: AuditSchema.Actors.Web);
