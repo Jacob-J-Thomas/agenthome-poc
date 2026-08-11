@@ -45,7 +45,7 @@ public sealed class CustomLoopExecutionCancellationSignalGroup : ICustomLoopExec
                 return null;
             }
 
-            return new GroupRegistration(primary, secondary);
+            return new CustomLoopExecutionCancellationSignalGroupRegistration(primary, secondary);
         }
         catch
         {
@@ -92,15 +92,4 @@ public sealed class CustomLoopExecutionCancellationSignalGroup : ICustomLoopExec
         CancellationToken cancellationToken = default)
         => _primary.RequestActiveAttemptCancellationAsync(runId, operationId, cancellationToken);
 
-    private sealed class GroupRegistration(IDisposable primary, IDisposable secondary) : IDisposable
-    {
-        private IDisposable? _primary = primary;
-        private IDisposable? _secondary = secondary;
-
-        public void Dispose()
-        {
-            Interlocked.Exchange(ref _secondary, null)?.Dispose();
-            Interlocked.Exchange(ref _primary, null)?.Dispose();
-        }
-    }
 }
