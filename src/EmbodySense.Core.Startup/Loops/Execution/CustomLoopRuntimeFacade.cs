@@ -32,7 +32,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     private readonly CustomLoopAdmissionService _admissionService;
     private readonly CustomLoopRecoveryService _recoveryService;
     private readonly CustomLoopLifecycleService _lifecycleService;
-    private readonly CustomLoopOrderedRunner _runner;
+    private readonly CustomLoopOrderedRunner _humanInvocationRunner;
+    private readonly CustomLoopOrderedRunner _triggerInvocationRunner;
     private readonly CustomLoopRuntimeContext _runtimeContext;
     private readonly SemaphoreSlim _executionAvailabilityGate = new(1, 1);
     private readonly string _surface;
@@ -57,7 +58,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     /// <param name="admissionService">The admission service.</param>
     /// <param name="recoveryService">The recovery service.</param>
     /// <param name="lifecycleService">The lifecycle service.</param>
-    /// <param name="runner">The runner.</param>
+    /// <param name="humanInvocationRunner">The retained compatibility runner used only for intentional human invocation.</param>
+    /// <param name="triggerInvocationRunner">The governed runner used for explicit trigger-adapter invocation.</param>
     /// <param name="runtimeContext">The runtime context.</param>
     /// <param name="customExecutionAvailable">The custom execution available.</param>
     /// <param name="customExecutionReacquisitionAllowed">The custom execution reacquisition allowed.</param>
@@ -77,7 +79,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         CustomLoopAdmissionService admissionService,
         CustomLoopRecoveryService recoveryService,
         CustomLoopLifecycleService lifecycleService,
-        CustomLoopOrderedRunner runner,
+        CustomLoopOrderedRunner humanInvocationRunner,
+        CustomLoopOrderedRunner triggerInvocationRunner,
         CustomLoopRuntimeContext runtimeContext,
         bool customExecutionAvailable,
         bool customExecutionReacquisitionAllowed,
@@ -97,7 +100,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         _admissionService = admissionService ?? throw new ArgumentNullException(nameof(admissionService));
         _recoveryService = recoveryService ?? throw new ArgumentNullException(nameof(recoveryService));
         _lifecycleService = lifecycleService ?? throw new ArgumentNullException(nameof(lifecycleService));
-        _runner = runner ?? throw new ArgumentNullException(nameof(runner));
+        _humanInvocationRunner = humanInvocationRunner ?? throw new ArgumentNullException(nameof(humanInvocationRunner));
+        _triggerInvocationRunner = triggerInvocationRunner ?? throw new ArgumentNullException(nameof(triggerInvocationRunner));
         _runtimeContext = runtimeContext ?? throw new ArgumentNullException(nameof(runtimeContext));
         _customExecutionAvailable = customExecutionAvailable;
         _customExecutionReacquisitionAllowed = customExecutionReacquisitionAllowed;
@@ -128,15 +132,27 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     /// proved. Unsupported run-discovery schemas fail closed with explicit cleanup guidance.
     /// </remarks>
     public Task<LoopRunInvocationResponse> InvokeAsync(LoopRunInvocationInput input, CancellationToken cancellationToken)
-        => InvokeAuthorizedAsync(input, _actor, _surface, _currentRoleId, cancellationToken);
+        => InvokeAuthorizedAsync(input, _actor, _surface, _currentRoleId, _humanInvocationRunner, cancellationToken);
 
     async Task<LoopRunInvocationResponse> ITriggerCustomLoopInvoker.InvokeAsync(LoopRunInvocationInput input, TriggerActorContext actorContext, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(actorContext);
-        return await InvokeAuthorizedAsync(input, actorContext.ActorId.Value, actorContext.SurfaceId, actorContext.RoleId, cancellationToken);
+        return await InvokeAuthorizedAsync(
+            input,
+            actorContext.ActorId.Value,
+            actorContext.SurfaceId,
+            actorContext.RoleId,
+            _triggerInvocationRunner,
+            cancellationToken);
     }
 
-    private async Task<LoopRunInvocationResponse> InvokeAuthorizedAsync(LoopRunInvocationInput input, string actor, string surface, string currentRoleId, CancellationToken cancellationToken)
+    private async Task<LoopRunInvocationResponse> InvokeAuthorizedAsync(
+        LoopRunInvocationInput input,
+        string actor,
+        string surface,
+        string currentRoleId,
+        CustomLoopOrderedRunner runner,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
         CustomLoopInvocationOperation pending;
@@ -446,7 +462,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
                 return new LoopRunInvocationResponse(CustomLoopAdmissionStatus.Admitted.ToString(), admission.Run?.Status.ToString(), false, admission.Run is null ? null : Map(admission.Run), admission.ValidationErrors.Select(Map).ToArray(), "The durable admitted invocation outcome was recovered without another provider dispatch.");
             }
 
-            var execution = await ExecuteOrderedRunAsync(_runner.RunAsync(new CustomLoopOrderedRunRequest(admission.Run!.Id, actor), cancellationToken));
+            var execution = await ExecuteOrderedRunAsync(runner.RunAsync(new CustomLoopOrderedRunRequest(admission.Run!.Id, actor), cancellationToken));
             CustomLoopRunRecord? executedRun = execution.Run;
             var executionDetail = execution.Detail;
             if (executedRun is null)
