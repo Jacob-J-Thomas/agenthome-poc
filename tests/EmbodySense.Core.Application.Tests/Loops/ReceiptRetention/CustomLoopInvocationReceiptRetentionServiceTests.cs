@@ -123,6 +123,41 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
         Assert.True(Assert.Single(audit.AppendTokens).IsCancellationRequested);
     }
 
+    [Fact]
+    public async Task Typed_receipt_writer_retries_the_exact_write_once_after_governed_retention()
+    {
+        var store = new FakeStore(Operation(CustomLoopInvocationReceiptRetentionOperationState.Reserved));
+        store.ReceiptWriteStatuses.Enqueue(CustomLoopInvocationOperationStoreStatus.LimitExceeded);
+        store.ReceiptWriteStatuses.Enqueue(CustomLoopInvocationOperationStoreStatus.Completed);
+
+        var result = await Service(store, new FakeAuditLog()).CompleteAsync(InvocationOperation());
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, result.Status);
+        Assert.Equal(2, store.ReceiptWriteCalls);
+        Assert.Equal(1, store.CommitCalls);
+    }
+
+    [Theory]
+    [InlineData(true, "embodysense.web", CustomLoopInvocationOperationStoreStatus.RetentionAuditUnavailable)]
+    [InlineData(false, "unsafe\nactor", CustomLoopInvocationOperationStoreStatus.RetentionInvalid)]
+    public async Task Typed_receipt_writer_maps_failed_retention_without_retrying(
+        bool failAudit,
+        string actor,
+        CustomLoopInvocationOperationStoreStatus expected)
+    {
+        var store = new FakeStore(Operation(CustomLoopInvocationReceiptRetentionOperationState.Reserved));
+        store.ReceiptWriteStatuses.Enqueue(CustomLoopInvocationOperationStoreStatus.RetentionRequired);
+        var audit = new FakeAuditLog
+        {
+            FailingAction = failAudit ? AuditSchema.Actions.LoopInvocationReceiptRetentionIntent : null,
+        };
+
+        var result = await Service(store, audit).CompleteAsync(InvocationOperation() with { Actor = actor });
+
+        Assert.Equal(expected, result.Status);
+        Assert.Equal(1, store.ReceiptWriteCalls);
+    }
+
     private static CustomLoopInvocationReceiptRetentionService Service(FakeStore store, FakeAuditLog audit)
     {
         return new CustomLoopInvocationReceiptRetentionService(store, audit, new FixedTimeProvider(_now));
@@ -154,6 +189,32 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
             committed ? candidates.Length : 0,
             committed ? candidates.Sum(candidate => candidate.ArtifactUtf8Bytes) : 0);
     }
+
+    private static CustomLoopInvocationOperation InvocationOperation()
+        => new(
+            CustomLoopInvocationOperation.CurrentSchemaVersion,
+            "invoke-receipt-write",
+            new string('a', 64),
+            "loop-receipt-write",
+            1,
+            new string('b', 64),
+            "embodysense.web",
+            "web",
+            "role-receipt-write",
+            new string('c', 64),
+            "provider",
+            "model",
+            CustomLoopInvocationBindingState.CapturedContext,
+            null,
+            new string('d', 64),
+            _now,
+            _now,
+            CustomLoopInvocationOperationState.Pending,
+            CustomLoopInvocationOutcome.Unknown,
+            string.Empty,
+            null,
+            [],
+            "pending");
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
@@ -199,6 +260,10 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
         public bool AbandonFirstCommit { get; init; }
 
         public int CommitCalls { get; private set; }
+
+        public Queue<CustomLoopInvocationOperationStoreStatus> ReceiptWriteStatuses { get; } = [];
+
+        public int ReceiptWriteCalls { get; private set; }
 
         public List<CancellationToken> MutationTokens { get; } = [];
 
@@ -318,6 +383,14 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
 
         public Task<CustomLoopInvocationOperation?> GetAsync(string operationId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
-        public Task<CustomLoopInvocationOperationStoreResult> CompleteAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<CustomLoopInvocationOperationStoreResult> CompleteAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ReceiptWriteCalls++;
+            var status = ReceiptWriteStatuses.Count == 0
+                ? CustomLoopInvocationOperationStoreStatus.Completed
+                : ReceiptWriteStatuses.Dequeue();
+            return Task.FromResult(new CustomLoopInvocationOperationStoreResult(status, operation));
+        }
     }
 }

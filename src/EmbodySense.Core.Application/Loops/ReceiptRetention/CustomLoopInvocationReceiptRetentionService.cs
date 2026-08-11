@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -39,6 +40,86 @@ public sealed class CustomLoopInvocationReceiptRetentionService
     public Task<CustomLoopInvocationReceiptRetentionResult> PruneForCapacityAsync(string actor, string surface, CancellationToken cancellationToken = default)
     {
         return PruneForCapacityAsync(actor, surface, MaxCandidateReselections, cancellationToken);
+    }
+
+    /// <summary>
+    /// Begins one invocation receipt with governed capacity recovery and at most one exact retry.
+    /// </summary>
+    /// <param name="operation">The exact invocation operation to begin.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The begin, replay, capacity, or retention result.</returns>
+    public Task<CustomLoopInvocationOperationStoreResult> BeginAsync(
+        CustomLoopInvocationOperation operation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        return WriteWithRetentionAsync(
+            token => _store.BeginAsync(operation, token),
+            operation.Actor,
+            operation.Surface,
+            cancellationToken);
+    }
+
+    /// <summary>Binds one invocation receipt with governed capacity recovery and at most one exact retry.</summary>
+    /// <param name="operation">The exact invocation operation to bind.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The bind, replay, capacity, or retention result.</returns>
+    public Task<CustomLoopInvocationOperationStoreResult> BindAsync(
+        CustomLoopInvocationOperation operation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        return WriteWithRetentionAsync(
+            token => _store.BindAsync(operation, token),
+            operation.Actor,
+            operation.Surface,
+            cancellationToken);
+    }
+
+    /// <summary>Completes one invocation receipt with governed capacity recovery and at most one exact retry.</summary>
+    /// <param name="operation">The exact invocation operation to complete.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The completion, replay, capacity, or retention result.</returns>
+    public Task<CustomLoopInvocationOperationStoreResult> CompleteAsync(
+        CustomLoopInvocationOperation operation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        return WriteWithRetentionAsync(
+            token => _store.CompleteAsync(operation, token),
+            operation.Actor,
+            operation.Surface,
+            cancellationToken);
+    }
+
+    private async Task<CustomLoopInvocationOperationStoreResult> WriteWithRetentionAsync(
+        Func<CancellationToken, Task<CustomLoopInvocationOperationStoreResult>> write,
+        string actor,
+        string surface,
+        CancellationToken cancellationToken)
+    {
+        var result = await write(cancellationToken).ConfigureAwait(false);
+        if (result.Status is not (CustomLoopInvocationOperationStoreStatus.LimitExceeded or CustomLoopInvocationOperationStoreStatus.RetentionRequired))
+        {
+            return result;
+        }
+
+        // Capacity is reclaimed only through the governed retention state machine. The exact write is
+        // retried once after a safely committed retention outcome; no caller can bypass replay or audit.
+        var retention = await PruneForCapacityAsync(actor, surface, cancellationToken).ConfigureAwait(false);
+        if (!retention.AllowsReceiptWrite)
+        {
+            var status = retention.Status switch
+            {
+                CustomLoopInvocationReceiptRetentionStatus.OperationInProgress => CustomLoopInvocationOperationStoreStatus.RetentionRequired,
+                CustomLoopInvocationReceiptRetentionStatus.AuditUnavailable => CustomLoopInvocationOperationStoreStatus.RetentionAuditUnavailable,
+                CustomLoopInvocationReceiptRetentionStatus.Invalid => CustomLoopInvocationOperationStoreStatus.RetentionInvalid,
+                _ => CustomLoopInvocationOperationStoreStatus.LimitExceeded,
+            };
+            return new CustomLoopInvocationOperationStoreResult(status, result.Operation);
+        }
+
+        return await write(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<CustomLoopInvocationReceiptRetentionResult> PruneForCapacityAsync(string actor, string surface, int remainingCandidateReselections, CancellationToken cancellationToken)
