@@ -3,6 +3,9 @@ using System.Text;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Loops.Admission.Models;
+using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants;
+using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Tests.Loops.Admission;
@@ -71,6 +74,115 @@ public sealed class GovernedLoopAdmissionStoreTests
         Assert.Null(read.Outcome.Receipt);
         Assert.NotNull(read.Outcome.Rejection);
         Assert.True(GovernedLoopAdmissionValidator.Validate(read.Outcome).IsValid);
+    }
+
+    [Fact]
+    public async Task Structured_authority_and_capability_denial_proofs_round_trip_through_file_trust_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
+        var authority = RejectionMutation(
+            paths,
+            "deny-authority",
+            RequestA,
+            0,
+            GovernedLoopAdmissionFailureCode.AuthorityDenied,
+            authorityDenial: AuthorityDenialWithProfile());
+        var capability = RejectionMutation(
+            paths,
+            "deny-capability",
+            RequestB,
+            1,
+            GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied);
+
+        Assert.Equal(GovernedLoopAdmissionStoreCommitStatus.Committed, (await Store(paths, trust).CommitAsync(authority)).Status);
+        Assert.Equal(GovernedLoopAdmissionStoreCommitStatus.Committed, (await Store(paths, trust).CommitAsync(capability)).Status);
+        var restarted = new GovernedLoopAdmissionStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var authorityRead = await restarted.ReadByOperationAsync(WorkspaceId(paths), authority.OperationId);
+        var capabilityRead = await restarted.ReadByOperationAsync(WorkspaceId(paths), capability.OperationId);
+
+        var authorityProof = authorityRead.Outcome!.Rejection!.AuthorityDenial!;
+        Assert.Equal(AuthorityBoundaryDecision.Deny, authorityProof.BoundaryReceipt.Decision);
+        Assert.Equal("bounded-profile", Assert.Single(authorityProof.BoundaryReceipt.Profiles).ProfileId.Value);
+        Assert.Null(authorityRead.Outcome.Rejection.CapabilityDenial);
+        var capabilityProof = capabilityRead.Outcome!.Rejection!.CapabilityDenial!;
+        Assert.NotEmpty(capabilityProof.Violations);
+        Assert.All(capabilityProof.Violations, violation => Assert.Equal(
+            GovernedLoopAdmissionCapabilityDenialReason.RequiredCapabilityOutsideEffectiveAuthority,
+            violation.Reason));
+        Assert.Null(capabilityRead.Outcome.Rejection.AuthorityDenial);
+        Assert.True(GovernedLoopAdmissionValidator.Validate(authorityRead.Outcome).IsValid);
+        Assert.True(GovernedLoopAdmissionValidator.Validate(capabilityRead.Outcome).IsValid);
+    }
+
+    [Fact]
+    public async Task Malformed_structured_denial_proofs_are_rejected_before_durable_intent()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var authority = RejectionMutation(
+            paths,
+            "deny-authority",
+            RequestA,
+            0,
+            GovernedLoopAdmissionFailureCode.AuthorityDenied);
+        var authorityRejection = authority.Outcome.Rejection!;
+        var authorityProof = authorityRejection.AuthorityDenial!;
+        var widenedProof = new GovernedLoopAdmissionAuthorityDenialProof(
+            authorityProof.SchemaVersion,
+            authorityProof.CandidateCeiling,
+            authorityProof.CandidateCeiling,
+            authorityProof.BoundaryReceipt);
+        var malformedAuthorityRejection = new GovernedLoopAdmissionRejection(
+            authorityRejection.SchemaVersion,
+            authorityRejection.Intent,
+            authorityRejection.FailureCode,
+            widenedProof,
+            null,
+            authorityRejection.References,
+            authorityRejection.RejectedAtUtc,
+            authorityRejection.ContentHash);
+        var malformedAuthority = authority with
+        {
+            Outcome = authority.Outcome with { Rejection = malformedAuthorityRejection }
+        };
+
+        var capability = RejectionMutation(
+            paths,
+            "deny-capability",
+            RequestB,
+            0,
+            GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied);
+        var capabilityRejection = capability.Outcome.Rejection!;
+        var capabilityProof = capabilityRejection.CapabilityDenial!;
+        var emptyViolationProof = new GovernedLoopAdmissionCapabilityDenialProof(
+            capabilityProof.SchemaVersion,
+            capabilityProof.Requirements,
+            capabilityProof.RequirementsHash,
+            capabilityProof.EffectiveAuthority,
+            [],
+            capabilityProof.EvaluatedAtUtc);
+        var malformedCapabilityRejection = new GovernedLoopAdmissionRejection(
+            capabilityRejection.SchemaVersion,
+            capabilityRejection.Intent,
+            capabilityRejection.FailureCode,
+            null,
+            emptyViolationProof,
+            capabilityRejection.References,
+            capabilityRejection.RejectedAtUtc,
+            capabilityRejection.ContentHash);
+        var malformedCapability = capability with
+        {
+            Outcome = capability.Outcome with { Rejection = malformedCapabilityRejection }
+        };
+
+        Assert.False(GovernedLoopAdmissionValidator.Validate(malformedAuthority.Outcome).IsValid);
+        Assert.False(GovernedLoopAdmissionValidator.Validate(malformedCapability.Outcome).IsValid);
+        Assert.Equal(GovernedLoopAdmissionStoreCommitStatus.Unavailable, (await Store(paths, trust).CommitAsync(malformedAuthority)).Status);
+        Assert.Equal(GovernedLoopAdmissionStoreCommitStatus.Unavailable, (await Store(paths, trust).CommitAsync(malformedCapability)).Status);
+        Assert.False(File.Exists(PrimaryPath(paths)));
     }
 
     [Fact]
@@ -623,6 +735,56 @@ public sealed class GovernedLoopAdmissionStoreTests
             GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
             generation,
             outcome);
+    }
+
+    private static GovernedLoopAdmissionStoreMutation RejectionMutation(
+        WorkspacePaths paths,
+        string operationId,
+        char requestHash,
+        long generation,
+        GovernedLoopAdmissionFailureCode failureCode,
+        GovernedLoopAdmissionAuthorityDenialProof? authorityDenial = null,
+        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial = null)
+    {
+        var workspaceId = WorkspaceId(paths);
+        var intent = GovernedLoopAdmissionTestFixture.Intent(
+            workspaceId: workspaceId,
+            operationId: operationId,
+            requestHash: GovernedLoopAdmissionTestFixture.Hash(requestHash));
+        var rejection = GovernedLoopAdmissionTestFixture.Rejection(
+            intent,
+            failureCode,
+            authorityDenial,
+            capabilityDenial);
+        var outcome = GovernedLoopAdmissionTestFixture.RejectedOutcome(intent, rejection);
+        Assert.True(GovernedLoopAdmissionValidator.Validate(outcome).IsValid);
+        return new GovernedLoopAdmissionStoreMutation(
+            workspaceId,
+            operationId,
+            intent.RequestHash,
+            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+            generation,
+            outcome);
+    }
+
+    private static GovernedLoopAdmissionAuthorityDenialProof AuthorityDenialWithProfile()
+    {
+        Assert.True(AuthorityProfileId.TryParse("bounded-profile", out var profileId, out _));
+        Assert.True(AuthorityProfileRevision.TryParse("3", out var revision, out _));
+        Assert.True(AuthorityBoundaryReceiptFactory.TryCreate(
+            AuthorityBoundaryReceipt.CurrentSchemaVersion,
+            AuthorityBoundaryDecision.Deny,
+            [new AuthorityBoundaryCondition(AuthorityBoundaryDecision.Deny, AuthorityBoundaryReason.ProfileRetired)],
+            [new AuthorityProfileReference(profileId!, revision!)],
+            GovernedLoopAdmissionTestFixture.RecordedAtUtc,
+            out var receipt,
+            out var validation), string.Join(',', validation.Errors));
+        var candidate = GovernedLoopAdmissionTestFixture.EffectiveAuthority();
+        return new GovernedLoopAdmissionAuthorityDenialProof(
+            GovernedLoopAdmissionLimits.CurrentSchemaVersion,
+            candidate,
+            AuthorityCeilingIntersection.EmptyCeiling(),
+            receipt!);
     }
 
     private static string WorkspaceId(WorkspacePaths paths) => CapabilityWorkspaceScopeId.Create(paths.RootPath);
