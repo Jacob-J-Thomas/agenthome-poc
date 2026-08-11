@@ -1336,7 +1336,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                     prepared.Run!,
                     actor,
                     context,
-                    context.AuditRecorder);
+                    context.AuditRecorder,
+                    prepared.AuthenticatedPureOutcomeSnapshot);
             }
 
             var terminal = await TerminateAsync(prepared.Run!, actor, CustomLoopRunStatus.NeedsReview, "canonical_pure_checkpoint_missing", "Canonical pure-node evidence resolved without one checkpoint advancement.");
@@ -1465,7 +1466,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopRunRecord run,
         string actor,
         SequentialExecutionContext context,
-        IGovernedLoopSequentialAuditRecorder auditRecorder)
+        IGovernedLoopSequentialAuditRecorder auditRecorder,
+        CustomLoopRunRecord? authenticatedOutcomeSnapshot)
     {
         if (run.Status is CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.CancelRequested)
         {
@@ -1479,6 +1481,32 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         if (run.IsTerminal)
         {
+            if (authenticatedOutcomeSnapshot is not null
+                && TryCreateAuthenticatedPureCheckpointSnapshot(
+                    authenticatedOutcomeSnapshot,
+                    run,
+                    context,
+                    out var checkpointSnapshot)
+                && TryGetAcceptedPureCancellationLifecycleSuccessor(
+                    checkpointSnapshot,
+                    run,
+                    out var cancellationLifecycle))
+            {
+                if (run.Events.LastOrDefault() is { Kind: CustomLoopRunEventKind.IntegrityWarning } warning)
+                {
+                    return new RunAdvance(run, Result(CustomLoopOrderedRunStatus.Cancelled, run, warning.Detail));
+                }
+
+                var cancellation = await CompleteSequentialPureTerminalLifecycleAuditAsync(
+                    run,
+                    CustomLoopRunStatus.Cancelled,
+                    null,
+                    cancellationLifecycle!.Detail,
+                    cancellationLifecycle,
+                    auditRecorder);
+                return new RunAdvance(cancellation.Run, cancellation);
+            }
+
             var terminal = await CompleteOrProjectSequentialTerminalAsync(run, actor, context);
             return new RunAdvance(terminal.Run, terminal);
         }
@@ -1519,6 +1547,57 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return run.Events.Any(item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted
             && item.Sequence > outcome.Sequence
             && item.Sequence <= run.Checkpoint.LastCommittedSequence);
+    }
+
+    private static bool TryCreateAuthenticatedPureCheckpointSnapshot(
+        CustomLoopRunRecord outcomeSnapshot,
+        CustomLoopRunRecord latest,
+        SequentialExecutionContext context,
+        out CustomLoopRunRecord checkpointSnapshot)
+    {
+        checkpointSnapshot = outcomeSnapshot;
+        if (!CustomLoopRunValidator.HasExactDurableEventPrefix(outcomeSnapshot, latest)
+            || outcomeSnapshot.Events.LastOrDefault() is not
+            {
+                Kind: CustomLoopRunEventKind.NodeAttemptCompleted,
+                PureNodeOutcomeJson: { } outcomeJson,
+                SequentialNodeEvidence:
+                {
+                    Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                    Disposition: CustomLoopSequentialNodeDisposition.Completed,
+                } evidence,
+            }
+            || !GovernedLoopPureNodeOutcome.TryDeserialize(context.Artifact.Graph, outcomeJson, out var outcome, out _)
+            || context.Plan.Nodes.SingleOrDefault(item => string.Equals(item.NodeId, evidence.NodeId, StringComparison.Ordinal)) is not { } node
+            || outcomeSnapshot.Frontier?.Payload.Nodes.SingleOrDefault(item => string.Equals(item.NodeId, evidence.NodeId, StringComparison.Ordinal)) is not
+            {
+                AttemptOperationId: { } attemptOperationId,
+            }
+            || evidence.Attempt <= 0
+            || !TryProjectPureNodeCheckpoint(outcomeSnapshot, context, node, outcome!, out var projectedCheckpoint, out _)
+            || CompleteSequentialFrontier(outcomeSnapshot, context, node, evidence.Attempt, attemptOperationId) is not { } frontier
+            || latest.Events.Skip(outcomeSnapshot.Events.Length).FirstOrDefault() is not
+            {
+                Kind: CustomLoopRunEventKind.CheckpointCommitted,
+            } checkpointEvent
+            || checkpointEvent.Sequence != outcomeSnapshot.Events.Length + 1L
+            || outcomeSnapshot.LifecycleVersion == int.MaxValue)
+        {
+            return false;
+        }
+
+        checkpointSnapshot = outcomeSnapshot with
+        {
+            LifecycleVersion = outcomeSnapshot.LifecycleVersion + 1,
+            UpdatedAtUtc = checkpointEvent.TimestampUtc,
+            Checkpoint = projectedCheckpoint with { LastCommittedSequence = checkpointEvent.Sequence },
+            ExecutionClock = AdvanceClock(outcomeSnapshot.ExecutionClock, checkpointEvent.TimestampUtc, terminal: false),
+            Events = [.. outcomeSnapshot.Events, checkpointEvent],
+            Frontier = frontier,
+        };
+        return CustomLoopRunValidator.ValidateUpdate(outcomeSnapshot, checkpointSnapshot).IsValid
+            && CustomLoopRunValidator.HasExactDurableEventPrefix(checkpointSnapshot, latest)
+            && CheckpointsEqual(checkpointSnapshot.Checkpoint, latest.Checkpoint);
     }
 
     private static bool TryCreateConcurrentPureOutcomeSnapshot(
@@ -1633,6 +1712,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         };
         foreach (var statuses in possibleChains)
         {
+            if (current.LifecycleVersion > int.MaxValue - statuses.Length)
+            {
+                continue;
+            }
+
             var candidate = current with
             {
                 LifecycleVersion = checked(current.LifecycleVersion + statuses.Length),
@@ -1865,6 +1949,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         run = persistedOutcome.Run!;
+        var authenticatedOutcomeSnapshot = persistedOutcome.AuthenticatedPureOutcomeSnapshot;
         var durableCompletion = FindSequentialNodeEvidence(run, node, attempt);
         if (durableCompletion is not
             {
@@ -1895,8 +1980,15 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         return HasCommittedSequentialPureCheckpoint(run, node, attempt)
-            ? new RunAdvance(run, null)
-            : new RunAdvance(run, null, projectedCheckpoint);
+            ? new RunAdvance(
+                run,
+                null,
+                AuthenticatedPureOutcomeSnapshot: authenticatedOutcomeSnapshot)
+            : new RunAdvance(
+                run,
+                null,
+                projectedCheckpoint,
+                AuthenticatedPureOutcomeSnapshot: authenticatedOutcomeSnapshot);
     }
 
     private async Task<RunAdvance> PersistSequentialPureOutcomeAsync(
@@ -1935,7 +2027,15 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 pureNodeOutcomeJson: outcome.CanonicalJson);
             completion = WithSequentialEvidence(completion, sequentialNode, CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed);
             var persisted = await PersistAsync(run, Append(run, completion.TimestampUtc, [completion]), IntegrityToken(), outcomeMayExist: false);
-            if (persisted.Terminal is null || persisted.Terminal.Status != CustomLoopOrderedRunStatus.Conflict)
+            if (persisted.Terminal is null)
+            {
+                return new RunAdvance(
+                    persisted.Run,
+                    null,
+                    AuthenticatedPureOutcomeSnapshot: persisted.Run);
+            }
+
+            if (persisted.Terminal.Status != CustomLoopOrderedRunStatus.Conflict)
             {
                 return persisted;
             }
@@ -1973,7 +2073,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                         || IsAcceptedPureControlSuccessor(outcomeSnapshot, latest)
                         || HasCommittedSequentialPureCheckpoint(latest, sequentialNode.Node, sequentialNode.Attempt)))
                 {
-                    return new RunAdvance(latest, null);
+                    return new RunAdvance(
+                        latest,
+                        null,
+                        AuthenticatedPureOutcomeSnapshot: outcomeSnapshot);
                 }
 
                 return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, latest, "The concurrent pure-node completion does not extend the exact open attempt through an authenticated outcome, control chain, or committed checkpoint."));
@@ -2264,7 +2367,6 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
             var reconciled = await CompleteSequentialPureTerminalLifecycleAuditAsync(
                 run,
-                actor,
                 authenticatedStatus,
                 authenticatedStatus == CustomLoopRunStatus.Failed ? durableFailureCode : null,
                 authenticatedLifecycle!.Detail,
@@ -2384,7 +2486,6 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
                 var reconciled = await CompleteSequentialPureTerminalLifecycleAuditAsync(
                     latest,
-                    actor,
                     authenticatedStatus,
                     authenticatedStatus == CustomLoopRunStatus.Failed ? terminalFailureCode : null,
                     authenticatedLifecycle!.Detail,
@@ -2470,7 +2571,6 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
                 var cancellation = await CompleteSequentialPureTerminalLifecycleAuditAsync(
                     latest,
-                    actor,
                     CustomLoopRunStatus.Cancelled,
                     null,
                     cancellationLifecycle!.Detail,
@@ -4984,6 +5084,22 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return false;
         }
 
+        return TryGetAcceptedPureCancellationLifecycleSuccessor(current, latest, out terminalLifecycle);
+    }
+
+    private static bool TryGetAcceptedPureCancellationLifecycleSuccessor(
+        CustomLoopRunRecord current,
+        CustomLoopRunRecord latest,
+        out CustomLoopRunEvent? terminalLifecycle)
+    {
+        terminalLifecycle = null;
+        if (latest.Status != CustomLoopRunStatus.Cancelled
+            || !latest.IsTerminal
+            || !CustomLoopRunValidator.HasExactDurableEventPrefix(current, latest))
+        {
+            return false;
+        }
+
         var terminalSnapshot = WithoutTerminalIntegrityWarning(latest);
         if (terminalSnapshot is null)
         {
@@ -5056,7 +5172,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         var terminalSnapshot = WithoutTerminalIntegrityWarning(latest);
         if (terminalSnapshot is null
-            || !CustomLoopRunValidator.HasExactDurableEventPrefix(rejectionSnapshot, terminalSnapshot))
+            || !CustomLoopRunValidator.HasExactDurableEventPrefix(rejectionSnapshot, terminalSnapshot)
+            || rejectionSnapshot.LifecycleVersion == int.MaxValue)
         {
             return false;
         }
@@ -5727,7 +5844,6 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             ? await CompleteTerminalLifecycleAuditAsync(persisted.Run, actor, terminalStatus, failureCode, detail, terminalEvent)
             : await CompleteSequentialPureTerminalLifecycleAuditAsync(
                 persisted.Run,
-                actor,
                 terminalStatus,
                 failureCode,
                 detail,
@@ -5737,7 +5853,6 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private async Task<CustomLoopOrderedRunResult> CompleteSequentialPureTerminalLifecycleAuditAsync(
         CustomLoopRunRecord terminalRun,
-        string actor,
         CustomLoopRunStatus terminalStatus,
         string? failureCode,
         string detail,
@@ -7175,7 +7290,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopRunRecord? Run,
         CustomLoopOrderedRunResult? Terminal,
         CustomLoopRunCheckpoint? PendingCheckpoint = null,
-        PendingTerminal? PendingTerminal = null);
+        PendingTerminal? PendingTerminal = null,
+        CustomLoopRunRecord? AuthenticatedPureOutcomeSnapshot = null);
 
     private sealed record PendingTerminal(
         CustomLoopRunStatus Status,

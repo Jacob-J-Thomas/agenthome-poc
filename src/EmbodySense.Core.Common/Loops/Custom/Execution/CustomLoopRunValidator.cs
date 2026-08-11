@@ -209,6 +209,11 @@ public static class CustomLoopRunValidator
             return false;
         }
 
+        if (actual.LifecycleVersion == expectedPrefix.LifecycleVersion)
+        {
+            return HasSameDurableVersion(expectedPrefix, actual);
+        }
+
         var immutableErrors = new List<CustomLoopValidationError>();
         ValidateImmutableAdmission(expectedPrefix, actual, immutableErrors);
         if (immutableErrors.Count != 0)
