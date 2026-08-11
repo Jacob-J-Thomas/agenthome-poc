@@ -16,6 +16,8 @@ namespace EmbodySense.Core.Application.Loops.Sequential;
 /// </remarks>
 public static class GovernedLoopSequentialLegacyDefinitionProjector
 {
+    private const string WorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
+
     /// <summary>Projects a validated exact binding, invocation snapshot, plan, and immutable graph artifact.</summary>
     public static GovernedLoopSequentialLegacyDefinitionProjectionResult Project(
         GovernedLoopSequentialAdapterBinding? binding,
@@ -71,6 +73,11 @@ public static class GovernedLoopSequentialLegacyDefinitionProjector
                 })
                 .ToArray();
             var createdAtUtc = artifact.RevisionArtifact.CreatedAtUtc.ToUniversalTime();
+            CustomLoopToolAssignment[] toolAssignments = graph.AuthorityCeiling.CapabilityIds.Contains(
+                WorkspaceCommandCapabilityId,
+                StringComparer.Ordinal)
+                ? [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search]
+                : [];
             var definition = new CustomLoopDefinition(
                 CustomLoopDefinition.CurrentSchemaVersion,
                 graph.GraphId,
@@ -87,7 +94,7 @@ public static class GovernedLoopSequentialLegacyDefinitionProjector
                     invocationSnapshot.InvokingConversation is not null),
                 CustomLoopContextDefaults.CreatePrototypeDefaults(),
                 inferenceSteps,
-                [],
+                toolAssignments,
                 new CustomLoopExitPolicy(
                     0,
                     CustomLoopDefinition.DefaultExitDecisionInstruction,
@@ -96,7 +103,7 @@ public static class GovernedLoopSequentialLegacyDefinitionProjector
             {
                 // This manifest exists only to satisfy the fenced legacy definition contract. The canonical ordered
                 // path revalidates the exact graph capability pins supplied by its immutable adapter hand-off.
-                CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(graph.GraphId, []),
+                CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(graph.GraphId, toolAssignments),
             };
             definition = CustomLoopDefinitionContentHash.Apply(definition);
             return CustomLoopDefinitionValidator.Validate(definition).IsValid

@@ -142,6 +142,33 @@ public sealed class GovernedLoopSequentialLegacyDefinitionProjectorTests
             Assert.Single(definition.InferenceSteps).Instruction);
     }
 
+    [Fact]
+    public void Tool_enabled_projection_maps_only_the_exact_fenced_legacy_workspace_assignments()
+    {
+        var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(allowWorkspaceTools: true);
+        var plan = Assert.IsType<GovernedLoopSequentialPlan>(GovernedLoopSequentialPlanBuilder.Build(artifact).Plan);
+        var invocation = Invocation(includeConversation: true);
+        var binding = Binding(artifact, invocation);
+
+        var result = GovernedLoopSequentialLegacyDefinitionProjector.Project(binding, invocation, plan, artifact);
+
+        Assert.Equal(GovernedLoopSequentialLegacyDefinitionProjectionStatus.Ready, result.Status);
+        var definition = Assert.IsType<CustomLoopDefinition>(result.Definition);
+        Assert.Equal(
+            [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search],
+            definition.ToolAssignments);
+        Assert.Equal(
+            [LoopCapabilityRequirements.ConversationTurnId, LoopCapabilityRequirements.WorkspaceCommandId],
+            LoopCapabilityRequirements.GetAssignedCapabilityIds(definition.CapabilityRequirements));
+        Assert.True(CustomLoopDefinitionValidator.Validate(definition).IsValid);
+
+        var toolFreeArtifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact();
+        var toolFreePlan = Assert.IsType<GovernedLoopSequentialPlan>(GovernedLoopSequentialPlanBuilder.Build(toolFreeArtifact).Plan);
+        Assert.Equal(
+            GovernedLoopSequentialLegacyDefinitionProjectionStatus.InvalidArtifact,
+            GovernedLoopSequentialLegacyDefinitionProjector.Project(binding, invocation, toolFreePlan, toolFreeArtifact).Status);
+    }
+
     private static GovernedLoopSequentialInvocationSnapshot Invocation(bool includeConversation)
     {
         var context = CustomLoopContextSnapshot.CreateEmpty(GovernedLoopSequentialApplicationTestFixture.Now);
