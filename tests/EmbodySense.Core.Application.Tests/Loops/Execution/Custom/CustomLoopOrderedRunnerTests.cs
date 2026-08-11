@@ -644,13 +644,13 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Theory]
-    [InlineData(ProviderAuthorityDenyMismatch.Operation)]
-    [InlineData(ProviderAuthorityDenyMismatch.Correlation)]
-    [InlineData(ProviderAuthorityDenyMismatch.Boundary)]
-    [InlineData(ProviderAuthorityDenyMismatch.RequiredAuthorityAndPins)]
-    [InlineData(ProviderAuthorityDenyMismatch.AdmittedProof)]
+    [InlineData("operation")]
+    [InlineData("correlation")]
+    [InlineData("boundary")]
+    [InlineData("required-authority-and-pins")]
+    [InlineData("admitted-proof")]
     public async Task Canonical_unrelated_structurally_valid_authority_deny_requires_review_without_provider_dispatch(
-        ProviderAuthorityDenyMismatch mismatch)
+        string mismatch)
     {
         var context = await SequentialContextAsync(Run(SequentialDefinition()));
         var store = new FakeRunStore(context.Run);
@@ -4803,7 +4803,7 @@ public sealed class CustomLoopOrderedRunnerTests
     private static GovernedLoopEffectAuthorityStoppedException DefinitiveEffectAuthorityDeny(
         SequentialTestContext context,
         CustomLoopInferenceAttemptRequest providerRequest,
-        ProviderAuthorityDenyMismatch mismatch = ProviderAuthorityDenyMismatch.None)
+        string? mismatch = null)
     {
         var adapterBinding = context.Evidence.AdapterBinding;
         var receipt = adapterBinding.AdmissionReceipt;
@@ -4836,7 +4836,7 @@ public sealed class CustomLoopOrderedRunnerTests
             receipt.Evidence.CapabilityAdmission.Pins,
             [],
             receipt.Evidence.GrantDependencyEvidenceHash);
-        if (mismatch == ProviderAuthorityDenyMismatch.AdmittedProof)
+        if (string.Equals(mismatch, "admitted-proof", StringComparison.Ordinal))
         {
             admitted = admitted with { DependencyEvidenceHash = Hash("unrelated-admitted-authority-proof") };
         }
@@ -4856,22 +4856,22 @@ public sealed class CustomLoopOrderedRunnerTests
             $"provider-transport-v1\n{providerRequest.RunId}\n{providerRequest.StepId}\n{providerRequest.Attempt}\n{providerRequest.AttemptCorrelationId}");
         var correlationId = providerRequest.AttemptCorrelationId;
         var boundary = GovernedLoopEffectBoundaryKind.ProviderTransport;
-        if (mismatch == ProviderAuthorityDenyMismatch.Operation)
+        if (string.Equals(mismatch, "operation", StringComparison.Ordinal))
         {
             effectOperationId = "provider-" + Hash("unrelated-provider-operation");
         }
 
-        if (mismatch == ProviderAuthorityDenyMismatch.Correlation)
+        if (string.Equals(mismatch, "correlation", StringComparison.Ordinal))
         {
             correlationId = "attempt-unrelated-correlation";
         }
 
-        if (mismatch == ProviderAuthorityDenyMismatch.Boundary)
+        if (string.Equals(mismatch, "boundary", StringComparison.Ordinal))
         {
             boundary = GovernedLoopEffectBoundaryKind.WorkspaceToolIntake;
         }
 
-        if (mismatch == ProviderAuthorityDenyMismatch.RequiredAuthorityAndPins)
+        if (string.Equals(mismatch, "required-authority-and-pins", StringComparison.Ordinal))
         {
             var unrelatedPin = receipt.Evidence.CapabilityAdmission.Pins.Single(
                 pin => string.Equals(pin.DescriptorIdentity.Id.Value, "org.embodysense/conversation-turn", StringComparison.Ordinal));
@@ -4911,16 +4911,6 @@ public sealed class CustomLoopOrderedRunnerTests
             GovernedLoopEffectAuthorityExecutionStatus.Decided,
             GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
             decision);
-    }
-
-    public enum ProviderAuthorityDenyMismatch
-    {
-        None,
-        Operation,
-        Correlation,
-        Boundary,
-        RequiredAuthorityAndPins,
-        AdmittedProof,
     }
 
     private static string Hash(string content)
