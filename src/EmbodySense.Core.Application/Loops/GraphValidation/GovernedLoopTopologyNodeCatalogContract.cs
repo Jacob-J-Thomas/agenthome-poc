@@ -29,6 +29,32 @@ public static class GovernedLoopTopologyNodeCatalogContract
         return contract is not null;
     }
 
+    internal static bool HasExactCatalogSemantics(GovernedLoopNodeCatalogDescriptor candidate)
+    {
+        if (!TryResolve(candidate.Descriptor, out var canonical) || canonical is null)
+        {
+            return false;
+        }
+
+        return candidate.IsAdvertised == canonical.IsAdvertised
+            && candidate.IsExecutable == canonical.IsExecutable
+            && candidate.IsLegalEntry == canonical.IsLegalEntry
+            && candidate.IsLegalTerminal == canonical.IsLegalTerminal
+            && candidate.AllowedControlOutcomes.SequenceEqual(canonical.AllowedControlOutcomes)
+            && candidate.RequiredControlOutcomes.SequenceEqual(canonical.RequiredControlOutcomes)
+            && candidate.JoinPolicy == canonical.JoinPolicy
+            && candidate.MinimumIncomingControlEdges == canonical.MinimumIncomingControlEdges
+            && candidate.AllowsCycle == canonical.AllowsCycle
+            && string.Equals(candidate.CycleIterationBudgetParameterId, canonical.CycleIterationBudgetParameterId, StringComparison.Ordinal)
+            && string.Equals(candidate.CycleTimeBudgetMillisecondsParameterId, canonical.CycleTimeBudgetMillisecondsParameterId, StringComparison.Ordinal)
+            && candidate.Ports.Count == canonical.Ports.Count
+            && candidate.Ports.Zip(canonical.Ports).All(pair => HasExactPortSemantics(pair.First, pair.Second))
+            && candidate.Parameters.Count == canonical.Parameters.Count
+            && candidate.Parameters.Zip(canonical.Parameters).All(pair => HasExactParameterSemantics(pair.First, pair.Second))
+            && candidate.RequiredCapabilityIds.SequenceEqual(canonical.RequiredCapabilityIds, StringComparer.Ordinal)
+            && Equals(candidate.ResourceBudget, canonical.ResourceBudget);
+    }
+
     internal static bool HasExactSchemaSemantics(
         GovernedLoopNodeDefinition node,
         IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas)
@@ -143,6 +169,34 @@ public static class GovernedLoopTopologyNodeCatalogContract
             new GovernedLoopCatalogParameterContract(GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter, GovernedLoopParameterValueKind.Integer, Required: false, 1, 5, 1, CustomLoopLimits.MaxGraphCycleIterations, Array.Empty<string>()),
             new GovernedLoopCatalogParameterContract(GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter, GovernedLoopParameterValueKind.Integer, Required: false, 1, 8, 1, CustomLoopLimits.MaxGraphCycleMilliseconds, Array.Empty<string>()),
         ];
+
+    private static bool HasExactPortSemantics(
+        GovernedLoopCatalogPortContract? candidate,
+        GovernedLoopCatalogPortContract canonical)
+    {
+        return candidate is not null
+            && string.Equals(candidate.Id, canonical.Id, StringComparison.Ordinal)
+            && candidate.Direction == canonical.Direction
+            && candidate.BindingKind == canonical.BindingKind
+            && Equals(candidate.AllowedValueKinds, canonical.AllowedValueKinds)
+            && candidate.Required == canonical.Required;
+    }
+
+    private static bool HasExactParameterSemantics(
+        GovernedLoopCatalogParameterContract? candidate,
+        GovernedLoopCatalogParameterContract canonical)
+    {
+        return candidate is not null
+            && string.Equals(candidate.Id, canonical.Id, StringComparison.Ordinal)
+            && candidate.ValueKind == canonical.ValueKind
+            && candidate.Required == canonical.Required
+            && candidate.MinimumCharacters == canonical.MinimumCharacters
+            && candidate.MaximumCharacters == canonical.MaximumCharacters
+            && candidate.MinimumInteger == canonical.MinimumInteger
+            && candidate.MaximumInteger == canonical.MaximumInteger
+            && candidate.AllowedValues is not null
+            && candidate.AllowedValues.SequenceEqual(canonical.AllowedValues, StringComparer.Ordinal);
+    }
 
     private static string DescriptorKey(GovernedLoopNodeCatalogDescriptor descriptor)
         => $"{(int)descriptor.Descriptor.Kind:D3}:{descriptor.Descriptor.TypeId}:{descriptor.Descriptor.Version:D10}";

@@ -123,7 +123,7 @@ public static class GovernedLoopSequentialPlanBuilder
             || reverse[graph.EntryNodeId].Count != 0
             || adjacency[graph.TerminalNodeIds[0]].Count != 0
             || !HasExactControlOutcomes(graph)
-            || HasImpossibleJoin(graph, adjacency))
+            || HasImpossibleJoin(graph))
         {
             return null;
         }
@@ -132,6 +132,16 @@ public static class GovernedLoopSequentialPlanBuilder
         var rawComponentByNode = stronglyConnected
             .SelectMany((nodes, index) => nodes.Select(nodeId => (nodeId, index)))
             .ToDictionary(item => item.nodeId, item => item.index, StringComparer.Ordinal);
+        foreach (var node in graph.Nodes.Where(node => !string.Equals(node.Id, graph.EntryNodeId, StringComparison.Ordinal) && node.Descriptor.Kind != GovernedLoopNodeKind.Join))
+        {
+            var component = stronglyConnected[rawComponentByNode[node.Id]];
+            var cyclic = component.Count > 1 || adjacency[component[0]].Contains(component[0]);
+            if (!cyclic && graph.ControlEdges.Count(edge => string.Equals(edge.ToNodeId, node.Id, StringComparison.Ordinal)) != 1)
+            {
+                return null;
+            }
+        }
+
         var componentOutgoing = stronglyConnected.Select(_ => new SortedSet<int>()).ToArray();
         var componentIncoming = stronglyConnected.Select(_ => new SortedSet<int>()).ToArray();
         foreach (var edge in graph.ControlEdges)
@@ -196,8 +206,16 @@ public static class GovernedLoopSequentialPlanBuilder
             if (cyclic)
             {
                 var externalIncoming = graph.ControlEdges.Where(edge => rawComponentByNode[edge.ToNodeId] == rawIndex && rawComponentByNode[edge.FromNodeId] != rawIndex).ToArray();
-                var externalOutgoing = graph.ControlEdges.Count(edge => rawComponentByNode[edge.FromNodeId] == rawIndex && rawComponentByNode[edge.ToNodeId] != rawIndex);
-                if (externalIncoming.Length != 1 || externalOutgoing < 1
+                var externalOutgoing = graph.ControlEdges.Where(edge => rawComponentByNode[edge.FromNodeId] == rawIndex && rawComponentByNode[edge.ToNodeId] != rawIndex).ToArray();
+                if (externalIncoming.Length != 1 || externalOutgoing.Length < 1
+                    || externalOutgoing.Any(edge =>
+                    {
+                        var internalEdges = graph.ControlEdges.Where(candidate =>
+                            string.Equals(candidate.FromNodeId, edge.FromNodeId, StringComparison.Ordinal)
+                            && rawComponentByNode[candidate.ToNodeId] == rawIndex).ToArray();
+                        return internalEdges.Length != 1
+                            || !GovernedLoopControlTopologySemantics.AreMutuallyExclusive(internalEdges[0].Condition, edge.Condition);
+                    })
                     || !TryOrderCycleNodes(componentNodes, externalIncoming[0].ToNodeId, graph, rawComponentByNode, rawIndex, out traversalNodes))
                 {
                     return null;
@@ -356,59 +374,17 @@ public static class GovernedLoopSequentialPlanBuilder
         return true;
     }
 
-    private static bool HasImpossibleJoin(
-        GovernedLoopGraphDefinition graph,
-        IReadOnlyDictionary<string, SortedSet<string>> adjacency)
+    private static bool HasImpossibleJoin(GovernedLoopGraphDefinition graph)
     {
         foreach (var join in graph.Nodes.Where(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.AllJoin)))
         {
-            var arrivals = graph.ControlEdges
+            var incoming = graph.ControlEdges
                 .Where(edge => string.Equals(edge.ToNodeId, join.Id, StringComparison.Ordinal))
-                .Select(edge => edge.FromNodeId)
-                .Order(StringComparer.Ordinal)
+                .OrderBy(edge => edge.Id, StringComparer.Ordinal)
                 .ToArray();
-            foreach (var condition in graph.Nodes.Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Condition))
-            {
-                var whenTrue = graph.ControlEdges.Single(edge => string.Equals(edge.FromNodeId, condition.Id, StringComparison.Ordinal) && edge.Condition == GovernedLoopControlCondition.True).ToNodeId;
-                var whenFalse = graph.ControlEdges.Single(edge => string.Equals(edge.FromNodeId, condition.Id, StringComparison.Ordinal) && edge.Condition == GovernedLoopControlCondition.False).ToNodeId;
-                var trueArrivals = arrivals.Where(arrival => CanReachBeforeJoin(whenTrue, arrival, join.Id, adjacency)).ToArray();
-                var falseArrivals = arrivals.Where(arrival => CanReachBeforeJoin(whenFalse, arrival, join.Id, adjacency)).ToArray();
-                if (trueArrivals.Length > 0 && falseArrivals.Length > 0
-                    && trueArrivals.Any(left => falseArrivals.Any(right => !string.Equals(left, right, StringComparison.Ordinal))))
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private static bool CanReachBeforeJoin(
-        string sourceNodeId,
-        string targetNodeId,
-        string joinNodeId,
-        IReadOnlyDictionary<string, SortedSet<string>> adjacency)
-    {
-        var visited = new HashSet<string>(StringComparer.Ordinal);
-        var pending = new Stack<string>();
-        pending.Push(sourceNodeId);
-        while (pending.Count > 0)
-        {
-            var current = pending.Pop();
-            if (string.Equals(current, joinNodeId, StringComparison.Ordinal) || !visited.Add(current))
-            {
-                continue;
-            }
-
-            if (string.Equals(current, targetNodeId, StringComparison.Ordinal))
+            if (!GovernedLoopControlTopologySemantics.AreAllJoinInputsJointlySatisfiable(graph, join.Id, incoming))
             {
                 return true;
-            }
-
-            foreach (var successor in adjacency[current].Reverse())
-            {
-                pending.Push(successor);
             }
         }
 

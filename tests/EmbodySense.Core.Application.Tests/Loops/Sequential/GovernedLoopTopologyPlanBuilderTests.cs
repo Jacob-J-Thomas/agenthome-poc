@@ -62,6 +62,40 @@ public sealed class GovernedLoopTopologyPlanBuilderTests
     }
 
     [Fact]
+    public void All_join_over_direct_mutually_exclusive_condition_arrivals_fails_closed()
+    {
+        var source = BranchArtifact(GovernedLoopSequentialNodeDescriptors.AllJoin).Graph;
+        var artifact = Artifact(
+            source.Nodes.Where(node => node.Id is not ("branch-a" or "branch-b")).ToArray(),
+            source.ControlEdges
+                .Where(edge => edge.FromNodeId is not ("condition" or "branch-a" or "branch-b"))
+                .Concat(
+                [
+                    Edge("condition-true-to-join", "condition", "join", GovernedLoopControlCondition.True),
+                    Edge("condition-false-to-join", "condition", "join", GovernedLoopControlCondition.False),
+                ])
+                .ToArray(),
+            source.Bindings.Where(binding => binding.ToNodeId is not ("branch-a" or "branch-b")).ToArray());
+
+        var result = GovernedLoopTopologyPlanBuilder.Build(artifact);
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, result.Status);
+        Assert.Null(result.Plan);
+        Assert.Equal("$.graph.controlEdges", result.FailurePath);
+    }
+
+    [Fact]
+    public void All_join_after_selected_reconvergence_and_fanout_is_admitted()
+    {
+        var result = GovernedLoopTopologyPlanBuilder.Build(ReconvergedAllJoinArtifact());
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, result.Status);
+        var plan = Assert.IsType<GovernedLoopSequentialPlan>(result.Plan);
+        Assert.Equal(GovernedLoopJoinPolicy.Selected, ResolveJoin(plan.Nodes.Single(node => node.NodeId == "selected-join").Descriptor));
+        Assert.Equal(GovernedLoopJoinPolicy.All, ResolveJoin(plan.Nodes.Single(node => node.NodeId == "all-join").Descriptor));
+    }
+
+    [Fact]
     public void Bounded_self_cycle_receives_stable_cycle_identity_and_most_restrictive_bounds()
     {
         var first = CycleArtifact(iterations: "7", durationMilliseconds: "9000");
@@ -130,6 +164,16 @@ public sealed class GovernedLoopTopologyPlanBuilderTests
     }
 
     [Fact]
+    public void Cycle_exit_must_be_exclusive_with_loop_continuation()
+    {
+        var result = GovernedLoopTopologyPlanBuilder.Build(NonExclusiveCycleArtifact());
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, result.Status);
+        Assert.Null(result.Plan);
+        Assert.Equal("$.graph.controlEdges", result.FailurePath);
+    }
+
+    [Fact]
     public void Duplicate_condition_outcome_and_incomplete_join_fail_before_plan_creation()
     {
         var source = BranchArtifact(GovernedLoopSequentialNodeDescriptors.SelectedJoin).Graph;
@@ -141,9 +185,20 @@ public sealed class GovernedLoopTopologyPlanBuilderTests
             source.Nodes,
             source.ControlEdges.Where(edge => edge.Id != "branch-b-to-join").Append(new GovernedLoopControlEdgeDefinition("branch-b-to-exit", "branch-b", "exit", GovernedLoopControlCondition.Success)).ToArray(),
             source.Bindings);
+        var implicitExitMerge = Artifact(
+            source.Nodes.Where(node => node.Id != "join").ToArray(),
+            source.ControlEdges.Where(edge => edge.FromNodeId != "join" && edge.ToNodeId != "join")
+                .Concat(
+                [
+                    new GovernedLoopControlEdgeDefinition("branch-a-to-exit", "branch-a", "exit", GovernedLoopControlCondition.Success),
+                    new GovernedLoopControlEdgeDefinition("branch-b-to-exit", "branch-b", "exit", GovernedLoopControlCondition.Success),
+                ])
+                .ToArray(),
+            source.Bindings);
 
         Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, GovernedLoopTopologyPlanBuilder.Build(duplicateOutcome).Status);
         Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, GovernedLoopTopologyPlanBuilder.Build(missingJoinArrival).Status);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, GovernedLoopTopologyPlanBuilder.Build(implicitExitMerge).Status);
     }
 
     [Fact]
@@ -200,6 +255,87 @@ public sealed class GovernedLoopTopologyPlanBuilderTests
             Edge("join-to-exit", "join", "exit", GovernedLoopControlCondition.Success),
         };
         return Artifact(nodes, edges, StandardBindings(includeCondition: false, includeBranches: true));
+    }
+
+    private static GovernedLoopGraphRevisionArtifact ReconvergedAllJoinArtifact()
+    {
+        var nodes = new[]
+        {
+            GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+            GovernedLoopSequentialApplicationTestFixture.Inference("infer"),
+            Condition("condition", includeCycleBudgets: false),
+            Identity("selected-a"),
+            Identity("selected-b"),
+            Join("selected-join", GovernedLoopSequentialNodeDescriptors.SelectedJoin),
+            Identity("branch-a"),
+            Identity("branch-b"),
+            Join("all-join", GovernedLoopSequentialNodeDescriptors.AllJoin),
+            GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+        };
+        var edges = new[]
+        {
+            Edge("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+            Edge("infer-to-condition", "infer", "condition", GovernedLoopControlCondition.Success),
+            Edge("condition-true", "condition", "selected-a", GovernedLoopControlCondition.True),
+            Edge("condition-false", "condition", "selected-b", GovernedLoopControlCondition.False),
+            Edge("selected-a-to-join", "selected-a", "selected-join", GovernedLoopControlCondition.Success),
+            Edge("selected-b-to-join", "selected-b", "selected-join", GovernedLoopControlCondition.Success),
+            Edge("selected-join-to-branch-a", "selected-join", "branch-a", GovernedLoopControlCondition.Success),
+            Edge("selected-join-to-branch-b", "selected-join", "branch-b", GovernedLoopControlCondition.Success),
+            Edge("branch-a-to-all-join", "branch-a", "all-join", GovernedLoopControlCondition.Success),
+            Edge("branch-b-to-all-join", "branch-b", "all-join", GovernedLoopControlCondition.Success),
+            Edge("all-join-to-exit", "all-join", "exit", GovernedLoopControlCondition.Success),
+        };
+        var bindings = new GovernedLoopBindingDefinition[]
+        {
+            new("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+            new("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+            new("result-to-condition", GovernedLoopBindingKind.Data, "infer", "result", "condition", GovernedLoopTopologyNodeVocabulary.ValuePort),
+            new("result-to-selected-a", GovernedLoopBindingKind.Data, "infer", "result", "selected-a", GovernedLoopPureNodeVocabulary.InputPort),
+            new("result-to-selected-b", GovernedLoopBindingKind.Data, "infer", "result", "selected-b", GovernedLoopPureNodeVocabulary.InputPort),
+            new("result-to-branch-a", GovernedLoopBindingKind.Data, "infer", "result", "branch-a", GovernedLoopPureNodeVocabulary.InputPort),
+            new("result-to-branch-b", GovernedLoopBindingKind.Data, "infer", "result", "branch-b", GovernedLoopPureNodeVocabulary.InputPort),
+            new("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+        };
+        return Artifact(nodes, edges, bindings);
+    }
+
+    private static GovernedLoopGraphRevisionArtifact NonExclusiveCycleArtifact()
+    {
+        GovernedLoopNodeDefinition CyclicInference(string id, string instruction)
+            => GovernedLoopSequentialApplicationTestFixture.Inference(id, instruction) with
+            {
+                Parameters = new Dictionary<string, string>
+                {
+                    ["instruction"] = instruction,
+                    [GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter] = "3",
+                    [GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter] = "5000",
+                }
+            };
+
+        var nodes = new[]
+        {
+            GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+            CyclicInference("infer-a", "Start the bounded cycle."),
+            CyclicInference("infer-b", "Continue the bounded cycle."),
+            GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+        };
+        var edges = new[]
+        {
+            Edge("trigger-to-infer-a", "trigger", "infer-a", GovernedLoopControlCondition.Always),
+            Edge("infer-a-to-infer-b", "infer-a", "infer-b", GovernedLoopControlCondition.Success),
+            Edge("infer-b-to-infer-a", "infer-b", "infer-a", GovernedLoopControlCondition.Success),
+            Edge("infer-a-to-exit", "infer-a", "exit", GovernedLoopControlCondition.Success),
+        };
+        var bindings = new GovernedLoopBindingDefinition[]
+        {
+            new("request-to-infer-a", GovernedLoopBindingKind.Data, "trigger", "request", "infer-a", "request"),
+            new("context-to-infer-a", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer-a", "invocation-context"),
+            new("result-to-infer-b", GovernedLoopBindingKind.Data, "infer-a", "result", "infer-b", "request"),
+            new("context-to-infer-b", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer-b", "invocation-context"),
+            new("result-to-exit", GovernedLoopBindingKind.Data, "infer-a", "result", "exit", "result"),
+        };
+        return Artifact(nodes, edges, bindings);
     }
 
     private static GovernedLoopGraphRevisionArtifact CycleArtifact(string? iterations, string? durationMilliseconds)
