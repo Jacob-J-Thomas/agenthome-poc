@@ -5,7 +5,7 @@ namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 public sealed class GovernedLoopSequentialAuditOperationIdTests
 {
     [Fact]
-    public void Admission_and_node_identities_are_deterministic_domain_separated_and_bounded()
+    public void Admission_node_and_terminal_identities_are_deterministic_domain_separated_and_bounded()
     {
         var receipt = new string('a', 64);
         var binding = new string('b', 64);
@@ -13,12 +13,20 @@ public sealed class GovernedLoopSequentialAuditOperationIdTests
         var first = GovernedLoopSequentialAuditOperationId.ForAdmission(receipt, binding);
         var replay = GovernedLoopSequentialAuditOperationId.ForAdmission(receipt, binding);
         var node = GovernedLoopSequentialAuditOperationId.ForNodeOutcome(receipt);
+        var terminal = GovernedLoopSequentialAuditOperationId.ForTerminalLifecycle(receipt);
+        var terminalReplay = GovernedLoopSequentialAuditOperationId.ForTerminalLifecycle(receipt);
 
         Assert.Equal(first, replay);
+        Assert.Equal(terminal, terminalReplay);
         Assert.NotEqual(first, node);
+        Assert.NotEqual(first, terminal);
+        Assert.NotEqual(node, terminal);
         Assert.StartsWith("sequential-audit-", first, StringComparison.Ordinal);
         Assert.Equal("sequential-audit-".Length + 64, first.Length);
         Assert.All(first["sequential-audit-".Length..], character => Assert.True(character is >= '0' and <= '9' or >= 'a' and <= 'f'));
+        Assert.StartsWith("sequential-audit-", terminal, StringComparison.Ordinal);
+        Assert.Equal("sequential-audit-".Length + 64, terminal.Length);
+        Assert.All(terminal["sequential-audit-".Length..], character => Assert.True(character is >= '0' and <= '9' or >= 'a' and <= 'f'));
     }
 
     [Fact]
@@ -38,6 +46,9 @@ public sealed class GovernedLoopSequentialAuditOperationIdTests
         Assert.NotEqual(
             GovernedLoopSequentialAuditOperationId.ForNodeOutcome(receipt),
             GovernedLoopSequentialAuditOperationId.ForNodeOutcome(changedReceipt));
+        Assert.NotEqual(
+            GovernedLoopSequentialAuditOperationId.ForTerminalLifecycle(receipt),
+            GovernedLoopSequentialAuditOperationId.ForTerminalLifecycle(changedReceipt));
     }
 
     [Theory]
@@ -51,5 +62,6 @@ public sealed class GovernedLoopSequentialAuditOperationIdTests
         Assert.Throws<ArgumentException>(() => GovernedLoopSequentialAuditOperationId.ForAdmission(invalid, new string('b', 64)));
         Assert.Throws<ArgumentException>(() => GovernedLoopSequentialAuditOperationId.ForAdmission(new string('a', 64), invalid));
         Assert.Throws<ArgumentException>(() => GovernedLoopSequentialAuditOperationId.ForNodeOutcome(invalid));
+        Assert.Throws<ArgumentException>(() => GovernedLoopSequentialAuditOperationId.ForTerminalLifecycle(invalid));
     }
 }

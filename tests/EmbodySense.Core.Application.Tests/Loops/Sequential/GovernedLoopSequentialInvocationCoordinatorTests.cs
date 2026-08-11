@@ -390,7 +390,6 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
     [InlineData(CustomLoopRunStatus.Running, GovernedLoopSequentialInvocationStatus.RecoveryRequired)]
     [InlineData(CustomLoopRunStatus.Paused, GovernedLoopSequentialInvocationStatus.RecoveryRequired)]
     [InlineData(CustomLoopRunStatus.NeedsReview, GovernedLoopSequentialInvocationStatus.Terminal)]
-    [InlineData(CustomLoopRunStatus.Completed, GovernedLoopSequentialInvocationStatus.Terminal)]
     public async Task Existing_non_admitted_lifecycle_states_never_call_first_run(
         CustomLoopRunStatus runStatus,
         GovernedLoopSequentialInvocationStatus expectedStatus)
@@ -422,6 +421,92 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
 
         Assert.Equal(expectedStatus, result.Status);
         Assert.Equal(0, runtime.RunCallCount);
+    }
+
+    [Fact]
+    public async Task Existing_completed_run_routes_once_to_runtime_for_exact_completion_reconciliation()
+    {
+        var context = await ContextAsync();
+        var ready = await MaterializedAsync(context);
+        var completed = Assert.IsType<CustomLoopRunRecord>(ready.Run) with
+        {
+            Status = CustomLoopRunStatus.Completed,
+            CompletedAtUtc = _coordinatedAtUtc,
+            FinalOutput = "completed output",
+        };
+        var materializer = new RecordingMaterializer
+        {
+            Result = ready with
+            {
+                Status = GovernedLoopSequentialMaterializationStatus.Replayed,
+                Run = completed,
+            },
+        };
+        var runtimeResult = new CustomLoopOrderedRunResult(
+            CustomLoopOrderedRunStatus.Completed,
+            completed,
+            "The exact Completed run and its grant-completion evidence were reconciled.",
+            ProviderWasInvoked: false);
+        var runtime = new RecordingOrderedRuntime { Result = runtimeResult };
+
+        var result = await Coordinator(
+            new RecordingOperationStore(context.Operation),
+            new RecordingAdmissionService(context.AdmissionResult),
+            materializer,
+            runtime).InvokeAsync(context.Request);
+
+        Assert.Equal(GovernedLoopSequentialInvocationStatus.Terminal, result.Status);
+        Assert.Same(runtimeResult, result.Execution);
+        Assert.Same(completed, result.Run);
+        Assert.False(result.ProviderWasInvoked());
+        Assert.Equal(1, runtime.RunCallCount);
+        var request = Assert.IsType<GovernedLoopSequentialOrderedRunRequest>(runtime.LastRunRequest);
+        Assert.Equal(context.Receipt.ContentHash, request.Anchor.AdapterBinding.AdmissionReceiptHash);
+        Assert.Equal(completed.Id, request.Anchor.AdapterBinding.ExecutionBinding.RunId);
+    }
+
+    [Theory]
+    [InlineData(CustomLoopOrderedRunStatus.InvalidState, GovernedLoopSequentialInvocationStatus.Invalid)]
+    [InlineData(CustomLoopOrderedRunStatus.NeedsReview, GovernedLoopSequentialInvocationStatus.RecoveryRequired)]
+    public async Task Completed_reconciliation_failure_retains_runtime_evidence_without_reporting_terminal_success(
+        CustomLoopOrderedRunStatus executionStatus,
+        GovernedLoopSequentialInvocationStatus expectedStatus)
+    {
+        var context = await ContextAsync();
+        var ready = await MaterializedAsync(context);
+        var completed = Assert.IsType<CustomLoopRunRecord>(ready.Run) with
+        {
+            Status = CustomLoopRunStatus.Completed,
+            CompletedAtUtc = _coordinatedAtUtc,
+            FinalOutput = "unproved output",
+        };
+        var materializer = new RecordingMaterializer
+        {
+            Result = ready with
+            {
+                Status = GovernedLoopSequentialMaterializationStatus.Replayed,
+                Run = completed,
+            },
+        };
+        var runtimeResult = new CustomLoopOrderedRunResult(
+            executionStatus,
+            completed,
+            "Exact Completed-run reconciliation failed closed.",
+            ProviderWasInvoked: false);
+        var runtime = new RecordingOrderedRuntime { Result = runtimeResult };
+
+        var result = await Coordinator(
+            new RecordingOperationStore(context.Operation),
+            new RecordingAdmissionService(context.AdmissionResult),
+            materializer,
+            runtime).InvokeAsync(context.Request);
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Same(runtimeResult, result.Execution);
+        Assert.Same(completed, result.Run);
+        Assert.Equal(runtimeResult.Detail, result.Detail);
+        Assert.False(result.ProviderWasInvoked());
+        Assert.Equal(1, runtime.RunCallCount);
     }
 
     [Fact]
