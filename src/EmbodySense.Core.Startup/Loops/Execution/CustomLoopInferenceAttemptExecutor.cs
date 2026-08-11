@@ -200,7 +200,25 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     {
         ArgumentNullException.ThrowIfNull(request);
         ValidateRequestEnvelope(request, _options.Surface);
-        var providerAuthorityRequest = ResolveProviderAuthorityRequest(request);
+        var legacyDispatch = IsLegacyDispatch(request);
+        GovernedLoopEffectAuthorityRequest? providerAuthorityRequest = null;
+        if (legacyDispatch)
+        {
+            var allowedCapabilities = LoopCapabilityRequirements.GetAssignedCapabilityIds(request.CapabilityAdmission!.Requirements);
+            var currentCapabilities = await _capabilityAdmissionService.RevalidateAsync(
+                request.CapabilityAdmission,
+                allowedCapabilities,
+                cancellationToken);
+            if (!currentCapabilities.IsValid)
+            {
+                throw new InvalidOperationException($"Capability authority changed before provider dispatch: {currentCapabilities.Detail}");
+            }
+        }
+        else
+        {
+            providerAuthorityRequest = ResolveProviderAuthorityRequest(request);
+        }
+
         var authority = request.AuthoritySnapshot ?? await _authorityProvider.ResolveAsync(request.RoleId, request.AdmittedToolAssignments, cancellationToken);
         request = request with { AuthoritySnapshot = authority };
         ValidateAuthoritySnapshot(request);
@@ -213,25 +231,63 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             var observer = new CorrelatedToolEvidenceObserver(_evidenceSink, request);
             var retention = new ToolResultRetentionService(_auditLog, loopDefinition, _toolResultRetentionStore);
             var mutationBoundary = new CapabilityAuthorityWorkspaceMutationCommitBoundary(_paths, _capabilityAuthorityTransaction);
-            var actuationAuthorityBoundary = new GovernedLoopToolActuationAuthorityBoundary(
-                _effectAuthorityBoundary!,
-                request.AdmissionReceipt!,
-                request.ExecutionBinding!,
-                request.GraphArtifact!,
-                request.StepId,
-                request.Attempt,
-                request.AttemptCorrelationId);
-            var broker = new ToolBroker(
-                _paths,
-                permissionService,
-                _approvalPrompt,
-                new LocalWorkspaceClient(_paths, mutationBoundary),
-                _auditLog,
-                loopDefinition,
-                _toolResultRetentionStore,
-                governanceObserver: observer,
-                actuationAuthorityBoundary: actuationAuthorityBoundary);
-            boundedBroker = new BoundedCorrelatedToolBroker(broker, _auditLog, _authorityProvider, retention, observer, _effectAuthorityBoundary!, _paths, request);
+            if (legacyDispatch)
+            {
+                var revalidator = new CustomLoopToolActuationAuthorityRevalidator(
+                    _authorityProvider,
+                    request,
+                    observer,
+                    _capabilityAdmissionService);
+                var broker = new ToolBroker(
+                    _paths,
+                    permissionService,
+                    _approvalPrompt,
+                    new LocalWorkspaceClient(_paths, mutationBoundary),
+                    _auditLog,
+                    loopDefinition,
+                    _toolResultRetentionStore,
+                    governanceObserver: observer,
+                    actuationAuthorityRevalidator: revalidator);
+                boundedBroker = new BoundedCorrelatedToolBroker(
+                    broker,
+                    _auditLog,
+                    _authorityProvider,
+                    retention,
+                    observer,
+                    _paths,
+                    request);
+            }
+            else
+            {
+                var actuationAuthorityBoundary = new GovernedLoopToolActuationAuthorityBoundary(
+                    _effectAuthorityBoundary!,
+                    request.AdmissionReceipt!,
+                    request.ExecutionBinding!,
+                    request.GraphArtifact!,
+                    request.StepId,
+                    request.Attempt,
+                    request.AttemptCorrelationId);
+                var broker = new ToolBroker(
+                    _paths,
+                    permissionService,
+                    _approvalPrompt,
+                    new LocalWorkspaceClient(_paths, mutationBoundary),
+                    _auditLog,
+                    loopDefinition,
+                    _toolResultRetentionStore,
+                    governanceObserver: observer,
+                    actuationAuthorityBoundary: actuationAuthorityBoundary);
+                boundedBroker = new BoundedCorrelatedToolBroker(
+                    broker,
+                    _auditLog,
+                    _authorityProvider,
+                    retention,
+                    observer,
+                    _effectAuthorityBoundary!,
+                    _paths,
+                    request);
+            }
+
             toolBroker = boundedBroker;
         }
 
@@ -239,7 +295,9 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         var usesInjectedFactory = _clientFactory is not null;
         var client = usesInjectedFactory
             ? _clientFactory!(effectiveOptions, toolBroker)
-            : new LlmInferenceClient(effectiveOptions, toolBroker);
+            : legacyDispatch
+                ? new LlmInferenceClient(effectiveOptions, toolBroker, providerRequestStarted: providerRequestStarted)
+                : new LlmInferenceClient(effectiveOptions, toolBroker);
         if (client is null)
         {
             throw new InvalidOperationException("The custom-loop inference client factory returned null.");
@@ -251,11 +309,25 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
 
         try
         {
-            var response = await client.GenerateAsync(
-                request.InferenceRequest,
-                responseChunkHandler: null,
-                cancellationToken,
-                CreateProviderTransportBoundary(providerAuthorityRequest, providerRequestStarted));
+            LlmInferenceResponse response;
+            if (legacyDispatch)
+            {
+                if (usesInjectedFactory)
+                {
+                    providerRequestStarted?.Invoke();
+                }
+
+                response = await client.GenerateAsync(request.InferenceRequest, cancellationToken: cancellationToken);
+            }
+            else
+            {
+                response = await client.GenerateAsync(
+                    request.InferenceRequest,
+                    responseChunkHandler: null,
+                    cancellationToken,
+                    CreateProviderTransportBoundary(providerAuthorityRequest!, providerRequestStarted));
+            }
+
             return new CustomLoopInferenceAttemptResult(
                 response.OutputText,
                 response.Surface.ToString(),
@@ -282,6 +354,12 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             }
         }
     }
+
+    private bool IsLegacyDispatch(CustomLoopInferenceAttemptRequest request)
+        => _effectAuthorityBoundary is null
+            && request.AdmissionReceipt is null
+            && request.ExecutionBinding is null
+            && request.GraphArtifact is null;
 
     private GovernedLoopEffectAuthorityRequest ResolveProviderAuthorityRequest(CustomLoopInferenceAttemptRequest request)
     {

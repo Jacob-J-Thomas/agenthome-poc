@@ -38,7 +38,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
     private readonly ToolResultRetentionService _toolResultRetention;
     private readonly CorrelatedToolEvidenceObserver _observer;
-    private readonly IGovernedLoopEffectAuthorityBoundary _effectAuthorityBoundary;
+    private readonly IGovernedLoopEffectAuthorityBoundary? _effectAuthorityBoundary;
     private readonly WorkspacePaths _paths;
     private readonly CustomLoopInferenceAttemptRequest _attempt;
     private readonly int _toolRequestsUsedInRun;
@@ -68,16 +68,74 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         IGovernedLoopEffectAuthorityBoundary effectAuthorityBoundary,
         WorkspacePaths paths,
         CustomLoopInferenceAttemptRequest request)
+        : this(
+            inner,
+            auditLog,
+            authorityProvider,
+            toolResultRetention,
+            observer,
+            effectAuthorityBoundary ?? throw new ArgumentNullException(nameof(effectAuthorityBoundary)),
+            paths,
+            request,
+            governedAuthorityRequired: true)
+    {
+    }
+
+    /// <summary>
+    /// Wraps the retained legacy custom-loop broker without adding canonical graph authority semantics.
+    /// </summary>
+    /// <param name="inner">The inner.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="authorityProvider">The authority provider.</param>
+    /// <param name="toolResultRetention">The tool result retention.</param>
+    /// <param name="observer">The observer.</param>
+    /// <param name="paths">The paths.</param>
+    /// <param name="request">The request.</param>
+    public BoundedCorrelatedToolBroker(
+        IToolBroker inner,
+        IAuditLog auditLog,
+        ICustomLoopToolAuthorityProvider authorityProvider,
+        ToolResultRetentionService toolResultRetention,
+        CorrelatedToolEvidenceObserver observer,
+        WorkspacePaths paths,
+        CustomLoopInferenceAttemptRequest request)
+        : this(
+            inner,
+            auditLog,
+            authorityProvider,
+            toolResultRetention,
+            observer,
+            effectAuthorityBoundary: null,
+            paths,
+            request,
+            governedAuthorityRequired: false)
+    {
+    }
+
+    private BoundedCorrelatedToolBroker(
+        IToolBroker inner,
+        IAuditLog auditLog,
+        ICustomLoopToolAuthorityProvider authorityProvider,
+        ToolResultRetentionService toolResultRetention,
+        CorrelatedToolEvidenceObserver observer,
+        IGovernedLoopEffectAuthorityBoundary? effectAuthorityBoundary,
+        WorkspacePaths paths,
+        CustomLoopInferenceAttemptRequest request,
+        bool governedAuthorityRequired)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         _auditLog = auditLog ?? throw new ArgumentNullException(nameof(auditLog));
         _authorityProvider = authorityProvider ?? throw new ArgumentNullException(nameof(authorityProvider));
         _toolResultRetention = toolResultRetention ?? throw new ArgumentNullException(nameof(toolResultRetention));
         _observer = observer ?? throw new ArgumentNullException(nameof(observer));
-        _effectAuthorityBoundary = effectAuthorityBoundary ?? throw new ArgumentNullException(nameof(effectAuthorityBoundary));
+        _effectAuthorityBoundary = effectAuthorityBoundary;
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
         _attempt = request ?? throw new ArgumentNullException(nameof(request));
         _toolRequestsUsedInRun = request.ToolRequestsUsedInRun;
+        if (governedAuthorityRequired && _effectAuthorityBoundary is null)
+        {
+            throw new ArgumentNullException(nameof(effectAuthorityBoundary));
+        }
     }
 
     /// <summary>
@@ -186,16 +244,19 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
             return await DenyAuthorityAsync(correlatedRequest, authority, resolvedTarget, requestOrdinal, cancellationToken);
         }
 
-        var intake = await EvaluateIntakeAuthorityAsync(correlatedRequest, resolvedTarget, cancellationToken);
-        if (intake.Decision!.Disposition == GovernedLoopEffectAuthorityDisposition.Deny)
+        if (_effectAuthorityBoundary is not null)
         {
-            var detail = $"Current governed-loop authority denied the exact workspace-tool intake ({intake.Decision.Reason.ToString().ToLowerInvariant()}).";
-            return await DenyAuthorityAsync(correlatedRequest, authority, resolvedTarget, requestOrdinal, cancellationToken, detail);
-        }
+            var intake = await EvaluateIntakeAuthorityAsync(correlatedRequest, resolvedTarget, cancellationToken);
+            if (intake.Decision!.Disposition == GovernedLoopEffectAuthorityDisposition.Deny)
+            {
+                var detail = $"Current governed-loop authority denied the exact workspace-tool intake ({intake.Decision.Reason.ToString().ToLowerInvariant()}).";
+                return await DenyAuthorityAsync(correlatedRequest, authority, resolvedTarget, requestOrdinal, cancellationToken, detail);
+            }
 
-        if (intake.Decision.Disposition != GovernedLoopEffectAuthorityDisposition.Direct)
-        {
-            throw Stopped(intake);
+            if (intake.Decision.Disposition != GovernedLoopEffectAuthorityDisposition.Direct)
+            {
+                throw Stopped(intake);
+            }
         }
 
         var result = await _inner.ExecuteAsync(correlatedRequest, cancellationToken);
@@ -223,7 +284,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         GovernedLoopEffectAuthorityExecutionResult<bool>? result;
         try
         {
-            result = await _effectAuthorityBoundary.ExecuteAsync(
+            result = await _effectAuthorityBoundary!.ExecuteAsync(
                 authorityRequest,
                 token =>
                 {
