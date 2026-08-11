@@ -803,6 +803,58 @@ public sealed class CustomLoopLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Resume_needs_review_without_an_executor_snapshot_quarantines_the_authoritative_running_run()
+    {
+        var paused = Run("run-resume-needs-review", CustomLoopRunStatus.Paused);
+        var store = new MultiRunStore([paused]);
+        var executor = new NoopResumeExecutor(CustomLoopOrderedRunStatus.NeedsReview);
+        var service = new CustomLoopLifecycleService(
+            store,
+            new InMemoryOperationStore(),
+            executor,
+            new RecordingModelAvailability(),
+            new RecordingCancellationSignal(),
+            new RecordingAuditLog(),
+            new TestExecutionGate(),
+            new FixedTimeProvider(_now.AddSeconds(3)));
+
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(paused.Id, paused.LifecycleVersion, "resume-needs-review", AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store[paused.Id].Status);
+        Assert.Equal("lifecycle_control_failed", store[paused.Id].FailureCode);
+        Assert.Single(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Resume_one_shot_authoritative_reload_failure_still_quarantines_the_running_run()
+    {
+        var paused = Run("run-resume-reload-failure", CustomLoopRunStatus.Paused);
+        var store = new MultiRunStore([paused])
+        {
+            ThrowOnGetCall = 2,
+        };
+        var executor = new NoopResumeExecutor(CustomLoopOrderedRunStatus.InvalidState, resultRun: paused);
+        var service = new CustomLoopLifecycleService(
+            store,
+            new InMemoryOperationStore(),
+            executor,
+            new RecordingModelAvailability(),
+            new RecordingCancellationSignal(),
+            new RecordingAuditLog(),
+            new TestExecutionGate(),
+            new FixedTimeProvider(_now.AddSeconds(3)));
+
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(paused.Id, paused.LifecycleVersion, "resume-reload-failure", AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store[paused.Id].Status);
+        Assert.Equal("lifecycle_control_failed", store[paused.Id].FailureCode);
+        Assert.True(store.GetCallCount >= 3);
+        Assert.Single(executor.Requests);
+    }
+
+    [Fact]
     public async Task Resume_executor_cancellation_completes_an_already_durable_cancel_request()
     {
         var run = Run("run-resume-cancelled", CustomLoopRunStatus.Paused);
@@ -1275,11 +1327,15 @@ public sealed class CustomLoopLifecycleServiceTests
 
         public bool ThrowOnGet { get; init; }
 
+        public int? ThrowOnGetCall { get; init; }
+
         public bool ThrowOnUpdate { get; init; }
 
         public Exception? UpdateException { get; set; }
 
         public int UpdateCallCount { get; private set; }
+
+        public int GetCallCount { get; private set; }
 
         public CustomLoopRunRecord this[string id] => Runs[id];
 
@@ -1287,7 +1343,8 @@ public sealed class CustomLoopLifecycleServiceTests
 
         public Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default)
         {
-            if (ThrowOnGet)
+            GetCallCount++;
+            if (ThrowOnGet || ThrowOnGetCall == GetCallCount)
             {
                 throw new IOException("Run store unavailable.");
             }
