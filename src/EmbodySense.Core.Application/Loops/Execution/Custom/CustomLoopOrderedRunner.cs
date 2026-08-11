@@ -6450,12 +6450,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     {
         var selected = GovernedLoopSequentialFrontierMachine.Select(run.Frontier, context.Anchor.AdapterBinding, context.Plan);
         return selected is
-            {
-                Status: GovernedLoopSequentialFrontierSelectionStatus.Running,
-                Node: { } node,
-                Attempt: { } attempt,
-                AttemptOperationId: { } attemptOperationId,
-            }
+        {
+            Status: GovernedLoopSequentialFrontierSelectionStatus.Running,
+            Node: { } node,
+            Attempt: { } attempt,
+            AttemptOperationId: { } attemptOperationId,
+        }
             && GovernedLoopSequentialNodeDescriptors.IsPure(node.Descriptor)
             && FindSequentialDispatchStart(run, node, attempt, attemptOperationId) is not null
             && FindSequentialNodeEvidence(run, node, attempt) is null;
@@ -6463,11 +6463,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private static bool HasExactOpenPureAttempt(CustomLoopRunRecord run, SequentialNodeExecutionContext context)
         => run.Frontier?.Payload.Nodes[^1] is
-            {
-                Status: GovernedLoopNodeExecutionStatus.Running,
-                Attempt: { } attempt,
-                AttemptOperationId: { } attemptOperationId,
-            } node
+        {
+            Status: GovernedLoopNodeExecutionStatus.Running,
+            Attempt: { } attempt,
+            AttemptOperationId: { } attemptOperationId,
+        } node
             && string.Equals(node.NodeId, context.Node.NodeId, StringComparison.Ordinal)
             && attempt == context.Attempt
             && string.Equals(attemptOperationId, context.AttemptOperationId, StringComparison.Ordinal)
