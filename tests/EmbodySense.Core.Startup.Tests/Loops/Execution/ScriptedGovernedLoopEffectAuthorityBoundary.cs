@@ -39,6 +39,14 @@ internal sealed class ScriptedGovernedLoopEffectAuthorityBoundary(ScriptedEffect
                 "The exact direct decision was already present."),
             ScriptedEffectAuthorityBehavior.DoubleCallback => await DoubleCallbackAsync(request, commit, cancellationToken),
             ScriptedEffectAuthorityBehavior.LateCallback => CaptureLate<TResult>(request, commit),
+            ScriptedEffectAuthorityBehavior.NullResult => null!,
+            ScriptedEffectAuthorityBehavior.MalformedResult => new GovernedLoopEffectAuthorityExecutionResult<TResult>(
+                (GovernedLoopEffectAuthorityExecutionStatus)999,
+                Decision: null,
+                (GovernedLoopEffectAuthorityEvidenceStoreStatus)999,
+                CommitInvoked: false,
+                Result: default,
+                "The scripted boundary returned malformed protocol values."),
             _ => throw new InvalidOperationException("Unsupported scripted effect-authority behavior."),
         };
     }
@@ -166,7 +174,7 @@ internal sealed class ScriptedGovernedLoopEffectAuthorityBoundary(ScriptedEffect
             request.RequiredCapabilityPins,
             disposition,
             reason,
-            WorkspaceToolAuthorityTestFixture.Now,
+            receipt.Evidence.EvaluatedAtUtc,
             string.Empty));
         if (!GovernedLoopEffectAuthorityContractValidator.Validate(decision).IsValid)
         {

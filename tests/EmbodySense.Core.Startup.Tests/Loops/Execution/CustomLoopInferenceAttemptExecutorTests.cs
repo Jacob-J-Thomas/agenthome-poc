@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Governance.Permissions;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
@@ -118,6 +119,8 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             [CanonicalInferenceAuthorityTestData.ModelInferenceCapabilityId],
             authorityRequest.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity.Id.Value));
         Assert.Equal(authorityRequest.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity), authorityRequest.RequiredAuthority.Capabilities);
+        Assert.Equal(0, authorityRequest.RequiredAuthority.MaxTargetCount);
+        Assert.Equal(CapabilitySideEffectClass.None, authorityRequest.RequiredAuthority.MaxSideEffectClass);
         Assert.Equal(1, boundary.CommitInvocations);
         Assert.Equal(1, transportWrites);
         Assert.Equal(1, providerStarts);
@@ -145,6 +148,8 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             ],
             authorityRequest.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity.Id.Value));
         Assert.Equal(authorityRequest.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity), authorityRequest.RequiredAuthority.Capabilities);
+        Assert.Equal(1, authorityRequest.RequiredAuthority.MaxTargetCount);
+        Assert.Equal(CapabilitySideEffectClass.ReadOnly, authorityRequest.RequiredAuthority.MaxSideEffectClass);
     }
 
     [Fact]
@@ -461,10 +466,167 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var events = await new AuditLog(paths).ReadTailAsync(100);
         var authorityEvents = events.Where(item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate).ToArray();
         Assert.Equal(7, authorityEvents.Length);
-        Assert.Equal(3, authorityEvents.Count(item => Metadata(item, "authority_phase") == "pre_actuation_revalidation" && item.Outcome == AuditSchema.Outcomes.Allowed));
+        Assert.Equal(3, authorityEvents.Count(item => Metadata(item, "authority_phase") == "actuation_boundary" && item.Outcome == AuditSchema.Outcomes.Allowed));
         Assert.Contains(authorityEvents, item => item.Outcome == AuditSchema.Outcomes.Denied && Metadata(item, "command") == "write");
         Assert.All(authorityEvents, AssertCorrelation);
         Assert.All(events.Where(item => item.Action is AuditSchema.Actions.ToolPermissionEvaluate or AuditSchema.Actions.ToolExecute), AssertCorrelation);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_derives_stable_missing_tool_correlation_and_distinct_exact_intake_and_actuation_operations()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "first");
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "other.txt"), "second");
+        var boundary = new RoutingEffectAuthorityBoundary();
+        var results = new List<ToolResult>();
+        var attempt = CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]);
+
+        async Task ExecuteAsync(string target)
+        {
+            var executor = CreateExecutor(
+                workspace,
+                async (broker, _, cancellationToken) =>
+                {
+                    results.Add(await Assert.IsAssignableFrom<IToolBroker>(broker).ExecuteAsync(new ToolRequest(ToolCommand.Read, target), cancellationToken));
+                    return Response();
+                },
+                factory: (_, broker, behavior) => new TransportThenBehaviorInferenceClient(broker, behavior),
+                effectAuthorityBoundary: boundary);
+            await executor.ExecuteAsync(attempt);
+        }
+
+        await ExecuteAsync(Path.Combine("system", "note.txt"));
+        await ExecuteAsync(Path.Combine("system", "note.txt"));
+        await ExecuteAsync(Path.Combine("system", "other.txt"));
+
+        Assert.All(results, item => Assert.Equal(ToolExecutionOutcome.Succeeded, item.Outcome));
+        Assert.Single(results.Select(item => item.Request.CorrelationId).Distinct(StringComparer.Ordinal));
+        var correlation = Assert.IsType<string>(results[0].Request.CorrelationId);
+        var expectedCorrelation = "workspace-tool-correlation-" + CustomLoopTraceContentHash.Compute(
+            $"workspace-tool-correlation-v1\n{attempt.RunId}\n{attempt.StepId}\n{attempt.Attempt}\n{attempt.AttemptCorrelationId}\n1");
+        Assert.Equal(expectedCorrelation, correlation);
+        Assert.True(correlation.Length <= CustomLoopLimits.MaxArtifactIdCharacters);
+        var intake = boundary.Requests.Where(item => item.BoundaryKind == GovernedLoopEffectBoundaryKind.WorkspaceToolIntake).ToArray();
+        var actuation = boundary.Requests.Where(item => item.BoundaryKind == GovernedLoopEffectBoundaryKind.WorkspaceActuation).ToArray();
+        Assert.Equal(3, intake.Length);
+        Assert.Equal(3, actuation.Length);
+        Assert.Equal(intake[0].EffectOperationId, intake[1].EffectOperationId);
+        Assert.NotEqual(intake[0].EffectOperationId, intake[2].EffectOperationId);
+        Assert.Equal(actuation[0].EffectOperationId, actuation[1].EffectOperationId);
+        Assert.NotEqual(actuation[0].EffectOperationId, actuation[2].EffectOperationId);
+        Assert.All(Enumerable.Range(0, intake.Length), index => Assert.NotEqual(intake[index].EffectOperationId, actuation[index].EffectOperationId));
+        Assert.All(intake.Concat(actuation), item =>
+        {
+            Assert.Equal(CanonicalInferenceAuthorityTestData.WorkspaceCommandCapabilityId, Assert.Single(item.RequiredCapabilityPins).DescriptorIdentity.Id.Value);
+            Assert.Equal("attempt-1", item.CorrelationId);
+        });
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_durable_intake_deny_returns_retained_denial_without_permission_approval_or_actuation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "must not be read");
+        var approvalPrompt = new RecordingApprovalPrompt(approved: true);
+        var evidenceSink = new RecordingEvidenceSink();
+        var boundary = new RoutingEffectAuthorityBoundary { IntakeBehavior = ScriptedEffectAuthorityBehavior.Deny };
+        ToolResult? observed = null;
+        var executor = CreateExecutor(
+            workspace,
+            async (broker, _, cancellationToken) =>
+            {
+                observed = await Assert.IsAssignableFrom<IToolBroker>(broker).ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+                return Response();
+            },
+            factory: (_, broker, behavior) => new TransportThenBehaviorInferenceClient(broker, behavior),
+            approvalPrompt: approvalPrompt,
+            evidenceSink: evidenceSink,
+            effectAuthorityBoundary: boundary);
+
+        await executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]));
+
+        var denied = Assert.IsType<ToolResult>(observed);
+        Assert.Equal(ToolExecutionOutcome.Denied, denied.Outcome);
+        Assert.Equal(ToolResultRetentionStatus.Retained, denied.Retention?.Status);
+        Assert.Equal(ToolApprovalDecision.NotEvaluated, denied.Governance?.ApprovalDecision);
+        Assert.DoesNotContain("must not be read", denied.OutputText, StringComparison.Ordinal);
+        Assert.Empty(approvalPrompt.Requests);
+        Assert.DoesNotContain(boundary.Requests, item => item.BoundaryKind == GovernedLoopEffectBoundaryKind.WorkspaceActuation);
+        Assert.Contains(evidenceSink.Evidence, item => item is { Phase: CustomLoopToolEvidencePhase.OutcomeObserved, Outcome: ToolExecutionOutcome.Denied });
+        Assert.DoesNotContain(await new AuditLog(paths).ReadTailAsync(100), item => item.Action == AuditSchema.Actions.ToolExecute);
+    }
+
+    [Theory]
+    [InlineData(ScriptedEffectAuthorityBehavior.Pause, GovernedLoopEffectAuthorityExecutionStatus.Decided, GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended)]
+    [InlineData(ScriptedEffectAuthorityBehavior.Invalid, GovernedLoopEffectAuthorityExecutionStatus.InvalidRequest, GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown)]
+    [InlineData(ScriptedEffectAuthorityBehavior.Unavailable, GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable, GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown)]
+    [InlineData(ScriptedEffectAuthorityBehavior.ReplayAmbiguous, GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected, GovernedLoopEffectAuthorityEvidenceStoreStatus.AlreadyPresent)]
+    public async Task ExecuteAsync_stopped_intake_throws_typed_posture_without_permission_approval_or_actuation(
+        ScriptedEffectAuthorityBehavior behavior,
+        GovernedLoopEffectAuthorityExecutionStatus expectedStatus,
+        GovernedLoopEffectAuthorityEvidenceStoreStatus expectedEvidence)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
+        var approvalPrompt = new RecordingApprovalPrompt(approved: true);
+        var boundary = new RoutingEffectAuthorityBoundary { IntakeBehavior = behavior };
+        var executor = CreateExecutor(
+            workspace,
+            async (broker, _, cancellationToken) =>
+            {
+                await Assert.IsAssignableFrom<IToolBroker>(broker).ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+                return Response();
+            },
+            factory: (_, broker, scriptedBehavior) => new TransportThenBehaviorInferenceClient(broker, scriptedBehavior),
+            approvalPrompt: approvalPrompt,
+            effectAuthorityBoundary: boundary);
+
+        var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() =>
+            executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read])));
+
+        Assert.Equal(expectedStatus, exception.ExecutionStatus);
+        Assert.Equal(expectedEvidence, exception.EvidenceStatus);
+        Assert.Empty(approvalPrompt.Requests);
+        Assert.DoesNotContain(boundary.Requests, item => item.BoundaryKind == GovernedLoopEffectBoundaryKind.WorkspaceActuation);
+        Assert.DoesNotContain(await new AuditLog(paths).ReadTailAsync(100), item => item.Action == AuditSchema.Actions.ToolExecute);
+    }
+
+    [Theory]
+    [InlineData(ScriptedEffectAuthorityBehavior.NullResult)]
+    [InlineData(ScriptedEffectAuthorityBehavior.MalformedResult)]
+    [InlineData(ScriptedEffectAuthorityBehavior.DoubleCallback)]
+    public async Task ExecuteAsync_hostile_intake_protocol_fails_closed_before_inner_governance(ScriptedEffectAuthorityBehavior behavior)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
+        var approvalPrompt = new RecordingApprovalPrompt(approved: true);
+        var boundary = new RoutingEffectAuthorityBoundary { IntakeBehavior = behavior };
+        var executor = CreateExecutor(
+            workspace,
+            async (broker, _, cancellationToken) =>
+            {
+                await Assert.IsAssignableFrom<IToolBroker>(broker).ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+                return Response();
+            },
+            factory: (_, broker, scriptedBehavior) => new TransportThenBehaviorInferenceClient(broker, scriptedBehavior),
+            approvalPrompt: approvalPrompt,
+            effectAuthorityBoundary: boundary);
+
+        var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() =>
+            executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read])));
+
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable, exception.ExecutionStatus);
+        Assert.Equal(GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown, exception.EvidenceStatus);
+        Assert.Null(exception.Decision);
+        Assert.Empty(approvalPrompt.Requests);
+        Assert.DoesNotContain(boundary.Requests, item => item.BoundaryKind == GovernedLoopEffectBoundaryKind.WorkspaceActuation);
+        Assert.DoesNotContain(await new AuditLog(paths).ReadTailAsync(100), item => item.Action == AuditSchema.Actions.ToolExecute);
     }
 
     [Fact]
@@ -519,57 +681,97 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_revalidates_authority_after_approval_and_denies_revocation_before_actuation()
+    public async Task ExecuteAsync_revalidates_governed_authority_after_approval_and_retains_revocation_denial()
     {
         using var workspace = new TestWorkspace();
         var paths = await InitializeWorkspaceAsync(workspace);
         await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
         await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "must remain unread");
-        var authorityProvider = new TestAuthorityProvider();
-        var approvalPrompt = new RecordingApprovalPrompt(approved: true, beforeDecision: () => authorityProvider.Revoke("role-2"));
+        var boundary = new RoutingEffectAuthorityBoundary();
+        var approvalPrompt = new RecordingApprovalPrompt(approved: true, beforeDecision: () =>
+        {
+            Assert.Equal(0, boundary.ActiveBoundaryCount);
+            Assert.Contains(boundary.Requests, item => item.BoundaryKind == GovernedLoopEffectBoundaryKind.WorkspaceToolIntake);
+            Assert.DoesNotContain(boundary.Requests, item => item.BoundaryKind == GovernedLoopEffectBoundaryKind.WorkspaceActuation);
+            boundary.ActuationBehavior = ScriptedEffectAuthorityBehavior.Deny;
+        });
         var evidenceSink = new RecordingEvidenceSink();
         ToolResult? observed = null;
-        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
-        {
-            Assert.NotNull(broker);
-            observed = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
-            return Response();
-        }, approvalPrompt: approvalPrompt, evidenceSink: evidenceSink, authorityProvider: authorityProvider);
+        var executor = CreateExecutor(
+            workspace,
+            async (broker, _, cancellationToken) =>
+            {
+                observed = await Assert.IsAssignableFrom<IToolBroker>(broker).ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+                return Response();
+            },
+            factory: (_, broker, behavior) => new TransportThenBehaviorInferenceClient(broker, behavior),
+            approvalPrompt: approvalPrompt,
+            evidenceSink: evidenceSink,
+            effectAuthorityBoundary: boundary);
 
         var result = await executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]));
 
-        Assert.Equal(3, authorityProvider.ResolveCount);
         Assert.Equal(1, result.ToolRequestsConsumed);
         var toolResult = Assert.IsType<ToolResult>(observed);
         Assert.Equal(ToolExecutionOutcome.Denied, toolResult.Outcome);
+        Assert.Equal(ToolResultRetentionStatus.Retained, toolResult.Retention?.Status);
         Assert.DoesNotContain("must remain unread", toolResult.OutputText, StringComparison.Ordinal);
         Assert.Equal(ToolAuthorityDecision.Denied, toolResult.Governance?.AuthorityDecision);
         Assert.Equal(ToolApprovalDecision.Approved, toolResult.Governance?.ApprovalDecision);
         Assert.Single(approvalPrompt.Requests);
         var refreshedEvidence = evidenceSink.Evidence.Where(item => item.Phase is CustomLoopToolEvidencePhase.GovernanceDecided or CustomLoopToolEvidencePhase.OutcomeObserved).ToArray();
         Assert.NotEmpty(refreshedEvidence);
-        Assert.All(refreshedEvidence, item =>
-        {
-            Assert.Equal("role-2", item.Authority.RoleId);
-            Assert.Empty(item.Authority.CurrentRoleCeiling);
-            Assert.Empty(item.Authority.EffectiveAssignments);
-            Assert.False(item.Authority.IsValid);
-        });
         Assert.Contains(refreshedEvidence, item => item is { Phase: CustomLoopToolEvidencePhase.OutcomeObserved, Governance.AuthorityDecision: ToolAuthorityDecision.Denied, Governance.ApprovalDecision: ToolApprovalDecision.Approved });
 
         var events = await new AuditLog(paths).ReadTailAsync(100);
-        var revalidation = Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "authority_phase") == "pre_actuation_revalidation");
+        var revalidation = Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "authority_phase") == "actuation_boundary");
         Assert.Equal(AuditSchema.Outcomes.Denied, revalidation.Outcome);
-        Assert.Equal("role-1", Metadata(revalidation, "role_id"));
-        Assert.Equal("role-2", Metadata(revalidation, "current_role_id"));
-        Assert.Equal(string.Empty, Metadata(revalidation, "current_role_commands"));
-        Assert.Equal("false", Metadata(revalidation, "authority_valid")?.ToLowerInvariant());
+        Assert.Equal("workspaceactuation", Metadata(revalidation, "effect_boundary_kind"));
+        Assert.Equal("deny", Metadata(revalidation, "effect_authority_disposition"));
         Assert.DoesNotContain(events, item => item.Action == AuditSchema.Actions.ToolExecutionIntent);
         var deniedExecution = Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolExecute);
         Assert.Equal(AuditSchema.Outcomes.Denied, deniedExecution.Outcome);
-        Assert.Equal("role-1", Metadata(deniedExecution, "role_id"));
-        Assert.Equal("role-2", Metadata(deniedExecution, "current_role_id"));
         Assert.Equal("true", Metadata(deniedExecution, "approved_by_human")?.ToLowerInvariant());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_post_approval_ambiguous_actuation_retains_review_trace_without_workspace_execution()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "must remain unread");
+        var boundary = new RoutingEffectAuthorityBoundary();
+        var approvalPrompt = new RecordingApprovalPrompt(approved: true, beforeDecision: () =>
+        {
+            Assert.Equal(0, boundary.ActiveBoundaryCount);
+            boundary.ActuationBehavior = ScriptedEffectAuthorityBehavior.ReplayAmbiguous;
+        });
+        var evidenceSink = new RecordingEvidenceSink();
+        var executor = CreateExecutor(
+            workspace,
+            async (broker, _, cancellationToken) =>
+            {
+                await Assert.IsAssignableFrom<IToolBroker>(broker).ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+                return Response();
+            },
+            factory: (_, broker, behavior) => new TransportThenBehaviorInferenceClient(broker, behavior),
+            approvalPrompt: approvalPrompt,
+            evidenceSink: evidenceSink,
+            effectAuthorityBoundary: boundary);
+
+        await Assert.ThrowsAsync<ToolActuationReviewRequiredException>(() =>
+            executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read])));
+
+        Assert.Single(approvalPrompt.Requests);
+        Assert.Contains(evidenceSink.Evidence, item => item.Phase == CustomLoopToolEvidencePhase.RequestReserved);
+        Assert.DoesNotContain(evidenceSink.Evidence, item => item.Phase == CustomLoopToolEvidencePhase.OutcomeObserved);
+        var events = await new AuditLog(paths).ReadTailAsync(100);
+        Assert.Contains(events, item => item.Action == AuditSchema.Actions.ToolApprovalDecision && item.Outcome == AuditSchema.Outcomes.Approved);
+        var ambiguous = Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "authority_phase") == "actuation_boundary");
+        Assert.Equal(AuditSchema.Outcomes.NeedsReview, ambiguous.Outcome);
+        Assert.Equal("alreadypresent", Metadata(ambiguous, "effect_authority_evidence_status"));
+        Assert.DoesNotContain(events, item => item.Action == AuditSchema.Actions.ToolExecute);
     }
 
     [Fact]
@@ -1456,6 +1658,58 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         CaptureCommit,
     }
 
+    private sealed class RoutingEffectAuthorityBoundary : IGovernedLoopEffectAuthorityBoundary
+    {
+        private readonly object _gate = new();
+        private readonly List<GovernedLoopEffectAuthorityRequest> _requests = [];
+        private int _activeBoundaryCount;
+
+        public ScriptedEffectAuthorityBehavior IntakeBehavior { get; set; } = ScriptedEffectAuthorityBehavior.Direct;
+
+        public ScriptedEffectAuthorityBehavior ActuationBehavior { get; set; } = ScriptedEffectAuthorityBehavior.Direct;
+
+        public int ActiveBoundaryCount => Volatile.Read(ref _activeBoundaryCount);
+
+        public IReadOnlyList<GovernedLoopEffectAuthorityRequest> Requests
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _requests.ToArray();
+                }
+            }
+        }
+
+        public async Task<GovernedLoopEffectAuthorityExecutionResult<TResult>> ExecuteAsync<TResult>(
+            GovernedLoopEffectAuthorityRequest request,
+            Func<CancellationToken, Task<TResult>> commit,
+            CancellationToken cancellationToken = default)
+        {
+            lock (_gate)
+            {
+                _requests.Add(request);
+            }
+
+            var behavior = request.BoundaryKind switch
+            {
+                GovernedLoopEffectBoundaryKind.ProviderTransport => ScriptedEffectAuthorityBehavior.Direct,
+                GovernedLoopEffectBoundaryKind.WorkspaceToolIntake => IntakeBehavior,
+                GovernedLoopEffectBoundaryKind.WorkspaceActuation => ActuationBehavior,
+                _ => throw new InvalidOperationException("The focused tool router received an unrelated effect boundary."),
+            };
+            Interlocked.Increment(ref _activeBoundaryCount);
+            try
+            {
+                return await new ScriptedGovernedLoopEffectAuthorityBoundary(behavior).ExecuteAsync(request, commit, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeBoundaryCount);
+            }
+        }
+    }
+
     private sealed class RecordingEffectAuthorityBoundary(
         EffectBoundaryBehavior behavior,
         Func<CancellationToken, Task>? beforeDecision = null,
@@ -1692,6 +1946,31 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             Disposed = true;
             return ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class TransportThenBehaviorInferenceClient(
+        IToolBroker? broker,
+        Func<IToolBroker?, LlmInferenceRequest, CancellationToken, Task<LlmInferenceResponse>> behavior) : ILlmInferenceClient, IAsyncDisposable
+    {
+        public Task<LlmInferenceResponse> GenerateAsync(
+            LlmInferenceRequest request,
+            Func<string, CancellationToken, Task>? responseChunkHandler = null,
+            CancellationToken cancellationToken = default)
+        {
+            return behavior(broker, request, cancellationToken);
+        }
+
+        public async Task<LlmInferenceResponse> GenerateAsync(
+            LlmInferenceRequest request,
+            Func<string, CancellationToken, Task>? responseChunkHandler,
+            CancellationToken cancellationToken,
+            InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
+        {
+            await providerTransportCommitBoundary(_ => Task.CompletedTask, cancellationToken);
+            return await behavior(broker, request, cancellationToken);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class SyncFakeInferenceClient : ILlmInferenceClient, IDisposable

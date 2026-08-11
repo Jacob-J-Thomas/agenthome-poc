@@ -8,6 +8,7 @@ using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Clients.LocalWorkspace;
@@ -212,10 +213,26 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             var permissionService = new ReloadingToolPermissionService(_paths, new PermissionPolicyStore());
             var observer = new CorrelatedToolEvidenceObserver(_evidenceSink, request);
             var retention = new ToolResultRetentionService(_auditLog, loopDefinition, _toolResultRetentionStore);
-            var revalidator = new CustomLoopToolActuationAuthorityRevalidator(_authorityProvider, request, observer, _capabilityAdmissionService);
             var mutationBoundary = new CapabilityAuthorityWorkspaceMutationCommitBoundary(_paths, _capabilityAuthorityTransaction);
-            var broker = new ToolBroker(_paths, permissionService, _approvalPrompt, new LocalWorkspaceClient(_paths, mutationBoundary), _auditLog, loopDefinition, _toolResultRetentionStore, observer, revalidator);
-            boundedBroker = new BoundedCorrelatedToolBroker(broker, _auditLog, _authorityProvider, retention, observer, _paths, request);
+            var actuationAuthorityBoundary = new GovernedLoopToolActuationAuthorityBoundary(
+                _effectAuthorityBoundary!,
+                request.AdmissionReceipt!,
+                request.ExecutionBinding!,
+                request.GraphArtifact!,
+                request.StepId,
+                request.Attempt,
+                request.AttemptCorrelationId);
+            var broker = new ToolBroker(
+                _paths,
+                permissionService,
+                _approvalPrompt,
+                new LocalWorkspaceClient(_paths, mutationBoundary),
+                _auditLog,
+                loopDefinition,
+                _toolResultRetentionStore,
+                governanceObserver: observer,
+                actuationAuthorityBoundary: actuationAuthorityBoundary);
+            boundedBroker = new BoundedCorrelatedToolBroker(broker, _auditLog, _authorityProvider, retention, observer, _effectAuthorityBoundary!, _paths, request);
             toolBroker = boundedBroker;
         }
 
@@ -369,7 +386,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             var requiredAuthority = new AuthorityCeiling(
                 requiredIdentities,
                 admittedAuthority.DataClasses,
-                MaxTargetCount: 1,
+                MaxTargetCount: requiresWorkspace ? 1 : 0,
                 requiresWorkspace ? CapabilitySideEffectClass.ReadOnly : CapabilitySideEffectClass.None,
                 AllowsRecurrence: false,
                 AllowsExternalPublication: false,
