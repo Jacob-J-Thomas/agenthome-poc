@@ -63,6 +63,49 @@ public sealed record GovernedLoopFrontierPosture
         return frontier;
     }
 
+    /// <summary>Creates a validated schema-1 bound frontier from its canonical aggregate coordinates.</summary>
+    /// <param name="binding">The exact execution binding.</param>
+    /// <param name="workspaceId">The canonical workspace scope.</param>
+    /// <param name="graphArtifactHash">The exact graph-artifact hash.</param>
+    /// <param name="graphLayoutHash">The exact graph-layout hash.</param>
+    /// <param name="admissionReceiptHash">The exact successful admission-receipt hash.</param>
+    /// <param name="frontierVersion">The positive optimistic frontier version.</param>
+    /// <param name="concurrencyCeiling">The admitted concurrent-node ceiling.</param>
+    /// <param name="status">The aggregate frontier posture.</param>
+    /// <param name="nodes">The immutable contiguous deterministic plan prefix.</param>
+    /// <param name="updatedAtUtc">The UTC frontier commit timestamp.</param>
+    /// <param name="contentHash">The exact retained frontier hash, or empty to compute it.</param>
+    /// <returns>The validated, defensively copied canonical frontier posture.</returns>
+    public static GovernedLoopFrontierPosture Create(
+        GovernedLoopExecutionBinding binding,
+        string workspaceId,
+        string graphArtifactHash,
+        string graphLayoutHash,
+        string admissionReceiptHash,
+        long frontierVersion,
+        int concurrencyCeiling,
+        Models.GovernedLoopFrontierStatus status,
+        IEnumerable<GovernedLoopNodeExecutionEvidence> nodes,
+        DateTimeOffset updatedAtUtc,
+        string contentHash)
+    {
+        var payload = GovernedLoopFrontierPayload.Create(
+            GovernedLoopFrontierPayload.CurrentSchemaVersion,
+            frontierVersion,
+            concurrencyCeiling,
+            status,
+            nodes,
+            updatedAtUtc,
+            contentHash);
+        return Create(
+            binding,
+            workspaceId,
+            graphArtifactHash,
+            graphLayoutHash,
+            admissionReceiptHash,
+            payload);
+    }
+
     internal GovernedLoopFrontierPosture WithPayload(GovernedLoopFrontierPayload payload)
         => new(WorkspaceId, Binding, GraphArtifactHash, GraphLayoutHash, AdmissionReceiptHash, payload);
 }
