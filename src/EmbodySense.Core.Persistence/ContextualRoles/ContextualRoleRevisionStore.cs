@@ -27,12 +27,12 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
 
     /// <summary>Initializes a contextual-role store rooted beneath the supplied workspace's <c>.agent</c> directory.</summary>
     /// <param name="workspacePaths">The canonical workspace paths.</param>
-    /// <param name="workspaceId">The stable bounded workspace identity bound into every artifact.</param>
+    /// <param name="workspaceId">The canonical workspace SHA-256 identity bound into every artifact.</param>
     /// <param name="options">Optional bounded persistence and recovery-evaluation settings.</param>
     /// <param name="timeProvider">The clock used for durable evidence timestamps.</param>
     /// <param name="authorityTransaction">The optional shared reentrant workspace authority fence.</param>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="workspacePaths"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentException">Thrown when <paramref name="workspaceId"/> is not a valid bounded identifier.</exception>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="workspaceId"/> is not a canonical workspace SHA-256 identifier.</exception>
     /// <exception cref="ArgumentOutOfRangeException">Thrown when a configured persistence limit is outside the schema-1 safety ceilings.</exception>
     /// <exception cref="DirectoryNotFoundException">Thrown when the canonical workspace root does not exist.</exception>
     /// <exception cref="InvalidOperationException">Thrown when the canonical workspace root is a symbolic link, reparse point, or junction.</exception>
@@ -44,9 +44,9 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
         ICapabilityAuthorityTransaction? authorityTransaction = null)
     {
         ArgumentNullException.ThrowIfNull(workspacePaths);
-        if (!ContextualRoleId.IsValid(workspaceId))
+        if (!ContextualRoleWorkspaceId.IsValid(workspaceId))
         {
-            throw new ArgumentException("Workspace id must be a bounded lowercase ASCII identifier.", nameof(workspaceId));
+            throw new ArgumentException("Workspace id must be a canonical workspace SHA-256 identifier.", nameof(workspaceId));
         }
 
         _options = options ?? new ContextualRoleRevisionStoreOptions();

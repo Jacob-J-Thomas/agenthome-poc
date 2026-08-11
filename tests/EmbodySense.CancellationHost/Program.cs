@@ -209,6 +209,8 @@ static async Task<int> HostCapabilityAsync(string behavior)
 
 static async Task<int> HoldContextualRoleMutationAsync(string workspaceRoot)
 {
+    var paths = new WorkspacePaths(workspaceRoot);
+    var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
     var now = DateTimeOffset.UtcNow;
     var revision = ContextualRoleRevisionContentHash.Apply(new ContextualRoleRevision(
         1,
@@ -218,7 +220,7 @@ static async Task<int> HoldContextualRoleMutationAsync(string workspaceRoot)
         "Provide bounded review assistance.",
         ContextualRoleStatus.Published,
         new ContextualRoleProvenance("user-jake", now, now),
-        new ContextualRoleWorkspaceApplicability(ImmutableArray.Create("workspace-one")),
+        new ContextualRoleWorkspaceApplicability(ImmutableArray.Create(workspaceId)),
         new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.RoleArtifact, "reviewer-source", ContextualRoleInstructionClassification.RoleInstruction),
         new ContextualRolePolicyMaxima(ImmutableArray<string>.Empty)));
     var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest("create-reviewer", string.Empty, ContextualRoleRevisionMutationKind.Create, "reviewer", "user-jake", revision, null, now));
@@ -234,7 +236,7 @@ static async Task<int> HoldContextualRoleMutationAsync(string workspaceRoot)
             }
         }
     };
-    var result = await new ContextualRoleRevisionStore(new WorkspacePaths(workspaceRoot), "workspace-one", options).MutateAsync(request);
+    var result = await new ContextualRoleRevisionStore(paths, workspaceId, options).MutateAsync(request);
     return result.Status == ContextualRoleRevisionMutationStatus.Accepted ? 0 : 3;
 }
 

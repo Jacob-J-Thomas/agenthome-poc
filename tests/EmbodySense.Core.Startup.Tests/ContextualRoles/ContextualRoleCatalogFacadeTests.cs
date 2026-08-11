@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Common.ContextualRoles;
@@ -16,6 +17,7 @@ namespace EmbodySense.Core.Startup.Tests.ContextualRoles;
 
 public sealed class ContextualRoleCatalogFacadeTests
 {
+    private const string OtherWorkspaceId = "workspace-sha256:1111111111111111111111111111111111111111111111111111111111111111";
     private static readonly DateTimeOffset _now = new(2026, 8, 9, 18, 30, 0, TimeSpan.Zero);
 
     [Fact]
@@ -23,19 +25,20 @@ public sealed class ContextualRoleCatalogFacadeTests
     {
         using var workspace = new TestWorkspace();
         var before = Snapshot(workspace.RootPath);
+        var paths = new WorkspacePaths(Path.Combine(workspace.RootPath, ".", "nested", ".."));
 
-        _ = new ContextualRoleCatalogFacade(workspace.RootPath, "workspace-one");
+        _ = new ContextualRoleCatalogFacade(paths.RootPath);
 
         Assert.Equal(before.ToArray(), Snapshot(workspace.RootPath).ToArray());
-        Assert.Throws<ArgumentException>(() => new ContextualRoleCatalogFacade(" ", "workspace-one"));
-        Assert.Throws<ArgumentException>(() => new ContextualRoleCatalogFacade(workspace.RootPath, "../unsafe"));
+        Assert.True(ContextualRoleWorkspaceId.IsValid(CapabilityWorkspaceScopeId.Create(paths.RootPath)));
+        Assert.Throws<ArgumentException>(() => new ContextualRoleCatalogFacade(" "));
     }
 
     [Fact]
     public async Task Cancellation_propagates_before_catalog_or_exact_inspection()
     {
         using var workspace = new TestWorkspace();
-        var facade = new ContextualRoleCatalogFacade(workspace.RootPath, "workspace-one");
+        var facade = new ContextualRoleCatalogFacade(workspace.RootPath);
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 
@@ -53,12 +56,12 @@ public sealed class ContextualRoleCatalogFacadeTests
         const string RoleSecret = "role-secret-canary-271be1";
         await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, "AGENTS.md"), AgentsSecret);
         await File.WriteAllTextAsync(paths.RolePath, RoleSecret);
-        var reviewer = Revision("reviewer", ContextualRoleInstructionSourceKind.AgentsMarkdown, "nearest-agents", capabilityIds: ["org.embodysense/workspace/write", "org.embodysense/workspace/read"]);
-        var writer = Revision("writer", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
+        var reviewer = Revision(paths, "reviewer", ContextualRoleInstructionSourceKind.AgentsMarkdown, "nearest-agents", capabilityIds: ["org.embodysense/workspace/write", "org.embodysense/workspace/read"]);
+        var writer = Revision(paths, "writer", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
         await CreateAsync(paths, reviewer);
         await CreateAsync(paths, writer);
         var before = Snapshot(workspace.RootPath);
-        var facade = new ContextualRoleCatalogFacade(workspace.RootPath, "workspace-one");
+        var facade = new ContextualRoleCatalogFacade(workspace.RootPath);
 
         var first = await facade.ReadCatalogAsync(null, 1);
         var second = await facade.ReadCatalogAsync(first.NextCursor, 1);
@@ -100,9 +103,9 @@ public sealed class ContextualRoleCatalogFacadeTests
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.AgentPath);
         await File.WriteAllTextAsync(paths.RolePath, "review instructions");
-        var revision = Revision("reviewer", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
+        var revision = Revision(paths, "reviewer", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
         await CreateAsync(paths, revision);
-        var facade = new ContextualRoleCatalogFacade(workspace.RootPath, "workspace-one");
+        var facade = new ContextualRoleCatalogFacade(workspace.RootPath);
 
         var ready = await facade.InspectAsync(new ContextualRoleInspectionInput("reviewer", 1, revision.ContentHash));
         var staleHash = await facade.InspectAsync(new ContextualRoleInspectionInput("reviewer", 1, new string('0', 64)));
@@ -130,13 +133,13 @@ public sealed class ContextualRoleCatalogFacadeTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.AgentPath);
-        var missing = Revision("missing", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
-        var unknown = Revision("unknown", ContextualRoleInstructionSourceKind.RoleArtifact, "role-artifact");
-        var crossWorkspace = Revision("cross-workspace", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role", workspaceId: "workspace-other");
+        var missing = Revision(paths, "missing", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
+        var unknown = Revision(paths, "unknown", ContextualRoleInstructionSourceKind.RoleArtifact, "role-artifact");
+        var crossWorkspace = Revision(paths, "cross-workspace", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role", workspaceId: OtherWorkspaceId);
         await CreateAsync(paths, missing);
         await CreateAsync(paths, unknown);
         await CreateAsync(paths, crossWorkspace);
-        var facade = new ContextualRoleCatalogFacade(workspace.RootPath, "workspace-one");
+        var facade = new ContextualRoleCatalogFacade(workspace.RootPath);
 
         var missingResult = await facade.InspectAsync(Input(missing));
         var unknownResult = await facade.InspectAsync(Input(unknown));
@@ -163,9 +166,9 @@ public sealed class ContextualRoleCatalogFacadeTests
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.AgentPath);
         await File.WriteAllTextAsync(paths.RolePath, "role instructions");
-        var disabledRevision = Revision("disabled", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
-        var tombstonedRevision = Revision("tombstoned", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
-        var replacedRevision = Revision("replaced", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
+        var disabledRevision = Revision(paths, "disabled", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
+        var tombstonedRevision = Revision(paths, "tombstoned", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
+        var replacedRevision = Revision(paths, "replaced", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
         await CreateAsync(paths, disabledRevision);
         await CreateAsync(paths, tombstonedRevision);
         await CreateAsync(paths, replacedRevision);
@@ -173,7 +176,7 @@ public sealed class ContextualRoleCatalogFacadeTests
         await LifecycleAsync(paths, tombstonedRevision.Identity, ContextualRoleRevisionMutationKind.Tombstone, "tombstone-tombstoned", _now.AddMinutes(1));
         var replacement = ContextualRoleRevisionContentHash.Apply(replacedRevision with { Identity = new ContextualRoleRevisionIdentity("replaced", 2), Purpose = "Replacement purpose." });
         await ReplaceAsync(paths, replacedRevision.Identity, replacement);
-        var facade = new ContextualRoleCatalogFacade(workspace.RootPath, "workspace-one");
+        var facade = new ContextualRoleCatalogFacade(workspace.RootPath);
 
         var disabled = await facade.InspectAsync(Input(disabledRevision));
         var tombstoned = await facade.InspectAsync(Input(tombstonedRevision));
@@ -198,9 +201,9 @@ public sealed class ContextualRoleCatalogFacadeTests
         var outsideRole = Path.Combine(outside.RootPath, "ROLE.md");
         await File.WriteAllTextAsync(outsideRole, OutsideSecret);
         File.CreateSymbolicLink(paths.RolePath, outsideRole);
-        var revision = Revision("reviewer", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
+        var revision = Revision(paths, "reviewer", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
         await CreateAsync(paths, revision);
-        var facade = new ContextualRoleCatalogFacade(workspace.RootPath, "workspace-one");
+        var facade = new ContextualRoleCatalogFacade(workspace.RootPath);
 
         var result = await facade.InspectAsync(Input(revision));
         var serialized = JsonSerializer.Serialize(result);
@@ -217,13 +220,13 @@ public sealed class ContextualRoleCatalogFacadeTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var revision = Revision("reviewer", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
+        var revision = Revision(paths, "reviewer", ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role");
         await CreateAsync(paths, revision);
         await File.WriteAllTextAsync(Path.Combine(paths.AgentPath, "contextual-roles", "states", "reviewer.json"), "{broken");
-        var facade = new ContextualRoleCatalogFacade(workspace.RootPath, "workspace-one");
+        var facade = new ContextualRoleCatalogFacade(workspace.RootPath);
         var invalid = await facade.ReadCatalogAsync(null, ContextualRoleCatalogLimits.MaximumPageSize + 1);
         var ambiguous = await facade.ReadCatalogAsync(null, 10);
-        var unavailable = await new ContextualRoleCatalogFacade(Path.Combine(workspace.RootPath, "missing"), "workspace-one").ReadCatalogAsync(null, 10);
+        var unavailable = await new ContextualRoleCatalogFacade(Path.Combine(workspace.RootPath, "missing")).ReadCatalogAsync(null, 10);
 
         Assert.Equal("invalid", invalid.Status);
         Assert.Equal("invalid_contextual_role_catalog_request", invalid.Error!.Code);
@@ -273,29 +276,30 @@ public sealed class ContextualRoleCatalogFacadeTests
     private static async Task CreateAsync(WorkspacePaths paths, ContextualRoleRevision revision)
     {
         var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest($"create-{revision.Identity.RoleId}", string.Empty, ContextualRoleRevisionMutationKind.Create, revision.Identity.RoleId, "user-jake", revision, null, _now));
-        using var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        using var store = new ContextualRoleRevisionStore(paths, WorkspaceId(paths));
         Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await store.MutateAsync(request)).Status);
     }
 
     private static async Task LifecycleAsync(WorkspacePaths paths, ContextualRoleRevisionIdentity identity, ContextualRoleRevisionMutationKind kind, string operationId, DateTimeOffset requestedAt)
     {
         var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(operationId, string.Empty, kind, identity.RoleId, "user-jake", null, identity, requestedAt));
-        using var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        using var store = new ContextualRoleRevisionStore(paths, WorkspaceId(paths));
         Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await store.MutateAsync(request)).Status);
     }
 
     private static async Task ReplaceAsync(WorkspacePaths paths, ContextualRoleRevisionIdentity previous, ContextualRoleRevision replacement)
     {
         var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest($"replace-{previous.RoleId}", string.Empty, ContextualRoleRevisionMutationKind.Replace, previous.RoleId, "user-jake", replacement, previous, _now.AddMinutes(1)));
-        using var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        using var store = new ContextualRoleRevisionStore(paths, WorkspaceId(paths));
         Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await store.MutateAsync(request)).Status);
     }
 
     private static ContextualRoleRevision Revision(
+        WorkspacePaths paths,
         string roleId,
         ContextualRoleInstructionSourceKind sourceKind,
         string sourceId,
-        string workspaceId = "workspace-one",
+        string? workspaceId = null,
         IReadOnlyList<string>? capabilityIds = null)
     {
         var value = new ContextualRoleRevision(
@@ -306,11 +310,13 @@ public sealed class ContextualRoleCatalogFacadeTests
             $"Purpose for {roleId}.",
             ContextualRoleStatus.Published,
             new ContextualRoleProvenance("user-jake", _now, _now),
-            new ContextualRoleWorkspaceApplicability([workspaceId]),
+            new ContextualRoleWorkspaceApplicability([workspaceId ?? WorkspaceId(paths)]),
             new ContextualRoleInstructionSourceReference(sourceKind, sourceId, ContextualRoleInstructionClassification.RoleInstruction),
             new ContextualRolePolicyMaxima((capabilityIds ?? []).ToImmutableArray()));
         return ContextualRoleRevisionContentHash.Apply(value);
     }
+
+    private static string WorkspaceId(WorkspacePaths paths) => CapabilityWorkspaceScopeId.Create(paths.RootPath);
 
     private static IReadOnlyDictionary<string, string> Snapshot(string root)
         => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
