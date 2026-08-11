@@ -251,12 +251,10 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         var pure = WithPureFrontier(context.Run);
         var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(pure)).Status);
-
-        var baselineCapacity = CustomLoopRunStore.CalculateRequiredTraceCapacity(context.Run, 1_000);
-        var pureCapacity = CustomLoopRunStore.CalculateRequiredTraceCapacity(pure, 1_000);
-        Assert.Equal(CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes, pureCapacity - baselineCapacity);
+        Assert.True(await store.HasSufficientTraceCapacityForDispatchAsync(pure, 1));
 
         var start = PureEvent(2, "event-pure-start", CustomLoopRunEventKind.NodeAttemptStarted, context.Binding);
+        Assert.Equal(CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes, start.TraceReservationUtf8Bytes);
         var started = pure with
         {
             LifecycleVersion = 2,
@@ -290,7 +288,6 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         var overLimit = WithPendingPureFrontier(context.Run, 3);
 
         Assert.True(CustomLoopRunValidator.Validate(overLimit).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(overLimit).Errors));
-        Assert.True(CustomLoopRunStore.CalculateRequiredTraceCapacity(overLimit, 1_000) > CustomLoopLimits.MaxRunTraceUtf8Bytes);
         var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
         Assert.Equal(CustomLoopRunStoreStatus.LimitExceeded, (await store.CreateAsync(overLimit)).Status);
     }
