@@ -81,6 +81,10 @@ public static class GovernedLoopSequentialNodeDescriptors
     public static bool IsPure(GovernedLoopNodeDescriptor? descriptor)
         => IsTransform(descriptor) || IsValidate(descriptor);
 
+    /// <summary>Gets whether a descriptor executes without provider, effect, clock, or ambient-state access.</summary>
+    public static bool IsDeterministic(GovernedLoopNodeDescriptor? descriptor)
+        => IsPure(descriptor) || IsTopology(descriptor);
+
     /// <summary>Gets whether a descriptor exactly names one supported dependency-free Transform.</summary>
     public static bool IsTransform(GovernedLoopNodeDescriptor? descriptor)
         => descriptor is not null

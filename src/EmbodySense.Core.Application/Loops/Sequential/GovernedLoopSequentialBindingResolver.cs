@@ -12,25 +12,45 @@ using EmbodySense.Core.Common.Loops.Sequential;
 
 namespace EmbodySense.Core.Application.Loops.Sequential;
 
-/// <summary>Materializes only the exact graph-declared data inputs available to one deterministic pure node.</summary>
+/// <summary>Materializes only the exact graph-declared data inputs causally available to one deterministic node activation.</summary>
 /// <remarks>The resolver has no provider, effect, authority, filesystem, network, clock, or ambient-context dependency.</remarks>
 public static class GovernedLoopSequentialBindingResolver
 {
-    /// <summary>Resolves the exact graph-pinned inputs for one Transform or Validate node.</summary>
+    /// <summary>Resolves the exact graph-pinned inputs for the sole current activation of one deterministic node.</summary>
     public static GovernedLoopSequentialBindingResolutionResult Resolve(
         GovernedLoopGraphRevisionArtifact? artifact,
         GovernedLoopSequentialPlan? plan,
         GovernedLoopSequentialPlanNode? node,
         CustomLoopRunRecord? run)
     {
-        if (!IsExactContext(artifact, plan, node, run))
+        var activation = run?.Frontier?.Payload.Nodes
+            .Where(candidate => node is not null
+                && candidate.PlanOrdinal == node.Ordinal
+                && string.Equals(candidate.NodeId, node.NodeId, StringComparison.Ordinal)
+                && candidate.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running)
+            .Take(2)
+            .ToArray();
+        return activation is { Length: 1 }
+            ? Resolve(artifact, plan, node, activation[0], run)
+            : Rejected("pure-node.activation-invalid", "$.frontier");
+    }
+
+    /// <summary>Resolves exact graph-pinned inputs for one immutable durable activation and its causal ancestors.</summary>
+    public static GovernedLoopSequentialBindingResolutionResult Resolve(
+        GovernedLoopGraphRevisionArtifact? artifact,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
+        CustomLoopRunRecord? run)
+    {
+        if (!IsExactContext(artifact, plan, node, activation, run))
         {
             return Rejected("pure-node.context-invalid", "$");
         }
 
         try
         {
-            return ResolveExact(artifact!, plan!, node!, run!);
+            return ResolveExact(artifact!, plan!, node!, activation!, run!);
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
         {
@@ -42,26 +62,24 @@ public static class GovernedLoopSequentialBindingResolver
         GovernedLoopGraphRevisionArtifact artifact,
         GovernedLoopSequentialPlan plan,
         GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
         CustomLoopRunRecord run)
     {
         var graph = artifact.Graph;
         var graphNode = graph.Nodes.SingleOrDefault(value => string.Equals(value.Id, node.NodeId, StringComparison.Ordinal));
         if (graphNode is null
-            || graphNode.Descriptor.Kind is not (GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate)
+            || graphNode.Descriptor.Kind is not (GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate or GovernedLoopNodeKind.Condition)
             || graph.Bindings.Any(binding => string.Equals(binding.ToNodeId, graphNode.Id, StringComparison.Ordinal) && binding.Kind != GovernedLoopBindingKind.Data))
         {
             return Rejected("pure-node.binding-invalid", "$.bindings");
         }
 
-        var ordinals = plan.Nodes.ToDictionary(value => value.NodeId, value => value.Ordinal, StringComparer.Ordinal);
         var inputs = new List<GovernedLoopTypedBindingValue>();
         foreach (var binding in graph.Bindings
                      .Where(value => string.Equals(value.ToNodeId, graphNode.Id, StringComparison.Ordinal))
                      .OrderBy(value => value.Id, StringComparer.Ordinal))
         {
-            if (!ordinals.TryGetValue(binding.FromNodeId, out var sourceOrdinal)
-                || sourceOrdinal >= node.Ordinal
-                || !TryResolveSourceValue(artifact, plan, run, binding.FromNodeId, binding.FromPortId, out var value))
+            if (!TryResolveSourceValue(artifact, plan, run, activation, binding.FromNodeId, binding.FromPortId, out var value))
             {
                 return Rejected("pure-node.source-evidence-invalid", $"$.bindings[{binding.Id}]");
             }
@@ -87,13 +105,19 @@ public static class GovernedLoopSequentialBindingResolver
         GovernedLoopGraphRevisionArtifact artifact,
         GovernedLoopSequentialPlan plan,
         CustomLoopRunRecord run,
+        GovernedLoopNodeExecutionEvidence targetActivation,
         string sourceNodeId,
         string sourcePortId,
         out GovernedLoopTypedValue? value)
     {
         value = null;
-        var source = plan.Nodes.SingleOrDefault(item => string.Equals(item.NodeId, sourceNodeId, StringComparison.Ordinal));
-        if (source is null || !HasExactCompletedFrontierEvidence(run, source, out var outcomeEvent))
+        if (!TryResolveCausalSourceActivation(plan, run, targetActivation, sourceNodeId, out var sourceActivation))
+        {
+            return false;
+        }
+
+        var source = plan.Nodes[sourceActivation!.PlanOrdinal];
+        if (!HasExactCompletedFrontierEvidence(run, source, sourceActivation, out var outcomeEvent))
         {
             return false;
         }
@@ -145,13 +169,146 @@ public static class GovernedLoopSequentialBindingResolver
         return true;
     }
 
+    private static bool TryResolveCausalSourceActivation(
+        GovernedLoopSequentialPlan plan,
+        CustomLoopRunRecord run,
+        GovernedLoopNodeExecutionEvidence targetActivation,
+        string sourceNodeId,
+        out GovernedLoopNodeExecutionEvidence? sourceActivation)
+    {
+        sourceActivation = null;
+        if (run.Frontier?.Payload.Nodes is not { } activations
+            || activations.ElementAtOrDefault(targetActivation.ActivationOrdinal) is not { } exactTarget
+            || exactTarget.ActivationOrdinal != targetActivation.ActivationOrdinal
+            || exactTarget.VisitOrdinal != targetActivation.VisitOrdinal)
+        {
+            return false;
+        }
+
+        var ancestorOrdinals = new HashSet<int>();
+        var pending = new Queue<GovernedLoopNodeExecutionEvidence>();
+        pending.Enqueue(targetActivation);
+        while (pending.Count > 0)
+        {
+            var current = pending.Dequeue();
+            if (!TryResolveDirectPredecessors(plan, activations, current, out var predecessors))
+            {
+                return false;
+            }
+
+            foreach (var predecessor in predecessors)
+            {
+                if (ancestorOrdinals.Add(predecessor.ActivationOrdinal))
+                {
+                    pending.Enqueue(predecessor);
+                }
+            }
+        }
+
+        sourceActivation = ancestorOrdinals
+            .Select(ordinal => activations[ordinal])
+            .Where(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Completed
+                && string.Equals(candidate.NodeId, sourceNodeId, StringComparison.Ordinal))
+            .OrderByDescending(candidate => candidate.ActivationOrdinal)
+            .FirstOrDefault();
+        return sourceActivation is not null;
+    }
+
+    private static bool TryResolveDirectPredecessors(
+        GovernedLoopSequentialPlan plan,
+        IReadOnlyList<GovernedLoopNodeExecutionEvidence> activations,
+        GovernedLoopNodeExecutionEvidence target,
+        out IReadOnlyList<GovernedLoopNodeExecutionEvidence> predecessors)
+    {
+        var resolved = new List<GovernedLoopNodeExecutionEvidence>();
+        if (target.JoinArrivals.Count > 0)
+        {
+            foreach (var arrival in target.JoinArrivals)
+            {
+                if (activations.ElementAtOrDefault(arrival.SourceActivationOrdinal) is not { } source
+                    || source.ActivationOrdinal >= target.ActivationOrdinal
+                    || source.Status != GovernedLoopNodeExecutionStatus.Completed
+                    || !source.SelectedControlEdgeIds.Contains(arrival.ControlEdgeId, StringComparer.Ordinal)
+                    || !EdgeReachesActivation(plan, source, target, arrival.ControlEdgeId))
+                {
+                    predecessors = [];
+                    return false;
+                }
+
+                resolved.Add(source);
+            }
+
+            predecessors = resolved.DistinctBy(candidate => candidate.ActivationOrdinal).ToArray();
+            return true;
+        }
+
+        foreach (var edgeId in target.IncomingControlEdgeIds)
+        {
+            var matches = activations
+                .Take(target.ActivationOrdinal)
+                .Where(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Completed
+                    && candidate.SelectedControlEdgeIds.Contains(edgeId, StringComparer.Ordinal)
+                    && EdgeReachesActivation(plan, candidate, target, edgeId))
+                .OrderByDescending(candidate => candidate.ActivationOrdinal)
+                .Take(2)
+                .ToArray();
+            if (matches.Length == 0)
+            {
+                predecessors = [];
+                return false;
+            }
+
+            resolved.Add(matches[0]);
+        }
+
+        predecessors = resolved.DistinctBy(candidate => candidate.ActivationOrdinal).ToArray();
+        return true;
+    }
+
+    private static bool EdgeReachesActivation(
+        GovernedLoopSequentialPlan plan,
+        GovernedLoopNodeExecutionEvidence source,
+        GovernedLoopNodeExecutionEvidence target,
+        string edgeId)
+    {
+        if (plan.ControlEdges.SingleOrDefault(edge => string.Equals(edge.Id, edgeId, StringComparison.Ordinal)) is not { } edge
+            || !string.Equals(edge.FromNodeId, source.NodeId, StringComparison.Ordinal)
+            || !string.Equals(edge.ToNodeId, target.NodeId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var sourcePlan = plan.Nodes[source.PlanOrdinal];
+        var targetPlan = plan.Nodes[target.PlanOrdinal];
+        if (targetPlan.CycleId is null)
+        {
+            return target.CycleIteration is null;
+        }
+
+        if (!string.Equals(sourcePlan.CycleId, targetPlan.CycleId, StringComparison.Ordinal))
+        {
+            return target.CycleIteration == 1;
+        }
+
+        if (source.CycleIteration is not { } sourceIteration)
+        {
+            return false;
+        }
+
+        var expected = targetPlan.ComponentTraversalOrdinal > sourcePlan.ComponentTraversalOrdinal
+            ? sourceIteration
+            : checked(sourceIteration + 1);
+        return target.CycleIteration == expected;
+    }
+
     private static bool HasExactCompletedFrontierEvidence(
         CustomLoopRunRecord run,
         GovernedLoopSequentialPlanNode source,
+        GovernedLoopNodeExecutionEvidence sourceActivation,
         out CustomLoopRunEvent? outcomeEvent)
     {
         outcomeEvent = null;
-        if (run.Frontier?.Payload.Nodes.SingleOrDefault(item => string.Equals(item.NodeId, source.NodeId, StringComparison.Ordinal)) is not
+        if (run.Frontier?.Payload.Nodes.ElementAtOrDefault(sourceActivation.ActivationOrdinal) is not
             {
                 Status: GovernedLoopNodeExecutionStatus.Completed,
                 Attempt: { } attempt,
@@ -168,8 +325,12 @@ public static class GovernedLoopSequentialBindingResolver
                 Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
                 Disposition: CustomLoopSequentialNodeDisposition.Completed,
             } evidence
+            && evidence.ActivationOrdinal == sourceActivation.ActivationOrdinal
+            && evidence.VisitOrdinal == sourceActivation.VisitOrdinal
             && string.Equals(evidence.NodeId, source.NodeId, StringComparison.Ordinal)
             && evidence.Attempt == attempt
+            && string.Equals(evidence.CycleId, sourceActivation.CycleId, StringComparison.Ordinal)
+            && evidence.CycleIteration == sourceActivation.CycleIteration
             && string.Equals(evidence.OutcomeArtifactHash, evidenceHash, StringComparison.Ordinal)
             && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
             && CustomLoopSequentialOutcomeArtifactHash.Matches(item)).Take(2).ToArray();
@@ -186,11 +347,13 @@ public static class GovernedLoopSequentialBindingResolver
         GovernedLoopGraphRevisionArtifact? artifact,
         GovernedLoopSequentialPlan? plan,
         GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
         CustomLoopRunRecord? run)
     {
         if (artifact is null
             || plan is null
             || node is null
+            || activation is null
             || run is null
             || run.SequentialAdapterBinding is not { } binding
             || run.SequentialInvocationSnapshot is not { } snapshot)
@@ -212,6 +375,14 @@ public static class GovernedLoopSequentialBindingResolver
                 && plan.Nodes.Count(item => string.Equals(item.NodeId, node.NodeId, StringComparison.Ordinal)) == 1
                 && Equals(plan.Nodes[node.Ordinal].Descriptor, node.Descriptor)
                 && string.Equals(plan.Nodes[node.Ordinal].NodeId, node.NodeId, StringComparison.Ordinal)
+                && activation.PlanOrdinal == node.Ordinal
+                && string.Equals(activation.NodeId, node.NodeId, StringComparison.Ordinal)
+                && activation.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running
+                && run.Frontier?.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is { } exactActivation
+                && exactActivation.ActivationOrdinal == activation.ActivationOrdinal
+                && exactActivation.VisitOrdinal == activation.VisitOrdinal
+                && exactActivation.CycleIteration == activation.CycleIteration
+                && string.Equals(exactActivation.CycleId, activation.CycleId, StringComparison.Ordinal)
                 && artifact.Graph.Nodes.SingleOrDefault(item => string.Equals(item.Id, node.NodeId, StringComparison.Ordinal)) is { } graphNode
                 && Equals(graphNode.Descriptor, node.Descriptor)
                 && string.Equals(binding.GraphArtifactHash, artifact.ArtifactHash, StringComparison.Ordinal)

@@ -1584,6 +1584,7 @@ public static class CustomLoopRunValidator
         else if (item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed)
         {
             var isPureNode = IsPureNodeEvent(run, item);
+            var isTopologyNode = IsTopologyNodeEvent(run, item);
             var hasValidPureEventShape = item.Kind switch
             {
                 CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
@@ -1596,6 +1597,25 @@ public static class CustomLoopRunValidator
                 if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal) || !hasValidPureEventShape)
                 {
                     Add(errors, "sequential_pure_node_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential Transform or Validate evidence must identify its exact pinned frontier node and use the pure-node start, completion, or failure envelope.");
+                }
+
+                return;
+            }
+
+            if (isTopologyNode)
+            {
+                var hasValidTopologyShape = item.Kind switch
+                {
+                    CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
+                    CustomLoopRunEventKind.NodeAttemptCompleted => item.PureNodeOutcomeJson is null,
+                    CustomLoopRunEventKind.NodeAttemptFailed => HasPriorSequentialDispatch(run.Events, eventIndex, evidence, CustomLoopRunEventKind.NodeAttemptStarted),
+                    _ => false,
+                };
+                if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal)
+                    || item.Iteration != (evidence.CycleIteration ?? 1)
+                    || !hasValidTopologyShape)
+                {
+                    Add(errors, "sequential_topology_node_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential Condition or Join evidence must identify its exact activation, cycle iteration, and deterministic start, completion, or failure envelope.");
                 }
 
                 return;
@@ -1689,7 +1709,7 @@ public static class CustomLoopRunValidator
     private static void ValidateTraceReservation(CustomLoopRunEvent item, string field, CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
     {
         var startsAttempt = item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted;
-        var expectedReservation = IsPureNodeEvent(run, item)
+        var expectedReservation = IsPureNodeEvent(run, item) || IsTopologyNodeEvent(run, item)
             ? CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes
             : CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes;
         if (startsAttempt && item.TraceReservationUtf8Bytes != expectedReservation)
@@ -1711,6 +1731,17 @@ public static class CustomLoopRunValidator
 
         var node = run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal);
         return node?.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate;
+    }
+
+    private static bool IsTopologyNodeEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        if (item.SequentialNodeEvidence is not { ActivationOrdinal: var activationOrdinal })
+        {
+            return false;
+        }
+
+        var node = run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal);
+        return node?.Descriptor.Kind is GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Join;
     }
 
     private static bool ToolPhaseMatchesEventKind(CustomLoopToolEvidencePhase phase, CustomLoopRunEventKind kind)

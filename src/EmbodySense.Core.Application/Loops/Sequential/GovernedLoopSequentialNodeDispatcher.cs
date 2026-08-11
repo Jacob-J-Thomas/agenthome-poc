@@ -160,7 +160,9 @@ public sealed class GovernedLoopSequentialNodeDispatcher
         return evidence.SelectedControlEdgeIds.All(edgeId => planEdges.TryGetValue(edgeId, out var edge)
             && string.Equals(edge.FromNodeId, request.Node.NodeId, StringComparison.Ordinal)
             && edge.Condition == evidence.ControlOutcome)
-            && evidence.SkippedControlEdgeIds.All(planEdges.ContainsKey);
+            && evidence.SkippedControlEdgeIds.All(edgeId => planEdges.TryGetValue(edgeId, out var edge)
+                && string.Equals(edge.FromNodeId, request.Node.NodeId, StringComparison.Ordinal)
+                && edge.Condition != evidence.ControlOutcome);
     }
 
     private static bool IsSortedUnique(IReadOnlyList<string> values)
