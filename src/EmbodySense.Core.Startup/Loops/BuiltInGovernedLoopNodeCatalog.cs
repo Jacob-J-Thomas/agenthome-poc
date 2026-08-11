@@ -13,6 +13,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const int ProviderTransportResourceUnitsPerActivation = 1;
     private const string SourceEvidenceId = "built-in-governed-loop-node-catalog-schema-1-v1";
     private static readonly IReadOnlyList<GovernedLoopControlCondition> _always =
         Array.AsReadOnly(new[] { GovernedLoopControlCondition.Always });
@@ -72,7 +73,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                 }),
                 Array.Empty<GovernedLoopCatalogParameterContract>(),
                 Array.Empty<string>(),
-                ResourceBudget()),
+                ActivationBudget()),
             new GovernedLoopNodeCatalogDescriptor(
                 GovernedLoopSequentialNodeDescriptors.ProviderInference,
                 IsAdvertised: true,
@@ -99,7 +100,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                     CycleParameter(GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter, CustomLoopLimits.MaxGraphCycleMilliseconds),
                 }.OrderBy(item => item.Id, StringComparer.Ordinal).ToArray()),
                 Array.AsReadOnly(new[] { ModelInferenceCapabilityId }),
-                ResourceBudget()),
+                ActivationBudget(ProviderTransportResourceUnitsPerActivation)),
             new GovernedLoopNodeCatalogDescriptor(
                 GovernedLoopSequentialNodeDescriptors.SuccessExit,
                 IsAdvertised: true,
@@ -120,7 +121,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                 }),
                 Array.Empty<GovernedLoopCatalogParameterContract>(),
                 Array.AsReadOnly(new[] { ConversationTurnCapabilityId }),
-                ResourceBudget()),
+                ActivationBudget()),
         });
 
     private static GovernedLoopCatalogPortContract Port(
@@ -151,12 +152,12 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             MaximumInteger: maximum,
             Array.Empty<string>());
 
-    private static GovernedLoopNodeResourceBudget ResourceBudget()
+    private static GovernedLoopNodeResourceBudget ActivationBudget(int resourceUnits = 0)
         => new(
-            Attempts: 0,
+            Attempts: 1,
             PayloadCharacters: 0,
-            EvidenceItems: 0,
-            ResourceUnits: 0);
+            EvidenceItems: 1,
+            ResourceUnits: resourceUnits);
 
     private static string DescriptorKey(GovernedLoopNodeCatalogDescriptor descriptor)
         => $"{(int)descriptor.Descriptor.Kind:D3}:{descriptor.Descriptor.TypeId}:{descriptor.Descriptor.Version:D10}";

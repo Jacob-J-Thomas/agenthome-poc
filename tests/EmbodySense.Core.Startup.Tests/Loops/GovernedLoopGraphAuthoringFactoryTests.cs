@@ -206,11 +206,11 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
 
         Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, first.Status);
         Assert.Equal(first.GraphValidationEvidenceHash, second.GraphValidationEvidenceHash);
-        Assert.Equal("c4f9605552bbdacfaf7cb49ce0eff286474620fa0919b2dd4bda691b8ee1b7a8", first.GraphValidationEvidenceHash);
+        Assert.Equal("b5f449d8cbb0b9d147674a8c7cf198984f51de082768c0741971165a89a02f29", first.GraphValidationEvidenceHash);
     }
 
     [Fact]
-    public async Task Built_in_baseline_catalog_pins_ports_parameters_capabilities_and_zero_pricing()
+    public async Task Built_in_baseline_catalog_pins_contracts_and_requires_its_exact_execution_envelope()
     {
         var linear = Candidate();
         var portMismatch = linear with
@@ -238,18 +238,37 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
         var portResult = await AuthorWithBuiltInCatalogAsync(portMismatch);
         var parameterResult = await AuthorWithBuiltInCatalogAsync(missingInstruction);
         var capabilityResult = await AuthorWithBuiltInCatalogAsync(missingExitCapability);
-        var zeroPricingResult = await AuthorWithBuiltInCatalogAsync(linear, Authority() with
+        var zeroEnvelopeResult = await AuthorWithBuiltInCatalogAsync(linear, Authority() with
         {
             MaxAttempts = 0,
             MaxPayloadCharacters = 0,
             MaxEvidenceItems = 0,
             MaxResourceUnits = 0,
         });
+        var exactEnvelope = Authority() with
+        {
+            MaxAttempts = 3,
+            MaxPayloadCharacters = 0,
+            MaxEvidenceItems = 3,
+            MaxResourceUnits = 1,
+        };
+        var exactEnvelopeResult = await AuthorWithBuiltInCatalogAsync(linear, exactEnvelope);
+        var insufficientAttempts = await AuthorWithBuiltInCatalogAsync(linear, exactEnvelope with { MaxAttempts = 2 });
+        var insufficientEvidence = await AuthorWithBuiltInCatalogAsync(linear, exactEnvelope with { MaxEvidenceItems = 2 });
+        var insufficientProviderUnits = await AuthorWithBuiltInCatalogAsync(linear, exactEnvelope with { MaxResourceUnits = 0 });
 
         Assert.Contains(portResult.GraphValidationErrors, error => error.Code == "node.port-contract.incompatible" && error.Element.Id == "trigger.request");
         Assert.Contains(parameterResult.GraphValidationErrors, error => error.Code == "node.parameter.required" && error.Element.Id == "infer");
         Assert.Contains(capabilityResult.GraphValidationErrors, error => error.Code == "node.authority.missing-capability" && error.Element.Id == "exit");
-        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, zeroPricingResult.Status);
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.ValidationRejected, zeroEnvelopeResult.Status);
+        Assert.Contains(zeroEnvelopeResult.GraphValidationErrors, error => error.Code == "graph.resources.attempts");
+        Assert.Contains(zeroEnvelopeResult.GraphValidationErrors, error => error.Code == "graph.resources.evidence");
+        Assert.Contains(zeroEnvelopeResult.GraphValidationErrors, error => error.Code == "graph.resources.units");
+        Assert.DoesNotContain(zeroEnvelopeResult.GraphValidationErrors, error => error.Code == "graph.resources.payload");
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, exactEnvelopeResult.Status);
+        Assert.Contains(insufficientAttempts.GraphValidationErrors, error => error.Code == "graph.resources.attempts");
+        Assert.Contains(insufficientEvidence.GraphValidationErrors, error => error.Code == "graph.resources.evidence");
+        Assert.Contains(insufficientProviderUnits.GraphValidationErrors, error => error.Code == "graph.resources.units");
     }
 
     [Fact]
