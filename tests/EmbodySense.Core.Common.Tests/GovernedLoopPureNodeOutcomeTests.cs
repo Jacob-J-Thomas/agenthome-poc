@@ -368,9 +368,9 @@ public sealed class GovernedLoopPureNodeOutcomeTests
         bool contextInput = false,
         IReadOnlyList<GovernedLoopValueSchemaDefinition>? valueSchemas = null)
     {
-        const string capability = "org.embodysense/model-inference";
-        var loopAuthority = grantPureAuthority ? GovernedLoopAuthorityCeiling.Create([capability]) : GovernedLoopAuthorityCeiling.Create([]);
-        var nodeAuthority = grantPureAuthority ? GovernedLoopAuthorityCeiling.Create([capability]) : GovernedLoopAuthorityCeiling.Create([]);
+        const string Capability = "org.embodysense/model-inference";
+        var loopAuthority = grantPureAuthority ? GovernedLoopAuthorityCeiling.Create([Capability]) : GovernedLoopAuthorityCeiling.Create([]);
+        var nodeAuthority = grantPureAuthority ? GovernedLoopAuthorityCeiling.Create([Capability]) : GovernedLoopAuthorityCeiling.Create([]);
         var inputKind = contextInput ? GovernedLoopBindingKind.Context : GovernedLoopBindingKind.Data;
         var schemas = valueSchemas?.ToArray() ??
         [
@@ -477,12 +477,12 @@ public sealed class GovernedLoopPureNodeOutcomeTests
 
     private static string Rehash(string canonicalJson)
     {
-        const string marker = ",\"contentHash\":\"";
-        var markerIndex = canonicalJson.LastIndexOf(marker, StringComparison.Ordinal);
+        const string Marker = ",\"contentHash\":\"";
+        var markerIndex = canonicalJson.LastIndexOf(Marker, StringComparison.Ordinal);
         Assert.True(markerIndex > 0);
         var payload = canonicalJson[..markerIndex] + "}";
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
-        return string.Concat(canonicalJson.AsSpan(0, markerIndex), marker, hash, "\"}");
+        return string.Concat(canonicalJson.AsSpan(0, markerIndex), Marker, hash, "\"}");
     }
 
     private static IEnumerable<GovernedLoopTypedBindingValue> ThrowingInputs(GovernedLoopTypedBindingValue value)
