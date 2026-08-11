@@ -107,6 +107,137 @@ public sealed class GovernedLoopRuntimeTests
     }
 
     [Fact]
+    public async Task First_bound_completion_replays_after_restart_and_rejects_a_second_run_without_provider_dispatch()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(
+            completionConstraint: AuthorityGrantCompletionConstraintKind.FirstBoundRunCompletion);
+        var firstInput = fixture.Input("invoke-first-bound-success", "complete the first bound run");
+
+        await using (var runtime = await fixture.CreateRuntimeAsync())
+        {
+            var completed = await runtime.InvokeGovernedLoopAsync(firstInput);
+            var replayed = await runtime.InvokeGovernedLoopAsync(firstInput);
+
+            Assert.True(string.Equals("Executed", completed.Status, StringComparison.Ordinal), completed.Detail);
+            Assert.Equal("Completed", completed.ExecutionStatus);
+            Assert.Equal(CustomLoopRunStatus.Completed.ToString(), completed.Run?.Status);
+            Assert.True(completed.WasDispatched);
+            Assert.Equal("Terminal", replayed.Status);
+            Assert.Equal("Replayed", replayed.AdmissionStatus);
+            Assert.Equal("Completed", replayed.ExecutionStatus);
+            Assert.False(replayed.WasDispatched);
+            Assert.Equal(completed.Run?.Id, replayed.Run?.Id);
+            Assert.Equal(1, fixture.ProviderAttempts);
+        }
+
+        await using var restarted = await fixture.CreateRuntimeAsync(preserveCurrentConversation: true);
+        var restartReplay = await restarted.InvokeGovernedLoopAsync(firstInput);
+        var rejected = await restarted.InvokeGovernedLoopAsync(
+            fixture.Input("invoke-first-bound-second", "a second run must not dispatch"));
+
+        Assert.Equal("Terminal", restartReplay.Status);
+        Assert.Equal("Replayed", restartReplay.AdmissionStatus);
+        Assert.Equal("Completed", restartReplay.ExecutionStatus);
+        Assert.False(restartReplay.WasDispatched);
+        Assert.True(string.Equals("Executed", rejected.Status, StringComparison.Ordinal), rejected.Detail);
+        Assert.Equal("Failed", rejected.ExecutionStatus);
+        Assert.Equal(CustomLoopRunStatus.Failed.ToString(), rejected.Run?.Status);
+        Assert.Equal("effect_authority_denied", rejected.Run?.FailureCode);
+        Assert.False(rejected.WasDispatched);
+        Assert.Equal(1, fixture.ProviderAttempts);
+    }
+
+    [Fact]
+    public async Task Failed_provider_attempt_does_not_consume_first_bound_completion()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(
+            completionConstraint: AuthorityGrantCompletionConstraintKind.FirstBoundRunCompletion,
+            failFirstAttempts: 1);
+        await using var runtime = await fixture.CreateRuntimeAsync();
+
+        var failed = await runtime.InvokeGovernedLoopAsync(
+            fixture.Input("invoke-first-bound-provider-failure", "fail before completion"));
+        var completed = await runtime.InvokeGovernedLoopAsync(
+            fixture.Input("invoke-first-bound-after-provider-failure", "complete after the failed attempt"));
+
+        Assert.Equal("Failed", failed.ExecutionStatus);
+        Assert.Equal(CustomLoopRunStatus.Failed.ToString(), failed.Run?.Status);
+        Assert.True(failed.WasDispatched);
+        Assert.True(string.Equals("Executed", completed.Status, StringComparison.Ordinal), completed.Detail);
+        Assert.Equal("Completed", completed.ExecutionStatus);
+        Assert.Equal(CustomLoopRunStatus.Completed.ToString(), completed.Run?.Status);
+        Assert.True(completed.WasDispatched);
+        Assert.Equal(2, fixture.ProviderAttempts);
+    }
+
+    [Fact]
+    public async Task Paused_then_cancelled_run_does_not_consume_first_bound_completion()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(
+            pauseProvider: true,
+            completionConstraint: AuthorityGrantCompletionConstraintKind.FirstBoundRunCompletion);
+        await using var runtime = await fixture.CreateRuntimeAsync();
+        var invocation = runtime.InvokeGovernedLoopAsync(
+            fixture.Input("invoke-first-bound-pause-cancel", "pause and cancel before completion"));
+        await fixture.WaitForProviderAsync();
+        using var runStore = new CustomLoopRunStore(fixture.Paths);
+        var running = await WaitForRunAsync(runStore, CustomLoopRunStatus.Running);
+
+        var pause = await runtime.PauseCustomLoopAsync(
+            new LoopRunControlInput(running.Id, running.LifecycleVersion, "pause-first-bound-before-cancel"));
+        Assert.Equal("PauseRequested", pause.Status);
+        fixture.ReleaseProvider();
+
+        var paused = await invocation;
+        Assert.Equal("Paused", paused.ExecutionStatus);
+        Assert.Equal(CustomLoopRunStatus.Paused.ToString(), paused.Run?.Status);
+        var cancelled = await runtime.CancelCustomLoopAsync(
+            new LoopRunControlInput(paused.Run!.Id, paused.Run.LifecycleVersion, "cancel-first-bound-paused-run"));
+        var completed = await runtime.InvokeGovernedLoopAsync(
+            fixture.Input("invoke-first-bound-after-cancel", "complete after cancellation"));
+
+        Assert.Equal("Cancelled", cancelled.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled.ToString(), cancelled.Run?.Status);
+        Assert.True(string.Equals("Executed", completed.Status, StringComparison.Ordinal), completed.Detail);
+        Assert.Equal("Completed", completed.ExecutionStatus);
+        Assert.Equal(CustomLoopRunStatus.Completed.ToString(), completed.Run?.Status);
+        Assert.Equal(2, fixture.ProviderAttempts);
+    }
+
+    [Fact]
+    public async Task Publication_conflict_does_not_consume_first_bound_completion()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(
+            pauseProvider: true,
+            completionConstraint: AuthorityGrantCompletionConstraintKind.FirstBoundRunCompletion);
+
+        await using (var runtime = await fixture.CreateRuntimeAsync())
+        {
+            var invocation = runtime.InvokeGovernedLoopAsync(
+                fixture.Input("invoke-first-bound-publication-conflict", "conflict before publication"));
+            await fixture.WaitForProviderAsync();
+            await new ConversationMemoryStore(fixture.Paths).AppendMessageAsync(
+                LlmMessage.User("interleaving durable conversation message"));
+            fixture.ReleaseProvider();
+
+            var failed = await invocation;
+            Assert.Equal("Failed", failed.ExecutionStatus);
+            Assert.Equal(CustomLoopRunStatus.Failed.ToString(), failed.Run?.Status);
+            Assert.Equal("conversation_publication_failed", failed.Run?.FailureCode);
+            Assert.Equal(1, fixture.ProviderAttempts);
+        }
+
+        await using var restarted = await fixture.CreateRuntimeAsync(preserveCurrentConversation: true);
+        var completed = await restarted.InvokeGovernedLoopAsync(
+            fixture.Input("invoke-first-bound-after-publication-conflict", "complete after publication conflict"));
+
+        Assert.True(string.Equals("Executed", completed.Status, StringComparison.Ordinal), completed.Detail);
+        Assert.Equal("Completed", completed.ExecutionStatus);
+        Assert.Equal(CustomLoopRunStatus.Completed.ToString(), completed.Run?.Status);
+        Assert.Equal(2, fixture.ProviderAttempts);
+    }
+
+    [Fact]
     public async Task Definitive_authority_rejection_replays_after_restart_without_materialization_or_provider_work()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(includeRestrictedGrant: true);
@@ -369,9 +500,12 @@ public sealed class GovernedLoopRuntimeTests
             bool includeRestrictedGrant = false,
             bool pauseProvider = false,
             int inferenceSteps = 1,
-            TimeSpan? grantLifetime = null)
+            TimeSpan? grantLifetime = null,
+            AuthorityGrantCompletionConstraintKind completionConstraint = AuthorityGrantCompletionConstraintKind.None,
+            int failFirstAttempts = 0)
         {
             Assert.InRange(inferenceSteps, 1, 2);
+            Assert.InRange(failFirstAttempts, 0, 2);
             var workspace = new TestWorkspace();
             try
             {
@@ -379,11 +513,27 @@ public sealed class GovernedLoopRuntimeTests
                 var paths = new WorkspacePaths(workspace.RootPath);
                 var role = await CreateRoleAsync(paths);
                 var publication = await CreatePublishedGraphAsync(workspace, paths, role, inferenceSteps);
-                var grant = await CreateGrantAsync(workspace, paths, role, publication, "governed-full-grant", FullCeiling(), grantLifetime);
+                var grant = await CreateGrantAsync(
+                    workspace,
+                    paths,
+                    role,
+                    publication,
+                    "governed-full-grant",
+                    FullCeiling(),
+                    grantLifetime,
+                    completionConstraint);
                 var restricted = includeRestrictedGrant
-                    ? await CreateGrantAsync(workspace, paths, role, publication, "governed-empty-grant", EmptyCeiling(), null)
+                    ? await CreateGrantAsync(
+                        workspace,
+                        paths,
+                        role,
+                        publication,
+                        "governed-empty-grant",
+                        EmptyCeiling(),
+                        null,
+                        AuthorityGrantCompletionConstraintKind.None)
                     : null;
-                var codexPath = await CreateCodexExecutableAsync(workspace, pauseProvider);
+                var codexPath = await CreateCodexExecutableAsync(workspace, pauseProvider, failFirstAttempts);
                 return new GovernedRuntimeFixture(workspace, publication, grant, restricted, codexPath);
             }
             catch
@@ -624,7 +774,8 @@ public sealed class GovernedLoopRuntimeTests
             GovernedLoopRevisionPublicationPin publication,
             string grantId,
             AuthorityCeiling requestedCeiling,
-            TimeSpan? grantLifetime)
+            TimeSpan? grantLifetime,
+            AuthorityGrantCompletionConstraintKind completionConstraint)
         {
             var trust = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
             var store = new AuthorityProfileStore(paths, trust);
@@ -681,7 +832,7 @@ public sealed class GovernedLoopRuntimeTests
                 new AuthorityGrantBoundary(
                     recordedAtUtc.AddMinutes(-1),
                     recordedAtUtc.Add(grantLifetime ?? TimeSpan.FromHours(12)),
-                    AuthorityGrantCompletionConstraintKind.None),
+                    completionConstraint),
                 Actor(),
                 Purpose("Delegate one exact published governed loop."),
                 recordedAtUtc,
@@ -941,7 +1092,10 @@ public sealed class GovernedLoopRuntimeTests
             return revision!;
         }
 
-        private static async Task<string> CreateCodexExecutableAsync(TestWorkspace workspace, bool pauseProvider)
+        private static async Task<string> CreateCodexExecutableAsync(
+            TestWorkspace workspace,
+            bool pauseProvider,
+            int failFirstAttempts)
         {
             var scriptPath = workspace.File("fake-governed-codex.js");
             var commandPath = workspace.File(OperatingSystem.IsWindows() ? "fake-governed-codex.cmd" : "fake-governed-codex");
@@ -956,6 +1110,7 @@ public sealed class GovernedLoopRuntimeTests
                 const startedPath = {{startedPath}};
                 const releasePath = {{releasePath}};
                 const pauseEveryTurn = {{pauseEveryTurn}};
+                const failFirstAttempts = {{failFirstAttempts}};
 
                 if (process.argv.slice(2).includes("--version")) {
                   process.stdout.write("codex-cli compatible-governed-test\n");
@@ -1013,8 +1168,16 @@ public sealed class GovernedLoopRuntimeTests
                       const turnId = `turn-governed-${++turnNumber}`;
                       const userPrompt = prompt(message);
                       const attempts = fs.existsSync(counterPath) ? Number(fs.readFileSync(counterPath, "utf8")) : 0;
-                      fs.writeFileSync(counterPath, String(attempts + 1));
+                      const attemptNumber = attempts + 1;
+                      fs.writeFileSync(counterPath, String(attemptNumber));
                       write({ id: message.id, result: { turn: { id: turnId } } });
+                      if (attemptNumber <= failFirstAttempts) {
+                        write({
+                          method: "turn/completed",
+                          params: { threadId, turnId, turn: { id: turnId, status: "failed", error: { message: "planned governed provider failure" }, items: [] } }
+                        });
+                        break;
+                      }
                       const finish = () => complete(threadId, turnId, `governed response: ${userPrompt}`);
                       if (pauseEveryTurn && !fs.existsSync(releasePath)) {
                         fs.writeFileSync(startedPath, "started");
