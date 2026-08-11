@@ -214,9 +214,10 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         {
             Hash = EmbodySense.Core.Application.Tests.Governance.Authority.Grants.AuthorityGrantApplicationTestFixture.Capability(
                 unrelated.DescriptorIdentity.Id.Value,
-                hash: '8').Hash,
+                hash: '9').Hash,
         };
         var driftedPin = unrelated with { DescriptorIdentity = driftedIdentity };
+        Assert.NotEqual(unrelated, driftedPin);
         var capabilities = new StubEffectCapabilityAdmissionService
         {
             Result = new CapabilityRevalidationResult(
