@@ -41,6 +41,25 @@ public sealed class TriggerWorkerRuntimeFacadeTests
     }
 
     [Fact]
+    public void Malformed_trigger_operation_identity_stops_before_invocation()
+    {
+        var envelope = Envelope();
+        var lease = new TriggerWorkerLease("worker-1", 1, _workerAtUtc, _workerAtUtc.AddSeconds(30), 0);
+        var malformed = Intent(envelope, lease, new string('a', 64)) with { OperationId = "trigger-" + new string('A', 64) };
+
+        var preparation = TriggerCustomLoopDispatchProtocol.Prepare(envelope, malformed);
+        var response = new LoopRunInvocationResponse("Admitted", "Completed", true, Run(envelope, malformed.OperationId, "Completed"), [], "untrusted response");
+        var mapped = TriggerCustomLoopDispatchProtocol.Map(envelope, malformed, response);
+
+        Assert.Null(preparation.Input);
+        Assert.Null(preparation.ActorContext);
+        Assert.Equal(TriggerDispatchOutcome.NeedsReview, preparation.Rejection!.Outcome);
+        Assert.Contains("malformed operation identity", preparation.Rejection.Detail, StringComparison.Ordinal);
+        Assert.Equal(TriggerDispatchOutcome.NeedsReview, mapped.Outcome);
+        Assert.Null(mapped.GovernedInvocation);
+    }
+
+    [Fact]
     public void Governed_reference_and_invalid_utf8_are_proved_rejected_before_runner_invocation()
     {
         var lease = new TriggerWorkerLease("worker-1", 1, _workerAtUtc, _workerAtUtc.AddSeconds(30), 0);

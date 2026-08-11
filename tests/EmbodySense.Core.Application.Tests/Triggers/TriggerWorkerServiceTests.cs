@@ -387,6 +387,7 @@ public sealed class TriggerWorkerServiceTests
         Assert.Equal(first, replay);
         Assert.NotEqual(first, next);
         Assert.StartsWith("trigger-", first, StringComparison.Ordinal);
+        Assert.True(TriggerDispatchOperationId.IsValid(first));
         Assert.True(first.Length <= 120);
         Assert.Throws<ArgumentOutOfRangeException>(() => TriggerWorkerRequestHash.ComputeOperationId(deliveryId, 0));
         Assert.Throws<ArgumentNullException>(() => TriggerWorkerRequestHash.ComputeOperationId(null!, 1));
