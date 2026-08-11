@@ -74,7 +74,7 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
     private async Task<CapabilityAdmissionResult> AdmitUnderAuthorityAsync(CapabilityDependencyManifest requirements, string requirementsHash, IReadOnlyCollection<CapabilityId> allowedCapabilityIds, CancellationToken cancellationToken)
     {
         var catalog = await ReadCurrentCatalogAsync(cancellationToken);
-        if (!catalog.IsAvailable)
+        if (catalog.Status != CapabilityCatalogSnapshotStatus.Available)
         {
             return Rejected(catalog.Detail);
         }
@@ -136,12 +136,17 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
         var invalid = ValidateSnapshot(snapshot);
         if (invalid is not null)
         {
-            return Invalid(invalid);
+            return Invalid(CapabilityRevalidationStatus.InvalidSnapshot, invalid);
+        }
+
+        if (!string.Equals(snapshot.WorkspaceScopeId, _workspaceScopeId, StringComparison.Ordinal))
+        {
+            return Invalid(CapabilityRevalidationStatus.WorkspaceMismatch, "Capability admission evidence belongs to another workspace.");
         }
 
         if (!SelectedRootRequirementsAreAllowed(snapshot.Requirements, snapshot.Evidence, allowedCapabilityIds))
         {
-            return Invalid("Current loop or role authority is narrower than the immutable admitted capability pins.");
+            return Invalid(CapabilityRevalidationStatus.AuthorityNarrowed, "Current loop or role authority is narrower than the immutable admitted capability pins.");
         }
 
         return await _authorityTransaction.ExecuteAsync(transactionCancellationToken => RevalidateUnderAuthorityAsync(snapshot, allowedCapabilityIds, transactionCancellationToken), cancellationToken);
@@ -150,26 +155,72 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
     private async Task<CapabilityRevalidationResult> RevalidateUnderAuthorityAsync(CapabilityAdmissionSnapshot snapshot, IReadOnlyCollection<CapabilityId> allowedCapabilityIds, CancellationToken cancellationToken)
     {
         var catalog = await ReadCurrentCatalogAsync(cancellationToken);
-        if (!catalog.IsAvailable)
+        if (catalog.Status != CapabilityCatalogSnapshotStatus.Available)
         {
-            return Invalid(catalog.Detail);
+            var status = catalog.Status == CapabilityCatalogSnapshotStatus.Unavailable
+                ? CapabilityRevalidationStatus.CatalogUnavailable
+                : CapabilityRevalidationStatus.CatalogAmbiguous;
+            return Invalid(status, catalog.Detail);
         }
 
+        var currentPins = new List<CapabilityAdmissionPin>(snapshot.Pins.Count);
+        var observedPins = new List<CapabilityAdmissionPin>(snapshot.Pins.Count);
+        var stoppedStatus = CapabilityRevalidationStatus.Active;
+        string? stoppedDetail = null;
         foreach (var pin in snapshot.Pins)
         {
-            var entry = catalog.Entries.SingleOrDefault(item => AdmissionPinMatches(pin, item));
-            if (entry is null)
+            var sameId = catalog.Entries.Where(item => item.Descriptor.Id.Equals(pin.DescriptorIdentity.Id)).ToArray();
+            if (sameId.Length == 0)
             {
-                return Invalid($"Admitted capability `{pin.DescriptorIdentity.Id.Value}` is absent or its descriptor, implementation, or provenance drifted.");
+                SelectStoppedPosture(
+                    CapabilityRevalidationStatus.PinMissing,
+                    $"Admitted capability `{pin.DescriptorIdentity.Id.Value}` is absent from the current catalog.",
+                    ref stoppedStatus,
+                    ref stoppedDetail);
+                continue;
             }
 
-            if (!IsCurrentlyAvailable(entry))
+            var exact = sameId.Where(item => CapabilityDescriptorIdentity.TryCreate(item.Descriptor, out _, out _) && AdmissionPinMatches(pin, item)).ToArray();
+            if (sameId.Length != 1 || exact.Length != 1)
             {
-                return Invalid($"Admitted capability `{pin.DescriptorIdentity.Id.Value}` is disabled, unavailable, untrusted, uninstalled, host-incompatible, or removed.");
+                var status = sameId.Length != 1 ? CapabilityRevalidationStatus.CatalogAmbiguous : CapabilityRevalidationStatus.PinDrifted;
+                if (sameId.Length == 1 && IsCurrentlyAvailable(sameId[0]) && TryCreateCurrentPin(sameId[0], out var driftedPin))
+                {
+                    observedPins.Add(driftedPin!);
+                }
+
+                SelectStoppedPosture(
+                    status,
+                    $"Admitted capability `{pin.DescriptorIdentity.Id.Value}` did not resolve to one exact current descriptor, implementation, provenance, and safe description.",
+                    ref stoppedStatus,
+                    ref stoppedDetail);
+                continue;
             }
+
+            if (!IsCurrentlyAvailable(exact[0]))
+            {
+                SelectStoppedPosture(
+                    CapabilityRevalidationStatus.PinInactive,
+                    $"Admitted capability `{pin.DescriptorIdentity.Id.Value}` is disabled, unavailable, untrusted, uninstalled, host-incompatible, or removed.",
+                    ref stoppedStatus,
+                    ref stoppedDetail);
+                continue;
+            }
+
+            currentPins.Add(pin);
         }
 
-        return new CapabilityRevalidationResult(true, snapshot.Pins.ToArray(), "Every immutable admitted pin remains exact, currently available, and inside narrower authority.");
+        if (stoppedStatus != CapabilityRevalidationStatus.Active)
+        {
+            return Invalid(stoppedStatus, stoppedDetail!, currentPins.AsReadOnly(), observedPins.AsReadOnly());
+        }
+
+        return new CapabilityRevalidationResult(
+            true,
+            currentPins.AsReadOnly(),
+            "Every immutable admitted pin remains exact, currently available, and inside narrower authority.",
+            CapabilityRevalidationStatus.Active,
+            []);
     }
 
     private string? ValidateSnapshot(CapabilityAdmissionSnapshot snapshot)
@@ -178,11 +229,6 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
         if (structural is not null)
         {
             return structural;
-        }
-
-        if (!string.Equals(snapshot.WorkspaceScopeId, _workspaceScopeId, StringComparison.Ordinal))
-        {
-            return "Capability admission evidence belongs to another workspace.";
         }
 
         return null;
@@ -198,13 +244,13 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
             var read = await _catalogStore.ReadAsync(cursor, PageSize, cancellationToken);
             if (read.Status != CapabilityCatalogReadStatus.Available || read.Page is null)
             {
-                return new CatalogSnapshot(false, [], "The current capability catalog is unavailable; last-proved or partial state cannot authorize a new effect.");
+                return new CatalogSnapshot(CapabilityCatalogSnapshotStatus.Unavailable, [], "The current capability catalog is unavailable; last-proved or partial state cannot authorize a new effect.");
             }
 
             revision ??= read.Page.CatalogRevision;
             if (revision != read.Page.CatalogRevision || entries.Count + read.Page.Entries.Count > CapabilityDependencyResolutionLimits.Default.MaximumCandidates)
             {
-                return new CatalogSnapshot(false, [], "The capability catalog changed during its bounded read or exceeded the admission limit.");
+                return new CatalogSnapshot(CapabilityCatalogSnapshotStatus.Ambiguous, [], "The capability catalog changed during its bounded read or exceeded the admission limit.");
             }
 
             entries.AddRange(read.Page.Entries);
@@ -212,7 +258,7 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
         }
         while (cursor is not null);
 
-        return new CatalogSnapshot(true, entries, "The current proved catalog was read completely.");
+        return new CatalogSnapshot(CapabilityCatalogSnapshotStatus.Available, entries, "The current proved catalog was read completely.");
     }
 
     private bool IsCurrentlyAvailable(CapabilityCatalogEntry entry)
@@ -248,6 +294,46 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
             && pin.Artifact.Signature is null;
     }
 
+    private static bool TryCreateCurrentPin(CapabilityCatalogEntry entry, out CapabilityAdmissionPin? pin)
+    {
+        pin = null;
+        if (!CapabilityDescriptorIdentity.TryCreate(entry.Descriptor, out var identity, out _))
+        {
+            return false;
+        }
+
+        pin = new CapabilityAdmissionPin(
+            identity!,
+            entry.Descriptor.Kind,
+            entry.Descriptor.Implementation,
+            entry.Descriptor.Provenance,
+            new CapabilityDependencyArtifactMetadata(null, null),
+            entry.Descriptor.Purpose);
+        return true;
+    }
+
+    private static void SelectStoppedPosture(
+        CapabilityRevalidationStatus candidate,
+        string detail,
+        ref CapabilityRevalidationStatus selected,
+        ref string? selectedDetail)
+    {
+        if (RevalidationPriority(candidate) > RevalidationPriority(selected))
+        {
+            selected = candidate;
+            selectedDetail = detail;
+        }
+    }
+
+    private static int RevalidationPriority(CapabilityRevalidationStatus status) => status switch
+    {
+        CapabilityRevalidationStatus.CatalogAmbiguous => 4,
+        CapabilityRevalidationStatus.PinDrifted => 3,
+        CapabilityRevalidationStatus.PinInactive => 2,
+        CapabilityRevalidationStatus.PinMissing => 1,
+        _ => 0,
+    };
+
     private static bool SelectedRootRequirementsAreAllowed(CapabilityDependencyManifest requirements, IReadOnlyList<CapabilityDependencyResolutionEvidence> evidence, IReadOnlyCollection<CapabilityId> allowedCapabilityIds)
     {
         var allowed = allowedCapabilityIds.Select(item => item.Value).ToHashSet(StringComparer.Ordinal);
@@ -262,7 +348,13 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
 
     private static CapabilityAdmissionResult Rejected(string detail) => new(false, null, detail);
 
-    private static CapabilityRevalidationResult Invalid(string detail) => new(false, [], detail);
+    private static CapabilityRevalidationResult Invalid(
+        CapabilityRevalidationStatus status,
+        string detail,
+        IReadOnlyList<CapabilityAdmissionPin>? effectivePins = null,
+        IReadOnlyList<CapabilityAdmissionPin>? observedPins = null)
+        => new(false, effectivePins ?? [], detail, status, observedPins ?? []);
 
-    private sealed record CatalogSnapshot(bool IsAvailable, IReadOnlyList<CapabilityCatalogEntry> Entries, string Detail);
+    private sealed record CatalogSnapshot(CapabilityCatalogSnapshotStatus Status, IReadOnlyList<CapabilityCatalogEntry> Entries, string Detail);
+
 }

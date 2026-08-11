@@ -23,6 +23,7 @@ public sealed class AuthorityGrantResolverTests
 
         Assert.Equal(AuthorityGrantResolutionStatus.Active, result.Status);
         Assert.Equal(harness.Snapshot.CurrentGrant, result.Grant);
+        Assert.Equal(harness.Snapshot.CurrentGrant, result.CurrentGrant);
         Assert.Equal(harness.Snapshot.CurrentGrant.RequestedCeiling, result.EffectiveCeiling);
         Assert.Equal(64, result.DependencyEvidenceHash.Length);
         Assert.Equal(AuthorityGrantApplicationTestFixture.Now, result.EvaluatedAtUtc);
@@ -91,7 +92,8 @@ public sealed class AuthorityGrantResolverTests
 
         Assert.Equal(AuthorityGrantResolutionStatus.Stale, result.Status);
         Assert.Equal(first, result.Grant);
-        Assert.Equal(second, harness.Snapshot.CurrentGrant);
+        Assert.Equal(second, result.CurrentGrant);
+        Assert.NotEqual(result.Grant, result.CurrentGrant);
         Assert.Equal(0, harness.Profile.Calls);
     }
 
