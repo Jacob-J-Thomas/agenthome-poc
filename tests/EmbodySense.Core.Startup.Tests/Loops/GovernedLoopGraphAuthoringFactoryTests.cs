@@ -8,6 +8,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
@@ -16,6 +17,7 @@ using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
+using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
@@ -170,15 +172,15 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
     }
 
     [Fact]
-    public async Task Built_in_catalog_admits_representative_linear_pure_topology_and_bounded_cycle_graphs()
+    public async Task Built_in_catalog_admits_runtime_executable_linear_pure_topology_and_bounded_cycle_graphs()
     {
         var candidates = new (string Name, GovernedLoopGraphCandidate Candidate)[]
         {
-            ("linear", Candidate()),
-            ("transform", IdentityTransformCandidate()),
-            ("validate", SchemaConformanceCandidate()),
-            ("condition-join", ConditionJoinCandidate()),
-            ("bounded-cycle", BoundedCycleCandidate()),
+            ("linear", RuntimeExecutable(Candidate())),
+            ("transform", RuntimeExecutable(IdentityTransformCandidate())),
+            ("validate", RuntimeExecutable(SchemaConformanceCandidate())),
+            ("condition-join", RuntimeExecutable(ConditionJoinCandidate())),
+            ("bounded-cycle", RuntimeExecutable(BoundedCycleCandidate())),
         };
 
         foreach (var (name, candidate) in candidates)
@@ -189,6 +191,10 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
                 result.Status == GovernedLoopGraphAuthoringStatus.Committed,
                 $"The built-in catalog rejected the {name} graph:{Environment.NewLine}{string.Join(Environment.NewLine, result.GraphValidationErrors.Select(error => $"{error.Code}: {error.Element.Path}"))}");
             Assert.Matches("^[0-9a-f]{64}$", result.GraphValidationEvidenceHash);
+            var plan = GovernedLoopSequentialPlanBuilder.Build(Artifact(candidate));
+            Assert.True(
+                plan.Status == GovernedLoopSequentialPlanBuildStatus.Ready,
+                $"The built-in catalog admitted the {name} graph, but the executable runtime rejected `{plan.FailurePath}` with `{plan.Status}`.");
         }
     }
 
@@ -648,6 +654,31 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
         GovernedLoopBindingKind kind,
         string valueSchemaId = "text")
         => new(id, direction, kind, valueSchemaId, true);
+
+    private static GovernedLoopGraphCandidate RuntimeExecutable(GovernedLoopGraphCandidate candidate)
+        => candidate with
+        {
+            AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(
+                [ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
+        };
+
+    private static GovernedLoopGraphRevisionArtifact Artifact(GovernedLoopGraphCandidate candidate)
+    {
+        var normalized = GovernedLoopGraphNormalizer.Normalize(candidate);
+        var graph = Assert.IsType<GovernedLoopGraphDefinition>(normalized.Graph);
+        var revision = GovernedLoopRevisionArtifactFactory.Create(
+            1,
+            graph.RevisionReference,
+            null,
+            null,
+            $"create-{graph.GraphId}",
+            "actor-1",
+            _now);
+        return GovernedLoopGraphRevisionArtifactFactory.Create(
+            GovernedLoopGraphRevisionArtifact.CurrentSchemaVersion,
+            revision,
+            graph);
+    }
 
     private static GovernedLoopNodeCatalogSnapshot Catalog(GovernedLoopGraphCandidate candidate)
     {
