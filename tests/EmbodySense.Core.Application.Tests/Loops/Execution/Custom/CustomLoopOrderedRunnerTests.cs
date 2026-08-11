@@ -44,6 +44,8 @@ using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Authority;
 using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Revisions;
@@ -137,6 +139,41 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal("final outcome", publication.CanonicalOutput);
         Assert.True(Array.FindIndex(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted && item.StepId == "infer-01")
             < Array.FindIndex(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted && item.Detail.Contains("infer-01", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task Canonical_adapter_executes_transform_and_validate_nodes_without_provider_dispatch()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact(role));
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("governed answer"));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.True(result.Status == CustomLoopOrderedRunStatus.Completed, result.Detail);
+        Assert.Equal("governed answer", result.Run!.FinalOutput);
+        Assert.Equal(["infer"], executor.Requests.Select(item => item.StepId));
+        Assert.Equal(["trigger", "identity", "infer", "validate-length", "exit"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        var pureStarts = result.Run.Events.Where(item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted
+            && item.StepId is "identity" or "validate-length").ToArray();
+        Assert.Equal(2, pureStarts.Length);
+        Assert.All(pureStarts, item => Assert.Equal(CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes, item.TraceReservationUtf8Bytes));
+        var outcomes = result.Run.Events.Where(item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted
+            && item.PureNodeOutcomeJson is not null).ToArray();
+        Assert.Equal(2, outcomes.Length);
+        Assert.All(outcomes, item => Assert.True(GovernedLoopPureNodeOutcome.TryDeserialize(context.Artifact.Graph, item.PureNodeOutcomeJson!, out _, out _)));
+        var validation = Assert.Single(outcomes, item => item.StepId == "validate-length");
+        Assert.True(GovernedLoopPureNodeOutcome.TryDeserialize(context.Artifact.Graph, validation.PureNodeOutcomeJson!, out var validationOutcome, out _));
+        Assert.True(validationOutcome!.ValidationEvidence!.Passed);
     }
 
     [Fact]
@@ -4933,7 +4970,8 @@ public sealed class CustomLoopOrderedRunnerTests
 
     private static async Task<SequentialTestContext> SequentialContextAsync(
         CustomLoopRunRecord run,
-        AuthorityGrantCompletionConstraintKind completionConstraint = AuthorityGrantCompletionConstraintKind.None)
+        AuthorityGrantCompletionConstraintKind completionConstraint = AuthorityGrantCompletionConstraintKind.None,
+        Func<EmbodySense.Core.Common.ContextualRoles.Models.ContextualRoleRevisionPin, GovernedLoopGraphRevisionArtifact>? artifactFactory = null)
     {
         var seedHarness = GovernedLoopAdmissionTestHarness.Create(
             completionConstraint: completionConstraint,
@@ -4942,11 +4980,12 @@ public sealed class CustomLoopOrderedRunnerTests
         var seedOutcome = Assert.IsType<GovernedLoopAdmissionTerminalOutcome>((await seedHarness.CreateService().AdmitAsync(seedHarness.Request)).Outcome);
         var seedReceipt = Assert.IsType<GovernedLoopAdmissionReceipt>(seedOutcome.Receipt);
         var inferenceIds = run.AdmittedDefinition.InferenceSteps.Select(step => step.Id).ToArray();
-        var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(
-            inferenceIds.Length,
-            inferenceIds,
-            owningRole: seedReceipt.Intent.Role,
-            allowWorkspaceTools: run.AdmittedDefinition.ToolAssignments.Length > 0);
+        var artifact = artifactFactory?.Invoke(seedReceipt.Intent.Role)
+            ?? GovernedLoopSequentialApplicationTestFixture.LinearArtifact(
+                inferenceIds.Length,
+                inferenceIds,
+                owningRole: seedReceipt.Intent.Role,
+                allowWorkspaceTools: run.AdmittedDefinition.ToolAssignments.Length > 0);
         var publication = GovernedLoopRevisionPublicationPinFactory.Create(
             1,
             artifact.RevisionArtifact.Revision,
@@ -5594,6 +5633,7 @@ public sealed class CustomLoopOrderedRunnerTests
             {
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Trigger => orderedEvent?.Kind == CustomLoopRunEventKind.Admitted,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Inference => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
+                EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Transform or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Validate => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Exit => orderedEvent?.Kind is CustomLoopRunEventKind.ExitDecisionCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
                 _ => false,
             };

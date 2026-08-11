@@ -78,7 +78,7 @@ internal static class GovernedLoopSequentialApplicationTestFixture
                     : [ConversationTurnCapabilityId, ModelInferenceCapabilityId]));
     }
 
-    internal static GovernedLoopGraphRevisionArtifact MixedPureArtifact()
+    internal static GovernedLoopGraphRevisionArtifact MixedPureArtifact(ContextualRoleRevisionPin? owningRole = null)
     {
         var nodes = new GovernedLoopNodeDefinition[]
         {
@@ -111,6 +111,7 @@ internal static class GovernedLoopSequentialApplicationTestFixture
                 new GovernedLoopControlEdgeDefinition("validation-to-exit", "validate-length", "exit", GovernedLoopControlCondition.Success)
             ],
             ["exit"],
+            owningRole,
             bindings:
             [
                 new GovernedLoopBindingDefinition("request-to-identity", GovernedLoopBindingKind.Data, "trigger", "request", "identity", GovernedLoopPureNodeVocabulary.InputPort),
