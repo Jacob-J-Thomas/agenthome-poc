@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Graph;
@@ -11,7 +13,7 @@ public sealed class GovernedLoopGraphDefinition
         string graphId,
         string revisionId,
         string purpose,
-        string owningRoleId,
+        ContextualRoleRevisionPin owningRole,
         string entryNodeId,
         string[] terminalNodeIds,
         GovernedLoopAuthorityCeiling authorityCeiling,
@@ -25,7 +27,7 @@ public sealed class GovernedLoopGraphDefinition
         GraphId = graphId;
         RevisionId = revisionId;
         Purpose = purpose;
-        OwningRoleId = owningRoleId;
+        OwningRole = owningRole;
         EntryNodeId = entryNodeId;
         TerminalNodeIds = Array.AsReadOnly(terminalNodeIds);
         AuthorityCeiling = authorityCeiling;
@@ -54,9 +56,9 @@ public sealed class GovernedLoopGraphDefinition
     /// <summary>Gets the bounded canonical loop purpose.</summary>
     /// <value>The purpose available to governance and execution consumers.</value>
     public string Purpose { get; }
-    /// <summary>Gets the owning contextual role reference.</summary>
-    /// <value>The canonical role identifier.</value>
-    public string OwningRoleId { get; }
+    /// <summary>Gets the exact immutable contextual-role revision that owns the loop.</summary>
+    /// <value>The stable role identity, positive revision, and canonical semantic content hash.</value>
+    public ContextualRoleRevisionPin OwningRole { get; }
     /// <summary>Gets the explicit control-flow entry node.</summary>
     /// <value>The trigger node identifier.</value>
     public string EntryNodeId { get; }
@@ -96,7 +98,7 @@ public sealed class GovernedLoopGraphDefinition
     /// <param name="graphId">The stable graph identifier.</param>
     /// <param name="revisionId">The stable immutable revision identifier.</param>
     /// <param name="purpose">The canonical loop purpose.</param>
-    /// <param name="owningRoleId">The owning role reference.</param>
+    /// <param name="owningRole">The exact immutable owning-role revision.</param>
     /// <param name="entryNodeId">The trigger entry node identifier.</param>
     /// <param name="terminalNodeIds">The exit and fail terminal node identities.</param>
     /// <param name="authorityCeiling">The non-granting maximum loop authority.</param>
@@ -114,7 +116,7 @@ public sealed class GovernedLoopGraphDefinition
         string graphId,
         string revisionId,
         string purpose,
-        string owningRoleId,
+        ContextualRoleRevisionPin owningRole,
         string entryNodeId,
         IEnumerable<string> terminalNodeIds,
         GovernedLoopAuthorityCeiling authorityCeiling,
@@ -132,7 +134,7 @@ public sealed class GovernedLoopGraphDefinition
 
         GovernedLoopGraphRules.RequireId(graphId, nameof(graphId));
         GovernedLoopGraphRules.RequireId(revisionId, nameof(revisionId));
-        GovernedLoopGraphRules.RequireId(owningRoleId, nameof(owningRoleId));
+        RequireOwningRole(owningRole);
         GovernedLoopGraphRules.RequireId(entryNodeId, nameof(entryNodeId));
         GovernedLoopGraphRules.RequireText(purpose, nameof(purpose), CustomLoopLimits.MaxDescriptionCharacters, required: true);
         ArgumentNullException.ThrowIfNull(authorityCeiling);
@@ -149,7 +151,31 @@ public sealed class GovernedLoopGraphDefinition
         var canonicalBindings = ValidateBindings(bindings, canonicalNodes);
         var canonicalOutput = ValidateOutput(outputContract, canonicalNodes, canonicalSchemas);
         var canonicalDisplay = ValidateDisplay(displayMetadata, nodeById);
-        return new GovernedLoopGraphDefinition(graphId, revisionId, purpose, owningRoleId, entryNodeId, canonicalTerminals, authorityCeiling, canonicalSchemas, canonicalNodes, canonicalEdges, canonicalBindings, canonicalOutput, canonicalDisplay);
+        var canonicalOwningRole = new ContextualRoleRevisionPin(
+            new ContextualRoleRevisionIdentity(owningRole.Identity.RoleId, owningRole.Identity.Revision),
+            owningRole.ContentHash);
+        return new GovernedLoopGraphDefinition(graphId, revisionId, purpose, canonicalOwningRole, entryNodeId, canonicalTerminals, authorityCeiling, canonicalSchemas, canonicalNodes, canonicalEdges, canonicalBindings, canonicalOutput, canonicalDisplay);
+    }
+
+    private static void RequireOwningRole(ContextualRoleRevisionPin owningRole)
+    {
+        ArgumentNullException.ThrowIfNull(owningRole);
+        ArgumentNullException.ThrowIfNull(owningRole.Identity);
+        if (!ContextualRoleId.IsValid(owningRole.Identity.RoleId))
+        {
+            throw new ArgumentException("The owning role identifier must be canonical.", nameof(owningRole));
+        }
+
+        if (owningRole.Identity.Revision < 1)
+        {
+            throw new ArgumentException("The owning role revision must be positive.", nameof(owningRole));
+        }
+
+        if (owningRole.ContentHash is not { Length: ContextualRoleLimits.Sha256HexCharacters }
+            || owningRole.ContentHash.Any(character => character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+        {
+            throw new ArgumentException("The owning role content hash must be a canonical lowercase SHA-256 digest.", nameof(owningRole));
+        }
     }
 
     private static GovernedLoopValueSchemaDefinition[] ValidateSchemas(IEnumerable<GovernedLoopValueSchemaDefinition> schemas)

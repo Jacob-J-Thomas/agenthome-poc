@@ -29,7 +29,7 @@ public sealed class GovernedLoopGraphRevisionContractHashTests
         var artifact = Artifact(GovernedLoopGraphTestFixture.Create());
 
         Assert.Equal("c7ebd67190f910cda7016b2db89d3a69124b5333a638d8075ed0bcb42c59de35", artifact.LayoutHash);
-        Assert.Equal("31ca1e9ff71c03a116f1506b4ff758e0fcc00218b1b123da48937dbbd6c4dafb", artifact.ArtifactHash);
+        Assert.Equal("31fd4f8c1e857656e39918ae800f43cdbd8903b78f805650b6afd95a0dd73c52", artifact.ArtifactHash);
     }
 
     [Fact]
@@ -76,6 +76,26 @@ public sealed class GovernedLoopGraphRevisionContractHashTests
         Assert.Equal(original.LayoutHash, changed.LayoutHash);
         Assert.NotEqual(original.Graph.ExecutableHash, changed.Graph.ExecutableHash);
         Assert.NotEqual(original.ArtifactHash, changed.ArtifactHash);
+    }
+
+    [Fact]
+    public void Owning_role_pin_changes_executable_and_full_identity_but_not_layout_identity()
+    {
+        var original = Artifact(GovernedLoopGraphTestFixture.Create());
+        var roleVariants = new[]
+        {
+            GovernedLoopGraphTestFixture.Role("writer"),
+            GovernedLoopGraphTestFixture.Role(revision: 2),
+            GovernedLoopGraphTestFixture.Role(contentHash: 'b'),
+        };
+
+        foreach (var role in roleVariants)
+        {
+            var changed = Artifact(GovernedLoopGraphTestFixture.Create(owningRole: role));
+            Assert.Equal(original.LayoutHash, changed.LayoutHash);
+            Assert.NotEqual(original.Graph.ExecutableHash, changed.Graph.ExecutableHash);
+            Assert.NotEqual(original.ArtifactHash, changed.ArtifactHash);
+        }
     }
 
     [Fact]

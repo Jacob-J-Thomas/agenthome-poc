@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -9,11 +10,14 @@ public sealed class GovernedLoopGraphDefinitionTests
     [Fact]
     public void Valid_graph_is_canonical_bounded_and_explicit()
     {
-        var graph = GovernedLoopGraphTestFixture.Create();
+        var owningRole = GovernedLoopGraphTestFixture.Role();
+        var graph = GovernedLoopGraphTestFixture.Create(owningRole: owningRole);
 
         Assert.Equal(1, graph.SchemaVersion);
         Assert.Equal("research-loop", graph.GraphId);
-        Assert.Equal("researcher", graph.OwningRoleId);
+        Assert.Equal(GovernedLoopGraphTestFixture.Role(), graph.OwningRole);
+        Assert.NotSame(owningRole, graph.OwningRole);
+        Assert.NotSame(owningRole.Identity, graph.OwningRole.Identity);
         Assert.Equal(["model-inference", "workspace-read"], graph.AuthorityCeiling.CapabilityIds);
         Assert.Contains(graph.Bindings, binding => binding.Kind == GovernedLoopBindingKind.Data);
         Assert.Contains(graph.Bindings, binding => binding.Kind == GovernedLoopBindingKind.Context);
@@ -21,6 +25,15 @@ public sealed class GovernedLoopGraphDefinitionTests
         Assert.Equal(graph.ExecutableHash, graph.RevisionReference.ExecutableHash);
         Assert.Equal(graph.RevisionId, graph.RevisionReference.RevisionId);
         Assert.Equal(1, graph.RevisionReference.SchemaVersion);
+    }
+
+    [Fact]
+    public void Owning_role_requires_an_exact_canonical_revision_pin()
+    {
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphTestFixture.Create(owningRole: new ContextualRoleRevisionPin(null!, new string('a', 64))));
+        Assert.Throws<ArgumentException>(() => GovernedLoopGraphTestFixture.Create(owningRole: GovernedLoopGraphTestFixture.Role("INVALID")));
+        Assert.Throws<ArgumentException>(() => GovernedLoopGraphTestFixture.Create(owningRole: GovernedLoopGraphTestFixture.Role(revision: 0)));
+        Assert.Throws<ArgumentException>(() => GovernedLoopGraphTestFixture.Create(owningRole: GovernedLoopGraphTestFixture.Role(contentHash: 'A')));
     }
 
     [Fact]

@@ -21,7 +21,12 @@ public static class GovernedLoopExecutableHash
         writer.WriteNumber("schemaVersion", graph.SchemaVersion);
         writer.WriteString("purpose", graph.Purpose);
         writer.WriteString("entryNodeId", graph.EntryNodeId);
-        writer.WriteString("owningRoleId", graph.OwningRoleId);
+        writer.WritePropertyName("owningRole");
+        writer.WriteStartObject();
+        writer.WriteString("contentHash", graph.OwningRole.ContentHash);
+        writer.WriteNumber("revision", graph.OwningRole.Identity.Revision);
+        writer.WriteString("roleId", graph.OwningRole.Identity.RoleId);
+        writer.WriteEndObject();
         WriteStrings(writer, "terminalNodeIds", graph.TerminalNodeIds);
         WriteAuthority(writer, graph.AuthorityCeiling);
         WriteSchemas(writer, graph.ValueSchemas);

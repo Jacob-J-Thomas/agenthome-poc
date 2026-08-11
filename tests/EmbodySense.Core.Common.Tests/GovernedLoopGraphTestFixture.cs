@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
@@ -9,7 +10,7 @@ internal static class GovernedLoopGraphTestFixture
         string graphId = "research-loop",
         string revisionId = "revision-1",
         string purpose = "Research one question within explicit context and authority.",
-        string owningRoleId = "researcher",
+        ContextualRoleRevisionPin? owningRole = null,
         string entryNodeId = "trigger",
         IEnumerable<string>? terminalNodeIds = null,
         GovernedLoopAuthorityCeiling? authorityCeiling = null,
@@ -28,8 +29,19 @@ internal static class GovernedLoopGraphTestFixture
         bindings ??= Bindings();
         output ??= Output();
         display ??= Display();
+        owningRole ??= Role();
         terminalNodeIds ??= ["exit"];
-        return GovernedLoopGraphDefinition.Create(schemaVersion, graphId, revisionId, purpose, owningRoleId, entryNodeId, terminalNodeIds, authorityCeiling, schemas, nodes, edges, bindings, output, display);
+        return GovernedLoopGraphDefinition.Create(schemaVersion, graphId, revisionId, purpose, owningRole, entryNodeId, terminalNodeIds, authorityCeiling, schemas, nodes, edges, bindings, output, display);
+    }
+
+    public static ContextualRoleRevisionPin Role(
+        string roleId = "researcher",
+        int revision = 1,
+        char contentHash = 'a')
+    {
+        return new ContextualRoleRevisionPin(
+            new ContextualRoleRevisionIdentity(roleId, revision),
+            new string(contentHash, 64));
     }
 
     public static GovernedLoopValueSchemaDefinition[] Schemas()

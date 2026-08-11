@@ -11,6 +11,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models;
@@ -70,6 +71,32 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         Assert.DoesNotContain("createdAtUtc", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("createdByActorId", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("creationOperationId", payload, StringComparison.Ordinal);
+        using var payloadJson = JsonDocument.Parse(payload);
+        var executableGraph = payloadJson.RootElement.GetProperty("executableGraph");
+        Assert.Equal(
+            ["schemaVersion", "graphId", "revisionId", "purpose", "owningRole", "entryNodeId"],
+            executableGraph.EnumerateObject().Take(6).Select(property => property.Name));
+        var owningRole = executableGraph.GetProperty("owningRole");
+        Assert.Equal(["contentHash", "revision", "roleId"], owningRole.EnumerateObject().Select(property => property.Name));
+        Assert.Equal(graph.OwningRole.ContentHash, owningRole.GetProperty("contentHash").GetString());
+        Assert.Equal(graph.OwningRole.Identity.Revision, owningRole.GetProperty("revision").GetInt32());
+        Assert.Equal(graph.OwningRole.Identity.RoleId, owningRole.GetProperty("roleId").GetString());
+        Assert.DoesNotContain("owningRoleId", payload, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Payload_hash_binds_every_exact_owning_role_pin_component()
+    {
+        var baseline = Graph();
+        var baselineHash = GovernedLoopGraphRevisionStoreJson.ComputePayloadHash(baseline);
+        var variants = new[]
+        {
+            Graph(owningRole: Role("writer", 1, 'a')),
+            Graph(owningRole: Role("researcher", 2, 'a')),
+            Graph(owningRole: Role("researcher", 1, 'b')),
+        };
+
+        Assert.All(variants, graph => Assert.NotEqual(baselineHash, GovernedLoopGraphRevisionStoreJson.ComputePayloadHash(graph)));
     }
 
     [Fact]
@@ -378,6 +405,9 @@ public sealed class GovernedLoopGraphRevisionStoreTests
     [InlineData("unknown")]
     [InlineData("noncanonical")]
     [InlineData("raw-content-digest")]
+    [InlineData("legacy-owning-role")]
+    [InlineData("mixed-owning-role")]
+    [InlineData("malformed-owning-role")]
     public async Task Malformed_or_noncanonical_payloads_are_never_projected(string corruption)
     {
         using var workspace = new TestWorkspace();
@@ -398,6 +428,9 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             "unknown" => Encoding.UTF8.GetBytes(text.Replace("{\n", "{\n  \"unknown\": true,\n", StringComparison.Ordinal)),
             "noncanonical" => Encoding.UTF8.GetBytes(text.Replace("\n", "\r\n", StringComparison.Ordinal)),
             "raw-content-digest" => Encoding.UTF8.GetBytes(text.Replace("\"contentDigest\": \"sha256:", "\"contentDigest\": \"", StringComparison.Ordinal)),
+            "legacy-owning-role" => Encoding.UTF8.GetBytes(ReplaceOwningRole(text, "\"owningRoleId\": \"researcher\"")),
+            "mixed-owning-role" => Encoding.UTF8.GetBytes(text.Replace("\"owningRole\": {", "\"owningRoleId\": \"researcher\",\n    \"owningRole\": {", StringComparison.Ordinal)),
+            "malformed-owning-role" => Encoding.UTF8.GetBytes(text.Replace("\"revision\": 1", "\"revision\": 0", StringComparison.Ordinal)),
             _ => throw new ArgumentOutOfRangeException(nameof(corruption)),
         };
         await File.WriteAllBytesAsync(path, bytes);
@@ -1368,7 +1401,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             new FixedAuthorityProvider(new GovernedLoopAuthoritySnapshot(
                 true,
                 "authority-one",
-                graph.OwningRoleId,
+                graph.OwningRole.Identity.RoleId,
                 graph.AuthorityCeiling.CapabilityIds,
                 CustomLoopLimits.MaxGraphNodeAttempts,
                 100_000,
@@ -1388,7 +1421,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             graph.GraphId,
             graph.RevisionId,
             graph.Purpose,
-            graph.OwningRoleId,
+            graph.OwningRole,
             graph.EntryNodeId,
             graph.TerminalNodeIds,
             graph.AuthorityCeiling,
@@ -1425,13 +1458,14 @@ public sealed class GovernedLoopGraphRevisionStoreTests
     private static GovernedLoopGraphDefinition Graph(
         string graphId = "graph-one",
         string revisionId = "revision-one",
-        GovernedLoopDisplayMetadata? display = null)
+        GovernedLoopDisplayMetadata? display = null,
+        ContextualRoleRevisionPin? owningRole = null)
         => GovernedLoopGraphDefinition.Create(
             1,
             graphId,
             revisionId,
             "Answer one bounded request.",
-            "researcher",
+            owningRole ?? Role(),
             "trigger",
             ["exit"],
             GovernedLoopAuthorityCeiling.Create(["model-inference"]),
@@ -1519,7 +1553,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             "all-enums-graph",
             "all-enums-revision",
             "Round-trip every closed schema-one graph discriminator.",
-            "researcher",
+            Role(),
             "trigger",
             ["exit", "fail"],
             GovernedLoopAuthorityCeiling.Create(["model-inference"]),
@@ -1543,6 +1577,22 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                 "Return the result.",
                 [new GovernedLoopOutputDefinition("result", "text", "exit", "published", true)]),
             new GovernedLoopDisplayMetadata("All enums", "Every closed discriminator.", display));
+    }
+
+    private static ContextualRoleRevisionPin Role(
+        string roleId = "researcher",
+        int revision = 1,
+        char contentHash = 'a')
+        => new(new ContextualRoleRevisionIdentity(roleId, revision), new string(contentHash, 64));
+
+    private static string ReplaceOwningRole(string json, string replacement)
+    {
+        const string StartMarker = "    \"owningRole\": {";
+        const string EndMarker = "    },\n    \"entryNodeId\"";
+        var start = json.IndexOf(StartMarker, StringComparison.Ordinal);
+        var end = json.IndexOf(EndMarker, start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start);
+        return json[..start] + "    " + replacement + ",\n    \"entryNodeId\"" + json[(end + EndMarker.Length)..];
     }
 
     private static GovernedLoopDisplayMetadata Display(string name, int x, int y)

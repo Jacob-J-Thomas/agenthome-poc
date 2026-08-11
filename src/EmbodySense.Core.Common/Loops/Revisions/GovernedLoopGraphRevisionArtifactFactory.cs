@@ -85,7 +85,7 @@ public static class GovernedLoopGraphRevisionArtifactFactory
             graph.GraphId,
             graph.RevisionId,
             graph.Purpose,
-            graph.OwningRoleId,
+            graph.OwningRole,
             graph.EntryNodeId,
             graph.TerminalNodeIds,
             graph.AuthorityCeiling,

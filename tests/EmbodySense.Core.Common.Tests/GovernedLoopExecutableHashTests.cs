@@ -8,7 +8,7 @@ public sealed class GovernedLoopExecutableHashTests
     [Fact]
     public void Canonical_schema_one_hash_is_pinned()
     {
-        Assert.Equal("7070f926faefd98b1ccd517e6a1a8b0070f6a3385ec224f6db157cf4ea45b0dc", GovernedLoopGraphTestFixture.Create().ExecutableHash);
+        Assert.Equal("6ffe63101d6747b8d5cc8ed212b16e2a32c16ca31f4bc4efc14c3d4f29339faa", GovernedLoopGraphTestFixture.Create().ExecutableHash);
     }
 
     [Fact]
@@ -94,6 +94,16 @@ public sealed class GovernedLoopExecutableHashTests
         Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(purpose: "Perform a different governed purpose.").ExecutableHash);
         Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(authorityCeiling: GovernedLoopAuthorityCeiling.Create(["model-inference"]), nodes: nodes.Select(node => node.Id == "infer" ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(["model-inference"]) } : node)).ExecutableHash);
         Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(nodes: nodes).ExecutableHash);
+    }
+
+    [Fact]
+    public void Every_owning_role_pin_component_changes_executable_identity()
+    {
+        var expected = GovernedLoopGraphTestFixture.Create().ExecutableHash;
+
+        Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(owningRole: GovernedLoopGraphTestFixture.Role("writer")).ExecutableHash);
+        Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(owningRole: GovernedLoopGraphTestFixture.Role(revision: 2)).ExecutableHash);
+        Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(owningRole: GovernedLoopGraphTestFixture.Role(contentHash: 'b')).ExecutableHash);
     }
 
     [Fact]

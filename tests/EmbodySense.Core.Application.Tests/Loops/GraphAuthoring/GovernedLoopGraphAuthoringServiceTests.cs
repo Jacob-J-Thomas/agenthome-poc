@@ -6,6 +6,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -145,6 +146,22 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
         Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, executableResult.Status);
         Assert.Equal(GovernedLoopGraphRevisionChangeKind.Executable, executableResult.ChangeKind);
         Assert.Equal(3, store.Snapshot(first.GraphId!)!.Artifacts.Count);
+    }
+
+    [Fact]
+    public void Authoring_request_hash_binds_every_exact_owning_role_pin_component()
+    {
+        var baseline = Candidate("revision-1");
+        var lifecycle = Create("create", baseline);
+        var expected = GovernedLoopGraphAuthoringRequestHash.Compute(lifecycle, baseline.Normalize());
+        var variants = new[]
+        {
+            baseline with { OwningRole = Role("writer", 1, 'a') },
+            baseline with { OwningRole = Role("researcher", 2, 'a') },
+            baseline with { OwningRole = Role("researcher", 1, 'b') },
+        };
+
+        Assert.All(variants, candidate => Assert.NotEqual(expected, GovernedLoopGraphAuthoringRequestHash.Compute(lifecycle, candidate.Normalize())));
     }
 
     [Fact]
@@ -526,13 +543,14 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
     private static GovernedLoopGraphCandidate Candidate(
         string revisionId,
         string purpose = "Research one question safely.",
-        string displayDescription = "Display only.")
+        string displayDescription = "Display only.",
+        ContextualRoleRevisionPin? owningRole = null)
         => new(
             1,
             "research-loop",
             revisionId,
             purpose,
-            "researcher",
+            owningRole ?? Role(),
             "trigger",
             ["exit"],
             GovernedLoopAuthorityCeiling.Create(["model-inference", "workspace-read"]),
@@ -556,6 +574,12 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
                     new GovernedLoopNodeDisplayMetadata("infer", "Inference", "Answer.", 100, 0),
                     new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 200, 0),
                 ]));
+
+    private static ContextualRoleRevisionPin Role(
+        string roleId = "researcher",
+        int revision = 1,
+        char contentHash = 'a')
+        => new(new ContextualRoleRevisionIdentity(roleId, revision), new string(contentHash, 64));
 
     private static GovernedLoopNodeDefinition[] Nodes()
         =>
