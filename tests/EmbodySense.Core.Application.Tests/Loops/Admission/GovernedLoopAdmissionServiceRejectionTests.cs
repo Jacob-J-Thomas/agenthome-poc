@@ -120,6 +120,24 @@ public sealed class GovernedLoopAdmissionServiceRejectionTests
     }
 
     [Fact]
+    public async Task Temporally_incoherent_active_binding_mismatch_never_becomes_a_permanent_rejection()
+    {
+        var harness = GovernedLoopAdmissionTestHarness.Create();
+        var otherRole = AuthorityGrantApplicationTestFixture.Role(roleId: "other-role", capabilityIds: []);
+        var otherRolePin = new ContextualRoleRevisionPin(otherRole.Identity, otherRole.ContentHash);
+        var request = BindGrant(
+            harness,
+            harness.Grant.Binding with { Role = otherRolePin },
+            recordedAtUtc: AuthorityGrantApplicationTestFixture.Now.AddTicks(1));
+
+        var result = await harness.CreateService().AdmitAsync(request);
+
+        Assert.Equal(GovernedLoopAdmissionStatus.Ambiguous, result.Status);
+        Assert.Null(result.Outcome);
+        Assert.Equal(0, harness.CommitCount);
+    }
+
+    [Fact]
     public async Task Graph_required_capability_absent_from_exact_grant_commits_structured_capability_denial()
     {
         var harness = GovernedLoopAdmissionTestHarness.Create(includeCapability: true);
@@ -151,6 +169,27 @@ public sealed class GovernedLoopAdmissionServiceRejectionTests
             rejection.References.Select(reference => reference.Kind));
         Assert.Equal(0, harness.CapabilityAdmissionCount);
         Assert.Equal(0, harness.RunIdentityGenerationCount);
+    }
+
+    [Fact]
+    public async Task Capability_denial_is_not_committed_after_the_exact_grant_expires()
+    {
+        var harness = GovernedLoopAdmissionTestHarness.Create(includeCapability: true);
+        var emptyAuthority = AuthorityCeilingIntersection.EmptyCeiling();
+        var request = BindGrant(
+            harness,
+            harness.Grant.Binding,
+            emptyAuthority,
+            boundary: harness.Grant.Boundary with
+            {
+                ExpiresAtUtc = AuthorityGrantApplicationTestFixture.Now.AddMinutes(1),
+            });
+
+        var result = await harness.CreateService().AdmitAsync(request);
+
+        Assert.Equal(GovernedLoopAdmissionStatus.Ambiguous, result.Status);
+        Assert.Null(result.Outcome);
+        Assert.Equal(0, harness.CommitCount);
     }
 
     [Fact]
@@ -353,13 +392,17 @@ public sealed class GovernedLoopAdmissionServiceRejectionTests
     private static GovernedLoopAdmissionRequest BindGrant(
         GovernedLoopAdmissionTestHarness harness,
         AuthorityGrantBinding binding,
-        AuthorityCeiling? ceiling = null)
+        AuthorityCeiling? ceiling = null,
+        DateTimeOffset? recordedAtUtc = null,
+        AuthorityGrantBoundary? boundary = null)
     {
         var exactCeiling = ceiling ?? harness.Grant.RequestedCeiling;
         var grant = AuthorityGrantHash.Apply(harness.Grant with
         {
             Binding = binding,
             RequestedCeiling = exactCeiling,
+            Boundary = boundary ?? harness.Grant.Boundary,
+            RecordedAtUtc = recordedAtUtc ?? harness.Grant.RecordedAtUtc,
             ContentHash = string.Empty,
         });
         var reference = new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);

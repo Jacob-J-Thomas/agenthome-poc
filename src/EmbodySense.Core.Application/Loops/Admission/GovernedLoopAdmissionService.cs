@@ -200,6 +200,16 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
             return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
         }
 
+        if (artifact.RevisionArtifact.CreatedAtUtc > grant.EvaluatedAtUtc
+            || role.Revision!.Provenance.RecordedAtUtc > role.Lifecycle!.UpdatedAtUtc
+            || role.Lifecycle.UpdatedAtUtc > grant.EvaluatedAtUtc
+            || grant.Grant!.RecordedAtUtc > grant.EvaluatedAtUtc
+            || grant.Grant.Boundary.EffectiveAtUtc > grant.EvaluatedAtUtc
+            || grant.Grant.Boundary.ExpiresAtUtc is { } evaluatedExpiry && evaluatedExpiry <= grant.EvaluatedAtUtc)
+        {
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+        }
+
         if (!Equals(grant.Grant!.Binding.Role, intent.Role))
         {
             return await CommitDefinitiveFailureAsync(
@@ -207,6 +217,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                 intent,
                 GovernedLoopAdmissionFailureCode.RoleMismatch,
                 storeGeneration,
+                grant.EvaluatedAtUtc,
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -217,16 +228,8 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                 intent,
                 GovernedLoopAdmissionFailureCode.GrantMismatch,
                 storeGeneration,
+                grant.EvaluatedAtUtc,
                 cancellationToken).ConfigureAwait(false);
-        }
-
-        if (artifact.RevisionArtifact.CreatedAtUtc > grant.EvaluatedAtUtc
-            || role.Revision!.Provenance.RecordedAtUtc > role.Lifecycle!.UpdatedAtUtc
-            || role.Lifecycle.UpdatedAtUtc > grant.EvaluatedAtUtc
-            || grant.Grant!.RecordedAtUtc > grant.EvaluatedAtUtc
-            || grant.Grant.Boundary.EffectiveAtUtc > grant.EvaluatedAtUtc)
-        {
-            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
         }
 
         if (artifact.Graph.AuthorityCeiling.CapabilityIds.Count > CapabilityContractLimits.MaxDependencyManifestDependencies)
@@ -266,6 +269,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                 manifest!,
                 requirementsHash!,
                 policyAuthority,
+                grant,
                 storeGeneration,
                 cancellationToken).ConfigureAwait(false);
         }
@@ -796,6 +800,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                 intent,
                 code,
                 storeGeneration,
+                role.Lifecycle?.UpdatedAtUtc ?? role.Revision?.Provenance.RecordedAtUtc ?? default,
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -826,6 +831,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                 intent,
                 code,
                 storeGeneration,
+                resolution.EvaluatedAtUtc,
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -843,6 +849,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         CapabilityDependencyManifest requirements,
         string requirementsHash,
         AuthorityCeiling effectiveAuthority,
+        AuthorityGrantResolution grant,
         long storeGeneration,
         CancellationToken cancellationToken)
     {
@@ -850,6 +857,12 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         if (!TryGetTrustedUtcNow(out var rejectedAtUtc))
         {
             return Result(GovernedLoopAdmissionStatus.Unavailable, request);
+        }
+
+        if (grant.EvaluatedAtUtc > rejectedAtUtc
+            || grant.Grant?.Boundary.ExpiresAtUtc is { } expiry && expiry <= rejectedAtUtc)
+        {
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
         }
 
         var violations = requirements.Required
@@ -891,12 +904,19 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         GovernedLoopAdmissionIntent intent,
         GovernedLoopAdmissionFailureCode failureCode,
         long storeGeneration,
+        DateTimeOffset minimumEvidenceTimeUtc,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!TryGetTrustedUtcNow(out var rejectedAtUtc))
         {
             return Result(GovernedLoopAdmissionStatus.Unavailable, request);
+        }
+
+        if (minimumEvidenceTimeUtc != default
+            && (!IsTrustedUtc(minimumEvidenceTimeUtc) || minimumEvidenceTimeUtc > rejectedAtUtc))
+        {
+            return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
         }
 
         return await CommitDefinitiveFailureAtAsync(
@@ -977,10 +997,16 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                 && role.Lifecycle is not null
                 && role.Lifecycle.SchemaVersion == 1
                 && string.Equals(role.Lifecycle.RoleId, pin.Identity.RoleId, StringComparison.Ordinal)
+                && role.Lifecycle.CurrentIdentity is not null
+                && string.Equals(role.Lifecycle.CurrentIdentity.RoleId, pin.Identity.RoleId, StringComparison.Ordinal)
+                && role.Lifecycle.CurrentIdentity.Revision > 0
+                && Enum.IsDefined(role.Lifecycle.State)
+                && role.Lifecycle.State != ContextualRoleLifecycleState.Unknown
                 && ContextualRoleId.IsValid(role.Lifecycle.LastOperationId)
                 && Enum.IsDefined(role.Lifecycle.LastMutationKind)
                 && role.Lifecycle.LastMutationKind != ContextualRoleRevisionMutationKind.Unknown
                 && IsTrustedUtc(role.Lifecycle.UpdatedAtUtc)
+                && role.Revision.Provenance.RecordedAtUtc <= role.Lifecycle.UpdatedAtUtc
                 && string.Equals(role.WorkspaceId, _workspaceId, StringComparison.Ordinal)
                 && IsSha256(role.EvidenceHash);
         }
