@@ -323,6 +323,101 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     }
 
     [Fact]
+    public async Task Trace_capacity_accepts_exactly_one_deterministic_canonical_exit_after_the_model_attempt_ceiling()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+        var afterInference = await CompleteCanonicalInferenceAsync(store, context);
+        var exitStarted = WithEvidence(
+            Event(4, "event-exit-started", CustomLoopRunEventKind.ExitDecisionStarted, "exit", 1),
+            context.Binding,
+            "exit",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var exitCompleted = WithEvidence(
+            Event(5, "event-exit-completed", CustomLoopRunEventKind.ExitDecisionCompleted, "exit", 1) with
+            {
+                ExitDecision = CustomLoopExitDecision.Complete,
+            },
+            context.Binding,
+            "exit",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var candidate = afterInference with
+        {
+            LifecycleVersion = 4,
+            UpdatedAtUtc = _timestamp.AddMinutes(4),
+            Events = [.. afterInference.Events, exitStarted, exitCompleted],
+        };
+
+        Assert.True(await store.HasSufficientTraceCapacityForDispatchAsync(candidate, 3));
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(candidate, 3)).Status);
+    }
+
+    [Fact]
+    public async Task Trace_capacity_does_not_widen_the_legacy_model_attempt_ceiling()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var legacy = AsLegacyRun(context.Run);
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(legacy)).Status);
+        var started = legacy with
+        {
+            LifecycleVersion = 2,
+            UpdatedAtUtc = _timestamp.AddMinutes(1),
+            Events = [.. legacy.Events, Event(2, "event-legacy-started", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 1)],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(started, 1)).Status);
+        var completed = started with
+        {
+            LifecycleVersion = 3,
+            UpdatedAtUtc = _timestamp.AddMinutes(2),
+            Events = [.. started.Events, Event(3, "event-legacy-completed", CustomLoopRunEventKind.NodeAttemptCompleted, "step-1", 1)],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, 2)).Status);
+        var overLimit = completed with
+        {
+            LifecycleVersion = 4,
+            UpdatedAtUtc = _timestamp.AddMinutes(3),
+            Events = [.. completed.Events, Event(4, "event-legacy-second-start", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 2)],
+        };
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(overLimit, 3));
+        Assert.Contains("more provider-attempt starts", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Trace_capacity_rejects_a_second_canonical_non_exit_model_attempt()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+        var afterInference = await CompleteCanonicalInferenceAsync(store, context);
+        var secondStart = WithEvidence(
+            Event(4, "event-inference-second-start", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 2),
+            context.Binding,
+            "step-1",
+            2,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var overLimit = afterInference with
+        {
+            LifecycleVersion = 4,
+            UpdatedAtUtc = _timestamp.AddMinutes(3),
+            Events = [.. afterInference.Events, secondStart],
+        };
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(overLimit, 3));
+        Assert.Contains("more provider-attempt starts", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Persisted_marker_digest_substitution_fails_closed_after_restart()
     {
         using var workspace = new TestWorkspace();
@@ -527,6 +622,53 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         run = CustomLoopAdmissionRequestHash.Apply(run);
         Assert.True(CustomLoopRunValidator.Validate(run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(run).Errors));
         return new SequentialContext(run, invocation, binding, anchor, plan);
+    }
+
+    private static async Task<CustomLoopRunRecord> CompleteCanonicalInferenceAsync(
+        CustomLoopRunStore store,
+        SequentialContext context)
+    {
+        var start = WithEvidence(
+            Event(2, "event-inference-start", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 1),
+            context.Binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var started = context.Run with
+        {
+            LifecycleVersion = 2,
+            UpdatedAtUtc = _timestamp.AddMinutes(1),
+            Events = [.. context.Run.Events, start],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(started, 1)).Status);
+        var completion = WithEvidence(
+            Event(3, "event-inference-completed", CustomLoopRunEventKind.NodeAttemptCompleted, "step-1", 1),
+            context.Binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var completed = started with
+        {
+            LifecycleVersion = 3,
+            UpdatedAtUtc = _timestamp.AddMinutes(2),
+            Events = [.. started.Events, completion],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, 2)).Status);
+        return completed;
+    }
+
+    private static CustomLoopRunRecord AsLegacyRun(CustomLoopRunRecord run)
+    {
+        var capabilityAdmission = TestCapabilityAdmissionFactory.Create(run.AdmittedDefinition.CapabilityRequirements, _timestamp);
+        return CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            CapabilityAdmission = capabilityAdmission,
+            SequentialInvocationSnapshot = null,
+            SequentialAdapterBinding = null,
+            Events = [run.Events[0] with { SequentialNodeEvidence = null }],
+        });
     }
 
     private static GovernedLoopGraphDefinition LinearGraph()

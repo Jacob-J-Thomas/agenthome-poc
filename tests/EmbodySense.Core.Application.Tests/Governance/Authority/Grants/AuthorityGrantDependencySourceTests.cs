@@ -40,6 +40,27 @@ public sealed class AuthorityGrantDependencySourceTests
     }
 
     [Fact]
+    public async Task Profile_source_accepts_store_canonical_request_digest_and_rejects_unprefixed_alias()
+    {
+        var record = AuthorityGrantApplicationTestFixture.ProfileRecord();
+        var pin = new AuthorityGrantProfilePin(
+            new(record.ProfileId, record.CurrentProfile.Revision),
+            record.CurrentHash);
+        var store = new ProfileStore { Result = Available(record) };
+        var source = new AuthorityGrantProfileSource(store);
+
+        var canonical = await source.ResolveAsync(pin, AuthorityGrantApplicationTestFixture.Now);
+        store.Result = Available(Copy(
+            record,
+            operations: [record.Operations[0] with { RequestHash = record.Operations[0].RequestHash[7..] }]));
+        var unprefixed = await source.ResolveAsync(pin, AuthorityGrantApplicationTestFixture.Now);
+
+        Assert.StartsWith("sha256:", record.Operations[0].RequestHash, StringComparison.Ordinal);
+        Assert.Equal(AuthorityGrantDependencyStatus.Active, canonical.Status);
+        Assert.Equal(AuthorityGrantDependencyStatus.Ambiguous, unprefixed.Status);
+    }
+
+    [Fact]
     public async Task Profile_source_requires_applied_correlated_revision_and_tombstone_evidence()
     {
         var valid = AuthorityGrantApplicationTestFixture.ProfileRecord();
@@ -425,7 +446,7 @@ public sealed class AuthorityGrantDependencySourceTests
         AuthorityProfileMutationKind kind,
         int revision,
         DateTimeOffset time)
-        => new(operationId, hash.Value[7..], kind, AuthorityProfileMutationStatus.Applied, profile.ProfileId, revision, AuthorityGrantApplicationTestFixture.Actor(), AuthorityGrantApplicationTestFixture.Purpose(), time);
+        => new(operationId, hash.Value, kind, AuthorityProfileMutationStatus.Applied, profile.ProfileId, revision, AuthorityGrantApplicationTestFixture.Actor(), AuthorityGrantApplicationTestFixture.Purpose(), time);
 
     private sealed class ProfileStore : IAuthorityProfileStore
     {

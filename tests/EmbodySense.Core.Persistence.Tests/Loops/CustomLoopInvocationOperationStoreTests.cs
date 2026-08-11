@@ -332,6 +332,50 @@ public sealed class CustomLoopInvocationOperationStoreTests
     }
 
     [Fact]
+    public async Task Sequential_definitive_rejection_requires_no_run_or_validation_errors_and_replays_after_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var pending = SequentialPending("invoke-sequential-definitive-rejection", "exact prompt");
+        var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
+        var bound = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = Hash('b'),
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context),
+            SequentialInvocationSnapshot = SequentialSnapshot(pending, context),
+        };
+        var store = new CustomLoopInvocationOperationStore(paths);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(bound)).Status);
+        var rejected = bound with
+        {
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Rejected,
+            AdmissionStatus = nameof(CustomLoopInvocationOutcome.Rejected),
+            RunId = null,
+            ValidationErrors = [],
+            Detail = "The immutable canonical admission was definitively rejected.",
+        };
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(rejected)).Status);
+        var restarted = new CustomLoopInvocationOperationStore(paths);
+        var loaded = Assert.IsType<CustomLoopInvocationOperation>(await restarted.GetAsync(pending.OperationId));
+        Assert.Equal(CustomLoopInvocationOutcome.Rejected, loaded.Outcome);
+        Assert.Equal(nameof(CustomLoopInvocationOutcome.Rejected), loaded.AdmissionStatus);
+        Assert.Null(loaded.RunId);
+        Assert.Empty(loaded.ValidationErrors);
+        Assert.Equal(rejected.SequentialInvocationSnapshot?.ContentHash, loaded.SequentialInvocationSnapshot?.ContentHash);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, (await restarted.CompleteAsync(rejected)).Status);
+        await Assert.ThrowsAsync<FormatException>(() => restarted.CompleteAsync(rejected with { RunId = "run-rejected" }));
+        await Assert.ThrowsAsync<FormatException>(() => restarted.CompleteAsync(rejected with
+        {
+            ValidationErrors = [new CustomLoopValidationError("authority-rejected", "authority", "The grant was insufficient.")],
+        }));
+    }
+
+    [Fact]
     public async Task Semantically_valid_maximum_snapshot_that_exceeds_the_receipt_limit_is_refused_without_mutation()
     {
         using var workspace = new TestWorkspace();

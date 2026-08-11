@@ -131,7 +131,8 @@ internal sealed class GovernedLoopRuntimeFacade : IDisposable
         GovernedLoopSequentialInvocationSnapshot snapshot;
         try
         {
-            snapshot = existing?.SequentialInvocationSnapshot ?? await CaptureAsync(input!, cancellationToken).ConfigureAwait(false);
+            snapshot = existing?.SequentialInvocationSnapshot
+                ?? await CaptureAsync(input!, existing?.CreatedAtUtc, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -165,7 +166,7 @@ internal sealed class GovernedLoopRuntimeFacade : IDisposable
                 return Failure(GovernedLoopSequentialInvocationStatus.Invalid.ToString(), $"The exact graph could not form an ordered-runtime projection: {projection.Status}.");
             }
 
-            var now = UtcNow(snapshot.ContextCapturedAtUtc);
+            var now = snapshot.ContextCapturedAtUtc;
             pending = CustomLoopInvocationRequestHash.ApplySequential(new CustomLoopInvocationOperation(
                 CustomLoopInvocationOperation.CurrentSchemaVersion,
                 input.OperationId,
@@ -279,9 +280,12 @@ internal sealed class GovernedLoopRuntimeFacade : IDisposable
 
     private async Task<GovernedLoopSequentialInvocationSnapshot> CaptureAsync(
         GovernedLoopRunInvocationInput input,
+        DateTimeOffset? durableCaptureInstant,
         CancellationToken cancellationToken)
     {
-        var capture = await _runtimeContext.CaptureAsync(includeInvokingConversation: true, cancellationToken).ConfigureAwait(false);
+        var capture = durableCaptureInstant is { } capturedAtUtc
+            ? await _runtimeContext.CaptureAsync(includeInvokingConversation: true, capturedAtUtc, cancellationToken).ConfigureAwait(false)
+            : await _runtimeContext.CaptureAsync(includeInvokingConversation: true, cancellationToken).ConfigureAwait(false);
         return GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
             GovernedLoopSequentialInvocationSnapshot.CurrentSchemaVersion,
             input.InvocationPrompt,

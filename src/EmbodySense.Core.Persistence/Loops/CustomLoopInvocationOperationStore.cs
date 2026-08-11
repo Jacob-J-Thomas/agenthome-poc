@@ -1093,6 +1093,12 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         var hasValidOptionalRun = operation.RunId is null || CustomLoopArtifactIdentifier.IsValid(operation.RunId);
         return operation.AdmissionStatus switch
         {
+            nameof(CustomLoopInvocationOutcome.Rejected) => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext
+                && operation.SequentialAdmissionRequestHash is not null
+                && operation.SequentialArtifactHash is not null
+                && operation.SequentialInvocationSnapshot is not null
+                && operation.RunId is null
+                && operation.ValidationErrors.Length == 0,
             CustomLoopAdmissionStatusNames.Invalid => operation.BindingState == CustomLoopInvocationBindingState.ConversationInvalid
                 ? operation.RunId is null
                 : operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && hasValidOptionalRun,
