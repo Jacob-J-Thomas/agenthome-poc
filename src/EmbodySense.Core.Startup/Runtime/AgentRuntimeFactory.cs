@@ -444,6 +444,7 @@ public sealed class AgentRuntimeFactory
                 recovery,
                 customLifecycle,
                 legacyRunner,
+                governedRunner,
                 customRuntimeContext,
                 customExecutionAvailable,
                 customExecutionReacquisitionAllowed,
