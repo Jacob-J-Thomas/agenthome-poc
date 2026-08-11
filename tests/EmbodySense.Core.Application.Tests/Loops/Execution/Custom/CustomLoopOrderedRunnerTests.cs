@@ -642,12 +642,12 @@ public sealed class CustomLoopOrderedRunnerTests
 
             if (injectedControls++ == 0)
             {
-                var pause = await lifecycle.PauseAsync(new CustomLoopPauseRequest(store.Current.Id, store.Current.LifecycleVersion, "pause-at-first-pure-CAS", AuditSchema.Actors.Web));
+                var pause = await lifecycle.PauseAsync(new CustomLoopPauseRequest(store.Current.Id, store.Current.LifecycleVersion, "pause-at-first-pure-cas", AuditSchema.Actors.Web));
                 Assert.Equal(CustomLoopControlStatus.PauseRequested, pause.Status);
                 return;
             }
 
-            var cancel = await lifecycle.CancelAsync(new CustomLoopCancelRequest(store.Current.Id, store.Current.LifecycleVersion, "cancel-at-second-pure-CAS", AuditSchema.Actors.Web));
+            var cancel = await lifecycle.CancelAsync(new CustomLoopCancelRequest(store.Current.Id, store.Current.LifecycleVersion, "cancel-at-second-pure-cas", AuditSchema.Actors.Web));
             Assert.Equal(CustomLoopControlStatus.CancelRequested, cancel.Status);
         };
         var evidence = new SequentialEvidenceHarness(store, context.Evidence);
