@@ -137,6 +137,32 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Canonical_exhausted_governed_tool_budget_is_applied_before_provider_dispatch()
+    {
+        var admitted = Run(SequentialDefinition(allowWorkspaceTools: true)) with
+        {
+            Checkpoint = CustomLoopRunCheckpoint.Start() with
+            {
+                ToolRequestsUsed = CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun,
+            },
+        };
+        var context = await SequentialContextAsync(admitted);
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("budget-safe outcome"));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
+
+        Assert.True(result.Status == CustomLoopOrderedRunStatus.Completed, result.Detail);
+        var request = Assert.Single(executor.Requests);
+        Assert.False(request.AllowTools);
+        Assert.Contains(request.InferenceRequest.Messages, message => message.Content.Contains("Tools: none", StringComparison.Ordinal));
+        Assert.Equal(CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun, result.Run!.Checkpoint.ToolRequestsUsed);
+        Assert.DoesNotContain(result.Run.Events, item => item.ToolEvidence is not null);
+    }
+
+    [Fact]
     public async Task Canonical_adapter_rejects_every_self_consistent_legacy_projection_substitution_before_dispatch()
     {
         var context = await SequentialContextAsync(Run(SequentialDefinition()));
@@ -392,6 +418,109 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Empty(executor.Requests);
         Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Rejected, evidence.Requests[^1].Disposition);
         Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection });
+        Assert.Single(evidence.AuditRequests);
+    }
+
+    [Fact]
+    public async Task Canonical_inference_deadline_retains_definitive_rejection_and_terminal_replay_never_redispatches()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition(includeConversation: true), new CustomLoopConversationReference("conversation-one", "version-one", _now)));
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("must not run"));
+        var publisher = new RecordingPublisher();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var time = new FinalDispatchDeadlineTimeProvider(_now, store, reportDeadlineReached: true);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(store, executor, publisher, timeProvider: time),
+            evidence,
+            evidence);
+        var request = new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web);
+
+        var result = await adapter.RunAsync(request);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal("run_deadline_exceeded", result.Run!.FailureCode);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Rejected, evidence.Requests[^1].Disposition);
+        var rejection = Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            Disposition: CustomLoopSequentialNodeDisposition.Rejected,
+        });
+        Assert.Equal("infer-01", rejection.SequentialNodeEvidence!.NodeId);
+        Assert.Single(evidence.AuditRequests);
+
+        var replay = await adapter.ResumeAsync(new GovernedLoopSequentialOrderedResumeRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            result.Run.LifecycleVersion,
+            "resume-terminal-deadline",
+            AuditSchema.Actors.Cli));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, replay.Status);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+        Assert.Single(evidence.AuditRequests);
+    }
+
+    [Fact]
+    public async Task Canonical_deterministic_exit_capability_failure_retains_rejected_exit_evidence()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("inference outcome"));
+        var publisher = new RecordingPublisher();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(
+                store,
+                executor,
+                publisher,
+                capabilityAdmissionService: new ThrowingOnRevalidationCapabilityAdmissionService(3)),
+            evidence,
+            evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal("canonical_exit_capability_check_failed", result.Run!.FailureCode);
+        Assert.Single(executor.Requests);
+        Assert.Empty(publisher.Requests);
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Rejected, evidence.Requests[^1].Disposition);
+        var rejection = Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            Disposition: CustomLoopSequentialNodeDisposition.Rejected,
+            NodeId: "exit",
+        });
+        Assert.Equal(CustomLoopRunEventKind.NodeAttemptFailed, rejection.Kind);
+        Assert.Equal(2, evidence.AuditRequests.Count);
+    }
+
+    [Fact]
+    public async Task Canonical_deadline_before_deterministic_exit_is_a_run_boundary_and_never_dispatches_the_exit_node()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("inference outcome"));
+        var publisher = new RecordingPublisher();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(store, executor, publisher, timeProvider: new CanonicalExitBoundaryDeadlineTimeProvider(_now, store)),
+            evidence,
+            evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal("run_deadline_exceeded", result.Run!.FailureCode);
+        Assert.Single(executor.Requests);
+        Assert.Empty(publisher.Requests);
+        Assert.Equal(["trigger", "infer-01"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.DoesNotContain(result.Run.Events, item => item.StepId == "exit");
         Assert.Single(evidence.AuditRequests);
     }
 
@@ -3828,6 +3957,14 @@ public sealed class CustomLoopOrderedRunnerTests
                 ? now.AddMilliseconds(CustomLoopLimits.MaxRunExecutionMilliseconds)
                 : now.AddMilliseconds(CustomLoopLimits.MaxRunExecutionMilliseconds - 1);
         }
+    }
+
+    private sealed class CanonicalExitBoundaryDeadlineTimeProvider(DateTimeOffset now, FakeRunStore store) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow()
+            => store.Current.Checkpoint.NextStepIndex == store.Current.AdmittedDefinition.InferenceSteps.Length
+                ? now.AddMilliseconds(CustomLoopLimits.MaxRunExecutionMilliseconds)
+                : now;
     }
 
     private sealed class FinalDispatchActionTimeProvider(DateTimeOffset now, FakeRunStore store) : TimeProvider
