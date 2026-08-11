@@ -1490,15 +1490,15 @@ public sealed class GovernedLoopGraphValidationServiceTests
     {
         return node.Parameters.Select(parameter => parameter.Key switch
         {
-            "max-iterations" => IntegerParameter(parameter.Key, 1, CustomLoopLimits.MaxGraphCycleIterations),
-            "max-milliseconds" => IntegerParameter(parameter.Key, 1, CustomLoopLimits.MaxGraphCycleMilliseconds),
+            "max-iterations" => IntegerParameter(parameter.Key, 1, CustomLoopLimits.MaxGraphCycleIterations, required: false),
+            "max-milliseconds" => IntegerParameter(parameter.Key, 1, CustomLoopLimits.MaxGraphCycleMilliseconds, required: false),
             _ => new GovernedLoopCatalogParameterContract(parameter.Key, GovernedLoopParameterValueKind.Text, true, 1, CustomLoopLimits.MaxGraphParameterValueCharacters, null, null, [])
         }).ToArray();
     }
 
-    private static GovernedLoopCatalogParameterContract IntegerParameter(string id, long minimum, long maximum)
+    private static GovernedLoopCatalogParameterContract IntegerParameter(string id, long minimum, long maximum, bool required = true)
     {
-        return new GovernedLoopCatalogParameterContract(id, GovernedLoopParameterValueKind.Integer, true, 1, 20, minimum, maximum, []);
+        return new GovernedLoopCatalogParameterContract(id, GovernedLoopParameterValueKind.Integer, required, 1, 20, minimum, maximum, []);
     }
 
     private static GovernedLoopGraphCandidate Candidate(IReadOnlyList<GovernedLoopNodeDefinition?>? nodes = null, IReadOnlyList<GovernedLoopControlEdgeDefinition?>? edges = null)

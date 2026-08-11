@@ -8,5 +8,7 @@ public enum GovernedLoopJoinPolicy
     /// <summary>Any one incoming control path satisfies the join.</summary>
     Any,
     /// <summary>All declared incoming control paths must be jointly satisfiable.</summary>
-    All
+    All,
+    /// <summary>The join releases after every incoming path is durably proved arrived or skipped and at least one arrived.</summary>
+    Selected
 }

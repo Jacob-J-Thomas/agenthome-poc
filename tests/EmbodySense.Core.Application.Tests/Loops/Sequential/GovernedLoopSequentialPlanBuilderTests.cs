@@ -370,7 +370,7 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
     }
 
     [Fact]
-    public void Branch_join_and_cycle_shapes_fail_closed()
+    public void Structurally_supported_fanout_still_requires_exact_node_contracts_and_unbounded_cycles_fail_closed()
     {
         var nodes = new[]
         {
@@ -397,7 +397,7 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
             ],
             ["exit"]);
 
-        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, GovernedLoopSequentialPlanBuilder.Build(branch).Status);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, GovernedLoopSequentialPlanBuilder.Build(branch).Status);
         Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, GovernedLoopSequentialPlanBuilder.Build(cycle).Status);
     }
 

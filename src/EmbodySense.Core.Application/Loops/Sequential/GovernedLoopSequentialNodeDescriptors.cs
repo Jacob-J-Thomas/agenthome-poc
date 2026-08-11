@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
+using EmbodySense.Core.Application.Loops.GraphValidation;
 
 namespace EmbodySense.Core.Application.Loops.Sequential;
 
@@ -14,6 +15,24 @@ public static class GovernedLoopSequentialNodeDescriptors
 
     /// <summary>Gets the exact supported successful-exit descriptor.</summary>
     public static GovernedLoopNodeDescriptor SuccessExit { get; } = new(GovernedLoopNodeKind.Exit, "success-exit", 1);
+
+    /// <summary>Gets the exact supported Boolean Condition descriptor.</summary>
+    public static GovernedLoopNodeDescriptor BooleanCondition { get; } = Topology(GovernedLoopNodeKind.Condition, GovernedLoopTopologyNodeVocabulary.BooleanCondition);
+
+    /// <summary>Gets the exact supported text-equality Condition descriptor.</summary>
+    public static GovernedLoopNodeDescriptor ExactTextCondition { get; } = Topology(GovernedLoopNodeKind.Condition, GovernedLoopTopologyNodeVocabulary.ExactTextCondition);
+
+    /// <summary>Gets the exact supported governed model-decision Condition descriptor.</summary>
+    public static GovernedLoopNodeDescriptor ModelDecisionCondition { get; } = Topology(GovernedLoopNodeKind.Condition, GovernedLoopTopologyNodeVocabulary.ModelDecisionCondition);
+
+    /// <summary>Gets the exact supported all-arrivals Join descriptor.</summary>
+    public static GovernedLoopNodeDescriptor AllJoin { get; } = Topology(GovernedLoopNodeKind.Join, GovernedLoopTopologyNodeVocabulary.AllJoin);
+
+    /// <summary>Gets the exact supported first-arrival Join descriptor.</summary>
+    public static GovernedLoopNodeDescriptor AnyJoin { get; } = Topology(GovernedLoopNodeKind.Join, GovernedLoopTopologyNodeVocabulary.AnyJoin);
+
+    /// <summary>Gets the exact supported selected-path Join descriptor.</summary>
+    public static GovernedLoopNodeDescriptor SelectedJoin { get; } = Topology(GovernedLoopNodeKind.Join, GovernedLoopTopologyNodeVocabulary.SelectedJoin);
 
     /// <summary>Gets the exact supported identity Transform descriptor.</summary>
     public static GovernedLoopNodeDescriptor IdentityTransform { get; } = Pure(GovernedLoopNodeKind.Transform, GovernedLoopPureNodeVocabulary.IdentityTransform);
@@ -48,7 +67,15 @@ public static class GovernedLoopSequentialNodeDescriptors
             && (Equals(descriptor, ManualTrigger)
                 || Equals(descriptor, ProviderInference)
                 || Equals(descriptor, SuccessExit)
+                || IsTopology(descriptor)
                 || IsPure(descriptor));
+
+    /// <summary>Gets whether a descriptor exactly names one supported deterministic Condition or Join.</summary>
+    public static bool IsTopology(GovernedLoopNodeDescriptor? descriptor)
+        => descriptor is not null
+            && descriptor.Version == GovernedLoopTopologyNodeVocabulary.DescriptorVersion
+            && (descriptor.Kind == GovernedLoopNodeKind.Condition && GovernedLoopTopologyNodeVocabulary.IsCondition(descriptor.TypeId)
+                || descriptor.Kind == GovernedLoopNodeKind.Join && GovernedLoopTopologyNodeVocabulary.IsJoin(descriptor.TypeId));
 
     /// <summary>Gets whether a descriptor exactly names one supported dependency-free Transform or Validate.</summary>
     public static bool IsPure(GovernedLoopNodeDescriptor? descriptor)
@@ -70,4 +97,7 @@ public static class GovernedLoopSequentialNodeDescriptors
 
     private static GovernedLoopNodeDescriptor Pure(GovernedLoopNodeKind kind, string typeId)
         => new(kind, typeId, GovernedLoopPureNodeVocabulary.DescriptorVersion);
+
+    private static GovernedLoopNodeDescriptor Topology(GovernedLoopNodeKind kind, string typeId)
+        => new(kind, typeId, GovernedLoopTopologyNodeVocabulary.DescriptorVersion);
 }

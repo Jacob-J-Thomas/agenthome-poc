@@ -236,9 +236,9 @@ public sealed class GovernedLoopGraphValidationService
     private static void ValidateCycleBudgetContract(GovernedLoopNodeCatalogDescriptor descriptor, string parameterId, long maximum, string descriptorPath, List<GovernedLoopGraphValidationError> errors)
     {
         var parameter = descriptor.Parameters.Take(CustomLoopLimits.MaxGraphDescriptorParameters).FirstOrDefault(value => value is not null && string.Equals(value.Id, parameterId, StringComparison.Ordinal));
-        if (parameter is null || parameter.ValueKind != GovernedLoopParameterValueKind.Integer || !parameter.Required || parameter.MinimumInteger is null or < 1 || parameter.MaximumInteger is null || parameter.MaximumInteger > maximum)
+        if (parameter is null || parameter.ValueKind != GovernedLoopParameterValueKind.Integer || parameter.Required || parameter.MinimumInteger is null or < 1 || parameter.MaximumInteger is null || parameter.MaximumInteger > maximum)
         {
-            Add(errors, "catalog.cycle-budget-parameter.invalid", GovernedLoopGraphElementKind.Catalog, descriptor.Descriptor.TypeId, $"{descriptorPath}.parameters[{parameterId}]", "Cycle budget parameters must be required positive bounded integer contracts.");
+            Add(errors, "catalog.cycle-budget-parameter.invalid", GovernedLoopGraphElementKind.Catalog, descriptor.Descriptor.TypeId, $"{descriptorPath}.parameters[{parameterId}]", "Cycle budget parameters must be optional positive bounded integer contracts and become mandatory only for nodes admitted inside an SCC.");
         }
     }
 
@@ -342,6 +342,7 @@ public sealed class GovernedLoopGraphValidationService
             ValidateNodePorts(graph, node, descriptor, errors);
             ValidateNodeParameters(node, descriptor, errors);
             ValidatePureNodeSchemaSemantics(graph, node, errors);
+            ValidateTopologyNodeSchemaSemantics(graph, node, descriptor, errors);
             ValidateNodeAuthority(node, descriptor, errors);
         }
 
@@ -371,6 +372,35 @@ public sealed class GovernedLoopGraphValidationService
                 node.Id,
                 $"graph.nodes[{node.Id}]",
                 "The pure-node schema relationships, bounded topology, nullability, element schema, or ordered bounds conflict with the exact executable descriptor semantics.");
+        }
+    }
+
+    private static void ValidateTopologyNodeSchemaSemantics(
+        GovernedLoopGraphDefinition graph,
+        GovernedLoopNodeDefinition node,
+        GovernedLoopNodeCatalogDescriptor admittedDescriptor,
+        List<GovernedLoopGraphValidationError> errors)
+    {
+        if (!GovernedLoopTopologyNodeCatalogContract.TryResolve(node.Descriptor, out var canonical)
+            || canonical is null
+            || admittedDescriptor.JoinPolicy != canonical.JoinPolicy
+            || admittedDescriptor.AllowsCycle != canonical.AllowsCycle
+            || !admittedDescriptor.Ports.SequenceEqual(canonical.Ports)
+            || !admittedDescriptor.Parameters.SequenceEqual(canonical.Parameters))
+        {
+            return;
+        }
+
+        var schemas = graph.ValueSchemas.ToDictionary(schema => schema.Id, StringComparer.Ordinal);
+        if (!GovernedLoopTopologyNodeCatalogContract.HasExactSchemaSemantics(node, schemas))
+        {
+            Add(
+                errors,
+                "node.topology-schema-contract.incompatible",
+                GovernedLoopGraphElementKind.Node,
+                node.Id,
+                $"graph.nodes[{node.Id}]",
+                "The Condition or Join schema, parameter relationship, nullability, or exact executable topology contract is incompatible.");
         }
     }
 
@@ -570,6 +600,17 @@ public sealed class GovernedLoopGraphValidationService
             foreach (var required in descriptor.RequiredControlOutcomes.Take(Enum.GetValues<GovernedLoopControlCondition>().Length - 1).Where(required => !actual.Contains(required)).OrderBy(value => value))
             {
                 Add(errors, "node.branch-outcome.missing", GovernedLoopGraphElementKind.Node, node.Id, $"graph.nodes[{node.Id}]", $"Required branch outcome `{required}` has no outgoing control edge.");
+            }
+
+            if (node.Descriptor.Kind == GovernedLoopNodeKind.Condition)
+            {
+                foreach (var required in descriptor.RequiredControlOutcomes.OrderBy(value => value))
+                {
+                    if (outgoing.Count(edge => edge.Condition == required) > 1)
+                    {
+                        Add(errors, "node.branch-outcome.ambiguous", GovernedLoopGraphElementKind.Node, node.Id, $"graph.nodes[{node.Id}]", $"A Condition cannot declare more than one outgoing edge for required outcome `{required}`.");
+                    }
+                }
             }
         }
     }
