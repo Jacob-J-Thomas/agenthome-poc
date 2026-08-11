@@ -351,6 +351,30 @@ public sealed class GovernedLoopGraphRevisionStoreTests
     }
 
     [Fact]
+    public async Task Root_inspection_uses_its_held_lock_handle_but_still_rejects_an_unsafe_nonlock_entry()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var store = Store(paths, trust);
+        var graph = Graph();
+
+        var committed = await store.CommitAsync(CreateDraft(graph, "create-one", HashA, HashB, 0, _time));
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, committed.Status);
+        var operationsPath = Path.Combine(GraphRoot(paths), "operations");
+        Directory.Move(operationsPath, workspace.File("retained-operations"));
+        var external = workspace.File("unsafe-root-entry.json");
+        await File.WriteAllTextAsync(external, "unsafe");
+        CreateHardLink(operationsPath, external);
+
+        var read = await store.ReadGraphAsync(graph.GraphId);
+
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ambiguous, read.Status);
+        Assert.Null(read.Snapshot);
+    }
+
+    [Fact]
     public async Task Visible_lifecycle_without_its_exact_payload_fails_closed_without_fallback_scanning()
     {
         using var workspace = new TestWorkspace();
