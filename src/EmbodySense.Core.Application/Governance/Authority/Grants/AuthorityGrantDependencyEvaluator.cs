@@ -10,6 +10,7 @@ using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Revisions;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 
 namespace EmbodySense.Core.Application.Governance.Authority.Grants;
@@ -157,8 +158,16 @@ internal sealed class AuthorityGrantDependencyEvaluator
             && Equals(revision.Identity, pin.Identity)
             && string.Equals(revision.ContentHash, pin.ContentHash, StringComparison.Ordinal)
             && ContextualRoleRevisionValidator.Validate(revision).IsValid
+            && ContextualRoleWorkspaceId.IsValid(resolution.WorkspaceId)
+            && revision.WorkspaceApplicability.AppliesTo(resolution.WorkspaceId)
+            && resolution.SourceStatus == ContextualRoleInstructionSourceProbeStatus.Ready
+            && lifecycle.SchemaVersion == 1
             && Equals(lifecycle.CurrentIdentity, pin.Identity)
+            && string.Equals(lifecycle.RoleId, pin.Identity.RoleId, StringComparison.Ordinal)
             && lifecycle.State == ContextualRoleLifecycleState.Active
+            && ContextualRoleId.IsValid(lifecycle.LastOperationId)
+            && Enum.IsDefined(lifecycle.LastMutationKind)
+            && lifecycle.LastMutationKind != ContextualRoleRevisionMutationKind.Unknown
             && lifecycle.UpdatedAtUtc != default
             && lifecycle.UpdatedAtUtc.Offset == TimeSpan.Zero
             && lifecycle.UpdatedAtUtc <= evaluatedAtUtc;
@@ -185,13 +194,43 @@ internal sealed class AuthorityGrantDependencyEvaluator
             {
                 Status: AuthorityGrantDependencyStatus.Active,
                 PublicationPin: { } bindingPin,
+                Artifact: { } graphArtifact,
                 OwningRole: { } owner,
                 CapabilityIds: not null,
             }
             && Equals(bindingPin, binding.Loop)
-            && Equals(owner, binding.Role.Identity)
+            && Equals(owner, binding.Role)
+            && IsExactGraphArtifact(graphArtifact, artifact, binding.Loop, owner, loopBinding.CapabilityIds)
             && IsCanonicalCapabilityIds(loopBinding.CapabilityIds)
             && AuthorityGrantEvidenceHash.IsSha256(loopBinding.EvidenceHash);
+
+    private static bool IsExactGraphArtifact(
+        GovernedLoopGraphRevisionArtifact graphArtifact,
+        GovernedLoopRevisionArtifact publicationArtifact,
+        GovernedLoopRevisionPublicationPin pin,
+        ContextualRoleRevisionPin owner,
+        IReadOnlyList<string> capabilityIds)
+    {
+        if (!Equals(graphArtifact.RevisionArtifact, publicationArtifact)
+            || !Equals(graphArtifact.Graph.OwningRole, owner)
+            || !capabilityIds.SequenceEqual(graphArtifact.Graph.AuthorityCeiling.CapabilityIds, StringComparer.Ordinal))
+        {
+            return false;
+        }
+
+        try
+        {
+            return string.Equals(GovernedLoopGraphRevisionContractHash.ComputeArtifactHash(graphArtifact), graphArtifact.ArtifactHash, StringComparison.Ordinal)
+                && graphArtifact.RevisionArtifact.Revision.SchemaVersion == pin.Revision.SchemaVersion
+                && string.Equals(graphArtifact.RevisionArtifact.Revision.GraphId, pin.Revision.GraphId, StringComparison.Ordinal)
+                && string.Equals(graphArtifact.RevisionArtifact.Revision.RevisionId, pin.Revision.RevisionId, StringComparison.Ordinal)
+                && string.Equals(graphArtifact.RevisionArtifact.Revision.ExecutableHash, pin.Revision.ExecutableHash, StringComparison.Ordinal);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
 
     private static bool IsCanonicalCapabilityIds(IReadOnlyList<string> values)
         => values.Count <= CustomLoopLimits.MaxGraphAuthorityCapabilities

@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
@@ -464,10 +465,20 @@ public sealed class AuthorityGrantLifecycleServiceTests
             case "role":
                 var role = AuthorityGrantApplicationTestFixture.Role(capabilityIds: []);
                 harness.Role.Role = role;
-                binding = binding with { Role = new ContextualRoleRevisionPin(role.Identity, role.ContentHash) };
+                var rolePin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
+                harness.LoopBinding.Artifact = AuthorityGrantApplicationTestFixture.GraphArtifact(rolePin);
+                binding = binding with
+                {
+                    Role = rolePin,
+                    Loop = AuthorityGrantApplicationTestFixture.LoopPin(rolePin),
+                };
                 break;
             case "loop":
-                harness.LoopBinding.CapabilityIds = [];
+                harness.LoopBinding.Artifact = AuthorityGrantApplicationTestFixture.GraphArtifact(capabilityIds: []);
+                binding = binding with
+                {
+                    Loop = AuthorityGrantApplicationTestFixture.LoopPin(capabilityIds: []),
+                };
                 break;
         }
 
@@ -641,7 +652,14 @@ public sealed class AuthorityGrantLifecycleServiceTests
         };
         if (posture == "ceiling")
         {
-            harness.LoopBinding.CapabilityIds = [];
+            harness.LoopBinding.Artifact = AuthorityGrantApplicationTestFixture.GraphArtifact(capabilityIds: []);
+            request = AuthorityGrantApplicationTestFixture.Request(
+                AuthorityGrantOperationKind.Replace,
+                current,
+                binding: AuthorityGrantApplicationTestFixture.Binding() with
+                {
+                    Loop = AuthorityGrantApplicationTestFixture.LoopPin(capabilityIds: []),
+                });
         }
 
         harness.Store.CommitFactory = mutation => new AuthorityGrantStoreCommitResult(
@@ -1015,7 +1033,7 @@ public sealed class AuthorityGrantLifecycleServiceTests
             }
 
             var role = Role ?? AuthorityGrantApplicationTestFixture.Role();
-            return Task.FromResult(new AuthorityGrantRoleResolution(Status, pin, role, AuthorityGrantApplicationTestFixture.RoleLifecycle(role), AuthorityGrantApplicationTestFixture.Hash64('d')));
+            return Task.FromResult(new AuthorityGrantRoleResolution(Status, pin, role, AuthorityGrantApplicationTestFixture.RoleLifecycle(role), AuthorityGrantApplicationTestFixture.WorkspaceId, ContextualRoleInstructionSourceProbeStatus.Ready, AuthorityGrantApplicationTestFixture.Hash64('d')));
         }
     }
 
@@ -1039,6 +1057,7 @@ public sealed class AuthorityGrantLifecycleServiceTests
     private sealed class LoopBindingSourceStub : IGovernedLoopGrantBindingSource
     {
         internal AuthorityGrantDependencyStatus Status { get; set; } = AuthorityGrantDependencyStatus.Active;
+        internal Common.Loops.Revisions.Models.GovernedLoopGraphRevisionArtifact? Artifact { get; set; }
         internal IReadOnlyList<string>? CapabilityIds { get; set; }
         internal bool SubstituteOwner { get; set; }
         internal Exception? Exception { get; set; }
@@ -1050,12 +1069,16 @@ public sealed class AuthorityGrantLifecycleServiceTests
                 throw Exception;
             }
 
-            var owner = SubstituteOwner ? new Common.ContextualRoles.Models.ContextualRoleRevisionIdentity("other-role", 1) : AuthorityGrantApplicationTestFixture.Role().Identity;
+            var artifact = Artifact ?? AuthorityGrantApplicationTestFixture.GraphArtifact();
+            var owner = SubstituteOwner
+                ? new Common.ContextualRoles.Models.ContextualRoleRevisionPin(new Common.ContextualRoles.Models.ContextualRoleRevisionIdentity("other-role", 1), artifact.Graph.OwningRole.ContentHash)
+                : artifact.Graph.OwningRole;
             return Task.FromResult(new GovernedLoopGrantBindingResolution(
                 Status,
                 pin,
+                artifact,
                 owner,
-                CapabilityIds ?? [AuthorityGrantApplicationTestFixture.Capability().Id.Value],
+                CapabilityIds ?? artifact.Graph.AuthorityCeiling.CapabilityIds,
                 AuthorityGrantApplicationTestFixture.Hash64('e')));
         }
     }

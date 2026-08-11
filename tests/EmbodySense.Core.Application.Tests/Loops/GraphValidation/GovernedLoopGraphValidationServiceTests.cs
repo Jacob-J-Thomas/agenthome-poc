@@ -1,5 +1,10 @@
+using EmbodySense.Core.Application.ContextualRoles.Models;
+using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
+using EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
+using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -8,6 +13,9 @@ namespace EmbodySense.Core.Application.Tests.Loops.GraphValidation;
 
 public sealed class GovernedLoopGraphValidationServiceTests
 {
+    private const string ModelInferenceCapability = "org.embodysense/model-inference";
+    private const string WorkspaceReadCapability = "org.embodysense/workspace-read";
+
     [Fact]
     public async Task ValidateReturnsNormalizedGraphAndDeterministicEvidence()
     {
@@ -27,6 +35,24 @@ public sealed class GovernedLoopGraphValidationServiceTests
         Assert.Equal(first.Graph.ExecutableHash, second.Graph!.ExecutableHash);
         Assert.Equal(first.Evidence, second.Evidence);
         Assert.Equal(64, first.Evidence!.CombinedHash.Length);
+    }
+
+    [Fact]
+    public async Task ValidateAuthorityEvidenceIsStableAcrossCapabilityEnumerationOrder()
+    {
+        var candidate = Candidate();
+        var descriptors = Descriptors(candidate);
+        var forward = await Service(descriptors, Authority()).ValidateAsync(candidate);
+        var reversedAuthority = Authority() with
+        {
+            CapabilityIds = Authority().CapabilityIds.Reverse().ToArray(),
+        };
+
+        var reverse = await Service(descriptors, reversedAuthority).ValidateAsync(candidate);
+
+        Assert.True(forward.IsValid);
+        Assert.True(reverse.IsValid);
+        Assert.Equal(forward.Evidence, reverse.Evidence);
     }
 
     [Fact]
@@ -326,7 +352,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
         {
             ResourceBudget = new GovernedLoopNodeResourceBudget(2, 2, 2, 2)
         } : descriptor).ToArray();
-        var authority = Authority() with { CapabilityIds = ["model-inference"], MaxAttempts = 1, MaxPayloadCharacters = 1, MaxEvidenceItems = 1, MaxResourceUnits = 1 };
+        var authority = Authority(capabilityIds: [ModelInferenceCapability]) with { MaxAttempts = 1, MaxPayloadCharacters = 1, MaxEvidenceItems = 1, MaxResourceUnits = 1 };
 
         var result = await Service(descriptors, authority).ValidateAsync(candidate);
 
@@ -342,9 +368,31 @@ public sealed class GovernedLoopGraphValidationServiceTests
     {
         var candidate = Candidate();
 
-        var result = await Service(Descriptors(candidate), Authority() with { RoleId = "different-role" }).ValidateAsync(candidate);
+        var result = await Service(Descriptors(candidate), Authority("different-role")).ValidateAsync(candidate);
 
         Assert.Contains(result.Errors, error => error.Code == "authority.role.mismatch");
+    }
+
+    [Fact]
+    public async Task ValidateBindsTheFullOwningRoleRevisionAndContentHash()
+    {
+        var candidate = Candidate();
+        var descriptors = Descriptors(candidate);
+        var revisionSubstitution = AuthorityFromRevision(AuthorityGrantApplicationTestFixture.Role(
+            capabilityIds: [ModelInferenceCapability, WorkspaceReadCapability],
+            roleId: "researcher",
+            revision: 2));
+        var baseline = RoleRevision();
+        var contentSubstitution = AuthorityFromRevision(ContextualRoleRevisionContentHash.Apply(baseline with
+        {
+            Purpose = "A substituted immutable role payload.",
+        }));
+
+        var revisionResult = await Service(descriptors, revisionSubstitution).ValidateAsync(candidate);
+        var contentResult = await Service(descriptors, contentSubstitution).ValidateAsync(candidate);
+
+        Assert.Contains(revisionResult.Errors, error => error.Code == "authority.role.mismatch");
+        Assert.Contains(contentResult.Errors, error => error.Code == "authority.role.mismatch");
     }
 
     [Fact]
@@ -776,7 +824,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
                 AllowedControlOutcomes = [GovernedLoopControlCondition.Failure],
                 RequiredControlOutcomes = [],
                 Ports = descriptor.Ports.Where(port => port.Id != "result").ToArray(),
-                RequiredCapabilityIds = ["workspace-read"]
+                RequiredCapabilityIds = [WorkspaceReadCapability]
             },
             _ => descriptor
         }).ToArray();
@@ -816,7 +864,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
     {
         var candidate = Candidate();
         var descriptors = Descriptors(candidate);
-        var malformedAuthority = Authority() with { RoleId = "different-role", CapabilityIds = ["INVALID"], MaxAttempts = -1 };
+        var malformedAuthority = Authority() with { OwningRole = RolePin("different-role"), CapabilityIds = ["INVALID"], MaxAttempts = -1 };
         var malformedResult = await Service(descriptors, malformedAuthority).ValidateAsync(candidate);
         var catalogFailure = await new GovernedLoopGraphValidationService(new ThrowingCatalog(), new FixedAuthority(Authority())).ValidateAsync(candidate);
         var authorityFailure = await new GovernedLoopGraphValidationService(new FixedCatalog(new GovernedLoopNodeCatalogSnapshot(true, "catalog-1", descriptors)), new ThrowingAuthority()).ValidateAsync(candidate);
@@ -870,9 +918,43 @@ public sealed class GovernedLoopGraphValidationServiceTests
         return descriptor with { AllowsCycle = true, CycleIterationBudgetParameterId = "max-iterations", CycleTimeBudgetMillisecondsParameterId = "max-milliseconds" };
     }
 
-    private static GovernedLoopAuthoritySnapshot Authority()
+    private static GovernedLoopAuthoritySnapshot Authority(
+        string roleId = "researcher",
+        IReadOnlyList<string>? capabilityIds = null)
     {
-        return new GovernedLoopAuthoritySnapshot(true, "authority-1", "researcher", ["model-inference", "workspace-read"], CustomLoopLimits.MaxGraphNodeAttempts, 100_000, CustomLoopLimits.MaxGraphNodeEvidenceItems, 100);
+        var revision = RoleRevision(roleId, capabilityIds);
+        return AuthorityFromRevision(revision);
+    }
+
+    private static GovernedLoopAuthoritySnapshot AuthorityFromRevision(ContextualRoleRevision revision)
+    {
+        var pin = new ContextualRoleRevisionPin(revision.Identity, revision.ContentHash);
+        return new GovernedLoopAuthoritySnapshot(
+            true,
+            AuthorityGrantApplicationTestFixture.Hash64('e'),
+            pin,
+            revision,
+            AuthorityGrantApplicationTestFixture.RoleLifecycle(revision),
+            AuthorityGrantApplicationTestFixture.WorkspaceId,
+            ContextualRoleInstructionSourceProbeStatus.Ready,
+            revision.PolicyMaxima.CapabilityIds,
+            CustomLoopLimits.MaxGraphNodeAttempts,
+            100_000,
+            CustomLoopLimits.MaxGraphNodeEvidenceItems,
+            100);
+    }
+
+    private static ContextualRoleRevision RoleRevision(
+        string roleId = "researcher",
+        IReadOnlyList<string>? capabilityIds = null)
+        => AuthorityGrantApplicationTestFixture.Role(
+            capabilityIds: capabilityIds ?? [ModelInferenceCapability, WorkspaceReadCapability],
+            roleId: roleId);
+
+    private static ContextualRoleRevisionPin RolePin(string roleId = "researcher")
+    {
+        var revision = RoleRevision(roleId);
+        return new ContextualRoleRevisionPin(revision.Identity, revision.ContentHash);
     }
 
     private static GovernedLoopNodeCatalogDescriptor[] Descriptors(GovernedLoopGraphCandidate candidate)
@@ -920,7 +1002,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
 
     private static GovernedLoopGraphCandidate Candidate(IReadOnlyList<GovernedLoopNodeDefinition?>? nodes = null, IReadOnlyList<GovernedLoopControlEdgeDefinition?>? edges = null)
     {
-        return new GovernedLoopGraphCandidate(1, "research-loop", "revision-1", "Research one question safely.", "researcher", "trigger", ["exit"], GovernedLoopAuthorityCeiling.Create(["model-inference", "workspace-read"]), Schemas(), nodes ?? Nodes(), edges ?? Edges(), Bindings(), Output(), Display());
+        return new GovernedLoopGraphCandidate(1, "research-loop", "revision-1", "Research one question safely.", RolePin(), "trigger", ["exit"], GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, WorkspaceReadCapability]), Schemas(), nodes ?? Nodes(), edges ?? Edges(), Bindings(), Output(), Display());
     }
 
     private static GovernedLoopValueSchemaDefinition[] Schemas() => [new("text", GovernedLoopValueKind.Text, false)];
@@ -930,7 +1012,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
         return
         [
             new GovernedLoopNodeDefinition("trigger", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Trigger, "manual-trigger", 1), [Output("request", GovernedLoopBindingKind.Data), Output("invocation-context", GovernedLoopBindingKind.Context)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>()),
-            new GovernedLoopNodeDefinition("infer", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1), [Input("request", GovernedLoopBindingKind.Data), Input("invocation-context", GovernedLoopBindingKind.Context), Output("result", GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create(["model-inference"]), new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
+            new GovernedLoopNodeDefinition("infer", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1), [Input("request", GovernedLoopBindingKind.Data), Input("invocation-context", GovernedLoopBindingKind.Context), Output("result", GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability]), new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
             new GovernedLoopNodeDefinition("exit", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1), [Input("result", GovernedLoopBindingKind.Data), Output("published-result", GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>())
         ];
     }
@@ -965,7 +1047,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
 
     private sealed class FixedAuthority(GovernedLoopAuthoritySnapshot snapshot) : IGovernedLoopAuthoritySnapshotProvider
     {
-        public Task<GovernedLoopAuthoritySnapshot> GetSnapshotAsync(string roleId, CancellationToken cancellationToken = default) => Task.FromResult(snapshot);
+        public Task<GovernedLoopAuthoritySnapshot> GetSnapshotAsync(ContextualRoleRevisionPin? owningRole, CancellationToken cancellationToken = default) => Task.FromResult(snapshot);
     }
 
     private sealed class CancelingCatalog : IGovernedLoopNodeCatalog
@@ -980,6 +1062,6 @@ public sealed class GovernedLoopGraphValidationServiceTests
 
     private sealed class ThrowingAuthority : IGovernedLoopAuthoritySnapshotProvider
     {
-        public Task<GovernedLoopAuthoritySnapshot> GetSnapshotAsync(string roleId, CancellationToken cancellationToken = default) => Task.FromException<GovernedLoopAuthoritySnapshot>(new IOException("Unavailable."));
+        public Task<GovernedLoopAuthoritySnapshot> GetSnapshotAsync(ContextualRoleRevisionPin? owningRole, CancellationToken cancellationToken = default) => Task.FromException<GovernedLoopAuthoritySnapshot>(new IOException("Unavailable."));
     }
 }

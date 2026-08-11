@@ -1,10 +1,13 @@
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.ContextualRoles.Models;
+using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
+using EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
@@ -17,6 +20,8 @@ namespace EmbodySense.Core.Application.Tests.Loops.GraphAuthoring;
 
 public sealed class GovernedLoopGraphAuthoringServiceTests
 {
+    private const string ModelInferenceCapability = "org.embodysense/model-inference";
+    private const string WorkspaceReadCapability = "org.embodysense/workspace-read";
     private static readonly DateTimeOffset _now = DateTimeOffset.Parse("2026-08-10T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
 
     [Fact]
@@ -553,7 +558,7 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
             owningRole ?? Role(),
             "trigger",
             ["exit"],
-            GovernedLoopAuthorityCeiling.Create(["model-inference", "workspace-read"]),
+            GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, WorkspaceReadCapability]),
             [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
             Nodes(),
             [
@@ -575,17 +580,28 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
                     new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 200, 0),
                 ]));
 
+    private static ContextualRoleRevisionPin Role()
+    {
+        var revision = RoleRevision();
+        return new ContextualRoleRevisionPin(revision.Identity, revision.ContentHash);
+    }
+
     private static ContextualRoleRevisionPin Role(
-        string roleId = "researcher",
-        int revision = 1,
-        char contentHash = 'a')
+        string roleId,
+        int revision,
+        char contentHash)
         => new(new ContextualRoleRevisionIdentity(roleId, revision), new string(contentHash, 64));
+
+    private static ContextualRoleRevision RoleRevision()
+        => AuthorityGrantApplicationTestFixture.Role(
+            capabilityIds: [ModelInferenceCapability, WorkspaceReadCapability],
+            roleId: "researcher");
 
     private static GovernedLoopNodeDefinition[] Nodes()
         =>
         [
             new("trigger", new(GovernedLoopNodeKind.Trigger, "manual-trigger", 1), [Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>()),
-            new("infer", new(GovernedLoopNodeKind.Inference, "provider-inference", 1), [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create(["model-inference"]), new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
+            new("infer", new(GovernedLoopNodeKind.Inference, "provider-inference", 1), [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability]), new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
             new("exit", new(GovernedLoopNodeKind.Exit, "success-exit", 1), [Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>()),
         ];
 
@@ -622,7 +638,23 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
     }
 
     private static GovernedLoopAuthoritySnapshot Authority()
-        => new(true, "authority-1", "researcher", ["model-inference", "workspace-read"], CustomLoopLimits.MaxGraphNodeAttempts, 100_000, CustomLoopLimits.MaxGraphNodeEvidenceItems, 100);
+    {
+        var revision = RoleRevision();
+        var pin = new ContextualRoleRevisionPin(revision.Identity, revision.ContentHash);
+        return new(
+            true,
+            AuthorityGrantApplicationTestFixture.Hash64('e'),
+            pin,
+            revision,
+            AuthorityGrantApplicationTestFixture.RoleLifecycle(revision),
+            AuthorityGrantApplicationTestFixture.WorkspaceId,
+            ContextualRoleInstructionSourceProbeStatus.Ready,
+            revision.PolicyMaxima.CapabilityIds,
+            CustomLoopLimits.MaxGraphNodeAttempts,
+            100_000,
+            CustomLoopLimits.MaxGraphNodeEvidenceItems,
+            100);
+    }
 
     private static AuthorityActorId Actor()
     {
@@ -644,7 +676,7 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
 
     private sealed class FixedAuthority(GovernedLoopAuthoritySnapshot snapshot) : IGovernedLoopAuthoritySnapshotProvider
     {
-        public Task<GovernedLoopAuthoritySnapshot> GetSnapshotAsync(string roleId, CancellationToken cancellationToken = default) => Task.FromResult(snapshot);
+        public Task<GovernedLoopAuthoritySnapshot> GetSnapshotAsync(ContextualRoleRevisionPin? owningRole, CancellationToken cancellationToken = default) => Task.FromResult(snapshot);
     }
 
     private sealed class StubAuthorizer : IGovernedLoopRevisionActorAuthorizer
