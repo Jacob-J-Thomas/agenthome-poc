@@ -351,6 +351,8 @@ public sealed class AgentRuntimeFactory
                 capabilityAdmission,
                 governedEffectAuthorityEvidence,
                 capabilityAuthority);
+            var governedPublicationAuthority = new GovernedLoopConversationPublicationAuthorityBoundaryProvider(
+                governedEffectAuthority);
             var governedToolAuthority = new GovernedLoopReadOnlyWorkspaceToolAdapter();
             var customInferenceExecutor = new CustomLoopInferenceAttemptExecutor(
                 effectiveOptions,
@@ -368,7 +370,8 @@ public sealed class AgentRuntimeFactory
                 auditLog,
                 governedToolAuthority,
                 attemptCancellationBroker: customExecutionGate,
-                capabilityAdmissionService: capabilityAdmission);
+                capabilityAdmissionService: capabilityAdmission,
+                conversationPublicationAuthorityBoundaryProvider: governedPublicationAuthority);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,
