@@ -29,7 +29,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
     private const string RejectedDetail = "Canonical admission committed a definitive rejection; no run or provider request was created.";
     private readonly string _workspaceId;
     private readonly ICustomLoopInvocationOperationStore _operationStore;
-    private readonly CustomLoopInvocationReceiptRetentionService _receiptRetention;
+    private readonly CustomLoopInvocationReceiptWriter _receiptWriter;
     private readonly IGovernedLoopAdmissionService _admissionService;
     private readonly IGovernedLoopSequentialRunMaterializer _materializer;
     private readonly IGovernedLoopSequentialOrderedRuntime _orderedRuntime;
@@ -39,7 +39,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
     public GovernedLoopSequentialInvocationCoordinator(
         string workspaceId,
         ICustomLoopInvocationOperationStore operationStore,
-        CustomLoopInvocationReceiptRetentionService receiptRetention,
+        CustomLoopInvocationReceiptWriter receiptWriter,
         IGovernedLoopAdmissionService admissionService,
         IGovernedLoopSequentialRunMaterializer materializer,
         IGovernedLoopSequentialOrderedRuntime orderedRuntime,
@@ -52,7 +52,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
 
         _workspaceId = workspaceId;
         _operationStore = operationStore ?? throw new ArgumentNullException(nameof(operationStore));
-        _receiptRetention = receiptRetention ?? throw new ArgumentNullException(nameof(receiptRetention));
+        _receiptWriter = receiptWriter ?? throw new ArgumentNullException(nameof(receiptWriter));
         _admissionService = admissionService ?? throw new ArgumentNullException(nameof(admissionService));
         _materializer = materializer ?? throw new ArgumentNullException(nameof(materializer));
         _orderedRuntime = orderedRuntime ?? throw new ArgumentNullException(nameof(orderedRuntime));
@@ -330,7 +330,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
         Exception? writeFailure = null;
         try
         {
-            stored = await _receiptRetention.BindAsync(candidate, cancellationToken).ConfigureAwait(false);
+            stored = await _receiptWriter.BindAsync(candidate, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -390,7 +390,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
         try
         {
             using var integrityWindow = new CancellationTokenSource(_integrityWriteTimeout);
-            stored = await _receiptRetention.CompleteAsync(candidate, integrityWindow.Token).ConfigureAwait(false);
+            stored = await _receiptWriter.CompleteAsync(candidate, integrityWindow.Token).ConfigureAwait(false);
             if (stored.Status is CustomLoopInvocationOperationStoreStatus.Completed or CustomLoopInvocationOperationStoreStatus.Replayed
                 && stored.Operation is { } durable
                 && MatchesCompletedInvocation(durable, candidate, outcome, admissionStatus, runId))
@@ -540,6 +540,8 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
         string admissionStatus,
         string? runId)
         => MatchesStoredOperation(operation, expected)
+            && expected.SequentialInvocationSnapshot is { } expectedSnapshot
+            && MatchesBoundInvocation(operation, expectedSnapshot)
             && operation.State == CustomLoopInvocationOperationState.Complete
             && operation.Outcome == outcome
             && string.Equals(operation.AdmissionStatus, admissionStatus, StringComparison.Ordinal)

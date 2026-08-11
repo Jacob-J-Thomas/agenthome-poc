@@ -58,7 +58,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
         var coordinator = new GovernedLoopSequentialInvocationCoordinator(
             _workspaceId,
             operations,
-            Retention(operations),
+            Writer(operations),
             admission,
             materializer,
             runtime,
@@ -442,12 +442,18 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
     }
 
     [Fact]
-    public async Task Substituted_successful_completion_result_conflicts_and_forbids_runtime_dispatch()
+    public async Task Substituted_snapshot_with_copied_hash_in_successful_completion_conflicts_and_forbids_dispatch()
     {
         var context = await ContextAsync();
         var operations = new RecordingOperationStore(context.Operation)
         {
-            CompleteMutation = operation => operation with { InvokingConversationId = new string('e', 64) },
+            CompleteMutation = operation => operation with
+            {
+                SequentialInvocationSnapshot = operation.SequentialInvocationSnapshot! with
+                {
+                    TriggerPrompt = "Mutated content carrying the copied old hash.",
+                },
+            },
         };
         var runtime = new RecordingOrderedRuntime();
 
@@ -497,11 +503,11 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
         };
         operations.CompleteStatuses.Enqueue(CustomLoopInvocationOperationStoreStatus.RetentionRequired);
         var runtime = new RecordingOrderedRuntime();
-        var retention = Retention(operations, new RecordingRetentionAuditLog { FailAppend = failAudit });
+        var writer = Writer(operations, new RecordingRetentionAuditLog { FailAppend = failAudit });
         var coordinator = new GovernedLoopSequentialInvocationCoordinator(
             _workspaceId,
             operations,
-            retention,
+            writer,
             new RecordingAdmissionService(context.AdmissionResult),
             new RecordingMaterializer { Result = await MaterializedAsync(context) },
             runtime,
@@ -544,19 +550,21 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
         => new(
             _workspaceId,
             operations,
-            Retention(operations),
+            Writer(operations),
             admission,
             materializer,
             runtime,
             new GovernedLoopSequentialRunMaterializerTests.FixedTimeProvider(_coordinatedAtUtc));
 
-    private static CustomLoopInvocationReceiptRetentionService Retention(
+    private static CustomLoopInvocationReceiptWriter Writer(
         RecordingOperationStore operations,
         RecordingRetentionAuditLog? audit = null)
         => new(
             operations,
-            audit ?? new RecordingRetentionAuditLog(),
-            new GovernedLoopSequentialRunMaterializerTests.FixedTimeProvider(_coordinatedAtUtc));
+            new CustomLoopInvocationReceiptRetentionService(
+                operations,
+                audit ?? new RecordingRetentionAuditLog(),
+                new GovernedLoopSequentialRunMaterializerTests.FixedTimeProvider(_coordinatedAtUtc)));
 
     private static GovernedLoopGraphRevisionArtifact WithChangedLayout(GovernedLoopGraphRevisionArtifact artifact)
     {
