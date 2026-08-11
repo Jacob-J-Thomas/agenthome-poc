@@ -6,7 +6,10 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
+using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -570,10 +573,11 @@ public sealed class CustomLoopLifecycleService
     private async Task<TransitionResult> PersistTransitionAsync(CustomLoopRunRecord current, CustomLoopRunStatus status, string actor, string eventId, string detail)
     {
         var now = Now(current);
-        var candidate = CreateTransition(current, status, eventId, detail, now);
+        CustomLoopRunRecord candidate;
         CustomLoopRunStoreResult stored;
         try
         {
+            candidate = CreateTransition(current, status, eventId, detail, now);
             stored = await _runStore.UpdateAsync(candidate, current.LifecycleVersion, IntegrityToken());
         }
         catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
@@ -791,6 +795,7 @@ public sealed class CustomLoopLifecycleService
             _ => run.ExecutionClock
         };
         var lifecycle = new CustomLoopRunEvent(run.Events.Length + 1, eventId, now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, detail, [], null, null, null, null, null, null, null, null, null, null, ControlExpectedLifecycleVersion: run.LifecycleVersion);
+        var frontier = ProjectCanonicalFrontier(run, status, now);
         return run with
         {
             LifecycleVersion = run.LifecycleVersion + 1,
@@ -801,8 +806,27 @@ public sealed class CustomLoopLifecycleService
             Events = [.. run.Events, lifecycle],
             FinalOutput = null,
             FailureCode = status is CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview ? "lifecycle_control_failed" : null,
-            FailureDetail = status is CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview ? detail : null
+            FailureDetail = status is CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview ? detail : null,
+            Frontier = frontier,
         };
+    }
+
+    private static GovernedLoopFrontierPosture? ProjectCanonicalFrontier(CustomLoopRunRecord run, CustomLoopRunStatus status, DateTimeOffset now)
+    {
+        if (run.SequentialAdapterBinding is not { } binding || run.Frontier is not { } frontier || status != CustomLoopRunStatus.Cancelled)
+        {
+            return run.Frontier;
+        }
+
+        if (frontier.Payload.Status == GovernedLoopFrontierStatus.Cancelled)
+        {
+            return frontier;
+        }
+
+        var cancelled = GovernedLoopSequentialFrontierMachine.CancelCurrent(frontier, binding, now);
+        return cancelled.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied && cancelled.Frontier is not null
+            ? cancelled.Frontier
+            : throw new InvalidOperationException("The exact canonical frontier could not enter Cancelled with its lifecycle transition.");
     }
 
     private static CustomLoopExecutionClock StopClock(CustomLoopExecutionClock clock, DateTimeOffset now)
