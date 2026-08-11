@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Governance.Tools.Models;
 using EmbodySense.Core.Application.LocalWorkspace;
+using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.LocalWorkspace.Models;
@@ -133,6 +134,29 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
         Assert.Contains(events, auditEvent => auditEvent.Action == "tool.loop_authority.evaluate" && auditEvent.Outcome == "needs_review");
     }
 
+    [Theory]
+    [InlineData(ToolActuationAuthorityDisposition.ReviewRequired)]
+    [InlineData(ToolActuationAuthorityDisposition.Ambiguous)]
+    public async Task Secondary_audit_failure_cannot_replace_the_exact_review_checkpoint(ToolActuationAuthorityDisposition disposition)
+    {
+        using var workspace = await CreateWorkspaceAsync();
+        var executor = new CountingWorkspaceToolExecutor();
+        var retention = new RecordingRetentionStore();
+        var boundary = new AdversarialBoundary(disposition == ToolActuationAuthorityDisposition.ReviewRequired ? BoundaryBehavior.ReviewRequired : BoundaryBehavior.Ambiguous);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var audit = new FailingActuationAuthorityAuditLog(new AuditLog(paths));
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), executor, retention, boundary, audit);
+
+        var exception = await Assert.ThrowsAsync<ToolActuationReviewRequiredException>(
+            () => broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/note.txt")));
+
+        Assert.Equal(disposition, exception.Disposition);
+        Assert.IsType<IOException>(exception.InnerException);
+        Assert.Equal(0, executor.CallCount);
+        Assert.Equal(0, retention.CallCount);
+        Assert.Equal(1, audit.RejectedActuationAudits);
+    }
+
     private static async Task<TestWorkspace> CreateWorkspaceAsync()
     {
         var workspace = new TestWorkspace();
@@ -140,11 +164,11 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
         return workspace;
     }
 
-    private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt approval, IWorkspaceToolExecutor executor, IToolResultRetentionStore retention, IToolActuationAuthorityBoundary boundary)
+    private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt approval, IWorkspaceToolExecutor executor, IToolResultRetentionStore retention, IToolActuationAuthorityBoundary boundary, IAuditLog? auditLog = null)
     {
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
-        return new ToolBroker(paths, new ToolPermissionService(paths, policy), approval, executor, new AuditLog(paths), LoopDefinition.CreateDefaultConversation(), retention, actuationAuthorityBoundary: boundary);
+        return new ToolBroker(paths, new ToolPermissionService(paths, policy), approval, executor, auditLog ?? new AuditLog(paths), LoopDefinition.CreateDefaultConversation(), retention, actuationAuthorityBoundary: boundary);
     }
 
     private enum BoundaryBehavior
@@ -289,6 +313,27 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
             CallCount++;
             return Task.FromResult(new ToolResultRetentionReference(ToolResultRetentionStatus.Retained, "retained/test.json", new string('a', 64), result.OutputText.Length, result.OutputText.Length, 1, DateTimeOffset.UtcNow, 0, "retained in test"));
         }
+    }
+
+    private sealed class FailingActuationAuthorityAuditLog(IAuditLog inner) : IAuditLog
+    {
+        public int RejectedActuationAudits { get; private set; }
+
+        public Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
+        {
+            if (auditEvent.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate
+                && auditEvent.Metadata.TryGetValue("authority_phase", out var phase)
+                && string.Equals(phase as string, "actuation_boundary", StringComparison.Ordinal))
+            {
+                RejectedActuationAudits++;
+                throw new IOException("actuation authority audit unavailable");
+            }
+
+            return inner.AppendAsync(auditEvent, cancellationToken);
+        }
+
+        public Task<IReadOnlyList<AuditEvent>> ReadTailAsync(int limit, CancellationToken cancellationToken = default)
+            => inner.ReadTailAsync(limit, cancellationToken);
     }
 
     private sealed class RecordingApprovalPrompt : IToolApprovalPrompt
