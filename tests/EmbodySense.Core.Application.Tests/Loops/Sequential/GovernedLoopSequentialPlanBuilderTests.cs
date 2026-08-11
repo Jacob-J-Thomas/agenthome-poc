@@ -29,6 +29,34 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
     }
 
     [Fact]
+    public void Exact_workspace_command_assignment_is_supported_only_as_a_graph_and_every_inference_node_subset()
+    {
+        var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(2, allowWorkspaceTools: true);
+
+        var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, result.Status);
+        Assert.Equal(
+            [GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId],
+            artifact.Graph.AuthorityCeiling.CapabilityIds);
+        Assert.All(
+            artifact.Graph.Nodes.Where(node => node.Descriptor == GovernedLoopSequentialNodeDescriptors.ProviderInference),
+            node => Assert.Equal(
+                [GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId],
+                node.AuthorityCeiling.CapabilityIds));
+
+        var firstInference = artifact.Graph.Nodes.Single(node => node.Id == "infer-01");
+        var missingNodeAssignment = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            artifact.Graph,
+            nodes: artifact.Graph.Nodes.Select(node => node.Id == firstInference.Id
+                ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId]) }
+                : node).ToArray());
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, GovernedLoopSequentialPlanBuilder.Build(missingNodeAssignment).Status);
+        Assert.Equal("$.graph.nodes", GovernedLoopSequentialPlanBuilder.Build(missingNodeAssignment).FailurePath);
+    }
+
+    [Fact]
     public void Traversal_uses_control_edges_instead_of_canonical_node_array_order()
     {
         var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(2, ["z-infer", "a-infer"]);
@@ -94,8 +122,8 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
             nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([]) } : node).ToArray());
         var substitutedAuthority = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
-            nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(["org.embodysense/workspace-read"]) } : node).ToArray(),
-            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, "org.embodysense/workspace-read"]));
+            nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId]) } : node).ToArray(),
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId]));
         var missingContextPort = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
             nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { Ports = node.Ports.Where(port => port.Id != "invocation-context").ToArray() } : node).ToArray(),

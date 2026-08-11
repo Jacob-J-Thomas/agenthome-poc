@@ -12,6 +12,7 @@ public static class GovernedLoopSequentialPlanBuilder
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const string WorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
 
     /// <summary>Builds a plan for exactly <c>Manual Trigger -&gt; 1-5 Inference -&gt; Exit</c>.</summary>
     public static GovernedLoopSequentialPlanBuildResult Build(GovernedLoopGraphRevisionArtifact? artifact)
@@ -148,6 +149,17 @@ public static class GovernedLoopSequentialPlanBuilder
             return "$.graph.valueSchemas";
         }
 
+        var allowsWorkspaceTools = graph.AuthorityCeiling.CapabilityIds.SequenceEqual(
+            [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId],
+            StringComparer.Ordinal);
+        if (!allowsWorkspaceTools
+            && !graph.AuthorityCeiling.CapabilityIds.SequenceEqual(
+                [ConversationTurnCapabilityId, ModelInferenceCapabilityId],
+                StringComparer.Ordinal))
+        {
+            return "$.graph.authorityCeiling";
+        }
+
         var nodeById = graph.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
         foreach (var planNode in planNodes)
         {
@@ -155,7 +167,7 @@ public static class GovernedLoopSequentialPlanBuilder
             var exact = planNode.Descriptor.Kind switch
             {
                 GovernedLoopNodeKind.Trigger => IsExactTrigger(node),
-                GovernedLoopNodeKind.Inference => IsExactInference(node),
+                GovernedLoopNodeKind.Inference => IsExactInference(node, allowsWorkspaceTools),
                 GovernedLoopNodeKind.Exit => IsExactExit(node),
                 _ => false,
             };
@@ -163,13 +175,6 @@ public static class GovernedLoopSequentialPlanBuilder
             {
                 return "$.graph.nodes";
             }
-        }
-
-        if (!graph.AuthorityCeiling.CapabilityIds.SequenceEqual(
-                [ConversationTurnCapabilityId, ModelInferenceCapabilityId],
-                StringComparer.Ordinal))
-        {
-            return "$.graph.authorityCeiling";
         }
 
         if (!HasExactBindings(graph.Bindings, planNodes))
@@ -196,8 +201,12 @@ public static class GovernedLoopSequentialPlanBuilder
                 new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
                 new GovernedLoopPortDefinition("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context, "text", true));
 
-    private static bool IsExactInference(GovernedLoopNodeDefinition node)
-        => node.AuthorityCeiling.CapabilityIds.SequenceEqual([ModelInferenceCapabilityId], StringComparer.Ordinal)
+    private static bool IsExactInference(GovernedLoopNodeDefinition node, bool allowsWorkspaceTools)
+        => node.AuthorityCeiling.CapabilityIds.SequenceEqual(
+                allowsWorkspaceTools
+                    ? [ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]
+                    : [ModelInferenceCapabilityId],
+                StringComparer.Ordinal)
             && node.Parameters.Count == 1
             && node.Parameters.TryGetValue("instruction", out var instruction)
             && !string.IsNullOrWhiteSpace(instruction)
