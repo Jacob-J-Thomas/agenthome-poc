@@ -170,13 +170,28 @@ public sealed class GovernedLoopGraphValidationServiceTests
     [Fact]
     public async Task ValidateRejectsPureNodeSchemaSemanticsThatTheExecutablePlanCannotHonor()
     {
-        foreach (var (name, candidate) in InvalidPureSemanticCandidates())
+        foreach (var (name, nodeId, candidate) in InvalidPureSemanticCandidates())
         {
             var result = await Service(ExactPureCatalog(candidate)).ValidateAsync(candidate);
 
             Assert.True(
-                result.Errors.Any(error => error.Code == "node.pure-schema-contract.incompatible"),
+                result.Errors.Any(error => error.Code == "node.pure-schema-contract.incompatible" && error.Element.Id == nodeId),
                 $"The `{name}` candidate did not fail the exact pure-node schema contract: {string.Join(", ", result.Errors.Select(error => error.Code))}");
+        }
+    }
+
+    [Fact]
+    public async Task ValidatePreservesExactUnformattedSchemaConformanceAndConcatSemantics()
+    {
+        foreach (var candidate in new[]
+                 {
+                     CandidateFromGraph(GovernedLoopPureSchemaAdmissionTestFixture.SchemaConformanceArtifact().Graph),
+                     CandidateFromGraph(GovernedLoopPureSchemaAdmissionTestFixture.ConcatArtifact().Graph),
+                 })
+        {
+            var result = await Service(ExactPureCatalog(candidate)).ValidateAsync(candidate);
+
+            Assert.DoesNotContain(result.Errors, error => error.Code == "node.pure-schema-contract.incompatible");
         }
     }
 
@@ -1117,7 +1132,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
             .. GovernedLoopPureNodeCatalogContract.Descriptors,
         ];
 
-    private static IReadOnlyList<(string Name, GovernedLoopGraphCandidate Candidate)> InvalidPureSemanticCandidates()
+    private static IReadOnlyList<(string Name, string NodeId, GovernedLoopGraphCandidate Candidate)> InvalidPureSemanticCandidates()
     {
         var mixed = CandidateFromGraph(GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact().Graph);
         var identityMismatch = mixed with
@@ -1156,11 +1171,16 @@ public sealed class GovernedLoopGraphValidationServiceTests
 
         return
         [
-            ("identity with different input and output schemas", identityMismatch),
-            ("canonical equality with different operand kinds", EqualityMismatchCandidate()),
-            ("ordered concat with a non-Text element schema", ConcatElementMismatchCandidate()),
-            ("validator with reversed bounds", reversedLength),
-            ("validator with nullable input", nullableLength),
+            ("identity with different input and output schemas", "identity", identityMismatch),
+            ("canonical equality with different operand kinds", "equality", EqualityMismatchCandidate()),
+            ("ordered concat with a non-Text element schema", "concat", ConcatElementMismatchCandidate()),
+            ("schema conformance with a direct format", "schema-check", CandidateFromGraph(GovernedLoopPureSchemaAdmissionTestFixture.SchemaConformanceArtifact(formatRoot: true).Graph)),
+            ("schema conformance with a formatted array element", "schema-check", CandidateFromGraph(GovernedLoopPureSchemaAdmissionTestFixture.SchemaConformanceArtifact(formatElement: true).Graph)),
+            ("schema conformance with a cyclic array schema", "schema-check", CandidateFromGraph(GovernedLoopPureSchemaAdmissionTestFixture.SchemaConformanceArtifact(cycle: true).Graph)),
+            ("ordered concat with a formatted array", "concat", CandidateFromGraph(GovernedLoopPureSchemaAdmissionTestFixture.ConcatArtifact(formatArray: true).Graph)),
+            ("ordered concat with a formatted array element", "concat", CandidateFromGraph(GovernedLoopPureSchemaAdmissionTestFixture.ConcatArtifact(formatElement: true).Graph)),
+            ("validator with reversed bounds", "validate-length", reversedLength),
+            ("validator with nullable input", "validate-length", nullableLength),
         ];
     }
 

@@ -178,6 +178,31 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
     }
 
     [Theory]
+    [InlineData("schema-root-format")]
+    [InlineData("schema-element-format")]
+    [InlineData("schema-cycle")]
+    [InlineData("concat-array-format")]
+    [InlineData("concat-element-format")]
+    public void Formatted_or_cyclic_pure_schema_trees_fail_before_plan_admission(string substitution)
+    {
+        var artifact = substitution switch
+        {
+            "schema-root-format" => GovernedLoopPureSchemaAdmissionTestFixture.SchemaConformanceArtifact(formatRoot: true),
+            "schema-element-format" => GovernedLoopPureSchemaAdmissionTestFixture.SchemaConformanceArtifact(formatElement: true),
+            "schema-cycle" => GovernedLoopPureSchemaAdmissionTestFixture.SchemaConformanceArtifact(cycle: true),
+            "concat-array-format" => GovernedLoopPureSchemaAdmissionTestFixture.ConcatArtifact(formatArray: true),
+            "concat-element-format" => GovernedLoopPureSchemaAdmissionTestFixture.ConcatArtifact(formatElement: true),
+            _ => throw new InvalidOperationException("Unknown pure-schema substitution."),
+        };
+
+        var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, result.Status);
+        Assert.Null(result.Plan);
+        Assert.Equal("$.graph.valueSchemas", result.FailurePath);
+    }
+
+    [Theory]
     [InlineData(0)]
     [InlineData(6)]
     public void Inference_count_outside_the_supported_bounds_fails_closed(int inferenceCount)

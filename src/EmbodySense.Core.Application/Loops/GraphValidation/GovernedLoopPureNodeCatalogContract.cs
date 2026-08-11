@@ -47,7 +47,9 @@ public static class GovernedLoopPureNodeCatalogContract
                 && string.Equals(input.ValueSchemaId, output.ValueSchemaId, StringComparison.Ordinal),
             GovernedLoopPureNodeVocabulary.StructuredSelect => IsNonNullable(input, schemas),
             GovernedLoopPureNodeVocabulary.OrderedTextConcat => IsExactConcat(node, schemas, output),
-            GovernedLoopPureNodeVocabulary.SchemaConformance => IsNonNullable(result, schemas),
+            GovernedLoopPureNodeVocabulary.SchemaConformance => input is not null
+                && IsNonNullable(result, schemas)
+                && HasNoDeclaredFormat(input.ValueSchemaId, schemas, new HashSet<string>(StringComparer.Ordinal)),
             GovernedLoopPureNodeVocabulary.CanonicalEquality => IsExactEquality(node, schemas, result),
             GovernedLoopPureNodeVocabulary.InclusiveIntegerRange or GovernedLoopPureNodeVocabulary.InclusiveNumberRange
                 => IsNonNullable(input, schemas) && IsNonNullable(result, schemas) && HasOrderedRange(node),
@@ -165,14 +167,32 @@ public static class GovernedLoopPureNodeCatalogContract
         if (values is null
             || output is null
             || !schemas.TryGetValue(values.ValueSchemaId, out var valuesSchema)
-            || valuesSchema is not { Nullable: false, ElementSchemaId: { } elementSchemaId }
+            || valuesSchema is not { Nullable: false, Format: null, ElementSchemaId: { } elementSchemaId }
             || !schemas.TryGetValue(elementSchemaId, out var element))
         {
             return false;
         }
 
-        return element is { Kind: GovernedLoopValueKind.Text, Nullable: false }
+        return element is { Kind: GovernedLoopValueKind.Text, Nullable: false, Format: null, ElementSchemaId: null }
             && IsNonNullable(output, schemas);
+    }
+
+    private static bool HasNoDeclaredFormat(
+        string schemaId,
+        IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas,
+        HashSet<string> active)
+    {
+        if (!schemas.TryGetValue(schemaId, out var schema) || !active.Add(schema.Id))
+        {
+            return false;
+        }
+
+        var valid = schema.Format is null
+            && (schema.Kind != GovernedLoopValueKind.Array
+                || schema.ElementSchemaId is not null
+                && HasNoDeclaredFormat(schema.ElementSchemaId, schemas, active));
+        active.Remove(schema.Id);
+        return valid;
     }
 
     private static bool IsExactEquality(
