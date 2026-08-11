@@ -60,6 +60,14 @@ public sealed record CustomLoopInvocationOperation(
     /// </summary>
     public const int CurrentSchemaVersion = 1;
 
+    /// <summary>Gets the exact canonical admission-request hash frozen before context capture, or null for the fenced legacy path.</summary>
+    [JsonRequired]
+    public string? SequentialAdmissionRequestHash { get; init; }
+
+    /// <summary>Gets the exact immutable graph-artifact hash frozen before context capture, or null for the fenced legacy path.</summary>
+    [JsonRequired]
+    public string? SequentialArtifactHash { get; init; }
+
     /// <summary>Gets the exact bounded invocation payload frozen before canonical admission, or null for the fenced legacy path.</summary>
     [JsonRequired]
     public GovernedLoopSequentialInvocationSnapshot? SequentialInvocationSnapshot { get; init; }
