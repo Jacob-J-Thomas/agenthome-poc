@@ -130,7 +130,7 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
         store.ReceiptWriteStatuses.Enqueue(CustomLoopInvocationOperationStoreStatus.LimitExceeded);
         store.ReceiptWriteStatuses.Enqueue(CustomLoopInvocationOperationStoreStatus.Completed);
 
-        var result = await Service(store, new FakeAuditLog()).CompleteAsync(InvocationOperation());
+        var result = await Writer(store, new FakeAuditLog()).CompleteAsync(InvocationOperation());
 
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, result.Status);
         Assert.Equal(2, store.ReceiptWriteCalls);
@@ -152,7 +152,7 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
             FailingAction = failAudit ? AuditSchema.Actions.LoopInvocationReceiptRetentionIntent : null,
         };
 
-        var result = await Service(store, audit).CompleteAsync(InvocationOperation() with { Actor = actor });
+        var result = await Writer(store, audit).CompleteAsync(InvocationOperation() with { Actor = actor });
 
         Assert.Equal(expected, result.Status);
         Assert.Equal(1, store.ReceiptWriteCalls);
@@ -162,6 +162,9 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
     {
         return new CustomLoopInvocationReceiptRetentionService(store, audit, new FixedTimeProvider(_now));
     }
+
+    private static CustomLoopInvocationReceiptWriter Writer(FakeStore store, FakeAuditLog audit)
+        => new(store, Service(store, audit));
 
     private static CustomLoopInvocationReceiptRetentionOperation Operation(CustomLoopInvocationReceiptRetentionOperationState state, DateTimeOffset? ownershipStartedAtUtc = null)
     {
