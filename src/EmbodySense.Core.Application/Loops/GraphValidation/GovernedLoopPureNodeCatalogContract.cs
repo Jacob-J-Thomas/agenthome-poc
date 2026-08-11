@@ -1,3 +1,4 @@
+using System.Globalization;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -30,6 +31,30 @@ public static class GovernedLoopPureNodeCatalogContract
             ? null
             : _descriptors.SingleOrDefault(candidate => Equals(candidate.Descriptor, descriptor));
         return contract is not null;
+    }
+
+    internal static bool HasExactSchemaSemantics(
+        GovernedLoopNodeDefinition node,
+        IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas)
+    {
+        var input = InputPort(node, GovernedLoopPureNodeVocabulary.InputPort);
+        var output = OutputPort(node, GovernedLoopPureNodeVocabulary.OutputPort);
+        var result = OutputPort(node, GovernedLoopPureNodeVocabulary.ResultPort);
+        return node.Descriptor.TypeId switch
+        {
+            GovernedLoopPureNodeVocabulary.IdentityTransform => input is not null
+                && output is not null
+                && string.Equals(input.ValueSchemaId, output.ValueSchemaId, StringComparison.Ordinal),
+            GovernedLoopPureNodeVocabulary.StructuredSelect => IsNonNullable(input, schemas),
+            GovernedLoopPureNodeVocabulary.OrderedTextConcat => IsExactConcat(node, schemas, output),
+            GovernedLoopPureNodeVocabulary.SchemaConformance => IsNonNullable(result, schemas),
+            GovernedLoopPureNodeVocabulary.CanonicalEquality => IsExactEquality(node, schemas, result),
+            GovernedLoopPureNodeVocabulary.InclusiveIntegerRange or GovernedLoopPureNodeVocabulary.InclusiveNumberRange
+                => IsNonNullable(input, schemas) && IsNonNullable(result, schemas) && HasOrderedRange(node),
+            GovernedLoopPureNodeVocabulary.TextLength or GovernedLoopPureNodeVocabulary.ArrayLength
+                => IsNonNullable(input, schemas) && IsNonNullable(result, schemas) && HasOrderedIntegerRange(node),
+            _ => false,
+        };
     }
 
     private static IReadOnlyList<GovernedLoopNodeCatalogDescriptor> CreateDescriptors()
@@ -130,6 +155,88 @@ public static class GovernedLoopPureNodeCatalogContract
 
     private static GovernedLoopValueKindSet Kinds(params GovernedLoopValueKind[] values)
         => GovernedLoopValueKindSet.Create(values);
+
+    private static bool IsExactConcat(
+        GovernedLoopNodeDefinition node,
+        IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas,
+        GovernedLoopPortDefinition? output)
+    {
+        var values = InputPort(node, GovernedLoopPureNodeVocabulary.ValuesPort);
+        if (values is null
+            || output is null
+            || !schemas.TryGetValue(values.ValueSchemaId, out var valuesSchema)
+            || valuesSchema is not { Nullable: false, ElementSchemaId: { } elementSchemaId }
+            || !schemas.TryGetValue(elementSchemaId, out var element))
+        {
+            return false;
+        }
+
+        return element is { Kind: GovernedLoopValueKind.Text, Nullable: false }
+            && IsNonNullable(output, schemas);
+    }
+
+    private static bool IsExactEquality(
+        GovernedLoopNodeDefinition node,
+        IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas,
+        GovernedLoopPortDefinition? result)
+    {
+        var left = InputPort(node, GovernedLoopPureNodeVocabulary.LeftPort);
+        var right = InputPort(node, GovernedLoopPureNodeVocabulary.RightPort);
+        return left is not null
+            && right is not null
+            && schemas.TryGetValue(left.ValueSchemaId, out var leftSchema)
+            && schemas.TryGetValue(right.ValueSchemaId, out var rightSchema)
+            && leftSchema.Kind == rightSchema.Kind
+            && IsNonNullable(result, schemas);
+    }
+
+    private static bool IsNonNullable(
+        GovernedLoopPortDefinition? port,
+        IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas)
+        => port is not null
+            && schemas.TryGetValue(port.ValueSchemaId, out var schema)
+            && !schema.Nullable;
+
+    private static bool HasOrderedRange(GovernedLoopNodeDefinition node)
+        => node.Descriptor.TypeId == GovernedLoopPureNodeVocabulary.InclusiveIntegerRange
+            ? HasOrderedIntegerRange(node)
+            : TryGetParameter(node, GovernedLoopPureNodeVocabulary.MinimumParameter, out var minimumValue)
+                && TryGetParameter(node, GovernedLoopPureNodeVocabulary.MaximumParameter, out var maximumValue)
+                && TryCanonicalNumber(minimumValue, out var minimum)
+                && TryCanonicalNumber(maximumValue, out var maximum)
+                && minimum <= maximum;
+
+    private static bool HasOrderedIntegerRange(GovernedLoopNodeDefinition node)
+        => TryGetParameter(node, GovernedLoopPureNodeVocabulary.MinimumParameter, out var minimumValue)
+            && TryGetParameter(node, GovernedLoopPureNodeVocabulary.MaximumParameter, out var maximumValue)
+            && long.TryParse(minimumValue, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var minimum)
+            && long.TryParse(maximumValue, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var maximum)
+            && string.Equals(minimum.ToString(CultureInfo.InvariantCulture), minimumValue, StringComparison.Ordinal)
+            && string.Equals(maximum.ToString(CultureInfo.InvariantCulture), maximumValue, StringComparison.Ordinal)
+            && minimum <= maximum;
+
+    private static bool TryCanonicalNumber(string value, out double number)
+    {
+        number = default;
+        return GovernedLoopTypedValue.TryCreate(
+                GovernedLoopTypedValue.CurrentSchemaVersion,
+                GovernedLoopValueKind.Number,
+                value,
+                out var canonical,
+                out _)
+            && string.Equals(canonical!.CanonicalValueJson, value, StringComparison.Ordinal)
+            && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out number)
+            && double.IsFinite(number);
+    }
+
+    private static GovernedLoopPortDefinition? InputPort(GovernedLoopNodeDefinition node, string id)
+        => node.Ports.SingleOrDefault(port => port.Direction == GovernedLoopPortDirection.Input && string.Equals(port.Id, id, StringComparison.Ordinal));
+
+    private static GovernedLoopPortDefinition? OutputPort(GovernedLoopNodeDefinition node, string id)
+        => node.Ports.SingleOrDefault(port => port.Direction == GovernedLoopPortDirection.Output && string.Equals(port.Id, id, StringComparison.Ordinal));
+
+    private static bool TryGetParameter(GovernedLoopNodeDefinition node, string id, out string value)
+        => node.Parameters.TryGetValue(id, out value!);
 
     private static string DescriptorKey(GovernedLoopNodeCatalogDescriptor value)
         => $"{(int)value.Descriptor.Kind:D3}:{value.Descriptor.TypeId}:{value.Descriptor.Version:D10}";

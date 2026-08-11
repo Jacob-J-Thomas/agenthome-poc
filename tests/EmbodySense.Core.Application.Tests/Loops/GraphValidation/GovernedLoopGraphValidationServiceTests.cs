@@ -2,6 +2,8 @@ using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
+using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Tests.Loops.Sequential;
 using EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
@@ -163,6 +165,19 @@ public sealed class GovernedLoopGraphValidationServiceTests
         Assert.False(result.IsValid);
         Assert.Null(result.Evidence);
         Assert.Contains(result.Errors, error => error.Code == "catalog.port-contract.invalid");
+    }
+
+    [Fact]
+    public async Task ValidateRejectsPureNodeSchemaSemanticsThatTheExecutablePlanCannotHonor()
+    {
+        foreach (var (name, candidate) in InvalidPureSemanticCandidates())
+        {
+            var result = await Service(ExactPureCatalog(candidate)).ValidateAsync(candidate);
+
+            Assert.True(
+                result.Errors.Any(error => error.Code == "node.pure-schema-contract.incompatible"),
+                $"The `{name}` candidate did not fail the exact pure-node schema contract: {string.Join(", ", result.Errors.Select(error => error.Code))}");
+        }
     }
 
     [Fact]
@@ -1094,6 +1109,173 @@ public sealed class GovernedLoopGraphValidationServiceTests
                 new GovernedLoopNodeResourceBudget(0, 0, 0, 0));
         }).ToArray();
     }
+
+    private static GovernedLoopNodeCatalogDescriptor[] ExactPureCatalog(GovernedLoopGraphCandidate candidate)
+        =>
+        [
+            .. Descriptors(candidate).Where(descriptor => !GovernedLoopPureNodeCatalogContract.TryResolve(descriptor.Descriptor, out _)),
+            .. GovernedLoopPureNodeCatalogContract.Descriptors,
+        ];
+
+    private static IReadOnlyList<(string Name, GovernedLoopGraphCandidate Candidate)> InvalidPureSemanticCandidates()
+    {
+        var mixed = CandidateFromGraph(GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact().Graph);
+        var identityMismatch = mixed with
+        {
+            Nodes = mixed.Nodes!.Select(node => string.Equals(node!.Id, "identity", StringComparison.Ordinal)
+                ? node with
+                {
+                    Ports = node.Ports.Select(port => string.Equals(port.Id, GovernedLoopPureNodeVocabulary.OutputPort, StringComparison.Ordinal)
+                        ? port with { ValueSchemaId = "boolean" }
+                        : port).ToArray(),
+                }
+                : node).ToArray(),
+            Bindings = mixed.Bindings!.Select(binding => string.Equals(binding!.Id, "identity-to-request", StringComparison.Ordinal)
+                ? binding with { FromNodeId = "trigger", FromPortId = "request" }
+                : binding).ToArray(),
+        };
+        var reversedLength = mixed with
+        {
+            Nodes = mixed.Nodes!.Select(node => string.Equals(node!.Id, "validate-length", StringComparison.Ordinal)
+                ? node with
+                {
+                    Parameters = new Dictionary<string, string>
+                    {
+                        [GovernedLoopPureNodeVocabulary.MinimumParameter] = "2",
+                        [GovernedLoopPureNodeVocabulary.MaximumParameter] = "1",
+                    },
+                }
+                : node).ToArray(),
+        };
+        var nullableLength = mixed with
+        {
+            ValueSchemas = mixed.ValueSchemas!.Select(schema => string.Equals(schema!.Id, "text", StringComparison.Ordinal)
+                ? schema with { Nullable = true }
+                : schema).ToArray(),
+        };
+
+        return
+        [
+            ("identity with different input and output schemas", identityMismatch),
+            ("canonical equality with different operand kinds", EqualityMismatchCandidate()),
+            ("ordered concat with a non-Text element schema", ConcatElementMismatchCandidate()),
+            ("validator with reversed bounds", reversedLength),
+            ("validator with nullable input", nullableLength),
+        ];
+    }
+
+    private static GovernedLoopGraphCandidate EqualityMismatchCandidate()
+    {
+        var nodes = new GovernedLoopNodeDefinition[]
+        {
+            GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+            new(
+                "schema-check",
+                GovernedLoopSequentialNodeDescriptors.SchemaConformance,
+                [
+                    GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                    GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.ResultPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "boolean"),
+                ],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>()),
+            new(
+                "equality",
+                GovernedLoopSequentialNodeDescriptors.CanonicalEquality,
+                [
+                    GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.LeftPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                    GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.RightPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "boolean"),
+                    GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.ResultPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "boolean"),
+                ],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>()),
+            GovernedLoopSequentialApplicationTestFixture.Inference("infer"),
+            GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+        };
+        var artifact = GovernedLoopSequentialApplicationTestFixture.Artifact(
+            nodes,
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-schema", "trigger", "schema-check", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("schema-to-equality", "schema-check", "equality", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("equality-to-infer", "equality", "infer", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success),
+            ],
+            ["exit"],
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("request-to-schema", GovernedLoopBindingKind.Data, "trigger", "request", "schema-check", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("request-to-left", GovernedLoopBindingKind.Data, "trigger", "request", "equality", GovernedLoopPureNodeVocabulary.LeftPort),
+                new GovernedLoopBindingDefinition("schema-to-right", GovernedLoopBindingKind.Data, "schema-check", GovernedLoopPureNodeVocabulary.ResultPort, "equality", GovernedLoopPureNodeVocabulary.RightPort),
+                new GovernedLoopBindingDefinition("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ],
+            valueSchemas:
+            [
+                new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, false),
+                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
+            ]);
+        return CandidateFromGraph(artifact.Graph);
+    }
+
+    private static GovernedLoopGraphCandidate ConcatElementMismatchCandidate()
+    {
+        var trigger = GovernedLoopSequentialApplicationTestFixture.Trigger("trigger") with
+        {
+            Ports =
+            [
+                GovernedLoopSequentialApplicationTestFixture.Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "items"),
+                GovernedLoopSequentialApplicationTestFixture.Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context),
+            ],
+        };
+        var concat = new GovernedLoopNodeDefinition(
+            "concat",
+            GovernedLoopSequentialNodeDescriptors.OrderedTextConcat,
+            [
+                GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.ValuesPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "items"),
+                GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string> { [GovernedLoopPureNodeVocabulary.SeparatorParameter] = "," });
+        var artifact = GovernedLoopSequentialApplicationTestFixture.Artifact(
+            [trigger, concat, GovernedLoopSequentialApplicationTestFixture.Inference("infer"), GovernedLoopSequentialApplicationTestFixture.Exit("exit")],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-concat", "trigger", "concat", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("concat-to-infer", "concat", "infer", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success),
+            ],
+            ["exit"],
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("request-to-values", GovernedLoopBindingKind.Data, "trigger", "request", "concat", GovernedLoopPureNodeVocabulary.ValuesPort),
+                new GovernedLoopBindingDefinition("concat-to-infer", GovernedLoopBindingKind.Data, "concat", GovernedLoopPureNodeVocabulary.OutputPort, "infer", "request"),
+                new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ],
+            valueSchemas:
+            [
+                new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, false),
+                new GovernedLoopValueSchemaDefinition("items", GovernedLoopValueKind.Array, false, ElementSchemaId: "boolean"),
+                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
+            ]);
+        return CandidateFromGraph(artifact.Graph);
+    }
+
+    private static GovernedLoopGraphCandidate CandidateFromGraph(GovernedLoopGraphDefinition graph)
+        => new(
+            graph.SchemaVersion,
+            graph.GraphId,
+            graph.RevisionId,
+            graph.Purpose,
+            RolePin(),
+            graph.EntryNodeId,
+            graph.TerminalNodeIds.Cast<string?>().ToArray(),
+            graph.AuthorityCeiling,
+            graph.ValueSchemas.Cast<GovernedLoopValueSchemaDefinition?>().ToArray(),
+            graph.Nodes.Cast<GovernedLoopNodeDefinition?>().ToArray(),
+            graph.ControlEdges.Cast<GovernedLoopControlEdgeDefinition?>().ToArray(),
+            graph.Bindings.Cast<GovernedLoopBindingDefinition?>().ToArray(),
+            graph.OutputContract,
+            graph.DisplayMetadata);
 
     private static GovernedLoopCatalogParameterContract[] ParameterContracts(GovernedLoopNodeDefinition node)
     {

@@ -285,26 +285,7 @@ public static class GovernedLoopSequentialPlanBuilder
             return false;
         }
 
-        var input = Input(node, GovernedLoopPureNodeVocabulary.InputPort);
-        var output = Output(node, GovernedLoopPureNodeVocabulary.OutputPort);
-        var result = Output(node, GovernedLoopPureNodeVocabulary.ResultPort);
-        return node.Descriptor.TypeId switch
-        {
-            GovernedLoopPureNodeVocabulary.IdentityTransform => input is not null
-                && output is not null
-                && string.Equals(input.ValueSchemaId, output.ValueSchemaId, StringComparison.Ordinal),
-            GovernedLoopPureNodeVocabulary.StructuredSelect => input is not null
-                && !schemas[input.ValueSchemaId].Nullable,
-            GovernedLoopPureNodeVocabulary.OrderedTextConcat => IsExactConcat(node, schemas, output),
-            GovernedLoopPureNodeVocabulary.SchemaConformance => result is not null
-                && IsNonNullable(result, schemas),
-            GovernedLoopPureNodeVocabulary.CanonicalEquality => IsExactEquality(node, schemas, result),
-            GovernedLoopPureNodeVocabulary.InclusiveIntegerRange or GovernedLoopPureNodeVocabulary.InclusiveNumberRange
-                => input is not null && !schemas[input.ValueSchemaId].Nullable && IsNonNullable(result, schemas) && HasOrderedRange(node),
-            GovernedLoopPureNodeVocabulary.TextLength or GovernedLoopPureNodeVocabulary.ArrayLength
-                => input is not null && !schemas[input.ValueSchemaId].Nullable && IsNonNullable(result, schemas) && HasOrderedIntegerRange(node),
-            _ => false,
-        };
+        return GovernedLoopPureNodeCatalogContract.HasExactSchemaSemantics(node, schemas);
     }
 
     private static bool HasExactPurePorts(
@@ -369,18 +350,6 @@ public static class GovernedLoopSequentialPlanBuilder
         };
     }
 
-    private static bool HasOrderedRange(GovernedLoopNodeDefinition node)
-        => node.Descriptor.TypeId == GovernedLoopPureNodeVocabulary.InclusiveIntegerRange
-            ? HasOrderedIntegerRange(node)
-            : TryCanonicalNumber(node.Parameters[GovernedLoopPureNodeVocabulary.MinimumParameter], out var minimum)
-                && TryCanonicalNumber(node.Parameters[GovernedLoopPureNodeVocabulary.MaximumParameter], out var maximum)
-                && minimum <= maximum;
-
-    private static bool HasOrderedIntegerRange(GovernedLoopNodeDefinition node)
-        => TryCanonicalInteger(node.Parameters[GovernedLoopPureNodeVocabulary.MinimumParameter], out var minimum)
-            && TryCanonicalInteger(node.Parameters[GovernedLoopPureNodeVocabulary.MaximumParameter], out var maximum)
-            && minimum <= maximum;
-
     private static bool TryCanonicalInteger(string value, out long integer)
         => long.TryParse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out integer)
             && string.Equals(integer.ToString(CultureInfo.InvariantCulture), value, StringComparison.Ordinal);
@@ -421,48 +390,6 @@ public static class GovernedLoopSequentialPlanBuilder
 
         return true;
     }
-
-    private static bool IsExactConcat(
-        GovernedLoopNodeDefinition node,
-        IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas,
-        GovernedLoopPortDefinition? output)
-    {
-        var values = Input(node, GovernedLoopPureNodeVocabulary.ValuesPort);
-        if (values is null
-            || output is null
-            || schemas[values.ValueSchemaId] is not { Nullable: false, ElementSchemaId: { } elementSchemaId }
-            || !schemas.TryGetValue(elementSchemaId, out var element))
-        {
-            return false;
-        }
-
-        return element is { Kind: GovernedLoopValueKind.Text, Nullable: false }
-            && IsNonNullable(output, schemas);
-    }
-
-    private static bool IsExactEquality(
-        GovernedLoopNodeDefinition node,
-        IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas,
-        GovernedLoopPortDefinition? result)
-    {
-        var left = Input(node, GovernedLoopPureNodeVocabulary.LeftPort);
-        var right = Input(node, GovernedLoopPureNodeVocabulary.RightPort);
-        return left is not null
-            && right is not null
-            && schemas[left.ValueSchemaId].Kind == schemas[right.ValueSchemaId].Kind
-            && IsNonNullable(result, schemas);
-    }
-
-    private static bool IsNonNullable(
-        GovernedLoopPortDefinition? port,
-        IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas)
-        => port is not null && !schemas[port.ValueSchemaId].Nullable;
-
-    private static GovernedLoopPortDefinition? Input(GovernedLoopNodeDefinition node, string id)
-        => node.Ports.SingleOrDefault(port => port.Direction == GovernedLoopPortDirection.Input && string.Equals(port.Id, id, StringComparison.Ordinal));
-
-    private static GovernedLoopPortDefinition? Output(GovernedLoopNodeDefinition node, string id)
-        => node.Ports.SingleOrDefault(port => port.Direction == GovernedLoopPortDirection.Output && string.Equals(port.Id, id, StringComparison.Ordinal));
 
     private static bool HasExactPortSet(
         GovernedLoopNodeDefinition node,

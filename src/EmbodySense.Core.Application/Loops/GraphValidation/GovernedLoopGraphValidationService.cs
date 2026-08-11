@@ -341,6 +341,7 @@ public sealed class GovernedLoopGraphValidationService
 
             ValidateNodePorts(graph, node, descriptor, errors);
             ValidateNodeParameters(node, descriptor, errors);
+            ValidatePureNodeSchemaSemantics(graph, node, errors);
             ValidateNodeAuthority(node, descriptor, errors);
         }
 
@@ -348,6 +349,29 @@ public sealed class GovernedLoopGraphValidationService
         ValidateJoins(graph, semantics, errors);
         ValidateCycles(graph, semantics, errors);
         ValidateResources(graph, semantics, authority, errors);
+    }
+
+    private static void ValidatePureNodeSchemaSemantics(
+        GovernedLoopGraphDefinition graph,
+        GovernedLoopNodeDefinition node,
+        List<GovernedLoopGraphValidationError> errors)
+    {
+        if (!GovernedLoopPureNodeCatalogContract.TryResolve(node.Descriptor, out _))
+        {
+            return;
+        }
+
+        var schemas = graph.ValueSchemas.ToDictionary(schema => schema.Id, StringComparer.Ordinal);
+        if (!GovernedLoopPureNodeCatalogContract.HasExactSchemaSemantics(node, schemas))
+        {
+            Add(
+                errors,
+                "node.pure-schema-contract.incompatible",
+                GovernedLoopGraphElementKind.Node,
+                node.Id,
+                $"graph.nodes[{node.Id}]",
+                "The pure-node schema relationships, nullability, element schema, or ordered bounds conflict with the exact executable descriptor semantics.");
+        }
     }
 
     private static void ValidateNodePorts(GovernedLoopGraphDefinition graph, GovernedLoopNodeDefinition node, GovernedLoopNodeCatalogDescriptor descriptor, List<GovernedLoopGraphValidationError> errors)
