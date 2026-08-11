@@ -74,9 +74,10 @@ public sealed class CustomLoopExecutionCancellationSignalGroup : ICustomLoopExec
             _secondary.CancelActiveAttempt(runId);
             delivered = true;
         }
-        catch (InvalidOperationException) when (delivered)
+        catch (InvalidOperationException)
         {
-            // The peer does not own this attempt; the selected runner already accepted the signal.
+            // The peer does not own this attempt; either the selected runner accepted the signal,
+            // or the retained primary ownership failure is reported below.
         }
 
         if (!delivered)
