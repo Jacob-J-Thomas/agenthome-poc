@@ -55,7 +55,7 @@ public sealed class ConversationPublicationEffectAuthorityRequestFactoryTests
         Assert.NotEqual(first.TargetFingerprint, otherRun.TargetFingerprint);
         Assert.Equal(first.TargetFingerprint, Create(fixture, nodeAttempt: 3).TargetFingerprint);
         Assert.Equal(first.TargetFingerprint, Create(fixture, publicationOperationId: "conversation-publication-2").TargetFingerprint);
-        Assert.Equal(first.TargetFingerprint, otherRevision.TargetFingerprint);
+        Assert.NotEqual(first.TargetFingerprint, otherRevision.TargetFingerprint);
     }
 
     [Fact]
