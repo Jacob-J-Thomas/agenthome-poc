@@ -237,6 +237,9 @@ public sealed class CustomLoopRecoveryService
 
         return run.Events.Any(item => item.Sequence > started.Sequence
             && item.SequentialNodeEvidence is { } outcome
+            && item.Iteration == started.Iteration
+            && string.Equals(item.StepId, started.StepId, StringComparison.Ordinal)
+            && item.Attempt == started.Attempt
             && string.Equals(outcome.NodeId, dispatch.NodeId, StringComparison.Ordinal)
             && outcome.Attempt == dispatch.Attempt
             && IsResolvedSequentialOutcome(outcome)

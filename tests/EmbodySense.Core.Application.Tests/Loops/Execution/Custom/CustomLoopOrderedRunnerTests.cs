@@ -1142,6 +1142,64 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Restart_recovery_quarantines_a_canonical_terminal_with_substituted_iteration_coordinates()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        CustomLoopRunRecord? retainedOutcome = null;
+        var crashingStore = new FakeRunStore(context.Run)
+        {
+            AfterUpdate = candidate =>
+            {
+                if (retainedOutcome is null
+                    && candidate.Events.Any(item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted
+                        && item.StepId == "infer-01"
+                        && item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome }))
+                {
+                    retainedOutcome = candidate;
+                    throw new IOException("Simulated process loss after canonical outcome retention.");
+                }
+
+                return Task.CompletedTask;
+            },
+        };
+        var executor = new QueueExecutor(Result("retained outcome"));
+        var evidence = new SequentialEvidenceHarness(crashingStore, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(crashingStore, executor), evidence, evidence);
+
+        _ = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
+
+        var interrupted = Assert.IsType<CustomLoopRunRecord>(retainedOutcome);
+        var events = interrupted.Events.ToArray();
+        var terminalIndex = Array.FindIndex(events, item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome }
+            && string.Equals(item.StepId, "infer-01", StringComparison.Ordinal));
+        var terminal = events[terminalIndex];
+        var substituted = terminal with { Iteration = terminal.Iteration!.Value + 1 };
+        var terminalEvidence = terminal.SequentialNodeEvidence!;
+        substituted = substituted with
+        {
+            SequentialNodeEvidence = CustomLoopSequentialNodeEvidenceHash.Apply(terminalEvidence with
+            {
+                OutcomeArtifactHash = CustomLoopSequentialOutcomeArtifactHash.Compute(substituted),
+                EvidenceHash = string.Empty,
+            }),
+        };
+        events[terminalIndex] = substituted;
+        var malformed = interrupted with { Events = events };
+        var validation = CustomLoopRunValidator.Validate(malformed);
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+        var recoveryStore = new FakeRunStore(malformed);
+        var recoveryAudit = new RecordingAuditLog();
+
+        var recovered = Assert.Single(await new CustomLoopRecoveryService(recoveryStore, recoveryAudit, new FixedTimeProvider(malformed.UpdatedAtUtc.AddSeconds(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.NeedsReview, recovered.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, recoveryStore.Current.Status);
+        Assert.Equal("recovery_open_attempt", recoveryStore.Current.FailureCode);
+        Assert.All(recoveryAudit.Events, item => Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]));
+        Assert.Single(executor.Requests);
+    }
+
+    [Fact]
     public async Task Canonical_resume_reconciles_tool_enabled_outcome_from_persisted_authority_without_provider_or_tool_redispatch()
     {
         var context = await SequentialContextAsync(Run(SequentialDefinition(allowWorkspaceTools: true)));
