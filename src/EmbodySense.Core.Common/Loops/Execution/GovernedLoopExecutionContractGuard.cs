@@ -128,6 +128,7 @@ internal static class GovernedLoopExecutionContractGuard
         var nodePlans = new Dictionary<string, GovernedLoopNodeExecutionEvidence>(StringComparer.Ordinal);
         var visits = new Dictionary<string, int>(StringComparer.Ordinal);
         var lastCycleIterations = new Dictionary<string, int>(StringComparer.Ordinal);
+        var lastNodeCycleIterations = new Dictionary<string, int>(StringComparer.Ordinal);
         for (var index = 0; index < nodes.Count; index++)
         {
             var node = nodes[index];
@@ -178,11 +179,17 @@ internal static class GovernedLoopExecutionContractGuard
 
             if (node.CycleId is { } cycleId && node.CycleIteration is { } cycleIteration)
             {
+                if (lastNodeCycleIterations.TryGetValue(node.NodeId, out var lastNodeCycleIteration) && cycleIteration <= lastNodeCycleIteration)
+                {
+                    throw new ArgumentException("Cycle iteration evidence must strictly advance for each repeated exact node identity.", parameterName);
+                }
+
                 if (lastCycleIterations.TryGetValue(cycleId, out var lastCycleIteration) && cycleIteration < lastCycleIteration)
                 {
                     throw new ArgumentException("Cycle iteration evidence cannot move backward within one exact cycle identity.", parameterName);
                 }
 
+                lastNodeCycleIterations[node.NodeId] = cycleIteration;
                 lastCycleIterations[cycleId] = cycleIteration;
             }
 

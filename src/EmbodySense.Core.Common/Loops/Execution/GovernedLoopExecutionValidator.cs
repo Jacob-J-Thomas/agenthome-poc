@@ -177,7 +177,7 @@ public static class GovernedLoopExecutionValidator
     /// <param name="current">The currently retained canonical execution evidence.</param>
     /// <param name="next">The proposed canonical successor evidence.</param>
     /// <returns>A bounded value-free validation result.</returns>
-    /// <remarks>Exact unchanged planes are accepted so later evidence may compose with immutable terminal lifecycle and frontier snapshots. Every changed retained effect or projection must make one legal item transition, while new canonical identities may be appended.</remarks>
+    /// <remarks>Exact unchanged planes are accepted so later evidence may compose with immutable terminal lifecycle and frontier snapshots. Every changed retained item must make one legal transition. New node activations must first be exposed as Ready or durably pruned as Skipped; other new canonical identities may be appended in their valid evidence posture.</remarks>
     public static GovernedLoopExecutionValidationResult ValidateTransition(GovernedLoopExecutionEvidenceSet? current, GovernedLoopExecutionEvidenceSet? next)
     {
         var errors = new List<GovernedLoopExecutionValidationError>();
@@ -455,6 +455,14 @@ public static class GovernedLoopExecutionValidator
                 Add(errors, GovernedLoopExecutionValidationErrorCode.IllegalTransition, $"$frontier.payload.nodes[{index}].status");
             }
         }
+
+        for (var index = current.Count; index < next.Count; index++)
+        {
+            if (next[index].Status is not (GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Skipped))
+            {
+                Add(errors, GovernedLoopExecutionValidationErrorCode.IllegalTransition, $"$frontier.payload.nodes[{index}].status");
+            }
+        }
     }
 
     private static bool SameNodeCollection(IReadOnlyList<GovernedLoopNodeExecutionEvidence> current, IReadOnlyList<GovernedLoopNodeExecutionEvidence> next)
@@ -590,7 +598,9 @@ public static class GovernedLoopExecutionValidator
 
     private static void ValidateEffectOrigins(GovernedLoopFrontierPayload frontier, IReadOnlyList<GovernedLoopEffectPosture> effects, List<GovernedLoopExecutionValidationError> errors)
     {
-        var nodesById = frontier.Nodes.ToDictionary(node => node.NodeId, StringComparer.Ordinal);
+        var nodesById = frontier.Nodes
+            .GroupBy(node => node.NodeId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
         for (var index = 0; index < effects.Count; index++)
         {
             var effect = effects[index]?.Payload;
@@ -599,13 +609,13 @@ public static class GovernedLoopExecutionValidator
                 continue;
             }
 
-            if (!nodesById.TryGetValue(nodeId, out var node))
+            if (!nodesById.TryGetValue(nodeId, out var nodes))
             {
                 Add(errors, GovernedLoopExecutionValidationErrorCode.EffectOriginNodeMissing, $"$.effects[{index}].payload.originNodeId");
                 continue;
             }
 
-            if (node.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Skipped)
+            if (nodes.All(node => node.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Skipped))
             {
                 Add(errors, GovernedLoopExecutionValidationErrorCode.EffectOriginNodeNotExecutable, $"$.effects[{index}].payload.originNodeId");
             }

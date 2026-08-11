@@ -28,6 +28,29 @@ public sealed class GovernedLoopFrontierActivationContractTests
     }
 
     [Fact]
+    public void Repeated_cycle_history_composes_without_treating_node_identity_as_unique()
+    {
+        var binding = GovernedLoopExecutionTestFixture.Binding();
+        var first = CycleActivation(0, 1, GovernedLoopNodeExecutionStatus.Completed, GovernedLoopControlCondition.True, ["edge-loop"], []);
+        var second = CycleActivation(1, 2, GovernedLoopNodeExecutionStatus.Ready, null, [], []);
+        var frontier = GovernedLoopExecutionTestFixture.Frontier(
+            binding,
+            GovernedLoopFrontierStatus.Active,
+            nodes: [first, second],
+            updatedAtUtc: GovernedLoopExecutionTestFixture.UpdatedAtUtc);
+        var lifecycle = GovernedLoopExecutionTestFixture.Lifecycle(binding, GovernedLoopRunStatus.Running);
+        var effect = GovernedLoopEffectPosture.Create(
+            binding,
+            GovernedLoopExecutionTestFixture.Effect(originNodeId: "condition"));
+
+        var validation = GovernedLoopExecutionValidator.ValidateComposition(1, lifecycle, frontier, [effect], []);
+        var evidence = GovernedLoopExecutionEvidenceSet.Create(1, lifecycle, frontier, [effect], []);
+
+        Assert.True(validation.IsValid);
+        Assert.Equal(2, evidence.Frontier.Payload.Nodes.Count);
+    }
+
+    [Fact]
     public void Activation_history_rejects_gaps_implicit_cycles_and_changed_plan_topology()
     {
         var first = CycleActivation(0, 1, GovernedLoopNodeExecutionStatus.Completed, GovernedLoopControlCondition.True, ["edge-loop"], []);
@@ -58,6 +81,25 @@ public sealed class GovernedLoopFrontierActivationContractTests
         Assert.Throws<ArgumentException>(() => Payload([first, visitGap]));
         Assert.Throws<ArgumentException>(() => Payload([first, implicitCycle]));
         Assert.Throws<ArgumentException>(() => Payload([first, changedTopology]));
+    }
+
+    [Fact]
+    public void Repeated_node_visits_require_strictly_advancing_cycle_iterations()
+    {
+        var first = CycleActivation(0, 1, GovernedLoopNodeExecutionStatus.Completed, GovernedLoopControlCondition.True, ["edge-loop"], []);
+        var repeatedIteration = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            1,
+            0,
+            2,
+            "condition",
+            Descriptor(GovernedLoopNodeKind.Condition),
+            ["edge-loop"],
+            ["edge-loop"],
+            GovernedLoopNodeExecutionStatus.Ready,
+            cycleId: "cycle-main",
+            cycleIteration: 1);
+
+        Assert.Throws<ArgumentException>(() => Payload([first, repeatedIteration]));
     }
 
     [Fact]
@@ -189,6 +231,50 @@ public sealed class GovernedLoopFrontierActivationContractTests
     }
 
     [Fact]
+    public void Skipped_activation_cannot_invent_a_selected_route_that_authenticates_a_join()
+    {
+        Assert.Throws<ArgumentException>(() => GovernedLoopNodeExecutionEvidence.CreateActivation(
+            0,
+            0,
+            1,
+            "pruned",
+            Descriptor(GovernedLoopNodeKind.Transform),
+            [],
+            ["edge-join"],
+            GovernedLoopNodeExecutionStatus.Skipped,
+            outcomeEvidenceId: "skip-evidence",
+            outcomeEvidenceHash: Hash('e'),
+            controlOutcome: GovernedLoopControlCondition.Success,
+            selectedControlEdgeIds: ["edge-join"],
+            skippedControlEdgeIds: []));
+    }
+
+    [Fact]
+    public void Frontier_successor_exposes_new_activations_before_claim_or_terminal_resolution()
+    {
+        var currentRunning = SimpleActivation(0, 0, "first", GovernedLoopNodeExecutionStatus.Running);
+        var current = Frontier(1, [currentRunning]);
+        var completed = SimpleActivation(0, 0, "first", GovernedLoopNodeExecutionStatus.Completed);
+        var skipped = SimpleActivation(1, 1, "pruned", GovernedLoopNodeExecutionStatus.Skipped);
+        var ready = SimpleActivation(2, 2, "next", GovernedLoopNodeExecutionStatus.Ready);
+        var exposed = Frontier(2, [completed, skipped, ready]);
+
+        Assert.True(GovernedLoopExecutionValidator.ValidateTransition(current, exposed).IsValid);
+
+        var appendedRunning = SimpleActivation(1, 1, "next", GovernedLoopNodeExecutionStatus.Running);
+        var claimedWithoutExposure = Frontier(2, [completed, appendedRunning]);
+        var appendedCompleted = SimpleActivation(1, 1, "next", GovernedLoopNodeExecutionStatus.Completed);
+        var completedWithoutExposure = Frontier(2, [completed, appendedCompleted], GovernedLoopFrontierStatus.Completed);
+
+        Assert.Contains(
+            GovernedLoopExecutionValidator.ValidateTransition(current, claimedWithoutExposure).Errors,
+            error => error.Code == GovernedLoopExecutionValidationErrorCode.IllegalTransition && error.Path == "$frontier.payload.nodes[1].status");
+        Assert.Contains(
+            GovernedLoopExecutionValidator.ValidateTransition(current, completedWithoutExposure).Errors,
+            error => error.Code == GovernedLoopExecutionValidationErrorCode.IllegalTransition && error.Path == "$frontier.payload.nodes[1].status");
+    }
+
+    [Fact]
     public void Committed_route_and_join_evidence_are_immutable_across_frontier_successors()
     {
         var current = Activation(GovernedLoopControlCondition.True, ["edge-true"], ["edge-false"]);
@@ -294,7 +380,9 @@ public sealed class GovernedLoopFrontierActivationContractTests
         IEnumerable<string>? outgoing = null)
     {
         int? attempt = status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Skipped ? null : 1;
-        var outcome = status == GovernedLoopNodeExecutionStatus.Completed ? $"outcome-{nodeId}" : null;
+        var outcome = status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed
+            ? $"outcome-{nodeId}"
+            : status == GovernedLoopNodeExecutionStatus.Skipped ? $"skip-{nodeId}" : null;
         return GovernedLoopNodeExecutionEvidence.CreateActivation(
             activationOrdinal,
             planOrdinal,

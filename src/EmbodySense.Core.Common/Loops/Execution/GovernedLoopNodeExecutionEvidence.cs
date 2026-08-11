@@ -220,6 +220,11 @@ public sealed record GovernedLoopNodeExecutionEvidence
             throw new ArgumentException("Control routing cannot commit before the activation reaches a terminal node posture.", nameof(controlOutcome));
         }
 
+        if (status == GovernedLoopNodeExecutionStatus.Skipped && (controlOutcome is not null || selected.Count != 0 || skipped.Count != 0))
+        {
+            throw new ArgumentException("A skipped activation prunes its outgoing paths without inventing control-outcome or route-partition evidence.", nameof(controlOutcome));
+        }
+
         if (selected.Intersect(skipped, StringComparer.Ordinal).Any()
             || selected.Concat(skipped).Except(outgoing, StringComparer.Ordinal).Any()
             || controlOutcome is not null && !selected.Concat(skipped).Order(StringComparer.Ordinal).SequenceEqual(outgoing, StringComparer.Ordinal))
