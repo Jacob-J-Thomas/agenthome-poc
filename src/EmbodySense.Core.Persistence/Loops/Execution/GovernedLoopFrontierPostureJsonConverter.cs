@@ -112,7 +112,9 @@ internal sealed class GovernedLoopFrontierPostureJsonConverter : JsonConverter<G
     {
         RequireStartObject(ref reader, "Governed-loop frontier node evidence must be an object.");
         RequireSchema(ref reader, "schemaVersion");
+        var activationOrdinal = RequireInt32(ref reader, "activationOrdinal");
         var planOrdinal = RequireInt32(ref reader, "planOrdinal");
+        var visitOrdinal = RequireInt32(ref reader, "visitOrdinal");
         var nodeId = RequireString(ref reader, "nodeId");
         RequireProperty(ref reader, "descriptor");
         var descriptor = ReadDescriptor(ref reader);
@@ -120,6 +122,15 @@ internal sealed class GovernedLoopFrontierPostureJsonConverter : JsonConverter<G
         var incoming = ReadIdentifiers(ref reader, GovernedLoopExecutionLimits.MaxIncomingEdges, "incoming control edges");
         RequireProperty(ref reader, "outgoingControlEdgeIds");
         var outgoing = ReadIdentifiers(ref reader, GovernedLoopExecutionLimits.MaxOutgoingEdges, "outgoing control edges");
+        var cycleId = RequireNullableString(ref reader, "cycleId");
+        var cycleIteration = RequireNullableInt32(ref reader, "cycleIteration");
+        var controlOutcome = RequireNullableControlOutcome(ref reader, "controlOutcome");
+        RequireProperty(ref reader, "selectedControlEdgeIds");
+        var selected = ReadIdentifiers(ref reader, GovernedLoopExecutionLimits.MaxOutgoingEdges, "selected control edges");
+        RequireProperty(ref reader, "skippedControlEdgeIds");
+        var skipped = ReadIdentifiers(ref reader, GovernedLoopExecutionLimits.MaxOutgoingEdges, "skipped control edges");
+        RequireProperty(ref reader, "joinArrivals");
+        var joinArrivals = ReadJoinArrivals(ref reader);
         RequireProperty(ref reader, "status");
         var status = ReadNodeStatus(ref reader);
         var attempt = RequireNullableInt32(ref reader, "attempt");
@@ -127,8 +138,10 @@ internal sealed class GovernedLoopFrontierPostureJsonConverter : JsonConverter<G
         var outcomeEvidenceId = RequireNullableString(ref reader, "outcomeEvidenceId");
         var outcomeEvidenceHash = RequireNullableString(ref reader, "outcomeEvidenceHash");
         RequireEndObject(ref reader, "Governed-loop frontier node evidence contains missing, reordered, or unsupported properties.");
-        return GovernedLoopNodeExecutionEvidence.Create(
+        return GovernedLoopNodeExecutionEvidence.CreateActivation(
+            activationOrdinal,
             planOrdinal,
+            visitOrdinal,
             nodeId,
             descriptor,
             incoming,
@@ -137,7 +150,44 @@ internal sealed class GovernedLoopFrontierPostureJsonConverter : JsonConverter<G
             attempt,
             attemptOperationId,
             outcomeEvidenceId,
-            outcomeEvidenceHash);
+            outcomeEvidenceHash,
+            cycleId,
+            cycleIteration,
+            controlOutcome,
+            selected,
+            skipped,
+            joinArrivals);
+    }
+
+    private static GovernedLoopJoinArrivalEvidence[] ReadJoinArrivals(ref Utf8JsonReader reader)
+    {
+        if (reader.TokenType != JsonTokenType.StartArray)
+        {
+            throw new JsonException("Governed-loop join arrivals must be an array.");
+        }
+
+        var arrivals = new List<GovernedLoopJoinArrivalEvidence>();
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+        {
+            if (arrivals.Count == GovernedLoopExecutionLimits.MaxJoinArrivals)
+            {
+                throw new JsonException("Governed-loop join arrivals exceed the schema-1 bound.");
+            }
+
+            RequireStartObject(ref reader, "Governed-loop join-arrival evidence must be an object.");
+            RequireSchema(ref reader, "schemaVersion");
+            var controlEdgeId = RequireString(ref reader, "controlEdgeId");
+            var sourceActivationOrdinal = RequireInt32(ref reader, "sourceActivationOrdinal");
+            RequireEndObject(ref reader, "Governed-loop join-arrival evidence contains missing, reordered, or unsupported properties.");
+            arrivals.Add(GovernedLoopJoinArrivalEvidence.Create(1, controlEdgeId, sourceActivationOrdinal));
+        }
+
+        if (reader.TokenType != JsonTokenType.EndArray)
+        {
+            throw new JsonException("The governed-loop join-arrival array is incomplete.");
+        }
+
+        return [.. arrivals];
     }
 
     private static GovernedLoopNodeDescriptor ReadDescriptor(ref Utf8JsonReader reader)
@@ -203,7 +253,9 @@ internal sealed class GovernedLoopFrontierPostureJsonConverter : JsonConverter<G
     {
         writer.WriteStartObject();
         writer.WriteNumber("schemaVersion", node.SchemaVersion);
+        writer.WriteNumber("activationOrdinal", node.ActivationOrdinal);
         writer.WriteNumber("planOrdinal", node.PlanOrdinal);
+        writer.WriteNumber("visitOrdinal", node.VisitOrdinal);
         writer.WriteString("nodeId", node.NodeId);
         writer.WritePropertyName("descriptor");
         writer.WriteStartObject();
@@ -214,6 +266,32 @@ internal sealed class GovernedLoopFrontierPostureJsonConverter : JsonConverter<G
         writer.WriteEndObject();
         WriteIdentifiers(writer, "incomingControlEdgeIds", node.IncomingControlEdgeIds);
         WriteIdentifiers(writer, "outgoingControlEdgeIds", node.OutgoingControlEdgeIds);
+        writer.WriteString("cycleId", node.CycleId);
+        WriteNullableNumber(writer, "cycleIteration", node.CycleIteration);
+        writer.WritePropertyName("controlOutcome");
+        if (node.ControlOutcome is { } controlOutcome)
+        {
+            JsonSerializer.Serialize(writer, controlOutcome, options);
+        }
+        else
+        {
+            writer.WriteNullValue();
+        }
+
+        WriteIdentifiers(writer, "selectedControlEdgeIds", node.SelectedControlEdgeIds);
+        WriteIdentifiers(writer, "skippedControlEdgeIds", node.SkippedControlEdgeIds);
+        writer.WritePropertyName("joinArrivals");
+        writer.WriteStartArray();
+        foreach (var arrival in node.JoinArrivals)
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("schemaVersion", arrival.SchemaVersion);
+            writer.WriteString("controlEdgeId", arrival.ControlEdgeId);
+            writer.WriteNumber("sourceActivationOrdinal", arrival.SourceActivationOrdinal);
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
         writer.WritePropertyName("status");
         JsonSerializer.Serialize(writer, node.Status, options);
         WriteNullableNumber(writer, "attempt", node.Attempt);
@@ -291,6 +369,28 @@ internal sealed class GovernedLoopFrontierPostureJsonConverter : JsonConverter<G
             "fail" => GovernedLoopNodeKind.Fail,
             _ => throw new JsonException("The governed-loop node kind is unsupported."),
         };
+
+    private static GovernedLoopControlCondition? RequireNullableControlOutcome(ref Utf8JsonReader reader, string propertyName)
+    {
+        RequireProperty(ref reader, propertyName);
+        if (reader.TokenType == JsonTokenType.Null)
+        {
+            return null;
+        }
+
+        return RequireEnumText(ref reader, "control outcome") switch
+        {
+            "always" => GovernedLoopControlCondition.Always,
+            "success" => GovernedLoopControlCondition.Success,
+            "failure" => GovernedLoopControlCondition.Failure,
+            "true" => GovernedLoopControlCondition.True,
+            "false" => GovernedLoopControlCondition.False,
+            "timeout" => GovernedLoopControlCondition.Timeout,
+            "approved" => GovernedLoopControlCondition.Approved,
+            "rejected" => GovernedLoopControlCondition.Rejected,
+            _ => throw new JsonException("The governed-loop control outcome is unsupported."),
+        };
+    }
 
     private static string RequireEnumText(ref Utf8JsonReader reader, string description)
         => reader.TokenType == JsonTokenType.String

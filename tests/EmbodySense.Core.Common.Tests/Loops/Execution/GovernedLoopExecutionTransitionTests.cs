@@ -133,7 +133,7 @@ public sealed class GovernedLoopExecutionTransitionTests
         var missing = GovernedLoopExecutionTestFixture.Frontier(binding, GovernedLoopFrontierStatus.Active, 2, [GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "later")], GovernedLoopExecutionTestFixture.UpdatedAtUtc.AddMinutes(1));
 
         Assert.True(GovernedLoopExecutionValidator.ValidateTransition(current, valid).IsValid);
-        Assert.Contains(GovernedLoopExecutionValidator.ValidateTransition(current, changedEdges).Errors, error => error.Code == GovernedLoopExecutionValidationErrorCode.IllegalTransition);
+        Assert.Contains(GovernedLoopExecutionValidator.ValidateTransition(current, changedEdges).Errors, error => error.Code == GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged);
         Assert.Contains(GovernedLoopExecutionValidator.ValidateTransition(current, changedAttempt).Errors, error => error.Code == GovernedLoopExecutionValidationErrorCode.IllegalTransition);
         Assert.Contains(GovernedLoopExecutionValidator.ValidateTransition(current, missing).Errors, error => error.Code == GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged);
 

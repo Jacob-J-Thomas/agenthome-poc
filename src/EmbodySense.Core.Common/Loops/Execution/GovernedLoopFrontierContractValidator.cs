@@ -18,19 +18,20 @@ public static class GovernedLoopFrontierContractValidator
         if (frontier.SchemaVersion != GovernedLoopExecutionLimits.CurrentSchemaVersion
             || frontier.Binding.SchemaVersion != GovernedLoopExecutionLimits.CurrentSchemaVersion
             || frontier.Payload.SchemaVersion != GovernedLoopExecutionLimits.CurrentSchemaVersion
-            || frontier.Payload.Nodes.Any(node => node.SchemaVersion != GovernedLoopExecutionLimits.CurrentSchemaVersion))
+            || frontier.Payload.Nodes.Any(node => node.SchemaVersion != GovernedLoopExecutionLimits.CurrentSchemaVersion
+                || node.JoinArrivals.Any(arrival => arrival.SchemaVersion != GovernedLoopExecutionLimits.CurrentSchemaVersion)))
         {
             Add(errors, GovernedLoopExecutionValidationErrorCode.UnsupportedSchemaVersion, "$frontier.schemaVersion");
         }
 
         if (frontier.Payload.ConcurrencyCeiling != GovernedLoopExecutionLimits.Schema1ConcurrencyCeiling
-            || frontier.Payload.Nodes.Count(node => node.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running) > frontier.Payload.ConcurrencyCeiling)
+            || frontier.Payload.Nodes.Count(node => node.Status == GovernedLoopNodeExecutionStatus.Running) > frontier.Payload.ConcurrencyCeiling)
         {
             Add(errors, GovernedLoopExecutionValidationErrorCode.ConcurrencyCeilingExceeded, "$frontier.payload.concurrencyCeiling");
         }
 
-        if (frontier.Payload.Nodes.Select((node, index) => node.PlanOrdinal == index).Any(matches => !matches)
-            || frontier.Payload.Nodes.Select(node => node.NodeId).Distinct(StringComparer.Ordinal).Count() != frontier.Payload.Nodes.Count)
+        if (frontier.Payload.Nodes.Select((node, index) => node.ActivationOrdinal == index).Any(matches => !matches)
+            || frontier.Payload.Nodes.GroupBy(node => node.NodeId, StringComparer.Ordinal).Any(group => group.Select((node, index) => node.VisitOrdinal == index + 1).Any(matches => !matches)))
         {
             Add(errors, GovernedLoopExecutionValidationErrorCode.PlanPrefixInvalid, "$frontier.payload.nodes");
         }

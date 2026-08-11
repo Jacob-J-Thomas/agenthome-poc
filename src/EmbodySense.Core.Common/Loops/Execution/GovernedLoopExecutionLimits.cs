@@ -21,14 +21,23 @@ public static class GovernedLoopExecutionLimits
     /// <summary>Gets the maximum node attempt number.</summary>
     public const int MaxNodeAttempt = 1_000_000;
 
-    /// <summary>Gets the maximum node evidence items in one frontier.</summary>
+    /// <summary>Gets the maximum activation evidence items in one frontier.</summary>
     public const int MaxFrontierNodes = 128;
+
+    /// <summary>Gets the maximum positive visit ordinal retained for one graph node.</summary>
+    public const int MaxNodeVisits = MaxFrontierNodes;
+
+    /// <summary>Gets the maximum explicit cycle iteration retained by one activation.</summary>
+    public const int MaxCycleIterations = 10_000;
 
     /// <summary>Gets the maximum committed incoming control edges recorded for one node execution.</summary>
     public const int MaxIncomingEdges = 512;
 
     /// <summary>Gets the maximum committed outgoing control edges recorded for one node execution.</summary>
     public const int MaxOutgoingEdges = 512;
+
+    /// <summary>Gets the maximum exact predecessor arrivals recorded for one join activation.</summary>
+    public const int MaxJoinArrivals = MaxIncomingEdges;
 
     /// <summary>Gets the only supported schema-1 concurrent-node ceiling.</summary>
     public const int Schema1ConcurrencyCeiling = 1;

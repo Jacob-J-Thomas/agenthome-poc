@@ -8,6 +8,7 @@ using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Tests.Loops.Admission;
@@ -43,6 +44,57 @@ public sealed class CustomLoopFrontierStoreTests
             CustomLoopRunArtifactSerializer.Serialize(hydrated));
         Assert.Equal(frontier.Payload.ContentHash, hydratedFrontier.Payload.ContentHash);
         Assert.True(GovernedLoopFrontierContractHash.Matches(hydratedFrontier));
+        Assert.All(hydratedFrontier.Payload.Nodes, node =>
+        {
+            Assert.Equal(node.PlanOrdinal, node.ActivationOrdinal);
+            Assert.Equal(1, node.VisitOrdinal);
+            Assert.Null(node.CycleId);
+            Assert.Null(node.CycleIteration);
+            Assert.Null(node.ControlOutcome);
+            Assert.Empty(node.SelectedControlEdgeIds);
+            Assert.Empty(node.SkippedControlEdgeIds);
+            Assert.Empty(node.JoinArrivals);
+        });
+
+        var first = frontier.Payload.Nodes[0];
+        var routedCycleActivation = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            first.ActivationOrdinal,
+            first.PlanOrdinal,
+            first.VisitOrdinal,
+            first.NodeId,
+            first.Descriptor,
+            first.IncomingControlEdgeIds,
+            first.OutgoingControlEdgeIds,
+            first.Status,
+            first.Attempt,
+            first.AttemptOperationId,
+            first.OutcomeEvidenceId,
+            first.OutcomeEvidenceHash,
+            "cycle-main",
+            1,
+            GovernedLoopControlCondition.Always,
+            first.OutgoingControlEdgeIds,
+            [],
+            []);
+        var enrichedFrontier = GovernedLoopFrontierPosture.Create(
+            frontier.Binding,
+            frontier.WorkspaceId,
+            frontier.GraphArtifactHash,
+            frontier.GraphLayoutHash,
+            frontier.AdmissionReceiptHash,
+            frontier.Payload.FrontierVersion,
+            frontier.Payload.ConcurrencyCeiling,
+            frontier.Payload.Status,
+            [routedCycleActivation, .. frontier.Payload.Nodes.Skip(1)],
+            frontier.Payload.UpdatedAtUtc,
+            string.Empty);
+        var enriched = context.Run with { Frontier = enrichedFrontier };
+        var hydratedEnriched = CustomLoopRunArtifactSerializer.Deserialize(CustomLoopRunArtifactSerializer.Serialize(enriched));
+        var enrichedActivation = Assert.IsType<GovernedLoopFrontierPosture>(hydratedEnriched.Frontier).Payload.Nodes[0];
+        Assert.Equal("cycle-main", enrichedActivation.CycleId);
+        Assert.Equal(1, enrichedActivation.CycleIteration);
+        Assert.Equal(GovernedLoopControlCondition.Always, enrichedActivation.ControlOutcome);
+        Assert.Equal(first.OutgoingControlEdgeIds, enrichedActivation.SelectedControlEdgeIds);
 
         var capabilityAdmission = TestCapabilityAdmissionFactory.Create(
             context.Run.AdmittedDefinition.CapabilityRequirements,
@@ -88,6 +140,14 @@ public sealed class CustomLoopFrontierStoreTests
             candidate => candidate["run"]!["frontier"]!["payload"]!["status"] = "future",
             candidate => candidate["run"]!["frontier"]!["payload"]!["concurrencyCeiling"] = 2,
             candidate => candidate["run"]!["frontier"]!["payload"]!["frontierVersion"] = 0,
+            RemoveActivationShape,
+            candidate => candidate["run"]!["frontier"]!["payload"]!["nodes"]![0]!["activationOrdinal"] = 1,
+            candidate => candidate["run"]!["frontier"]!["payload"]!["nodes"]![0]!["visitOrdinal"] = 2,
+            candidate => candidate["run"]!["frontier"]!["payload"]!["nodes"]![0]!["cycleId"] = "cycle-main",
+            candidate => candidate["run"]!["frontier"]!["payload"]!["nodes"]![0]!["controlOutcome"] = "future",
+            AddSelectedEdgeWithoutOutcome,
+            AddMalformedJoinArrival,
+            AddTooManyJoinArrivals,
             candidate => candidate["run"]!["frontier"]!["payload"]!["nodes"]![1]!["planOrdinal"] = 2,
             AddTooManyNodes,
             AddTooManyOutgoingEdges,
@@ -1045,6 +1105,50 @@ public sealed class CustomLoopFrontierStoreTests
             clone["planOrdinal"] = ordinal;
             clone["nodeId"] = $"node-{ordinal}";
             nodes.Add(clone);
+        }
+    }
+
+    private static void RemoveActivationShape(JsonObject root)
+    {
+        var node = root["run"]!["frontier"]!["payload"]!["nodes"]![0]!.AsObject();
+        Assert.True(node.Remove("activationOrdinal"));
+        Assert.True(node.Remove("visitOrdinal"));
+        Assert.True(node.Remove("cycleId"));
+        Assert.True(node.Remove("cycleIteration"));
+        Assert.True(node.Remove("controlOutcome"));
+        Assert.True(node.Remove("selectedControlEdgeIds"));
+        Assert.True(node.Remove("skippedControlEdgeIds"));
+        Assert.True(node.Remove("joinArrivals"));
+    }
+
+    private static void AddSelectedEdgeWithoutOutcome(JsonObject root)
+    {
+        var node = root["run"]!["frontier"]!["payload"]!["nodes"]![0]!;
+        var outgoing = node["outgoingControlEdgeIds"]!.AsArray();
+        node["selectedControlEdgeIds"]!.AsArray().Add(outgoing[0]!.GetValue<string>());
+    }
+
+    private static void AddMalformedJoinArrival(JsonObject root)
+    {
+        root["run"]!["frontier"]!["payload"]!["nodes"]![1]!["joinArrivals"]!.AsArray().Add(new JsonObject
+        {
+            ["schemaVersion"] = 1,
+            ["controlEdgeId"] = "edge-trigger-inference-1",
+            ["sourceActivationOrdinal"] = 1,
+        });
+    }
+
+    private static void AddTooManyJoinArrivals(JsonObject root)
+    {
+        var arrivals = root["run"]!["frontier"]!["payload"]!["nodes"]![1]!["joinArrivals"]!.AsArray();
+        for (var index = 0; index <= GovernedLoopExecutionLimits.MaxJoinArrivals; index++)
+        {
+            arrivals.Add(new JsonObject
+            {
+                ["schemaVersion"] = 1,
+                ["controlEdgeId"] = $"edge-{index:D3}",
+                ["sourceActivationOrdinal"] = 0,
+            });
         }
     }
 

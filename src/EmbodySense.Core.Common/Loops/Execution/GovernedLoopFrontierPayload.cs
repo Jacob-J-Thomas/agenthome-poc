@@ -31,7 +31,7 @@ public sealed record GovernedLoopFrontierPayload
     /// <summary>Gets the aggregate frontier posture.</summary>
     public GovernedLoopFrontierStatus Status { get; }
 
-    /// <summary>Gets the immutable contiguous deterministic plan prefix.</summary>
+    /// <summary>Gets the immutable contiguous deterministic activation history.</summary>
     public IReadOnlyList<GovernedLoopNodeExecutionEvidence> Nodes { get; }
 
     /// <summary>Gets the UTC commit timestamp.</summary>
@@ -52,7 +52,7 @@ public sealed record GovernedLoopFrontierPayload
     {
         GovernedLoopExecutionContractGuard.RequireSchema(schemaVersion, nameof(schemaVersion));
         var snapshot = GovernedLoopExecutionContractGuard.SnapshotBounded(nodes, nameof(nodes), GovernedLoopExecutionLimits.MaxFrontierNodes);
-        GovernedLoopExecutionContractGuard.RequireContiguousPlanPrefix(snapshot, nameof(nodes));
+        GovernedLoopExecutionContractGuard.RequireCanonicalActivationHistory(snapshot, nameof(nodes));
         if (concurrencyCeiling != GovernedLoopExecutionLimits.Schema1ConcurrencyCeiling)
         {
             throw new ArgumentOutOfRangeException(nameof(concurrencyCeiling), "Schema-1 governed-loop execution requires a concurrency ceiling of one.");
@@ -63,9 +63,9 @@ public sealed record GovernedLoopFrontierPayload
             throw new ArgumentException("Node evidence does not match the aggregate frontier status.", nameof(nodes));
         }
 
-        if (snapshot.Count(node => node.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running) > concurrencyCeiling)
+        if (snapshot.Count(node => node.Status == GovernedLoopNodeExecutionStatus.Running) > concurrencyCeiling)
         {
-            throw new ArgumentException("Ready and running frontier nodes exceed the admitted concurrency ceiling.", nameof(nodes));
+            throw new ArgumentException("Running frontier activations exceed the admitted concurrency ceiling.", nameof(nodes));
         }
 
         if (!string.IsNullOrEmpty(contentHash))

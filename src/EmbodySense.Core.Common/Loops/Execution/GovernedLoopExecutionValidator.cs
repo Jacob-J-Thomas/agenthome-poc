@@ -439,10 +439,14 @@ public static class GovernedLoopExecutionValidator
 
     private static void ValidateNodeHistory(IReadOnlyList<GovernedLoopNodeExecutionEvidence> current, IReadOnlyList<GovernedLoopNodeExecutionEvidence> next, List<GovernedLoopExecutionValidationError> errors)
     {
-        var successors = next.ToDictionary(node => node.NodeId, StringComparer.Ordinal);
+        var successors = next.ToDictionary(node => node.ActivationOrdinal);
         for (var index = 0; index < current.Count; index++)
         {
-            if (!successors.TryGetValue(current[index].NodeId, out var successor))
+            if (!successors.TryGetValue(current[index].ActivationOrdinal, out var successor))
+            {
+                Add(errors, GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged, $"$frontier.payload.nodes[{index}]");
+            }
+            else if (!SameNodeActivationIdentity(current[index], successor))
             {
                 Add(errors, GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged, $"$frontier.payload.nodes[{index}]");
             }
@@ -518,15 +522,44 @@ public static class GovernedLoopExecutionValidator
     private static bool SameNodeEvidence(GovernedLoopNodeExecutionEvidence current, GovernedLoopNodeExecutionEvidence next)
     {
         return string.Equals(current.NodeId, next.NodeId, StringComparison.Ordinal)
+            && current.ActivationOrdinal == next.ActivationOrdinal
             && current.PlanOrdinal == next.PlanOrdinal
+            && current.VisitOrdinal == next.VisitOrdinal
             && current.Descriptor == next.Descriptor
             && current.IncomingControlEdgeIds.SequenceEqual(next.IncomingControlEdgeIds, StringComparer.Ordinal)
             && current.OutgoingControlEdgeIds.SequenceEqual(next.OutgoingControlEdgeIds, StringComparer.Ordinal)
+            && string.Equals(current.CycleId, next.CycleId, StringComparison.Ordinal)
+            && current.CycleIteration == next.CycleIteration
+            && current.ControlOutcome == next.ControlOutcome
+            && current.SelectedControlEdgeIds.SequenceEqual(next.SelectedControlEdgeIds, StringComparer.Ordinal)
+            && current.SkippedControlEdgeIds.SequenceEqual(next.SkippedControlEdgeIds, StringComparer.Ordinal)
+            && current.JoinArrivals.Count == next.JoinArrivals.Count
+            && current.JoinArrivals.Zip(next.JoinArrivals).All(pair => pair.First.SchemaVersion == pair.Second.SchemaVersion
+                && pair.First.SourceActivationOrdinal == pair.Second.SourceActivationOrdinal
+                && string.Equals(pair.First.ControlEdgeId, pair.Second.ControlEdgeId, StringComparison.Ordinal))
             && current.Attempt == next.Attempt
             && string.Equals(current.AttemptOperationId, next.AttemptOperationId, StringComparison.Ordinal)
             && current.Status == next.Status
             && string.Equals(current.OutcomeEvidenceId, next.OutcomeEvidenceId, StringComparison.Ordinal)
             && string.Equals(current.OutcomeEvidenceHash, next.OutcomeEvidenceHash, StringComparison.Ordinal);
+    }
+
+    private static bool SameNodeActivationIdentity(GovernedLoopNodeExecutionEvidence current, GovernedLoopNodeExecutionEvidence next)
+    {
+        return current.SchemaVersion == next.SchemaVersion
+            && current.ActivationOrdinal == next.ActivationOrdinal
+            && current.PlanOrdinal == next.PlanOrdinal
+            && current.VisitOrdinal == next.VisitOrdinal
+            && string.Equals(current.NodeId, next.NodeId, StringComparison.Ordinal)
+            && current.Descriptor == next.Descriptor
+            && current.IncomingControlEdgeIds.SequenceEqual(next.IncomingControlEdgeIds, StringComparer.Ordinal)
+            && current.OutgoingControlEdgeIds.SequenceEqual(next.OutgoingControlEdgeIds, StringComparer.Ordinal)
+            && string.Equals(current.CycleId, next.CycleId, StringComparison.Ordinal)
+            && current.CycleIteration == next.CycleIteration
+            && current.JoinArrivals.Count == next.JoinArrivals.Count
+            && current.JoinArrivals.Zip(next.JoinArrivals).All(pair => pair.First.SchemaVersion == pair.Second.SchemaVersion
+                && pair.First.SourceActivationOrdinal == pair.Second.SourceActivationOrdinal
+                && string.Equals(pair.First.ControlEdgeId, pair.Second.ControlEdgeId, StringComparison.Ordinal));
     }
 
     private static void ValidateEvidenceTimes(
