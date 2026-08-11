@@ -2767,6 +2767,29 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Canonical_malformed_referenced_route_evidence_returns_errors_and_does_not_abort_recovery()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var malformed = WithMalformedReferencedSequentialRoute(context.Run);
+
+        var validation = CustomLoopRunValidator.Validate(malformed);
+
+        Assert.False(validation.IsValid);
+        Assert.Contains(validation.Errors, error => error.Code == "execution_frontier_outcome_evidence_mismatch");
+        Assert.Contains(validation.Errors, error => error.Code == "invalid_sequential_node_evidence");
+
+        var store = new FakeRunStore(malformed, validateSeed: false);
+        var recovery = new CustomLoopRecoveryService(store, new RecordingAuditLog(), new FixedTimeProvider(malformed.UpdatedAtUtc.AddSeconds(1)));
+
+        var result = Assert.Single(await recovery.RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.Failed, result.Status);
+        Assert.Same(malformed, result.Run);
+        Assert.Same(malformed, store.Current);
+        Assert.Empty(store.Writes);
+    }
+
+    [Fact]
     public async Task Canonical_restart_after_running_claim_without_dispatch_evidence_blocks_once_without_provider_redispatch()
     {
         var context = await SequentialContextAsync(Run(SequentialDefinition()));
@@ -6695,6 +6718,22 @@ public sealed partial class CustomLoopOrderedRunnerTests
         };
         Assert.True(CustomLoopRunValidator.Validate(candidate).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(candidate).Errors));
         return candidate;
+    }
+
+    private static CustomLoopRunRecord WithMalformedReferencedSequentialRoute(CustomLoopRunRecord run)
+    {
+        var outcomeEvidenceId = run.Frontier!.Payload.Nodes[0].OutcomeEvidenceId;
+        var events = run.Events.ToArray();
+        var eventIndex = Array.FindIndex(events, item => string.Equals(item.EventId, outcomeEvidenceId, StringComparison.Ordinal));
+        var referenced = events[eventIndex];
+        events[eventIndex] = referenced with
+        {
+            SequentialNodeEvidence = referenced.SequentialNodeEvidence! with
+            {
+                SelectedControlEdgeIds = null!,
+            },
+        };
+        return run with { Events = events };
     }
 
     private static async Task<CustomLoopRunRecord> RecoverForExplicitResumeAsync(CustomLoopRunRecord run, string operationId)

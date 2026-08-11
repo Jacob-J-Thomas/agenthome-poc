@@ -575,7 +575,12 @@ public static class CustomLoopRunValidator
                 .Take(2)
                 .ToArray();
             var evidence = matchingEvents.Length == 1 ? matchingEvents[0].SequentialNodeEvidence : null;
+            var nodeSelectedControlEdgeIds = node.SelectedControlEdgeIds;
+            var nodeSkippedControlEdgeIds = node.SkippedControlEdgeIds;
+            var evidenceSelectedControlEdgeIds = evidence?.SelectedControlEdgeIds;
+            var evidenceSkippedControlEdgeIds = evidence?.SkippedControlEdgeIds;
             var compatible = evidence is not null
+                && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
                 && CustomLoopSequentialOutcomeArtifactHash.Matches(matchingEvents[0])
                 && string.Equals(evidence.OutcomeArtifactHash, node.OutcomeEvidenceHash, StringComparison.Ordinal)
                 && evidence.ActivationOrdinal == node.ActivationOrdinal
@@ -591,8 +596,12 @@ public static class CustomLoopRunValidator
                         && HasExactGoverningSkipActivation(frontier.Payload.Nodes, node, evidence)
                     : node.Attempt == evidence.Attempt
                         && node.ControlOutcome == evidence.ControlOutcome
-                        && node.SelectedControlEdgeIds.SequenceEqual(evidence.SelectedControlEdgeIds, StringComparer.Ordinal)
-                        && node.SkippedControlEdgeIds.SequenceEqual(evidence.SkippedControlEdgeIds, StringComparer.Ordinal)
+                        && nodeSelectedControlEdgeIds is not null
+                        && nodeSkippedControlEdgeIds is not null
+                        && evidenceSelectedControlEdgeIds is not null
+                        && evidenceSkippedControlEdgeIds is not null
+                        && nodeSelectedControlEdgeIds.SequenceEqual(evidenceSelectedControlEdgeIds, StringComparer.Ordinal)
+                        && nodeSkippedControlEdgeIds.SequenceEqual(evidenceSkippedControlEdgeIds, StringComparer.Ordinal)
                         && IsFrontierOutcomeDispositionCompatible(node.Status, evidence.Kind, evidence.Disposition));
             if (!compatible)
             {
