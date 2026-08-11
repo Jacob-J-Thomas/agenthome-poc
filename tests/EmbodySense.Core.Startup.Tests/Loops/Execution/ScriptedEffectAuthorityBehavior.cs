@@ -12,4 +12,6 @@ public enum ScriptedEffectAuthorityBehavior
     LateCallback,
     NullResult,
     MalformedResult,
+    MismatchedOperation,
+    ForgedAdmittedProof,
 }

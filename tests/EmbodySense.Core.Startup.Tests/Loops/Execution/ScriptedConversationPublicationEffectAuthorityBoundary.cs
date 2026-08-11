@@ -53,6 +53,8 @@ internal sealed class ScriptedConversationPublicationEffectAuthorityBoundary(
             ScriptedConversationPublicationAuthorityBehavior.NullResult => null!,
             ScriptedConversationPublicationAuthorityBehavior.MalformedResult => Malformed<TResult>(),
             ScriptedConversationPublicationAuthorityBehavior.MismatchedDecision => Mismatched<TResult>(request),
+            ScriptedConversationPublicationAuthorityBehavior.MismatchedOperationDecision => MismatchedOperation<TResult>(request),
+            ScriptedConversationPublicationAuthorityBehavior.ForgedAdmittedProofDecision => ForgedAdmittedProof<TResult>(request),
             ScriptedConversationPublicationAuthorityBehavior.SwallowCallbackFailure => await SwallowCallbackFailureAsync(request, commit, cancellationToken),
             _ => throw new InvalidOperationException("Unsupported scripted conversation-publication authority behavior."),
         };
@@ -185,6 +187,20 @@ internal sealed class ScriptedConversationPublicationEffectAuthorityBoundary(
         });
         Assert.True(GovernedLoopEffectAuthorityContractValidator.Validate(mismatched).IsValid);
         return Stopped<TResult>(request, mismatched);
+    }
+
+    private static GovernedLoopEffectAuthorityExecutionResult<TResult> MismatchedOperation<TResult>(
+        GovernedLoopEffectAuthorityRequest request)
+    {
+        var exact = Decision(request, GovernedLoopEffectAuthorityDisposition.Pause, GovernedLoopEffectAuthorityReason.EvidenceAmbiguous);
+        return Stopped<TResult>(request, HostileEffectAuthorityDecisionFactory.ForDifferentOperation(exact));
+    }
+
+    private static GovernedLoopEffectAuthorityExecutionResult<TResult> ForgedAdmittedProof<TResult>(
+        GovernedLoopEffectAuthorityRequest request)
+    {
+        var exact = Decision(request, GovernedLoopEffectAuthorityDisposition.Pause, GovernedLoopEffectAuthorityReason.EvidenceAmbiguous);
+        return Stopped<TResult>(request, HostileEffectAuthorityDecisionFactory.WithForgedAdmittedProof(exact));
     }
 
     private static GovernedLoopEffectAuthorityExecutionResult<TResult> Direct<TResult>(

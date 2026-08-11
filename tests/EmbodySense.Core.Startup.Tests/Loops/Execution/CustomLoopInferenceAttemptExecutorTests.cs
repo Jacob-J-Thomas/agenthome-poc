@@ -347,12 +347,16 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(0, providerStarts);
     }
 
-    [Fact]
-    public async Task ExecuteAsync_rejects_a_valid_stopped_decision_for_a_different_exact_request()
+    [Theory]
+    [InlineData(EffectBoundaryBehavior.MismatchedPause)]
+    [InlineData(EffectBoundaryBehavior.MismatchedOperationPause)]
+    [InlineData(EffectBoundaryBehavior.ForgedAdmittedProofPause)]
+    public async Task ExecuteAsync_rejects_a_valid_stopped_decision_for_a_different_exact_request(
+        EffectBoundaryBehavior behavior)
     {
         using var workspace = new TestWorkspace();
         var transportWrites = 0;
-        var boundary = new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.MismatchedPause);
+        var boundary = new RecordingEffectAuthorityBoundary(behavior);
         var executor = CreateExecutor(
             workspace,
             (_, _, _) =>
@@ -600,6 +604,8 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
     [InlineData(ScriptedEffectAuthorityBehavior.NullResult)]
     [InlineData(ScriptedEffectAuthorityBehavior.MalformedResult)]
     [InlineData(ScriptedEffectAuthorityBehavior.DoubleCallback)]
+    [InlineData(ScriptedEffectAuthorityBehavior.MismatchedOperation)]
+    [InlineData(ScriptedEffectAuthorityBehavior.ForgedAdmittedProof)]
     public async Task ExecuteAsync_hostile_intake_protocol_fails_closed_before_inner_governance(ScriptedEffectAuthorityBehavior behavior)
     {
         using var workspace = new TestWorkspace();
@@ -1654,6 +1660,8 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         NullResult,
         MalformedResult,
         MismatchedPause,
+        MismatchedOperationPause,
+        ForgedAdmittedProofPause,
         ReturnBeforeCommitCompletes,
         CaptureCommit,
     }
@@ -1827,6 +1835,24 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
                         GovernedLoopEffectAuthorityReason.GrantUnavailable,
                         includeCurrentProof: false,
                         "A canonical decision belongs to a different exact request.");
+                case EffectBoundaryBehavior.MismatchedOperationPause:
+                    return Stopped<TResult>(
+                        HostileEffectAuthorityDecisionFactory.ForDifferentOperation(
+                            CanonicalInferenceAuthorityTestData.Decision(
+                                request,
+                                GovernedLoopEffectAuthorityDisposition.Pause,
+                                GovernedLoopEffectAuthorityReason.EvidenceAmbiguous,
+                                includeCurrentProof: true)),
+                        "A canonical decision names a different provider operation.");
+                case EffectBoundaryBehavior.ForgedAdmittedProofPause:
+                    return Stopped<TResult>(
+                        HostileEffectAuthorityDecisionFactory.WithForgedAdmittedProof(
+                            CanonicalInferenceAuthorityTestData.Decision(
+                                request,
+                                GovernedLoopEffectAuthorityDisposition.Pause,
+                                GovernedLoopEffectAuthorityReason.EvidenceAmbiguous,
+                                includeCurrentProof: true)),
+                        "A canonical decision carries a forged admitted-authority proof.");
                 case EffectBoundaryBehavior.ReturnBeforeCommitCompletes:
                     Interlocked.Increment(ref _commitInvocations);
                     _pendingCommit = commit(cancellationToken);
@@ -1876,6 +1902,17 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
                 status,
                 CanonicalInferenceAuthorityTestData.Decision(request, disposition, reason, includeCurrentProof),
                 evidenceStatus,
+                CommitInvoked: false,
+                Result: default,
+                detail);
+
+        private static GovernedLoopEffectAuthorityExecutionResult<TResult> Stopped<TResult>(
+            GovernedLoopEffectAuthorityDecision decision,
+            string detail)
+            => new(
+                GovernedLoopEffectAuthorityExecutionStatus.Decided,
+                decision,
+                GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
                 CommitInvoked: false,
                 Result: default,
                 detail);

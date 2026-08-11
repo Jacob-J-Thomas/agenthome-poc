@@ -60,7 +60,7 @@ public sealed class GovernedLoopToolActuationAuthorityBoundaryTests
     [InlineData(ScriptedEffectAuthorityBehavior.Invalid)]
     [InlineData(ScriptedEffectAuthorityBehavior.Unavailable)]
     [InlineData(ScriptedEffectAuthorityBehavior.ReplayAmbiguous)]
-    public async Task Invalid_unavailable_or_replayed_authority_is_ambiguous_with_zero_actuation(ScriptedEffectAuthorityBehavior behavior)
+    public async Task Unresolved_replayed_or_mismatched_authority_is_ambiguous_with_zero_actuation(ScriptedEffectAuthorityBehavior behavior)
     {
         var fixture = WorkspaceToolAuthorityTestFixture.Create();
         var effect = new ScriptedGovernedLoopEffectAuthorityBoundary(behavior);
@@ -78,6 +78,24 @@ public sealed class GovernedLoopToolActuationAuthorityBoundaryTests
             Assert.Equal("alreadypresent", result.AuditMetadata["effect_authority_evidence_status"]);
             Assert.Equal("pause", result.AuditMetadata["effect_authority_disposition"]);
         }
+    }
+
+    [Theory]
+    [InlineData(ScriptedEffectAuthorityBehavior.MismatchedOperation)]
+    [InlineData(ScriptedEffectAuthorityBehavior.ForgedAdmittedProof)]
+    public async Task Structurally_valid_but_inexact_decisions_are_protocol_failures_with_zero_actuation(
+        ScriptedEffectAuthorityBehavior behavior)
+    {
+        var fixture = WorkspaceToolAuthorityTestFixture.Create();
+        var effect = new ScriptedGovernedLoopEffectAuthorityBoundary(behavior);
+        var callbackCount = 0;
+
+        await Assert.ThrowsAsync<ToolActuationAuthorityProtocolException>(() => CreateBoundary(effect, fixture).ExecuteAsync(
+            fixture.ToolRequest,
+            (_, _) => Task.FromResult(++callbackCount)));
+
+        Assert.Equal(0, callbackCount);
+        Assert.Equal(0, effect.CallbackInvocations);
     }
 
     [Fact]

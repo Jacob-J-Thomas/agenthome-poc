@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Loops.Execution;
@@ -52,6 +53,42 @@ public sealed class ConversationPublicationEffectAuthorityRequestFactoryTests
         Assert.NotEqual(
             first.EffectOperationId,
             Create(ConversationPublicationAuthorityTestFixture.Create(revisionId: "revision-2")).EffectOperationId);
+    }
+
+    [Fact]
+    public void Target_fingerprint_is_stable_bounded_and_changes_with_immutable_admission_intent()
+    {
+        var fixture = ConversationPublicationAuthorityTestFixture.Create();
+
+        var first = GovernedLoopEffectAuthorityOperationIdentity.CreateConversationPublicationTargetFingerprint(fixture.Receipt);
+
+        Assert.Equal(64, first.Length);
+        Assert.All(first, character => Assert.True(character is >= '0' and <= '9' or >= 'a' and <= 'f'));
+        Assert.Equal(first, GovernedLoopEffectAuthorityOperationIdentity.CreateConversationPublicationTargetFingerprint(fixture.Receipt));
+        Assert.NotEqual(
+            first,
+            GovernedLoopEffectAuthorityOperationIdentity.CreateConversationPublicationTargetFingerprint(
+                ConversationPublicationAuthorityTestFixture.Create(revisionId: "revision-target-other").Receipt));
+    }
+
+    [Fact]
+    public void Operation_identity_rejects_missing_or_noncanonical_target_fingerprints()
+    {
+        var fixture = ConversationPublicationAuthorityTestFixture.Create();
+
+        Assert.Throws<ArgumentNullException>(() =>
+            GovernedLoopEffectAuthorityOperationIdentity.CreateConversationPublicationTargetFingerprint(null!));
+        Assert.Throws<ArgumentException>(() =>
+            GovernedLoopEffectAuthorityOperationIdentity.CreateConversationPublicationTargetFingerprint(
+                fixture.Receipt with { ContentHash = string.Empty }));
+        Assert.Throws<ArgumentException>(() => GovernedLoopEffectAuthorityOperationIdentity.CreateConversationPublication(
+            fixture.Receipt,
+            fixture.Binding,
+            fixture.Artifact,
+            ConversationPublicationAuthorityTestFixture.NodeId,
+            ConversationPublicationAuthorityTestFixture.NodeAttempt,
+            ConversationPublicationAuthorityTestFixture.PublicationOperationId,
+            new string('A', 64)));
     }
 
     [Fact]

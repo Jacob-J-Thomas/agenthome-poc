@@ -1,6 +1,4 @@
-using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
+using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Common.Authority;
@@ -22,8 +20,6 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 public static class ConversationPublicationEffectAuthorityRequestFactory
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
-    private const string OperationIdentityDomain = "embodysense-conversation-publication-effect-v1";
-    private static readonly UTF8Encoding _strictUtf8 = new(false, true);
 
     /// <summary>Creates one deterministic publication request bound to complete immutable admission evidence.</summary>
     /// <param name="admissionReceipt">The complete exact successful admission receipt retained by the run.</param>
@@ -98,13 +94,15 @@ public static class ConversationPublicationEffectAuthorityRequestFactory
             throw new ArgumentException("The derived conversation-publication ceiling was not an exact non-granting narrowing of admitted authority.", nameof(admissionReceipt));
         }
 
-        var effectOperationId = CreateEffectOperationId(
+        var targetFingerprint = GovernedLoopEffectAuthorityOperationIdentity.CreateConversationPublicationTargetFingerprint(admissionReceipt);
+        var effectOperationId = GovernedLoopEffectAuthorityOperationIdentity.CreateConversationPublication(
             admissionReceipt,
             executionBinding,
             graphArtifact,
             nodeId,
             nodeAttempt,
-            publicationOperationId);
+            publicationOperationId,
+            targetFingerprint);
         return new GovernedLoopEffectAuthorityRequest(
             admissionReceipt,
             executionBinding,
@@ -143,36 +141,4 @@ public static class ConversationPublicationEffectAuthorityRequestFactory
         }
     }
 
-    private static string CreateEffectOperationId(
-        GovernedLoopAdmissionReceipt receipt,
-        GovernedLoopExecutionBinding binding,
-        GovernedLoopGraphRevisionArtifact artifact,
-        string nodeId,
-        int nodeAttempt,
-        string publicationOperationId)
-    {
-        var canonical = new StringBuilder(1_024);
-        Append(canonical, OperationIdentityDomain);
-        Append(canonical, receipt.ContentHash);
-        Append(canonical, binding.RunId);
-        Append(canonical, binding.ExecutionGeneration.ToString(CultureInfo.InvariantCulture));
-        Append(canonical, binding.Revision.GraphId);
-        Append(canonical, binding.Revision.RevisionId);
-        Append(canonical, binding.Revision.ExecutableHash);
-        Append(canonical, artifact.ArtifactHash);
-        Append(canonical, artifact.LayoutHash);
-        Append(canonical, nodeId);
-        Append(canonical, nodeAttempt.ToString(CultureInfo.InvariantCulture));
-        Append(canonical, publicationOperationId);
-        var digest = Convert.ToHexString(SHA256.HashData(_strictUtf8.GetBytes(canonical.ToString()))).ToLowerInvariant();
-        return "conversation-publication-" + digest;
-    }
-
-    private static void Append(StringBuilder canonical, string value)
-    {
-        canonical.Append(value.Length.ToString(CultureInfo.InvariantCulture));
-        canonical.Append(':');
-        canonical.Append(value);
-        canonical.Append('|');
-    }
 }

@@ -3,6 +3,7 @@ using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.Governance.Audit;
@@ -14,15 +15,13 @@ using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Execution.Authority;
 using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Application.Capabilities;
-using EmbodySense.Core.Common.Authority.Grants;
-using EmbodySense.Core.Common.Authority.Grants.Models;
-using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Loops.Revisions;
@@ -52,6 +51,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private const string PublicationDefinitelyFailedDetail = "Conversation publication definitely failed; no success is reported.";
     private const string PublicationUncertainDetail = "Conversation publication outcome is uncertain and requires review.";
     private const string PublicationMismatchedIdentityDetail = "Conversation publisher returned an operation ID that did not match the durable publication intent.";
+    private const string PublicationAuthorityUnprovenDetail = "Conversation publisher reported success without completing the exact canonical publication-authority boundary.";
     private const string PublicationUnsupportedDetail = "Conversation publisher returned an unsupported outcome that requires review.";
     private const string PublicationOmittedDetail = "Conversation publication was selected but omitted because admission bound no invoking conversation.";
     private const string CanonicalCallerCancellationDetail = "Caller cancellation rejected the canonical node before provider invocation.";
@@ -2067,6 +2067,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         ConversationPublicationCommitBoundary? appendCommitBoundary = null;
+        var canonicalPublicationAuthorityCompleted = 0;
+        var canonicalPublicationAuthorityInvocations = 0;
+        var canonicalPublicationAuthorityProtocolFailed = 0;
         if (sequentialNode is not null)
         {
             if (_conversationPublicationAuthorityBoundaryProvider is null)
@@ -2082,7 +2085,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
             try
             {
-                appendCommitBoundary = _conversationPublicationAuthorityBoundaryProvider.CreateCommitBoundary(
+                var authorityCommitBoundary = _conversationPublicationAuthorityBoundaryProvider.CreateCommitBoundary(
                     new GovernedLoopConversationPublicationAuthorityRequest(
                         sequentialNode.Binding.AdmissionReceipt,
                         sequentialNode.Binding.ExecutionBinding,
@@ -2090,10 +2093,44 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                         sequentialNode.Node.NodeId,
                         sequentialNode.Attempt,
                         operationId));
-                if (appendCommitBoundary is null)
+                if (authorityCommitBoundary is null)
                 {
                     throw new InvalidOperationException("The canonical publication authority provider returned no commit boundary.");
                 }
+
+                var boundaryMarker = new object();
+                appendCommitBoundary = async (commitAppend, token) =>
+                {
+                    if (Interlocked.Increment(ref canonicalPublicationAuthorityInvocations) != 1)
+                    {
+                        Volatile.Write(ref canonicalPublicationAuthorityProtocolFailed, 1);
+                        throw new InvalidOperationException("The canonical publication-authority boundary may be invoked exactly once.");
+                    }
+
+                    var protocol = await ConversationPublicationCommitProtocol.ExecuteAsync(
+                        authorityCommitBoundary,
+                        async callbackToken =>
+                        {
+                            await commitAppend(callbackToken);
+                            return boundaryMarker;
+                        },
+                        token);
+                    if (protocol.Status == ConversationPublicationCommitProtocolStatus.Completed
+                        && ReferenceEquals(protocol.Value, boundaryMarker))
+                    {
+                        Volatile.Write(ref canonicalPublicationAuthorityCompleted, 1);
+                        return;
+                    }
+
+                    Volatile.Write(ref canonicalPublicationAuthorityProtocolFailed, 1);
+
+                    if (protocol.Failure is not null)
+                    {
+                        ExceptionDispatchInfo.Capture(protocol.Failure).Throw();
+                    }
+
+                    throw new InvalidOperationException($"The canonical publication-authority boundary did not complete its exact append callback ({protocol.Status}).");
+                };
             }
             catch (Exception exception)
             {
@@ -2220,7 +2257,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             var terminal = await TerminateAsync(cancellationBoundary.Run, actor, CustomLoopRunStatus.Failed, "publication_cancelled_before_dispatch", "Conversation publication was cancelled before the append began, but no durable cancellation request could be confirmed.");
             return new RunAdvance(terminal.Run, terminal);
         }
-        catch (GovernedLoopEffectAuthorityStoppedException exception) when (!publicationDispatched)
+        catch (GovernedLoopEffectAuthorityStoppedException exception) when (sequentialNode is not null && !publicationDispatched)
         {
             var definitiveDeny = IsExactDefinitivePublicationAuthorityDeny(exception, run, sequentialNode, operationId);
             var terminal = await TerminateAsync(
@@ -2233,7 +2270,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                     : "Canonical conversation-publication authority stopped before append and requires review.");
             return new RunAdvance(terminal.Run, terminal);
         }
-        catch (Exception exception) when (!publicationDispatched)
+        catch (Exception exception) when (sequentialNode is not null && !publicationDispatched)
         {
             var terminal = await TerminateAsync(
                 run,
@@ -2256,18 +2293,26 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         publication ??= new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Uncertain, null, "Publisher returned no result after publication may have occurred.");
 
         var publicationIdMatches = string.Equals(publication.PublicationId, operationId, StringComparison.Ordinal);
-        var isPublished = publicationIdMatches && (publication.Outcome is CustomLoopConversationPublicationOutcome.Published or CustomLoopConversationPublicationOutcome.AlreadyPublished);
+        var reportsPublished = publication.Outcome is CustomLoopConversationPublicationOutcome.Published or CustomLoopConversationPublicationOutcome.AlreadyPublished;
+        var canonicalAuthorityProven = sequentialNode is null
+            || Volatile.Read(ref canonicalPublicationAuthorityCompleted) == 1
+                && Volatile.Read(ref canonicalPublicationAuthorityInvocations) == 1
+                && Volatile.Read(ref canonicalPublicationAuthorityProtocolFailed) == 0
+                && publicationDispatched;
+        var isPublished = publicationIdMatches && reportsPublished && canonicalAuthorityProven;
         var publicationId = operationId;
         var eventDetail = !publicationIdMatches
             ? PublicationMismatchedIdentityDetail
-            : publication.Outcome switch
-            {
-                CustomLoopConversationPublicationOutcome.Published => PublicationPublishedDetail,
-                CustomLoopConversationPublicationOutcome.AlreadyPublished => PublicationAlreadyPublishedDetail,
-                CustomLoopConversationPublicationOutcome.DefinitelyFailed => PublicationDefinitelyFailedDetail,
-                CustomLoopConversationPublicationOutcome.Uncertain => PublicationUncertainDetail,
-                _ => PublicationUnsupportedDetail,
-            };
+            : reportsPublished && !canonicalAuthorityProven
+                ? PublicationAuthorityUnprovenDetail
+                : publication.Outcome switch
+                {
+                    CustomLoopConversationPublicationOutcome.Published => PublicationPublishedDetail,
+                    CustomLoopConversationPublicationOutcome.AlreadyPublished => PublicationAlreadyPublishedDetail,
+                    CustomLoopConversationPublicationOutcome.DefinitelyFailed => PublicationDefinitelyFailedDetail,
+                    CustomLoopConversationPublicationOutcome.Uncertain => PublicationUncertainDetail,
+                    _ => PublicationUnsupportedDetail,
+                };
         var publicationEvent = Event(run, Now(run), CustomLoopRunEventKind.ConversationPublished, eventDetail, run.Checkpoint.Iteration, stepId, output: isPublished ? output.Content : null, originalOutputCharacters: isPublished ? output.Content.Length : null, truncated: isPublished ? false : null, published: isPublished, publicationId: publicationId);
         var persisted = await PersistAsync(run, Append(run, publicationEvent.TimestampUtc, [publicationEvent]), IntegrityToken(), outcomeMayExist: publication.Outcome != CustomLoopConversationPublicationOutcome.DefinitelyFailed);
         if (persisted.Terminal is not null)
@@ -2467,25 +2512,28 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 false,
                 true,
                 false);
-            var admittedBinding = new AuthorityGrantBinding(
-                receipt.Evidence.GrantProfile,
-                receipt.Intent.Role,
-                receipt.Intent.Publication);
-            return string.Equals(decision.RunId, run.Id, StringComparison.Ordinal)
-                && decision.ExecutionGeneration == sequentialNode.Binding.ExecutionBinding.ExecutionGeneration
-                && string.Equals(decision.AdmissionReceiptHash, sequentialNode.Binding.AdmissionReceiptHash, StringComparison.Ordinal)
-                && string.Equals(decision.NodeId, sequentialNode.Node.NodeId, StringComparison.Ordinal)
-                && decision.NodeAttempt == sequentialNode.Attempt
-                && string.Equals(decision.CorrelationId, publicationOperationId, StringComparison.Ordinal)
-                && decision.BoundaryKind == GovernedLoopEffectBoundaryKind.ConversationPublication
-                && AuthorityCeilingSubset.IsEqual(decision.RequiredAuthority, requiredAuthority)
-                && decision.RequiredCapabilityPins.SequenceEqual(conversationPins)
-                && Equals(decision.AdmittedAuthority.Grant, receipt.Intent.AuthorityGrant)
-                && Equals(decision.AdmittedAuthority.Binding, admittedBinding)
-                && Equals(decision.AdmittedAuthority.Boundary, receipt.Evidence.GrantBoundary)
-                && AuthorityCeilingSubset.IsEqual(decision.AdmittedAuthority.Ceiling, receipt.Evidence.EffectiveAuthority)
-                && decision.AdmittedAuthority.CapabilityPins.SequenceEqual(receipt.Evidence.CapabilityAdmission.Pins)
-                && string.Equals(decision.AdmittedAuthority.DependencyEvidenceHash, receipt.Evidence.GrantDependencyEvidenceHash, StringComparison.Ordinal);
+            var targetFingerprint = GovernedLoopEffectAuthorityOperationIdentity.CreateConversationPublicationTargetFingerprint(receipt);
+            var effectOperationId = GovernedLoopEffectAuthorityOperationIdentity.CreateConversationPublication(
+                receipt,
+                sequentialNode.Binding.ExecutionBinding,
+                sequentialNode.Artifact,
+                sequentialNode.Node.NodeId,
+                sequentialNode.Attempt,
+                publicationOperationId,
+                targetFingerprint);
+            var expectedRequest = new GovernedLoopEffectAuthorityRequest(
+                receipt,
+                sequentialNode.Binding.ExecutionBinding,
+                sequentialNode.Artifact,
+                sequentialNode.Node.NodeId,
+                sequentialNode.Attempt,
+                effectOperationId,
+                publicationOperationId,
+                GovernedLoopEffectBoundaryKind.ConversationPublication,
+                requiredAuthority,
+                conversationPins);
+            return string.Equals(run.Id, expectedRequest.ExecutionBinding.RunId, StringComparison.Ordinal)
+                && GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(decision, expectedRequest);
         }
         catch (Exception malformed) when (malformed is ArgumentException or InvalidOperationException or NotSupportedException)
         {

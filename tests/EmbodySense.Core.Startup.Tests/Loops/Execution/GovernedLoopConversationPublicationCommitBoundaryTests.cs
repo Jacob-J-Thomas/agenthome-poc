@@ -208,6 +208,8 @@ public sealed class GovernedLoopConversationPublicationCommitBoundaryTests
     [InlineData(ScriptedConversationPublicationAuthorityBehavior.NullResult)]
     [InlineData(ScriptedConversationPublicationAuthorityBehavior.MalformedResult)]
     [InlineData(ScriptedConversationPublicationAuthorityBehavior.MismatchedDecision)]
+    [InlineData(ScriptedConversationPublicationAuthorityBehavior.MismatchedOperationDecision)]
+    [InlineData(ScriptedConversationPublicationAuthorityBehavior.ForgedAdmittedProofDecision)]
     public async Task Missing_callback_null_result_or_exact_decision_mismatch_is_a_protocol_failure_with_zero_append(
         ScriptedConversationPublicationAuthorityBehavior behavior)
     {
