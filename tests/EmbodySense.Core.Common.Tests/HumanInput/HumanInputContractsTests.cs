@@ -31,6 +31,7 @@ public sealed class HumanInputContractsTests
             request with { RequestId = "request-other" },
             request with { RequestVersionId = "request-version-other" },
             request with { Binding = request.Binding with { WorkspaceId = "workspace-other" } },
+            request with { Binding = request.Binding with { LoopGraphId = "governed-loop-other" } },
             request with { Binding = request.Binding with { LoopRevisionId = "revision-other" } },
             request with { Binding = request.Binding with { NodeId = "node-other" } },
             request with { Binding = request.Binding with { RunId = "run-other" } },
@@ -195,6 +196,7 @@ public sealed class HumanInputContractsTests
         var bindings = new[]
         {
             request.Binding with { WorkspaceId = "workspace-other" },
+            request.Binding with { LoopGraphId = "governed-loop-other" },
             request.Binding with { LoopRevisionId = "revision-other" },
             request.Binding with { NodeId = "node-other" },
             request.Binding with { RunId = "run-other" },
@@ -653,7 +655,7 @@ public sealed class HumanInputContractsTests
             HumanInputResponseKind.Reference => new HumanInputResponseSchema(kind, null, null, null, new HumanInputReferencePolicy(HumanInputReferenceKind.Reference, 64)),
             _ => throw new ArgumentOutOfRangeException(nameof(kind))
         };
-        var request = new HumanInputRequest(1, "request-one", "request-version-one", new HumanInputRequestBinding("workspace-one", "revision-one", "node-one", "run-one", "checkpoint-one"), "Collect data", "Provide data only.", schema, HumanInputPrivacyClass.Private, [new HumanInputEligibleRespondent("user-one", "route-one")], new HumanInputTiming(_at, _at.AddHours(1)), new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstEligibleResponse), new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, "node-one", "checkpoint-one"), string.Empty);
+        var request = new HumanInputRequest(1, "request-one", "request-version-one", new HumanInputRequestBinding("workspace-one", "governed-loop", "revision-one", "node-one", "run-one", "checkpoint-one"), "Collect data", "Provide data only.", schema, HumanInputPrivacyClass.Private, [new HumanInputEligibleRespondent("user-one", "route-one")], new HumanInputTiming(_at, _at.AddHours(1)), new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstEligibleResponse), new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, "node-one", "checkpoint-one"), string.Empty);
         return HumanInputRequestHash.Apply(request);
     }
 

@@ -100,7 +100,7 @@ public static class HumanInputValidator
 
         if (!Equals(response.Binding, request.Binding))
         {
-            Add(errors, "binding_mismatch", "binding", "Response workspace, loop revision, node, run, and checkpoint binding must exactly match the request.");
+            Add(errors, "binding_mismatch", "binding", "Response workspace, loop graph and revision, node, run, and checkpoint binding must exactly match the request.");
         }
 
         ValidateId(response.AuthenticatedActorRef, "authenticatedActorRef", errors);
@@ -127,11 +127,12 @@ public static class HumanInputValidator
     {
         if (binding is null)
         {
-            Add(errors, "binding_required", field, "An exact workspace, loop revision, node, run, and checkpoint binding is required.");
+            Add(errors, "binding_required", field, "An exact workspace, loop graph and revision, node, run, and checkpoint binding is required.");
             return;
         }
 
         ValidateId(binding.WorkspaceId, $"{field}.workspaceId", errors);
+        ValidateId(binding.LoopGraphId, $"{field}.loopGraphId", errors);
         ValidateId(binding.LoopRevisionId, $"{field}.loopRevisionId", errors);
         ValidateId(binding.NodeId, $"{field}.nodeId", errors);
         ValidateId(binding.RunId, $"{field}.runId", errors);
