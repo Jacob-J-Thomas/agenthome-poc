@@ -17,7 +17,6 @@ $resultsRoot = Join-Path $repoRoot "tests\VerificationResults"
 $watchdogLogPath = Join-Path $resultsRoot "watchdog.log"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
-$completionMarkerPattern = '(?m)^VERIFY_COMPLETE schema_version=1 status=passed elapsed_seconds=[0-9]+(?:\.[0-9]+)?$'
 
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 . (Join-Path $PSScriptRoot "verification-deadline.ps1")
@@ -79,7 +78,7 @@ try {
         [Console]::Error.WriteLine($standardError.TrimEnd())
     }
 
-    $completionMarkerCount = [regex]::Matches($standardOutput, $completionMarkerPattern).Count
+    $completionMarkerCount = Get-VerificationCompletionMarkerCount -StandardOutput $standardOutput
     $childTimedOut = [regex]::IsMatch($combinedOutput, '(?m)^VERIFY_CHILD_TIMEOUT name=')
     $elapsedTicks = if ($deadlineExceeded) { $deadline.Ticks + 1L } else { $stopwatch.Elapsed.Ticks }
     $exitCode = if ($deadlineExceeded) { $null } else { $process.ExitCode }

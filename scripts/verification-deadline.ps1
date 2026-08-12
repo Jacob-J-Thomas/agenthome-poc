@@ -1,5 +1,19 @@
 Set-StrictMode -Version Latest
 
+function Get-VerificationCompletionMarkerCount {
+    param(
+        [AllowEmptyString()]
+        [string]$StandardOutput
+    )
+
+    if ([string]::IsNullOrEmpty($StandardOutput)) {
+        return 0
+    }
+
+    $pattern = '(?m)^VERIFY_COMPLETE schema_version=1 status=passed elapsed_seconds=[0-9]+(?:\.[0-9]+)?\r?$'
+    return [regex]::Matches($StandardOutput, $pattern).Count
+}
+
 function Get-VerificationDeadlineDisposition {
     param(
         [Parameter(Mandatory = $true)]
