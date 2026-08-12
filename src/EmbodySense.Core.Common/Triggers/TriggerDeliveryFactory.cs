@@ -9,6 +9,8 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Triggers.Models;
+using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 
 namespace EmbodySense.Core.Common.Triggers;
 
@@ -233,10 +235,92 @@ public static class TriggerDeliveryFactory
         TriggerAdmissionReason visibleReason,
         out TriggerDeliveryEnvelope? envelope,
         out TriggerContractValidationResult validation)
+        => TryCreateEnvelopeCore(
+            schemaVersion,
+            deliveryId,
+            deduplicationId,
+            kind,
+            adapter,
+            loop,
+            actorContext,
+            authority,
+            temporal,
+            payload,
+            redelivery,
+            null,
+            publicationRequested,
+            invokingConversation,
+            visibleStatus,
+            visibleReason,
+            out envelope,
+            out validation);
+
+    /// <summary>
+    /// Creates a canonical schema-version-1 time envelope with exact schedule execution coordinates.
+    /// </summary>
+    /// <remarks>The directive is evidence only and is never interpreted as an authority grant.</remarks>
+    public static bool TryCreateScheduledEnvelope(
+        int schemaVersion,
+        TriggerDeliveryId? deliveryId,
+        TriggerDeduplicationId? deduplicationId,
+        TriggerAdapterReference? adapter,
+        TriggerLoopReference? loop,
+        TriggerActorContext? actorContext,
+        TriggerAuthorityEvidence? authority,
+        TriggerTemporalEvidence? temporal,
+        TriggerPayloadEvidence? payload,
+        TriggerRedeliveryEvidence? redelivery,
+        ScheduleExecutionDirective? scheduleExecutionDirective,
+        bool publicationRequested,
+        CustomLoopConversationReference? invokingConversation,
+        TriggerAdmissionStatus visibleStatus,
+        TriggerAdmissionReason visibleReason,
+        out TriggerDeliveryEnvelope? envelope,
+        out TriggerContractValidationResult validation)
+        => TryCreateEnvelopeCore(
+            schemaVersion,
+            deliveryId,
+            deduplicationId,
+            TriggerKind.Time,
+            adapter,
+            loop,
+            actorContext,
+            authority,
+            temporal,
+            payload,
+            redelivery,
+            scheduleExecutionDirective,
+            publicationRequested,
+            invokingConversation,
+            visibleStatus,
+            visibleReason,
+            out envelope,
+            out validation);
+
+    private static bool TryCreateEnvelopeCore(
+        int schemaVersion,
+        TriggerDeliveryId? deliveryId,
+        TriggerDeduplicationId? deduplicationId,
+        TriggerKind kind,
+        TriggerAdapterReference? adapter,
+        TriggerLoopReference? loop,
+        TriggerActorContext? actorContext,
+        TriggerAuthorityEvidence? authority,
+        TriggerTemporalEvidence? temporal,
+        TriggerPayloadEvidence? payload,
+        TriggerRedeliveryEvidence? redelivery,
+        ScheduleExecutionDirective? scheduleExecutionDirective,
+        bool publicationRequested,
+        CustomLoopConversationReference? invokingConversation,
+        TriggerAdmissionStatus visibleStatus,
+        TriggerAdmissionReason visibleReason,
+        out TriggerDeliveryEnvelope? envelope,
+        out TriggerContractValidationResult validation)
     {
+        var directiveSnapshot = ScheduleContractCopy.Copy(scheduleExecutionDirective);
         envelope = deliveryId is null || deduplicationId is null || adapter is null || loop is null || actorContext is null || authority is null || temporal is null || payload is null || redelivery is null
             ? null
-            : new TriggerDeliveryEnvelope(schemaVersion, deliveryId, deduplicationId, kind, adapter, loop, actorContext, authority, temporal, payload, redelivery, publicationRequested, invokingConversation, visibleStatus, visibleReason);
+            : new TriggerDeliveryEnvelope(schemaVersion, deliveryId, deduplicationId, kind, adapter, loop, actorContext, authority, temporal, payload, redelivery, directiveSnapshot, publicationRequested, invokingConversation, visibleStatus, visibleReason);
         validation = TriggerDeliveryValidator.Validate(envelope);
         if (!validation.IsValid)
         {

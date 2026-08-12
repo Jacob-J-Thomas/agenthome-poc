@@ -5,6 +5,7 @@ using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Triggers.Models;
+using EmbodySense.Core.Common.Triggers.Schedules;
 
 namespace EmbodySense.Core.Common.Triggers;
 
@@ -39,6 +40,7 @@ public static class TriggerDeliveryValidator
         errors.AddRange(ValidateLoopReference(envelope.Loop).Errors);
         errors.AddRange(ValidateAdapterReference(envelope.Adapter).Errors);
         errors.AddRange(ValidateAuthorityEvidence(envelope.Authority).Errors);
+        ValidateScheduleExecutionDirective(envelope, errors);
         if (envelope.Redelivery.Attempt == 1 && !envelope.Redelivery.OriginalDeliveryId.Equals(envelope.DeliveryId))
         {
             errors.Add(Error("invalid_original_delivery", "redelivery.originalDeliveryId"));
@@ -57,6 +59,57 @@ public static class TriggerDeliveryValidator
         }
 
         return new TriggerContractValidationResult(errors);
+    }
+
+    private static void ValidateScheduleExecutionDirective(
+        TriggerDeliveryEnvelope envelope,
+        List<TriggerContractError> errors)
+    {
+        var directive = envelope.ScheduleExecutionDirective;
+        if (envelope.Kind == TriggerKind.Time)
+        {
+            if (directive is null)
+            {
+                errors.Add(Error("schedule_execution_directive_required", "scheduleExecutionDirective"));
+                return;
+            }
+
+            var validation = ScheduleContractValidator.ValidateExecutionDirective(directive);
+            foreach (var error in validation.Errors)
+            {
+                errors.Add(Error(
+                    error.Code,
+                    error.Path == "$"
+                        ? "scheduleExecutionDirective"
+                        : $"scheduleExecutionDirective.{error.Path}"));
+            }
+
+            if (!Equals(directive.Target, envelope.Loop))
+            {
+                errors.Add(Error("schedule_target_mismatch", "scheduleExecutionDirective.target"));
+            }
+
+            if (directive.Identity is null
+                || !Equals(directive.Identity.DeliveryId, envelope.DeliveryId)
+                || !Equals(directive.Identity.DeduplicationId, envelope.DeduplicationId))
+            {
+                errors.Add(Error("schedule_identity_mismatch", "scheduleExecutionDirective.identity"));
+            }
+
+            if (directive.Occurrence is null
+                || envelope.Temporal is null
+                || directive.Occurrence.ScheduledAtUtc != envelope.Temporal.CreatedAtUtc)
+            {
+                errors.Add(Error("schedule_occurrence_mismatch", "scheduleExecutionDirective.occurrence"));
+            }
+
+            return;
+        }
+
+        if (directive is not null)
+        {
+            errors.Add(Error("schedule_execution_directive_forbidden", "scheduleExecutionDirective"));
+        }
     }
 
     /// <summary>

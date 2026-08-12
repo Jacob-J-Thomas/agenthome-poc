@@ -2056,6 +2056,16 @@ public sealed class ScheduleDueOccurrenceEvaluator
         out SchedulePendingDelivery? preparedPending)
     {
         preparedPending = null;
+        var directive = new ScheduleExecutionDirective(
+            ScheduleExecutionDirective.CurrentSchemaVersion,
+            definition.ScheduleId,
+            definition.Revision,
+            state.DefinitionHash,
+            pending.Occurrence,
+            pending.Identity,
+            current.Target,
+            definition.Overlap,
+            overlapEvidenceHash);
         if (!TriggerDeliveryFactory.TryCreateInlinePayload(current.GetResolvedPayload(), out var payload, out _)
             || !TriggerDeliveryFactory.TryCreateTemporalEvidence(
                 now,
@@ -2073,11 +2083,10 @@ public sealed class ScheduleDueOccurrenceEvaluator
                 pending.Identity.DeliveryId,
                 out var redelivery,
                 out _)
-            || !TriggerDeliveryFactory.TryCreateEnvelope(
+            || !TriggerDeliveryFactory.TryCreateScheduledEnvelope(
                 1,
                 pending.Identity.DeliveryId,
                 pending.Identity.DeduplicationId,
-                TriggerKind.Time,
                 current.Adapter,
                 current.Target,
                 current.ActorContext,
@@ -2085,6 +2094,7 @@ public sealed class ScheduleDueOccurrenceEvaluator
                 temporal,
                 payload,
                 redelivery,
+                directive,
                 false,
                 null,
                 TriggerAdmissionStatus.Unknown,

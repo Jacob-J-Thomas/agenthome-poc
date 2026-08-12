@@ -10,6 +10,60 @@ namespace EmbodySense.Core.Common.Triggers.Schedules;
 /// <summary>Revalidates dependency-free schedule definitions, state, and evidence at public boundaries.</summary>
 public static class ScheduleContractValidator
 {
+    /// <summary>Validates one immutable schedule execution directive without granting authority.</summary>
+    public static ScheduleContractValidationResult ValidateExecutionDirective(ScheduleExecutionDirective? directive)
+    {
+        var errors = new List<ScheduleContractError>();
+        if (directive is null)
+        {
+            return Result(Error("required", "$"));
+        }
+
+        ValidateSchema(directive.SchemaVersion, "schemaVersion", errors);
+        ValidateScheduleId(directive.ScheduleId, "scheduleId", errors);
+        ValidateRevision(directive.DefinitionRevision, "definitionRevision", errors);
+        if (!IsSha256(directive.DefinitionHash))
+        {
+            errors.Add(Error("invalid_hash", "definitionHash"));
+        }
+
+        AddNested(errors, ValidateOccurrence(directive.Occurrence), "occurrence");
+        ValidateIdentityShape(directive.Identity, "identity", errors);
+        var targetValidation = TriggerDeliveryValidator.ValidateLoopReference(directive.Target);
+        if (!targetValidation.IsValid || directive.Target?.Kind != TriggerLoopTargetKind.GovernedPublication)
+        {
+            errors.Add(Error("governed_target_required", "target"));
+        }
+
+        if (!IsDefined(directive.Overlap))
+        {
+            errors.Add(Error("unsupported_overlap_policy", "overlap"));
+        }
+
+        if (!IsSha256(directive.PreQueueOverlapEvidenceHash))
+        {
+            errors.Add(Error("invalid_hash", "preQueueOverlapEvidenceHash"));
+        }
+
+        if (directive.ScheduleId is not null
+            && IsRevision(directive.DefinitionRevision)
+            && IsSha256(directive.DefinitionHash)
+            && ValidateOccurrence(directive.Occurrence).IsValid
+            && ScheduleIdentityDerivation.TryDerive(
+                directive.ScheduleId,
+                directive.DefinitionRevision,
+                directive.DefinitionHash,
+                directive.Occurrence,
+                out var expectedIdentity,
+                out _)
+            && !Equals(expectedIdentity, directive.Identity))
+        {
+            errors.Add(Error("identity_derivation_mismatch", "identity"));
+        }
+
+        return Result(errors);
+    }
+
     /// <summary>Validates one immutable schedule definition without resolving authority, time, or time-zone rules.</summary>
     public static ScheduleContractValidationResult ValidateDefinition(ScheduleDefinition? definition)
     {
@@ -127,6 +181,13 @@ public static class ScheduleContractValidator
                 errors.Add(Error("prepared_identity_mismatch", "prepared.envelope"));
             }
 
+            if (pending.Prepared.Envelope?.ScheduleExecutionDirective is { } directive
+                && (!Equals(pending.Occurrence, directive.Occurrence)
+                    || !Equals(pending.Identity, directive.Identity)))
+            {
+                errors.Add(Error("prepared_directive_mismatch", "prepared.envelope.scheduleExecutionDirective"));
+            }
+
             if (IsUtc(pending.Prepared.PreparedAtUtc)
                 && IsUtc(pending.ClaimedAtUtc)
                 && pending.Prepared.PreparedAtUtc < pending.ClaimedAtUtc)
@@ -160,6 +221,17 @@ public static class ScheduleContractValidator
             if (!IsSha256(pending.OverlapEvidenceHash))
             {
                 errors.Add(Error("invalid_hash", "overlapEvidenceHash"));
+            }
+
+            if (pending.Prepared?.Envelope?.ScheduleExecutionDirective is { } directive
+                && !string.Equals(
+                    pending.OverlapEvidenceHash,
+                    directive.PreQueueOverlapEvidenceHash,
+                    StringComparison.Ordinal))
+            {
+                errors.Add(Error(
+                    "prepared_overlap_evidence_mismatch",
+                    "prepared.envelope.scheduleExecutionDirective.preQueueOverlapEvidenceHash"));
             }
 
             AddNested(errors, ValidateFinalizationPlan(pending.FinalizationPlan), "finalizationPlan");
@@ -371,6 +443,19 @@ public static class ScheduleContractValidator
         if (!Equals(envelope.Loop, definition!.Target))
         {
             errors.Add(Error("target_mismatch", "state.pendingDelivery.prepared.envelope.loop"));
+        }
+
+        var directive = envelope.ScheduleExecutionDirective;
+        if (directive is null
+            || !Equals(directive.ScheduleId, definition.ScheduleId)
+            || directive.DefinitionRevision != definition.Revision
+            || !string.Equals(directive.DefinitionHash, state.DefinitionHash, StringComparison.Ordinal)
+            || !Equals(directive.Target, definition.Target)
+            || directive.Overlap != definition.Overlap)
+        {
+            errors.Add(Error(
+                "schedule_execution_directive_mismatch",
+                "state.pendingDelivery.prepared.envelope.scheduleExecutionDirective"));
         }
 
         if (!Equals(envelope.Adapter, definition.TimeAdapter))

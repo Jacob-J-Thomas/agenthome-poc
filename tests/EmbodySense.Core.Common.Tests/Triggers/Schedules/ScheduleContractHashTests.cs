@@ -173,10 +173,17 @@ public sealed class ScheduleContractHashTests
         {
             PendingDelivery = pending with { RecurrenceProofHash = new string('2', 64) },
         }));
-        Assert.NotEqual(pendingHash, StateHash(pendingState with
-        {
-            PendingDelivery = pending with { OverlapEvidenceHash = new string('3', 64) },
-        }));
+        var changedOverlapHash = new string('3', 64);
+        var changedOverlapPrepared = ScheduleContractTestData.Prepared(
+            occurrence,
+            overlapEvidenceHash: changedOverlapHash);
+        var changedOverlapPending = ScheduleContractTestData.Pending(
+            occurrence,
+            changedOverlapPrepared,
+            overlapEvidenceHash: changedOverlapHash);
+        Assert.NotEqual(
+            pendingHash,
+            StateHash(pendingState with { PendingDelivery = changedOverlapPending }));
 
         var terminal = ScheduleContractTestData.Terminal(occurrence);
         var terminalState = ScheduleContractTestData.State(

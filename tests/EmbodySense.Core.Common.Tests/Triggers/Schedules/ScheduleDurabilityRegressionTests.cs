@@ -934,6 +934,7 @@ public sealed class ScheduleDurabilityRegressionTests
             payload: payload,
             temporal: temporal,
             redelivery: redelivery,
+            overlap: definition.Overlap,
             publicationRequested: publicationRequested,
             conversation: conversation);
         var pending = ScheduleContractTestData.Pending(

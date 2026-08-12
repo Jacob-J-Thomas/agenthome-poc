@@ -1,10 +1,22 @@
 using EmbodySense.Core.Common.Triggers.Schedules.Models;
+using EmbodySense.Core.Common.Triggers.Models;
 
 namespace EmbodySense.Core.Common.Triggers.Schedules;
 
 /// <summary>Creates isolated copies of schedule contracts at public and persistence boundaries.</summary>
 public static class ScheduleContractCopy
 {
+    /// <summary>Copies one schedule execution directive and its nested schedule and target evidence.</summary>
+    public static ScheduleExecutionDirective? Copy(ScheduleExecutionDirective? directive)
+        => directive is null
+            ? null
+            : directive with
+            {
+                Occurrence = Copy(directive.Occurrence)!,
+                Identity = directive.Identity is null ? null! : directive.Identity with { },
+                Target = Copy(directive.Target)!,
+            };
+
     /// <summary>Copies one definition without normalizing or validating it.</summary>
     public static ScheduleDefinition? Copy(ScheduleDefinition? definition)
         => definition is null
@@ -94,6 +106,38 @@ public static class ScheduleContractCopy
                 Identity = evidence.Identity is null ? null! : evidence.Identity with { },
                 Result = evidence.Result is null ? null! : evidence.Result with { },
             };
+
+    private static TriggerLoopReference? Copy(TriggerLoopReference? target)
+    {
+        if (target is null)
+        {
+            return null;
+        }
+
+        return target.Kind switch
+        {
+            TriggerLoopTargetKind.LegacyDefinition => new TriggerLoopReference(
+                target.Kind,
+                target.LegacyDefinition is null
+                    ? null
+                    : new TriggerLegacyLoopDefinitionReference(
+                        target.LegacyDefinition.LoopId,
+                        target.LegacyDefinition.DefinitionVersion,
+                        target.LegacyDefinition.ContentHash),
+                null,
+                null),
+            TriggerLoopTargetKind.GovernedPublication => new TriggerLoopReference(
+                target.Kind,
+                null,
+                target.GovernedPublication is null
+                    ? null
+                    : target.GovernedPublication with { },
+                target.AuthorityGrant is null
+                    ? null
+                    : target.AuthorityGrant with { }),
+            _ => new TriggerLoopReference(target.Kind, null, null, null),
+        };
+    }
 
     /// <summary>Copies one derived delivery-provenance projection and all schedule-owned nested records.</summary>
     public static ScheduleDeliveryProvenanceEvidence? Copy(ScheduleDeliveryProvenanceEvidence? evidence)

@@ -27,6 +27,15 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
         Assert.Equal(2, result.State.NextOccurrence!.Ordinal);
         var terminal = Assert.Single(result.State.TerminalDeliveryEvidence);
         var prepared = fixture.Store.Mutations[1].Replacement.PendingDelivery!;
+        var directive = Assert.IsType<ScheduleExecutionDirective>(prepared.Prepared!.Envelope.ScheduleExecutionDirective);
+        Assert.Equal(fixture.Definition.ScheduleId, directive.ScheduleId);
+        Assert.Equal(fixture.Definition.Revision, directive.DefinitionRevision);
+        Assert.Equal(fixture.Store.Mutations[0].Replacement.DefinitionHash, directive.DefinitionHash);
+        Assert.Equal(prepared.Occurrence, directive.Occurrence);
+        Assert.Equal(prepared.Identity, directive.Identity);
+        Assert.Equal(fixture.Definition.Target, directive.Target);
+        Assert.Equal(fixture.Definition.Overlap, directive.Overlap);
+        Assert.Equal(new string('a', 64), directive.PreQueueOverlapEvidenceHash);
         Assert.Equal(ScheduleDeliveryResultKind.Queued, terminal.Result.Kind);
         Assert.Equal(prepared.CurrentEvidenceHash, terminal.CurrentEvidenceHash);
         Assert.Equal(prepared.RecurrenceProofHash, terminal.RecurrenceProofHash);
