@@ -35,6 +35,46 @@ if (args is ["credential-mutex-contention", var contentionId])
     return await WindowsCredentialProviderCrossProcessHost.RunMutexContentionAsync(contentionId);
 }
 
+if (args is ["credential-external-value"])
+{
+    return await WindowsCredentialProviderCrossProcessHost.RunExternalValueAsync();
+}
+
+if (args is ["authority-grant-store", var authorityMode, var authorityWorkspaceRoot, var authorityTrustRoot, var authorityMarkerPath, var authorityResultPath])
+{
+    return await AuthorityGrantStoreCrossProcessHost.RunAsync(authorityMode, authorityWorkspaceRoot, authorityTrustRoot, authorityMarkerPath, authorityResultPath);
+}
+
+if (args is ["default-turn-archive-process-loss", var archiveWorkspaceRoot, var archivePhase])
+{
+    return await DefaultConversationStoreCrossProcessHost.RunArchiveProcessLossAsync(archiveWorkspaceRoot, archivePhase);
+}
+
+if (args is ["default-turn-publication", var publicationWorkspaceRoot, var publicationReadyPath, var publicationReleasePath, var publicationResultPath])
+{
+    return await DefaultConversationStoreCrossProcessHost.RunPublicationAsync(publicationWorkspaceRoot, publicationReadyPath, publicationReleasePath, publicationResultPath);
+}
+
+if (args is ["default-turn-active-set-lease", var leaseWorkspaceRoot, var leaseReadyPath, var leaseReleasePath])
+{
+    return await DefaultConversationStoreCrossProcessHost.RunActiveSetLeaseAsync(leaseWorkspaceRoot, leaseReadyPath, leaseReleasePath);
+}
+
+if (args is ["default-turn-history-stage-substitution", var stagePath, var displacedPath, var replacementPayload])
+{
+    return DefaultConversationStoreCrossProcessHost.RunHistoryStageSubstitution(stagePath, displacedPath, replacementPayload);
+}
+
+if (args is ["human-input-request-store", var humanInputMode, var humanInputWorkspaceRoot, var humanInputTrustRoot, var humanInputGatePath, var humanInputReadyPath, var humanInputOutputPath, var humanInputRequestId, var humanInputOperationId, var humanInputRequestHash, var humanInputBoundary, var humanInputGeneration, var humanInputRelatedRequestId])
+{
+    return await HumanInputRequestStoreCrossProcessHost.RunAsync(humanInputMode, humanInputWorkspaceRoot, humanInputTrustRoot, humanInputGatePath, humanInputReadyPath, humanInputOutputPath, humanInputRequestId, humanInputOperationId, humanInputRequestHash, humanInputBoundary, humanInputGeneration, humanInputRelatedRequestId);
+}
+
+if (args is ["governed-loop-revision-store", var revisionMode, var revisionWorkspaceRoot, var revisionTrustRoot, var revisionGatePath, var revisionReadyPath, var revisionOutputPath, var revisionGraphId, var revisionId, var revisionOperationId, var revisionRequestHash])
+{
+    return await GovernedLoopRevisionStoreCrossProcessHost.RunAsync(revisionMode, revisionWorkspaceRoot, revisionTrustRoot, revisionGatePath, revisionReadyPath, revisionOutputPath, revisionGraphId, revisionId, revisionOperationId, revisionRequestHash);
+}
+
 if (args is ["sequential-audit-record-then-exit", var auditWorkspaceRoot])
 {
     return await SequentialAuditCrossProcessHost.RecordThenExitAsync(auditWorkspaceRoot);

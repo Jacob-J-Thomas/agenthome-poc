@@ -3,7 +3,6 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Nodes;
-using Microsoft.Win32.SafeHandles;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.Governance.Authority.Models;
@@ -27,11 +26,6 @@ namespace EmbodySense.Core.Persistence.Tests.Authority;
 
 public sealed class AuthorityGrantStoreTests : IDisposable
 {
-    private const string CrossProcessMode = "EMBODYSENSE_AUTHORITY_GRANT_STORE_MODE";
-    private const string CrossProcessWorkspace = "EMBODYSENSE_AUTHORITY_GRANT_STORE_WORKSPACE";
-    private const string CrossProcessTrustRoot = "EMBODYSENSE_AUTHORITY_GRANT_STORE_TRUST_ROOT";
-    private const string CrossProcessMarker = "EMBODYSENSE_AUTHORITY_GRANT_STORE_MARKER";
-    private const string CrossProcessResult = "EMBODYSENSE_AUTHORITY_GRANT_STORE_RESULT";
     private static readonly DateTimeOffset _now = new(2026, 8, 10, 12, 0, 0, TimeSpan.Zero);
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, false) } };
     private readonly TestWorkspace _trustRoot = new();
@@ -700,44 +694,6 @@ public sealed class AuthorityGrantStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task Cross_process_grant_store_host()
-    {
-        var mode = Environment.GetEnvironmentVariable(CrossProcessMode);
-        if (mode is not ("commit-receipt" or "crash-after-proof" or "crash-after-primary" or "crash-after-trust" or "crash-after-result"))
-        {
-            return;
-        }
-
-        var workspaceRoot = Environment.GetEnvironmentVariable(CrossProcessWorkspace)!;
-        var trustRoot = Environment.GetEnvironmentVariable(CrossProcessTrustRoot)!;
-        var markerPath = Environment.GetEnvironmentVariable(CrossProcessMarker)!;
-        var resultPath = Environment.GetEnvironmentVariable(CrossProcessResult)!;
-        var paths = new WorkspacePaths(workspaceRoot);
-        var trust = new FileCapabilityCatalogTrustProvider(trustRoot);
-        var grantId = GrantId("cross-process-missing-grant");
-        var receipt = Receipt(grantId, "cross-process-receipt", Hash('1'));
-        var mutation = new AuthorityGrantStoreMutation(1, null, receipt);
-        if (mode is "crash-after-proof" or "crash-after-primary")
-        {
-            var barrier = new ExternalCrashDurabilityBarrier(markerPath, mode == "crash-after-proof" ? 1 : 2);
-            _ = await new AuthorityProfileStore(paths, trust, new FixedTimeProvider(_now), barrier).CommitAsync(mutation);
-            return;
-        }
-
-        ICapabilityCatalogTrustProvider effectiveTrust = mode == "crash-after-trust"
-            ? new ExternalCrashAfterAdvanceTrustProvider(trust, markerPath)
-            : trust;
-        var result = await new AuthorityProfileStore(paths, effectiveTrust, new FixedTimeProvider(_now)).CommitAsync(mutation);
-        if (mode == "crash-after-result")
-        {
-            await File.WriteAllTextAsync(markerPath, result.Status.ToString());
-            await Task.Delay(Timeout.InfiniteTimeSpan);
-        }
-
-        await File.WriteAllTextAsync(resultPath, result.Status.ToString());
-    }
-
-    [Fact]
     public async Task Concurrent_same_operation_has_one_commit_and_one_exact_replay()
     {
         using var workspace = new TestWorkspace();
@@ -1257,25 +1213,13 @@ public sealed class AuthorityGrantStoreTests : IDisposable
         string markerPath,
         string resultPath)
     {
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            WorkingDirectory = Path.GetTempPath(),
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(AuthorityGrantStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.Authority.AuthorityGrantStoreTests.Cross_process_grant_store_host");
-        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        startInfo.Environment[CrossProcessMode] = mode;
-        startInfo.Environment[CrossProcessWorkspace] = workspaceRoot;
-        startInfo.Environment[CrossProcessTrustRoot] = trustRoot;
-        startInfo.Environment[CrossProcessMarker] = markerPath;
-        startInfo.Environment[CrossProcessResult] = resultPath;
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("The authority-grant store child process did not start.");
+        return Verification.CancellationHostProcess.Start(
+            "authority-grant-store",
+            mode,
+            workspaceRoot,
+            trustRoot,
+            markerPath,
+            resultPath);
     }
 
     private static async Task WaitForSuccessfulExitAsync(Process process)
@@ -1316,88 +1260,6 @@ public sealed class AuthorityGrantStoreTests : IDisposable
     private sealed class FixedTimeProvider(DateTimeOffset timestamp) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => timestamp;
-    }
-
-    private sealed class ExternalCrashDurabilityBarrier(string markerPath, int targetFlushCount) : ICapabilityCatalogDurabilityBarrier
-    {
-        private int _flushCount;
-
-        public void BeforeDirectoryMove(string stagingPath, string destinationPath)
-        {
-        }
-
-        public void AfterDirectoryMove(string stagingPath, string destinationPath)
-        {
-        }
-
-        public void FlushAfterDirectoryCreate(string directoryPath, SafeFileHandle parentDirectory)
-        {
-        }
-
-        public async ValueTask FlushAfterRenameAsync(string destinationPath, SafeFileHandle parentDirectory)
-        {
-            if (Interlocked.Increment(ref _flushCount) != targetFlushCount)
-            {
-                return;
-            }
-
-            await File.WriteAllTextAsync(markerPath, destinationPath);
-            await Task.Delay(Timeout.InfiniteTimeSpan);
-        }
-    }
-
-    private sealed class ExternalCrashAfterAdvanceTrustProvider(
-        ICapabilityCatalogTrustProvider inner,
-        string markerPath) : ICapabilityCatalogTrustProvider
-    {
-        public int MaximumAuthenticationTagUtf8Bytes => inner.MaximumAuthenticationTagUtf8Bytes;
-
-        public void RequireDisjointWorkspace(string workspaceRootPath) => inner.RequireDisjointWorkspace(workspaceRootPath);
-
-        public Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default)
-            => inner.ReadAsync(workspaceIdentity, cancellationToken);
-
-        public Task<CapabilityCatalogTrustState> InitializeAsync(
-            string workspaceIdentity,
-            long generation,
-            string contentDigest,
-            CancellationToken cancellationToken = default)
-            => inner.InitializeAsync(workspaceIdentity, generation, contentDigest, cancellationToken);
-
-        public Task<string> AuthenticateArtifactAsync(
-            string workspaceIdentity,
-            long generation,
-            string contentDigest,
-            CancellationToken cancellationToken = default)
-            => inner.AuthenticateArtifactAsync(workspaceIdentity, generation, contentDigest, cancellationToken);
-
-        public Task<bool> VerifyArtifactAsync(
-            string workspaceIdentity,
-            long generation,
-            string contentDigest,
-            string authenticationTag,
-            CancellationToken cancellationToken = default)
-            => inner.VerifyArtifactAsync(workspaceIdentity, generation, contentDigest, authenticationTag, cancellationToken);
-
-        public async Task<CapabilityCatalogTrustState> AdvanceAsync(
-            string workspaceIdentity,
-            long expectedGeneration,
-            string expectedContentDigest,
-            long newGeneration,
-            string newContentDigest,
-            CancellationToken cancellationToken = default)
-        {
-            var advanced = await inner.AdvanceAsync(
-                workspaceIdentity,
-                expectedGeneration,
-                expectedContentDigest,
-                newGeneration,
-                newContentDigest,
-                cancellationToken);
-            await File.WriteAllTextAsync(markerPath, "trust-advanced", cancellationToken);
-            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-            return advanced;
-        }
     }
 
     private sealed class DelayedCapabilityAuthorityTransaction(ICapabilityAuthorityTransaction inner) : ICapabilityAuthorityTransaction

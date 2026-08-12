@@ -7,6 +7,29 @@ namespace EmbodySense.CancellationHost.Credentials;
 
 internal static class WindowsCredentialProviderCrossProcessHost
 {
+    internal static async Task<int> RunExternalValueAsync()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return 2;
+        }
+
+        var requests = Requests("workspace-external-process-v1", "credential-external-process-v1");
+        byte[] value = [99, 114, 111, 115, 115, 45, 112, 114, 111, 99, 101, 115, 115, 45, 115, 101, 99, 114, 101, 116];
+        try
+        {
+            var result = await new WindowsCredentialValueProvider().CreateAsync(
+                requests.Mutation with { ValueByteLength = value.Length },
+                destination => Copy(value, destination),
+                CancellationToken.None);
+            return result.Succeeded ? 0 : 3;
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(value);
+        }
+    }
+
     internal static async Task<int> RunMutexContentionAsync(string contentionId)
     {
         if (!OperatingSystem.IsWindows() || !Guid.TryParseExact(contentionId, "N", out _))
@@ -42,6 +65,12 @@ internal static class WindowsCredentialProviderCrossProcessHost
             new CredentialProviderMutationRequest(workspaceId, reference!, provider!, operation!, 16),
             new CredentialProviderUseRequest(workspaceId, reference!, provider!, operation!),
             new CredentialProviderDeleteRequest(workspaceId, reference!, provider!, operation!));
+    }
+
+    private static int Copy(ReadOnlySpan<byte> source, Span<byte> destination)
+    {
+        source.CopyTo(destination);
+        return source.Length;
     }
 
     private sealed record ProviderRequests(

@@ -29,18 +29,6 @@ public sealed class DefaultConversationTurnRecoveryTests
     private const int ProcessLossExitCode = 173;
     private const string ProcessLossWorkspaceVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PROCESS_LOSS_WORKSPACE";
     private const string ProcessLossBoundaryVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PROCESS_LOSS_BOUNDARY";
-    private const string ArchiveProcessLossWorkspaceVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_ARCHIVE_PROCESS_LOSS_WORKSPACE";
-    private const string ArchiveProcessLossPhaseVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_ARCHIVE_PROCESS_LOSS_PHASE";
-    private const string PublicationWorkspaceVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PUBLICATION_WORKSPACE";
-    private const string PublicationReadyVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PUBLICATION_READY";
-    private const string PublicationReleaseVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PUBLICATION_RELEASE";
-    private const string PublicationResultVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PUBLICATION_RESULT";
-    private const string TurnLeaseWorkspaceVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_LEASE_WORKSPACE";
-    private const string TurnLeaseReadyVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_LEASE_READY";
-    private const string TurnLeaseReleaseVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_LEASE_RELEASE";
-    private const string RetirementStageVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_RETIREMENT_STAGE";
-    private const string RetirementDisplacedVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_RETIREMENT_DISPLACED";
-    private const string RetirementReplacementVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_RETIREMENT_REPLACEMENT";
 
     public static TheoryData<DefaultConversationTurnBoundary, LoopRunStatus, int> DurableBoundaries => new()
     {
@@ -388,13 +376,10 @@ public sealed class DefaultConversationTurnRecoveryTests
         var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-source-proof");
         var temporaryIntentPath = GetSourceProofPublicationIntentTemporaryPath(paths, terminal.TurnId);
         await File.WriteAllBytesAsync(activePath, bytes);
-        using var process = StartSelfTest(
-            nameof(Archive_process_loss_worker_exits_after_source_proof_move),
-            new Dictionary<string, string>
-            {
-                [ArchiveProcessLossWorkspaceVariable] = workspace.RootPath,
-                [ArchiveProcessLossPhaseVariable] = phase.ToString()
-            });
+        using var process = Verification.CancellationHostProcess.Start(
+            "default-turn-archive-process-loss",
+            workspace.RootPath,
+            phase.ToString());
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
         try
@@ -433,21 +418,6 @@ public sealed class DefaultConversationTurnRecoveryTests
     }
 
     [Fact]
-    public async Task Archive_process_loss_worker_exits_after_source_proof_move()
-    {
-        var workspaceRoot = Environment.GetEnvironmentVariable(ArchiveProcessLossWorkspaceVariable);
-        if (string.IsNullOrWhiteSpace(workspaceRoot))
-        {
-            return;
-        }
-
-        var phaseText = Environment.GetEnvironmentVariable(ArchiveProcessLossPhaseVariable) ?? throw new InvalidOperationException("The archive process-loss phase is required.");
-        var coordination = new ExitingArchiveTurnStoreCoordination(Enum.Parse<DefaultConversationTurnArchivePhase>(phaseText), ProcessLossExitCode);
-        _ = await new DefaultConversationTurnStore(new WorkspacePaths(workspaceRoot), coordination).ListIncompleteAsync();
-        throw new InvalidOperationException("The archive process-loss failpoint did not terminate the worker.");
-    }
-
-    [Fact]
     public async Task Separate_process_compare_and_publish_allows_only_one_identical_content_identity()
     {
         using var workspace = new TestWorkspace();
@@ -457,15 +427,12 @@ public sealed class DefaultConversationTurnRecoveryTests
         var readyPath = workspace.File("publication-ready");
         var releasePath = workspace.File("publication-release");
         var resultPath = workspace.File("publication-result");
-        using var process = StartSelfTest(
-            nameof(Cross_process_publication_worker_compares_and_publishes),
-            new Dictionary<string, string>
-            {
-                [PublicationWorkspaceVariable] = workspace.RootPath,
-                [PublicationReadyVariable] = readyPath,
-                [PublicationReleaseVariable] = releasePath,
-                [PublicationResultVariable] = resultPath
-            });
+        using var process = Verification.CancellationHostProcess.Start(
+            "default-turn-publication",
+            workspace.RootPath,
+            readyPath,
+            releasePath,
+            resultPath);
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
         try
@@ -499,49 +466,16 @@ public sealed class DefaultConversationTurnRecoveryTests
     }
 
     [Fact]
-    public async Task Cross_process_publication_worker_compares_and_publishes()
-    {
-        var workspaceRoot = Environment.GetEnvironmentVariable(PublicationWorkspaceVariable);
-        if (string.IsNullOrWhiteSpace(workspaceRoot))
-        {
-            return;
-        }
-
-        var readyPath = Environment.GetEnvironmentVariable(PublicationReadyVariable) ?? throw new InvalidOperationException("The publication ready path is required.");
-        var releasePath = Environment.GetEnvironmentVariable(PublicationReleaseVariable) ?? throw new InvalidOperationException("The publication release path is required.");
-        var resultPath = Environment.GetEnvironmentVariable(PublicationResultVariable) ?? throw new InvalidOperationException("The publication result path is required.");
-        var memory = new ConversationMemoryStore(new WorkspacePaths(workspaceRoot));
-        var snapshot = await memory.LoadCurrentConversationSnapshotAsync();
-        await File.WriteAllTextAsync(readyPath, "ready");
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        while (!File.Exists(releasePath))
-        {
-            await Task.Delay(TimeSpan.FromMilliseconds(15), cancellation.Token);
-        }
-
-        var result = await memory.TryPublishMessageAsync(
-            snapshot.ConversationId,
-            snapshot.Version,
-            snapshot.Messages,
-            new ConversationMessagePublication("message-child", "publication-child", LlmMessage.User("identical")),
-            cancellation.Token);
-        await File.WriteAllTextAsync(resultPath, result.Status.ToString(), cancellation.Token);
-    }
-
-    [Fact]
     public async Task Cross_process_active_set_lease_contention_remains_cancellation_aware()
     {
         using var workspace = new TestWorkspace();
         var readyPath = workspace.File("turn-lease-ready");
         var releasePath = workspace.File("turn-lease-release");
-        using var process = StartSelfTest(
-            nameof(Cross_process_active_set_lease_worker_holds_until_released),
-            new Dictionary<string, string>
-            {
-                [TurnLeaseWorkspaceVariable] = workspace.RootPath,
-                [TurnLeaseReadyVariable] = readyPath,
-                [TurnLeaseReleaseVariable] = releasePath
-            });
+        using var process = Verification.CancellationHostProcess.Start(
+            "default-turn-active-set-lease",
+            workspace.RootPath,
+            readyPath,
+            releasePath);
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
         try
@@ -571,25 +505,6 @@ public sealed class DefaultConversationTurnRecoveryTests
                 await process.WaitForExitAsync();
             }
         }
-    }
-
-    [Fact]
-    public async Task Cross_process_active_set_lease_worker_holds_until_released()
-    {
-        var workspaceRoot = Environment.GetEnvironmentVariable(TurnLeaseWorkspaceVariable);
-        if (string.IsNullOrWhiteSpace(workspaceRoot))
-        {
-            return;
-        }
-
-        var readyPath = Environment.GetEnvironmentVariable(TurnLeaseReadyVariable) ?? throw new InvalidOperationException("The turn-lease ready path is required.");
-        var releasePath = Environment.GetEnvironmentVariable(TurnLeaseReleaseVariable) ?? throw new InvalidOperationException("The turn-lease release path is required.");
-        var coordination = new FileBlockingTurnStoreCoordination(readyPath, releasePath);
-        var paths = new WorkspacePaths(workspaceRoot);
-        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
-        var turns = new DefaultConversationTurnStore(paths, coordination);
-
-        _ = await turns.ListIncompleteAsync();
     }
 
     [Fact]
@@ -2496,12 +2411,11 @@ public sealed class DefaultConversationTurnRecoveryTests
         var replacementBytes = Encoding.UTF8.GetBytes("cross-process replacement");
         var coordination = new FailingHistoryStageRetirementCoordination(async _ =>
         {
-            using var process = StartSelfTest(nameof(History_stage_retirement_substitution_worker), new Dictionary<string, string>
-            {
-                [RetirementStageVariable] = pendingHistoryPath,
-                [RetirementDisplacedVariable] = displacedStagePath,
-                [RetirementReplacementVariable] = Convert.ToBase64String(replacementBytes)
-            });
+            using var process = Verification.CancellationHostProcess.Start(
+                "default-turn-history-stage-substitution",
+                pendingHistoryPath,
+                displacedStagePath,
+                Convert.ToBase64String(replacementBytes));
             var output = process.StandardOutput.ReadToEndAsync();
             var error = process.StandardError.ReadToEndAsync();
             await process.WaitForExitAsync();
@@ -2519,21 +2433,6 @@ public sealed class DefaultConversationTurnRecoveryTests
         Assert.Equal(originalPartialBytes, await File.ReadAllBytesAsync(displacedStagePath));
         await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).ListIncompleteAsync());
         Assert.Equal(replacementBytes, await File.ReadAllBytesAsync(retiredStagePath));
-    }
-
-    [Fact]
-    public void History_stage_retirement_substitution_worker()
-    {
-        var stagePath = Environment.GetEnvironmentVariable(RetirementStageVariable);
-        if (string.IsNullOrEmpty(stagePath))
-        {
-            return;
-        }
-
-        var displacedPath = Environment.GetEnvironmentVariable(RetirementDisplacedVariable) ?? throw new InvalidOperationException("The displaced stage path is required.");
-        var replacement = Environment.GetEnvironmentVariable(RetirementReplacementVariable) ?? throw new InvalidOperationException("The replacement bytes are required.");
-        File.Move(stagePath, displacedPath);
-        File.WriteAllBytes(stagePath, Convert.FromBase64String(replacement));
     }
 
     [Fact]
@@ -3823,18 +3722,6 @@ public sealed class DefaultConversationTurnRecoveryTests
             cancellationToken.ThrowIfCancellationRequested();
             QuarantineCount++;
             return Task.CompletedTask;
-        }
-    }
-
-    private sealed class FileBlockingTurnStoreCoordination(string readyPath, string releasePath) : IDefaultConversationTurnStoreCoordination
-    {
-        public async Task BeforeActiveSetOperationAsync(DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken = default)
-        {
-            await File.WriteAllTextAsync(readyPath, operation.ToString(), cancellationToken);
-            while (!File.Exists(releasePath))
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(15), cancellationToken);
-            }
         }
     }
 
