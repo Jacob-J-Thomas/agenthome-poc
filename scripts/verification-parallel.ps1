@@ -122,7 +122,10 @@ function Select-VerificationParallelPhase {
             Ordinary = [int]::MaxValue
             CpuBound = [int]::MaxValue
             ProcessHeavy = [int]::MaxValue
-        }
+        },
+
+        [ValidateRange(1, 32)]
+        [int]$MaximumBackfillsBeforeReservation = 1
     )
 
     if ($Pending.Count -eq 0 -or $AvailableCapacity -eq 0) {
@@ -149,7 +152,7 @@ function Select-VerificationParallelPhase {
     if ($fitIndex -gt 0) {
         for ($index = 0; $index -lt $fitIndex; $index++) {
             $resourceClass = if ($null -eq $Pending[$index].PSObject.Properties["ResourceClass"]) { "Ordinary" } else { [string]$Pending[$index].ResourceClass }
-            if ([int]$AvailableResourceClassSlots[$resourceClass] -gt 0 -and $Pending[$index].SchedulingDeferrals -ge 1) {
+            if ([int]$AvailableResourceClassSlots[$resourceClass] -gt 0 -and $Pending[$index].SchedulingDeferrals -ge $MaximumBackfillsBeforeReservation) {
                 return $null
             }
         }
@@ -179,7 +182,10 @@ function Invoke-VerificationParallelPhases {
         [int]$MaximumProcessHeavyWorkers = $MaximumWorkers,
 
         [ValidateRange(1, 32)]
-        [int]$MaximumCpuBoundWorkers = $MaximumWorkers
+        [int]$MaximumCpuBoundWorkers = $MaximumWorkers,
+
+        [ValidateRange(1, 32)]
+        [int]$MaximumBackfillsBeforeReservation = 1
     )
 
     if ($MaximumProcessHeavyWorkers -gt $MaximumWorkers -or $MaximumCpuBoundWorkers -gt $MaximumWorkers) {
@@ -230,7 +236,7 @@ function Invoke-VerificationParallelPhases {
                     CpuBound = $MaximumCpuBoundWorkers - $activeResourceClassCounts.CpuBound
                     ProcessHeavy = $MaximumProcessHeavyWorkers - $activeResourceClassCounts.ProcessHeavy
                 }
-                $phase = Select-VerificationParallelPhase -Pending $pending -AvailableCapacity $availableCapacity -AvailableResourceClassSlots $availableResourceClassSlots
+                $phase = Select-VerificationParallelPhase -Pending $pending -AvailableCapacity $availableCapacity -AvailableResourceClassSlots $availableResourceClassSlots -MaximumBackfillsBeforeReservation $MaximumBackfillsBeforeReservation
                 if ($null -eq $phase) {
                     break
                 }

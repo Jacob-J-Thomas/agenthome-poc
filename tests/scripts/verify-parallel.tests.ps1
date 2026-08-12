@@ -109,6 +109,7 @@ Assert-True -Condition ((Get-VerificationRequiredGateResourceCapacity) -eq 8) -M
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumProcessHeavyWorkers) -eq 2) -Message "Required gates must admit at most two helper-process-heavy phases."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumCpuBoundWorkers) -eq 1) -Message "Required gates must admit at most one CPU-bound non-test gate."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 8 -HardwareProcessorCount 10) -eq 6) -Message "The default eight-worker request on a ten-core host must retain the six-worker required-gate ceiling."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 4) -eq 6) -Message "A hosted four-core runner must admit six bounded logical required-gate workers when the default request provides them."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 10) -eq 4) -Message "A lower explicit worker request must remain authoritative below the required-gate ceiling."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 4) -eq 4) -Message "A hosted four-core request must not be expanded beyond its explicit four-worker bound."
 Assert-True -Condition ($requiredGateProfiles.Count -eq 33) -Message "The exact 29-lane test plan and four non-test gates must have checked-in duration/resource profiles."
@@ -316,6 +317,20 @@ finally {
     Assert-True -Condition ($heavy.Name -ceq "heavy") -Message "A previously bypassed heavy phase must run as soon as its required capacity is available."
     $lastOrdinary = Select-VerificationParallelPhase -Pending $fairPending -AvailableCapacity 1
     Assert-True -Condition ($lastOrdinary.Name -ceq "ordinary-two" -and $fairPending.Count -eq 0) -Message "Fair reservation cannot lose or strand the remaining ordinary phase."
+
+    $boundedBackfillPending = [Collections.Generic.List[object]]::new()
+    $boundedBackfillPending.Add([pscustomobject]@{ Name = "heavy"; EffectiveWeight = 3; ResourceClass = "ProcessHeavy"; SchedulingDeferrals = 0 })
+    foreach ($index in 1..5) {
+        $boundedBackfillPending.Add([pscustomobject]@{ Name = "ordinary-$index"; EffectiveWeight = 1; ResourceClass = "Ordinary"; SchedulingDeferrals = 0 })
+    }
+    foreach ($index in 1..4) {
+        $boundedBackfill = Select-VerificationParallelPhase -Pending $boundedBackfillPending -AvailableCapacity 1 -MaximumBackfillsBeforeReservation 4
+        Assert-True -Condition ($boundedBackfill.Name -ceq "ordinary-$index") -Message "The explicitly widened policy must admit bounded backfill $index without weakening the heavy phase's reservation."
+    }
+    $boundedReservation = Select-VerificationParallelPhase -Pending $boundedBackfillPending -AvailableCapacity 1 -MaximumBackfillsBeforeReservation 4
+    Assert-True -Condition ($null -eq $boundedReservation) -Message "The fifth bypass must be refused so bounded preflight backfill cannot starve a blocked heavy phase."
+    $reservedHeavy = Select-VerificationParallelPhase -Pending $boundedBackfillPending -AvailableCapacity 3 -MaximumBackfillsBeforeReservation 4
+    Assert-True -Condition ($reservedHeavy.Name -ceq "heavy") -Message "The widened policy must release its reservation immediately when the heavy phase fits."
 
     $classLimitedPending = [Collections.Generic.List[object]]::new()
     $classLimitedPending.Add([pscustomobject]@{ Name = "saturated-heavy"; EffectiveWeight = 3; ResourceClass = "ProcessHeavy"; SchedulingDeferrals = 0 })
