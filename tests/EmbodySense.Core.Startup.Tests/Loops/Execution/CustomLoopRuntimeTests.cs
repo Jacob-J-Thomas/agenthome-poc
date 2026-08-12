@@ -872,10 +872,10 @@ public sealed class CustomLoopRuntimeTests
         var invocation = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-idempotent-publish", Prompt));
         await WaitForAttemptStartAsync(workspace);
         await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).AppendMessageAsync(LlmMessage.Assistant(expectedOutput));
-        ReleaseAttempt(workspace);
 
         var history = await runtime.RunTurnAsync("/history");
         var loaded = await runtime.RunTurnAsync("1");
+        ReleaseAttempt(workspace);
         var response = await invocation;
         var persistedConversation = await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).LoadCurrentConversationAsync();
 

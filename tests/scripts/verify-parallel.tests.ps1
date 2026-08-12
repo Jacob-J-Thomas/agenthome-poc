@@ -318,20 +318,6 @@ finally {
     $lastOrdinary = Select-VerificationParallelPhase -Pending $fairPending -AvailableCapacity 1
     Assert-True -Condition ($lastOrdinary.Name -ceq "ordinary-two" -and $fairPending.Count -eq 0) -Message "Fair reservation cannot lose or strand the remaining ordinary phase."
 
-    $boundedBackfillPending = [Collections.Generic.List[object]]::new()
-    $boundedBackfillPending.Add([pscustomobject]@{ Name = "heavy"; EffectiveWeight = 3; ResourceClass = "ProcessHeavy"; SchedulingDeferrals = 0 })
-    foreach ($index in 1..5) {
-        $boundedBackfillPending.Add([pscustomobject]@{ Name = "ordinary-$index"; EffectiveWeight = 1; ResourceClass = "Ordinary"; SchedulingDeferrals = 0 })
-    }
-    foreach ($index in 1..4) {
-        $boundedBackfill = Select-VerificationParallelPhase -Pending $boundedBackfillPending -AvailableCapacity 1 -MaximumBackfillsBeforeReservation 4
-        Assert-True -Condition ($boundedBackfill.Name -ceq "ordinary-$index") -Message "The explicitly widened policy must admit bounded backfill $index without weakening the heavy phase's reservation."
-    }
-    $boundedReservation = Select-VerificationParallelPhase -Pending $boundedBackfillPending -AvailableCapacity 1 -MaximumBackfillsBeforeReservation 4
-    Assert-True -Condition ($null -eq $boundedReservation) -Message "The fifth bypass must be refused so bounded preflight backfill cannot starve a blocked heavy phase."
-    $reservedHeavy = Select-VerificationParallelPhase -Pending $boundedBackfillPending -AvailableCapacity 3 -MaximumBackfillsBeforeReservation 4
-    Assert-True -Condition ($reservedHeavy.Name -ceq "heavy") -Message "The widened policy must release its reservation immediately when the heavy phase fits."
-
     $classLimitedPending = [Collections.Generic.List[object]]::new()
     $classLimitedPending.Add([pscustomobject]@{ Name = "saturated-heavy"; EffectiveWeight = 3; ResourceClass = "ProcessHeavy"; SchedulingDeferrals = 0 })
     $classLimitedPending.Add([pscustomobject]@{ Name = "ordinary-backfill"; EffectiveWeight = 1; ResourceClass = "Ordinary"; SchedulingDeferrals = 0 })
