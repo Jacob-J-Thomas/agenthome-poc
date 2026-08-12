@@ -107,6 +107,7 @@ function Invoke-VerifierScenario {
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-phase.ps1") -Destination $scriptsPath
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-parallel.ps1") -Destination $scriptsPath
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-artifacts.ps1") -Destination $scriptsPath
+    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-temp.ps1") -Destination $scriptsPath
     Copy-Item -LiteralPath (Join-Path $repoRoot "global.json") -Destination $scenarioRoot
 
     $sentinelPath = Join-Path $testResultsPath "sentinel.txt"
