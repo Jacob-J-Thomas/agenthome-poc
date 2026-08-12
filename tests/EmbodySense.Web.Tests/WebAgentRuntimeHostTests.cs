@@ -522,10 +522,23 @@ public sealed class WebAgentRuntimeHostTests
         await send;
         running = Assert.IsType<LoopRunSnapshot>(await host.GetLoopRunAsync(running.Id));
         var cancellation = await host.CancelLoopAsync(new LoopRunControlInput(running.Id, running.LifecycleVersion, "cancel-after-chat-cancel"));
-        var completed = await invocation.WaitAsync(TimeSpan.FromSeconds(10));
+        var releasePath = workspace.File("host-dispose-custom-loop.release");
+        CustomLoopRunRecord terminalRun;
+        LoopRunInvocationResponse completed;
+        try
+        {
+            terminalRun = await WaitForTerminalRunAsync(new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)), running.Id);
+            await File.WriteAllTextAsync(releasePath, "released");
+            completed = await invocation.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(releasePath, "released");
+        }
 
         Assert.Contains(cancellation.Status, new[] { "CancelRequested", "Cancelled", "AuditWarning" });
         Assert.NotNull(cancellation.Run);
+        Assert.Contains(terminalRun.Status, new[] { CustomLoopRunStatus.Cancelled, CustomLoopRunStatus.NeedsReview, CustomLoopRunStatus.Failed });
         Assert.Contains(completed.ExecutionStatus, new[] { "Cancelled", "NeedsReview", "Failed" });
     }
 
@@ -613,7 +626,14 @@ public sealed class WebAgentRuntimeHostTests
         var invocation = host.InvokeLoopAsync(input, "connection-1");
         await WaitForMarkerAsync(workspace.File("host-dispose-custom-loop.marker"));
         var dispose = host.DisposeAsync().AsTask();
-        await dispose.WaitAsync(TimeSpan.FromSeconds(10));
+        try
+        {
+            await dispose.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(workspace.File("host-dispose-custom-loop.release"), "released");
+        }
         var invocationException = await Record.ExceptionAsync(async () => await invocation);
 
         Assert.True(invocationException is null or OperationCanceledException, invocationException?.ToString());
@@ -799,6 +819,22 @@ public sealed class WebAgentRuntimeHostTests
         throw new TimeoutException($"Custom run for admission operation `{admissionOperationId}` was not persisted.");
     }
 
+    private static async Task<CustomLoopRunRecord> WaitForTerminalRunAsync(CustomLoopRunStore store, string runId)
+    {
+        for (var attempt = 0; attempt < 400; attempt++)
+        {
+            var run = await store.GetAsync(runId);
+            if (run?.Status is CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview or CustomLoopRunStatus.Failed)
+            {
+                return run;
+            }
+
+            await Task.Delay(25);
+        }
+
+        throw new TimeoutException($"Custom run `{runId}` did not reach a terminal cancellation state.");
+    }
+
     private static string CurrentTranscriptPath(TestWorkspace workspace)
     {
         return workspace.File(".agent", "memory", "conversations", "current.ndjson");
@@ -887,7 +923,10 @@ public sealed class WebAgentRuntimeHostTests
                         }
                         if ($turnDelayMilliseconds -ge 30000) {
                             [IO.File]::WriteAllText((Join-Path $PSScriptRoot "host-dispose-custom-loop.marker"), "started")
-                            Start-Sleep -Milliseconds $turnDelayMilliseconds
+                            $releasePath = Join-Path $PSScriptRoot "host-dispose-custom-loop.release"
+                            while (-not [IO.File]::Exists($releasePath)) {
+                                Start-Sleep -Milliseconds 25
+                            }
                         }
                         elseif ($turnDelayMilliseconds -gt 0 -and $userText.Contains("hello from web")) {
                             Start-Sleep -Milliseconds $turnDelayMilliseconds
