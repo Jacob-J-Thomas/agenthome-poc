@@ -1822,6 +1822,11 @@ public sealed class CustomLoopOrderedRunnerTests
 
         Assert.Equal(CustomLoopRecoveryStatus.NeedsReview, recovered.Status);
         Assert.Equal(CustomLoopRunStatus.NeedsReview, recoveryStore.Current.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, recoveryStore.Current.Frontier!.Payload.Status);
+        var blocked = recoveryStore.Current.Frontier.Payload.Nodes[^1];
+        Assert.Equal(GovernedLoopNodeExecutionStatus.ReviewBlocked, blocked.Status);
+        Assert.Equal(interrupted.Frontier!.Payload.Nodes[^1].Attempt, blocked.Attempt);
+        Assert.Equal(interrupted.Frontier.Payload.Nodes[^1].AttemptOperationId, blocked.AttemptOperationId);
         Assert.Equal("recovery_open_attempt", recoveryStore.Current.FailureCode);
         Assert.All(recoveryAudit.Events, item => Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]));
         Assert.Empty(executor.Requests);
