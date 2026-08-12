@@ -14,7 +14,7 @@ $script:VerificationRequiredGateScheduleProfiles = @(
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-remainder-capabilities"; EstimatedDurationSeconds = 82; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-remainder-triggers"; EstimatedDurationSeconds = 78; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-contextual-roles"; EstimatedDurationSeconds = 75; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"; EstimatedDurationSeconds = 75; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"; EstimatedDurationSeconds = 140; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-loop-api-run"; EstimatedDurationSeconds = 72; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-remainder"; EstimatedDurationSeconds = 72; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-capabilities"; EstimatedDurationSeconds = 68; Weight = 1; ResourceClass = "Ordinary" }
@@ -49,6 +49,21 @@ function Get-VerificationRequiredGateMaximumProcessHeavyWorkers {
 
 function Get-VerificationRequiredGateMaximumCpuBoundWorkers {
     return $script:VerificationRequiredGateMaximumCpuBoundWorkers
+}
+
+function Get-VerificationRequiredGateMaximumWorkers {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 8)]
+        [int]$MaximumTestWorkers,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int]$HardwareProcessorCount
+    )
+
+    $logicalLaneWorkerCeiling = [Math]::Min(6, [Math]::Min($script:VerificationRequiredGateResourceCapacity, [Math]::Max(1, [int][Math]::Floor($HardwareProcessorCount * 1.5))))
+    return [Math]::Min($MaximumTestWorkers, $logicalLaneWorkerCeiling)
 }
 
 function Get-VerificationRequiredGateScheduleProfiles {

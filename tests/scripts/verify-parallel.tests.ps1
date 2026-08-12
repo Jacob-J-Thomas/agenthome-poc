@@ -108,6 +108,9 @@ $requiredGateProfiles = @(Get-VerificationRequiredGateScheduleProfiles)
 Assert-True -Condition ((Get-VerificationRequiredGateResourceCapacity) -eq 8) -Message "Required gates must use the explicit eight-unit logical resource capacity."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumProcessHeavyWorkers) -eq 2) -Message "Required gates must admit at most two helper-process-heavy phases."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumCpuBoundWorkers) -eq 1) -Message "Required gates must admit at most one CPU-bound non-test gate."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 8 -HardwareProcessorCount 10) -eq 6) -Message "The default eight-worker request on a ten-core host must retain the six-worker required-gate ceiling."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 10) -eq 4) -Message "A lower explicit worker request must remain authoritative below the required-gate ceiling."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 4) -eq 4) -Message "A hosted four-core request must not be expanded beyond its explicit four-worker bound."
 Assert-True -Condition ($requiredGateProfiles.Count -eq 33) -Message "The exact 29-lane test plan and four non-test gates must have checked-in duration/resource profiles."
 Assert-True -Condition (@($requiredGateProfiles | Group-Object Name -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Required gate scheduling profiles must have exact unique names."
 Assert-VerificationRequiredGateSchedule -Phases $requiredGateProfiles
@@ -128,16 +131,20 @@ Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $requiredGatePro
 foreach ($splitGateName in @("tests-EmbodySense.Core.Persistence.Tests-contextual-roles", "tests-EmbodySense.Core.Persistence.Tests-authority", "tests-EmbodySense.Core.Persistence.Tests-credentials", "tests-EmbodySense.Core.Persistence.Tests-human-input", "tests-EmbodySense.Core.Persistence.Tests-default-conversation", "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle", "tests-EmbodySense.IntegrationTests-governance", "tests-EmbodySense.IntegrationTests-cli", "tests-EmbodySense.IntegrationTests-codex-app-server", "tests-EmbodySense.IntegrationTests-remainder", "tests-EmbodySense.Web.Tests-runtime-host", "tests-EmbodySense.Web.Tests-loop-api-run", "tests-EmbodySense.Web.Tests-remainder")) {
     Assert-True -Condition ((Get-VerificationRequiredGateScheduleProfile -Name $splitGateName).EstimatedDurationSeconds -gt 0) -Message "Downstream split gate '$splitGateName' must be ready for singleton-class backlog-priority scheduling."
 }
-foreach ($processHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-default-conversation", "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle")) {
+foreach ($processHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-custom-run-trace", "tests-EmbodySense.Core.Persistence.Tests-default-conversation", "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle")) {
     $processHeavyProfile = Get-VerificationRequiredGateScheduleProfile -Name $processHeavyGateName
     Assert-True -Condition ($processHeavyProfile.Weight -eq 3 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "Nested-process persistence gate '$processHeavyGateName' must retain process-heavy weight and concurrency protection."
 }
 
 $requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 6 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
-Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -eq 409) -Message "The checked-in required-gate estimates must retain the bounded 409-second virtual makespan."
+Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -eq 428) -Message "The checked-in required-gate estimates must retain the bounded 428-second virtual makespan."
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-naming-style"] -eq 0) -Message "The first singleton CPU-bound gate must begin at virtual second zero."
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-whitespace"] -eq 45) -Message "The second singleton CPU-bound gate must begin immediately after the first estimate."
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["frontend-tests"] -eq 90) -Message "The final singleton CPU-bound gate must begin immediately after both formatting estimates."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"] -eq 0) -Message "The maximum-shape custom-run trace lane must begin at virtual second zero under its process-heavy profile."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime"] -eq 0) -Message "The tied custom runtime lane must retain the other process-heavy slot at virtual second zero."
+$initialResourceCapacity = ($requiredGateProfiles | Where-Object { $requiredGateVirtualSchedule.Starts[$_.Name] -eq 0 } | Measure-Object -Property Weight -Sum).Sum
+Assert-True -Condition ($initialResourceCapacity -eq 8) -Message "The exact-name tie must pack both initial process-heavy lanes and the first CPU gate into all eight logical resource units."
 
 $counterexamplePhases = @(
     [pscustomobject]@{ Name = "long-ordinary"; EstimatedDurationSeconds = 100; SchedulingPrioritySeconds = 100; ResourceClass = "Ordinary" }

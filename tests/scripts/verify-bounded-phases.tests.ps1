@@ -175,6 +175,7 @@ foreach ($heavyLane in @("EmbodySense.Core.Startup.Tests-loop-execution-custom-r
     Assert-Contains -Actual $scheduleScript -Expected "Name = `"tests-$heavyLane`";" -Message "Measured process-heavy lane '$heavyLane' must have a checked-in scheduling profile."
 }
 foreach ($nestedProcessProfile in @(
+    'Name = "tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"; EstimatedDurationSeconds = 140; Weight = 3; ResourceClass = "ProcessHeavy"'
     'Name = "tests-EmbodySense.Core.Persistence.Tests-default-conversation"; EstimatedDurationSeconds = 65; Weight = 3; ResourceClass = "ProcessHeavy"'
     'Name = "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle"; EstimatedDurationSeconds = 55; Weight = 3; ResourceClass = "ProcessHeavy"'
 )) {
@@ -191,7 +192,9 @@ Assert-Contains -Actual $scheduleScript -Expected 'Weight = 2; ResourceClass = "
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationRequiredGateScheduleProfile -Name $Name' -Message "Every required gate must obtain checked-in duration and resource metadata by exact name."
 Assert-Contains -Actual $verifyScript -Expected '-EstimatedDurationSeconds $profile.EstimatedDurationSeconds -Weight $profile.Weight -ResourceClass $profile.ResourceClass' -Message "Every required gate must pass its exact checked-in scheduler profile."
 Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases)' -Message "The complete required gate plan must fail closed before execution when a profile is missing or mismatched."
-Assert-Contains -Actual $verifyScript -Expected '$logicalLaneWorkerCeiling = [Math]::Min(6,' -Message "Required gates must cap child processes at six even when logical capacity is eight."
+Assert-Contains -Actual $scheduleScript -Expected '$logicalLaneWorkerCeiling = [Math]::Min(6,' -Message "Required gates must derive a six-process ceiling even when logical capacity is eight."
+Assert-Contains -Actual $scheduleScript -Expected 'return [Math]::Min($MaximumTestWorkers, $logicalLaneWorkerCeiling)' -Message "Required gates must preserve lower explicit worker requests without bypassing the derived ceiling."
+Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers $MaximumTestWorkers -HardwareProcessorCount $hardwareProcessorCount' -Message "Required gate execution must use the behavior-tested worker derivation."
 Assert-Contains -Actual $verifyScript -Expected '$effectiveRequiredGateMaximumProcessHeavyWorkers = [Math]::Min($requiredGateMaximumProcessHeavyWorkers, $requiredGateMaximumWorkers)' -Message "Low-core execution must cap the process-heavy limit at the effective worker ceiling."
 Assert-Contains -Actual $verifyScript -Expected '$effectiveRequiredGateMaximumCpuBoundWorkers = [Math]::Min($requiredGateMaximumCpuBoundWorkers, $requiredGateMaximumWorkers)' -Message "Low-core execution must cap the CPU-bound limit at the effective worker ceiling."
 Assert-Contains -Actual $verifyScript -Expected 'maximum_process_heavy=$effectiveRequiredGateMaximumProcessHeavyWorkers maximum_cpu_bound=$effectiveRequiredGateMaximumCpuBoundWorkers scheduling=singleton-class-backlog-priority-lpt' -Message "The required-gate plan must report effective limits and singleton-class backlog-priority scheduling."
