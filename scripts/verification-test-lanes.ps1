@@ -31,11 +31,14 @@ function Get-VerificationTestProjectLanes {
         return @(
             (New-VerificationTestLane -Name "graph-authoring" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring"))
             (New-VerificationTestLane -Name "capabilities" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Capabilities"))
-            (New-VerificationTestLane -Name "authority-context" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Audit", "EmbodySense.Core.Persistence.Tests.Authority", "EmbodySense.Core.Persistence.Tests.ContextualRoles", "EmbodySense.Core.Persistence.Tests.ToolResults"))
+            (New-VerificationTestLane -Name "contextual-roles" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.ContextualRoles"))
+            (New-VerificationTestLane -Name "authority" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Authority"))
+            (New-VerificationTestLane -Name "tool-results-audit" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.ToolResults", "EmbodySense.Core.Persistence.Tests.Audit"))
             (New-VerificationTestLane -Name "credentials" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Credentials"))
             (New-VerificationTestLane -Name "human-input-requests" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputRequest"))
             (New-VerificationTestLane -Name "human-input-responses" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputResponse"))
-            (New-VerificationTestLane -Name "default-conversation" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurn"))
+            (New-VerificationTestLane -Name "default-conversation-recovery" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurnRecoveryTests"))
+            (New-VerificationTestLane -Name "default-conversation-remainder" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurn") -ExcludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurnRecoveryTests"))
             (New-VerificationTestLane -Name "custom-definition-control" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.CustomLoopDefinition", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopControl", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopInvocation"))
             (New-VerificationTestLane -Name "custom-run-trace" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRun", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTrace", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopWorkspace", "EmbodySense.Core.Persistence.Tests.Loops.PersistencePublicBoundaryCoverage"))
             (New-VerificationTestLane -Name "governed-lifecycle" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.Admission", "EmbodySense.Core.Persistence.Tests.Loops.Revisions"))
@@ -53,6 +56,23 @@ function Get-VerificationTestProjectLanes {
             (New-VerificationTestLane -Name "loops-other" -IncludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Loops") -ExcludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Loops.Execution"))
             (New-VerificationTestLane -Name "runtime-triggers" -IncludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Runtime", "EmbodySense.Core.Startup.Tests.Triggers"))
             (New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Capabilities", "EmbodySense.Core.Startup.Tests.Loops", "EmbodySense.Core.Startup.Tests.Runtime", "EmbodySense.Core.Startup.Tests.Triggers"))
+        )
+    }
+
+    if ($TestProject.Name -eq "EmbodySense.IntegrationTests.csproj") {
+        return @(
+            (New-VerificationTestLane -Name "governance" -IncludeFullyQualifiedName @("EmbodySense.IntegrationTests.Core.Governance"))
+            (New-VerificationTestLane -Name "cli" -IncludeFullyQualifiedName @("EmbodySense.IntegrationTests.Cli"))
+            (New-VerificationTestLane -Name "codex-app-server" -IncludeFullyQualifiedName @("EmbodySense.IntegrationTests.CodexAppServer"))
+            (New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName @("EmbodySense.IntegrationTests.Core.Governance", "EmbodySense.IntegrationTests.Cli", "EmbodySense.IntegrationTests.CodexAppServer"))
+        )
+    }
+
+    if ($TestProject.Name -eq "EmbodySense.Web.Tests.csproj") {
+        return @(
+            (New-VerificationTestLane -Name "runtime-host" -IncludeFullyQualifiedName @("EmbodySense.Web.Tests.WebAgentRuntimeHostTests"))
+            (New-VerificationTestLane -Name "loop-api-run" -IncludeFullyQualifiedName @("EmbodySense.Web.Tests.LoopApiControllerTests", "EmbodySense.Web.Tests.LoopRunApiControllerTests"))
+            (New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName @("EmbodySense.Web.Tests.WebAgentRuntimeHostTests", "EmbodySense.Web.Tests.LoopApiControllerTests", "EmbodySense.Web.Tests.LoopRunApiControllerTests"))
         )
     }
 
