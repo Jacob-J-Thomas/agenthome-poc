@@ -281,13 +281,19 @@ try {
         if ($runningOnWindows) {
             $contractScripts = @("verify-sdk-diagnostics.tests.ps1") + $contractScripts
         }
+        $preflightCoverageContractWeight = Get-VerificationPreflightCoverageContractWeight -ResourceCapacity $hardwareBoundedResourceCapacity
         foreach ($contractScript in $contractScripts) {
             $contractArguments = @("-NoProfile")
             if ($runningOnWindows) {
                 $contractArguments += @("-ExecutionPolicy", "Bypass")
             }
             $contractArguments += @("-File", (Join-Path $testsPath "scripts\$contractScript"))
-            Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
+            if ($contractScript -ceq "verify-coverage.tests.ps1") {
+                Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 75 -Weight $preflightCoverageContractWeight -ResourceClass "ProcessHeavy"
+            }
+            else {
+                Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
+            }
         }
         $preflightProcessHeavyWeight = [Math]::Max(1, [int][Math]::Ceiling($hardwareBoundedResourceCapacity / 2.0))
         Add-VerificationParallelPhase -Name "build-pullrequest" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "build-pullrequest.log") -EstimatedDurationSeconds 90 -Weight $preflightProcessHeavyWeight -ResourceClass "ProcessHeavy"
@@ -297,7 +303,7 @@ try {
         else {
             Add-VerificationParallelPhase -Name "npm-ci" -FileName "npm" -Arguments @("ci", "--include=dev") -TimeoutSeconds 300 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "npm-ci.log") -EstimatedDurationSeconds 30 -Weight 1 -ResourceClass "Ordinary"
         }
-        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-preflight phases=$($script:VerificationParallelPhases.Count) maximum_workers=$MaximumTestWorkers maximum_resource_capacity=$hardwareBoundedResourceCapacity build_weight=$preflightProcessHeavyWeight npm_weight=1 contract_weight=1 configuration=$Configuration"
+        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-preflight phases=$($script:VerificationParallelPhases.Count) maximum_workers=$MaximumTestWorkers maximum_resource_capacity=$hardwareBoundedResourceCapacity build_weight=$preflightProcessHeavyWeight npm_weight=1 coverage_contract_weight=$preflightCoverageContractWeight ordinary_contract_weight=1 configuration=$Configuration"
         Invoke-VerificationParallelPhases -MaximumWorkers $MaximumTestWorkers -MaximumResourceCapacity $hardwareBoundedResourceCapacity | Out-Null
         Reset-VerificationParallelPhaseState
         $script:LastCompletedVerificationPhase = "pull-request-preflight"

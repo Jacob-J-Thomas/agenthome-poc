@@ -51,6 +51,16 @@ function Get-VerificationRequiredGateMaximumCpuBoundWorkers {
     return $script:VerificationRequiredGateMaximumCpuBoundWorkers
 }
 
+function Get-VerificationPreflightCoverageContractWeight {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 8)]
+        [int]$ResourceCapacity
+    )
+
+    return [Math]::Min(3, $ResourceCapacity)
+}
+
 function Get-VerificationRequiredGateMaximumWorkers {
     param(
         [Parameter(Mandatory = $true)]
