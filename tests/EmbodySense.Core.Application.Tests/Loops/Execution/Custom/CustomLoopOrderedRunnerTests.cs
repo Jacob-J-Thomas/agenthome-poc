@@ -7452,26 +7452,6 @@ public sealed class CustomLoopOrderedRunnerTests
         }
     }
 
-    private sealed class NoActiveAttemptCancellationSignal : ICustomLoopExecutionCancellationSignal
-    {
-        public IDisposable? TryRegisterActiveRun(string runId) => null;
-
-        public void CancelActiveAttempt(string runId)
-        {
-        }
-
-        public Task<CustomLoopAttemptCancellationResult> RequestActiveAttemptCancellationAsync(
-            string runId,
-            string operationId,
-            CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(new CustomLoopAttemptCancellationResult(
-                CustomLoopAttemptCancellationStatus.NoActiveAttempt,
-                "The simulated restarted runtime has no active provider attempt."));
-        }
-    }
-
     private sealed class RecordingAttemptCancellationBroker : ICustomLoopAttemptCancellationBroker
     {
         private CancellationTokenSource? _cancellation;

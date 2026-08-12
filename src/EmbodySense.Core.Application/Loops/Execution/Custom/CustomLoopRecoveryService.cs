@@ -439,29 +439,6 @@ public sealed class CustomLoopRecoveryService
             && CustomLoopSequentialOutcomeArtifactHash.Matches(item);
     }
 
-    private static GovernedLoopFrontierPosture? ProjectRecoveryFrontier(
-        CustomLoopRunRecord run,
-        CustomLoopRunStatus status,
-        DateTimeOffset now)
-    {
-        if (run.Frontier is not { } frontier || run.SequentialAdapterBinding is not { } binding)
-        {
-            return run.Frontier;
-        }
-
-        var transition = status switch
-        {
-            CustomLoopRunStatus.NeedsReview when frontier.Payload.Nodes[^1].Status == GovernedLoopNodeExecutionStatus.Running
-                => GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(frontier, binding, null, null, now),
-            CustomLoopRunStatus.Cancelled
-                => GovernedLoopSequentialFrontierMachine.CancelCurrent(frontier, binding, now),
-            _ => null,
-        };
-        return transition?.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied
-            ? transition.Frontier
-            : frontier;
-    }
-
     private static CustomLoopExecutionClock StopAtLastDurableUpdate(CustomLoopExecutionClock clock, DateTimeOffset durableStop)
     {
         var accumulated = clock.AccumulatedRunningMilliseconds;
