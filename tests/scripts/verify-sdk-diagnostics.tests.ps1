@@ -102,12 +102,7 @@ function Invoke-VerifierScenario {
     $testResultsPath = Join-Path $scenarioRoot "tests\Fake.Tests\TestResults"
     $fakeBinPath = Join-Path $scenarioRoot "fake-bin"
     [void](New-Item -ItemType Directory -Path $scriptsPath, $testResultsPath, $fakeBinPath -Force)
-    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verify.ps1") -Destination $scriptsPath
-    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verify-sdk.ps1") -Destination $scriptsPath
-    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-phase.ps1") -Destination $scriptsPath
-    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-parallel.ps1") -Destination $scriptsPath
-    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-artifacts.ps1") -Destination $scriptsPath
-    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-temp.ps1") -Destination $scriptsPath
+    Copy-Item -Path (Join-Path $repoRoot "scripts\*") -Destination $scriptsPath -Recurse
     Copy-Item -LiteralPath (Join-Path $repoRoot "global.json") -Destination $scenarioRoot
 
     $sentinelPath = Join-Path $testResultsPath "sentinel.txt"
