@@ -20,3 +20,44 @@ function Resolve-VerificationPhysicalTempRoot {
 
     return $physicalPath
 }
+
+function Get-VerificationLaneFixturePath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$PhysicalTempRoot,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$RunIdentity,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LaneIdentity
+    )
+
+    if (-not [IO.Path]::IsPathFullyQualified($PhysicalTempRoot)) {
+        throw "Verification lane temporary storage must use a fully qualified root."
+    }
+
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $identityBytes = [Text.Encoding]::UTF8.GetBytes("$RunIdentity`n$LaneIdentity")
+        $digest = $hash.ComputeHash($identityBytes)
+    }
+    finally {
+        $hash.Dispose()
+    }
+
+    # Six digest bytes keep each lane collision-resistant while leaving enough room
+    # for CoreFxPipe_<name> below macOS's 104-byte Unix-domain-socket limit.
+    $token = ([BitConverter]::ToString($digest, 0, 6)).Replace("-", "").ToLowerInvariant()
+    $fixturePath = Join-Path ([IO.Path]::GetFullPath($PhysicalTempRoot)) "e-$token"
+    $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
+    $maximumUnixFixturePathBytes = 72
+    if (-not $runningOnWindows -and [Text.Encoding]::UTF8.GetByteCount($fixturePath) -gt $maximumUnixFixturePathBytes) {
+        throw "Verification lane temporary path '$fixturePath' is too long for bounded Unix named-pipe endpoints. Use a shorter fully qualified temporary root."
+    }
+
+    return $fixturePath
+}

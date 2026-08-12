@@ -68,6 +68,18 @@ Assert-True -Condition ((Resolve-VerificationPhysicalTempRoot -RunnerTemp "" -Sy
 $null = Invoke-ExpectedFailure -ExpectedMessage "fully qualified path" -Action {
     Resolve-VerificationPhysicalTempRoot -RunnerTemp "relative-temp" -SystemTempPath $systemTempProbe
 }
+$laneFixturePath = Get-VerificationLaneFixturePath -PhysicalTempRoot ([IO.Path]::GetTempPath()) -RunIdentity "run-a" -LaneIdentity "project-lane-a"
+$sameLaneFixturePath = Get-VerificationLaneFixturePath -PhysicalTempRoot ([IO.Path]::GetTempPath()) -RunIdentity "run-a" -LaneIdentity "project-lane-a"
+$differentLaneFixturePath = Get-VerificationLaneFixturePath -PhysicalTempRoot ([IO.Path]::GetTempPath()) -RunIdentity "run-a" -LaneIdentity "project-lane-b"
+Assert-True -Condition ($laneFixturePath -ceq $sameLaneFixturePath) -Message "A run/lane identity must derive one stable temporary path."
+Assert-True -Condition ($laneFixturePath -cne $differentLaneFixturePath) -Message "Distinct lanes must derive disjoint temporary paths."
+Assert-True -Condition ((Split-Path -Parent $laneFixturePath) -ceq ([IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar))) -Message "Lane fixtures must remain on the selected physical temporary volume."
+if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    Assert-True -Condition ([Text.Encoding]::UTF8.GetByteCount($laneFixturePath) -le 72) -Message "Unix lane fixtures must reserve the CoreFxPipe endpoint suffix below macOS's 104-byte limit."
+}
+$null = Invoke-ExpectedFailure -ExpectedMessage "fully qualified root" -Action {
+    Get-VerificationLaneFixturePath -PhysicalTempRoot "relative-temp" -RunIdentity "run-a" -LaneIdentity "project-lane-a"
+}
 
 $scenarioRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-bounded-verifier-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scenarioRoot | Out-Null
@@ -143,12 +155,12 @@ Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationIsolatedOutputP
 Assert-Contains -Actual $verifyScript -Expected 'Copy-VerifiedDirectory -SourceDirectory $pristineDirectory -DestinationDirectory $laneDirectory' -Message "Every lane copy must be verified before use."
 Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory' -Message "Persistence child-process coverage must receive a process-scoped immutable source."
 Assert-Contains -Actual $verifyScript -Expected 'Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())' -Message "Hosted verification must select the runner-owned ephemeral volume with a local fallback."
-Assert-Contains -Actual $verifyScript -Expected '$verificationLaneFixtureRoot = Join-Path $verificationPhysicalTempRoot' -Message "Lane fixture isolation must remain outside retained repository artifacts."
+Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot' -Message "Lane fixture isolation must remain short, disjoint, and outside retained repository artifacts."
 Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."
 foreach ($tempVariable in @("TEMP", "TMP", "TMPDIR")) {
     Assert-Contains -Actual $verifyScript -Expected "$tempVariable = `$laneFixtureRoot" -Message "Every lane and descendant must use the fast isolated '$tempVariable' fixture root."
 }
-Assert-Contains -Actual $verifyScript -Expected 'Remove-Item -LiteralPath $verificationLaneFixtureRoot -Recurse -Force' -Message "Lane fixture roots must be cleaned after ordinary verifier completion."
+Assert-Contains -Actual $verifyScript -Expected 'Remove-Item -LiteralPath $laneFixtureRoot -Recurse -Force' -Message "Lane fixture roots must be cleaned after ordinary verifier completion."
 Assert-Contains -Actual $verifyScript -Expected '"vstest", $Lane.AssemblyPath' -Message "Test lanes must execute isolated assemblies."
 Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "loop-execution-custom-runtime" -IncludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTests")' -Message "Custom loop runtime tests must retain their independently scheduled Startup lane."
 Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "loop-execution-governed-runtime" -IncludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTests")' -Message "Governed loop runtime tests must retain their independently scheduled Startup lane."

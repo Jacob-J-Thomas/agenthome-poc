@@ -55,7 +55,8 @@ $requiredGateMaximumWorkers = Get-VerificationRequiredGateMaximumWorkers -Maximu
 $effectiveRequiredGateMaximumProcessHeavyWorkers = [Math]::Min($requiredGateMaximumProcessHeavyWorkers, $requiredGateMaximumWorkers)
 $effectiveRequiredGateMaximumCpuBoundWorkers = [Math]::Min($requiredGateMaximumCpuBoundWorkers, $requiredGateMaximumWorkers)
 $verificationPhysicalTempRoot = Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())
-$verificationLaneFixtureRoot = Join-Path $verificationPhysicalTempRoot ("embodysense-verification-fixtures-" + [Guid]::NewGuid().ToString("N"))
+$verificationFixtureRunIdentity = [Guid]::NewGuid().ToString("N")
+$verificationLaneFixtureRoots = [Collections.Generic.List[string]]::new()
 Reset-VerificationPhaseState
 Reset-VerificationParallelPhaseState
 
@@ -149,8 +150,13 @@ function Get-ProjectCoverageIsolation {
     foreach ($lane in $Lanes) {
         $laneDirectory = Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework
         $laneManifest = @(Copy-VerifiedDirectory -SourceDirectory $pristineDirectory -DestinationDirectory $laneDirectory -Description "$($TestProject.BaseName)/$($lane.Name) lane copy")
-        $laneFixtureRoot = Join-Path $verificationLaneFixtureRoot "$($TestProject.BaseName)-$($lane.Name)"
-        New-Item -ItemType Directory -Path $laneFixtureRoot -Force | Out-Null
+        $laneIdentity = "$($TestProject.BaseName)-$($lane.Name)"
+        $laneFixtureRoot = Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot -RunIdentity $verificationFixtureRunIdentity -LaneIdentity $laneIdentity
+        if (Test-Path -LiteralPath $laneFixtureRoot) {
+            throw "Verification lane temporary path collision for '$laneIdentity': $laneFixtureRoot"
+        }
+        New-Item -ItemType Directory -Path $laneFixtureRoot | Out-Null
+        $verificationLaneFixtureRoots.Add($laneFixtureRoot)
         $laneEnvironment = @{
             EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"
             TEMP = $laneFixtureRoot
@@ -420,8 +426,10 @@ try {
 }
 finally {
     Pop-Location
-    if (Test-Path -LiteralPath $verificationLaneFixtureRoot) {
-        Remove-Item -LiteralPath $verificationLaneFixtureRoot -Recurse -Force
+    foreach ($laneFixtureRoot in $verificationLaneFixtureRoots) {
+        if (Test-Path -LiteralPath $laneFixtureRoot) {
+            Remove-Item -LiteralPath $laneFixtureRoot -Recurse -Force
+        }
     }
 }
 
