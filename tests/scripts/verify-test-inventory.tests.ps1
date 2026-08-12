@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $partitionScriptPath = Join-Path $repoRoot "scripts\verify-test-partition.ps1"
 $inventoryScriptPath = Join-Path $repoRoot "scripts\verify-test-inventory.ps1"
+$phaseScriptPath = Join-Path $repoRoot "scripts\verification-phase.ps1"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
 $assertionCount = 0
@@ -19,18 +20,17 @@ function Assert-Contains {
     Assert-True -Condition ($Actual.IndexOf($Expected, [StringComparison]::Ordinal) -ge 0) -Message "$Message Expected '$Expected'. Actual: $Actual"
 }
 
+. $phaseScriptPath
+
 function Invoke-Script {
     param([string]$ScriptPath, [string[]]$Arguments)
 
     $childArguments = @("-NoProfile")
     if ($runningOnWindows) { $childArguments += @("-ExecutionPolicy", "Bypass") }
     $childArguments += @("-File", $ScriptPath) + $Arguments
-    $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $powerShellExecutable
-    $startInfo.UseShellExecute = $false
+    $startInfo = New-VerificationProcessStartInfo -FileName $powerShellExecutable -Arguments $childArguments
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
-    foreach ($argument in $childArguments) { $startInfo.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     try {
@@ -38,7 +38,7 @@ function Invoke-Script {
         $outputTask = $process.StandardOutput.ReadToEndAsync()
         $errorTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit(30000)) {
-            $process.Kill($true)
+            Stop-VerificationProcessTree $process
             throw "Contract child process exceeded its 30-second bound."
         }
         return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $outputTask.GetAwaiter().GetResult() + $errorTask.GetAwaiter().GetResult() }

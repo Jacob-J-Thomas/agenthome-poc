@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
+$phaseScriptPath = Join-Path $repoRoot "scripts\verification-phase.ps1"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $assertionCount = 0
 
@@ -38,6 +39,8 @@ function Assert-NotContains {
 
     Assert-True -Condition ($Actual.IndexOf($Unexpected, [StringComparison]::Ordinal) -lt 0) -Message "$Message Unexpected '$Unexpected'. Actual: $Actual"
 }
+
+. $phaseScriptPath
 
 function New-CoverageLines {
     param([int[]]$Hits)
@@ -186,16 +189,10 @@ function Invoke-CoverageVerification {
     if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
         $arguments += @("-ReportPath", $ReportPath)
     }
-    $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $powerShellExecutable
-    $startInfo.WorkingDirectory = $RepositoryRoot
-    $startInfo.UseShellExecute = $false
+    $startInfo = New-VerificationProcessStartInfo -FileName $powerShellExecutable -Arguments $arguments -WorkingDirectory $RepositoryRoot
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
-    foreach ($argument in $arguments) {
-        $startInfo.ArgumentList.Add($argument)
-    }
 
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
@@ -207,7 +204,7 @@ function Invoke-CoverageVerification {
         $standardOutput = $process.StandardOutput.ReadToEndAsync()
         $standardError = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit(30000)) {
-            $process.Kill($true)
+            Stop-VerificationProcessTree $process
             $process.WaitForExit()
             throw "Coverage verifier child process exceeded its 30-second contract-test bound."
         }

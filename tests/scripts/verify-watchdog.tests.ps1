@@ -63,11 +63,11 @@ Assert-Equal -Actual $failedChild.Code -Expected "child-failed" -Message "A nonz
 $watchdogScript = Get-Content -LiteralPath $watchdogScriptPath -Raw
 $verifyScript = Get-Content -LiteralPath $verifyScriptPath -Raw
 $workflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
-Assert-True -Condition ($watchdogScript.Contains('[int]$DeadlineSeconds = 600', [StringComparison]::Ordinal)) -Message "The external watchdog must default to exactly 600 seconds."
-Assert-True -Condition ($watchdogScript.Contains('[ValidateRange(1, 600)]', [StringComparison]::Ordinal)) -Message "No accepted watchdog override may exceed 600 seconds."
-Assert-True -Condition ($watchdogScript.Contains('Stop-VerificationProcessTree $process', [StringComparison]::Ordinal)) -Message "The watchdog must terminate the full verifier process tree."
-Assert-True -Condition ($verifyScript.Contains('VERIFY_COMPLETE schema_version=1 status=passed', [StringComparison]::Ordinal)) -Message "The verifier must emit an exact terminal marker only after successful completion."
-Assert-True -Condition ($workflow.Contains('./scripts/verify-with-watchdog.ps1 -Configuration Release', [StringComparison]::Ordinal)) -Message "Standard CI must invoke the external watchdog."
-Assert-True -Condition (-not $workflow.Contains('run: ./scripts/verify.ps1 -Configuration Release', [StringComparison]::Ordinal)) -Message "Standard CI must not bypass the external watchdog."
+Assert-True -Condition ($watchdogScript.IndexOf('[int]$DeadlineSeconds = 600', [StringComparison]::Ordinal) -ge 0) -Message "The external watchdog must default to exactly 600 seconds."
+Assert-True -Condition ($watchdogScript.IndexOf('[ValidateRange(1, 600)]', [StringComparison]::Ordinal) -ge 0) -Message "No accepted watchdog override may exceed 600 seconds."
+Assert-True -Condition ($watchdogScript.IndexOf('Stop-VerificationProcessTree $process', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must terminate the full verifier process tree."
+Assert-True -Condition ($verifyScript.IndexOf('VERIFY_COMPLETE schema_version=1 status=passed', [StringComparison]::Ordinal) -ge 0) -Message "The verifier must emit an exact terminal marker only after successful completion."
+Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release', [StringComparison]::Ordinal) -ge 0) -Message "Standard CI must invoke the external watchdog."
+Assert-True -Condition ($workflow.IndexOf('run: ./scripts/verify.ps1 -Configuration Release', [StringComparison]::Ordinal) -lt 0) -Message "Standard CI must not bypass the external watchdog."
 
 Write-Output "Verification watchdog contract tests passed ($assertionCount assertions)."

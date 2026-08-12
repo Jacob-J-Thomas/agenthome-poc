@@ -169,7 +169,12 @@ function New-VerificationProcessStartInfo {
                 throw "Verification process environment names cannot be empty."
             }
 
-            $startInfo.Environment[[string]$key] = [string]$Environment[$key]
+            if ($null -ne $startInfo.PSObject.Properties["Environment"]) {
+                $startInfo.Environment[[string]$key] = [string]$Environment[$key]
+            }
+            else {
+                $startInfo.EnvironmentVariables[[string]$key] = [string]$Environment[$key]
+            }
         }
     }
 

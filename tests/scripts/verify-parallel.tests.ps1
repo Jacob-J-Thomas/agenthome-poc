@@ -33,8 +33,17 @@ New-Item -ItemType Directory -Path $scenarioRoot | Out-Null
 try {
     $probePath = Join-Path $scenarioRoot "probe.ps1"
     @'
-param([string]$Name, [int]$DelayMilliseconds, [int]$ExitCode, [string]$OrderPath)
+param([string]$Name, [int]$DelayMilliseconds, [int]$ExitCode, [string]$OrderPath, [string]$SynchronizationRoot)
 if (-not [string]::IsNullOrWhiteSpace($OrderPath) -and $OrderPath -cne "-") { Add-Content -LiteralPath $OrderPath -Value $Name }
+if (-not [string]::IsNullOrWhiteSpace($SynchronizationRoot) -and $SynchronizationRoot -cne "-") {
+    New-Item -ItemType Directory -Path $SynchronizationRoot -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $SynchronizationRoot "$Name.ready") -Value "ready" -Encoding UTF8
+    $synchronizationDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while (@(Get-ChildItem -LiteralPath $SynchronizationRoot -Filter "*.ready" -File).Count -lt 3) {
+        if ([DateTimeOffset]::UtcNow -ge $synchronizationDeadline) { exit 41 }
+        Start-Sleep -Milliseconds 10
+    }
+}
 Start-Sleep -Milliseconds $DelayMilliseconds
 Write-Output "probe=$Name"
 Write-Output "environment=$env:VERIFY_PARALLEL_PROBE"
@@ -46,16 +55,15 @@ exit $ExitCode
         $baseArguments += @("-ExecutionPolicy", "Bypass")
     }
     $baseArguments += @("-File", $probePath)
+    $synchronizationRoot = Join-Path $scenarioRoot "overlap"
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "first" -FileName $powerShellExecutable -Arguments ($baseArguments + @("first", "700", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "first.log")
-    Add-VerificationParallelPhase -Name "second" -FileName $powerShellExecutable -Arguments ($baseArguments + @("second", "700", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "second.log")
-    Add-VerificationParallelPhase -Name "third" -FileName $powerShellExecutable -Arguments ($baseArguments + @("third", "700", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "third.log")
-    $parallelWatch = [Diagnostics.Stopwatch]::StartNew()
+    Add-VerificationParallelPhase -Name "first" -FileName $powerShellExecutable -Arguments ($baseArguments + @("first", "50", "0", "-", $synchronizationRoot)) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "first.log")
+    Add-VerificationParallelPhase -Name "second" -FileName $powerShellExecutable -Arguments ($baseArguments + @("second", "50", "0", "-", $synchronizationRoot)) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "second.log")
+    Add-VerificationParallelPhase -Name "third" -FileName $powerShellExecutable -Arguments ($baseArguments + @("third", "50", "0", "-", $synchronizationRoot)) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "third.log")
     $results = @(Invoke-VerificationParallelPhases -MaximumWorkers 3)
-    $parallelWatch.Stop()
 
     Assert-True -Condition ($results.Count -eq 3) -Message "Every successful parallel phase must be aggregated."
-    Assert-True -Condition ($parallelWatch.Elapsed -lt [TimeSpan]::FromSeconds(2.5)) -Message "Independent phases must overlap under the bounded worker ceiling."
+    Assert-True -Condition (@(Get-ChildItem -LiteralPath $synchronizationRoot -Filter "*.ready" -File).Count -eq 3) -Message "Independent phases must all reach a synchronization barrier under the bounded worker ceiling."
     Assert-Contains -Actual (Get-Content -Raw (Join-Path $scenarioRoot "first.log")) -Expected "probe=first" -Message "Each phase must retain isolated output."
 
     Reset-VerificationParallelPhaseState

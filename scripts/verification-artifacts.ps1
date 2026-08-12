@@ -43,9 +43,11 @@ function Get-VerificationDirectoryManifest {
         throw "Verification artifact directory is empty: $fullDirectory"
     }
 
+    $baseUri = [Uri]::new($fullDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar)
     return @($files | ForEach-Object {
+        $relativePath = [Uri]::UnescapeDataString($baseUri.MakeRelativeUri([Uri]::new($_.FullName)).ToString())
         [pscustomobject]@{
-            RelativePath = [IO.Path]::GetRelativePath($fullDirectory, $_.FullName).Replace('\', '/')
+            RelativePath = $relativePath.Replace('\', '/')
             Length = $_.Length
             Sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         }

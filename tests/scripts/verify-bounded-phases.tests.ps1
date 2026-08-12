@@ -126,8 +126,8 @@ Assert-Contains -Actual $stressWorkflow -Expected "schedule:" -Message "The stre
 Assert-Contains -Actual $stressWorkflow -Expected "-VerificationTier Stress" -Message "The scheduled workflow must invoke the stress tier."
 Assert-Contains -Actual $stressWorkflow -Expected "if: always()" -Message "Stress diagnostics must be retained on failure."
 Assert-Contains -Actual $verifyWorkflow -Expected "./scripts/verify-with-watchdog.ps1 -Configuration Release" -Message "Standard CI must enter through the external watchdog."
-Assert-True -Condition (-not $verifyWorkflow.Contains("run: ./scripts/verify.ps1", [StringComparison]::Ordinal)) -Message "Standard CI cannot bypass the watchdog."
-Assert-True -Condition (-not $verifyWorkflow.Contains("run: ./tests/scripts/", [StringComparison]::Ordinal)) -Message "Repository script tests must execute inside the measured verifier child."
+Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./scripts/verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "Standard CI cannot bypass the watchdog."
+Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./tests/scripts/", [StringComparison]::Ordinal) -lt 0) -Message "Repository script tests must execute inside the measured verifier child."
 foreach ($contractScript in @("verify-sdk-diagnostics.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1")) {
     Assert-Contains -Actual $verifyScript -Expected $contractScript -Message "The measured verifier must own '$contractScript'."
 }
