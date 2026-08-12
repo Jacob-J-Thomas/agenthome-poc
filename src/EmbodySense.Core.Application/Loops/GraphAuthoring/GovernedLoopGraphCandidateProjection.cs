@@ -13,7 +13,7 @@ internal static class GovernedLoopGraphCandidateProjection
             graph.GraphId,
             graph.RevisionId,
             graph.Purpose,
-            graph.OwningRoleId,
+            graph.OwningRole,
             graph.EntryNodeId,
             graph.TerminalNodeIds.Cast<string?>().ToArray(),
             graph.AuthorityCeiling,

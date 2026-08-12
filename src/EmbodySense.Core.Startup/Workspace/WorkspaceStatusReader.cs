@@ -17,8 +17,9 @@ public sealed class WorkspaceStatusReader
     /// <param name="rootPath">The workspace root, normalized to an absolute path.</param>
     /// <returns>
     /// A snapshot whose initialized flag requires the <c>.agent</c> directory, a readable nonblank role
-    /// document, and a valid current-version permissions document. Missing, invalid, or unsupported permission
-    /// configuration is represented as approval-required default access.
+    /// document, a valid current-version permissions document, the exact completion marker, and bounded proof
+    /// of the exact published and active default contextual-role revision. Missing, invalid, or unsupported
+    /// permission configuration is represented as approval-required default access.
     /// </returns>
     public WorkspaceStatusSnapshot Read(string rootPath)
     {
@@ -27,8 +28,9 @@ public sealed class WorkspaceStatusReader
         var hasAgentDirectory = Directory.Exists(paths.AgentPath);
         var hasRoleDocument = IsRoleDocumentAvailable(paths.RolePath);
         var hasCompletionMarker = WorkspaceInitializationCompletion.IsValid(paths.WorkspaceInitializationMarkerPath);
-        var isInitialized = hasAgentDirectory && hasRoleDocument && permissions.HasDocument && hasCompletionMarker;
-        var requiresExplicitCleanup = hasAgentDirectory && ((!hasRoleDocument && File.Exists(paths.RolePath)) || (!permissions.HasDocument && File.Exists(paths.PermissionsPath)) || (!hasCompletionMarker && WorkspaceInitializationCompletion.RequiresExplicitCleanup(paths.WorkspaceInitializationMarkerPath)));
+        var hasExactDefaultRole = hasAgentDirectory && hasCompletionMarker && DefaultContextualRoleSeeder.IsReady(paths);
+        var isInitialized = hasAgentDirectory && hasRoleDocument && permissions.HasDocument && hasCompletionMarker && hasExactDefaultRole;
+        var requiresExplicitCleanup = hasAgentDirectory && !isInitialized;
 
         return new WorkspaceStatusSnapshot(
             RootPath: paths.RootPath,

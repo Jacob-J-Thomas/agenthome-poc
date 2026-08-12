@@ -1,5 +1,8 @@
 using System.Globalization;
 using System.Text;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Graph;
@@ -20,6 +23,7 @@ public static class GovernedLoopGraphNormalizer
         }
 
         ValidateScalars(candidate, errors);
+        ValidateAuthorityCeiling(candidate.AuthorityCeiling, candidate.GraphId, "graph.authorityCeiling", errors);
         var schemas = Snapshot(candidate.ValueSchemas, CustomLoopLimits.MaxGraphValueSchemas, 1, "valueSchemas", GovernedLoopGraphElementKind.ValueSchema, errors);
         var nodes = Snapshot(candidate.Nodes, CustomLoopLimits.MaxGraphNodes, 2, "nodes", GovernedLoopGraphElementKind.Node, errors);
         var edges = Snapshot(candidate.ControlEdges, CustomLoopLimits.MaxGraphControlEdges, 1, "controlEdges", GovernedLoopGraphElementKind.ControlEdge, errors);
@@ -41,7 +45,7 @@ public static class GovernedLoopGraphNormalizer
 
         try
         {
-            var graph = GovernedLoopGraphDefinition.Create(candidate.SchemaVersion, candidate.GraphId!, candidate.RevisionId!, candidate.Purpose!, candidate.OwningRoleId!, candidate.EntryNodeId!, terminals.Cast<string>(), candidate.AuthorityCeiling!, schemas.Cast<GovernedLoopValueSchemaDefinition>(), nodes.Cast<GovernedLoopNodeDefinition>(), edges.Cast<GovernedLoopControlEdgeDefinition>(), bindings.Cast<GovernedLoopBindingDefinition>(), candidate.OutputContract!, candidate.DisplayMetadata!);
+            var graph = GovernedLoopGraphDefinition.Create(candidate.SchemaVersion, candidate.GraphId!, candidate.RevisionId!, candidate.Purpose!, candidate.OwningRole!, candidate.EntryNodeId!, terminals.Cast<string>(), candidate.AuthorityCeiling!, schemas.Cast<GovernedLoopValueSchemaDefinition>(), nodes.Cast<GovernedLoopNodeDefinition>(), edges.Cast<GovernedLoopControlEdgeDefinition>(), bindings.Cast<GovernedLoopBindingDefinition>(), candidate.OutputContract!, candidate.DisplayMetadata!);
             return new GovernedLoopGraphNormalizationResult(graph, Array.Empty<GovernedLoopGraphValidationError>());
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
@@ -60,12 +64,45 @@ public static class GovernedLoopGraphNormalizer
 
         ValidateId(candidate.GraphId, "graph.id.required", GovernedLoopGraphElementKind.Graph, candidate.GraphId, "graph.graphId", errors);
         ValidateId(candidate.RevisionId, "graph.revision-id.required", GovernedLoopGraphElementKind.Graph, candidate.GraphId, "graph.revisionId", errors);
-        ValidateId(candidate.OwningRoleId, "graph.role-id.required", GovernedLoopGraphElementKind.Graph, candidate.GraphId, "graph.owningRoleId", errors);
+        ValidateOwningRole(candidate.OwningRole, candidate.GraphId, errors);
         ValidateId(candidate.EntryNodeId, "graph.entry-id.required", GovernedLoopGraphElementKind.Graph, candidate.GraphId, "graph.entryNodeId", errors);
         ValidateText(candidate.Purpose, true, CustomLoopLimits.MaxDescriptionCharacters, "graph.purpose.invalid", GovernedLoopGraphElementKind.Graph, candidate.GraphId, "graph.purpose", errors);
         if (candidate.AuthorityCeiling is null)
         {
             errors.Add("graph.authority.required", GovernedLoopGraphElementKind.Authority, candidate.GraphId, "graph.authorityCeiling", "A non-granting loop authority ceiling is required.");
+        }
+    }
+
+    private static void ValidateOwningRole(ContextualRoleRevisionPin? owningRole, string? graphId, GovernedLoopGraphErrorCollector errors)
+    {
+        if (owningRole is null)
+        {
+            errors.Add("graph.role.required", GovernedLoopGraphElementKind.Graph, graphId, "graph.owningRole", "An exact owning-role revision is required.");
+            return;
+        }
+
+        if (owningRole.Identity is null)
+        {
+            errors.Add("graph.role-id.invalid", GovernedLoopGraphElementKind.Graph, graphId, "graph.owningRole.roleId", "The owning role identifier must be canonical.");
+            errors.Add("graph.role-revision.invalid", GovernedLoopGraphElementKind.Graph, graphId, "graph.owningRole.revision", "The owning role revision must be positive.");
+        }
+        else
+        {
+            if (!ContextualRoleId.IsValid(owningRole.Identity.RoleId))
+            {
+                errors.Add("graph.role-id.invalid", GovernedLoopGraphElementKind.Graph, graphId, "graph.owningRole.roleId", "The owning role identifier must be canonical.");
+            }
+
+            if (owningRole.Identity.Revision < 1)
+            {
+                errors.Add("graph.role-revision.invalid", GovernedLoopGraphElementKind.Graph, graphId, "graph.owningRole.revision", "The owning role revision must be positive.");
+            }
+        }
+
+        if (owningRole.ContentHash is not { Length: ContextualRoleLimits.Sha256HexCharacters }
+            || owningRole.ContentHash.Any(character => character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+        {
+            errors.Add("graph.role-content-hash.invalid", GovernedLoopGraphElementKind.Graph, graphId, "graph.owningRole.contentHash", "The owning role content hash must be a canonical lowercase SHA-256 digest.");
         }
     }
 
@@ -168,13 +205,43 @@ public static class GovernedLoopGraphNormalizer
             {
                 errors.Add("node.authority.required", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.authorityCeiling", "A non-granting node authority ceiling is required.");
             }
-            else if (node.AuthorityCeiling.CapabilityIds.Any(capability => !loopCapabilities.Contains(capability)))
+            else
             {
-                errors.Add("node.authority.widens-loop", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.authorityCeiling", "The node authority ceiling cannot widen the loop ceiling.");
+                ValidateAuthorityCeiling(node.AuthorityCeiling, node.Id, $"{path}.authorityCeiling", errors);
+                if (node.AuthorityCeiling.CapabilityIds.Any(capability => !loopCapabilities.Contains(capability)))
+                {
+                    errors.Add("node.authority.widens-loop", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.authorityCeiling", "The node authority ceiling cannot widen the loop ceiling.");
+                }
             }
 
             ValidatePorts(node, path, schemaIds, errors);
             ValidateParameters(node, path, errors);
+        }
+    }
+
+    private static void ValidateAuthorityCeiling(
+        GovernedLoopAuthorityCeiling? ceiling,
+        string? elementId,
+        string path,
+        GovernedLoopGraphErrorCollector errors)
+    {
+        if (ceiling?.CapabilityIds is null)
+        {
+            return;
+        }
+
+        if (ceiling.CapabilityIds.Count > CustomLoopLimits.MaxGraphAuthorityCapabilities)
+        {
+            errors.Add("authority.capabilities.count", GovernedLoopGraphElementKind.Authority, elementId, path, $"Authority ceilings may contain at most {CustomLoopLimits.MaxGraphAuthorityCapabilities} capabilities.");
+            return;
+        }
+
+        var capabilities = ceiling.CapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).ToArray();
+        if (capabilities.Any(value => !CapabilityId.TryParse(value, out _, out _))
+            || capabilities.Distinct(StringComparer.Ordinal).Count() != capabilities.Length
+            || !capabilities.SequenceEqual(capabilities.Order(StringComparer.Ordinal), StringComparer.Ordinal))
+        {
+            errors.Add("authority.capabilities.invalid", GovernedLoopGraphElementKind.Authority, elementId, path, "Authority ceilings require unique canonical lowercase provider/path capability identifiers in ordinal order.");
         }
     }
 

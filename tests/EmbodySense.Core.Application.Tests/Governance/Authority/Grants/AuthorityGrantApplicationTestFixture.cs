@@ -11,6 +11,8 @@ using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -21,6 +23,7 @@ namespace EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
 internal static class AuthorityGrantApplicationTestFixture
 {
     internal static readonly DateTimeOffset Now = new(2026, 8, 10, 18, 0, 0, TimeSpan.Zero);
+    internal static readonly string WorkspaceId = "workspace-sha256:" + new string('a', ContextualRoleLimits.Sha256HexCharacters);
 
     internal static AuthorityGrantMutationRequest Request(
         AuthorityGrantOperationKind kind = AuthorityGrantOperationKind.Create,
@@ -121,7 +124,7 @@ internal static class AuthorityGrantApplicationTestFixture
         var loop = LoopPin();
         return new AuthorityGrantBinding(
             new AuthorityGrantProfilePin(new AuthorityProfileReference(profile.ProfileId, profile.Revision), profileHash),
-            new AuthorityGrantRolePin(role.Identity, role.ContentHash),
+            new ContextualRoleRevisionPin(role.Identity, role.ContentHash),
             loop);
     }
 
@@ -220,7 +223,7 @@ internal static class AuthorityGrantApplicationTestFixture
             "Performs bounded governed-loop work.",
             status,
             new ContextualRoleProvenance("user-owner", Now.AddHours(-2), Now.AddHours(-1)),
-            new ContextualRoleWorkspaceApplicability(["workspace-one"]),
+            new ContextualRoleWorkspaceApplicability([WorkspaceId]),
             new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.RoleArtifact, "bounded-helper-source", ContextualRoleInstructionClassification.RoleInstruction),
             new ContextualRolePolicyMaxima((capabilityIds ?? [Capability().Id.Value]).ToImmutableArray()));
         return ContextualRoleRevisionContentHash.Apply(role);
@@ -232,16 +235,73 @@ internal static class AuthorityGrantApplicationTestFixture
         return new ContextualRoleLifecycleSnapshot(1, role.Identity.RoleId, role.Identity, state, "publish-role", ContextualRoleRevisionMutationKind.Create, Now.AddMinutes(-10));
     }
 
-    internal static GovernedLoopRevisionPublicationPin LoopPin()
+    internal static GovernedLoopRevisionPublicationPin LoopPin(
+        ContextualRoleRevisionPin? owningRole = null,
+        IReadOnlyList<string>? capabilityIds = null)
     {
-        var reference = GovernedLoopRevisionReference.Create(1, "governed-loop", "revision-1", Hash64('6'));
-        return GovernedLoopRevisionPublicationPinFactory.Create(1, reference, "publish-loop", Hash64('7'));
+        return GovernedLoopRevisionPublicationPinFactory.Create(1, LoopGraph(owningRole, capabilityIds).RevisionReference, "publish-loop", Hash64('7'));
     }
 
     internal static GovernedLoopRevisionArtifact LoopArtifact(GovernedLoopRevisionPublicationPin? pin = null)
     {
         pin ??= LoopPin();
         return GovernedLoopRevisionArtifactFactory.Create(1, pin.Revision, null, null, "create-loop", "user-owner", Now.AddHours(-1));
+    }
+
+    internal static GovernedLoopGraphRevisionArtifact GraphArtifact(
+        ContextualRoleRevisionPin? owningRole = null,
+        IReadOnlyList<string>? capabilityIds = null)
+    {
+        var graph = LoopGraph(owningRole, capabilityIds);
+        var pin = GovernedLoopRevisionPublicationPinFactory.Create(1, graph.RevisionReference, "publish-loop", Hash64('7'));
+        return GovernedLoopGraphRevisionArtifactFactory.Create(1, LoopArtifact(pin), graph);
+    }
+
+    internal static GovernedLoopGraphDefinition LoopGraph(
+        ContextualRoleRevisionPin? owningRole = null,
+        IReadOnlyList<string>? capabilityIds = null)
+    {
+        var role = Role();
+        owningRole ??= new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
+        capabilityIds ??= [Capability().Id.Value];
+        var candidate = new GovernedLoopGraphCandidate(
+            1,
+            "governed-loop",
+            "revision-1",
+            "Execute one bounded governed operation.",
+            owningRole,
+            "trigger",
+            ["exit"],
+            GovernedLoopAuthorityCeiling.Create(capabilityIds),
+            [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
+            [
+                new GovernedLoopNodeDefinition(
+                    "trigger",
+                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Trigger, "manual-trigger", 1),
+                    [new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true)],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>()),
+                new GovernedLoopNodeDefinition(
+                    "exit",
+                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
+                    [
+                        new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                        new GovernedLoopPortDefinition("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                    ],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>()),
+            ],
+            [new GovernedLoopControlEdgeDefinition("trigger-to-exit", "trigger", "exit", GovernedLoopControlCondition.Always)],
+            [new GovernedLoopBindingDefinition("request-binding", GovernedLoopBindingKind.Data, "trigger", "request", "exit", "request")],
+            new GovernedLoopOutputContract("Return the bounded result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
+            new GovernedLoopDisplayMetadata(
+                "Governed loop",
+                "Test-only governed loop.",
+                [
+                    new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Start.", 0, 0),
+                    new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 100, 0),
+                ]));
+        return GovernedLoopGraphNormalizer.Normalize(candidate).Graph!;
     }
 
     internal static GovernedLoopPublishedRevisionResolution PublishedLoop(GovernedLoopRevisionPublicationPin? pin = null)

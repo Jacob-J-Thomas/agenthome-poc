@@ -179,7 +179,7 @@ public static class AuthorityGrantJson
         return true;
     }
 
-    private static bool TryRolePin(JsonElement element, out AuthorityGrantRolePin? pin)
+    private static bool TryRolePin(JsonElement element, out ContextualRoleRevisionPin? pin)
     {
         pin = null;
         if (!IsExactObject(element, _roleProperties)
@@ -193,7 +193,7 @@ public static class AuthorityGrantJson
             return false;
         }
 
-        pin = new AuthorityGrantRolePin(new ContextualRoleRevisionIdentity(roleId!, revision), contentHash!);
+        pin = new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity(roleId!, revision), contentHash!);
         return true;
     }
 

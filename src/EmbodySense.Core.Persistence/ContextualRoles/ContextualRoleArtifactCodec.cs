@@ -75,7 +75,7 @@ internal static class ContextualRoleArtifactCodec
     public static void Validate(ContextualRoleWorkspaceAnchor value)
     {
         if (value.SchemaVersion != SchemaVersion
-            || !ContextualRoleId.IsValid(value.WorkspaceId)
+            || !ContextualRoleWorkspaceId.IsValid(value.WorkspaceId)
             || !IsHash(value.CanonicalRootHash)
             || value.RootCreationTimeUtcTicks <= 0
             || !IsUtc(value.CreatedAtUtc)

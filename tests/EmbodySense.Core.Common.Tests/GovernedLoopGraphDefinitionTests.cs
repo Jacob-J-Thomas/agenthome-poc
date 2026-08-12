@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -9,12 +10,15 @@ public sealed class GovernedLoopGraphDefinitionTests
     [Fact]
     public void Valid_graph_is_canonical_bounded_and_explicit()
     {
-        var graph = GovernedLoopGraphTestFixture.Create();
+        var owningRole = GovernedLoopGraphTestFixture.Role();
+        var graph = GovernedLoopGraphTestFixture.Create(owningRole: owningRole);
 
         Assert.Equal(1, graph.SchemaVersion);
         Assert.Equal("research-loop", graph.GraphId);
-        Assert.Equal("researcher", graph.OwningRoleId);
-        Assert.Equal(["model-inference", "workspace-read"], graph.AuthorityCeiling.CapabilityIds);
+        Assert.Equal(GovernedLoopGraphTestFixture.Role(), graph.OwningRole);
+        Assert.NotSame(owningRole, graph.OwningRole);
+        Assert.NotSame(owningRole.Identity, graph.OwningRole.Identity);
+        Assert.Equal([GovernedLoopGraphTestFixture.ModelInferenceCapability, GovernedLoopGraphTestFixture.WorkspaceReadCapability], graph.AuthorityCeiling.CapabilityIds);
         Assert.Contains(graph.Bindings, binding => binding.Kind == GovernedLoopBindingKind.Data);
         Assert.Contains(graph.Bindings, binding => binding.Kind == GovernedLoopBindingKind.Context);
         Assert.DoesNotContain(graph.ControlEdges, edge => edge.Id == graph.Bindings[0].Id);
@@ -24,9 +28,32 @@ public sealed class GovernedLoopGraphDefinitionTests
     }
 
     [Fact]
+    public void Owning_role_requires_an_exact_canonical_revision_pin()
+    {
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopGraphTestFixture.Create(owningRole: new ContextualRoleRevisionPin(null!, new string('a', 64))));
+        Assert.Throws<ArgumentException>(() => GovernedLoopGraphTestFixture.Create(owningRole: GovernedLoopGraphTestFixture.Role("INVALID")));
+        Assert.Throws<ArgumentException>(() => GovernedLoopGraphTestFixture.Create(owningRole: GovernedLoopGraphTestFixture.Role(revision: 0)));
+        Assert.Throws<ArgumentException>(() => GovernedLoopGraphTestFixture.Create(owningRole: GovernedLoopGraphTestFixture.Role(contentHash: 'A')));
+    }
+
+    [Fact]
     public void Authority_ceiling_requires_a_collection()
     {
         Assert.Throws<ArgumentNullException>(() => GovernedLoopAuthorityCeiling.Create(null!));
+    }
+
+    [Fact]
+    public void Authority_ceiling_requires_exact_capability_ids_and_canonicalizes_order()
+    {
+        var ceiling = GovernedLoopAuthorityCeiling.Create(
+            [GovernedLoopGraphTestFixture.WorkspaceReadCapability, GovernedLoopGraphTestFixture.ModelInferenceCapability]);
+
+        Assert.Equal(
+            [GovernedLoopGraphTestFixture.ModelInferenceCapability, GovernedLoopGraphTestFixture.WorkspaceReadCapability],
+            ceiling.CapabilityIds);
+        Assert.Throws<ArgumentException>(() => GovernedLoopAuthorityCeiling.Create(["model-inference"]));
+        Assert.Throws<ArgumentException>(() => GovernedLoopAuthorityCeiling.Create(["Org.EmbodySense/model-inference"]));
+        Assert.Throws<ArgumentException>(() => GovernedLoopAuthorityCeiling.Create([GovernedLoopGraphTestFixture.ModelInferenceCapability, GovernedLoopGraphTestFixture.ModelInferenceCapability]));
     }
 
     [Fact]
@@ -129,10 +156,10 @@ public sealed class GovernedLoopGraphDefinitionTests
     public void Node_authority_can_narrow_but_never_widen_loop_ceiling()
     {
         var narrowed = GovernedLoopGraphTestFixture.Create();
-        Assert.Equal(["model-inference"], narrowed.Nodes.Single(node => node.Id == "infer").AuthorityCeiling.CapabilityIds);
+        Assert.Equal([GovernedLoopGraphTestFixture.ModelInferenceCapability], narrowed.Nodes.Single(node => node.Id == "infer").AuthorityCeiling.CapabilityIds);
 
         var nodes = GovernedLoopGraphTestFixture.Nodes();
-        nodes[1] = nodes[1] with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(["external-publish"]) };
+        nodes[1] = nodes[1] with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(["org.embodysense/external-publish"]) };
         Assert.Throws<ArgumentException>(() => GovernedLoopGraphTestFixture.Create(nodes: nodes));
     }
 
@@ -164,7 +191,7 @@ public sealed class GovernedLoopGraphDefinitionTests
     [Fact]
     public void Public_collection_maxima_fail_closed()
     {
-        var tooManyCapabilities = Enumerable.Range(0, CustomLoopLimits.MaxGraphAuthorityCapabilities + 1).Select(index => $"capability-{index}");
+        var tooManyCapabilities = Enumerable.Range(0, CustomLoopLimits.MaxGraphAuthorityCapabilities + 1).Select(index => $"org.embodysense/capability-{index}");
         Assert.Throws<ArgumentException>(() => GovernedLoopAuthorityCeiling.Create(tooManyCapabilities));
 
         var tooManySchemas = Enumerable.Range(0, CustomLoopLimits.MaxGraphValueSchemas + 1).Select(index => new GovernedLoopValueSchemaDefinition($"schema-{index}", GovernedLoopValueKind.Text, false));
@@ -205,7 +232,7 @@ public sealed class GovernedLoopGraphDefinitionTests
     [Fact]
     public void Exact_public_collection_maxima_are_accepted()
     {
-        var capabilities = new[] { "model-inference", "workspace-read" }.Concat(Enumerable.Range(0, CustomLoopLimits.MaxGraphAuthorityCapabilities - 2).Select(index => $"capability-{index}"));
+        var capabilities = new[] { GovernedLoopGraphTestFixture.ModelInferenceCapability, GovernedLoopGraphTestFixture.WorkspaceReadCapability }.Concat(Enumerable.Range(0, CustomLoopLimits.MaxGraphAuthorityCapabilities - 2).Select(index => $"org.embodysense/capability-{index}"));
         var schemas = GovernedLoopGraphTestFixture.Schemas().Concat(Enumerable.Range(0, CustomLoopLimits.MaxGraphValueSchemas - 1).Select(index => new GovernedLoopValueSchemaDefinition($"schema-{index}", GovernedLoopValueKind.Text, false)));
 
         var graph = GovernedLoopGraphTestFixture.Create(authorityCeiling: GovernedLoopAuthorityCeiling.Create(capabilities), schemas: schemas);
@@ -284,7 +311,7 @@ public sealed class GovernedLoopGraphDefinitionTests
     public void Additional_local_value_invariants_fail_closed()
     {
         Assert.Throws<ArgumentException>(() => GovernedLoopGraphTestFixture.Create(purpose: new string('p', CustomLoopLimits.MaxDescriptionCharacters + 1)));
-        Assert.Throws<ArgumentException>(() => GovernedLoopAuthorityCeiling.Create(["workspace-read", "workspace-read"]));
+        Assert.Throws<ArgumentException>(() => GovernedLoopAuthorityCeiling.Create([GovernedLoopGraphTestFixture.WorkspaceReadCapability, GovernedLoopGraphTestFixture.WorkspaceReadCapability]));
 
         var arrayWithoutElement = new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Array, false);
         Assert.Throws<ArgumentException>(() => GovernedLoopGraphTestFixture.Create(schemas: [arrayWithoutElement]));

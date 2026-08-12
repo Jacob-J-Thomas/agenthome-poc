@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $phaseScriptPath = Join-Path $repoRoot "scripts\verification-phase.ps1"
 $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
+$coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
 $verifyWorkflowPath = Join-Path $repoRoot ".github\workflows\verify.yml"
 $stressWorkflowPath = Join-Path $repoRoot ".github\workflows\verification-stress.yml"
 $pullRequestSettingsPath = Join-Path $repoRoot "tests\verification-pull-request.runsettings"
@@ -110,6 +111,7 @@ finally {
 
 $verifyScript = Get-Content -Raw $verifyScriptPath
 $phaseScript = Get-Content -Raw $phaseScriptPath
+$coverageScript = Get-Content -Raw $coverageScriptPath
 $verifyWorkflow = Get-Content -Raw $verifyWorkflowPath
 $stressWorkflow = Get-Content -Raw $stressWorkflowPath
 $pullRequestSettings = Get-Content -Raw $pullRequestSettingsPath
@@ -128,8 +130,67 @@ Assert-Contains -Actual $verifyScript -Expected "Rejected_operation_capacity_pre
 Assert-Contains -Actual $verifyScript -Expected 'exact_test_count=2' -Message "Stress diagnostics must expose the expected exact-test inventory."
 Assert-Contains -Actual $pullRequestSettings -Expected '<TreatNoTestsAsError>true</TreatNoTestsAsError>' -Message "Required verification cannot silently accept an empty selection."
 Assert-Contains -Actual $pullRequestSettings -Expected '<TestSessionTimeout>1500000</TestSessionTimeout>' -Message "Pull-request test sessions must retain enough bounded time for the Persistence coverage suite."
-Assert-Contains -Actual $verifyScript -Expected '$coveragePhaseTimeoutSeconds = if ($_.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") { 1560 } else { 900 }' -Message "Only Persistence coverage receives the extended phase timeout."
-Assert-Contains -Actual $verifyScript -Expected '-TimeoutSeconds $coveragePhaseTimeoutSeconds' -Message "Coverage phases must use the project-specific bounded timeout."
+Assert-Contains -Actual $verifyScript -Expected '$persistenceCoveragePhaseTimeoutSeconds = 1560' -Message "Persistence coverage shards must retain the existing extended phase timeout."
+Assert-Contains -Actual $verifyScript -Expected '-TimeoutSeconds $persistenceCoveragePhaseTimeoutSeconds' -Message "Every Persistence coverage shard must use the existing bounded timeout."
+Assert-Contains -Actual $verifyScript -Expected 'Invoke-CheckedNativePhase -Name "coverage-$($_.BaseName)" -FileName "dotnet" -Arguments $testArguments -TimeoutSeconds 900' -Message "All other coverage projects must retain the existing bounded timeout."
+Assert-Contains -Actual $verifyScript -Expected 'foreach ($shard in $persistenceCoverageShards)' -Message "Persistence coverage must execute each declared shard in a fresh test process."
+Assert-Contains -Actual $verifyScript -Expected '"--collect:XPlat Code Coverage", "--filter", $shard.Filter, "--logger", "console;verbosity=detailed", "--results-directory", $shardResultsPath' -Message "Each Persistence shard must retain coverage collection, its exact filter, detailed logging, and an isolated result root."
+Assert-Contains -Actual $verifyScript -Expected 'Assert-CoverageReportProduced -TestProject $_ -MinimumWriteTimeUtc $shardStartedUtc -SearchRoot $shardResultsPath' -Message "Each Persistence shard must prove that its own invocation produced fresh coverage."
+Assert-Contains -Actual $verifyScript -Expected '$coverageArguments += @("-File", (Join-Path $PSScriptRoot "verify-coverage.ps1"), "-MinimumWriteTimeUtc", $coverageStartedUtc.ToString("O"))' -Message "All shard reports must continue through the canonical coverage merger."
+Assert-Contains -Actual $coverageScript -Expected 'if (-not $fileLines.ContainsKey($lineNumber) -or $hits -gt $fileLines[$lineNumber]) {' -Message "Split reports must continue to merge duplicate source lines by maximum hit count."
+
+$expectedPersistenceCoverageShards = @(
+    [pscustomobject]@{
+        Name = "graph-authoring"
+        Filter = "(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring)&(VerificationTier!=Stress)"
+    }
+    [pscustomobject]@{
+        Name = "governance"
+        Filter = "((FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Audit)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Authority)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Capabilities)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.ContextualRoles)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Credentials)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.HumanInput)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.ToolResults))&(VerificationTier!=Stress)"
+    }
+    [pscustomobject]@{
+        Name = "loops-triggers"
+        Filter = "((FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Triggers))&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring)&(VerificationTier!=Stress)"
+    }
+    [pscustomobject]@{
+        Name = "remainder"
+        Filter = "(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Triggers)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Audit)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Authority)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Capabilities)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.ContextualRoles)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Credentials)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.HumanInput)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.ToolResults)&(VerificationTier!=Stress)"
+    }
+)
+$shardDeclaration = [regex]::Match($verifyScript, '(?ms)^\$persistenceCoverageShards = @\(\r?\n(?<body>.*?)^\)')
+Assert-True -Condition $shardDeclaration.Success -Message "The Persistence coverage shard inventory must remain statically inspectable."
+$declaredShards = @([regex]::Matches($shardDeclaration.Groups["body"].Value, '(?ms)^\s+\[pscustomobject\]@\{\r?\n\s+Name = "(?<name>[^"]+)"\r?\n\s+Filter = "(?<filter>[^"]+)"\r?\n\s+\}'))
+Assert-True -Condition ($declaredShards.Count -eq $expectedPersistenceCoverageShards.Count) -Message "Persistence coverage must retain exactly four shards."
+for ($index = 0; $index -lt $expectedPersistenceCoverageShards.Count; $index++) {
+    Assert-True -Condition ($declaredShards[$index].Groups["name"].Value -ceq $expectedPersistenceCoverageShards[$index].Name) -Message "Persistence coverage shard order and names must remain deterministic."
+    Assert-True -Condition ($declaredShards[$index].Groups["filter"].Value -ceq $expectedPersistenceCoverageShards[$index].Filter) -Message "Persistence coverage shard filters must remain mutually exclusive, exhaustive, and stress-free."
+}
+
+$governancePrefixes = @("Audit", "Authority", "Capabilities", "ContextualRoles", "Credentials", "HumanInput", "ToolResults") | ForEach-Object { "EmbodySense.Core.Persistence.Tests.$_" }
+$coveragePartitionProbes = @(
+    "EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring.GraphContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.Loops.Admission.AdmissionContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.Triggers.TriggerContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.Audit.AuditContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.Authority.AuthorityContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.Capabilities.CapabilityContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.ContextualRoles.RoleContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.Credentials.CredentialContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.ToolResults.ToolResultContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.Memory.MemoryContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.Verification.VerificationContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.Workspace.WorkspaceContractTests.Probe",
+    "EmbodySense.Core.Persistence.Tests.FutureNamespace.FutureContractTests.Probe"
+)
+foreach ($fullyQualifiedName in $coveragePartitionProbes) {
+    $isGraphAuthoring = $fullyQualifiedName.StartsWith("EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring", [StringComparison]::Ordinal)
+    $isGovernance = @($governancePrefixes | Where-Object { $fullyQualifiedName.StartsWith($_, [StringComparison]::Ordinal) }).Count -gt 0
+    $isLoopsOrTriggers = (-not $isGraphAuthoring) -and ($fullyQualifiedName.StartsWith("EmbodySense.Core.Persistence.Tests.Loops", [StringComparison]::Ordinal) -or $fullyQualifiedName.StartsWith("EmbodySense.Core.Persistence.Tests.Triggers", [StringComparison]::Ordinal))
+    $isRemainder = -not ($isGraphAuthoring -or $isGovernance -or $isLoopsOrTriggers)
+    $partitionCount = @(@($isGraphAuthoring, $isGovernance, $isLoopsOrTriggers, $isRemainder) | Where-Object { $_ }).Count
+    Assert-True -Condition ($partitionCount -eq 1) -Message "Persistence coverage partition must select '$fullyQualifiedName' exactly once."
+}
 Assert-Contains -Actual $stressSettings -Expected '<TreatNoTestsAsError>true</TreatNoTestsAsError>' -Message "Stress verification cannot silently accept an empty selection."
 Assert-Contains -Actual $stressSettings -Expected '<TestSessionTimeout>1500000</TestSessionTimeout>' -Message "Stress test sessions must remain bounded."
 Assert-Contains -Actual $maximumTest -Expected '[Trait(VerificationTier.TraitName, VerificationTier.Stress)]' -Message "The adversarial maximum test must remain in the stress tier."

@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
@@ -5,11 +6,14 @@ namespace EmbodySense.Core.Common.Tests;
 
 internal static class GovernedLoopGraphTestFixture
 {
+    public const string ModelInferenceCapability = "org.embodysense/model-inference";
+    public const string WorkspaceReadCapability = "org.embodysense/workspace-read";
+
     public static GovernedLoopGraphDefinition Create(
         string graphId = "research-loop",
         string revisionId = "revision-1",
         string purpose = "Research one question within explicit context and authority.",
-        string owningRoleId = "researcher",
+        ContextualRoleRevisionPin? owningRole = null,
         string entryNodeId = "trigger",
         IEnumerable<string>? terminalNodeIds = null,
         GovernedLoopAuthorityCeiling? authorityCeiling = null,
@@ -21,15 +25,26 @@ internal static class GovernedLoopGraphTestFixture
         GovernedLoopDisplayMetadata? display = null,
         int schemaVersion = GovernedLoopGraphDefinition.CurrentSchemaVersion)
     {
-        authorityCeiling ??= GovernedLoopAuthorityCeiling.Create(["model-inference", "workspace-read"]);
+        authorityCeiling ??= GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, WorkspaceReadCapability]);
         schemas ??= Schemas();
         nodes ??= Nodes();
         edges ??= Edges();
         bindings ??= Bindings();
         output ??= Output();
         display ??= Display();
+        owningRole ??= Role();
         terminalNodeIds ??= ["exit"];
-        return GovernedLoopGraphDefinition.Create(schemaVersion, graphId, revisionId, purpose, owningRoleId, entryNodeId, terminalNodeIds, authorityCeiling, schemas, nodes, edges, bindings, output, display);
+        return GovernedLoopGraphDefinition.Create(schemaVersion, graphId, revisionId, purpose, owningRole, entryNodeId, terminalNodeIds, authorityCeiling, schemas, nodes, edges, bindings, output, display);
+    }
+
+    public static ContextualRoleRevisionPin Role(
+        string roleId = "researcher",
+        int revision = 1,
+        char contentHash = 'a')
+    {
+        return new ContextualRoleRevisionPin(
+            new ContextualRoleRevisionIdentity(roleId, revision),
+            new string(contentHash, 64));
     }
 
     public static GovernedLoopValueSchemaDefinition[] Schemas()
@@ -51,7 +66,7 @@ internal static class GovernedLoopGraphTestFixture
                 "infer",
                 new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
                 [InputPort("request", GovernedLoopBindingKind.Data), InputPort("invocation-context", GovernedLoopBindingKind.Context), OutputPort("result", GovernedLoopBindingKind.Data)],
-                GovernedLoopAuthorityCeiling.Create(["model-inference"]),
+                GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability]),
                 new Dictionary<string, string> { ["instruction"] = "Answer using only explicitly bound inputs." }),
             new GovernedLoopNodeDefinition(
                 "exit",

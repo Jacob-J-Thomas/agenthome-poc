@@ -5,7 +5,7 @@ internal sealed record ExecutableGraphJson(
     string? GraphId,
     string? RevisionId,
     string? Purpose,
-    string? OwningRoleId,
+    ContextualRoleRevisionPinJson? OwningRole,
     string? EntryNodeId,
     string[]? TerminalNodeIds,
     string[]? AuthorityCeiling,

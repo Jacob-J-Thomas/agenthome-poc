@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.ContextualRoles.Models;
+
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 /// <summary>Carries a raw, potentially invalid schema-1 graph candidate into fail-closed normalization.</summary>
@@ -7,7 +9,7 @@ public sealed record GovernedLoopGraphCandidate(
     string? GraphId,
     string? RevisionId,
     string? Purpose,
-    string? OwningRoleId,
+    ContextualRoleRevisionPin? OwningRole,
     string? EntryNodeId,
     IReadOnlyList<string?>? TerminalNodeIds,
     GovernedLoopAuthorityCeiling? AuthorityCeiling,

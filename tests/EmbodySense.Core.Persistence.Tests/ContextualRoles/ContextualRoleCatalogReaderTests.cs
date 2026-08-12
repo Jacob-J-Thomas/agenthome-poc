@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Common.ContextualRoles;
@@ -16,7 +17,8 @@ public sealed class ContextualRoleCatalogReaderTests
     public async Task Empty_and_invalid_catalog_reads_do_not_initialize_persistence()
     {
         using var workspace = new TestWorkspace();
-        using var store = new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new ContextualRoleRevisionStore(paths, WorkspaceId(paths));
 
         var empty = await store.ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 10));
         var invalidCursor = await store.ReadCatalogAsync(new ContextualRoleCatalogReadRequest("../unsafe", 10));
@@ -46,7 +48,7 @@ public sealed class ContextualRoleCatalogReaderTests
             .Select(path => Path.GetRelativePath(partialRoot, path))
             .Order(StringComparer.Ordinal)
             .ToArray();
-        using var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        using var store = new ContextualRoleRevisionStore(paths, WorkspaceId(paths));
 
         var catalog = await store.ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 10));
         var revision = await store.ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1)));
@@ -81,7 +83,7 @@ public sealed class ContextualRoleCatalogReaderTests
             .Select(path => Path.GetRelativePath(root, path))
             .Order(StringComparer.Ordinal)
             .ToArray();
-        using var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        using var store = new ContextualRoleRevisionStore(paths, WorkspaceId(paths));
 
         var result = await store.ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 10));
         var after = Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories)
@@ -104,7 +106,7 @@ public sealed class ContextualRoleCatalogReaderTests
         await CreateAsync(paths, "reviewer");
         await DisableAsync(paths, "reviewer");
 
-        using var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        using var store = new ContextualRoleRevisionStore(paths, WorkspaceId(paths));
         var first = await store.ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 2));
         var second = await store.ReadCatalogAsync(new ContextualRoleCatalogReadRequest(first.NextCursor, 2));
 
@@ -125,7 +127,7 @@ public sealed class ContextualRoleCatalogReaderTests
         await CreateAsync(paths, "reviewer");
         await File.WriteAllTextAsync(Path.Combine(paths.AgentPath, "contextual-roles", "states", "reviewer.json"), "{not-json");
 
-        using var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        using var store = new ContextualRoleRevisionStore(paths, WorkspaceId(paths));
         var result = await store.ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 10));
 
         Assert.Equal(ContextualRoleCatalogReadStatus.Ambiguous, result.Status);
@@ -135,9 +137,9 @@ public sealed class ContextualRoleCatalogReaderTests
 
     private static async Task CreateAsync(WorkspacePaths paths, string roleId)
     {
-        var revision = Revision(roleId);
+        var revision = Revision(roleId, WorkspaceId(paths));
         var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest($"create-{roleId}", string.Empty, ContextualRoleRevisionMutationKind.Create, roleId, "user-jake", revision, null, _now));
-        using var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        using var store = new ContextualRoleRevisionStore(paths, WorkspaceId(paths));
         Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await store.MutateAsync(request)).Status);
     }
 
@@ -145,11 +147,11 @@ public sealed class ContextualRoleCatalogReaderTests
     {
         var identity = new ContextualRoleRevisionIdentity(roleId, 1);
         var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest($"disable-{roleId}", string.Empty, ContextualRoleRevisionMutationKind.Disable, roleId, "user-jake", null, identity, _now.AddMinutes(1)));
-        using var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        using var store = new ContextualRoleRevisionStore(paths, WorkspaceId(paths));
         Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await store.MutateAsync(request)).Status);
     }
 
-    private static ContextualRoleRevision Revision(string roleId)
+    private static ContextualRoleRevision Revision(string roleId, string workspaceId)
     {
         var value = new ContextualRoleRevision(
             1,
@@ -159,9 +161,11 @@ public sealed class ContextualRoleCatalogReaderTests
             $"Purpose for {roleId}.",
             ContextualRoleStatus.Published,
             new ContextualRoleProvenance("user-jake", _now, _now),
-            new ContextualRoleWorkspaceApplicability(["workspace-one"]),
+            new ContextualRoleWorkspaceApplicability([workspaceId]),
             new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role", ContextualRoleInstructionClassification.RoleInstruction),
             new ContextualRolePolicyMaxima([]));
         return ContextualRoleRevisionContentHash.Apply(value);
     }
+
+    private static string WorkspaceId(WorkspacePaths paths) => CapabilityWorkspaceScopeId.Create(paths.RootPath);
 }

@@ -7,6 +7,9 @@ namespace EmbodySense.Core.Application.Tests.ContextualRoles;
 
 public sealed class ContextualRoleRevisionPortContractTests
 {
+    private const string WorkspaceId = "workspace-sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    private const string OtherWorkspaceId = "workspace-sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
     [Fact]
     public void Read_and_mutation_models_preserve_exact_immutable_identity_without_authority_effects()
     {
@@ -38,6 +41,8 @@ public sealed class ContextualRoleRevisionPortContractTests
 
         Assert.True(ContextualRoleRevisionMutationRequestHash.Matches(request));
         Assert.False(ContextualRoleRevisionMutationRequestHash.Matches(request with { Revision = revision with { DisplayName = "Changed" } }));
+        var otherWorkspace = ContextualRoleRevisionContentHash.Apply(revision with { WorkspaceApplicability = new ContextualRoleWorkspaceApplicability([OtherWorkspaceId]) });
+        Assert.False(ContextualRoleRevisionMutationRequestHash.Matches(request with { Revision = otherWorkspace }));
         Assert.False(ContextualRoleRevisionMutationRequestHash.Matches(request with { RequestedAtUtc = DateTimeOffset.UnixEpoch.AddSeconds(1) }));
         Assert.False(ContextualRoleRevisionMutationRequestHash.Matches(request with { ActorId = "user-other" }));
         Assert.Empty(ContextualRoleRevisionMutationRequestValidator.Validate(request));
@@ -110,7 +115,7 @@ public sealed class ContextualRoleRevisionPortContractTests
             "Review.",
             ContextualRoleStatus.Draft,
             new ContextualRoleProvenance("user-jake", DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch),
-            new ContextualRoleWorkspaceApplicability(["workspace"]),
+            new ContextualRoleWorkspaceApplicability([WorkspaceId]),
             new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.RoleArtifact, "role-source", ContextualRoleInstructionClassification.RoleInstruction),
             new ContextualRolePolicyMaxima([]));
         return ContextualRoleRevisionContentHash.Apply(revision);

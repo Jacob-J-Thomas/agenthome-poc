@@ -132,7 +132,15 @@ internal static class GovernedLoopGraphValidationEvidenceHash
     {
         writer.WriteStartObject();
         writer.WriteString("sourceEvidenceId", snapshot.SourceEvidenceId);
-        writer.WriteString("roleId", snapshot.RoleId);
+        writer.WriteStartObject("owningRole");
+        writer.WriteString("roleId", snapshot.OwningRole!.Identity.RoleId);
+        writer.WriteNumber("revision", snapshot.OwningRole.Identity.Revision);
+        writer.WriteString("contentHash", snapshot.OwningRole.ContentHash);
+        writer.WriteEndObject();
+        writer.WriteString("workspaceId", snapshot.WorkspaceId);
+        writer.WriteString("sourceStatus", snapshot.SourceStatus.ToString());
+        writer.WriteString("lifecycleOperationId", snapshot.RoleLifecycle!.LastOperationId);
+        writer.WriteString("lifecycleUpdatedAtUtc", snapshot.RoleLifecycle.UpdatedAtUtc);
         writer.WritePropertyName("capabilities");
         writer.WriteStartArray();
         foreach (var capability in snapshot.CapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Order(StringComparer.Ordinal))

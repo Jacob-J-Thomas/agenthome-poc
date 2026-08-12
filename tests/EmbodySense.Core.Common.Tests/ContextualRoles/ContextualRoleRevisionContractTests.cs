@@ -8,6 +8,8 @@ namespace EmbodySense.Core.Common.Tests.ContextualRoles;
 public sealed class ContextualRoleRevisionContractTests
 {
     private static readonly DateTimeOffset _createdAtUtc = new(2026, 8, 2, 12, 0, 0, TimeSpan.Zero);
+    private static readonly string _workspaceId = WorkspaceId('a');
+    private static readonly string _otherWorkspaceId = WorkspaceId('b');
 
     [Fact]
     public void Valid_immutable_revision_has_exact_attribution_and_non_granting_maxima()
@@ -23,8 +25,8 @@ public sealed class ContextualRoleRevisionContractTests
         Assert.Equal(_createdAtUtc, revision.Provenance.CreatedAtUtc);
         Assert.True(revision.PolicyMaxima.IsNonGranting);
         Assert.Contains("org.embodysense/workspace/read", revision.PolicyMaxima.CapabilityIds);
-        Assert.True(revision.WorkspaceApplicability.AppliesTo("agenthome"));
-        Assert.False(revision.WorkspaceApplicability.AppliesTo("other-workspace"));
+        Assert.True(revision.WorkspaceApplicability.AppliesTo(_workspaceId));
+        Assert.False(revision.WorkspaceApplicability.AppliesTo(_otherWorkspaceId));
     }
 
     [Fact]
@@ -49,12 +51,12 @@ public sealed class ContextualRoleRevisionContractTests
         var first = ValidRevision();
         var reordered = first with
         {
-            WorkspaceApplicability = new ContextualRoleWorkspaceApplicability(["workspace-b", "agenthome"]),
+            WorkspaceApplicability = new ContextualRoleWorkspaceApplicability([_otherWorkspaceId, _workspaceId]),
             PolicyMaxima = new ContextualRolePolicyMaxima(["org.embodysense/workspace/read", "org.embodysense/files/read"])
         };
         var reversed = reordered with
         {
-            WorkspaceApplicability = new ContextualRoleWorkspaceApplicability(["agenthome", "workspace-b"]),
+            WorkspaceApplicability = new ContextualRoleWorkspaceApplicability([_workspaceId, _otherWorkspaceId]),
             PolicyMaxima = new ContextualRolePolicyMaxima(["org.embodysense/files/read", "org.embodysense/workspace/read"])
         };
 
@@ -81,7 +83,7 @@ public sealed class ContextualRoleRevisionContractTests
         {
             DisplayName = new string('d', ContextualRoleLimits.MaxDisplayNameCharacters),
             Purpose = new string('p', ContextualRoleLimits.MaxPurposeCharacters),
-            WorkspaceApplicability = new ContextualRoleWorkspaceApplicability(Enumerable.Range(1, ContextualRoleLimits.MaxWorkspaceScopes).Select(index => $"workspace-{index}").ToImmutableArray()),
+            WorkspaceApplicability = new ContextualRoleWorkspaceApplicability(Enumerable.Range(1, ContextualRoleLimits.MaxWorkspaceScopes).Select(WorkspaceId).ToImmutableArray()),
             PolicyMaxima = new ContextualRolePolicyMaxima(Enumerable.Range(1, ContextualRoleLimits.MaxCapabilityMaximums).Select(index => $"org.example/capability-{index}").ToImmutableArray())
         };
         maximum = ContextualRoleRevisionContentHash.Apply(maximum);
@@ -89,7 +91,7 @@ public sealed class ContextualRoleRevisionContractTests
         {
             DisplayName = new string('d', ContextualRoleLimits.MaxDisplayNameCharacters + 1),
             Purpose = new string('p', ContextualRoleLimits.MaxPurposeCharacters + 1),
-            WorkspaceApplicability = new ContextualRoleWorkspaceApplicability(Enumerable.Range(1, ContextualRoleLimits.MaxWorkspaceScopes + 1).Select(index => $"workspace-{index}").ToImmutableArray()),
+            WorkspaceApplicability = new ContextualRoleWorkspaceApplicability(Enumerable.Range(1, ContextualRoleLimits.MaxWorkspaceScopes + 1).Select(WorkspaceId).ToImmutableArray()),
             PolicyMaxima = new ContextualRolePolicyMaxima(Enumerable.Range(1, ContextualRoleLimits.MaxCapabilityMaximums + 1).Select(index => $"org.example/capability-{index}").ToImmutableArray())
         };
         tooLarge = ContextualRoleRevisionContentHash.Apply(tooLarge);
@@ -128,6 +130,27 @@ public sealed class ContextualRoleRevisionContractTests
         var result = ContextualRoleRevisionValidator.Validate(revision);
 
         Assert.Contains(result.Errors, error => error.Code == "duplicate_capability_maximum" && error.Field == "policyMaxima.capabilityIds[1]");
+    }
+
+    [Fact]
+    public void Workspace_applicability_rejects_legacy_case_and_digest_aliases()
+    {
+        string[] invalid =
+        [
+            "workspace-one",
+            "Workspace-sha256:" + new string('a', ContextualRoleLimits.Sha256HexCharacters),
+            "workspace-sha256:" + new string('A', ContextualRoleLimits.Sha256HexCharacters),
+            "workspace-sha256:" + new string('a', ContextualRoleLimits.Sha256HexCharacters - 1),
+        ];
+
+        foreach (var workspaceId in invalid)
+        {
+            var revision = ContextualRoleRevisionContentHash.Apply(ValidRevision() with { WorkspaceApplicability = new ContextualRoleWorkspaceApplicability([workspaceId]) });
+
+            var result = ContextualRoleRevisionValidator.Validate(revision);
+
+            Assert.Contains(result.Errors, error => error.Code == "invalid_workspace_id" && error.Field == "workspaceApplicability.workspaceIds[0]");
+        }
     }
 
     [Fact]
@@ -275,7 +298,7 @@ public sealed class ContextualRoleRevisionContractTests
     {
         var revision = ValidRevision() with
         {
-            WorkspaceApplicability = new ContextualRoleWorkspaceApplicability(["agenthome", "agenthome", "unsafe space"]),
+            WorkspaceApplicability = new ContextualRoleWorkspaceApplicability([_workspaceId, _workspaceId, "unsafe space"]),
             Provenance = new ContextualRoleProvenance("Invalid Author", _createdAtUtc, _createdAtUtc.AddMinutes(-1))
         };
         revision = ContextualRoleRevisionContentHash.Apply(revision);
@@ -298,9 +321,13 @@ public sealed class ContextualRoleRevisionContractTests
             "Review changes within the declared workspace.",
             ContextualRoleStatus.Published,
             new ContextualRoleProvenance("user-jake", _createdAtUtc, _createdAtUtc),
-            new ContextualRoleWorkspaceApplicability(["agenthome"]),
+            new ContextualRoleWorkspaceApplicability([_workspaceId]),
             new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.RoleArtifact, "reviewer-instructions", ContextualRoleInstructionClassification.RoleInstruction),
             new ContextualRolePolicyMaxima(["org.embodysense/files/read", "org.embodysense/workspace/read"]));
         return ContextualRoleRevisionContentHash.Apply(revision);
     }
+
+    private static string WorkspaceId(char hashCharacter) => "workspace-sha256:" + new string(hashCharacter, ContextualRoleLimits.Sha256HexCharacters);
+
+    private static string WorkspaceId(int index) => $"workspace-sha256:{index:x64}";
 }

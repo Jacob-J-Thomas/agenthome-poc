@@ -24,9 +24,9 @@ public sealed class ContextualRoleInspectionService
         IContextualRoleLifecycleReader lifecycleReader,
         IContextualRoleInstructionSourceProbe sourceProbe)
     {
-        if (!ContextualRoleId.IsValid(workspaceId))
+        if (!ContextualRoleWorkspaceId.IsValid(workspaceId))
         {
-            throw new ArgumentException("Workspace id must be a bounded lowercase ASCII identifier.", nameof(workspaceId));
+            throw new ArgumentException("Workspace id must be a canonical workspace SHA-256 identifier.", nameof(workspaceId));
         }
 
         ArgumentNullException.ThrowIfNull(catalogReader);

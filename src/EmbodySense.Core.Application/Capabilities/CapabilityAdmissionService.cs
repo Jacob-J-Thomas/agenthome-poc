@@ -52,6 +52,22 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
             return Rejected("The loop capability requirement manifest is invalid.");
         }
 
+        if (requirements.Required.Count == 0 && requirements.Optional.Count == 0)
+        {
+            var snapshot = new CapabilityAdmissionSnapshot(
+                CapabilityAdmissionSnapshot.CurrentSchemaVersion,
+                _workspaceScopeId,
+                requirements,
+                requirementsHash!.Value,
+                [],
+                [],
+                _timeProvider.GetUtcNow().ToUniversalTime());
+            var snapshotError = CapabilityAdmissionSnapshotValidator.Validate(snapshot);
+            return snapshotError is null
+                ? new CapabilityAdmissionResult(true, snapshot, "The loop requires no capabilities; an exact empty admission proof was recorded without consulting the catalog.")
+                : Rejected($"Empty capability admission evidence is invalid: {snapshotError}");
+        }
+
         return await _authorityTransaction.ExecuteAsync(transactionCancellationToken => AdmitUnderAuthorityAsync(requirements, requirementsHash!.Value, allowedCapabilityIds, transactionCancellationToken), cancellationToken);
     }
 

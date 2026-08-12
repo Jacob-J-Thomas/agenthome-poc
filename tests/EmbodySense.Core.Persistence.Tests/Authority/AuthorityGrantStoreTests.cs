@@ -1184,7 +1184,7 @@ public sealed class AuthorityGrantStoreTests : IDisposable
     private static AuthorityGrantBinding Binding(AuthorityProfileRecord profile)
     {
         var profilePin = new AuthorityGrantProfilePin(new AuthorityProfileReference(profile.ProfileId, profile.CurrentProfile.Revision), profile.CurrentHash);
-        var rolePin = new AuthorityGrantRolePin(new ContextualRoleRevisionIdentity("bounded-helper", 1), Hash('1'));
+        var rolePin = new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("bounded-helper", 1), Hash('1'));
         var loopRevision = GovernedLoopRevisionReference.Create(1, "bounded-loop", "revision-1", Hash('2'));
         var loopPin = GovernedLoopRevisionPublicationPinFactory.Create(1, loopRevision, "publish-loop", Hash('3'));
         return new AuthorityGrantBinding(profilePin, rolePin, loopPin);
