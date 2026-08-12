@@ -30,6 +30,41 @@ public sealed class CodexAppServerInferenceTests
     private static readonly JsonSerializerOptions _auditJsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
     [Fact]
+    public void Constructor_rejects_non_positive_or_relaxed_safety_deadlines()
+    {
+        var options = new LlmInferenceClientOptions
+        {
+            Surface = LlmInferenceSurface.OpenAiCodex,
+            Model = "gpt-test",
+            WorkingDirectory = Directory.GetCurrentDirectory(),
+            CodexSandbox = "read-only"
+        };
+        var transport = new ScriptedAppServerTransport();
+
+        var zeroWrite = Assert.Throws<ArgumentOutOfRangeException>(() => new CodexAppServerInferenceClient(
+            options,
+            transport: transport,
+            postCheckpointWriteDeadline: TimeSpan.Zero));
+        var relaxedWrite = Assert.Throws<ArgumentOutOfRangeException>(() => new CodexAppServerInferenceClient(
+            options,
+            transport: transport,
+            postCheckpointWriteDeadline: TimeSpan.FromSeconds(16)));
+        var zeroAudit = Assert.Throws<ArgumentOutOfRangeException>(() => new CodexAppServerInferenceClient(
+            options,
+            transport: transport,
+            lateTransportAuditDeadline: TimeSpan.Zero));
+        var relaxedAudit = Assert.Throws<ArgumentOutOfRangeException>(() => new CodexAppServerInferenceClient(
+            options,
+            transport: transport,
+            lateTransportAuditDeadline: TimeSpan.FromSeconds(6)));
+
+        Assert.Equal("postCheckpointWriteDeadline", zeroWrite.ParamName);
+        Assert.Equal("postCheckpointWriteDeadline", relaxedWrite.ParamName);
+        Assert.Equal("lateTransportAuditDeadline", zeroAudit.ParamName);
+        Assert.Equal("lateTransportAuditDeadline", relaxedAudit.ParamName);
+    }
+
+    [Fact]
     public async Task GenerateAsync_streams_agent_message_deltas_and_returns_completed_message()
     {
         var transport = new ScriptedAppServerTransport(
@@ -616,7 +651,9 @@ public sealed class CodexAppServerInferenceTests
                 return Task.CompletedTask;
             }
         };
-        await using var client = CreateRawClient(transport);
+        await using var client = CreateRawClient(
+            transport,
+            postCheckpointWriteDeadline: TimeSpan.FromMilliseconds(250));
         var durableDispatchStarted = false;
 
         var exception = await Assert.ThrowsAsync<TimeoutException>(() => client.GenerateAsync(
@@ -782,7 +819,10 @@ public sealed class CodexAppServerInferenceTests
             }
         };
         var auditLog = new BlockingAuditLog();
-        await using var client = CreateRawClient(transport, auditLog);
+        await using var client = CreateRawClient(
+            transport,
+            auditLog,
+            lateTransportAuditDeadline: TimeSpan.FromMilliseconds(250));
         var generation = client.GenerateAsync(
             LlmInferenceRequest.FromUserText("hello"),
             responseChunkHandler: null,
@@ -1157,7 +1197,9 @@ public sealed class CodexAppServerInferenceTests
     private static CodexAppServerInferenceClient CreateRawClient(
         ScriptedAppServerTransport transport,
         IAuditLog? auditLog = null,
-        Action? providerRequestStarted = null)
+        Action? providerRequestStarted = null,
+        TimeSpan? postCheckpointWriteDeadline = null,
+        TimeSpan? lateTransportAuditDeadline = null)
     {
         return new CodexAppServerInferenceClient(new LlmInferenceClientOptions
         {
@@ -1165,7 +1207,12 @@ public sealed class CodexAppServerInferenceTests
             Model = "gpt-test",
             WorkingDirectory = Directory.GetCurrentDirectory(),
             CodexSandbox = "read-only"
-        }, transport: transport, auditLog: auditLog, providerRequestStarted: providerRequestStarted);
+        },
+        transport: transport,
+        auditLog: auditLog,
+        providerRequestStarted: providerRequestStarted,
+        postCheckpointWriteDeadline: postCheckpointWriteDeadline,
+        lateTransportAuditDeadline: lateTransportAuditDeadline);
     }
 
     private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt prompt, LoopDefinition? loopDefinition = null)

@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -32,6 +33,7 @@ public sealed class HumanInputResponseStoreTests
 {
     private static readonly JsonSerializerOptions _responseJsonOptions = new(JsonSerializerDefaults.Web)
     {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) }
     };
 
@@ -390,44 +392,50 @@ public sealed class HumanInputResponseStoreTests
                 ImmutableArray.Create("role-00"))
         });
         var create = Create(request);
-        var store = Store(paths, trust);
-        await store.CommitAsync(create);
+        var authenticated = false;
+        HumanInputRequestPersistenceBoundary? boundary = null;
+        var store = Store(paths, trust, new HumanInputRequestStoreOptions
+        {
+            AuthenticatedArtifactObserver = _ =>
+            {
+                authenticated = true;
+                return ValueTask.CompletedTask;
+            },
+            DurableBoundaryObserver = (observed, _) =>
+            {
+                boundary = observed;
+                return ValueTask.CompletedTask;
+            }
+        });
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(create)).Status);
+        var seeded = await SeedMaximumResponseArtifactsAsync(paths, trust, request, create);
+        var seededDocument = JsonNode.Parse(await File.ReadAllTextAsync(PrimaryPath(paths)))!.AsObject();
+        var trustState = await trust.ReadAsync(seededDocument["workspaceIdentity"]!.GetValue<string>());
+        Assert.Equal(seeded.Generation, trustState!.CurrentGeneration);
+        Assert.Equal(seededDocument["contentDigest"]!.GetValue<string>(), trustState.CurrentContentDigest);
+        authenticated = false;
+        boundary = null;
         IHumanInputResponseLifecycleStore responses = store;
-        var firstVersion = await AppendMaximumResponseArtifactsAsync(
-            responses,
-            request,
-            create.PrimaryHeadToWrite!,
-            1,
-            "v1");
-        var amend = TransitionMutation(
-            HumanInputRequestLifecycleOperationKind.Amend,
-            request,
-            create.PrimaryHeadToWrite!,
-            firstVersion.Generation,
-            "amend-version",
-            HashC);
-        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(amend)).Status);
-        var amendedRequest = amend.RequestToAppend!;
-        var secondVersion = await AppendMaximumResponseArtifactsAsync(
-            responses,
-            amendedRequest,
-            amend.PrimaryHeadToWrite!,
-            firstVersion.Generation + 1,
-            "v2");
+        var seededRead = await responses.ReadAsync(Reference(seeded.AmendedRequest));
+        Assert.True(authenticated);
+        Assert.Equal(HumanInputResponseLifecycleStoreReadStatus.Ready, seededRead.Status);
         var releaseActor = respondents[0];
         var release = Withdraw(
-            amendedRequest,
-            amend.PrimaryHeadToWrite!,
-            secondVersion.Generation,
+            seeded.AmendedRequest,
+            seeded.AmendedHead,
+            seeded.Generation,
             "v2-release-one",
-            secondVersion.ActiveResponse,
+            seeded.ActiveResponse,
             releaseActor.RespondentId,
             releaseActor.RespondentRoleId);
-        Assert.Equal(HumanInputResponseLifecycleStoreCommitStatus.Committed, (await responses.CommitAsync(release)).Status);
+        var released = await responses.CommitAsync(release);
+        Assert.True(authenticated);
+        Assert.Equal(HumanInputRequestPersistenceBoundary.TrustAdvanced, boundary);
+        Assert.Equal(HumanInputResponseLifecycleStoreCommitStatus.Committed, released.Status);
         var sixtyFifth = Submit(
-            amendedRequest,
-            amend.PrimaryHeadToWrite!,
-            secondVersion.Generation + 1,
+            seeded.AmendedRequest,
+            seeded.AmendedHead,
+            seeded.Generation + 1,
             "v2-submit-65",
             "v2-response-65",
             answer: false,
@@ -436,10 +444,10 @@ public sealed class HumanInputResponseStoreTests
 
         var limited = await responses.CommitAsync(sixtyFifth);
         var firstRead = await responses.ReadAsync(Reference(request));
-        var secondRead = await responses.ReadAsync(Reference(amendedRequest));
+        var secondRead = await responses.ReadAsync(Reference(seeded.AmendedRequest));
 
         Assert.Equal(HumanInputResponseLifecycleStoreCommitStatus.LimitExceeded, limited.Status);
-        Assert.Equal(secondVersion.Generation + 1, limited.StoreGeneration);
+        Assert.Equal(seeded.Generation + 1, limited.StoreGeneration);
         Assert.Equal(HumanInputResponseContractLimits.MaxResponsesPerRequest, firstRead.Snapshot!.Responses.Count);
         Assert.Equal(HumanInputResponseContractLimits.MaxResponsesPerRequest, secondRead.Snapshot!.Responses.Count);
         Assert.DoesNotContain(secondRead.Snapshot.Responses, response => string.Equals(response.ResponseId, "v2-response-65", StringComparison.Ordinal));
@@ -2332,13 +2340,50 @@ public sealed class HumanInputResponseStoreTests
         await File.WriteAllTextAsync(output, result.Status.ToString());
     }
 
-    private static async Task<(long Generation, HumanInputResponseReference ActiveResponse)> AppendMaximumResponseArtifactsAsync(
-        IHumanInputResponseLifecycleStore store,
+    private static async Task<(long Generation, HumanInputRequest AmendedRequest, HumanInputRequestLifecycleHead AmendedHead, HumanInputResponseReference ActiveResponse)> SeedMaximumResponseArtifactsAsync(
+        WorkspacePaths paths,
+        TestCapabilityLifecycleTrustProvider trust,
+        HumanInputRequest request,
+        HumanInputRequestLifecycleStoreMutation create)
+    {
+        var root = JsonNode.Parse(await File.ReadAllTextAsync(PrimaryPath(paths)))!.AsObject();
+        var firstVersion = AppendMaximumResponseArtifacts(
+            root,
+            request,
+            create.PrimaryHeadToWrite!,
+            1,
+            "v1");
+        var amend = TransitionMutation(
+            HumanInputRequestLifecycleOperationKind.Amend,
+            request,
+            create.PrimaryHeadToWrite!,
+            firstVersion.Generation,
+            "amend-version",
+            HashC);
+        root["operations"]!.AsArray().Add(RequestOperationEnvelope(amend.Operation));
+        root["requestVersions"]!.AsArray().Add(ToJsonNode(amend.RequestToAppend!));
+        root["heads"]!.AsArray()[0] = ToJsonNode(amend.PrimaryHeadToWrite!);
+        var amendedRequest = amend.RequestToAppend!;
+        var secondVersion = AppendMaximumResponseArtifacts(
+            root,
+            amendedRequest,
+            amend.PrimaryHeadToWrite!,
+            firstVersion.Generation + 1,
+            "v2");
+        root["generation"] = secondVersion.Generation;
+        await ReplaceAuthenticatedAsync(paths, trust, root);
+        return (secondVersion.Generation, amendedRequest, amend.PrimaryHeadToWrite!, secondVersion.ActiveResponse);
+    }
+
+    private static (long Generation, HumanInputResponseReference ActiveResponse) AppendMaximumResponseArtifacts(
+        JsonObject root,
         HumanInputRequest request,
         HumanInputRequestLifecycleHead head,
         long generation,
         string operationPrefix)
     {
+        var operations = root["operations"]!.AsArray();
+        var responseArtifacts = root["responseArtifacts"]!.AsArray();
         HumanInputResponseReference? activeResponse = null;
         var respondents = request.EligibleRespondents;
         var batchCount = HumanInputResponseContractLimits.MaxResponsesPerRequest / respondents.Length;
@@ -2358,7 +2403,8 @@ public sealed class HumanInputResponseStoreTests
                     answer: false,
                     respondent.RespondentId,
                     respondent.RespondentRoleId);
-                Assert.Equal(HumanInputResponseLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(submit)).Status);
+                responseArtifacts.Add(ResponseArtifactNode(submit.ResponseToAppend!));
+                operations.Add(ResponseOperationEnvelope(submit.Operation));
                 generation++;
                 batchResponses.Add((submit.Operation.SubmittedResponse!, respondent));
             }
@@ -2380,12 +2426,57 @@ public sealed class HumanInputResponseStoreTests
                     item.Response,
                     item.Respondent.RespondentId,
                     item.Respondent.RespondentRoleId);
-                Assert.Equal(HumanInputResponseLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(withdraw)).Status);
+                operations.Add(ResponseOperationEnvelope(withdraw.Operation));
                 generation++;
             }
         }
 
         return (generation, activeResponse!);
+    }
+
+    private static JsonObject RequestOperationEnvelope(HumanInputRequestLifecycleOperationEvidence operation)
+    {
+        var evidence = ToJsonNode(operation).AsObject();
+        evidence["actorId"] = operation.ActorId.Value;
+        evidence["reason"] = operation.Reason.Value;
+        if (operation.GrantReference is { } grant)
+        {
+            evidence["grantReference"] = new JsonObject
+            {
+                ["grantId"] = grant.GrantId.Value,
+                ["revision"] = grant.Revision.ToString(),
+                ["contentHash"] = grant.ContentHash
+            };
+        }
+        return new()
+        {
+            ["schemaVersion"] = 1,
+            ["operationId"] = operation.OperationId,
+            ["family"] = "request-lifecycle",
+            ["requestLifecycle"] = evidence,
+            ["responseLifecycle"] = null
+        };
+    }
+
+    private static JsonObject ResponseOperationEnvelope(HumanInputResponseOperationEvidence operation)
+    {
+        var evidence = ToJsonNode(operation).AsObject();
+        evidence["actorId"] = operation.ActorId.Value;
+        return new()
+        {
+            ["schemaVersion"] = 1,
+            ["operationId"] = operation.OperationId,
+            ["family"] = "response-lifecycle",
+            ["requestLifecycle"] = null,
+            ["responseLifecycle"] = evidence
+        };
+    }
+
+    private static JsonObject ResponseArtifactNode(HumanInputResponseArtifact artifact)
+    {
+        var node = ToJsonNode(artifact).AsObject();
+        node["actorId"] = artifact.ActorId.Value;
+        return node;
     }
 
     private static HumanInputResponseLifecycleStoreMutation Submit(
@@ -2784,6 +2875,23 @@ public sealed class HumanInputResponseStoreTests
             root["generation"]!.GetValue<long>(),
             contentDigest,
             AuthenticationTag);
+    }
+
+    private static async Task ReplaceAuthenticatedAsync(
+        WorkspacePaths paths,
+        TestCapabilityLifecycleTrustProvider trust,
+        JsonObject root)
+    {
+        root["contentDigest"] = string.Empty;
+        root["authenticationTag"] = string.Empty;
+        var canonical = JsonSerializer.Serialize(root, _responseJsonOptions);
+        var contentDigest = CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes(canonical)).Value;
+        var workspaceIdentity = root["workspaceIdentity"]!.GetValue<string>();
+        var generation = root["generation"]!.GetValue<long>();
+        root["contentDigest"] = contentDigest;
+        root["authenticationTag"] = await trust.AuthenticateArtifactAsync(workspaceIdentity, generation, contentDigest);
+        await File.WriteAllTextAsync(PrimaryPath(paths), JsonSerializer.Serialize(root, _responseJsonOptions) + Environment.NewLine);
+        trust.SetCurrent(workspaceIdentity, generation, contentDigest);
     }
 
     private static JsonNode ToJsonNode<T>(T value)

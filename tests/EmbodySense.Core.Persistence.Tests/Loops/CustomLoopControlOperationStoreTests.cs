@@ -1631,10 +1631,11 @@ public sealed class CustomLoopControlOperationStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.CustomLoopControlOperationsPath);
-        for (var index = 0; index <= CustomLoopReceiptRetentionPolicy.MaxLifecycleControlReceiptCount; index++)
-        {
-            File.Create(Path.Combine(paths.CustomLoopControlOperationsPath, $"control-inventory-{index:D5}.json")).Dispose();
-        }
+        Parallel.For(
+            0,
+            CustomLoopReceiptRetentionPolicy.MaxLifecycleControlReceiptCount + 1,
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Min(8, Environment.ProcessorCount) },
+            index => File.Create(Path.Combine(paths.CustomLoopControlOperationsPath, $"control-inventory-{index:D5}.json")).Dispose());
 
         var lockedPath = Path.Combine(paths.CustomLoopControlOperationsPath, "control-inventory-00000.json");
         using var unreadableReceipt = new FileStream(lockedPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);

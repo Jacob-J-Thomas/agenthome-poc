@@ -26,6 +26,7 @@ using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -1244,6 +1245,7 @@ public sealed class CustomLoopRuntimeTests
         };
         var completedAtUtc = DateTimeOffset.UtcNow.ToUniversalTime() - CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration - TimeSpan.FromDays(1);
         long retainedBytes = 0;
+        var writes = new List<(string Path, string Json)>();
         for (var index = 0; retainedBytes <= CustomLoopLimits.MaxInvocationOperationWorkspaceUtf8Bytes; index++)
         {
             var operationId = $"invoke-expired-{index:D5}";
@@ -1257,12 +1259,23 @@ public sealed class CustomLoopRuntimeTests
                 State = CustomLoopInvocationOperationState.Complete,
                 Outcome = CustomLoopInvocationOutcome.Rejected,
                 AdmissionStatus = CustomLoopAdmissionStatusNames.NotFound,
-                Detail = new string('d', CustomLoopLimits.MaxRunDetailCharacters)
+                // U+0800 is one valid BMP scalar and is represented by three UTF-8 bytes (or a
+                // six-byte JSON escape). It fills the real character limit with fewer receipts
+                // while preserving the exact 128 MiB workspace-byte boundary exercised below.
+                Detail = new string('\u0800', CustomLoopLimits.MaxRunDetailCharacters)
             };
             var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, operationId + ".json");
-            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(completed, jsonOptions));
-            retainedBytes += new FileInfo(path).Length;
+            var json = JsonSerializer.Serialize(completed, jsonOptions);
+            writes.Add((path, json));
+            retainedBytes += Encoding.UTF8.GetByteCount(json);
         }
+
+        Assert.True(retainedBytes > CustomLoopLimits.MaxInvocationOperationWorkspaceUtf8Bytes);
+        await Parallel.ForEachAsync(
+            writes,
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Min(8, Environment.ProcessorCount) },
+            async (write, cancellationToken) => await File.WriteAllTextAsync(write.Path, write.Json, cancellationToken));
+        Assert.Equal(retainedBytes, writes.Sum(write => new FileInfo(write.Path).Length));
     }
 
     private static async Task PersistRejectedReceiptAsync(WorkspacePaths paths, LoopRunInvocationInput input, string roleId, string runId, CustomLoopAdmissionStatus admissionStatus)

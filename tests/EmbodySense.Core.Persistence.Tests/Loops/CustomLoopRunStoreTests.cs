@@ -1323,10 +1323,10 @@ public sealed class CustomLoopRunStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        for (var index = 0; index < CustomLoopLimits.MaxRunTracesPerWorkspace; index++)
-        {
-            await WriteDirectAsync(paths, CreateRun($"loop-{index:D3}", $"run-{index:D3}", $"invoke-{index:D3}"));
-        }
+        await WriteDirectBatchAsync(
+            paths,
+            Enumerable.Range(0, CustomLoopLimits.MaxRunTracesPerWorkspace)
+                .Select(index => CreateRun($"loop-{index:D3}", $"run-{index:D3}", $"invoke-{index:D3}")));
 
         var extra = CreateRun("loop-extra", "run-extra", "invoke-extra");
         var store = new CustomLoopRunStore(paths);
@@ -1346,10 +1346,10 @@ public sealed class CustomLoopRunStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var maximumReservations = checked((int)(CustomLoopLimits.MaxRunTraceWorkspaceUtf8Bytes / CustomLoopLimits.MaxRunTraceUtf8Bytes));
-        for (var index = 0; index < maximumReservations; index++)
-        {
-            await WriteDirectAsync(paths, CreateRun($"loop-{index:D3}", $"run-{index:D3}", $"invoke-{index:D3}"));
-        }
+        await WriteDirectBatchAsync(
+            paths,
+            Enumerable.Range(0, maximumReservations)
+                .Select(index => CreateRun($"loop-{index:D3}", $"run-{index:D3}", $"invoke-{index:D3}")));
 
         var store = new CustomLoopRunStore(paths);
         var quota = await store.GetTraceQuotaAsync();
@@ -1822,6 +1822,14 @@ public sealed class CustomLoopRunStoreTests
         var directory = Path.Combine(paths.CustomLoopRunsPath, run.LoopId);
         Directory.CreateDirectory(directory);
         await File.WriteAllBytesAsync(Path.Combine(directory, run.Id + ".json"), content);
+    }
+
+    private static async Task WriteDirectBatchAsync(WorkspacePaths paths, IEnumerable<CustomLoopRunRecord> runs)
+    {
+        await Parallel.ForEachAsync(
+            runs,
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Min(8, Environment.ProcessorCount) },
+            async (run, _) => await WriteDirectAsync(paths, run));
     }
 
     private static async Task<string> WriteRawAsync(WorkspacePaths paths, string loopId, string runId, string content)
