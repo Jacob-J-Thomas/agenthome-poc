@@ -60,7 +60,7 @@ public sealed class CustomLoopRuntimeTests
             + new string('p', TailBoundaryOffset - 2)
             + "😀"
             + new string('p', conversationTailCharacters - 1);
-        _ = await runtime.RunTurnAsync(oversizedPrompt);
+        await AppendFakeConversationTurnAsync(workspace, oversizedPrompt);
 
         var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-unicode-context", "capture Unicode safely"));
 
@@ -432,9 +432,12 @@ public sealed class CustomLoopRuntimeTests
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-entry-cap", "update-runtime-entry-cap");
         await using var runtime = await CreateRuntimeAsync(workspace);
-        for (var index = 0; index < (CustomLoopLimits.MaxInvokingConversationEntries / 2) + 1; index++)
+        var conversationStore = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        for (var index = 0; index <= CustomLoopLimits.MaxInvokingConversationEntries; index++)
         {
-            _ = await runtime.RunTurnAsync("x");
+            await conversationStore.AppendMessageAsync(index % 2 == 0
+                ? LlmMessage.User($"bounded user entry {index}")
+                : LlmMessage.Assistant($"bounded assistant entry {index}"));
         }
 
         var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-entry-cap", "entry cap test"));
@@ -703,7 +706,7 @@ public sealed class CustomLoopRuntimeTests
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-context", "update-runtime-context");
         await using var runtime = await CreateRuntimeAsync(workspace);
         var oversizedPrompt = "prompt-head-" + new string('x', CustomLoopLimits.MaxInvokingConversationCharacters + 500) + "-prompt-tail";
-        _ = await runtime.RunTurnAsync(oversizedPrompt);
+        await AppendFakeConversationTurnAsync(workspace, oversizedPrompt);
 
         var first = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-context-1", "first custom task"));
         var second = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-context-2", "second custom task"));
@@ -1410,6 +1413,13 @@ public sealed class CustomLoopRuntimeTests
             await CreateFakeCodexExecutableAsync(workspace),
             "read-only",
             AgentRuntimeSurface.Cli);
+    }
+
+    private static async Task AppendFakeConversationTurnAsync(TestWorkspace workspace, string prompt)
+    {
+        var conversationStore = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        await conversationStore.AppendMessageAsync(LlmMessage.User(prompt));
+        await conversationStore.AppendMessageAsync(LlmMessage.Assistant("fake response: " + prompt));
     }
 
     private sealed class RecordingConversationPublicationObserver : IAgentRuntimeConversationPublicationObserver
