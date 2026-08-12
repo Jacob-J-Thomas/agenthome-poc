@@ -794,7 +794,7 @@ public sealed class GovernedLoopGraphValidationService
                 isSaturated |= component.Any(nodeId => InternalControlFanOut(nodeId, componentNodeIds, graph) > 1);
             }
 
-            var internalMultiplier = cyclic ? CycleIterationProduct(component, graph, semantics, ref isSaturated) : 1;
+            var internalMultiplier = cyclic ? CycleIterationCeiling(component, graph, semantics, ref isSaturated) : 1;
             var executionMultiplicity = SaturatingMultiply(entries[componentIndex], internalMultiplier, ref isSaturated);
             long componentAttempts = 0;
             long componentPayloadCharacters = 0;
@@ -835,9 +835,9 @@ public sealed class GovernedLoopGraphValidationService
         return graph.ControlEdges.Count(edge => string.Equals(edge.FromNodeId, nodeId, StringComparison.Ordinal) && componentNodeIds.Contains(edge.ToNodeId));
     }
 
-    private static long CycleIterationProduct(IReadOnlyList<string> component, GovernedLoopGraphDefinition graph, IReadOnlyDictionary<string, GovernedLoopNodeCatalogDescriptor> semantics, ref bool isSaturated)
+    private static long CycleIterationCeiling(IReadOnlyList<string> component, GovernedLoopGraphDefinition graph, IReadOnlyDictionary<string, GovernedLoopNodeCatalogDescriptor> semantics, ref bool isSaturated)
     {
-        long product = 1;
+        var ceiling = long.MaxValue;
         foreach (var nodeId in component.Order(StringComparer.Ordinal))
         {
             var node = graph.Nodes.Single(node => string.Equals(node.Id, nodeId, StringComparison.Ordinal));
@@ -847,10 +847,10 @@ public sealed class GovernedLoopGraphValidationService
                 return long.MaxValue;
             }
 
-            product = SaturatingMultiply(product, iterations, ref isSaturated);
+            ceiling = Math.Min(ceiling, iterations);
         }
 
-        return product;
+        return ceiling;
     }
 
     private static long SaturatingAdd(long left, long right, ref bool isSaturated)

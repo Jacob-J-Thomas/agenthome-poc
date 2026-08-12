@@ -801,7 +801,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
     }
 
     [Fact]
-    public async Task ValidateAcceptsSingleSuccessorNestedCycleAtLimitAndRejectsLimitPlusOne()
+    public async Task ValidatePricesMultiNodeCycleAtTheMinimumRuntimeCeiling()
     {
         var nodes = Nodes();
         nodes[1] = nodes[1] with { Parameters = CycleParameters("2") };
@@ -822,8 +822,8 @@ public sealed class GovernedLoopGraphValidationServiceTests
         }).ToArray();
         var overLimit = atLimit.Select(descriptor => descriptor.Descriptor.TypeId == "nested-transform" ? descriptor with { ResourceBudget = new GovernedLoopNodeResourceBudget(6, 0, 0, 0) } : descriptor).ToArray();
 
-        var valid = await Service(atLimit, Authority() with { MaxAttempts = 60 }).ValidateAsync(candidate);
-        var invalid = await Service(overLimit, Authority() with { MaxAttempts = 65 }).ValidateAsync(candidate);
+        var valid = await Service(atLimit, Authority() with { MaxAttempts = 20 }).ValidateAsync(candidate);
+        var invalid = await Service(overLimit, Authority() with { MaxAttempts = 20 }).ValidateAsync(candidate);
 
         Assert.True(valid.IsValid);
         Assert.Contains(invalid.Errors, error => error.Code == "graph.resources.attempts");
@@ -884,7 +884,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
     }
 
     [Fact]
-    public async Task ValidateFailsClosedWhenNestedCycleMultiplierSaturatesWithZeroBudgets()
+    public async Task ValidateUsesTheSharedSccCycleCeilingWithoutMultiplyingNodeBudgets()
     {
         var nodes = Nodes();
         nodes[1] = nodes[1] with { Parameters = CycleParameters(CustomLoopLimits.MaxGraphCycleIterations.ToString()) };
@@ -905,8 +905,44 @@ public sealed class GovernedLoopGraphValidationServiceTests
 
         var result = await Service(descriptors).ValidateAsync(candidate);
 
-        Assert.Contains(result.Errors, error => error.Code == "graph.resources.activation-envelope");
-        Assert.DoesNotContain(result.Errors, error => error.Code.StartsWith("graph.resources.", StringComparison.Ordinal) && error.Code != "graph.resources.activation-envelope");
+        Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public async Task ValidatePricesEveryNodeInOneCycleAtTheRuntimeMinimumIterationCeiling()
+    {
+        var nodes = Nodes();
+        nodes[1] = nodes[1] with { Parameters = CycleParameters("10") };
+        var second = new GovernedLoopNodeDefinition(
+            "second",
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "second-transform", 1),
+            [],
+            GovernedLoopAuthorityCeiling.Create([]),
+            CycleParameters("10"));
+        var candidate = Candidate(
+            nodes: [.. nodes, second],
+            edges:
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("infer-to-second", "infer", "second", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("second-to-infer", "second", "infer", GovernedLoopControlCondition.Failure),
+                new GovernedLoopControlEdgeDefinition("second-to-exit", "second", "exit", GovernedLoopControlCondition.Success),
+            ]);
+        var descriptors = Descriptors(candidate).Select(descriptor => descriptor.Descriptor.TypeId switch
+        {
+            "provider-inference" or "second-transform" => EnableCycle(descriptor) with
+            {
+                ResourceBudget = new GovernedLoopNodeResourceBudget(3, 0, 0, 0),
+            },
+            _ => descriptor,
+        }).ToArray();
+
+        var exact = await Service(descriptors, Authority() with { MaxAttempts = 60 }).ValidateAsync(candidate);
+        var insufficient = await Service(descriptors.Reverse().ToArray(), Authority() with { MaxAttempts = 59 }).ValidateAsync(
+            candidate with { ControlEdges = candidate.ControlEdges!.Reverse().ToArray() });
+
+        Assert.True(exact.IsValid);
+        Assert.Contains(insufficient.Errors, error => error.Code == "graph.resources.attempts");
     }
 
     [Fact]
