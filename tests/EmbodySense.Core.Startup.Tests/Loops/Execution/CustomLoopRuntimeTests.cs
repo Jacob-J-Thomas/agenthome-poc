@@ -588,6 +588,7 @@ public sealed class CustomLoopRuntimeTests
         var defaultTurn = runtime.RunTurnAsync("delayed default turn");
         await WaitForAttemptStartAsync(workspace);
         await conversationMemory.StartFreshConversationAsync();
+        ReleaseAttempt(workspace);
         var divergentDefaultTurn = await defaultTurn;
         Assert.Equal("MessageNeedsReview", divergentDefaultTurn.Status.ToString());
         Assert.Contains("Existing user-owned content was preserved", divergentDefaultTurn.FailureDetail, StringComparison.Ordinal);
@@ -613,6 +614,7 @@ public sealed class CustomLoopRuntimeTests
         await WaitForAttemptStartAsync(workspace);
         await conversationMemory.StartFreshConversationAsync();
         var replacementIdentity = (await conversationMemory.LoadCurrentConversationSnapshotAsync()).Version;
+        ReleaseAttempt(workspace);
 
         var response = await invocation;
         var persistedConversation = await conversationMemory.LoadCurrentConversationAsync();
@@ -870,6 +872,7 @@ public sealed class CustomLoopRuntimeTests
         var invocation = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-idempotent-publish", Prompt));
         await WaitForAttemptStartAsync(workspace);
         await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).AppendMessageAsync(LlmMessage.Assistant(expectedOutput));
+        ReleaseAttempt(workspace);
 
         var history = await runtime.RunTurnAsync("/history");
         var loaded = await runtime.RunTurnAsync("1");
@@ -899,6 +902,7 @@ public sealed class CustomLoopRuntimeTests
         await WaitForAttemptStartAsync(workspace);
 
         var interleavingTurn = await runtime.RunTurnAsync("interleaving ordinary turn");
+        ReleaseAttempt(workspace);
         var response = await invocation;
 
         Assert.Equal("MessageCompleted", interleavingTurn.Status.ToString());
@@ -922,6 +926,7 @@ public sealed class CustomLoopRuntimeTests
         var invocation = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-append-failure", "delayed append failure"));
         await WaitForAttemptStartAsync(workspace);
         File.SetAttributes(paths.CurrentConversationPath, FileAttributes.ReadOnly);
+        ReleaseAttempt(workspace);
 
         LoopRunInvocationResponse response;
         try
@@ -954,6 +959,7 @@ public sealed class CustomLoopRuntimeTests
         var second = runtime.InvokeCustomLoopAsync(secondInput);
         var firstCompletion = await Task.WhenAny(first, second);
         var rejected = await second;
+        ReleaseAttempt(workspace);
         var completed = await first;
         var busyReplay = await runtime.InvokeCustomLoopAsync(secondInput);
         var changedContent = await runtime.InvokeCustomLoopAsync(secondInput with { InvocationPrompt = "changed invocation" });
@@ -987,6 +993,7 @@ public sealed class CustomLoopRuntimeTests
         var first = runtime.InvokeCustomLoopAsync(input);
         await WaitForAttemptStartAsync(workspace);
         var concurrent = await runtime.InvokeCustomLoopAsync(input);
+        ReleaseAttempt(workspace);
         var completed = await first;
         var replay = await runtime.InvokeCustomLoopAsync(input);
 
@@ -1399,23 +1406,44 @@ public sealed class CustomLoopRuntimeTests
 
     private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, IAgentRuntimeConversationPublicationObserver? observer = null)
     {
-        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath, conversationPublicationObserver: observer);
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace);
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+            new RejectingApprovalPrompt(),
+            workspace.ServerStatePath,
+            CreateCompatibleRuntimeStatus(executablePath),
+            observer);
         return await factory.CreateAsync(
             "test-model",
             workspace.RootPath,
-            await CreateFakeCodexExecutableAsync(workspace),
+            executablePath,
             "read-only",
             AgentRuntimeSurface.Cli);
     }
 
     private static async Task<AgentRuntime> CreateRuntimeWithoutProviderAsync(TestWorkspace workspace)
     {
-        return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath).CreateAsync(
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace);
+        return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+            new RejectingApprovalPrompt(),
+            workspace.ServerStatePath,
+            CreateCompatibleRuntimeStatus(executablePath)).CreateAsync(
             "test-model",
             workspace.RootPath,
-            await CreateFakeCodexExecutableAsync(workspace),
+            executablePath,
             "read-only",
             AgentRuntimeSurface.Cli);
+    }
+
+    private static CodexRuntimeStatus CreateCompatibleRuntimeStatus(string executablePath)
+    {
+        return new CodexRuntimeStatus(
+            CodexRuntimeCompatibility.Compatible,
+            executablePath,
+            executablePath,
+            "codex-cli 999.0.0-test",
+            "test-model",
+            "controlled test",
+            "The isolated fake provider is pre-admitted for this runtime integration scenario.");
     }
 
     private static async Task AppendFakeConversationTurnAsync(TestWorkspace workspace, string prompt)
@@ -1446,6 +1474,11 @@ public sealed class CustomLoopRuntimeTests
         }
 
         Assert.True(File.Exists(markerPath), $"The custom-loop provider attempt did not start within {_providerAttemptStartTimeout.TotalSeconds:0} seconds.");
+    }
+
+    private static void ReleaseAttempt(TestWorkspace workspace)
+    {
+        File.WriteAllText(workspace.File("custom-attempt-release.marker"), "released");
     }
 
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace)
@@ -1523,15 +1556,13 @@ public sealed class CustomLoopRuntimeTests
                   const heldOnceMarker = path.join(__dirname, "custom-attempt-held-once.marker");
                   const shouldHold = userText.includes("held")
                     && (!userText.includes("held-once") || !fs.existsSync(heldOnceMarker));
-                  if (shouldHold) {
+                  const shouldDelay = userText.includes("delayed");
+                  if (shouldHold || shouldDelay) {
                     if (userText.includes("held-once")) {
                       fs.writeFileSync(heldOnceMarker, "held");
                     }
                     fs.writeFileSync(path.join(__dirname, "custom-attempt-started.marker"), "started");
                     await waitForReleaseMarker(path.join(__dirname, "custom-attempt-release.marker"));
-                  } else if (userText.includes("delayed")) {
-                    fs.writeFileSync(path.join(__dirname, "custom-attempt-started.marker"), "started");
-                    await delay(1500);
                   }
 
                   const triggerMatch = userText.match(/(\[EmbodySense untrusted trigger prompt data\]\r?\n[\s\S]*?)\r?\n\[\/restored user message\]/);
