@@ -116,6 +116,9 @@ Assert-Contains -Actual $phaseScript -Expected 'if ($null -ne $commandScriptPath
 Assert-Contains -Actual $phaseScript -Expected 'elseif ($null -ne $startInfo.PSObject.Properties["ArgumentList"]) {' -Message "Non-batch phases must use ArgumentList when available."
 Assert-Contains -Actual $phaseScript -Expected 'VERIFY_CHILD_TIMEOUT name=$Name' -Message "Sequential timeouts must emit structured watchdog evidence."
 Assert-Contains -Actual $parallelScript -Expected 'Sort-Object -Property @{ Expression = "Priority"; Descending = $true }' -Message "Parallel phase priority must be deterministic and longest-first capable."
+Assert-Contains -Actual $parallelScript -Expected '[Math]::Min($MaximumWorkers, [Math]::Max(1, [Environment]::ProcessorCount))' -Message "Parallel resource capacity must never exceed the available processor count."
+Assert-Contains -Actual $parallelScript -Expected 'Select-VerificationParallelPhase -Pending $pending -AvailableCapacity $availableCapacity' -Message "The scheduler must select a fitting phase instead of blocking behind the queue head."
+Assert-Contains -Actual $parallelScript -Expected 'if ($Pending[$index].SchedulingDeferrals -ge 1)' -Message "Backfill must reserve a later fitting opportunity for bypassed phases."
 Assert-Contains -Actual $parallelScript -Expected 'VERIFY_CHILD_TIMEOUT name=$($result.Name)' -Message "Parallel timeouts must emit structured watchdog evidence."
 Assert-Contains -Actual $verifyScript -Expected '$testLaneTimeoutSeconds = 480' -Message "Every required lane must fit inside the outer budget."
 Assert-Contains -Actual $verifyScript -Expected 'Get-ProjectCoverageIsolation' -Message "Every test project must execute from isolated exact-build copies."
@@ -136,6 +139,11 @@ Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "l
 Assert-True -Condition ($verifyScript.IndexOf('[pscustomobject]@{ Name = "loop-execution";', [StringComparison]::Ordinal) -lt 0) -Message "The oversized serial Startup execution lane must not be restored."
 Assert-Contains -Actual $verifyScript -Expected '"EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime" { 2150; break }' -Message "The longest measured Startup execution lane must enter the worker queue early."
 Assert-Contains -Actual $verifyScript -Expected '"EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime" { 2075; break }' -Message "The Windows-dependent custom runtime lane must enter the worker queue before general Startup work."
+foreach ($heavyLane in @("EmbodySense.Core.Persistence.Tests-human-input-responses", "EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime", "EmbodySense.Core.Persistence.Tests-triggers", "EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime")) {
+    Assert-Contains -Actual $verifyScript -Expected "`"$heavyLane`" { `$true; break }" -Message "Measured process-heavy lane '$heavyLane' must consume two resource units."
+}
+Assert-Contains -Actual $verifyScript -Expected '-Weight $weight -ResourceClass $resourceClass' -Message "Every required test lane must declare explicit scheduler resource metadata."
+Assert-Contains -Actual $verifyScript -Expected 'kind=required-gates phases=$($script:VerificationParallelPhases.Count) maximum_resource_capacity=$MaximumTestWorkers' -Message "The required-gate plan must report capacity semantics instead of implying each child consumes one worker."
 Assert-Contains -Actual $verifyScript -Expected 'identity=TestCase.Id partition_identity=XunitTestCaseUniqueID' -Message "Stable inventory identities must remain explicit."
 Assert-Contains -Actual $verifyScript -Expected 'verify-test-partition.ps1' -Message "Canonical discovery and declarative lane selection must be reconciled."
 Assert-Contains -Actual $verifyScript -Expected 'Write-CoverageManifest' -Message "Coverage must be bound to an exact fresh report manifest."

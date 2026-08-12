@@ -25,7 +25,6 @@ $stressResultsPath = Join-Path $testsPath "EmbodySense.Core.Persistence.Tests\Te
 $verificationResultsPath = Join-Path $testsPath "VerificationResults"
 $verificationLogsPath = Join-Path $verificationResultsPath "Logs"
 $canonicalInventoryRoot = Join-Path $verificationResultsPath "Inventory\Canonical"
-$laneInventoryRoot = Join-Path $verificationResultsPath "Inventory\Lanes"
 $verificationInventoryPath = Join-Path $verificationResultsPath "required-execution-tests.json"
 $verificationPartitionReportPath = Join-Path $verificationResultsPath "required-test-partition.json"
 $verificationInventoryReportPath = Join-Path $verificationResultsPath "required-test-report.json"
@@ -220,7 +219,16 @@ function Add-TestExecutionPhase {
         "EmbodySense.Core.Clients.Tests-*" { 1600; break }
         default { 1500; break }
     }
-    Add-VerificationParallelPhase -Name "tests-$($Lane.Name)" -FileName "dotnet" -Arguments $arguments -TimeoutSeconds $testLaneTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$($Lane.Name).log") -CoverageSearchRoot $(if ($SkipCoverage) { $null } else { $Lane.ResultsPath }) -TrxPath (Join-Path $Lane.ResultsPath $trxName) -Environment $Lane.Environment -Priority $priority
+    $processHeavy = switch -Exact ($Lane.Name) {
+        "EmbodySense.Core.Persistence.Tests-human-input-responses" { $true; break }
+        "EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime" { $true; break }
+        "EmbodySense.Core.Persistence.Tests-triggers" { $true; break }
+        "EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime" { $true; break }
+        default { $false; break }
+    }
+    $weight = if ($processHeavy) { 2 } else { 1 }
+    $resourceClass = if ($processHeavy) { "ProcessHeavy" } else { "Ordinary" }
+    Add-VerificationParallelPhase -Name "tests-$($Lane.Name)" -FileName "dotnet" -Arguments $arguments -TimeoutSeconds $testLaneTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$($Lane.Name).log") -CoverageSearchRoot $(if ($SkipCoverage) { $null } else { $Lane.ResultsPath }) -TrxPath (Join-Path $Lane.ResultsPath $trxName) -Environment $Lane.Environment -Priority $priority -Weight $weight -ResourceClass $resourceClass
 }
 
 function Write-CoverageManifest {
@@ -407,7 +415,7 @@ try {
         }
     }
 
-    Write-Output "VERIFY_PARALLEL_PLAN kind=required-gates phases=$($script:VerificationParallelPhases.Count) maximum_workers=$MaximumTestWorkers coverage=$(-not $SkipCoverage)"
+    Write-Output "VERIFY_PARALLEL_PLAN kind=required-gates phases=$($script:VerificationParallelPhases.Count) maximum_resource_capacity=$MaximumTestWorkers coverage=$(-not $SkipCoverage)"
     $gateResults = @(Invoke-VerificationParallelPhases -MaximumWorkers $MaximumTestWorkers)
     $testResults = @($gateResults | Where-Object { $_.Name.StartsWith("tests-", [StringComparison]::Ordinal) })
     Reset-VerificationParallelPhaseState
