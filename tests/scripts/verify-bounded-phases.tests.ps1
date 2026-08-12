@@ -10,6 +10,7 @@ $verifyWorkflowPath = Join-Path $repoRoot ".github\workflows\verify.yml"
 $stressWorkflowPath = Join-Path $repoRoot ".github\workflows\verification-stress.yml"
 $pullRequestSettingsPath = Join-Path $repoRoot "tests\verification-pull-request.runsettings"
 $stressSettingsPath = Join-Path $repoRoot "tests\verification-stress.runsettings"
+$gitIgnorePath = Join-Path $repoRoot ".gitignore"
 $maximumTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopRunArtifactMaximumShapeTests.cs"
 $retentionTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopTraceRetentionStoreTests.cs"
 $powerShellExecutable = (Get-Process -Id $PID).Path
@@ -90,6 +91,7 @@ $verifyWorkflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
 $stressWorkflow = Get-Content -LiteralPath $stressWorkflowPath -Raw
 $pullRequestSettings = Get-Content -LiteralPath $pullRequestSettingsPath -Raw
 $stressSettings = Get-Content -LiteralPath $stressSettingsPath -Raw
+$gitIgnore = Get-Content -LiteralPath $gitIgnorePath -Raw
 $maximumTest = Get-Content -LiteralPath $maximumTestPath -Raw
 $retentionTest = Get-Content -LiteralPath $retentionTestPath -Raw
 
@@ -113,6 +115,7 @@ Assert-Contains -Actual $verifyScript -Expected 'Write-CoverageManifest' -Messag
 Assert-Contains -Actual $verifyScript -Expected 'kind=reconciliation' -Message "Inventory and coverage aggregation must overlap safely."
 Assert-Contains -Actual $verifyScript -Expected '-Name "git-diff-check"' -Message "The canonical verifier must retain git diff validation."
 Assert-Contains -Actual $verifyScript -Expected 'VERIFY_COMPLETE schema_version=1 status=passed' -Message "A successful standard run must emit exact terminal evidence."
+Assert-Contains -Actual $gitIgnore -Expected 'tests/VerificationResults/' -Message "Generated verifier diagnostics must remain uploadable without dirtying a local worktree."
 Assert-Contains -Actual $coverageScript -Expected 'if (-not $fileLines.ContainsKey($lineNumber) -or $hits -gt $fileLines[$lineNumber]) {' -Message "Split coverage must merge duplicate source lines by maximum hits."
 Assert-Contains -Actual $coverageScript -Expected 'Coverage report manifest contains duplicate report paths.' -Message "Duplicate report evidence must fail closed."
 Assert-Contains -Actual $coverageScript -Expected 'missing, stale, or unexpected reports' -Message "Coverage manifest reconciliation must reject extra or missing files."
