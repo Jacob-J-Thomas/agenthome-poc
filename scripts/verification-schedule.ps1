@@ -4,52 +4,35 @@ $script:VerificationRequiredGateResourceCapacity = 8
 $script:VerificationRequiredGateMaximumProcessHeavyWorkers = 2
 $script:VerificationRequiredGateMaximumCpuBoundWorkers = 1
 $script:VerificationRequiredGateScheduleProfiles = @(
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime"; EstimatedDurationSeconds = 150; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-credentials-remainder"; EstimatedDurationSeconds = 55; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 100; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-definition-control-remainder"; EstimatedDurationSeconds = 70; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-runtime-triggers"; EstimatedDurationSeconds = 90; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-contextual-roles"; EstimatedDurationSeconds = 85; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"; EstimatedDurationSeconds = 85; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime"; EstimatedDurationSeconds = 85; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-default-conversation-recovery"; EstimatedDurationSeconds = 55; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-default-conversation-remainder"; EstimatedDurationSeconds = 35; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-capabilities"; EstimatedDurationSeconds = 75; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-capabilities"; EstimatedDurationSeconds = 65; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-remainder"; EstimatedDurationSeconds = 30; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loops-other"; EstimatedDurationSeconds = 55; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-authority-grants-process"; EstimatedDurationSeconds = 50; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-authority-remainder"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-credentials-external-process"; EstimatedDurationSeconds = 25; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-tool-results"; EstimatedDurationSeconds = 35; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-audit-process"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-control-process"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-effect-authority-process"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-sequential-evidence-process"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-loop-api-run"; EstimatedDurationSeconds = 75; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-runtime-host"; EstimatedDurationSeconds = 70; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-remainder"; EstimatedDurationSeconds = 70; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-codex-app-server"; EstimatedDurationSeconds = 65; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-governance"; EstimatedDurationSeconds = 55; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-cli"; EstimatedDurationSeconds = 45; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime"; EstimatedDurationSeconds = 140; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-runtime-host"; EstimatedDurationSeconds = 120; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime"; EstimatedDurationSeconds = 115; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loops-other"; EstimatedDurationSeconds = 105; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-governance"; EstimatedDurationSeconds = 95; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-codex-app-server"; EstimatedDurationSeconds = 92; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-runtime-triggers"; EstimatedDurationSeconds = 85; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-remainder-capabilities"; EstimatedDurationSeconds = 82; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-remainder-triggers"; EstimatedDurationSeconds = 78; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-contextual-roles"; EstimatedDurationSeconds = 75; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"; EstimatedDurationSeconds = 75; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-loop-api-run"; EstimatedDurationSeconds = 72; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-remainder"; EstimatedDurationSeconds = 72; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-capabilities"; EstimatedDurationSeconds = 68; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-definition-control"; EstimatedDurationSeconds = 65; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-default-conversation"; EstimatedDurationSeconds = 65; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-credentials"; EstimatedDurationSeconds = 62; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-authority"; EstimatedDurationSeconds = 60; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-human-input"; EstimatedDurationSeconds = 60; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle"; EstimatedDurationSeconds = 55; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-tool-results-audit"; EstimatedDurationSeconds = 50; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-cli"; EstimatedDurationSeconds = 50; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-all"; EstimatedDurationSeconds = 45; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-remainder"; EstimatedDurationSeconds = 45; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-loops-execution"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-loops-remainder"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-capabilities-human-input"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-remainder"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "format-naming-style"; EstimatedDurationSeconds = 45; Weight = 2; ResourceClass = "CpuBound" }
     [pscustomobject]@{ Name = "format-whitespace"; EstimatedDurationSeconds = 45; Weight = 2; ResourceClass = "CpuBound" }
     [pscustomobject]@{ Name = "frontend-tests"; EstimatedDurationSeconds = 40; Weight = 2; ResourceClass = "CpuBound" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-governed-lifecycle"; EstimatedDurationSeconds = 35; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-human-input-requests"; EstimatedDurationSeconds = 30; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-human-input-responses"; EstimatedDurationSeconds = 40; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loop-execution-remainder"; EstimatedDurationSeconds = 40; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-loops-execution"; EstimatedDurationSeconds = 8; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-loops-remainder"; EstimatedDurationSeconds = 8; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-human-input"; EstimatedDurationSeconds = 8; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-remainder"; EstimatedDurationSeconds = 8; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-graph-authoring"; EstimatedDurationSeconds = 30; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-triggers"; EstimatedDurationSeconds = 25; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-all"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Clients.Tests-all"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.E2ETests-all"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Cli.Command.Tests-all"; EstimatedDurationSeconds = 10; Weight = 1; ResourceClass = "Ordinary" }
