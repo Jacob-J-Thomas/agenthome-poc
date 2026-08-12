@@ -661,17 +661,6 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
         string detail = "")
         => new(status, admission, materialization, execution, run, detail);
 
-    private enum OperationResolutionStatus
-    {
-        Ready,
-        Conflict,
-        NotFound,
-        LimitExceeded,
-        AuditUnavailable,
-        Invalid,
-        Unavailable,
-    }
-
     private sealed record OperationResolution(
         OperationResolutionStatus Status,
         CustomLoopInvocationOperation? Operation,

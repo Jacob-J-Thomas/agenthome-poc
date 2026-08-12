@@ -282,9 +282,4 @@ public sealed class GovernedLoopConversationPublicationCommitBoundary
 
     private static InvalidOperationException Protocol(string message) => new(message);
 
-    private enum PublicationAuthorityOutcome
-    {
-        Direct,
-        Stopped,
-    }
 }
