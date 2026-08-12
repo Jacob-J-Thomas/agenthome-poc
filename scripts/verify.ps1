@@ -259,8 +259,17 @@ try {
     $script:LastCompletedVerificationPhase = "clean-test-results"
     Write-Output "VERIFY_PHASE_COMPLETE name=clean-test-results elapsed_seconds=$([Math]::Round($cleanupStarted.Elapsed.TotalSeconds, 3)) completed_at_utc=$([DateTimeOffset]::UtcNow.ToString("O"))"
 
-    if ($VerificationTier -eq "PullRequest" -and -not $BrowserE2EOnly) {
+    $buildArguments = @("build")
+    if ($SkipRestore) {
+        $buildArguments += "--no-restore"
+    }
+    $buildArguments += if ($VerificationTier -eq "Stress") { $persistenceTestProjectPath } elseif ($BrowserE2EOnly) { $e2eProjectPath } else { "EmbodySense.sln" }
+    $buildArguments += @("-c", $Configuration, "/p:RestoreIgnoreFailedSources=true")
+
+    $normalPullRequestVerification = $VerificationTier -eq "PullRequest" -and -not $BrowserE2EOnly
+    if ($normalPullRequestVerification) {
         $contractScripts = @(
+            "verify-preflight-overlap.tests.ps1",
             "verify-coverage.tests.ps1",
             "verify-bounded-phases.tests.ps1",
             "verify-parallel.tests.ps1",
@@ -276,20 +285,23 @@ try {
                 $contractArguments += @("-ExecutionPolicy", "Bypass")
             }
             $contractArguments += @("-File", (Join-Path $testsPath "scripts\$contractScript"))
-            Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log")
+            Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -Priority 2800 -Weight 1 -ResourceClass "Ordinary"
         }
-        Write-Output "VERIFY_PARALLEL_PLAN kind=script-contracts phases=$($contractScripts.Count) maximum_workers=$([Math]::Min(4, $MaximumTestWorkers))"
-        Invoke-VerificationParallelPhases -MaximumWorkers ([Math]::Min(4, $MaximumTestWorkers)) | Out-Null
+        Add-VerificationParallelPhase -Name "build-pullrequest" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "build-pullrequest.log") -Priority 3000 -Weight 2 -ResourceClass "ProcessHeavy"
+        if ($runningOnWindows) {
+            Add-VerificationParallelPhase -Name "npm-ci" -FileName $env:ComSpec -Arguments @("/d", "/s", "/c", "npm.cmd ci --include=dev") -TimeoutSeconds 300 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "npm-ci.log") -Priority 2900 -Weight 1 -ResourceClass "Ordinary"
+        }
+        else {
+            Add-VerificationParallelPhase -Name "npm-ci" -FileName "npm" -Arguments @("ci", "--include=dev") -TimeoutSeconds 300 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "npm-ci.log") -Priority 2900 -Weight 1 -ResourceClass "Ordinary"
+        }
+        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-preflight phases=$($script:VerificationParallelPhases.Count) maximum_resource_capacity=$MaximumTestWorkers build_weight=2 npm_weight=1 contract_weight=1 configuration=$Configuration"
+        Invoke-VerificationParallelPhases -MaximumWorkers $MaximumTestWorkers | Out-Null
         Reset-VerificationParallelPhaseState
+        $script:LastCompletedVerificationPhase = "pull-request-preflight"
     }
-
-    $buildArguments = @("build")
-    if ($SkipRestore) {
-        $buildArguments += "--no-restore"
+    else {
+        Invoke-CheckedNativePhase -Name "build-$($VerificationTier.ToLowerInvariant())" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900
     }
-    $buildArguments += if ($VerificationTier -eq "Stress") { $persistenceTestProjectPath } elseif ($BrowserE2EOnly) { $e2eProjectPath } else { "EmbodySense.sln" }
-    $buildArguments += @("-c", $Configuration, "/p:RestoreIgnoreFailedSources=true")
-    Invoke-CheckedNativePhase -Name "build-$($VerificationTier.ToLowerInvariant())" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900
 
     if ($VerificationTier -eq "Stress") {
         Write-Output "VERIFY_STRESS_CONTRACT exact_test_count=2 session_timeout_seconds=1500 max_artifact_process_timeout_seconds=1800 deletion_capacity_process_timeout_seconds=1200"
@@ -317,13 +329,6 @@ try {
 
     if ($BrowserE2EOnly) {
         return
-    }
-
-    if ($runningOnWindows) {
-        Invoke-CheckedNativePhase -Name "npm-ci" -FileName $env:ComSpec -Arguments @("/d", "/s", "/c", "npm.cmd ci --include=dev") -TimeoutSeconds 300
-    }
-    else {
-        Invoke-CheckedNativePhase -Name "npm-ci" -FileName "npm" -Arguments @("ci", "--include=dev") -TimeoutSeconds 300
     }
 
     Write-Output "VERIFY_REQUIRED_TEST_CONTRACT identity=TestCase.Id partition_identity=XunitTestCaseUniqueID filter=VerificationTier!=Stress"

@@ -433,11 +433,11 @@ public sealed class CustomLoopRuntimeTests
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-entry-cap", "update-runtime-entry-cap");
         await using var runtime = await CreateRuntimeAsync(workspace);
         var conversationStore = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
-        for (var index = 0; index <= CustomLoopLimits.MaxInvokingConversationEntries; index++)
+        for (var index = 0; index < CustomLoopLimits.MaxInvokingConversationEntries + 2; index++)
         {
             await conversationStore.AppendMessageAsync(index % 2 == 0
-                ? LlmMessage.User($"bounded user entry {index}")
-                : LlmMessage.Assistant($"bounded assistant entry {index}"));
+                ? LlmMessage.User("x")
+                : LlmMessage.Assistant("fake response: x"));
         }
 
         var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-entry-cap", "entry cap test"));
@@ -446,7 +446,10 @@ public sealed class CustomLoopRuntimeTests
         Assert.InRange(conversation.Count(source => source.OmissionReason is null), 1, CustomLoopLimits.MaxInvokingConversationEntries);
         var omission = Assert.Single(conversation, source => source.OmissionReason is not null);
         Assert.Equal("invoking-conversation-omitted", omission.SourceId);
-        Assert.Contains("message(s) were omitted", omission.OmissionReason, StringComparison.Ordinal);
+        var omissionReason = Assert.IsType<string>(omission.OmissionReason);
+        Assert.Contains("older logical conversation message(s) were omitted", omissionReason, StringComparison.Ordinal);
+        Assert.True(int.TryParse(omissionReason.Split(' ', 2)[0], out var omittedCount));
+        Assert.True(omittedCount > 1, $"Expected one aggregate marker for multiple omissions, but found: {omissionReason}");
         Assert.Equal(Enumerable.Range(1, response.Run.Context.SourceManifest.Count), response.Run.Context.SourceManifest.Select(source => source.Order));
     }
 
