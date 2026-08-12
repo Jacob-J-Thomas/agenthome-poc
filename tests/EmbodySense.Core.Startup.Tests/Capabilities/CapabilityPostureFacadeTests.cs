@@ -23,10 +23,19 @@ public sealed class CapabilityPostureFacadeTests
         var facade = CapabilityPostureFacade.ForFileCapabilityTrustRoot(workspace.RootPath, workspace.ServerStatePath);
 
         var catalog = await facade.ReadCatalogAsync(null, 50);
+        var inference = await facade.ReadAsync("org.embodysense/model-inference");
         var exact = await facade.ReadAsync("org.embodysense/workspace-command");
 
         Assert.Equal("available", catalog.Status);
-        Assert.Equal(["org.embodysense/conversation-turn", "org.embodysense/workspace-command"], catalog.Capabilities.Select(item => item.Id));
+        Assert.Equal(
+            ["org.embodysense/conversation-turn", "org.embodysense/model-inference", "org.embodysense/workspace-command"],
+            catalog.Capabilities.Select(item => item.Id));
+        Assert.Equal("available", inference.Status);
+        var inferencePosture = Assert.IsType<CapabilityPostureSnapshot>(inference.Capability);
+        Assert.Equal("graph-node", inferencePosture.Kind);
+        Assert.Equal("none", inferencePosture.SideEffectClass);
+        Assert.Equal("available", inferencePosture.State);
+        Assert.Empty(inferencePosture.Dependents);
         Assert.Equal("available", exact.Status);
         var posture = Assert.IsType<CapabilityPostureSnapshot>(exact.Capability);
         Assert.Equal("actuator", posture.Kind);
@@ -40,9 +49,9 @@ public sealed class CapabilityPostureFacadeTests
         Assert.Equal("default-conversation", dependent.Identity);
         Assert.Equal("required", dependent.RequirementKind);
         Assert.Equal("assigned-definition", dependent.AuthorityPosture);
-        Assert.DoesNotContain(workspace.RootPath, JsonSerializer.Serialize(new { catalog, exact }), StringComparison.Ordinal);
-        Assert.DoesNotContain(workspace.ServerStatePath, JsonSerializer.Serialize(new { catalog, exact }), StringComparison.Ordinal);
-        Assert.DoesNotContain("secretValue", JsonSerializer.Serialize(new { catalog, exact }), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(workspace.RootPath, JsonSerializer.Serialize(new { catalog, inference, exact }), StringComparison.Ordinal);
+        Assert.DoesNotContain(workspace.ServerStatePath, JsonSerializer.Serialize(new { catalog, inference, exact }), StringComparison.Ordinal);
+        Assert.DoesNotContain("secretValue", JsonSerializer.Serialize(new { catalog, inference, exact }), StringComparison.OrdinalIgnoreCase);
         Assert.Equal(filesBefore, SnapshotFiles(workspace));
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();

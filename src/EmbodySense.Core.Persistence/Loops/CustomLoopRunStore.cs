@@ -9,6 +9,8 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -27,7 +29,11 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// explicit failures. Duplicate identities, corrupt JSON, unknown fields, unsupported run shapes, broken evidence ordering, or
 /// ambiguous recovery state throw <see cref="FormatException"/>. No legacy run reader or automatic schema migration is provided.
 /// </remarks>
-public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
+public sealed class CustomLoopRunStore :
+    ICustomLoopRunStore,
+    IGovernedLoopSequentialOrderedNodeEvidenceRecorder,
+    IGovernedLoopSequentialRunEvidenceSource,
+    IDisposable
 {
     private const string MutationLockFileName = ".custom-loop-runs.lock";
     private const string DiscoveryIndexFileName = ".custom-loop-run-index.json";
@@ -240,6 +246,164 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
         var artifact = await ReadArtifactAsync(matches[0], cancellationToken);
         return artifact.Run;
+    }
+
+    /// <summary>Resolves one exact retained terminal sequential-node receipt from the authoritative run artifacts.</summary>
+    public async Task<GovernedLoopSequentialNodeEvidenceReceipt?> ResolveAsync(string evidenceHash, CancellationToken cancellationToken = default)
+    {
+        if (!IsHash(evidenceHash))
+        {
+            throw new ArgumentException("Sequential node evidence hash must be lowercase SHA-256 hexadecimal.", nameof(evidenceHash));
+        }
+
+        await using var mutation = await AcquireMutationLockAsync(cancellationToken);
+        var matches = new List<GovernedLoopSequentialNodeEvidenceReceipt>(1);
+        await ScanArtifactsAsync(artifact =>
+        {
+            if (artifact.Run is not { } run)
+            {
+                return;
+            }
+
+            foreach (var runEvent in run.Events)
+            {
+                if (runEvent.SequentialNodeEvidence is not { Kind: not CustomLoopSequentialNodeEvidenceKind.DispatchStarted } evidence
+                    || !string.Equals(evidence.EvidenceHash, evidenceHash, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var receipt = ToApplicationReceipt(evidence);
+                if (!GovernedLoopSequentialNodeEvidenceHash.Matches(receipt)
+                    || !string.Equals(receipt.EvidenceHash, evidenceHash, StringComparison.Ordinal))
+                {
+                    throw new FormatException("Durable sequential node evidence does not map to its exact Application receipt hash.");
+                }
+
+                matches.Add(receipt);
+            }
+        }, cancellationToken);
+
+        return matches.Count switch
+        {
+            0 => null,
+            1 => matches[0],
+            _ => throw new FormatException($"Sequential node evidence hash `{evidenceHash}` exists more than once. The persisted state requires review."),
+        };
+    }
+
+    /// <summary>
+    /// Authenticates one exact terminal sequential-node event that was already retained atomically in the canonical run artifact.
+    /// </summary>
+    /// <remarks>
+    /// This operation never appends or rewrites evidence. The ordered-runtime coordinates are untrusted lookup hints; the current
+    /// run, immutable admission binding, builder-issued plan node, event identity, outcome digest, and terminal receipt must all
+    /// agree before the existing evidence identity is returned. Repeating the exact request is therefore naturally idempotent.
+    /// </remarks>
+    public async Task<GovernedLoopSequentialNodeHandlerResult> RetainAsync(
+        GovernedLoopSequentialOrderedNodeEvidenceRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateOrderedEvidenceRequest(request);
+
+        await using var mutation = await AcquireMutationLockAsync(cancellationToken);
+        var dispatch = request.Dispatch;
+        var binding = dispatch.Anchor.AdapterBinding;
+        var artifact = await ReadArtifactByRunIdAsync(binding.ExecutionBinding.RunId, cancellationToken);
+        if (artifact?.Run is not { } run)
+        {
+            throw new FormatException("The ordered sequential-node outcome does not belong to a live canonical run artifact.");
+        }
+
+        if (run.LifecycleVersion < request.OrderedLifecycleVersion
+            || run.SequentialAdapterBinding is not { } durableBinding
+            || run.SequentialInvocationSnapshot is not { } durableSnapshot
+            || !string.Equals(durableBinding.ContentHash, binding.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(durableSnapshot.ContentHash, dispatch.Anchor.InvocationSnapshot.ContentHash, StringComparison.Ordinal))
+        {
+            throw new FormatException("The ordered sequential-node outcome does not match the current durable lifecycle or immutable sequential admission binding.");
+        }
+
+        var eventIndex = checked((int)request.OrderedEventSequence - 1);
+        if (eventIndex < 0
+            || eventIndex >= run.Events.Length
+            || run.Events[eventIndex] is not { } orderedEvent
+            || orderedEvent.Sequence != request.OrderedEventSequence
+            || !string.Equals(orderedEvent.EventId, request.OrderedEventId, StringComparison.Ordinal)
+            || orderedEvent.SequentialNodeEvidence is not { Kind: not CustomLoopSequentialNodeEvidenceKind.DispatchStarted } evidence)
+        {
+            throw new FormatException("The exact ordered sequential-node terminal event is not present in the current durable run artifact.");
+        }
+
+        var receipt = ToApplicationReceipt(evidence);
+        var execution = binding.ExecutionBinding;
+        if (receipt.Disposition != request.Disposition
+            || receipt.Kind != ExpectedEvidenceKind(request.Disposition)
+            || !string.Equals(receipt.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(receipt.RunId, execution.RunId, StringComparison.Ordinal)
+            || !Equals(receipt.Revision, execution.Revision)
+            || receipt.ExecutionGeneration != execution.ExecutionGeneration
+            || !string.Equals(receipt.NodeId, dispatch.Node.NodeId, StringComparison.Ordinal)
+            || receipt.Attempt != dispatch.Attempt
+            || !CustomLoopSequentialOutcomeArtifactHash.Matches(orderedEvent)
+            || !GovernedLoopSequentialNodeEvidenceHash.Matches(receipt))
+        {
+            throw new FormatException("The ordered sequential-node terminal event does not authenticate the exact dispatch coordinates and disposition.");
+        }
+
+        return new GovernedLoopSequentialNodeHandlerResult(receipt.Disposition, receipt.EvidenceHash);
+    }
+
+    async Task<GovernedLoopSequentialRunEvidence?> IGovernedLoopSequentialRunEvidenceSource.ResolveAsync(
+        string runId,
+        CancellationToken cancellationToken)
+    {
+        var safeRunId = CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
+        await using var mutation = await AcquireMutationLockAsync(cancellationToken);
+        var artifact = await ReadArtifactByRunIdAsync(safeRunId, cancellationToken);
+        if (artifact?.Run is not { } run)
+        {
+            return null;
+        }
+
+        if (run.SequentialAdapterBinding is null && run.SequentialInvocationSnapshot is null)
+        {
+            return null;
+        }
+
+        if (run.SequentialAdapterBinding is not { } binding || run.SequentialInvocationSnapshot is not { } snapshot)
+        {
+            throw new FormatException("The durable run contains incomplete canonical sequential admission evidence.");
+        }
+
+        var bindingCopy = new EmbodySense.Core.Common.Loops.Sequential.Models.GovernedLoopSequentialAdapterBinding(
+            binding.SchemaVersion,
+            binding.WorkspaceId,
+            binding.ExecutionBinding,
+            binding.AdmissionOperationId,
+            binding.AdmissionReceiptHash,
+            binding.AdmissionRequestHash,
+            binding.InvocationPayloadHash,
+            binding.GraphArtifactHash,
+            binding.GraphLayoutHash,
+            binding.ContentHash);
+        var snapshotCopy = new EmbodySense.Core.Common.Loops.Sequential.Models.GovernedLoopSequentialInvocationSnapshot(
+            snapshot.SchemaVersion,
+            snapshot.TriggerPrompt,
+            snapshot.ModelSnapshot,
+            snapshot.InvokingConversation,
+            snapshot.ContextCapturedAtUtc,
+            snapshot.ContextManifest,
+            snapshot.ContentHash);
+        if (!EmbodySense.Core.Common.Loops.Sequential.GovernedLoopSequentialContractValidator.Validate(bindingCopy).IsValid
+            || !EmbodySense.Core.Common.Loops.Sequential.GovernedLoopSequentialContractValidator.Validate(snapshotCopy).IsValid
+            || !string.Equals(bindingCopy.ExecutionBinding.RunId, safeRunId, StringComparison.Ordinal)
+            || !string.Equals(bindingCopy.InvocationPayloadHash, snapshotCopy.ContentHash, StringComparison.Ordinal))
+        {
+            throw new FormatException("The durable run's canonical sequential admission evidence failed exact defensive projection validation.");
+        }
+
+        return new GovernedLoopSequentialRunEvidence(bindingCopy, snapshotCopy);
     }
 
     /// <summary>
@@ -1051,7 +1215,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             && left.TraceReservationUtf8Bytes is null
             && right.TraceReservationUtf8Bytes is null
             && left.ControlExpectedLifecycleVersion is null
-            && right.ControlExpectedLifecycleVersion is null;
+            && right.ControlExpectedLifecycleVersion is null
+            && left.SequentialNodeEvidence is null
+            && right.SequentialNodeEvidence is null;
     }
 
     private async Task<ArtifactScanResult> ScanArtifactsAsync(Action<RunArtifact>? visitor, CancellationToken cancellationToken)
@@ -2062,8 +2228,15 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         }
 
         var maximumAttempts = CustomLoopLimits.GetMaximumModelAttempts(run.AdmittedDefinition.InferenceSteps.Length, run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations);
-        var startedAttempts = run.Events.Count(item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted);
-        if (startedAttempts > maximumAttempts)
+        var canonicalExitStarts = run.Events.Count(IsCanonicalDeterministicExitStart);
+        if (canonicalExitStarts > 1)
+        {
+            throw new FormatException("A schema-1 sequential run can retain only one deterministic canonical Exit dispatch marker.");
+        }
+
+        var startedModelAttempts = run.Events.Count(item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
+            - canonicalExitStarts;
+        if (startedModelAttempts > maximumAttempts)
         {
             throw new FormatException("The run contains more provider-attempt starts than its admitted traversal can execute.");
         }
@@ -2084,6 +2257,20 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             + remainingControlReserve
             + CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes);
     }
+
+    private static bool IsCanonicalDeterministicExitStart(CustomLoopRunEvent item)
+        => item is
+        {
+            Kind: CustomLoopRunEventKind.ExitDecisionStarted,
+            StepId: "exit",
+            Attempt: 1,
+            SequentialNodeEvidence:
+            {
+                SchemaVersion: CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
+                Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+                Disposition: CustomLoopSequentialNodeDisposition.Unknown,
+            },
+        };
 
     private static int GetToolEvidencePhaseUtf8Bytes(CustomLoopToolTraceEvidence evidence)
     {
@@ -2792,6 +2979,95 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         }
     }
 
+    private static GovernedLoopSequentialNodeEvidenceReceipt ToApplicationReceipt(CustomLoopSequentialNodeEvidence evidence)
+    {
+        var kind = evidence.Kind switch
+        {
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome => GovernedLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection => GovernedLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention => GovernedLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            _ => throw new FormatException("Dispatch-start evidence cannot satisfy a terminal sequential-node receipt lookup."),
+        };
+        var disposition = evidence.Disposition switch
+        {
+            CustomLoopSequentialNodeDisposition.Completed => GovernedLoopSequentialNodeHandlerResultStatus.Completed,
+            CustomLoopSequentialNodeDisposition.Rejected => GovernedLoopSequentialNodeHandlerResultStatus.Rejected,
+            CustomLoopSequentialNodeDisposition.NeedsReview => GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview,
+            _ => throw new FormatException("Terminal sequential-node evidence has no terminal disposition."),
+        };
+        return new GovernedLoopSequentialNodeEvidenceReceipt(
+            GovernedLoopSequentialNodeEvidenceReceipt.CurrentSchemaVersion,
+            kind,
+            evidence.WorkspaceId,
+            evidence.RunId,
+            EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopRevisionReference.Create(
+                evidence.Revision.SchemaVersion,
+                evidence.Revision.GraphId,
+                evidence.Revision.RevisionId,
+                evidence.Revision.ExecutableHash),
+            evidence.ExecutionGeneration,
+            evidence.NodeId,
+            evidence.Attempt,
+            disposition,
+            evidence.OutcomeArtifactHash,
+            evidence.EvidenceHash);
+    }
+
+    private static void ValidateOrderedEvidenceRequest(GovernedLoopSequentialOrderedNodeEvidenceRequest? request)
+    {
+        if (request is null)
+        {
+            throw new ArgumentNullException(nameof(request));
+        }
+
+        var dispatch = request.Dispatch;
+        if (request.SchemaVersion != GovernedLoopSequentialOrderedNodeEvidenceRequest.CurrentSchemaVersion
+            || dispatch is null
+            || dispatch.SchemaVersion != GovernedLoopSequentialNodeDispatchRequest.CurrentSchemaVersion
+            || dispatch.Anchor is null
+            || dispatch.Plan is null
+            || dispatch.Node is null
+            || dispatch.Attempt is < 1 or > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxNodeAttempt
+            || request.Disposition == GovernedLoopSequentialNodeHandlerResultStatus.Unknown
+            || !Enum.IsDefined(request.Disposition)
+            || request.OrderedLifecycleVersion < 1
+            || request.OrderedEventSequence is < 1 or > int.MaxValue
+            || string.IsNullOrEmpty(request.OrderedEventId))
+        {
+            throw new ArgumentException("Ordered sequential-node evidence coordinates are invalid or unsupported.", nameof(request));
+        }
+
+        var binding = dispatch.Anchor.AdapterBinding;
+        var snapshot = dispatch.Anchor.InvocationSnapshot;
+        var plan = dispatch.Plan;
+        var node = dispatch.Node;
+        if (!EmbodySense.Core.Common.Loops.Sequential.GovernedLoopSequentialContractValidator.Validate(binding).IsValid
+            || !EmbodySense.Core.Common.Loops.Sequential.GovernedLoopSequentialContractValidator.Validate(snapshot).IsValid
+            || plan.SchemaVersion != 1
+            || plan.Revision is null
+            || plan.Nodes is null
+            || node.Ordinal < 0
+            || node.Ordinal >= plan.Nodes.Count
+            || !ReferenceEquals(plan.Nodes[node.Ordinal], node)
+            || !EmbodySense.Core.Application.Loops.Sequential.GovernedLoopSequentialNodeDescriptors.IsSupported(node.Descriptor)
+            || !Equals(plan.Revision, binding.ExecutionBinding.Revision)
+            || !string.Equals(plan.GraphArtifactHash, binding.GraphArtifactHash, StringComparison.Ordinal)
+            || !string.Equals(plan.GraphLayoutHash, binding.GraphLayoutHash, StringComparison.Ordinal)
+            || !string.Equals(snapshot.ContentHash, binding.InvocationPayloadHash, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Ordered sequential-node evidence does not carry an exact guard-issued anchor and builder-issued plan node.", nameof(request));
+        }
+    }
+
+    private static GovernedLoopSequentialNodeEvidenceKind ExpectedEvidenceKind(GovernedLoopSequentialNodeHandlerResultStatus disposition)
+        => disposition switch
+        {
+            GovernedLoopSequentialNodeHandlerResultStatus.Completed => GovernedLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            GovernedLoopSequentialNodeHandlerResultStatus.Rejected => GovernedLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview => GovernedLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            _ => GovernedLoopSequentialNodeEvidenceKind.Unknown,
+        };
+
     private static void ValidateDeletionMutation(CustomLoopTraceDeletionMutation? mutation)
     {
         ArgumentNullException.ThrowIfNull(mutation);
@@ -2958,6 +3234,10 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             throw new FormatException($"`{parameterName}` must be lowercase SHA-256 hexadecimal.");
         }
     }
+
+    private static bool IsHash(string? value)
+        => value is { Length: CustomLoopLimits.Sha256HexCharacters }
+            && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static void RequireUtc(DateTimeOffset value, string parameterName)
     {

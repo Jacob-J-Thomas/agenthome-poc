@@ -12,6 +12,25 @@ namespace EmbodySense.Core.Startup.Tests.Capabilities;
 public sealed class BuiltInCapabilityCatalogSeederTests
 {
     [Fact]
+    public void Catalog_declares_one_exact_non_effecting_local_model_inference_graph_node()
+    {
+        var descriptor = Assert.Single(
+            BuiltInCapabilityCatalog.Descriptors,
+            item => item.Id.Value == "org.embodysense/model-inference");
+
+        Assert.Equal(CapabilityDescriptor.CurrentSchemaVersion, descriptor.SchemaVersion);
+        Assert.Equal("1.0.0", descriptor.Version.Value);
+        Assert.Equal(CapabilityKind.GraphNode, descriptor.Kind);
+        Assert.Equal("org.embodysense", descriptor.Implementation.ProviderId.Value);
+        Assert.Equal("model-inference", descriptor.Implementation.ImplementationId);
+        Assert.Equal(CapabilitySideEffectClass.None, descriptor.SideEffectClass);
+        Assert.Equal(CapabilityEgressMode.None, descriptor.Requirements.EgressMode);
+        Assert.Empty(descriptor.Requirements.DataClasses);
+        Assert.Empty(descriptor.Requirements.EgressDestinations);
+        Assert.Empty(descriptor.Requirements.Secrets);
+    }
+
+    [Fact]
     public void Host_runtime_exposes_one_exact_compatible_bounded_context()
     {
         Assert.False(CapabilityHostRuntime.Platform.Equals(CapabilityPlatform.Any));

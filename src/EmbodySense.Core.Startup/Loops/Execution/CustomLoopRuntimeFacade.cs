@@ -4,7 +4,6 @@ using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Loops.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.Models;
-using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
@@ -27,7 +26,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     private readonly ICustomLoopDefinitionStore _definitionStore;
     private readonly ICustomLoopRunStore _runStore;
     private readonly ICustomLoopInvocationOperationStore _invocationOperationStore;
-    private readonly CustomLoopInvocationReceiptRetentionService _invocationReceiptRetention;
+    private readonly CustomLoopInvocationReceiptWriter _invocationReceiptWriter;
     private readonly ICustomLoopControlOperationStore _controlOperationStore;
     private readonly ICustomLoopWorkspaceExecutionGate _executionGate;
     private readonly CustomLoopAdmissionService _admissionService;
@@ -52,7 +51,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     /// <param name="definitionStore">The definition store.</param>
     /// <param name="runStore">The run store.</param>
     /// <param name="invocationOperationStore">The invocation operation store.</param>
-    /// <param name="invocationReceiptRetention">The invocation receipt retention.</param>
+    /// <param name="invocationReceiptWriter">The shared governed invocation receipt writer.</param>
     /// <param name="controlOperationStore">The control operation store.</param>
     /// <param name="executionGate">The execution gate.</param>
     /// <param name="admissionService">The admission service.</param>
@@ -72,7 +71,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         ICustomLoopDefinitionStore definitionStore,
         ICustomLoopRunStore runStore,
         ICustomLoopInvocationOperationStore invocationOperationStore,
-        CustomLoopInvocationReceiptRetentionService invocationReceiptRetention,
+        CustomLoopInvocationReceiptWriter invocationReceiptWriter,
         ICustomLoopControlOperationStore controlOperationStore,
         ICustomLoopWorkspaceExecutionGate executionGate,
         CustomLoopAdmissionService admissionService,
@@ -92,7 +91,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         _definitionStore = definitionStore ?? throw new ArgumentNullException(nameof(definitionStore));
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _invocationOperationStore = invocationOperationStore ?? throw new ArgumentNullException(nameof(invocationOperationStore));
-        _invocationReceiptRetention = invocationReceiptRetention ?? throw new ArgumentNullException(nameof(invocationReceiptRetention));
+        _invocationReceiptWriter = invocationReceiptWriter ?? throw new ArgumentNullException(nameof(invocationReceiptWriter));
         _controlOperationStore = controlOperationStore ?? throw new ArgumentNullException(nameof(controlOperationStore));
         _executionGate = executionGate ?? throw new ArgumentNullException(nameof(executionGate));
         _admissionService = admissionService ?? throw new ArgumentNullException(nameof(admissionService));
@@ -261,7 +260,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             CustomLoopInvocationOperation operation;
             try
             {
-                var begun = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BeginAsync(pending, token), pending.Actor, pending.Surface, cancellationToken);
+                var begun = await _invocationReceiptWriter.BeginAsync(pending, cancellationToken);
                 if (begun.Status == CustomLoopInvocationOperationStoreStatus.Conflict)
                 {
                     return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
@@ -617,7 +616,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         _executionAvailabilityGate.Dispose();
     }
 
-    private async Task<CustomExecutionAvailability> EnsureCustomExecutionAvailableAsync(string actor, CancellationToken cancellationToken)
+    internal async Task<CustomExecutionAvailability> EnsureCustomExecutionAvailableAsync(string actor, CancellationToken cancellationToken)
     {
         if (Volatile.Read(ref _customExecutionAvailable))
         {
@@ -840,7 +839,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             var durable = operation;
             if (operation.BindingState == CustomLoopInvocationBindingState.Unbound)
             {
-                var begun = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BeginAsync(operation, token), operation.Actor, operation.Surface, cancellationToken);
+                var begun = await _invocationReceiptWriter.BeginAsync(operation, cancellationToken);
                 if (begun.Status == CustomLoopInvocationOperationStoreStatus.Conflict)
                 {
                     return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
@@ -925,7 +924,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         CustomLoopInvocationOperationStoreResult stored;
         try
         {
-            stored = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BindAsync(bound, token), bound.Actor, bound.Surface, cancellationToken);
+            stored = await _invocationReceiptWriter.BindAsync(bound, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -1212,43 +1211,13 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         using var integrity = new CancellationTokenSource(_integrityWriteTimeout);
         try
         {
-            var result = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.CompleteAsync(completed, token), completed.Actor, completed.Surface, integrity.Token);
+            var result = await _invocationReceiptWriter.CompleteAsync(completed, integrity.Token);
             return result.Status is CustomLoopInvocationOperationStoreStatus.Completed or CustomLoopInvocationOperationStoreStatus.Replayed;
         }
         catch
         {
             return false;
         }
-    }
-
-    private async Task<CustomLoopInvocationOperationStoreResult> WriteReceiptWithRetentionAsync(
-        Func<CancellationToken, Task<CustomLoopInvocationOperationStoreResult>> write,
-        string actor,
-        string surface,
-        CancellationToken cancellationToken)
-    {
-        var result = await write(cancellationToken);
-        if (result.Status is not (CustomLoopInvocationOperationStoreStatus.LimitExceeded or CustomLoopInvocationOperationStoreStatus.RetentionRequired))
-        {
-            return result;
-        }
-
-        // Capacity is reclaimed only through governed retention. The original write is retried once
-        // after retention succeeds so no caller can bypass replay and audit guarantees.
-        var retention = await _invocationReceiptRetention.PruneForCapacityAsync(actor, surface, cancellationToken);
-        if (!retention.AllowsReceiptWrite)
-        {
-            var status = retention.Status switch
-            {
-                CustomLoopInvocationReceiptRetentionStatus.OperationInProgress => CustomLoopInvocationOperationStoreStatus.RetentionRequired,
-                CustomLoopInvocationReceiptRetentionStatus.AuditUnavailable => CustomLoopInvocationOperationStoreStatus.RetentionAuditUnavailable,
-                CustomLoopInvocationReceiptRetentionStatus.Invalid => CustomLoopInvocationOperationStoreStatus.RetentionInvalid,
-                _ => CustomLoopInvocationOperationStoreStatus.LimitExceeded
-            };
-            return new CustomLoopInvocationOperationStoreResult(status, result.Operation);
-        }
-
-        return await write(cancellationToken);
     }
 
     internal static LoopRunInvocationResponse ReceiptWriteFailure(CustomLoopInvocationOperationStoreStatus status)

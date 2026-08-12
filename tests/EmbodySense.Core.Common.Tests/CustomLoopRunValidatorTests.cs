@@ -1,16 +1,252 @@
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Sequential;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Common.Tests;
 
 public sealed class CustomLoopRunValidatorTests
 {
+    private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
+    private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const string WorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
+    private const string WorkspaceReadCapabilityId = "org.embodysense/workspace-read";
+
     private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
+
+    [Fact]
+    public void Sequential_trigger_evidence_is_payload_bound_and_required_to_match_exact_run_coordinates()
+    {
+        var run = CreateSequentialRun();
+
+        Assert.True(CustomLoopRunValidator.Validate(run).IsValid);
+        Assert.NotNull(run.Events[0].SequentialNodeEvidence);
+        Assert.True(CustomLoopSequentialOutcomeArtifactHash.Matches(run.Events[0]));
+        Assert.True(CustomLoopSequentialNodeEvidenceHash.Matches(run.Events[0].SequentialNodeEvidence));
+
+        var substitutedPayload = run with
+        {
+            Events = [run.Events[0] with { Detail = "Substituted trigger evidence." }],
+        };
+        AssertCodes(CustomLoopRunValidator.Validate(substitutedPayload), "invalid_sequential_node_evidence");
+
+        var substitutedRun = run with
+        {
+            Events = [run.Events[0] with
+            {
+                SequentialNodeEvidence = run.Events[0].SequentialNodeEvidence! with { RunId = "run-other" },
+            }],
+        };
+        AssertCodes(CustomLoopRunValidator.Validate(substitutedRun), "invalid_sequential_node_evidence");
+    }
+
+    [Fact]
+    public void Sequential_capability_admission_binds_the_graph_artifact_and_exact_sorted_roots()
+    {
+        var run = CreateSequentialRun();
+
+        var validation = CustomLoopRunValidator.Validate(run);
+
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+        Assert.NotEqual(GetRequirementsHash(run.AdmittedDefinition), run.CapabilityAdmission.RequirementsHash);
+        Assert.Equal("sha256:" + run.SequentialAdapterBinding!.GraphArtifactHash, run.CapabilityAdmission.Requirements.Artifact.Checksum?.Value);
+        Assert.Equal(
+            [ConversationTurnCapabilityId, ModelInferenceCapabilityId],
+            run.CapabilityAdmission.Evidence
+                .Where(item => item.SubjectId.Equals(run.CapabilityAdmission.Requirements.SubjectId) && item.Outcome == "Selected")
+                .Select(item => item.SelectedIdentity!.Id.Value));
+
+        var legacy = CreateRun();
+        var sequentialAdmissionOnLegacyRun = CustomLoopAdmissionRequestHash.Apply(legacy with { CapabilityAdmission = run.CapabilityAdmission });
+        AssertCodes(CustomLoopRunValidator.Validate(sequentialAdmissionOnLegacyRun), "capability_admission_definition_mismatch");
+    }
+
+    [Fact]
+    public void Sequential_tool_enabled_capability_admission_requires_exact_catalog_assignments_and_roots()
+    {
+        var run = CreateSequentialRun();
+        var assignments = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
+        var enabled = WithSequentialToolAssignments(
+            run,
+            assignments,
+            [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]);
+        var missing = WithSequentialToolAssignments(
+            run,
+            assignments,
+            [ConversationTurnCapabilityId, ModelInferenceCapabilityId]);
+        var extra = WithSequentialToolAssignments(
+            run,
+            assignments,
+            [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId, WorkspaceReadCapabilityId]);
+        var substituted = WithSequentialToolAssignments(
+            run,
+            assignments,
+            [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceReadCapabilityId]);
+        var partialAssignments = WithSequentialToolAssignments(
+            run,
+            [CustomLoopToolAssignment.Read],
+            [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]);
+
+        Assert.True(CustomLoopRunValidator.Validate(enabled).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(enabled).Errors));
+        Assert.Equal(
+            [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId],
+            enabled.CapabilityAdmission.Evidence
+                .Where(item => item.SubjectId.Equals(enabled.CapabilityAdmission.Requirements.SubjectId) && item.Outcome == "Selected")
+                .Select(item => item.SelectedIdentity!.Id.Value));
+        AssertCodes(CustomLoopRunValidator.Validate(missing), "sequential_capability_identity_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(extra), "sequential_capability_identity_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(substituted), "sequential_capability_identity_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(partialAssignments), "sequential_tool_assignment_mismatch");
+    }
+
+    [Fact]
+    public void Sequential_capability_admission_rejects_self_consistent_graph_or_root_identity_substitution()
+    {
+        var run = CreateSequentialRun();
+        var substitutedGraph = CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            CapabilityAdmission = CreateSequentialCapabilityAdmission(run.SequentialAdapterBinding!, [ConversationTurnCapabilityId, ModelInferenceCapabilityId], new string('9', 64)),
+        });
+        var rootSubstitution = CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            CapabilityAdmission = CreateSequentialCapabilityAdmission(run.SequentialAdapterBinding!, [ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]),
+        });
+
+        Assert.Null(CapabilityAdmissionSnapshotValidator.Validate(substitutedGraph.CapabilityAdmission));
+        Assert.Null(CapabilityAdmissionSnapshotValidator.Validate(rootSubstitution.CapabilityAdmission));
+        AssertCodes(CustomLoopRunValidator.Validate(substitutedGraph), "sequential_capability_graph_artifact_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(rootSubstitution), "sequential_capability_identity_mismatch");
+    }
+
+    [Fact]
+    public void Sequential_capability_admission_rejects_missing_extra_and_duplicate_selected_roots()
+    {
+        var run = CreateSequentialRun();
+        var missing = CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            CapabilityAdmission = CreateSequentialCapabilityAdmission(run.SequentialAdapterBinding!, [ModelInferenceCapabilityId]),
+        });
+        var extra = CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            CapabilityAdmission = CreateSequentialCapabilityAdmission(run.SequentialAdapterBinding!, [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]),
+        });
+        var duplicateAdmission = run.CapabilityAdmission with
+        {
+            Evidence = [.. run.CapabilityAdmission.Evidence, run.CapabilityAdmission.Evidence[0]],
+        };
+        var duplicate = CustomLoopAdmissionRequestHash.Apply(run with { CapabilityAdmission = duplicateAdmission });
+
+        AssertCodes(CustomLoopRunValidator.Validate(missing), "sequential_capability_identity_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(extra), "sequential_capability_identity_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(duplicate), "invalid_capability_admission");
+    }
+
+    [Fact]
+    public void Sequential_capability_admission_rejects_malformed_hash_and_resolution_evidence_before_specific_binding_checks()
+    {
+        var run = CreateSequentialRun();
+        var forgedHash = CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            CapabilityAdmission = run.CapabilityAdmission with { RequirementsHash = "sha256:" + new string('9', 64) },
+        });
+        var missingRootEvidence = CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            CapabilityAdmission = run.CapabilityAdmission with { Evidence = [] },
+        });
+
+        AssertCodes(CustomLoopRunValidator.Validate(forgedHash), "invalid_capability_admission");
+        AssertCodes(CustomLoopRunValidator.Validate(missingRootEvidence), "invalid_capability_admission");
+    }
+
+    [Fact]
+    public void Sequential_inference_evidence_requires_the_exact_admitted_legacy_step_identity()
+    {
+        var run = CreateSequentialRun();
+        var binding = run.SequentialAdapterBinding!;
+        var validStart = SequentialEvent(2, "inference-start", CustomLoopRunEventKind.NodeAttemptStarted, binding, "step-1", "step-1", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var validOutcome = SequentialEvent(3, "inference-complete", CustomLoopRunEventKind.NodeAttemptCompleted, binding, "step-1", "step-1", CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed);
+        var valid = run with { Events = [run.Events[0], validStart, validOutcome] };
+        Assert.True(CustomLoopRunValidator.Validate(valid).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(valid).Errors));
+
+        var mismatchedStart = SequentialEvent(2, "inference-start", CustomLoopRunEventKind.NodeAttemptStarted, binding, "canonical-inference", "step-1", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var mismatchedOutcome = SequentialEvent(3, "inference-complete", CustomLoopRunEventKind.NodeAttemptCompleted, binding, "canonical-inference", "step-1", CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed);
+        var unknownStart = SequentialEvent(2, "inference-start", CustomLoopRunEventKind.NodeAttemptStarted, binding, "other-step", "other-step", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var unknownOutcome = SequentialEvent(3, "inference-complete", CustomLoopRunEventKind.NodeAttemptCompleted, binding, "other-step", "other-step", CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed);
+
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], mismatchedStart, mismatchedOutcome] }), "sequential_inference_step_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], unknownStart, unknownOutcome] }), "sequential_inference_step_mismatch");
+    }
+
+    [Fact]
+    public void Sequential_exit_evidence_requires_the_reserved_legacy_exit_step_without_aliasing_the_canonical_node()
+    {
+        var run = CreateSequentialRun();
+        var binding = run.SequentialAdapterBinding!;
+        var validStart = SequentialEvent(2, "exit-start", CustomLoopRunEventKind.ExitDecisionStarted, binding, "canonical-exit-node", "exit", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var validOutcome = SequentialEvent(3, "exit-complete", CustomLoopRunEventKind.ExitDecisionCompleted, binding, "canonical-exit-node", "exit", CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed);
+        var valid = run with { Events = [run.Events[0], validStart, validOutcome] };
+        Assert.True(CustomLoopRunValidator.Validate(valid).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(valid).Errors));
+
+        var wrongStart = SequentialEvent(2, "exit-start", CustomLoopRunEventKind.ExitDecisionStarted, binding, "canonical-exit-node", "canonical-exit-node", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var wrongOutcome = SequentialEvent(3, "exit-complete", CustomLoopRunEventKind.ExitDecisionCompleted, binding, "canonical-exit-node", "canonical-exit-node", CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed);
+
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], wrongStart, wrongOutcome] }), "sequential_exit_step_mismatch");
+    }
+
+    [Fact]
+    public void Sequential_exit_rejection_is_classified_by_its_exact_prior_exit_dispatch()
+    {
+        var run = CreateSequentialRun();
+        var binding = run.SequentialAdapterBinding!;
+        var exitStart = SequentialEvent(2, "exit-start", CustomLoopRunEventKind.ExitDecisionStarted, binding, "canonical-exit-node", "exit", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var exitRejection = SequentialEvent(3, "exit-rejected", CustomLoopRunEventKind.NodeAttemptFailed, binding, "canonical-exit-node", "exit", CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected);
+        var valid = run with { Events = [run.Events[0], exitStart, exitRejection] };
+        Assert.True(CustomLoopRunValidator.Validate(valid).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(valid).Errors));
+
+        var substitutedStep = SequentialEvent(3, "exit-rejected", CustomLoopRunEventKind.NodeAttemptFailed, binding, "canonical-exit-node", "canonical-exit-node", CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected);
+        var inferenceStart = SequentialEvent(2, "inference-start", CustomLoopRunEventKind.NodeAttemptStarted, binding, "canonical-exit-node", "exit", CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], exitStart, substitutedStep] }), "sequential_exit_step_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], inferenceStart, exitRejection] }), "sequential_inference_step_mismatch");
+    }
+
+    [Fact]
+    public void Sequential_trigger_evidence_forbids_legacy_step_coordinates()
+    {
+        var run = CreateSequentialRun();
+        var coordinatedTrigger = run.Events[0] with { Iteration = 1, StepId = "trigger-node", Attempt = 1 };
+        coordinatedTrigger = WithSequentialEvidence(
+            coordinatedTrigger,
+            run.SequentialAdapterBinding!,
+            "trigger-node",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [coordinatedTrigger] }), "sequential_trigger_coordinates_mismatch");
+    }
+
+    [Fact]
+    public void Sequential_initial_materialization_requires_trigger_evidence_without_changing_the_legacy_shape()
+    {
+        var run = CreateSequentialRun();
+        var missingTriggerEvidence = run with
+        {
+            Events = [run.Events[0] with { SequentialNodeEvidence = null }],
+        };
+
+        AssertCodes(CustomLoopRunValidator.Validate(missingTriggerEvidence), "sequential_trigger_evidence_required");
+        Assert.True(CustomLoopRunValidator.Validate(CreateRun()).IsValid);
+    }
 
     [Fact]
     public void Validate_accepts_a_complete_admitted_trace_and_hashes_exact_content()
@@ -581,6 +817,141 @@ public sealed class CustomLoopRunValidatorTests
             CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp)
         };
         return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static CustomLoopRunRecord CreateSequentialRun()
+    {
+        var run = CreateRun();
+        var invocation = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
+            GovernedLoopSequentialInvocationSnapshot.CurrentSchemaVersion,
+            run.TriggerPrompt,
+            run.ModelSnapshot,
+            run.InvokingConversation,
+            run.ContextSnapshot.CapturedAtUtc,
+            run.ContextSnapshot.SourceManifest,
+            string.Empty));
+        var revision = GovernedLoopRevisionReference.Create(1, "graph-alpha", "revision-alpha", new string('a', 64));
+        var execution = GovernedLoopExecutionBinding.Create(1, run.Id, revision, 1);
+        var binding = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
+            GovernedLoopSequentialAdapterBinding.CurrentSchemaVersion,
+            "workspace-sha256:" + new string('b', 64),
+            execution,
+            run.AdmissionOperationId,
+            new string('c', 64),
+            new string('d', 64),
+            invocation.ContentHash,
+            new string('e', 64),
+            new string('f', 64),
+            string.Empty));
+        var admitted = WithSequentialEvidence(
+            run.Events[0],
+            binding,
+            "trigger-node",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var capabilityAdmission = CreateSequentialCapabilityAdmission(binding, [ConversationTurnCapabilityId, ModelInferenceCapabilityId]);
+        return CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            CapabilityAdmission = capabilityAdmission,
+            SequentialInvocationSnapshot = invocation,
+            SequentialAdapterBinding = binding,
+            Events = [admitted],
+        });
+    }
+
+    private static CapabilityAdmissionSnapshot CreateSequentialCapabilityAdmission(
+        GovernedLoopSequentialAdapterBinding binding,
+        IReadOnlyList<string> capabilityIds,
+        string? graphArtifactHash = null)
+    {
+        Assert.True(CapabilityId.TryParse("org.embodysense/loop-" + binding.GraphArtifactHash[..32], out var subject, out _));
+        Assert.True(CapabilityVersionRange.TryParse("*", out var compatibleVersions, out _));
+        Assert.True(CapabilityIntegrityDigest.TryParse("sha256:" + (graphArtifactHash ?? binding.GraphArtifactHash), out var checksum, out _));
+        var dependencies = capabilityIds.Select(capabilityId =>
+        {
+            Assert.True(CapabilityId.TryParse(capabilityId, out var dependency, out _));
+            return new CapabilityDependency(dependency!, compatibleVersions!);
+        }).ToArray();
+        var requirements = new CapabilityDependencyManifest(
+            CapabilityDependencyManifest.CurrentSchemaVersion,
+            CapabilityDependencyManifestKind.LoopPackage,
+            subject!,
+            dependencies,
+            [],
+            new CapabilityDependencyArtifactMetadata(checksum, null));
+        return TestCapabilityAdmissionFactory.Create(requirements, _timestamp);
+    }
+
+    private static CustomLoopRunRecord WithSequentialToolAssignments(
+        CustomLoopRunRecord run,
+        CustomLoopToolAssignment[] assignments,
+        IReadOnlyList<string> capabilityIds)
+    {
+        var definition = run.AdmittedDefinition with
+        {
+            ToolAssignments = assignments,
+            ContentHash = string.Empty,
+        };
+        definition = CustomLoopDefinitionContentHash.Apply(definition with
+        {
+            CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(definition.Id, assignments),
+        });
+        return CustomLoopAdmissionRequestHash.Apply(run with
+        {
+            AdmittedDefinition = definition,
+            CapabilityAdmission = CreateSequentialCapabilityAdmission(run.SequentialAdapterBinding!, capabilityIds),
+        });
+    }
+
+    private static string GetRequirementsHash(CustomLoopDefinition definition)
+    {
+        Assert.True(CapabilityDependencyManifestHash.TryCompute(definition.CapabilityRequirements, out var hash, out _));
+        return hash!.Value;
+    }
+
+    private static CustomLoopRunEvent WithSequentialEvidence(
+        CustomLoopRunEvent runEvent,
+        GovernedLoopSequentialAdapterBinding binding,
+        string nodeId,
+        int attempt,
+        CustomLoopSequentialNodeEvidenceKind kind,
+        CustomLoopSequentialNodeDisposition disposition)
+    {
+        var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
+            CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
+            kind,
+            binding.WorkspaceId,
+            binding.ExecutionBinding.RunId,
+            binding.ExecutionBinding.Revision,
+            binding.ExecutionBinding.ExecutionGeneration,
+            nodeId,
+            attempt,
+            disposition,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
+            string.Empty));
+        return runEvent with { SequentialNodeEvidence = evidence };
+    }
+
+    private static CustomLoopRunEvent SequentialEvent(
+        long sequence,
+        string eventId,
+        CustomLoopRunEventKind eventKind,
+        GovernedLoopSequentialAdapterBinding binding,
+        string nodeId,
+        string stepId,
+        CustomLoopSequentialNodeEvidenceKind evidenceKind,
+        CustomLoopSequentialNodeDisposition disposition)
+    {
+        var runEvent = Event(sequence, eventId, eventKind, iteration: 1, attempt: 1) with
+        {
+            StepId = stepId,
+            ExitDecision = eventKind == CustomLoopRunEventKind.ExitDecisionCompleted ? CustomLoopExitDecision.Complete : null,
+            TraceReservationUtf8Bytes = eventKind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted
+                ? CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes
+                : null,
+        };
+        return WithSequentialEvidence(runEvent, binding, nodeId, 1, evidenceKind, disposition);
     }
 
     private static CustomLoopToolAuthoritySnapshot Authority(CustomLoopToolAssignment[] effectiveAssignments)

@@ -1,0 +1,913 @@
+using System.Collections.Immutable;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.ContextualRoles;
+using EmbodySense.Core.Application.ContextualRoles.Models;
+using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
+using EmbodySense.Core.Application.Governance.Authority.Grants;
+using EmbodySense.Core.Application.Governance.Authority.Models;
+using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Application.Loops.GraphAuthoring;
+using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Application.Loops.GraphValidation;
+using EmbodySense.Core.Application.Loops.GraphValidation.Models;
+using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Revisions;
+using EmbodySense.Core.Application.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants;
+using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.Authority.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Authority;
+using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.ContextualRoles;
+using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
+using EmbodySense.Core.Persistence.Loops.Revisions;
+using EmbodySense.Core.Startup.Capabilities;
+using EmbodySense.Core.Startup.Governance;
+using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Loops.Execution.Models;
+using EmbodySense.Core.Startup.Runtime;
+using EmbodySense.Core.Startup.Runtime.Models;
+using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Tests.Support;
+
+namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
+
+public sealed class GovernedLoopRuntimeTests
+{
+    private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
+    private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+
+    [Fact]
+    public async Task Public_runtime_executes_exact_canonical_inputs_and_terminal_replay_precedes_workspace_busy_and_restart()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync();
+        var input = fixture.Input("invoke-canonical-success", "answer through the governed graph");
+
+        await using (var runtime = await fixture.CreateRuntimeAsync())
+        {
+            var executed = await runtime.InvokeGovernedLoopAsync(input);
+
+            Assert.True(string.Equals("Executed", executed.Status, StringComparison.Ordinal), executed.Detail);
+            Assert.Equal("Admitted", executed.AdmissionStatus);
+            Assert.Equal("Ready", executed.MaterializationStatus);
+            Assert.True(
+                string.Equals("Completed", executed.ExecutionStatus, StringComparison.Ordinal),
+                $"{executed.Detail} Run failure: {executed.Run?.FailureCode}/{executed.Run?.FailureDetail}");
+            Assert.True(executed.WasDispatched);
+            Assert.Equal(CustomLoopRunStatus.Completed.ToString(), executed.Run?.Status);
+            Assert.Equal(1, fixture.ProviderAttempts);
+
+            using var runStore = new CustomLoopRunStore(fixture.Paths);
+            var durableRun = Assert.IsType<CustomLoopRunRecord>(
+                await runStore.GetAsync(executed.Run!.Id));
+            Assert.NotNull(durableRun.SequentialAdapterBinding);
+            Assert.NotNull(durableRun.SequentialInvocationSnapshot);
+            Assert.Equal(input.OperationId, durableRun.SequentialAdapterBinding!.AdmissionOperationId);
+
+            await using var competingGate = new CustomLoopWorkspaceExecutionGate(fixture.Paths);
+            using var competingLease = Assert.IsAssignableFrom<IDisposable>(
+                competingGate.TryAcquire("competing-terminal-replay", Hash64('8')).Lease);
+            var terminalReplay = await runtime.InvokeGovernedLoopAsync(input);
+
+            Assert.Equal("Terminal", terminalReplay.Status);
+            Assert.Equal("Replayed", terminalReplay.AdmissionStatus);
+            Assert.False(terminalReplay.WasDispatched);
+            Assert.Equal(executed.Run.Id, terminalReplay.Run?.Id);
+            Assert.Equal(1, fixture.ProviderAttempts);
+        }
+
+        await using (var restarted = await fixture.CreateRuntimeAsync(preserveCurrentConversation: true))
+        {
+            var replay = await restarted.InvokeGovernedLoopAsync(input);
+
+            Assert.Equal("Terminal", replay.Status);
+            Assert.Equal("Replayed", replay.AdmissionStatus);
+            Assert.False(replay.WasDispatched);
+            Assert.Equal(1, fixture.ProviderAttempts);
+
+            var defaultTurn = await restarted.RunTurnAsync("legacy default path remains selected");
+            Assert.True(defaultTurn.IsMessageTurn);
+            Assert.Contains("legacy default path remains selected", defaultTurn.Output, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task Definitive_authority_rejection_replays_after_restart_without_materialization_or_provider_work()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(includeRestrictedGrant: true);
+        var input = fixture.Input("invoke-canonical-rejected", "must be rejected", fixture.RestrictedGrant!);
+
+        await using (var runtime = await fixture.CreateRuntimeAsync())
+        {
+            var rejected = await runtime.InvokeGovernedLoopAsync(input);
+            var replayed = await runtime.InvokeGovernedLoopAsync(input);
+
+            Assert.True(string.Equals("Rejected", rejected.Status, StringComparison.Ordinal), rejected.Detail);
+            Assert.Equal("Rejected", rejected.AdmissionStatus);
+            Assert.NotNull(rejected.AdmissionFailureCode);
+            Assert.Null(rejected.MaterializationStatus);
+            Assert.Null(rejected.Run);
+            Assert.False(rejected.WasDispatched);
+            Assert.Equal("Rejected", replayed.Status);
+            Assert.Equal("Replayed", replayed.AdmissionStatus);
+            Assert.False(replayed.WasDispatched);
+            Assert.Equal(0, fixture.ProviderAttempts);
+        }
+
+        await using var restarted = await fixture.CreateRuntimeAsync(preserveCurrentConversation: true);
+        var restartReplay = await restarted.InvokeGovernedLoopAsync(input);
+
+        Assert.Equal("Rejected", restartReplay.Status);
+        Assert.Equal("Replayed", restartReplay.AdmissionStatus);
+        Assert.False(restartReplay.WasDispatched);
+        Assert.Equal(0, fixture.ProviderAttempts);
+    }
+
+    [Fact]
+    public async Task Begin_before_snapshot_bind_recovers_only_when_the_exact_snapshot_can_be_reproduced()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync();
+        var input = fixture.Input("invoke-crash-window-exact", "recover the exact prepared snapshot");
+        await using var runtime = await fixture.CreateRuntimeAsync();
+        await using var competingGate = new CustomLoopWorkspaceExecutionGate(fixture.Paths);
+        var competing = competingGate.TryAcquire("competing-before-bind", Hash64('7'));
+        Assert.Equal(CustomLoopExecutionLeaseStatus.Acquired, competing.Status);
+
+        using (competing.Lease)
+        {
+            var interrupted = await runtime.InvokeGovernedLoopAsync(input);
+
+            Assert.Equal("WorkspaceBusy", interrupted.Status);
+            Assert.False(interrupted.WasDispatched);
+            Assert.Equal(0, fixture.ProviderAttempts);
+            var unbound = Assert.IsType<EmbodySense.Core.Application.Loops.Models.CustomLoopInvocationOperation>(
+                await new CustomLoopInvocationOperationStore(fixture.Paths).GetAsync(input.OperationId));
+            Assert.Equal(CustomLoopInvocationBindingState.Unbound, unbound.BindingState);
+            Assert.Null(unbound.SequentialInvocationSnapshot);
+        }
+
+        var recovered = await runtime.InvokeGovernedLoopAsync(input);
+        var durable = Assert.IsType<EmbodySense.Core.Application.Loops.Models.CustomLoopInvocationOperation>(
+            await new CustomLoopInvocationOperationStore(fixture.Paths).GetAsync(input.OperationId));
+
+        Assert.True(string.Equals("Executed", recovered.Status, StringComparison.Ordinal), recovered.Detail);
+        Assert.True(recovered.WasDispatched);
+        Assert.Equal(1, fixture.ProviderAttempts);
+        Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, durable.BindingState);
+        Assert.NotNull(durable.SequentialInvocationSnapshot);
+        Assert.Equal(durable.CreatedAtUtc, durable.SequentialInvocationSnapshot!.ContextCapturedAtUtc);
+    }
+
+    [Fact]
+    public async Task Begin_before_snapshot_bind_conflicts_when_context_changes_and_does_zero_provider_work()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync();
+        var input = fixture.Input("invoke-crash-window-changed", "do not substitute changed context");
+        await using var runtime = await fixture.CreateRuntimeAsync();
+        await using var competingGate = new CustomLoopWorkspaceExecutionGate(fixture.Paths);
+        var competing = competingGate.TryAcquire("competing-before-context-change", Hash64('6'));
+
+        using (Assert.IsAssignableFrom<IDisposable>(competing.Lease))
+        {
+            var interrupted = await runtime.InvokeGovernedLoopAsync(input);
+            Assert.Equal("WorkspaceBusy", interrupted.Status);
+        }
+
+        await File.AppendAllTextAsync(
+            fixture.Paths.AgentFile("CONTEXT.md"),
+            $"{Environment.NewLine}changed after durable Begin{Environment.NewLine}");
+        var conflicted = await runtime.InvokeGovernedLoopAsync(input);
+        var durable = Assert.IsType<EmbodySense.Core.Application.Loops.Models.CustomLoopInvocationOperation>(
+            await new CustomLoopInvocationOperationStore(fixture.Paths).GetAsync(input.OperationId));
+
+        Assert.Equal("Conflict", conflicted.Status);
+        Assert.False(conflicted.WasDispatched);
+        Assert.Equal(0, fixture.ProviderAttempts);
+        Assert.Equal(CustomLoopInvocationBindingState.Unbound, durable.BindingState);
+        Assert.Null(durable.SequentialInvocationSnapshot);
+    }
+
+    [Fact]
+    public async Task Public_pause_and_resume_reconstructs_the_canonical_plan_from_durable_evidence()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(pauseProvider: true);
+        var input = fixture.Input("invoke-canonical-pause", "pause-at-boundary");
+        await using var runtime = await fixture.CreateRuntimeAsync();
+
+        var invocation = runtime.InvokeGovernedLoopAsync(input);
+        await fixture.WaitForProviderAsync();
+        using var runStore = new CustomLoopRunStore(fixture.Paths);
+        var running = await WaitForRunAsync(runStore, CustomLoopRunStatus.Running);
+        Assert.NotNull(running.SequentialAdapterBinding);
+        Assert.NotNull(running.SequentialInvocationSnapshot);
+
+        var pause = await runtime.PauseCustomLoopAsync(
+            new LoopRunControlInput(running.Id, running.LifecycleVersion, "pause-canonical-run"));
+        Assert.Equal("PauseRequested", pause.Status);
+        fixture.ReleaseProvider();
+
+        var pausedInvocation = await invocation;
+        Assert.Equal("Paused", pausedInvocation.ExecutionStatus);
+        Assert.Equal(CustomLoopRunStatus.Paused.ToString(), pausedInvocation.Run?.Status);
+        var paused = Assert.IsType<CustomLoopRunRecord>(
+            await runStore.GetAsync(running.Id));
+        var resume = await runtime.ResumeCustomLoopAsync(
+            new LoopRunControlInput(paused.Id, paused.LifecycleVersion, "resume-canonical-run"));
+
+        Assert.Equal("Completed", resume.Status);
+        Assert.Equal(CustomLoopRunStatus.Completed.ToString(), resume.Run?.Status);
+        Assert.Equal(paused.SequentialAdapterBinding?.ContentHash, (await runStore.GetAsync(paused.Id))?.SequentialAdapterBinding?.ContentHash);
+    }
+
+    private static async Task<CustomLoopRunRecord> WaitForRunAsync(
+        CustomLoopRunStore store,
+        CustomLoopRunStatus status)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var run = (await store.ListNonterminalAsync()).SingleOrDefault(item => item.Status == status);
+            if (run is not null)
+            {
+                return run;
+            }
+
+            await Task.Delay(20);
+        }
+
+        throw new Xunit.Sdk.XunitException($"A canonical run did not reach {status} within the test deadline.");
+    }
+
+    private static string Hash64(char value) => new(value, 64);
+
+    private sealed class GovernedRuntimeFixture : IDisposable
+    {
+        private const string OwnerActorId = "governed-test-owner";
+        private static readonly DateTimeOffset _now = DateTimeOffset.UtcNow;
+        private readonly TestWorkspace _workspace;
+        private readonly string _providerCounterPath;
+        private readonly string _providerStartedPath;
+        private readonly string _providerReleasePath;
+        private readonly string _codexPath;
+
+        private GovernedRuntimeFixture(
+            TestWorkspace workspace,
+            GovernedLoopRevisionPublicationPin publication,
+            AuthorityGrantReference grant,
+            AuthorityGrantReference? restrictedGrant,
+            string codexPath)
+        {
+            _workspace = workspace;
+            Publication = publication;
+            Grant = grant;
+            RestrictedGrant = restrictedGrant;
+            _codexPath = codexPath;
+            Paths = new WorkspacePaths(workspace.RootPath);
+            _providerCounterPath = workspace.File("governed-provider-attempts.txt");
+            _providerStartedPath = workspace.File("governed-provider-started.marker");
+            _providerReleasePath = workspace.File("governed-provider-release.marker");
+        }
+
+        public WorkspacePaths Paths { get; }
+
+        public GovernedLoopRevisionPublicationPin Publication { get; }
+
+        public AuthorityGrantReference Grant { get; }
+
+        public AuthorityGrantReference? RestrictedGrant { get; }
+
+        public int ProviderAttempts
+            => File.Exists(_providerCounterPath)
+                ? int.Parse(File.ReadAllText(_providerCounterPath), System.Globalization.CultureInfo.InvariantCulture)
+                : 0;
+
+        public static async Task<GovernedRuntimeFixture> CreateAsync(
+            bool includeRestrictedGrant = false,
+            bool pauseProvider = false)
+        {
+            var workspace = new TestWorkspace();
+            try
+            {
+                await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+                var paths = new WorkspacePaths(workspace.RootPath);
+                var role = await CreateRoleAsync(paths);
+                var publication = await CreatePublishedGraphAsync(workspace, paths, role);
+                var grant = await CreateGrantAsync(workspace, paths, role, publication, "governed-full-grant", FullCeiling());
+                var restricted = includeRestrictedGrant
+                    ? await CreateGrantAsync(workspace, paths, role, publication, "governed-empty-grant", EmptyCeiling())
+                    : null;
+                var codexPath = await CreateCodexExecutableAsync(workspace, pauseProvider);
+                return new GovernedRuntimeFixture(workspace, publication, grant, restricted, codexPath);
+            }
+            catch
+            {
+                workspace.Dispose();
+                throw;
+            }
+        }
+
+        public GovernedLoopRunInvocationInput Input(
+            string operationId,
+            string prompt,
+            AuthorityGrantReference? grant = null)
+            => new(operationId, Publication, grant ?? Grant, prompt);
+
+        public Task<AgentRuntime> CreateRuntimeAsync(bool preserveCurrentConversation = false)
+            => AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+                    new RejectingApprovalPrompt(),
+                    _workspace.ServerStatePath)
+                .CreateAsync(
+                    "test-model",
+                    _workspace.RootPath,
+                    _codexPath,
+                    "read-only",
+                    AgentRuntimeSurface.Cli,
+                    preserveCurrentConversation);
+
+        public async Task WaitForProviderAsync()
+        {
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+            while (!File.Exists(_providerStartedPath) && DateTimeOffset.UtcNow < deadline)
+            {
+                await Task.Delay(20);
+            }
+
+            Assert.True(File.Exists(_providerStartedPath), "The governed provider attempt did not start within the test deadline.");
+        }
+
+        public void ReleaseProvider() => File.WriteAllText(_providerReleasePath, "release");
+
+        public void Dispose() => _workspace.Dispose();
+
+        private static async Task<ContextualRoleRevision> CreateRoleAsync(WorkspacePaths paths)
+        {
+            var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+            var revision = ContextualRoleRevisionContentHash.Apply(new ContextualRoleRevision(
+                ContextualRoleLimits.SchemaVersion,
+                new ContextualRoleRevisionIdentity("governed-helper", 1),
+                string.Empty,
+                "Governed helper",
+                "Execute one bounded canonical inference graph.",
+                ContextualRoleStatus.Published,
+                new ContextualRoleProvenance(OwnerActorId, _now.AddMinutes(-2), _now.AddMinutes(-1)),
+                new ContextualRoleWorkspaceApplicability(ImmutableArray.Create(workspaceId)),
+                new ContextualRoleInstructionSourceReference(
+                    ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown,
+                    "role",
+                    ContextualRoleInstructionClassification.RoleInstruction),
+                new ContextualRolePolicyMaxima(
+                    ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId))));
+            var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(
+                "create-governed-helper-role",
+                string.Empty,
+                ContextualRoleRevisionMutationKind.Create,
+                revision.Identity.RoleId,
+                OwnerActorId,
+                revision,
+                null,
+                _now));
+            using var store = new ContextualRoleRevisionStore(paths, workspaceId);
+            var result = await store.MutateAsync(request);
+            Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, result.Status);
+            return Assert.IsType<ContextualRoleRevision>(result.Revision);
+        }
+
+        private static async Task<GovernedLoopRevisionPublicationPin> CreatePublishedGraphAsync(
+            TestWorkspace workspace,
+            WorkspacePaths paths,
+            ContextualRoleRevision role)
+        {
+            var candidate = Candidate(new ContextualRoleRevisionPin(role.Identity, role.ContentHash));
+            var normalized = GovernedLoopGraphNormalizer.Normalize(candidate);
+            Assert.True(normalized.IsValid);
+            var revision = normalized.Graph!.RevisionReference;
+            var lifecycle = new ContextualRoleLifecycleSnapshot(
+                1,
+                role.Identity.RoleId,
+                role.Identity,
+                ContextualRoleLifecycleState.Active,
+                "create-governed-helper-role",
+                ContextualRoleRevisionMutationKind.Create,
+                _now);
+            var authority = new StaticAuthorityProvider(new GovernedLoopAuthoritySnapshot(
+                true,
+                Hash64('a'),
+                new ContextualRoleRevisionPin(role.Identity, role.ContentHash),
+                role,
+                lifecycle,
+                CapabilityWorkspaceScopeId.Create(paths.RootPath),
+                ContextualRoleInstructionSourceProbeStatus.Ready,
+                role.PolicyMaxima.CapabilityIds,
+                CustomLoopLimits.MaxGraphNodeAttempts,
+                100_000,
+                CustomLoopLimits.MaxGraphNodeEvidenceItems,
+                100));
+            var service = GovernedLoopGraphAuthoringFactory.Create(
+                paths,
+                new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath),
+                new StaticNodeCatalog(Catalog(candidate)),
+                authority,
+                new AllowingActorAuthorizer());
+            var created = await service.MutateAsync(new GovernedLoopGraphAuthoringRequest(
+                1,
+                new GovernedLoopRevisionLifecycleRequest(
+                    1,
+                    "create-governed-sequential-graph",
+                    GovernedLoopRevisionOperationKind.CreateDraft,
+                    revision.GraphId,
+                    Actor(),
+                    GovernedLoopRevisionLifecycleStatus.Unknown,
+                    0,
+                    null,
+                    null,
+                    revision,
+                    null,
+                    null),
+                candidate));
+            Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, created.Status);
+            var head = Assert.IsType<GovernedLoopRevisionLifecycleHead>(created.LifecycleResult?.Head);
+            var published = await service.MutateAsync(new GovernedLoopGraphAuthoringRequest(
+                1,
+                new GovernedLoopRevisionLifecycleRequest(
+                    1,
+                    "publish-governed-sequential-graph",
+                    GovernedLoopRevisionOperationKind.Publish,
+                    head.GraphId,
+                    Actor(),
+                    head.Status,
+                    head.LifecycleVersion,
+                    head.DraftRevision,
+                    head.PublishedRevision,
+                    null,
+                    head.DraftRevision,
+                    null),
+                null));
+            Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, published.Status);
+            return Assert.IsType<GovernedLoopRevisionPublicationPin>(published.LifecycleResult?.Head?.PublishedRevision);
+        }
+
+        private static async Task<AuthorityGrantReference> CreateGrantAsync(
+            TestWorkspace workspace,
+            WorkspacePaths paths,
+            ContextualRoleRevision role,
+            GovernedLoopRevisionPublicationPin publication,
+            string grantId,
+            AuthorityCeiling requestedCeiling)
+        {
+            var trust = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
+            var store = new AuthorityProfileStore(paths, trust);
+            var profileId = ProfileId("governed-loop-profile");
+            var profileRead = await store.ReadAsync(profileId.Value);
+            AuthorityProfileRecord profile;
+            if (profileRead.Status == AuthorityProfileReadStatus.NotFound)
+            {
+                var declaration = new AuthorityProfile(
+                    AuthorityProfile.CurrentSchemaVersion,
+                    profileId,
+                    ProfileRevision(1),
+                    AuthorityProfileStatus.Active,
+                    Purpose("Bound canonical sequential test execution."),
+                    new AuthorityProvenance(Actor(), AuthorityProvenanceKind.UserDeclaration),
+                    _now.AddMinutes(-5),
+                    _now.AddDays(1),
+                    FullCeiling(),
+                    []);
+                var created = await store.MutateAsync(new AuthorityProfileMutation(
+                    AuthorityProfileMutationKind.Create,
+                    "create-governed-loop-profile",
+                    0,
+                    declaration,
+                    null,
+                    null,
+                    Actor(),
+                    Purpose("Create the bounded governed-loop authority profile.")));
+                Assert.Equal(AuthorityProfileMutationStatus.Applied, created.Status);
+                profile = Assert.IsType<AuthorityProfileRecord>(created.Record);
+            }
+            else
+            {
+                Assert.Equal(AuthorityProfileReadStatus.Available, profileRead.Status);
+                profile = Assert.IsType<AuthorityProfileRecord>(profileRead.Record);
+            }
+
+            var binding = new AuthorityGrantBinding(
+                new AuthorityGrantProfilePin(
+                    new AuthorityProfileReference(profile.ProfileId, profile.CurrentProfile.Revision),
+                    profile.CurrentHash),
+                new ContextualRoleRevisionPin(role.Identity, role.ContentHash),
+                publication);
+            var grant = AuthorityGrantHash.Apply(new AuthorityGrant(
+                AuthorityGrantContractLimits.CurrentSchemaVersion,
+                GrantId(grantId),
+                GrantRevision(1),
+                null,
+                null,
+                AuthorityGrantLifecycleStatus.Active,
+                binding,
+                requestedCeiling,
+                new AuthorityGrantBoundary(
+                    _now.AddMinutes(-1),
+                    _now.AddHours(12),
+                    AuthorityGrantCompletionConstraintKind.None),
+                Actor(),
+                Purpose("Delegate one exact published governed loop."),
+                _now,
+                string.Empty));
+            var operationId = "create-" + grantId;
+            var requestHash = grantId.EndsWith("empty-grant", StringComparison.Ordinal) ? Hash64('3') : Hash64('2');
+            var observed = await store.ReadForMutationAsync(grant.GrantId, operationId, requestHash);
+            var evidence = new AuthorityGrantOperationEvidence(
+                AuthorityGrantContractLimits.CurrentSchemaVersion,
+                operationId,
+                requestHash,
+                AuthorityGrantOperationKind.Create,
+                AuthorityGrantOperationOutcome.Committed,
+                AuthorityGrantOperationFailureCode.None,
+                grant.GrantId,
+                0,
+                new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash),
+                grant.ChangedByActorId,
+                grant.Reason,
+                Hash64('4'),
+                Hash64('5'),
+                grant.RecordedAtUtc);
+            var committed = await store.CommitAsync(new AuthorityGrantStoreMutation(observed.StoreGeneration, grant, evidence));
+            Assert.Equal(AuthorityGrantStoreCommitStatus.Committed, committed.Status);
+            var reference = new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);
+            if (requestedCeiling.Capabilities.Count != 0)
+            {
+                await AssertDependenciesActiveAsync(workspace, paths, binding, reference);
+            }
+
+            return reference;
+        }
+
+        private static async Task AssertDependenciesActiveAsync(
+            TestWorkspace workspace,
+            WorkspacePaths paths,
+            AuthorityGrantBinding binding,
+            AuthorityGrantReference reference)
+        {
+            var trust = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
+            var transaction = new CapabilityAuthorityTransaction(paths);
+            var lifecycleStore = new GovernedLoopRevisionLifecycleStore(paths, trust, authorityTransaction: transaction);
+            var graphStore = new GovernedLoopGraphRevisionStore(paths, lifecycleStore, trust, authorityTransaction: transaction);
+            var publicationSource = new GovernedLoopPublishedRevisionSource(lifecycleStore, transaction);
+            var bindingSource = new GovernedLoopGrantBindingSource(publicationSource, graphStore, transaction);
+            using var roleStore = new ContextualRoleRevisionStore(
+                paths,
+                CapabilityWorkspaceScopeId.Create(paths.RootPath),
+                authorityTransaction: transaction);
+            var roleSource = new AuthorityGrantRoleSource(
+                CapabilityWorkspaceScopeId.Create(paths.RootPath),
+                roleStore,
+                roleStore,
+                new WorkspaceContextualRoleInstructionSourceProbe(paths),
+                transaction);
+            var authorityStore = new AuthorityProfileStore(paths, trust, authorityTransaction: transaction);
+            var profileSource = new AuthorityGrantProfileSource(authorityStore);
+            var resolver = new AuthorityGrantResolver(
+                authorityStore,
+                profileSource,
+                roleSource,
+                publicationSource,
+                bindingSource,
+                transaction);
+            var bindingResult = await bindingSource.ResolveAsync(binding.Loop);
+            var roleResult = await roleSource.ResolveAsync(binding.Role);
+            var profileRead = await authorityStore.ReadAsync(binding.Profile.Reference.ProfileId.Value);
+            var profileEvaluatedAtUtc = DateTimeOffset.UtcNow;
+            var profileResult = await profileSource.ResolveAsync(binding.Profile, profileEvaluatedAtUtc);
+            var grantResult = await resolver.ResolveAsync(reference);
+
+            Assert.Equal(AuthorityGrantDependencyStatus.Active, bindingResult.Status);
+            Assert.Equal(AuthorityGrantDependencyStatus.Active, roleResult.Status);
+            Assert.Equal(AuthorityProfileReadStatus.Available, profileRead.Status);
+            Assert.Equal(AuthorityGrantDependencyStatus.Active, profileResult.Status);
+            Assert.Equal(AuthorityGrantResolutionStatus.Active, grantResult.Status);
+        }
+
+        private static GovernedLoopGraphCandidate Candidate(ContextualRoleRevisionPin role)
+            => new(
+                1,
+                "governed-sequential-loop",
+                "revision-1",
+                "Execute one canonical sequential inference.",
+                role,
+                "trigger",
+                ["exit"],
+                GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
+                [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
+                [
+                    new GovernedLoopNodeDefinition(
+                        "trigger",
+                        new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Trigger, "manual-trigger", 1),
+                        [Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context)],
+                        GovernedLoopAuthorityCeiling.Create([]),
+                        new Dictionary<string, string>()),
+                    new GovernedLoopNodeDefinition(
+                        "inference",
+                        new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
+                        [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                        GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
+                        new Dictionary<string, string> { ["instruction"] = "Answer the bounded request." }),
+                    new GovernedLoopNodeDefinition(
+                        "exit",
+                        new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
+                        [Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                        GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]),
+                        new Dictionary<string, string>()),
+                ],
+                [
+                    new GovernedLoopControlEdgeDefinition("trigger-to-inference", "trigger", "inference", GovernedLoopControlCondition.Always),
+                    new GovernedLoopControlEdgeDefinition("inference-to-exit", "inference", "exit", GovernedLoopControlCondition.Success),
+                ],
+                [
+                    new GovernedLoopBindingDefinition("request-binding", GovernedLoopBindingKind.Data, "trigger", "request", "inference", "request"),
+                    new GovernedLoopBindingDefinition("context-binding", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "inference", "invocation-context"),
+                    new GovernedLoopBindingDefinition("result-binding", GovernedLoopBindingKind.Data, "inference", "result", "exit", "result"),
+                ],
+                new GovernedLoopOutputContract(
+                    "Return the bounded result.",
+                    [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
+                new GovernedLoopDisplayMetadata(
+                    "Governed sequential loop",
+                    "Public Startup composition test.",
+                    [
+                        new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Start.", 0, 0),
+                        new GovernedLoopNodeDisplayMetadata("inference", "Inference", "Infer.", 100, 0),
+                        new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 200, 0),
+                    ]));
+
+        private static GovernedLoopPortDefinition Port(
+            string id,
+            GovernedLoopPortDirection direction,
+            GovernedLoopBindingKind kind)
+            => new(id, direction, kind, "text", true);
+
+        private static GovernedLoopNodeCatalogSnapshot Catalog(GovernedLoopGraphCandidate candidate)
+        {
+            var schemas = candidate.ValueSchemas!.ToDictionary(schema => schema!.Id, schema => schema!.Kind, StringComparer.Ordinal);
+            var terminal = candidate.TerminalNodeIds!.ToHashSet(StringComparer.Ordinal);
+            var descriptors = candidate.Nodes!.Select(node =>
+            {
+                var outcomes = candidate.ControlEdges!
+                    .Where(edge => string.Equals(edge!.FromNodeId, node!.Id, StringComparison.Ordinal))
+                    .Select(edge => edge!.Condition)
+                    .Distinct()
+                    .Order()
+                    .ToArray();
+                return new GovernedLoopNodeCatalogDescriptor(
+                    node!.Descriptor,
+                    true,
+                    true,
+                    node.Descriptor.Kind == GovernedLoopNodeKind.Trigger,
+                    terminal.Contains(node.Id),
+                    outcomes,
+                    outcomes,
+                    GovernedLoopJoinPolicy.None,
+                    0,
+                    false,
+                    null,
+                    null,
+                    node.Ports.Select(port => new GovernedLoopCatalogPortContract(
+                        port.Id,
+                        port.Direction,
+                        port.BindingKind,
+                        schemas[port.ValueSchemaId],
+                        port.Required)).ToArray(),
+                    node.Parameters.Select(parameter => new GovernedLoopCatalogParameterContract(
+                        parameter.Key,
+                        GovernedLoopParameterValueKind.Text,
+                        true,
+                        1,
+                        CustomLoopLimits.MaxGraphParameterValueCharacters,
+                        null,
+                        null,
+                        [])).ToArray(),
+                    node.AuthorityCeiling.CapabilityIds,
+                    new GovernedLoopNodeResourceBudget(0, 0, 0, 0));
+            }).ToArray();
+            return new GovernedLoopNodeCatalogSnapshot(true, "governed-runtime-catalog", descriptors);
+        }
+
+        private static AuthorityCeiling FullCeiling()
+            => new(
+                BuiltInCapabilityCatalog.Descriptors
+                    .Where(item => item.Id.Value is ConversationTurnCapabilityId or ModelInferenceCapabilityId)
+                    .Select(CreateCapabilityIdentity)
+                    .OrderBy(item => item.Id.Value, StringComparer.Ordinal)
+                    .ToArray(),
+                [],
+                0,
+                CapabilitySideEffectClass.None,
+                false,
+                false,
+                false);
+
+        private static AuthorityCeiling EmptyCeiling()
+            => new([], [], 0, CapabilitySideEffectClass.None, false, false, false);
+
+        private static CapabilityDescriptorIdentity CreateCapabilityIdentity(CapabilityDescriptor descriptor)
+        {
+            Assert.True(CapabilityDescriptorIdentity.TryCreate(descriptor, out var identity, out var validation));
+            Assert.True(validation.IsValid);
+            return identity!;
+        }
+
+        private static AuthorityActorId Actor()
+        {
+            Assert.True(AuthorityActorId.TryParse(OwnerActorId, out var actor, out _));
+            return actor!;
+        }
+
+        private static AuthorityPurpose Purpose(string value)
+        {
+            Assert.True(AuthorityPurpose.TryParse(value, out var purpose, out _));
+            return purpose!;
+        }
+
+        private static AuthorityProfileId ProfileId(string value)
+        {
+            Assert.True(AuthorityProfileId.TryParse(value, out var id, out _));
+            return id!;
+        }
+
+        private static AuthorityProfileRevision ProfileRevision(int value)
+        {
+            Assert.True(AuthorityProfileRevision.TryParse(value.ToString(System.Globalization.CultureInfo.InvariantCulture), out var revision, out _));
+            return revision!;
+        }
+
+        private static AuthorityGrantId GrantId(string value)
+        {
+            Assert.True(AuthorityGrantId.TryParse(value, out var id, out _));
+            return id!;
+        }
+
+        private static AuthorityGrantRevision GrantRevision(int value)
+        {
+            Assert.True(AuthorityGrantRevision.TryParse(value.ToString(System.Globalization.CultureInfo.InvariantCulture), out var revision, out _));
+            return revision!;
+        }
+
+        private static async Task<string> CreateCodexExecutableAsync(TestWorkspace workspace, bool pauseProvider)
+        {
+            var scriptPath = workspace.File("fake-governed-codex.js");
+            var commandPath = workspace.File(OperatingSystem.IsWindows() ? "fake-governed-codex.cmd" : "fake-governed-codex");
+            var counterPath = System.Text.Json.JsonSerializer.Serialize(workspace.File("governed-provider-attempts.txt"));
+            var startedPath = System.Text.Json.JsonSerializer.Serialize(workspace.File("governed-provider-started.marker"));
+            var releasePath = System.Text.Json.JsonSerializer.Serialize(workspace.File("governed-provider-release.marker"));
+            var pauseEveryTurn = pauseProvider ? "true" : "false";
+            await File.WriteAllTextAsync(scriptPath, $$"""
+                const fs = require("node:fs");
+                const readline = require("node:readline");
+                const counterPath = {{counterPath}};
+                const startedPath = {{startedPath}};
+                const releasePath = {{releasePath}};
+                const pauseEveryTurn = {{pauseEveryTurn}};
+
+                if (process.argv.slice(2).includes("--version")) {
+                  process.stdout.write("codex-cli compatible-governed-test\n");
+                  process.exit(0);
+                }
+
+                const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+                let threadNumber = 0;
+                let turnNumber = 0;
+
+                function write(value) {
+                  process.stdout.write(`${JSON.stringify(value)}\n`);
+                }
+
+                function complete(threadId, turnId, text) {
+                  write({ method: "item/agentMessage/delta", params: { threadId, turnId, delta: text } });
+                  write({
+                    method: "turn/completed",
+                    params: { threadId, turnId, turn: { id: turnId, status: "completed", items: [{ type: "agentMessage", phase: "final_answer", text }] } }
+                  });
+                }
+
+                function prompt(message) {
+                  const text = (message.params?.input ?? []).map(item => String(item?.text ?? "")).join("\n");
+                  const marker = "Current user message:";
+                  const index = text.indexOf(marker);
+                  return index < 0 ? text : text.slice(index + marker.length).trim();
+                }
+
+                function waitForRelease(callback) {
+                  if (fs.existsSync(releasePath)) {
+                    callback();
+                    return;
+                  }
+
+                  setTimeout(() => waitForRelease(callback), 20);
+                }
+
+                input.on("line", line => {
+                  const message = JSON.parse(line);
+                  switch (message.method) {
+                    case "initialize":
+                      write({ id: message.id, result: {} });
+                      break;
+                    case "model/list":
+                      write({ id: message.id, result: { data: [{ id: "test-model", model: "test-model" }], nextCursor: null } });
+                      break;
+                    case "thread/start": {
+                      const threadId = `thread-governed-${++threadNumber}`;
+                      write({ id: message.id, result: { thread: { id: threadId } } });
+                      break;
+                    }
+                    case "turn/start": {
+                      const threadId = String(message.params?.threadId ?? `thread-governed-${threadNumber}`);
+                      const turnId = `turn-governed-${++turnNumber}`;
+                      const userPrompt = prompt(message);
+                      const attempts = fs.existsSync(counterPath) ? Number(fs.readFileSync(counterPath, "utf8")) : 0;
+                      fs.writeFileSync(counterPath, String(attempts + 1));
+                      write({ id: message.id, result: { turn: { id: turnId } } });
+                      const finish = () => complete(threadId, turnId, `governed response: ${userPrompt}`);
+                      if (pauseEveryTurn && !fs.existsSync(releasePath)) {
+                        fs.writeFileSync(startedPath, "started");
+                        waitForRelease(finish);
+                      } else {
+                        finish();
+                      }
+                      break;
+                    }
+                    default:
+                      break;
+                  }
+                });
+                """);
+            if (OperatingSystem.IsWindows())
+            {
+                await File.WriteAllTextAsync(commandPath, """
+                    @echo off
+                    node "%~dp0fake-governed-codex.js" %*
+                    """);
+            }
+            else
+            {
+                var escaped = scriptPath
+                    .Replace("\\", "\\\\", StringComparison.Ordinal)
+                    .Replace("\"", "\\\"", StringComparison.Ordinal)
+                    .Replace("$", "\\$", StringComparison.Ordinal)
+                    .Replace("`", "\\`", StringComparison.Ordinal);
+                await File.WriteAllTextAsync(commandPath, $"#!/bin/sh\nexec node \"{escaped}\" \"$@\"\n");
+                File.SetUnixFileMode(
+                    commandPath,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
+
+            return commandPath;
+        }
+    }
+
+    private sealed class StaticNodeCatalog(GovernedLoopNodeCatalogSnapshot snapshot) : IGovernedLoopNodeCatalog
+    {
+        public Task<GovernedLoopNodeCatalogSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(snapshot);
+    }
+
+    private sealed class StaticAuthorityProvider(GovernedLoopAuthoritySnapshot snapshot) : IGovernedLoopAuthoritySnapshotProvider
+    {
+        public Task<GovernedLoopAuthoritySnapshot> GetSnapshotAsync(
+            ContextualRoleRevisionPin? owningRole,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(snapshot);
+    }
+
+    private sealed class AllowingActorAuthorizer : IGovernedLoopRevisionActorAuthorizer
+    {
+        public Task<GovernedLoopRevisionActorAuthorization> AuthorizeAsync(
+            GovernedLoopRevisionActorAuthorizationRequest request,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(new GovernedLoopRevisionActorAuthorization(
+                GovernedLoopRevisionActorAuthorizationStatus.Authorized,
+                request.Request.OperationId,
+                request.RequestHash,
+                request.Request.ActorId,
+                Hash64('9')));
+    }
+
+    private sealed class RejectingApprovalPrompt : IAgentToolApprovalPrompt
+    {
+        public Task<(bool Approved, string DecisionBy, string Detail)> RequestApprovalAsync(
+            AgentToolApprovalRequest request,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult((false, "test", "No governed workspace tool is used in this graph."));
+    }
+}

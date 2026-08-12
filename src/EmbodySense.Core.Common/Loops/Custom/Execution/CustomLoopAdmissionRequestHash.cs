@@ -40,6 +40,12 @@ public static class CustomLoopAdmissionRequestHash
             WriteContextSnapshot(writer, run.ContextSnapshot);
             writer.WritePropertyName("capabilityAdmission");
             JsonSerializer.Serialize(writer, run.CapabilityAdmission);
+            if (run.SequentialInvocationSnapshot is not null || run.SequentialAdapterBinding is not null)
+            {
+                WriteString(writer, "sequentialInvocationHash", run.SequentialInvocationSnapshot?.ContentHash);
+                WriteString(writer, "sequentialAdapterBindingHash", run.SequentialAdapterBinding?.ContentHash);
+            }
+
             writer.WriteEndObject();
         }
 

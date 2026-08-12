@@ -6,10 +6,11 @@ namespace EmbodySense.Core.Startup.Capabilities;
 /// <summary>Defines safe descriptors for implementations shipped in the local runtime.</summary>
 public static class BuiltInCapabilityCatalog
 {
-    /// <summary>Gets the built-ins to declare and install without enabling, assigning, trusting, or authorizing them.</summary>
+    /// <summary>Gets the built-ins available to workspace bootstrap; descriptors never assign or authorize capability use.</summary>
     public static IReadOnlyList<CapabilityDescriptor> Descriptors { get; } = Array.AsReadOnly(new[]
     {
         Create("org.embodysense/conversation-turn", "conversation-turn", CapabilityKind.GraphNode, CapabilitySideEffectClass.None, "Execute one governed default-conversation inference step."),
+        Create("org.embodysense/model-inference", "model-inference", CapabilityKind.GraphNode, CapabilitySideEffectClass.None, "Dispatch one admitted model-inference node through the governed local runtime."),
         Create("org.embodysense/workspace-command", "workspace-command", CapabilityKind.Actuator, CapabilitySideEffectClass.LocalReversible, "Expose governed workspace commands through the runtime tool broker.")
     });
 

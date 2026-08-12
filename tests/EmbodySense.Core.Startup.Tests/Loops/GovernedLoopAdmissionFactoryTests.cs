@@ -9,6 +9,8 @@ using EmbodySense.Core.Application.Loops.Admission.Models;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
+using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
@@ -26,6 +28,7 @@ using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Loops.Admission;
+using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
@@ -34,6 +37,9 @@ namespace EmbodySense.Core.Startup.Tests.Loops;
 
 public sealed class GovernedLoopAdmissionFactoryTests
 {
+    private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
+    private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+
     [Fact]
     public async Task Production_composition_preserves_system_role_mapping_without_creating_an_ambient_grant()
     {
@@ -53,6 +59,71 @@ public sealed class GovernedLoopAdmissionFactoryTests
         Assert.Equal(GovernedLoopAdmissionStatus.Invalid, invalid.Status);
         Assert.False(File.Exists(paths.AuthorityProfilesDocumentPath));
         Assert.False(File.Exists(paths.AuthorityProfilesProofPath));
+    }
+
+    [Fact]
+    public async Task Seeded_catalog_admits_the_exact_first_wave_model_inference_capability_without_a_synthetic_receipt()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trustProvider = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var fixture = AdmissionFixture.CreateFirstWave(workspaceId);
+        Assert.Equal(
+            GovernedLoopSequentialPlanBuildStatus.Ready,
+            GovernedLoopSequentialPlanBuilder.Build(fixture.GraphRead.Artifact).Status);
+        var transaction = new CapabilityAuthorityTransaction(paths);
+        var ports = new MutableAdmissionPorts(fixture);
+        var store = new GovernedLoopAdmissionStore(paths, trustProvider, authorityTransaction: transaction);
+        var capabilityAdmission = CapabilityAdmissionFactory.Create(
+            paths,
+            trustProvider,
+            transaction,
+            new FixedTimeProvider(AdmissionFixture.Now.AddMinutes(1)));
+
+        using var facade = GovernedLoopAdmissionFactory.Create(
+            workspaceId,
+            store,
+            ports,
+            ports,
+            ports,
+            ports,
+            capabilityAdmission,
+            transaction,
+            ports,
+            new FixedTimeProvider(AdmissionFixture.Now.AddMinutes(1)));
+        var admitted = await facade.AdmitAsync(fixture.Request);
+
+        Assert.Equal(GovernedLoopAdmissionStatus.Admitted, admitted.Status);
+        var outcome = Assert.IsType<GovernedLoopAdmissionTerminalOutcome>(admitted.Outcome);
+        var receipt = Assert.IsType<GovernedLoopAdmissionReceipt>(outcome.Receipt);
+        var snapshot = receipt.Evidence.CapabilityAdmission;
+        Assert.Equal(
+            [ConversationTurnCapabilityId, ModelInferenceCapabilityId],
+            snapshot.Pins.Select(item => item.DescriptorIdentity.Id.Value));
+        var conversationTurnPin = Assert.Single(
+            snapshot.Pins,
+            item => item.DescriptorIdentity.Id.Value == ConversationTurnCapabilityId);
+        Assert.Equal("1.0.0", conversationTurnPin.DescriptorIdentity.Version.Value);
+        Assert.Equal(CapabilityKind.GraphNode, conversationTurnPin.Kind);
+        Assert.Equal("org.embodysense", conversationTurnPin.Implementation.ProviderId.Value);
+        Assert.Equal("conversation-turn", conversationTurnPin.Implementation.ImplementationId);
+        var modelInferencePin = Assert.Single(
+            snapshot.Pins,
+            item => item.DescriptorIdentity.Id.Value == ModelInferenceCapabilityId);
+        Assert.Equal("1.0.0", modelInferencePin.DescriptorIdentity.Version.Value);
+        Assert.Equal(CapabilityKind.GraphNode, modelInferencePin.Kind);
+        Assert.Equal("org.embodysense", modelInferencePin.Implementation.ProviderId.Value);
+        Assert.Equal("model-inference", modelInferencePin.Implementation.ImplementationId);
+        Assert.Equal(
+            [ConversationTurnCapabilityId, ModelInferenceCapabilityId],
+            snapshot.Evidence.Select(item => item.DependencyId.Value));
+        Assert.All(snapshot.Evidence, item => Assert.Equal("Selected", item.Outcome));
+        Assert.Equal(
+            snapshot.Pins.Select(item => item.DescriptorIdentity),
+            snapshot.Evidence.Select(item => item.SelectedIdentity));
+        Assert.Equal("sha256:" + fixture.GraphRead.Artifact!.ArtifactHash, snapshot.Requirements.Artifact.Checksum?.Value);
     }
 
     [Fact]
@@ -336,11 +407,18 @@ public sealed class GovernedLoopAdmissionFactoryTests
     {
         internal static readonly DateTimeOffset Now = new(2026, 8, 10, 18, 0, 0, TimeSpan.Zero);
 
-        internal static AdmissionFixture Create(string workspaceId)
+        internal static AdmissionFixture Create(string workspaceId) => Create(workspaceId, includeModelInference: false);
+
+        internal static AdmissionFixture CreateFirstWave(string workspaceId) => Create(workspaceId, includeModelInference: true);
+
+        private static AdmissionFixture Create(string workspaceId, bool includeModelInference)
         {
-            var role = CreateRole(workspaceId);
+            var capabilityIdentities = includeModelInference
+                ? new[] { CapabilityIdentity(ConversationTurnCapabilityId), CapabilityIdentity(ModelInferenceCapabilityId) }
+                : [];
+            var role = CreateRole(workspaceId, includeModelInference);
             var rolePin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
-            var graph = CreateGraph(rolePin);
+            var graph = CreateGraph(rolePin, includeModelInference);
             var revisionArtifact = GovernedLoopRevisionArtifactFactory.Create(
                 1,
                 graph.RevisionReference,
@@ -355,7 +433,16 @@ public sealed class GovernedLoopAdmissionFactoryTests
                 graph.RevisionReference,
                 "publish-loop",
                 Hash64('7'));
-            var ceiling = AuthorityCeilingIntersection.EmptyCeiling();
+            var ceiling = capabilityIdentities.Length == 0
+                ? AuthorityCeilingIntersection.EmptyCeiling()
+                : new AuthorityCeiling(
+                    capabilityIdentities,
+                    [],
+                    0,
+                    CapabilitySideEffectClass.None,
+                    false,
+                    false,
+                    false);
             var profile = CreateProfile(ceiling);
             var binding = new AuthorityGrantBinding(
                 new AuthorityGrantProfilePin(
@@ -410,7 +497,7 @@ public sealed class GovernedLoopAdmissionFactoryTests
                     Now));
         }
 
-        private static ContextualRoleRevision CreateRole(string workspaceId)
+        private static ContextualRoleRevision CreateRole(string workspaceId, bool includeModelInference)
         {
             var role = new ContextualRoleRevision(
                 1,
@@ -425,12 +512,20 @@ public sealed class GovernedLoopAdmissionFactoryTests
                     ContextualRoleInstructionSourceKind.RoleArtifact,
                     "bounded-helper-source",
                     ContextualRoleInstructionClassification.RoleInstruction),
-                new ContextualRolePolicyMaxima(ImmutableArray<string>.Empty));
+                new ContextualRolePolicyMaxima(
+                    includeModelInference
+                        ? ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId)
+                        : ImmutableArray<string>.Empty));
             return ContextualRoleRevisionContentHash.Apply(role);
         }
 
-        private static GovernedLoopGraphDefinition CreateGraph(ContextualRoleRevisionPin owningRole)
+        private static GovernedLoopGraphDefinition CreateGraph(ContextualRoleRevisionPin owningRole, bool includeModelInference)
         {
+            if (includeModelInference)
+            {
+                return CreateFirstWaveGraph(owningRole);
+            }
+
             var candidate = new GovernedLoopGraphCandidate(
                 1,
                 "governed-loop",
@@ -471,6 +566,81 @@ public sealed class GovernedLoopAdmissionFactoryTests
                         new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 100, 0),
                     ]));
             return Assert.IsType<GovernedLoopGraphDefinition>(GovernedLoopGraphNormalizer.Normalize(candidate).Graph);
+        }
+
+        private static GovernedLoopGraphDefinition CreateFirstWaveGraph(ContextualRoleRevisionPin owningRole)
+        {
+            var candidate = new GovernedLoopGraphCandidate(
+                1,
+                "governed-first-wave-loop",
+                "revision-1",
+                "Execute one bounded model-inference operation.",
+                owningRole,
+                "trigger",
+                ["exit"],
+                GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
+                [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
+                [
+                    new GovernedLoopNodeDefinition(
+                        "trigger",
+                        new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Trigger, "manual-trigger", 1),
+                        [
+                            new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                            new GovernedLoopPortDefinition("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context, "text", true),
+                        ],
+                        GovernedLoopAuthorityCeiling.Create([]),
+                        new Dictionary<string, string>()),
+                    new GovernedLoopNodeDefinition(
+                        "inference",
+                        new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
+                        [
+                            new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                            new GovernedLoopPortDefinition("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context, "text", true),
+                            new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                        ],
+                        GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
+                        new Dictionary<string, string> { ["instruction"] = "Answer the admitted request." }),
+                    new GovernedLoopNodeDefinition(
+                        "exit",
+                        new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
+                        [
+                            new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                            new GovernedLoopPortDefinition("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                        ],
+                        GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]),
+                        new Dictionary<string, string>()),
+                ],
+                [
+                    new GovernedLoopControlEdgeDefinition("trigger-to-inference", "trigger", "inference", GovernedLoopControlCondition.Always),
+                    new GovernedLoopControlEdgeDefinition("inference-to-exit", "inference", "exit", GovernedLoopControlCondition.Success),
+                ],
+                [
+                    new GovernedLoopBindingDefinition("request-binding", GovernedLoopBindingKind.Data, "trigger", "request", "inference", "request"),
+                    new GovernedLoopBindingDefinition("context-binding", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "inference", "invocation-context"),
+                    new GovernedLoopBindingDefinition("result-binding", GovernedLoopBindingKind.Data, "inference", "result", "exit", "result"),
+                ],
+                new GovernedLoopOutputContract(
+                    "Return the bounded result.",
+                    [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
+                new GovernedLoopDisplayMetadata(
+                    "Governed first-wave loop",
+                    "Test-only first-wave governed loop.",
+                    [
+                        new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Start.", 0, 0),
+                        new GovernedLoopNodeDisplayMetadata("inference", "Inference", "Infer.", 100, 0),
+                        new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 200, 0),
+                    ]));
+            return Assert.IsType<GovernedLoopGraphDefinition>(GovernedLoopGraphNormalizer.Normalize(candidate).Graph);
+        }
+
+        private static CapabilityDescriptorIdentity CapabilityIdentity(string capabilityId)
+        {
+            var descriptor = Assert.Single(
+                BuiltInCapabilityCatalog.Descriptors,
+                item => item.Id.Value == capabilityId);
+            Assert.True(CapabilityDescriptorHash.TryCompute(descriptor, out var hash, out var validation));
+            Assert.True(validation.IsValid);
+            return new CapabilityDescriptorIdentity(descriptor.Id, descriptor.Version, hash!);
         }
 
         private static AuthorityProfile CreateProfile(AuthorityCeiling ceiling)
