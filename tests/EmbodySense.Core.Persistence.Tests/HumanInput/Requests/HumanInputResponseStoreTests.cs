@@ -37,18 +37,6 @@ public sealed class HumanInputResponseStoreTests
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) }
     };
 
-    private const string CrossProcessMode = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_MODE";
-    private const string CrossProcessWorkspace = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_WORKSPACE";
-    private const string CrossProcessTrustRoot = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_TRUST_ROOT";
-    private const string CrossProcessGate = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_GATE";
-    private const string CrossProcessReady = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_READY";
-    private const string CrossProcessOutput = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_OUTPUT";
-    private const string CrossProcessOperation = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_OPERATION";
-    private const string CrossProcessResponse = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_ID";
-    private const string CrossProcessActor = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_ACTOR";
-    private const string CrossProcessRole = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_ROLE";
-    private const string CrossProcessBoundary = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_BOUNDARY";
-
     [Fact]
     public async Task Submit_selection_head_and_lifecycle_projection_commit_atomically_and_restart_exactly_once()
     {
@@ -2264,7 +2252,7 @@ public sealed class HumanInputResponseStoreTests
             "user-one",
             "role-one",
             boundary);
-        await WaitForPathAsync(ready);
+        await WaitForPathAsync(ready, process);
         await File.WriteAllTextAsync(gate, "go");
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
         Assert.NotEqual(0, process.ExitCode);
@@ -2290,54 +2278,6 @@ public sealed class HumanInputResponseStoreTests
         Assert.Single(read.Snapshot!.Responses);
         Assert.Single(read.Snapshot.Operations);
         Assert.NotNull(read.Snapshot.Selection);
-    }
-
-    [Fact]
-    public async Task Cross_process_human_input_response_store_host()
-    {
-        var mode = Environment.GetEnvironmentVariable(CrossProcessMode);
-        if (string.IsNullOrEmpty(mode))
-        {
-            return;
-        }
-
-        var workspace = Environment.GetEnvironmentVariable(CrossProcessWorkspace)!;
-        var trustRoot = Environment.GetEnvironmentVariable(CrossProcessTrustRoot)!;
-        var gate = Environment.GetEnvironmentVariable(CrossProcessGate)!;
-        var ready = Environment.GetEnvironmentVariable(CrossProcessReady)!;
-        var output = Environment.GetEnvironmentVariable(CrossProcessOutput)!;
-        var operationId = Environment.GetEnvironmentVariable(CrossProcessOperation)!;
-        var responseId = Environment.GetEnvironmentVariable(CrossProcessResponse)!;
-        var actorId = Environment.GetEnvironmentVariable(CrossProcessActor)!;
-        var roleId = Environment.GetEnvironmentVariable(CrossProcessRole)!;
-        await File.WriteAllTextAsync(ready, "ready");
-        await WaitForPathAsync(gate);
-        HumanInputRequestStoreOptions? options = null;
-        if (mode == "crash")
-        {
-            var boundary = Enum.Parse<HumanInputRequestPersistenceBoundary>(Environment.GetEnvironmentVariable(CrossProcessBoundary)!);
-            options = new HumanInputRequestStoreOptions
-            {
-                DurableBoundaryObserver = (observed, _) =>
-                {
-                    if (observed == boundary)
-                    {
-                        TerminateCrossProcessHost();
-                    }
-                    return ValueTask.CompletedTask;
-                }
-            };
-        }
-
-        var request = mode == "writer" ? ManualRequest(includeSecondRespondent: true) : CreateMutation().RequestToAppend!;
-        var head = Head(request, 1, HumanInputRequestLifecycleStatus.Pending, 0, null, null, "create-one", Time);
-        var mutation = Submit(request, head, 1, operationId, responseId, answer: mode == "crash", actorId, roleId);
-        IHumanInputResponseLifecycleStore store = new HumanInputRequestStore(
-            new WorkspacePaths(workspace),
-            new FileCapabilityCatalogTrustProvider(trustRoot),
-            options);
-        var result = await store.CommitAsync(mutation);
-        await File.WriteAllTextAsync(output, result.Status.ToString());
     }
 
     private static async Task<(long Generation, HumanInputRequest AmendedRequest, HumanInputRequestLifecycleHead AmendedHead, HumanInputResponseReference ActiveResponse)> SeedMaximumResponseArtifactsAsync(
@@ -2911,6 +2851,11 @@ public sealed class HumanInputResponseStoreTests
         string roleId,
         HumanInputRequestPersistenceBoundary? boundary = null)
     {
+        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+        var targetFramework = outputDirectory.Name;
+        var configuration = outputDirectory.Parent?.Name ?? throw new DirectoryNotFoundException("The active test build configuration could not be resolved.");
+        var hostAssembly = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", configuration, targetFramework, "EmbodySense.CancellationHost.dll");
+        Assert.True(File.Exists(hostAssembly), $"The cross-process child host assembly was not built at `{hostAssembly}`.");
         var startInfo = new ProcessStartInfo("dotnet")
         {
             WorkingDirectory = Path.GetTempPath(),
@@ -2919,26 +2864,33 @@ public sealed class HumanInputResponseStoreTests
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(HumanInputResponseStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputResponseStoreTests.Cross_process_human_input_response_store_host");
+        startInfo.ArgumentList.Add("exec");
+        startInfo.ArgumentList.Add(hostAssembly);
+        startInfo.ArgumentList.Add("human-input-response");
+        startInfo.ArgumentList.Add(mode);
+        startInfo.ArgumentList.Add(workspace);
+        startInfo.ArgumentList.Add(trustRoot);
+        startInfo.ArgumentList.Add(gate);
+        startInfo.ArgumentList.Add(ready);
+        startInfo.ArgumentList.Add(output);
+        startInfo.ArgumentList.Add(operationId);
+        startInfo.ArgumentList.Add(responseId);
+        startInfo.ArgumentList.Add(actorId);
+        startInfo.ArgumentList.Add(roleId);
+        startInfo.ArgumentList.Add(boundary?.ToString() ?? "none");
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        startInfo.Environment[CrossProcessMode] = mode;
-        startInfo.Environment[CrossProcessWorkspace] = workspace;
-        startInfo.Environment[CrossProcessTrustRoot] = trustRoot;
-        startInfo.Environment[CrossProcessGate] = gate;
-        startInfo.Environment[CrossProcessReady] = ready;
-        startInfo.Environment[CrossProcessOutput] = output;
-        startInfo.Environment[CrossProcessOperation] = operationId;
-        startInfo.Environment[CrossProcessResponse] = responseId;
-        startInfo.Environment[CrossProcessActor] = actorId;
-        startInfo.Environment[CrossProcessRole] = roleId;
-        if (boundary is not null)
-        {
-            startInfo.Environment[CrossProcessBoundary] = boundary.Value.ToString();
-        }
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process Human Input response store host did not start.");
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "EmbodySense.sln")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName ?? throw new DirectoryNotFoundException("The repository root could not be located from the test output directory.");
     }
 
     private static async Task WaitForPathAsync(string path, Process? process = null)
@@ -2961,12 +2913,6 @@ public sealed class HumanInputResponseStoreTests
         var error = await process.StandardError.ReadToEndAsync();
         var output = await process.StandardOutput.ReadToEndAsync();
         Assert.True(process.ExitCode == 0, error + Environment.NewLine + output);
-    }
-
-    private static void TerminateCrossProcessHost()
-    {
-        Process.GetCurrentProcess().Kill();
-        Thread.Sleep(Timeout.Infinite);
     }
 
     private sealed class CountingRejectingArtifactTrustProvider(ICapabilityCatalogTrustProvider inner)

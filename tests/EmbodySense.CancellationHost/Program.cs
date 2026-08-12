@@ -20,9 +20,30 @@ using EmbodySense.Core.Persistence.ContextualRoles.Models;
 using EmbodySense.Core.Persistence.Credentials;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.CancellationHost.Credentials;
+using EmbodySense.CancellationHost.Persistence;
 using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
+
+if (args is ["trigger-queue-admit", var queueWorkspaceRoot, var queueReleaseMarker, var queueReadyMarker, var queueResultMarker, var deliveryId, var deduplicationId, var loopId, var crashBoundary])
+{
+    return await TriggerQueueCrossProcessHost.RunAdmissionAsync(queueWorkspaceRoot, queueReleaseMarker, queueReadyMarker, queueResultMarker, deliveryId, deduplicationId, loopId, crashBoundary);
+}
+
+if (args is ["trigger-worker-select", var workerWorkspaceRoot, var workerReleaseMarker, var workerReadyMarker, var workerResultMarker, var workerId, var expectedGeneration])
+{
+    return await TriggerQueueCrossProcessHost.RunWorkerSelectionAsync(workerWorkspaceRoot, workerReleaseMarker, workerReadyMarker, workerResultMarker, workerId, expectedGeneration);
+}
+
+if (args is ["trigger-queue-hold-lock", var lockWorkspaceRoot, var lockReleaseMarker, var lockReadyMarker, var lockResultMarker])
+{
+    return await TriggerQueueCrossProcessHost.RunLockHolderAsync(lockWorkspaceRoot, lockReleaseMarker, lockReadyMarker, lockResultMarker);
+}
+
+if (args is ["human-input-response", var responseMode, var responseWorkspaceRoot, var responseTrustRoot, var responseReleaseMarker, var responseReadyMarker, var responseResultMarker, var responseOperationId, var responseId, var responseActorId, var responseActorRoleId, var responseBoundary])
+{
+    return await HumanInputResponseCrossProcessHost.RunAsync(responseMode, responseWorkspaceRoot, responseTrustRoot, responseReleaseMarker, responseReadyMarker, responseResultMarker, responseOperationId, responseId, responseActorId, responseActorRoleId, responseBoundary);
+}
 
 if (args is ["capability", var behavior])
 {
