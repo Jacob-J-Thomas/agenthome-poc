@@ -41,6 +41,7 @@ $testLaneTimeoutSeconds = 480
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 . (Join-Path $PSScriptRoot "verification-parallel.ps1")
 . (Join-Path $PSScriptRoot "verification-artifacts.ps1")
+. (Join-Path $PSScriptRoot "verification-coverage-evidence.ps1")
 . (Join-Path $PSScriptRoot "verification-coverage-manifest.ps1")
 . (Join-Path $PSScriptRoot "verification-temp.ps1")
 . (Join-Path $PSScriptRoot "verification-test-lanes.ps1")

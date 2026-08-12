@@ -31,15 +31,21 @@ function Assert-Contains {
 
 function Invoke-ExpectedFailure {
     param([scriptblock]$Action, [string]$ExpectedMessage)
+    $failureMessage = $null
     try {
         & $Action | Out-Null
-        throw "Expected the action to fail with '$ExpectedMessage'."
     }
     catch {
-        Assert-Contains -Actual $_.Exception.Message -Expected $ExpectedMessage -Message "Failure diagnostic mismatch."
-        return $_.Exception.Message
+        $failureMessage = $_.Exception.Message
     }
+    if ($null -eq $failureMessage) { throw "Expected the action to fail, but it completed successfully." }
+    Assert-Contains -Actual $failureMessage -Expected $ExpectedMessage -Message "Failure diagnostic mismatch."
+    return $failureMessage
 }
+
+$noOpWasRejected = $false
+try { $null = Invoke-ExpectedFailure -ExpectedMessage "never emitted" -Action { } } catch { $noOpWasRejected = $_.Exception.Message -ceq "Expected the action to fail, but it completed successfully." }
+Assert-True -Condition $noOpWasRejected -Message "The negative-test helper must reject a successful action instead of catching its own sentinel."
 
 . $phaseScriptPath
 . $tempScriptPath
