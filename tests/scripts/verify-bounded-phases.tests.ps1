@@ -123,6 +123,7 @@ Assert-Contains -Actual $phaseScript -Expected 'elseif ($null -ne $startInfo.PSO
 Assert-Contains -Actual $phaseScript -Expected 'VERIFY_CHILD_TIMEOUT name=$Name' -Message "Sequential timeouts must emit structured watchdog evidence."
 Assert-Contains -Actual $parallelScript -Expected 'Sort-Object -Property @{ Expression = "Priority"; Descending = $true }' -Message "Parallel phase priority must be deterministic and longest-first capable."
 Assert-Contains -Actual $parallelScript -Expected '[Math]::Min($MaximumWorkers, [Math]::Max(1, [Environment]::ProcessorCount))' -Message "Parallel resource capacity must never exceed the available processor count."
+Assert-Contains -Actual $parallelScript -Expected '$phase.EffectiveWeight = [Math]::Min($phase.Weight, $maximumResourceCapacity)' -Message "Declared phase weight must adapt to constrained hosts instead of making verification unschedulable."
 Assert-Contains -Actual $parallelScript -Expected 'Select-VerificationParallelPhase -Pending $pending -AvailableCapacity $availableCapacity' -Message "The scheduler must select a fitting phase instead of blocking behind the queue head."
 Assert-Contains -Actual $parallelScript -Expected 'if ($Pending[$index].SchedulingDeferrals -ge 1)' -Message "Backfill must reserve a later fitting opportunity for bypassed phases."
 Assert-Contains -Actual $parallelScript -Expected 'VERIFY_CHILD_TIMEOUT name=$($result.Name)' -Message "Parallel timeouts must emit structured watchdog evidence."

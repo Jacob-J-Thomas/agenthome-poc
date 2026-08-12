@@ -60,6 +60,7 @@ function Add-VerificationParallelPhase {
         Environment = if ($null -eq $Environment) { @{} } else { $Environment.Clone() }
         Priority = $Priority
         Weight = $Weight
+        EffectiveWeight = $Weight
         ResourceClass = $ResourceClass
         SchedulingDeferrals = 0
     }
@@ -80,7 +81,7 @@ function Select-VerificationParallelPhase {
 
     $fitIndex = -1
     for ($index = 0; $index -lt $Pending.Count; $index++) {
-        if ($Pending[$index].Weight -le $AvailableCapacity) {
+        if ($Pending[$index].EffectiveWeight -le $AvailableCapacity) {
             $fitIndex = $index
             break
         }
@@ -114,14 +115,9 @@ function Invoke-VerificationParallelPhases {
     )
 
     $maximumResourceCapacity = [Math]::Min($MaximumWorkers, [Math]::Max(1, [Environment]::ProcessorCount))
-    $oversizedPhases = @($script:VerificationParallelPhases | Where-Object { $_.Weight -gt $maximumResourceCapacity } | Sort-Object Name)
-    if ($oversizedPhases.Count -gt 0) {
-        $details = $oversizedPhases | ForEach-Object { "'$($_.Name)' requires weight $($_.Weight)" }
-        throw "Parallel verification cannot schedule phases beyond the hardware-bounded resource capacity $maximumResourceCapacity. $($details -join '; ')"
-    }
-
     $pending = [Collections.Generic.List[object]]::new()
     foreach ($phase in @($script:VerificationParallelPhases | Sort-Object -Property @{ Expression = "Priority"; Descending = $true }, @{ Expression = "Name"; Descending = $false })) {
+        $phase.EffectiveWeight = [Math]::Min($phase.Weight, $maximumResourceCapacity)
         $phase.SchedulingDeferrals = 0
         $pending.Add($phase)
     }
@@ -152,7 +148,7 @@ function Invoke-VerificationParallelPhases {
                 $process.StartInfo = $startInfo
                 $startedAtUtc = [DateTimeOffset]::UtcNow
                 $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-                Write-Host "VERIFY_PARALLEL_PHASE_START name=$($phase.Name) priority=$($phase.Priority) resource_class=$($phase.ResourceClass) weight=$($phase.Weight) started_at_utc=$($startedAtUtc.ToString("O")) timeout_seconds=$($phase.TimeoutSeconds) active_workers=$($running.Count + 1) active_capacity=$($activeResourceCapacity + $phase.Weight) maximum_capacity=$maximumResourceCapacity requested_capacity=$MaximumWorkers"
+                Write-Host "VERIFY_PARALLEL_PHASE_START name=$($phase.Name) priority=$($phase.Priority) resource_class=$($phase.ResourceClass) declared_weight=$($phase.Weight) effective_weight=$($phase.EffectiveWeight) started_at_utc=$($startedAtUtc.ToString("O")) timeout_seconds=$($phase.TimeoutSeconds) active_workers=$($running.Count + 1) active_capacity=$($activeResourceCapacity + $phase.EffectiveWeight) maximum_capacity=$maximumResourceCapacity requested_capacity=$MaximumWorkers"
                 try {
                     if (-not $process.Start()) {
                         throw "The process API returned false."
@@ -167,7 +163,7 @@ function Invoke-VerificationParallelPhases {
                         StandardOutput = $outputTask
                         StandardError = $errorTask
                     })
-                    $activeResourceCapacity += $phase.Weight
+                    $activeResourceCapacity += $phase.EffectiveWeight
                 }
                 catch {
                     $process.Dispose()
@@ -204,6 +200,7 @@ function Invoke-VerificationParallelPhases {
                     CoverageSearchRoot = $entry.Phase.CoverageSearchRoot
                     TrxPath = $entry.Phase.TrxPath
                     Weight = $entry.Phase.Weight
+                    EffectiveWeight = $entry.Phase.EffectiveWeight
                     ResourceClass = $entry.Phase.ResourceClass
                 }
                 $results.Add($result)
@@ -211,9 +208,9 @@ function Invoke-VerificationParallelPhases {
                 if ($timedOut) {
                     Write-Host "VERIFY_CHILD_TIMEOUT name=$($result.Name) timeout_seconds=$($entry.Phase.TimeoutSeconds) elapsed_seconds=$($result.ElapsedSeconds)"
                 }
-                Write-Host "VERIFY_PARALLEL_PHASE_COMPLETE name=$($result.Name) status=$status exit_code=$($result.ExitCode) resource_class=$($result.ResourceClass) weight=$($result.Weight) elapsed_seconds=$($result.ElapsedSeconds) output_path=$($result.OutputPath) completed_at_utc=$([DateTimeOffset]::UtcNow.ToString("O"))"
+                Write-Host "VERIFY_PARALLEL_PHASE_COMPLETE name=$($result.Name) status=$status exit_code=$($result.ExitCode) resource_class=$($result.ResourceClass) declared_weight=$($result.Weight) effective_weight=$($result.EffectiveWeight) elapsed_seconds=$($result.ElapsedSeconds) output_path=$($result.OutputPath) completed_at_utc=$([DateTimeOffset]::UtcNow.ToString("O"))"
                 [void]$running.Remove($entry)
-                $activeResourceCapacity -= $entry.Phase.Weight
+                $activeResourceCapacity -= $entry.Phase.EffectiveWeight
                 $entry.Process.Dispose()
             }
         }
