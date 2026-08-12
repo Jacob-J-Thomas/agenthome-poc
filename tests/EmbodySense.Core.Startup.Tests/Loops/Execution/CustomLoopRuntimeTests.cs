@@ -1245,7 +1245,8 @@ public sealed class CustomLoopRuntimeTests
         };
         var completedAtUtc = DateTimeOffset.UtcNow.ToUniversalTime() - CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration - TimeSpan.FromDays(1);
         long retainedBytes = 0;
-        var writes = new List<(string Path, string Json)>();
+        long writtenBytes = 0;
+        var writes = new List<(string Path, string Json)>(16);
         for (var index = 0; retainedBytes <= CustomLoopLimits.MaxInvocationOperationWorkspaceUtf8Bytes; index++)
         {
             var operationId = $"invoke-expired-{index:D5}";
@@ -1268,14 +1269,25 @@ public sealed class CustomLoopRuntimeTests
             var json = JsonSerializer.Serialize(completed, jsonOptions);
             writes.Add((path, json));
             retainedBytes += Encoding.UTF8.GetByteCount(json);
+            if (writes.Count == writes.Capacity)
+            {
+                writtenBytes += await WriteInvocationReceiptBatchAsync(writes);
+                writes.Clear();
+            }
         }
 
         Assert.True(retainedBytes > CustomLoopLimits.MaxInvocationOperationWorkspaceUtf8Bytes);
+        writtenBytes += await WriteInvocationReceiptBatchAsync(writes);
+        Assert.Equal(retainedBytes, writtenBytes);
+    }
+
+    private static async Task<long> WriteInvocationReceiptBatchAsync(IReadOnlyCollection<(string Path, string Json)> writes)
+    {
         await Parallel.ForEachAsync(
             writes,
             new ParallelOptions { MaxDegreeOfParallelism = Math.Min(8, Environment.ProcessorCount) },
             async (write, cancellationToken) => await File.WriteAllTextAsync(write.Path, write.Json, cancellationToken));
-        Assert.Equal(retainedBytes, writes.Sum(write => new FileInfo(write.Path).Length));
+        return writes.Sum(write => new FileInfo(write.Path).Length);
     }
 
     private static async Task PersistRejectedReceiptAsync(WorkspacePaths paths, LoopRunInvocationInput input, string roleId, string runId, CustomLoopAdmissionStatus admissionStatus)
