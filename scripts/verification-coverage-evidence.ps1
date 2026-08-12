@@ -183,6 +183,107 @@ function Test-VerificationCoverageStagingAliasPath {
     return $segments.Count -eq 3 -and $segments[0] -ceq "In" -and -not [string]::IsNullOrWhiteSpace($segments[1]) -and $segments[1] -cne "." -and $segments[1] -cne ".." -and $segments[1].IndexOfAny([char[]]@('/', '\', ':')) -lt 0 -and $segments[2] -ceq "coverage.cobertura.xml"
 }
 
+function Test-VerificationCoverageSafeSegment {
+    param([Parameter(Mandatory = $true)] [string]$Value)
+
+    return -not [string]::IsNullOrWhiteSpace($Value) -and
+        $Value -cne "." -and
+        $Value -cne ".." -and
+        $Value -cmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+}
+
+function Assert-VerificationCoverageCollectorPath {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [string]$CollectorRoot,
+        [Parameter(Mandatory = $true)] [string]$Description
+    )
+
+    if (-not (Test-VerificationCoverageDescendantPath -Path $Path -Root $CollectorRoot)) {
+        throw "$Description is outside its exact collector root: $Path"
+    }
+
+    $relativePath = [IO.Path]::GetRelativePath([IO.Path]::GetFullPath($CollectorRoot), [IO.Path]::GetFullPath($Path))
+    $segments = @($relativePath.Split([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), [StringSplitOptions]::RemoveEmptyEntries))
+    $collectorId = [Guid]::Empty
+    if ($segments.Count -ne 2 -or -not [Guid]::TryParseExact($segments[0], "D", [ref]$collectorId) -or $segments[1] -cne "coverage.cobertura.xml") {
+        throw "$Description is outside its exact GUID collector path: $Path"
+    }
+}
+
+function Assert-VerificationCoverageLaneProvenance {
+    param(
+        [Parameter(Mandatory = $true)] [string]$LaneName,
+        [Parameter(Mandatory = $true)] [string]$LaneResultsRoot,
+        [Parameter(Mandatory = $true)] [string]$TrxPath,
+        [Parameter(Mandatory = $true)] [string]$CanonicalPath,
+        [Parameter(Mandatory = $true)] [string]$ResultsRoot
+    )
+
+    $prefix = "tests-"
+    if (-not $LaneName.StartsWith($prefix, [StringComparison]::Ordinal)) {
+        throw "Coverage lane name does not use the exact test-lane identity prefix: '$LaneName'."
+    }
+    $laneId = $LaneName.Substring($prefix.Length)
+    if (-not (Test-VerificationCoverageSafeSegment -Value $laneId)) {
+        throw "Coverage lane name contains an unsafe exact test-lane identity: '$LaneName'."
+    }
+
+    $expectedRoot = [IO.Path]::GetFullPath((Join-Path (Join-Path $ResultsRoot "StandardTests") $laneId))
+    $fullLaneRoot = [IO.Path]::GetFullPath($LaneResultsRoot)
+    if (-not (Test-VerificationCoverageSamePath -Left $fullLaneRoot -Right $expectedRoot)) {
+        throw "Coverage lane '$LaneName' results root does not match its exact test-lane identity: $fullLaneRoot"
+    }
+
+    $expectedTrxPath = [IO.Path]::GetFullPath((Join-Path $expectedRoot "$laneId.trx"))
+    if (-not (Test-VerificationCoverageSamePath -Left $TrxPath -Right $expectedTrxPath)) {
+        throw "Coverage lane '$LaneName' TRX does not match its exact test-lane identity: $TrxPath"
+    }
+
+    Assert-VerificationCoverageCollectorPath -Path $CanonicalPath -CollectorRoot $expectedRoot -Description "Coverage lane '$LaneName' canonical report"
+}
+
+function Assert-VerificationCoverageChildProvenance {
+    param(
+        [Parameter(Mandatory = $true)] [string]$ProjectName,
+        [Parameter(Mandatory = $true)] [string]$ChildResultsRoot,
+        [Parameter(Mandatory = $true)] [string]$ReportPath,
+        [Parameter(Mandatory = $true)] [string]$ResultsRoot,
+        [string]$RepositoryRoot
+    )
+
+    if (-not (Test-VerificationCoverageSafeSegment -Value $ProjectName)) {
+        throw "Coverage child-process project name is not a safe exact project identity: '$ProjectName'."
+    }
+
+    $fullResultsRoot = [IO.Path]::GetFullPath($ResultsRoot)
+    $fullChildRoot = [IO.Path]::GetFullPath($ChildResultsRoot)
+    if (-not (Test-VerificationCoverageDescendantPath -Path $fullChildRoot -Root $fullResultsRoot)) {
+        throw "Coverage child-process results root is outside the verification results root: $fullChildRoot"
+    }
+    $relativeRoot = [IO.Path]::GetRelativePath($fullResultsRoot, $fullChildRoot)
+    $segments = @($relativeRoot.Split([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), [StringSplitOptions]::RemoveEmptyEntries))
+    $hasExactRoot = $segments.Count -eq 6 -and
+        $segments[0] -ceq "CoverageIsolation" -and
+        $segments[1] -ceq $ProjectName -and
+        $segments[2] -ceq "canonical" -and
+        $segments[3] -ceq "bin" -and
+        ($segments[4] -ceq "Debug" -or $segments[4] -ceq "Release") -and
+        $segments[5] -ceq "Results"
+    if (-not $hasExactRoot) {
+        throw "Coverage child-process results root does not match its exact project isolation provenance: $fullChildRoot"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+        $projectPath = Join-Path (Join-Path (Join-Path $RepositoryRoot "tests") $ProjectName) "$ProjectName.csproj"
+        if (-not (Test-Path -LiteralPath $projectPath -PathType Leaf)) {
+            throw "Coverage child-process project identity does not name an admitted test project: '$ProjectName'."
+        }
+    }
+
+    Assert-VerificationCoverageCollectorPath -Path $ReportPath -CollectorRoot $fullChildRoot -Description "Coverage child-process report"
+}
+
 function Get-VerificationCoverageEvidence {
     param([Parameter(Mandatory = $true)] [object]$Snapshot)
 

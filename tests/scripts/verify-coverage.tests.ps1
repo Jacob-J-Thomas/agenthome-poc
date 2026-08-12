@@ -247,14 +247,33 @@ function Write-FixtureCoverageManifest {
 
     $fullRoot = [IO.Path]::GetFullPath($ResultsRoot)
     $files = @(Get-ChildItem -LiteralPath $fullRoot -Recurse -Filter "coverage.cobertura.xml" -File | Sort-Object FullName)
+    $projectName = "Fixture.Tests"
+    $childResultsRoot = Join-Path $fullRoot "CoverageIsolation\$projectName\canonical\bin\Release\Results"
+    New-Item -ItemType Directory -Path $childResultsRoot -Force | Out-Null
+    $childFiles = @($files | ForEach-Object {
+        $collectorRoot = Join-Path $childResultsRoot ([Guid]::NewGuid().ToString("D"))
+        New-Item -ItemType Directory -Path $collectorRoot -Force | Out-Null
+        $destination = Join-Path $collectorRoot "coverage.cobertura.xml"
+        Move-Item -LiteralPath $_.FullName -Destination $destination
+        Get-Item -LiteralPath $destination
+    })
     $manifest = [ordered]@{
         schemaVersion = 1
         resultsRoot = $fullRoot
         minimumWriteTimeUtc = $MinimumWriteTimeUtc.ToUniversalTime().ToString("O")
         laneReportCount = 0
-        childReportCount = $files.Count
+        childReportCount = $childFiles.Count
         aliasReportCount = 0
-        reports = @($files | ForEach-Object { [ordered]@{ kind = "child"; path = $_.FullName; length = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
+        reports = @($childFiles | ForEach-Object {
+            [ordered]@{
+                kind = "child"
+                projectName = $projectName
+                childResultsRoot = $childResultsRoot
+                path = $_.FullName
+                length = $_.Length
+                sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+        })
         aliases = @()
     }
     [IO.File]::WriteAllText($ManifestPath, ($manifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
@@ -283,12 +302,14 @@ function New-CoverageManifestLaneFixture {
     )
 
     $resultsRoot = Join-Path $RepositoryRoot "tests\Fixture.Tests\TestResults"
-    $laneRoot = Join-Path $resultsRoot "lane"
-    $canonicalName = Join-Path "lane" "canonical-id"
+    $laneId = "fixture-lane"
+    $laneRoot = Join-Path (Join-Path $resultsRoot "StandardTests") $laneId
+    $canonicalId = "11111111-1111-4111-8111-111111111111"
+    $canonicalName = Join-Path (Join-Path "StandardTests" $laneId) $canonicalId
     Write-CoverageReport -RepositoryRoot $RepositoryRoot -Name $canonicalName -Packages $Packages -LastWriteTimeUtc $LastWriteTimeUtc
-    $canonicalPath = Join-Path (Join-Path $laneRoot "canonical-id") "coverage.cobertura.xml"
+    $canonicalPath = Join-Path (Join-Path $laneRoot $canonicalId) "coverage.cobertura.xml"
     $deploymentRoot = "fixture_runner_2026-08-12_00_00_00"
-    $trxPath = Join-Path $laneRoot "lane.trx"
+    $trxPath = Join-Path $laneRoot "$laneId.trx"
     Write-FixtureTrx -Path $trxPath -DeploymentRoot $deploymentRoot
     $aliasPath = Join-Path (Join-Path (Join-Path (Join-Path $laneRoot $deploymentRoot) "In") "fixture-machine") "coverage.cobertura.xml"
     if ($IncludeAlias) {
@@ -304,7 +325,7 @@ function New-CoverageManifestLaneFixture {
         AliasPath = $aliasPath
         TrxPath = $trxPath
         ManifestPath = Join-Path $resultsRoot "coverage-manifest.json"
-        Result = [pscustomobject]@{ Name = "tests-fixture-lane"; CoverageSearchRoot = $laneRoot; TrxPath = $trxPath }
+        Result = [pscustomobject]@{ Name = "tests-$laneId"; CoverageSearchRoot = $laneRoot; TrxPath = $trxPath }
     }
 }
 
@@ -333,6 +354,9 @@ try {
     Write-CoverageManifest -TestResults @($canonicalOnlyFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $canonicalOnlyFixture.ResultsRoot -ManifestPath $canonicalOnlyFixture.ManifestPath | Out-Null
     $canonicalOnlyManifest = Get-Content -LiteralPath $canonicalOnlyFixture.ManifestPath -Raw | ConvertFrom-Json
     Assert-True -Condition (@($canonicalOnlyManifest.reports).Count -eq 1 -and @($canonicalOnlyManifest.aliases).Count -eq 0) -Message "A canonical-only lane must retain one merge report and an explicit empty staging-alias inventory."
+    Invoke-ExpectedFailure -ExpectedMessage "duplicate lane name, results root, or exact TRX path" -Action {
+        Write-CoverageManifest -TestResults @($canonicalOnlyFixture.Result, $canonicalOnlyFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $canonicalOnlyFixture.ResultsRoot -ManifestPath $canonicalOnlyFixture.ManifestPath
+    }
 
     $validAliasRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-generator-alias"
     $validAliasFixture = New-CoverageManifestLaneFixture -RepositoryRoot $validAliasRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc -IncludeAlias
@@ -344,6 +368,47 @@ try {
     Assert-True -Condition ($validAliasResult.ExitCode -eq 0) -Message "A validated VSTest staging alias must preserve coverage verification. Actual: $($validAliasResult.Output)"
     Assert-Contains -Actual $validAliasResult.Output -Expected "VERIFY_COVERAGE_REPORT reports=1 packages=2" -Message "Coverage aggregation must merge only the canonical report."
 
+    $reclassifiedAliasRoot = Join-Path $validAliasFixture.ResultsRoot "CoverageIsolation\Fixture.Tests\canonical\bin\Release\Results"
+    New-Item -ItemType Directory -Path $reclassifiedAliasRoot -Force | Out-Null
+    $reclassifiedAlias = $validAliasManifest.aliases[0]
+    $validAliasManifest.reports = @($validAliasManifest.reports) + [pscustomobject]@{
+        kind = "child"
+        projectName = "Fixture.Tests"
+        childResultsRoot = $reclassifiedAliasRoot
+        path = $reclassifiedAlias.path
+        length = $reclassifiedAlias.length
+        sha256 = $reclassifiedAlias.sha256
+    }
+    $validAliasManifest.childReportCount = 1
+    $validAliasManifest.aliasReportCount = 0
+    $validAliasManifest.aliases = @()
+    $validAliasManifest.minimumWriteTimeUtc = $minimumWriteTimeUtc.ToUniversalTime().ToString("O")
+    [IO.File]::WriteAllText($validAliasFixture.ManifestPath, ($validAliasManifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+    $reclassifiedAliasResult = Invoke-CoverageVerification -RepositoryRoot $validAliasRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $validAliasFixture.ResultsRoot -ManifestPath $validAliasFixture.ManifestPath
+    Assert-True -Condition ($reclassifiedAliasResult.ExitCode -ne 0) -Message "A staging alias reclassified as a child report must fail closed."
+    Assert-Contains -Actual $reclassifiedAliasResult.Output -Expected "outside its exact collector root" -Message "Child report provenance must reject a reclassified staging alias before aggregation."
+
+    $duplicateLaneRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-consumer-duplicate-lane"
+    $duplicateLaneFixture = New-CoverageManifestLaneFixture -RepositoryRoot $duplicateLaneRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Write-CoverageManifest -TestResults @($duplicateLaneFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $duplicateLaneFixture.ResultsRoot -ManifestPath $duplicateLaneFixture.ManifestPath | Out-Null
+    $duplicateLaneManifest = Get-Content -LiteralPath $duplicateLaneFixture.ManifestPath -Raw | ConvertFrom-Json
+    $secondCollectorRoot = Join-Path $duplicateLaneFixture.LaneRoot "33333333-3333-4333-8333-333333333333"
+    New-Item -ItemType Directory -Path $secondCollectorRoot -Force | Out-Null
+    $secondLaneReportPath = Join-Path $secondCollectorRoot "coverage.cobertura.xml"
+    Copy-Item -LiteralPath $duplicateLaneFixture.CanonicalPath -Destination $secondLaneReportPath
+    [IO.File]::SetLastWriteTimeUtc($secondLaneReportPath, $freshWriteTimeUtc)
+    $secondLaneEntry = $duplicateLaneManifest.reports[0].PSObject.Copy()
+    $secondLaneEntry.path = $secondLaneReportPath
+    $secondLaneEntry.length = (Get-Item -LiteralPath $secondLaneReportPath).Length
+    $secondLaneEntry.sha256 = (Get-FileHash -LiteralPath $secondLaneReportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $duplicateLaneManifest.reports = @($duplicateLaneManifest.reports[0], $secondLaneEntry)
+    $duplicateLaneManifest.laneReportCount = 2
+    $duplicateLaneManifest.minimumWriteTimeUtc = $minimumWriteTimeUtc.ToUniversalTime().ToString("O")
+    [IO.File]::WriteAllText($duplicateLaneFixture.ManifestPath, ($duplicateLaneManifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+    $duplicateLaneResult = Invoke-CoverageVerification -RepositoryRoot $duplicateLaneRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $duplicateLaneFixture.ResultsRoot -ManifestPath $duplicateLaneFixture.ManifestPath
+    Assert-True -Condition ($duplicateLaneResult.ExitCode -ne 0) -Message "Multiple canonical reports attributed to one lane must fail closed."
+    Assert-Contains -Actual $duplicateLaneResult.Output -Expected "duplicate lane name" -Message "Lane identity uniqueness failures must identify the provenance collision."
+
     $mismatchedAliasRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-generator-alias-mismatch"
     $mismatchedAliasFixture = New-CoverageManifestLaneFixture -RepositoryRoot $mismatchedAliasRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc -IncludeAlias
     Add-Content -LiteralPath $mismatchedAliasFixture.AliasPath -Value "mismatch"
@@ -354,7 +419,7 @@ try {
 
     $extraReportRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-generator-extra"
     $extraReportFixture = New-CoverageManifestLaneFixture -RepositoryRoot $extraReportRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc
-    Write-CoverageReport -RepositoryRoot $extraReportRepository -Name (Join-Path "lane" "undeclared") -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Write-CoverageReport -RepositoryRoot $extraReportRepository -Name (Join-Path (Join-Path "StandardTests" "fixture-lane") "22222222-2222-4222-8222-222222222222") -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc
     Invoke-ExpectedFailure -ExpectedMessage "2 fresh canonical reports" -Action {
         Write-CoverageManifest -TestResults @($extraReportFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $extraReportFixture.ResultsRoot -ManifestPath $extraReportFixture.ManifestPath
     }
@@ -515,7 +580,8 @@ try {
 
     $unexpectedDirectory = Join-Path $manifestResultsRoot "unexpected"
     New-Item -ItemType Directory -Path $unexpectedDirectory | Out-Null
-    Copy-Item -LiteralPath (Join-Path $manifestResultsRoot "primary\coverage.cobertura.xml") -Destination (Join-Path $unexpectedDirectory "coverage.cobertura.xml")
+    $manifestInventory = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    Copy-Item -LiteralPath $manifestInventory.reports[0].path -Destination (Join-Path $unexpectedDirectory "coverage.cobertura.xml")
     $unexpectedManifestResult = Invoke-CoverageVerification -RepositoryRoot $manifestRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $manifestResultsRoot -ManifestPath $manifestPath
     Assert-True -Condition ($unexpectedManifestResult.ExitCode -ne 0) -Message "Coverage outside the exact manifest must fail closed."
     Assert-Contains -Actual $unexpectedManifestResult.Output -Expected "missing, stale, or unexpected reports" -Message "Unexpected-report diagnostics must be actionable."

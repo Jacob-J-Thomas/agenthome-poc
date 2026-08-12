@@ -32,11 +32,7 @@ function Get-VerificationCoverageLaneInventory {
     }
 
     $canonical = Read-VerificationCoverageSnapshot -Path $canonicalReports[0].FullName -Root $resultsRoot -Description "Coverage lane '$laneName' canonical report"
-    $canonicalRelativePath = [IO.Path]::GetRelativePath($resultsRoot, $canonical.FullName)
-    $canonicalSegments = @($canonicalRelativePath.Split([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), [StringSplitOptions]::RemoveEmptyEntries))
-    if ($canonicalSegments.Count -ne 2 -or [string]::IsNullOrWhiteSpace($canonicalSegments[0]) -or $canonicalSegments[0] -ceq "." -or $canonicalSegments[0] -ceq ".." -or $canonicalSegments[0].IndexOfAny([char[]]@('/', '\', ':')) -ge 0 -or $canonicalSegments[1] -cne "coverage.cobertura.xml") {
-        throw "Coverage lane '$laneName' canonical report is outside its exact collector path: $($canonical.FullName)"
-    }
+    Assert-VerificationCoverageCollectorPath -Path $canonical.FullName -CollectorRoot $resultsRoot -Description "Coverage lane '$laneName' canonical report"
 
     $alias = $null
     if ($deploymentReports.Count -eq 1) {
@@ -89,19 +85,39 @@ function Write-CoverageManifest {
 
     $laneReports = [Collections.Generic.List[object]]::new()
     $laneAliases = [Collections.Generic.List[object]]::new()
+    $laneNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $laneRoots = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
+    $laneTrxPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
     foreach ($result in $TestResults) {
         $inventory = Get-VerificationCoverageLaneInventory -Result $result -MinimumWriteTimeUtc $MinimumWriteTimeUtc
+        Assert-VerificationCoverageLaneProvenance -LaneName $inventory.LaneName -LaneResultsRoot $inventory.LaneResultsRoot -TrxPath $inventory.TrxPath -CanonicalPath $inventory.Canonical.FullName -ResultsRoot $fullVerificationResultsPath
+        if (-not $laneNames.Add($inventory.LaneName) -or -not $laneRoots.Add($inventory.LaneResultsRoot) -or -not $laneTrxPaths.Add($inventory.TrxPath)) {
+            throw "Coverage inventory contains a duplicate lane name, results root, or exact TRX path."
+        }
         $laneReports.Add($inventory)
         if ($null -ne $inventory.Alias) { $laneAliases.Add($inventory) }
     }
 
     $childReports = [Collections.Generic.List[object]]::new()
+    $childRootsByProject = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    $childProjectsByRoot = [Collections.Generic.Dictionary[string, string]]::new((Get-VerificationCoveragePathComparer))
     foreach ($isolation in $Isolations) {
         if (-not (Test-Path -LiteralPath $isolation.ChildResultsPath)) { continue }
+        $projectName = [string]$isolation.Project.BaseName
         $childRoot = [IO.Path]::GetFullPath([string]$isolation.ChildResultsPath)
         [void](Assert-VerificationCoverageOrdinaryPath -Path $childRoot -Root $fullVerificationResultsPath -PathType Container -Description "Coverage child-process results root")
+        if ($childRootsByProject.ContainsKey($projectName) -or $childProjectsByRoot.ContainsKey($childRoot)) {
+            throw "Coverage inventory contains a duplicate child-process project or results root declaration."
+        }
+        $childRootsByProject.Add($projectName, $childRoot)
+        $childProjectsByRoot.Add($childRoot, $projectName)
         foreach ($file in @(Get-ChildItem -LiteralPath $childRoot -Recurse -Filter "coverage.cobertura.xml" -File | Where-Object { $_.LastWriteTimeUtc -ge $MinimumWriteTimeUtc } | Sort-Object FullName)) {
-            $childReports.Add((Read-VerificationCoverageSnapshot -Path $file.FullName -Root $childRoot -Description "Coverage child-process report"))
+            Assert-VerificationCoverageChildProvenance -ProjectName $projectName -ChildResultsRoot $childRoot -ReportPath $file.FullName -ResultsRoot $fullVerificationResultsPath
+            $childReports.Add([pscustomobject]@{
+                ProjectName = $projectName
+                ChildResultsRoot = $childRoot
+                Snapshot = Read-VerificationCoverageSnapshot -Path $file.FullName -Root $childRoot -Description "Coverage child-process report"
+            })
         }
     }
 
@@ -110,7 +126,7 @@ function Write-CoverageManifest {
         Add-VerificationCoverageInventoryPath -Paths $expectedPaths -Path $lane.Canonical.FullName -Description "canonical report"
         if ($null -ne $lane.Alias) { Add-VerificationCoverageInventoryPath -Paths $expectedPaths -Path $lane.Alias.FullName -Description "staging alias" }
     }
-    foreach ($child in $childReports) { Add-VerificationCoverageInventoryPath -Paths $expectedPaths -Path $child.FullName -Description "child-process report" }
+    foreach ($child in $childReports) { Add-VerificationCoverageInventoryPath -Paths $expectedPaths -Path $child.Snapshot.FullName -Description "child-process report" }
 
     $actualPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
     foreach ($file in @(Get-ChildItem -LiteralPath $fullVerificationResultsPath -Recurse -Filter "coverage.cobertura.xml" -File | Sort-Object FullName)) {
@@ -135,9 +151,16 @@ function Write-CoverageManifest {
             sha256 = $evidence.sha256
         })
     }
-    foreach ($child in @($childReports | Sort-Object FullName)) {
-        $evidence = Get-VerificationCoverageEvidence -Snapshot $child
-        $reports.Add([ordered]@{ kind = "child"; path = $evidence.path; length = $evidence.length; sha256 = $evidence.sha256 })
+    foreach ($child in @($childReports | Sort-Object { $_.Snapshot.FullName })) {
+        $evidence = Get-VerificationCoverageEvidence -Snapshot $child.Snapshot
+        $reports.Add([ordered]@{
+            kind = "child"
+            projectName = $child.ProjectName
+            childResultsRoot = $child.ChildResultsRoot
+            path = $evidence.path
+            length = $evidence.length
+            sha256 = $evidence.sha256
+        })
     }
 
     $aliases = @($laneAliases | Sort-Object { $_.Alias.FullName } | ForEach-Object {

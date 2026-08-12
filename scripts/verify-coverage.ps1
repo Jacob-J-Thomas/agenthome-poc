@@ -44,8 +44,8 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
                 foreach ($propertyName in @("kind", "laneName", "laneResultsRoot", "trxPath", "deploymentRoot", "path", "sha256")) { Assert-VerificationCoverageJsonStringProperty -Element $reportElement -Name $propertyName -Description "Coverage lane report entry" }
             }
             elseif ($reportKind -ceq "child") {
-                Assert-VerificationCoverageJsonElementProperties -Element $reportElement -Expected @("kind", "path", "length", "sha256") -Description "Coverage child report entry"
-                foreach ($propertyName in @("kind", "path", "sha256")) { Assert-VerificationCoverageJsonStringProperty -Element $reportElement -Name $propertyName -Description "Coverage child report entry" }
+                Assert-VerificationCoverageJsonElementProperties -Element $reportElement -Expected @("kind", "projectName", "childResultsRoot", "path", "length", "sha256") -Description "Coverage child report entry"
+                foreach ($propertyName in @("kind", "projectName", "childResultsRoot", "path", "sha256")) { Assert-VerificationCoverageJsonStringProperty -Element $reportElement -Name $propertyName -Description "Coverage child report entry" }
             }
             else { throw "Coverage report manifest contains an unsupported report kind." }
         }
@@ -85,6 +85,11 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
 
     $reportEvidenceByPath = [Collections.Generic.Dictionary[string, object]]::new((Get-VerificationCoveragePathComparer))
     $manifestPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
+    $laneNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $laneRoots = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
+    $laneTrxPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
+    $childRootsByProject = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    $childProjectsByRoot = [Collections.Generic.Dictionary[string, string]]::new((Get-VerificationCoveragePathComparer))
     $actualLaneCount = 0
     $actualChildCount = 0
     foreach ($entry in $manifestReports) {
@@ -93,7 +98,7 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
             $actualLaneCount++
         }
         elseif ([string]$entry.kind -ceq "child") {
-            Assert-VerificationCoverageExactProperties -Value $entry -Expected @("kind", "path", "length", "sha256") -Description "Coverage child report entry"
+            Assert-VerificationCoverageExactProperties -Value $entry -Expected @("kind", "projectName", "childResultsRoot", "path", "length", "sha256") -Description "Coverage child report entry"
             $actualChildCount++
         }
         else {
@@ -116,18 +121,10 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
             }
             $laneResultsRoot = [IO.Path]::GetFullPath([string]$entry.laneResultsRoot)
             [void](Assert-VerificationCoverageOrdinaryPath -Path $laneResultsRoot -Root $fullResultsRoot -PathType Container -Description "Coverage lane results root")
-            if (-not (Test-VerificationCoverageDescendantPath -Path $path -Root $laneResultsRoot)) {
-                throw "Coverage lane report is outside its exact lane results root: $path"
-            }
-            $canonicalRelativePath = [IO.Path]::GetRelativePath($laneResultsRoot, $path)
-            $canonicalSegments = @($canonicalRelativePath.Split([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), [StringSplitOptions]::RemoveEmptyEntries))
-            if ($canonicalSegments.Count -ne 2 -or [string]::IsNullOrWhiteSpace($canonicalSegments[0]) -or $canonicalSegments[0] -ceq "." -or $canonicalSegments[0] -ceq ".." -or $canonicalSegments[0].IndexOfAny([char[]]@('/', '\', ':')) -ge 0 -or $canonicalSegments[1] -cne "coverage.cobertura.xml") {
-                throw "Coverage lane report is outside its exact canonical collector path: $path"
-            }
-
             $trxPath = [IO.Path]::GetFullPath([string]$entry.trxPath)
-            if (-not (Test-VerificationCoverageSamePath -Left (Split-Path -Parent $trxPath) -Right $laneResultsRoot)) {
-                throw "Coverage lane report TRX is outside the root of its exact lane results directory: $trxPath"
+            Assert-VerificationCoverageLaneProvenance -LaneName ([string]$entry.laneName) -LaneResultsRoot $laneResultsRoot -TrxPath $trxPath -CanonicalPath $path -ResultsRoot $fullResultsRoot
+            if (-not $laneNames.Add([string]$entry.laneName) -or -not $laneRoots.Add($laneResultsRoot) -or -not $laneTrxPaths.Add($trxPath)) {
+                throw "Coverage report manifest contains a duplicate lane name, results root, or exact TRX path."
             }
             $trxSnapshot = Read-VerificationCoverageSnapshot -Path $trxPath -Root $laneResultsRoot -Description "Coverage lane report exact TRX"
             $declaredDeploymentRoot = Get-VerificationCoverageDeploymentRoot -LaneName ([string]$entry.laneName) -TrxSnapshot $trxSnapshot
@@ -140,6 +137,25 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
             }
             $reportRecord | Add-Member -NotePropertyName LaneResultsRoot -NotePropertyValue $laneResultsRoot
             $reportRecord | Add-Member -NotePropertyName DeploymentPath -NotePropertyValue $deploymentPath
+        }
+        else {
+            $projectName = [string]$entry.projectName
+            $childResultsRoot = [IO.Path]::GetFullPath([string]$entry.childResultsRoot)
+            [void](Assert-VerificationCoverageOrdinaryPath -Path $childResultsRoot -Root $fullResultsRoot -PathType Container -Description "Coverage child-process results root")
+            Assert-VerificationCoverageChildProvenance -ProjectName $projectName -ChildResultsRoot $childResultsRoot -ReportPath $path -ResultsRoot $fullResultsRoot -RepositoryRoot $repoRoot
+
+            if ($childRootsByProject.ContainsKey($projectName)) {
+                if (-not (Test-VerificationCoverageSamePath -Left $childRootsByProject[$projectName] -Right $childResultsRoot)) {
+                    throw "Coverage report manifest maps one child-process project to multiple results roots."
+                }
+            }
+            else { $childRootsByProject.Add($projectName, $childResultsRoot) }
+            if ($childProjectsByRoot.ContainsKey($childResultsRoot)) {
+                if ($childProjectsByRoot[$childResultsRoot] -cne $projectName) {
+                    throw "Coverage report manifest maps one child-process results root to multiple projects."
+                }
+            }
+            else { $childProjectsByRoot.Add($childResultsRoot, $projectName) }
         }
         $reportEvidenceByPath.Add($path, $reportRecord)
         $coverageFiles += $snapshot
