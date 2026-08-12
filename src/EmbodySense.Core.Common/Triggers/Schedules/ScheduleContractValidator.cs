@@ -408,6 +408,10 @@ public static class ScheduleContractValidator
         }
 
         ValidateDefinitionBoundState(validDefinition, validState, errors);
+        if (validState.PendingDelivery?.Prepared is not null)
+        {
+            ValidatePreparedDeliveryCompositionCore(validDefinition, validState, errors);
+        }
 
         if (validState.PendingDelivery?.FinalizationPlan is { } finalizationPlan)
         {
@@ -434,13 +438,19 @@ public static class ScheduleContractValidator
             return Result(errors);
         }
 
-        if (state!.PendingDelivery?.Prepared?.Envelope is not { } envelope)
+        if (state!.PendingDelivery?.Prepared?.Envelope is null)
         {
             errors.Add(Error("prepared_delivery_required", "state.pendingDelivery.prepared"));
             return Result(errors);
         }
 
-        if (!Equals(envelope.Loop, definition!.Target))
+        return Result(errors);
+    }
+
+    private static void ValidatePreparedDeliveryCompositionCore(ScheduleDefinition definition, ScheduleState state, List<ScheduleContractError> errors)
+    {
+        var envelope = state.PendingDelivery!.Prepared!.Envelope;
+        if (!Equals(envelope.Loop, definition.Target))
         {
             errors.Add(Error("target_mismatch", "state.pendingDelivery.prepared.envelope.loop"));
         }
@@ -516,8 +526,6 @@ public static class ScheduleContractValidator
         {
             errors.Add(Error("initial_redelivery_required", "state.pendingDelivery.prepared.envelope.redelivery"));
         }
-
-        return Result(errors);
     }
 
     /// <summary>Validates one queue-result evidence item without interpreting it as proof of delivery.</summary>

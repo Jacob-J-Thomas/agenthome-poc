@@ -536,6 +536,39 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
         Assert.Equal(restartedAt, restarted.Store.Mutations[0].Replacement.LastClockObservedAtUtc);
     }
 
+    [Theory]
+    [InlineData(SchedulePendingDeliveryPhase.Prepared)]
+    [InlineData(SchedulePendingDeliveryPhase.ResultObserved)]
+    public async Task Loaded_pending_directive_policy_mismatch_fails_before_queue(SchedulePendingDeliveryPhase phase)
+    {
+        var initial = Fixture();
+        _ = await initial.Evaluator.EvaluateAsync(initial.Definition.ScheduleId);
+        var preparedState = initial.Store.Mutations
+            .Select(mutation => mutation.Replacement)
+            .Single(state => state.PendingDelivery?.Phase == SchedulePendingDeliveryPhase.Prepared);
+        var mismatchedState = WithDirectiveOverlap(preparedState, ScheduleOverlapPolicy.Allow, phase);
+        var stateValidation = ScheduleContractValidator.ValidateState(mismatchedState);
+        Assert.True(
+            stateValidation.IsValid,
+            ScheduleEvaluatorTestData.Errors(stateValidation));
+        var definitionValidation = ScheduleContractValidator.ValidateDefinitionStateComposition(
+            initial.Definition,
+            mismatchedState);
+        Assert.Contains(
+            definitionValidation.Errors,
+            error => error.Path == "state.pendingDelivery.prepared.envelope.scheduleExecutionDirective"
+                && error.Code == "schedule_execution_directive_mismatch");
+        var restarted = Fixture(initial.Definition, mismatchedState, mismatchedState.LastClockObservedAtUtc);
+
+        var result = await restarted.Evaluator.EvaluateAsync(initial.Definition.ScheduleId);
+
+        Assert.Equal(ScheduleEvaluationStatus.Corrupt, result.Status);
+        Assert.Equal("definition-state-invalid", result.ReasonCode);
+        Assert.Equal(0, restarted.Queue.Calls);
+        Assert.Equal(0, restarted.CurrentEvidence.Calls);
+        Assert.Empty(restarted.Store.Mutations);
+    }
+
     [Fact]
     public async Task Prepared_restart_reconciles_ambiguous_prior_success_as_exact_real_admission_replay()
     {
@@ -2684,6 +2717,56 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
             ScheduleInstantResolutionStatus.Resolved,
             timeZone.RulesFingerprint,
             DateTime.SpecifyKind(utc.UtcDateTime.AddHours(-5), DateTimeKind.Unspecified));
+
+    private static ScheduleState WithDirectiveOverlap(ScheduleState state, ScheduleOverlapPolicy overlap, SchedulePendingDeliveryPhase phase)
+    {
+        var pending = state.PendingDelivery!;
+        var prepared = pending.Prepared!;
+        var envelope = prepared.Envelope;
+        var directive = envelope.ScheduleExecutionDirective! with { Overlap = overlap };
+        Assert.True(TriggerDeliveryFactory.TryCreateScheduledEnvelope(
+            envelope.SchemaVersion,
+            envelope.DeliveryId,
+            envelope.DeduplicationId,
+            envelope.Adapter,
+            envelope.Loop,
+            envelope.ActorContext,
+            envelope.Authority,
+            envelope.Temporal,
+            envelope.Payload,
+            envelope.Redelivery,
+            directive,
+            envelope.PublicationRequested,
+            envelope.InvokingConversation,
+            envelope.VisibleStatus,
+            envelope.VisibleReason,
+            out var changedEnvelope,
+            out var validation),
+            string.Join(',', validation.Errors.Select(error => $"{error.Field}:{error.Code}")));
+        Assert.True(TriggerDeliveryHash.TryCompute(changedEnvelope, out var changedHash, out _));
+        var changedPrepared = prepared with
+        {
+            Envelope = changedEnvelope!,
+            CanonicalEnvelopeHash = changedHash!,
+        };
+        var result = phase == SchedulePendingDeliveryPhase.ResultObserved
+            ? new ScheduleDeliveryResultEvidence(
+                ScheduleDeliveryResultEvidence.CurrentSchemaVersion,
+                ScheduleDeliveryResultKind.Backpressured,
+                "queue-backpressured",
+                changedHash!,
+                prepared.PreparedAtUtc)
+            : null;
+        return state with
+        {
+            PendingDelivery = pending with
+            {
+                Phase = phase,
+                Prepared = changedPrepared,
+                Result = result,
+            },
+        };
+    }
 
     private static void AssertSameState(ScheduleState? actual, ScheduleState expected)
     {
