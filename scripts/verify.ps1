@@ -33,11 +33,6 @@ $coverageIsolationRoot = Join-Path $verificationResultsPath "CoverageIsolation"
 $standardTestResultsRoot = Join-Path $verificationResultsPath "StandardTests"
 $coverageManifestPath = Join-Path $verificationResultsPath "coverage-manifest.json"
 $coverageSummaryPath = Join-Path $verificationResultsPath "coverage-summary.json"
-$verificationPhysicalTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX) -and ($verificationPhysicalTempRoot -eq "/var" -or $verificationPhysicalTempRoot.StartsWith("/var/", [StringComparison]::Ordinal))) {
-    $verificationPhysicalTempRoot = "/private" + $verificationPhysicalTempRoot
-}
-$verificationLaneTrustRoot = Join-Path $verificationPhysicalTempRoot ("embodysense-verification-trust-" + [Guid]::NewGuid().ToString("N"))
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
 $maximumArtifactStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunArtifactMaximumShapeTests.Adversarial_maximum_transition_reservations_and_canonical_order_checks_remain_bounded"
@@ -47,6 +42,9 @@ $testLaneTimeoutSeconds = 480
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 . (Join-Path $PSScriptRoot "verification-parallel.ps1")
 . (Join-Path $PSScriptRoot "verification-artifacts.ps1")
+. (Join-Path $PSScriptRoot "verification-temp.ps1")
+$verificationPhysicalTempRoot = Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())
+$verificationLaneFixtureRoot = Join-Path $verificationPhysicalTempRoot ("embodysense-verification-fixtures-" + [Guid]::NewGuid().ToString("N"))
 Reset-VerificationPhaseState
 Reset-VerificationParallelPhaseState
 
@@ -174,8 +172,13 @@ function Get-ProjectCoverageIsolation {
     foreach ($lane in $Lanes) {
         $laneDirectory = Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework
         $laneManifest = @(Copy-VerifiedDirectory -SourceDirectory $pristineDirectory -DestinationDirectory $laneDirectory -Description "$($TestProject.BaseName)/$($lane.Name) lane copy")
+        $laneFixtureRoot = Join-Path $verificationLaneFixtureRoot "$($TestProject.BaseName)-$($lane.Name)"
+        New-Item -ItemType Directory -Path $laneFixtureRoot -Force | Out-Null
         $laneEnvironment = @{
-            EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $verificationLaneTrustRoot "$($TestProject.BaseName)-$($lane.Name)"
+            EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"
+            TEMP = $laneFixtureRoot
+            TMP = $laneFixtureRoot
+            TMPDIR = $laneFixtureRoot
         }
         if (-not $SkipCoverage -and $TestProject.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") {
             $laneEnvironment.EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory
@@ -456,8 +459,8 @@ try {
 }
 finally {
     Pop-Location
-    if (Test-Path -LiteralPath $verificationLaneTrustRoot) {
-        Remove-Item -LiteralPath $verificationLaneTrustRoot -Recurse -Force
+    if (Test-Path -LiteralPath $verificationLaneFixtureRoot) {
+        Remove-Item -LiteralPath $verificationLaneFixtureRoot -Recurse -Force
     }
 }
 

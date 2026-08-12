@@ -47,6 +47,7 @@ if (-not [string]::IsNullOrWhiteSpace($SynchronizationRoot) -and $Synchronizatio
 Start-Sleep -Milliseconds $DelayMilliseconds
 Write-Output "probe=$Name"
 Write-Output "environment=$env:VERIFY_PARALLEL_PROBE"
+Write-Output "physical_temp=$([IO.Path]::GetFullPath([IO.Path]::GetTempPath()))"
 exit $ExitCode
 '@ | Set-Content -LiteralPath $probePath -Encoding UTF8
 
@@ -79,10 +80,14 @@ exit $ExitCode
 
     Assert-Contains -Actual (Get-Content -Raw (Join-Path $scenarioRoot "success.log")) -Expected "probe=success" -Message "The harness must drain already-running peers before reporting failure."
 
+    $laneTempRoot = Join-Path $scenarioRoot "lane-temp"
+    New-Item -ItemType Directory -Path $laneTempRoot | Out-Null
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "environment" -FileName $powerShellExecutable -Arguments ($baseArguments + @("environment", "10", "0", "-")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "environment.log") -Environment @{ VERIFY_PARALLEL_PROBE = "scoped-child" }
+    Add-VerificationParallelPhase -Name "environment" -FileName $powerShellExecutable -Arguments ($baseArguments + @("environment", "10", "0", "-")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "environment.log") -Environment @{ VERIFY_PARALLEL_PROBE = "scoped-child"; TEMP = $laneTempRoot; TMP = $laneTempRoot; TMPDIR = $laneTempRoot }
     Invoke-VerificationParallelPhases -MaximumWorkers 1 | Out-Null
-    Assert-Contains -Actual (Get-Content -Raw (Join-Path $scenarioRoot "environment.log")) -Expected "environment=scoped-child" -Message "Per-phase environment overrides must reach only the child ProcessStartInfo."
+    $environmentLog = Get-Content -Raw (Join-Path $scenarioRoot "environment.log")
+    Assert-Contains -Actual $environmentLog -Expected "environment=scoped-child" -Message "Per-phase environment overrides must reach only the child ProcessStartInfo."
+    Assert-Contains -Actual $environmentLog -Expected "physical_temp=$([IO.Path]::GetFullPath($laneTempRoot))" -Message "A lane's .NET process and descendants must resolve the isolated fixture root as physical temporary storage."
     Assert-True -Condition ([string]::IsNullOrEmpty($env:VERIFY_PARALLEL_PROBE)) -Message "Per-phase environment overrides cannot mutate the verifier process environment."
 
     $orderPath = Join-Path $scenarioRoot "priority-order.txt"

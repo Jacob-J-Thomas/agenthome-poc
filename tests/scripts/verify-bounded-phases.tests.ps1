@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $phaseScriptPath = Join-Path $repoRoot "scripts\verification-phase.ps1"
 $parallelScriptPath = Join-Path $repoRoot "scripts\verification-parallel.ps1"
+$tempScriptPath = Join-Path $repoRoot "scripts\verification-temp.ps1"
 $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
 $watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
 $coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
@@ -41,6 +42,7 @@ function Invoke-ExpectedFailure {
 }
 
 . $phaseScriptPath
+. $tempScriptPath
 Reset-VerificationPhaseState
 
 $contextLine = Write-VerificationContext -RepositoryRoot $repoRoot -Configuration Debug -VerificationTier PullRequest
@@ -50,6 +52,14 @@ Assert-True -Condition ($context.schemaVersion -eq 1) -Message "Verifier context
 Assert-True -Condition ($context.verificationTier -eq "PullRequest") -Message "Verifier context must identify its tier."
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($context.repositoryHead)) -Message "Verifier context must identify the exact head or an explicit marker."
 Assert-True -Condition ($context.processorCount -ge 1) -Message "Verifier context must identify processor count."
+
+$systemTempProbe = Join-Path $repoRoot ("embodysense-system-temp-probe-" + [Guid]::NewGuid().ToString("N"))
+$runnerTempProbe = Join-Path $repoRoot ("embodysense-runner-temp-probe-" + [Guid]::NewGuid().ToString("N"))
+Assert-True -Condition ((Resolve-VerificationPhysicalTempRoot -RunnerTemp $runnerTempProbe -SystemTempPath $systemTempProbe) -ceq ([IO.Path]::GetFullPath($runnerTempProbe))) -Message "Hosted verification must prefer the runner-owned ephemeral temporary root."
+Assert-True -Condition ((Resolve-VerificationPhysicalTempRoot -RunnerTemp "" -SystemTempPath $systemTempProbe) -ceq ([IO.Path]::GetFullPath($systemTempProbe))) -Message "Local verification must retain a fully-qualified system-temp fallback."
+$null = Invoke-ExpectedFailure -ExpectedMessage "fully qualified path" -Action {
+    Resolve-VerificationPhysicalTempRoot -RunnerTemp "relative-temp" -SystemTempPath $systemTempProbe
+}
 
 $scenarioRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-bounded-verifier-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scenarioRoot | Out-Null
@@ -111,11 +121,13 @@ Assert-Contains -Actual $verifyScript -Expected 'Get-ProjectCoverageIsolation' -
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework' -Message "Every lane must preserve its bin/<Configuration>/<TargetFramework> AppContext suffix."
 Assert-Contains -Actual $verifyScript -Expected 'Copy-VerifiedDirectory -SourceDirectory $pristineDirectory -DestinationDirectory $laneDirectory' -Message "Every lane copy must be verified before use."
 Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory' -Message "Persistence child-process coverage must receive a process-scoped immutable source."
-Assert-Contains -Actual $verifyScript -Expected '$verificationPhysicalTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())' -Message "Lane trust isolation must begin from the system temporary root."
-Assert-Contains -Actual $verifyScript -Expected '$verificationPhysicalTempRoot = "/private" + $verificationPhysicalTempRoot' -Message "macOS lane trust isolation must avoid the synthetic /var alias."
-Assert-Contains -Actual $verifyScript -Expected '$verificationLaneTrustRoot = Join-Path $verificationPhysicalTempRoot' -Message "Lane trust isolation must remain outside retained repository artifacts."
-Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $verificationLaneTrustRoot "$($TestProject.BaseName)-$($lane.Name)"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."
-Assert-Contains -Actual $verifyScript -Expected 'Remove-Item -LiteralPath $verificationLaneTrustRoot -Recurse -Force' -Message "Lane trust roots must be cleaned after ordinary verifier completion."
+Assert-Contains -Actual $verifyScript -Expected 'Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())' -Message "Hosted verification must select the runner-owned ephemeral volume with a local fallback."
+Assert-Contains -Actual $verifyScript -Expected '$verificationLaneFixtureRoot = Join-Path $verificationPhysicalTempRoot' -Message "Lane fixture isolation must remain outside retained repository artifacts."
+Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."
+foreach ($tempVariable in @("TEMP", "TMP", "TMPDIR")) {
+    Assert-Contains -Actual $verifyScript -Expected "$tempVariable = `$laneFixtureRoot" -Message "Every lane and descendant must use the fast isolated '$tempVariable' fixture root."
+}
+Assert-Contains -Actual $verifyScript -Expected 'Remove-Item -LiteralPath $verificationLaneFixtureRoot -Recurse -Force' -Message "Lane fixture roots must be cleaned after ordinary verifier completion."
 Assert-Contains -Actual $verifyScript -Expected '"vstest", $Lane.AssemblyPath' -Message "Test lanes must execute isolated assemblies."
 Assert-Contains -Actual $verifyScript -Expected 'identity=TestCase.Id partition_identity=XunitTestCaseUniqueID' -Message "Stable inventory identities must remain explicit."
 Assert-Contains -Actual $verifyScript -Expected 'verify-test-partition.ps1' -Message "Canonical and lane discovery must be reconciled."
