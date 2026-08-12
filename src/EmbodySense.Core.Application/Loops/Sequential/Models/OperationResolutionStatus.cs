@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Application.Loops.Sequential;
+namespace EmbodySense.Core.Application.Loops.Sequential.Models;
 
 internal enum OperationResolutionStatus
 {
