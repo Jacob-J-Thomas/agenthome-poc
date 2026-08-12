@@ -7,14 +7,13 @@ using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Tests.Verification;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Audit;
 
 public sealed class AuditLogTests
 {
-    private const string CrossProcessWorkspaceVariable = "EMBODYSENSE_SEQUENTIAL_AUDIT_WORKSPACE";
-    private const int RecordThenExitCode = 91;
     private static readonly DateTimeOffset _timestamp = new(2026, 8, 10, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
@@ -344,11 +343,6 @@ public sealed class AuditLogTests
     [Fact]
     public async Task Sequential_recorder_reconciles_recorded_evidence_after_external_response_loss()
     {
-        if (Environment.GetEnvironmentVariable(CrossProcessWorkspaceVariable) is not null)
-        {
-            return;
-        }
-
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         using var process = StartRecordThenExitProcess(workspace.RootPath);
@@ -368,43 +362,8 @@ public sealed class AuditLogTests
         Assert.Single(await File.ReadAllLinesAsync(paths.EventsLogPath));
     }
 
-    [Fact]
-    public async Task Sequential_recorder_record_then_exit_child()
-    {
-        var workspaceRoot = Environment.GetEnvironmentVariable(CrossProcessWorkspaceVariable);
-        if (workspaceRoot is null)
-        {
-            return;
-        }
-
-        var evidenceHash = Hash('a');
-        var result = await new AuditLog(new WorkspacePaths(workspaceRoot)).RecordOnceAsync(
-            GovernedLoopSequentialAuditOperationId.ForNodeOutcome(evidenceHash),
-            evidenceHash,
-            Event());
-        Assert.Equal(GovernedLoopSequentialAuditRecordStatus.Recorded, result.Status);
-        Environment.Exit(RecordThenExitCode);
-    }
-
     private static Process StartRecordThenExitProcess(string workspaceRoot)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "dotnet",
-            WorkingDirectory = Path.GetTempPath(),
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(AuditLogTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.Audit.AuditLogTests.Sequential_recorder_record_then_exit_child");
-        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        startInfo.Environment[CrossProcessWorkspaceVariable] = workspaceRoot;
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("The sequential audit response-loss process did not start.");
-    }
+        => CancellationHostProcess.Start("sequential-audit-record-then-exit", workspaceRoot);
 
     private static AuditEvent Event(IReadOnlyDictionary<string, object?>? metadata = null)
         => new(

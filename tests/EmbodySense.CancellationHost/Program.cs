@@ -30,6 +30,26 @@ if (args is ["custom-loop-run-stage", var runLockPath, var runStagingPath, var r
     return await CustomLoopRunStagingWriterHost.RunAsync(runLockPath, runStagingPath, runReadyMarker, runReleaseMarker);
 }
 
+if (args is ["credential-mutex-contention", var contentionId])
+{
+    return await WindowsCredentialProviderCrossProcessHost.RunMutexContentionAsync(contentionId);
+}
+
+if (args is ["sequential-audit-record-then-exit", var auditWorkspaceRoot])
+{
+    return await SequentialAuditCrossProcessHost.RecordThenExitAsync(auditWorkspaceRoot);
+}
+
+if (args is ["sequential-evidence-resolve", var evidenceWorkspaceRoot, var evidenceHash, var evidenceResultPath])
+{
+    return await CustomLoopSequentialEvidenceCrossProcessHost.ResolveAsync(evidenceWorkspaceRoot, evidenceHash, evidenceResultPath);
+}
+
+if (args is ["effect-authority-crash", var effectMode, var effectWorkspaceRoot, var effectTrustRoot, var effectReleaseMarker, var effectReadyMarker, var effectOperationId])
+{
+    return await GovernedLoopEffectAuthorityCrashHost.RunAsync(effectMode, effectWorkspaceRoot, effectTrustRoot, effectReleaseMarker, effectReadyMarker, effectOperationId);
+}
+
 if (args is ["trigger-queue-admit", var queueWorkspaceRoot, var queueReleaseMarker, var queueReadyMarker, var queueResultMarker, var deliveryId, var deduplicationId, var loopId, var crashBoundary])
 {
     return await TriggerQueueCrossProcessHost.RunAdmissionAsync(queueWorkspaceRoot, queueReleaseMarker, queueReadyMarker, queueResultMarker, deliveryId, deduplicationId, loopId, crashBoundary);

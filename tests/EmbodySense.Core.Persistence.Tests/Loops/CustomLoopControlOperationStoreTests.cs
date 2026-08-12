@@ -14,6 +14,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Tests.Verification;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
@@ -2059,39 +2060,11 @@ public sealed class CustomLoopControlOperationStoreTests
     private static string NestedJson(int depth) => string.Concat(Enumerable.Repeat("{\"nested\":", depth)) + "null" + new string('}', depth);
 
     private static Process StartControlOperationHost(string workspaceRoot, CustomLoopControlOperation pending)
-    {
-        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
-        var targetFramework = outputDirectory.Name;
-        var configuration = outputDirectory.Parent?.Name ?? throw new DirectoryNotFoundException("The active test build configuration could not be resolved.");
-        var hostAssembly = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", configuration, targetFramework, "EmbodySense.CancellationHost.dll");
-        Assert.True(File.Exists(hostAssembly), $"Control-operation host assembly was not built at `{hostAssembly}`.");
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.ArgumentList.Add("exec");
-        startInfo.ArgumentList.Add(hostAssembly);
-        startInfo.ArgumentList.Add("hold-control");
-        startInfo.ArgumentList.Add(workspaceRoot);
-        startInfo.ArgumentList.Add(pending.Kind.ToString());
-        startInfo.ArgumentList.Add(pending.RunId);
-        startInfo.ArgumentList.Add(pending.ExpectedLifecycleVersion.ToString());
-        startInfo.ArgumentList.Add(pending.OperationId);
-        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("The control-operation owner process could not be started.");
-    }
-
-    private static string FindRepositoryRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "EmbodySense.sln")))
-        {
-            directory = directory.Parent;
-        }
-
-        return directory?.FullName ?? throw new DirectoryNotFoundException("The repository root could not be located from the test output directory.");
-    }
+        => CancellationHostProcess.Start(
+            "hold-control",
+            workspaceRoot,
+            pending.Kind.ToString(),
+            pending.RunId,
+            pending.ExpectedLifecycleVersion.ToString(),
+            pending.OperationId);
 }

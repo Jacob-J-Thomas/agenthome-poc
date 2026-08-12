@@ -10,6 +10,7 @@ using EmbodySense.Core.Application.Credentials.Models;
 using EmbodySense.Core.Common.Credentials;
 using EmbodySense.Core.Common.Credentials.Models;
 using EmbodySense.Core.Persistence.Credentials;
+using EmbodySense.Core.Persistence.Tests.Verification;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Credentials;
@@ -18,8 +19,6 @@ public sealed class WindowsCredentialValueProviderTests
 {
     private const string ChildModeVariable = "EMBODYSENSE_CREDENTIAL_PROVIDER_CHILD";
     private const string ExternalProcessMode = "external-value";
-    private const string MutexContentionIdVariable = "EMBODYSENSE_CREDENTIAL_MUTEX_CONTENTION_ID";
-    private const string MutexContentionMode = "mutex-contention";
 
     [Fact]
     public async Task Public_provider_round_trips_replaces_checks_health_and_deletes_without_workspace_artifacts()
@@ -607,7 +606,7 @@ public sealed class WindowsCredentialValueProviderTests
             Process? process = null;
             try
             {
-                process = StartCredentialChild(nameof(External_process_fixture_cannot_enter_shared_target_while_parent_holds_global_mutex), MutexContentionMode, contentionId);
+                process = CancellationHostProcess.Start("credential-mutex-contention", contentionId);
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
                 await process.WaitForExitAsync(timeout.Token);
                 var output = await process.StandardOutput.ReadToEndAsync(timeout.Token);
@@ -647,30 +646,7 @@ public sealed class WindowsCredentialValueProviderTests
         Assert.True(create.Succeeded);
     }
 
-    [Fact]
-    public async Task External_process_fixture_cannot_enter_shared_target_while_parent_holds_global_mutex()
-    {
-        if (!OperatingSystem.IsWindows() || !string.Equals(Environment.GetEnvironmentVariable(ChildModeVariable), MutexContentionMode, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        var provider = new WindowsCredentialValueProvider();
-        var contentionId = Environment.GetEnvironmentVariable(MutexContentionIdVariable);
-        Assert.True(Guid.TryParseExact(contentionId, "N", out _));
-        var requests = ContentionRequests(contentionId!);
-        var callbackInvoked = false;
-        var result = await provider.CreateAsync(requests.Mutation, _ =>
-        {
-            callbackInvoked = true;
-            return requests.Mutation.ValueByteLength;
-        }, CancellationToken.None);
-
-        Assert.Equal(CredentialFailureCode.Unavailable, result.Failure?.Code);
-        Assert.False(callbackInvoked);
-    }
-
-    private static Process StartCredentialChild(string fixtureName, string childMode, string? contentionId = null)
+    private static Process StartCredentialChild(string fixtureName, string childMode)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -686,11 +662,6 @@ public sealed class WindowsCredentialValueProviderTests
             typeof(WindowsCredentialValueProviderTests).Assembly.Location,
             "EmbodySense.Core.Persistence.Tests.Credentials.WindowsCredentialValueProviderTests." + fixtureName);
         startInfo.Environment[ChildModeVariable] = childMode;
-        if (contentionId is not null)
-        {
-            startInfo.Environment[MutexContentionIdVariable] = contentionId;
-        }
-
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         return Process.Start(startInfo) ?? throw new InvalidOperationException("The external credential-provider fixture did not start.");
     }
