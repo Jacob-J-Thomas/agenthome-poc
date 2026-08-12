@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
+$coverageManifestScriptPath = Join-Path $repoRoot "scripts\verification-coverage-manifest.ps1"
 $phaseScriptPath = Join-Path $repoRoot "scripts\verification-phase.ps1"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $assertionCount = 0
@@ -40,7 +41,20 @@ function Assert-NotContains {
     Assert-True -Condition ($Actual.IndexOf($Unexpected, [StringComparison]::Ordinal) -lt 0) -Message "$Message Unexpected '$Unexpected'. Actual: $Actual"
 }
 
+function Invoke-ExpectedFailure {
+    param([scriptblock]$Action, [string]$ExpectedMessage)
+
+    try {
+        & $Action | Out-Null
+        throw "Expected the action to fail with '$ExpectedMessage'."
+    }
+    catch {
+        Assert-Contains -Actual $_.Exception.Message -Expected $ExpectedMessage -Message "Failure diagnostic mismatch."
+    }
+}
+
 . $phaseScriptPath
+. $coverageManifestScriptPath
 
 function New-CoverageLines {
     param([int[]]$Hits)
@@ -220,7 +234,7 @@ function Invoke-CoverageVerification {
     }
 }
 
-function Write-CoverageManifest {
+function Write-FixtureCoverageManifest {
     param([string]$ResultsRoot, [string]$ManifestPath)
 
     $fullRoot = [IO.Path]::GetFullPath($ResultsRoot)
@@ -229,8 +243,57 @@ function Write-CoverageManifest {
         schemaVersion = 1
         resultsRoot = $fullRoot
         reports = @($files | ForEach-Object { [ordered]@{ path = $_.FullName; length = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
+        aliases = @()
     }
     [IO.File]::WriteAllText($ManifestPath, ($manifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+}
+
+function Write-FixtureTrx {
+    param(
+        [string]$Path,
+        [string]$DeploymentRoot,
+        [switch]$OmitDeployment
+    )
+
+    $directory = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $deployment = if ($OmitDeployment) { "" } else { "<Deployment runDeploymentRoot=`"$DeploymentRoot`" />" }
+    $content = "<?xml version=`"1.0`" encoding=`"utf-8`"?><TestRun xmlns=`"http://microsoft.com/schemas/VisualStudio/TeamTest/2010`"><TestSettings name=`"default`">$deployment</TestSettings></TestRun>"
+    [IO.File]::WriteAllText($Path, $content, [Text.UTF8Encoding]::new($false))
+}
+
+function New-CoverageManifestLaneFixture {
+    param(
+        [string]$RepositoryRoot,
+        [object[]]$Packages,
+        [DateTime]$LastWriteTimeUtc,
+        [switch]$IncludeAlias
+    )
+
+    $resultsRoot = Join-Path $RepositoryRoot "tests\Fixture.Tests\TestResults"
+    $laneRoot = Join-Path $resultsRoot "lane"
+    $canonicalName = Join-Path "lane" "canonical-id"
+    Write-CoverageReport -RepositoryRoot $RepositoryRoot -Name $canonicalName -Packages $Packages -LastWriteTimeUtc $LastWriteTimeUtc
+    $canonicalPath = Join-Path (Join-Path $laneRoot "canonical-id") "coverage.cobertura.xml"
+    $deploymentRoot = "fixture_runner_2026-08-12_00_00_00"
+    $trxPath = Join-Path $laneRoot "lane.trx"
+    Write-FixtureTrx -Path $trxPath -DeploymentRoot $deploymentRoot
+    $aliasPath = Join-Path (Join-Path (Join-Path (Join-Path $laneRoot $deploymentRoot) "In") "fixture-machine") "coverage.cobertura.xml"
+    if ($IncludeAlias) {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $aliasPath) -Force | Out-Null
+        Copy-Item -LiteralPath $canonicalPath -Destination $aliasPath
+        [IO.File]::SetLastWriteTimeUtc($aliasPath, $LastWriteTimeUtc)
+    }
+
+    return [pscustomobject]@{
+        ResultsRoot = $resultsRoot
+        LaneRoot = $laneRoot
+        CanonicalPath = $canonicalPath
+        AliasPath = $aliasPath
+        TrxPath = $trxPath
+        ManifestPath = Join-Path $resultsRoot "coverage-manifest.json"
+        Result = [pscustomobject]@{ Name = "tests-fixture-lane"; CoverageSearchRoot = $laneRoot; TrxPath = $trxPath }
+    }
 }
 
 $scenarioRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-coverage-verifier-" + [Guid]::NewGuid().ToString("N"))
@@ -247,6 +310,64 @@ try {
         (New-CoveragePackage -Name "Fixture.One" -Classes @($onePrimaryClass)),
         (New-CoveragePackage -Name "Fixture.Two" -Classes @($twoPrimaryClass))
     )
+    $oneManifestClass = New-CoverageClass -Name "Fixture.One.Manifest" -FileName "src/Fixture.One/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0))
+    $manifestGeneratorPackages = @(
+        (New-CoveragePackage -Name "Fixture.One" -Classes @($oneManifestClass)),
+        (New-CoveragePackage -Name "Fixture.Two" -Classes @($twoPrimaryClass))
+    )
+
+    $canonicalOnlyRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-generator-canonical"
+    $canonicalOnlyFixture = New-CoverageManifestLaneFixture -RepositoryRoot $canonicalOnlyRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Write-CoverageManifest -TestResults @($canonicalOnlyFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $canonicalOnlyFixture.ResultsRoot -ManifestPath $canonicalOnlyFixture.ManifestPath | Out-Null
+    $canonicalOnlyManifest = Get-Content -LiteralPath $canonicalOnlyFixture.ManifestPath -Raw | ConvertFrom-Json
+    Assert-True -Condition (@($canonicalOnlyManifest.reports).Count -eq 1 -and @($canonicalOnlyManifest.aliases).Count -eq 0) -Message "A canonical-only lane must retain one merge report and an explicit empty staging-alias inventory."
+
+    $validAliasRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-generator-alias"
+    $validAliasFixture = New-CoverageManifestLaneFixture -RepositoryRoot $validAliasRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc -IncludeAlias
+    Write-CoverageManifest -TestResults @($validAliasFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $validAliasFixture.ResultsRoot -ManifestPath $validAliasFixture.ManifestPath | Out-Null
+    $validAliasManifest = Get-Content -LiteralPath $validAliasFixture.ManifestPath -Raw | ConvertFrom-Json
+    Assert-True -Condition (@($validAliasManifest.reports).Count -eq 1 -and @($validAliasManifest.aliases).Count -eq 1) -Message "One byte-identical VSTest staging alias must be explicit evidence, not a second merge input."
+    $validAliasSummaryPath = Join-Path $validAliasFixture.ResultsRoot "coverage-summary.json"
+    $validAliasResult = Invoke-CoverageVerification -RepositoryRoot $validAliasRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $validAliasFixture.ResultsRoot -ManifestPath $validAliasFixture.ManifestPath -ReportPath $validAliasSummaryPath
+    Assert-True -Condition ($validAliasResult.ExitCode -eq 0) -Message "A validated VSTest staging alias must preserve coverage verification. Actual: $($validAliasResult.Output)"
+    Assert-Contains -Actual $validAliasResult.Output -Expected "VERIFY_COVERAGE_REPORT reports=1 packages=2" -Message "Coverage aggregation must merge only the canonical report."
+
+    $mismatchedAliasRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-generator-alias-mismatch"
+    $mismatchedAliasFixture = New-CoverageManifestLaneFixture -RepositoryRoot $mismatchedAliasRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc -IncludeAlias
+    Add-Content -LiteralPath $mismatchedAliasFixture.AliasPath -Value "mismatch"
+    [IO.File]::SetLastWriteTimeUtc($mismatchedAliasFixture.AliasPath, $freshWriteTimeUtc)
+    Invoke-ExpectedFailure -ExpectedMessage "staging alias does not byte-match" -Action {
+        Write-CoverageManifest -TestResults @($mismatchedAliasFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $mismatchedAliasFixture.ResultsRoot -ManifestPath $mismatchedAliasFixture.ManifestPath
+    }
+
+    $extraReportRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-generator-extra"
+    $extraReportFixture = New-CoverageManifestLaneFixture -RepositoryRoot $extraReportRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Write-CoverageReport -RepositoryRoot $extraReportRepository -Name (Join-Path "lane" "undeclared") -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Invoke-ExpectedFailure -ExpectedMessage "2 fresh canonical reports" -Action {
+        Write-CoverageManifest -TestResults @($extraReportFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $extraReportFixture.ResultsRoot -ManifestPath $extraReportFixture.ManifestPath
+    }
+
+    $malformedTrxRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-generator-malformed-trx"
+    $malformedTrxFixture = New-CoverageManifestLaneFixture -RepositoryRoot $malformedTrxRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Set-Content -LiteralPath $malformedTrxFixture.TrxPath -Value "<TestRun" -Encoding UTF8
+    Invoke-ExpectedFailure -ExpectedMessage "malformed exact TRX" -Action {
+        Write-CoverageManifest -TestResults @($malformedTrxFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $malformedTrxFixture.ResultsRoot -ManifestPath $malformedTrxFixture.ManifestPath
+    }
+
+    $missingDeploymentRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-generator-missing-deployment"
+    $missingDeploymentFixture = New-CoverageManifestLaneFixture -RepositoryRoot $missingDeploymentRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Write-FixtureTrx -Path $missingDeploymentFixture.TrxPath -DeploymentRoot "unused" -OmitDeployment
+    Invoke-ExpectedFailure -ExpectedMessage "must declare exactly one Deployment" -Action {
+        Write-CoverageManifest -TestResults @($missingDeploymentFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $missingDeploymentFixture.ResultsRoot -ManifestPath $missingDeploymentFixture.ManifestPath
+    }
+
+    $missingTrxRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-generator-missing-trx"
+    $missingTrxFixture = New-CoverageManifestLaneFixture -RepositoryRoot $missingTrxRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Remove-Item -LiteralPath $missingTrxFixture.TrxPath -Force
+    Invoke-ExpectedFailure -ExpectedMessage "missing its exact TRX" -Action {
+        Write-CoverageManifest -TestResults @($missingTrxFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $missingTrxFixture.ResultsRoot -ManifestPath $missingTrxFixture.ManifestPath
+    }
+
     Write-CoverageReport -RepositoryRoot $passingRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $freshWriteTimeUtc
 
     $oneAliasClass = New-CoverageClass -Name "Fixture.One.Alias" -FileName (Join-Path $passingRepository "src\Fixture.One\File.cs") -Lines @(
@@ -275,7 +396,7 @@ try {
     $manifestResultsRoot = Join-Path $manifestRepository "tests\Fixture.Tests\TestResults"
     $manifestPath = Join-Path $manifestRepository "coverage-manifest.json"
     $summaryPath = Join-Path $manifestRepository "coverage-summary.json"
-    Write-CoverageManifest -ResultsRoot $manifestResultsRoot -ManifestPath $manifestPath
+    Write-FixtureCoverageManifest -ResultsRoot $manifestResultsRoot -ManifestPath $manifestPath
     $manifestPassing = Invoke-CoverageVerification -RepositoryRoot $manifestRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $manifestResultsRoot -ManifestPath $manifestPath -ReportPath $summaryPath
     Assert-True -Condition ($manifestPassing.ExitCode -eq 0) -Message "An exact fresh coverage manifest must pass. Actual: $($manifestPassing.Output)"
     Assert-Contains -Actual $manifestPassing.Output -Expected "VERIFY_COVERAGE_REPORT reports=2 packages=2" -Message "Manifest-backed coverage must retain exact counts."
@@ -293,7 +414,7 @@ try {
     Write-CoverageReport -RepositoryRoot $duplicateManifestRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $freshWriteTimeUtc
     $duplicateResultsRoot = Join-Path $duplicateManifestRepository "tests\Fixture.Tests\TestResults"
     $duplicateManifestPath = Join-Path $duplicateManifestRepository "coverage-manifest.json"
-    Write-CoverageManifest -ResultsRoot $duplicateResultsRoot -ManifestPath $duplicateManifestPath
+    Write-FixtureCoverageManifest -ResultsRoot $duplicateResultsRoot -ManifestPath $duplicateManifestPath
     $duplicateManifest = Get-Content -LiteralPath $duplicateManifestPath -Raw | ConvertFrom-Json
     $duplicateManifest.reports = @($duplicateManifest.reports[0], $duplicateManifest.reports[0])
     [IO.File]::WriteAllText($duplicateManifestPath, ($duplicateManifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
@@ -308,7 +429,7 @@ try {
     Set-Content -LiteralPath $corruptReportPath -Value "<coverage" -Encoding UTF8
     [IO.File]::SetLastWriteTimeUtc($corruptReportPath, $freshWriteTimeUtc)
     $corruptManifestPath = Join-Path $corruptRepository "coverage-manifest.json"
-    Write-CoverageManifest -ResultsRoot (Split-Path -Parent $corruptResultsRoot) -ManifestPath $corruptManifestPath
+    Write-FixtureCoverageManifest -ResultsRoot (Split-Path -Parent $corruptResultsRoot) -ManifestPath $corruptManifestPath
     $corruptResult = Invoke-CoverageVerification -RepositoryRoot $corruptRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot (Split-Path -Parent $corruptResultsRoot) -ManifestPath $corruptManifestPath
     Assert-True -Condition ($corruptResult.ExitCode -ne 0) -Message "Corrupt coverage XML must fail closed."
 

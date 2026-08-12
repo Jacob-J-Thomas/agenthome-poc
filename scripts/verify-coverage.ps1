@@ -32,7 +32,13 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
     if ($manifestReports.Count -eq 0) {
         throw "Coverage report manifest contains no reports: $fullManifestPath"
     }
+    $aliasProperty = $manifest.PSObject.Properties["aliases"]
+    if ($null -eq $aliasProperty) {
+        throw "Coverage report manifest does not declare its schema-1 staging alias inventory: $fullManifestPath"
+    }
+    $manifestAliases = @($aliasProperty.Value)
     $manifestPaths = @()
+    $reportEvidenceByPath = @{}
     foreach ($entry in $manifestReports) {
         $path = [IO.Path]::GetFullPath([string]$entry.path)
         if (-not $path.StartsWith($fullResultsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -45,12 +51,48 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
         }
         $manifestPaths += $path
         $coverageFiles += $file
+        if ($reportEvidenceByPath.ContainsKey($path)) {
+            throw "Coverage report manifest contains duplicate report paths."
+        }
+        $reportEvidenceByPath[$path] = $entry
     }
-    if (@($manifestPaths | Sort-Object -Unique).Count -ne $manifestPaths.Count) {
-        throw "Coverage report manifest contains duplicate report paths."
+
+    $aliasPaths = @()
+    $aliasPathSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $manifestAliases) {
+        $pathText = [string]$entry.path
+        $canonicalPathText = [string]$entry.canonicalPath
+        if ([string]::IsNullOrWhiteSpace($pathText) -or [string]::IsNullOrWhiteSpace($canonicalPathText)) {
+            throw "Coverage report manifest contains an incomplete staging alias entry."
+        }
+
+        $path = [IO.Path]::GetFullPath($pathText)
+        $canonicalPath = [IO.Path]::GetFullPath($canonicalPathText)
+        if (-not $path.StartsWith($fullResultsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Coverage report manifest references a missing or out-of-root staging alias: $path"
+        }
+        if (-not $reportEvidenceByPath.ContainsKey($canonicalPath)) {
+            throw "Coverage report manifest staging alias does not reference one canonical report: $canonicalPath"
+        }
+        if ($reportEvidenceByPath.ContainsKey($path) -or -not $aliasPathSet.Add($path)) {
+            throw "Coverage report manifest contains duplicate or overlapping staging alias paths."
+        }
+
+        $file = Get-Item -LiteralPath $path
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $canonicalEntry = $reportEvidenceByPath[$canonicalPath]
+        if ($file.Length -ne [long]$entry.length -or $hash -cne [string]$entry.sha256 -or $file.LastWriteTimeUtc -lt $MinimumWriteTimeUtc) {
+            throw "Coverage report manifest evidence does not match the fresh staging alias: $path"
+        }
+        if ([long]$entry.length -ne [long]$canonicalEntry.length -or [string]$entry.sha256 -cne [string]$canonicalEntry.sha256) {
+            throw "Coverage report manifest staging alias does not byte-match its canonical report: $path"
+        }
+        $aliasPaths += $path
     }
+
     $actualPaths = @(Get-ChildItem -LiteralPath $fullResultsRoot -Recurse -Filter "coverage.cobertura.xml" -File | ForEach-Object { $_.FullName } | Sort-Object -Unique)
-    if (@(Compare-Object -ReferenceObject @($manifestPaths | Sort-Object) -DifferenceObject $actualPaths -CaseSensitive).Count -ne 0) {
+    $expectedPaths = @((@($manifestPaths) + @($aliasPaths)) | Sort-Object)
+    if (@(Compare-Object -ReferenceObject $expectedPaths -DifferenceObject $actualPaths -CaseSensitive).Count -ne 0) {
         throw "Coverage results contain missing, stale, or unexpected reports outside the exact manifest."
     }
 }

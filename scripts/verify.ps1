@@ -41,6 +41,7 @@ $testLaneTimeoutSeconds = 480
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 . (Join-Path $PSScriptRoot "verification-parallel.ps1")
 . (Join-Path $PSScriptRoot "verification-artifacts.ps1")
+. (Join-Path $PSScriptRoot "verification-coverage-manifest.ps1")
 . (Join-Path $PSScriptRoot "verification-temp.ps1")
 . (Join-Path $PSScriptRoot "verification-test-lanes.ps1")
 $verificationPhysicalTempRoot = Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())
@@ -231,49 +232,6 @@ function Add-TestExecutionPhase {
     Add-VerificationParallelPhase -Name "tests-$($Lane.Name)" -FileName "dotnet" -Arguments $arguments -TimeoutSeconds $testLaneTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$($Lane.Name).log") -CoverageSearchRoot $(if ($SkipCoverage) { $null } else { $Lane.ResultsPath }) -TrxPath (Join-Path $Lane.ResultsPath $trxName) -Environment $Lane.Environment -Priority $priority -Weight $weight -ResourceClass $resourceClass
 }
 
-function Write-CoverageManifest {
-    param([object[]]$TestResults, [object[]]$Isolations, [DateTime]$MinimumWriteTimeUtc)
-
-    $laneReports = [Collections.Generic.List[object]]::new()
-    foreach ($result in $TestResults) {
-        $reports = @(Get-ChildItem -LiteralPath $result.CoverageSearchRoot -Recurse -Filter "coverage.cobertura.xml" -File | Where-Object { $_.LastWriteTimeUtc -ge $MinimumWriteTimeUtc })
-        if ($reports.Count -ne 1) {
-            throw "Coverage lane '$($result.Name)' produced $($reports.Count) fresh reports; exactly one is required."
-        }
-        $laneReports.Add($reports[0])
-    }
-
-    $childReports = @($Isolations | ForEach-Object {
-        if (Test-Path -LiteralPath $_.ChildResultsPath) {
-            Get-ChildItem -LiteralPath $_.ChildResultsPath -Recurse -Filter "coverage.cobertura.xml" -File | Where-Object { $_.LastWriteTimeUtc -ge $MinimumWriteTimeUtc }
-        }
-    })
-    $allReports = @($laneReports) + @($childReports)
-    $allCoverageFiles = @(Get-ChildItem -LiteralPath $verificationResultsPath -Recurse -Filter "coverage.cobertura.xml" -File | Sort-Object FullName)
-    $expectedPaths = @($allReports.FullName | Sort-Object -Unique)
-    $actualPaths = @($allCoverageFiles.FullName | Sort-Object -Unique)
-    if (@(Compare-Object -ReferenceObject $expectedPaths -DifferenceObject $actualPaths -CaseSensitive).Count -ne 0) {
-        throw "Coverage results contain stale or unexpected reports outside the successful lane/child report inventory."
-    }
-
-    $manifest = [ordered]@{
-        schemaVersion = 1
-        resultsRoot = [IO.Path]::GetFullPath($verificationResultsPath)
-        minimumWriteTimeUtc = $MinimumWriteTimeUtc.ToString("O")
-        laneReportCount = $laneReports.Count
-        childReportCount = $childReports.Count
-        reports = @($allCoverageFiles | ForEach-Object {
-            [ordered]@{
-                path = $_.FullName
-                length = $_.Length
-                sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            }
-        })
-    }
-    [IO.File]::WriteAllText($coverageManifestPath, ($manifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
-    Write-Output "VERIFY_COVERAGE_MANIFEST_COMPLETE lanes=$($laneReports.Count) child_reports=$($childReports.Count) reports=$($allCoverageFiles.Count) path=$coverageManifestPath"
-}
-
 Push-Location $repoRoot
 try {
     & (Join-Path $PSScriptRoot "verify-sdk.ps1") -GlobalJsonPath (Join-Path $repoRoot "global.json") -RepositoryRoot $repoRoot
@@ -435,7 +393,7 @@ try {
     Add-VerificationParallelPhase -Name "test-inventory-reconciliation" -FileName $powerShellExecutable -Arguments $inventoryArguments -TimeoutSeconds 180 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "test-inventory-reconciliation.log")
 
     if (-not $SkipCoverage) {
-        Write-CoverageManifest -TestResults $testResults -Isolations @($isolations) -MinimumWriteTimeUtc $coverageStartedUtc
+        Write-CoverageManifest -TestResults $testResults -Isolations @($isolations) -MinimumWriteTimeUtc $coverageStartedUtc -VerificationResultsPath $verificationResultsPath -ManifestPath $coverageManifestPath
         $coverageArguments = @("-NoProfile")
         if ($runningOnWindows) { $coverageArguments += @("-ExecutionPolicy", "Bypass") }
         $coverageArguments += @("-File", (Join-Path $PSScriptRoot "verify-coverage.ps1"), "-MinimumWriteTimeUtc", $coverageStartedUtc.ToString("O"), "-ResultsRoot", $verificationResultsPath, "-ManifestPath", $coverageManifestPath, "-ReportPath", $coverageSummaryPath)
