@@ -554,7 +554,8 @@ public sealed class GovernedLoopRuntimeTests
         public Task<AgentRuntime> CreateRuntimeAsync(bool preserveCurrentConversation = false)
             => AgentRuntimeFactory.ForFileCapabilityTrustRoot(
                     new RejectingApprovalPrompt(),
-                    _workspace.ServerStatePath)
+                    _workspace.ServerStatePath,
+                    CompatibleRuntimeStatus())
                 .CreateAsync(
                     "test-model",
                     _workspace.RootPath,
@@ -615,16 +616,9 @@ public sealed class GovernedLoopRuntimeTests
                     current.RequestedCeiling.AllowsExternalPublication,
                     current.RequestedCeiling.AllowsIrreversibleAction)
                 : current.RequestedCeiling;
-            if (kind == AuthorityGrantOperationKind.Expire)
-            {
-                var remaining = current.Boundary.ExpiresAtUtc!.Value - DateTimeOffset.UtcNow;
-                if (remaining > TimeSpan.Zero)
-                {
-                    await Task.Delay(remaining + TimeSpan.FromMilliseconds(20));
-                }
-            }
-
-            var recordedAtUtc = DateTimeOffset.UtcNow;
+            var recordedAtUtc = kind == AuthorityGrantOperationKind.Expire
+                ? current.Boundary.ExpiresAtUtc!.Value
+                : DateTimeOffset.UtcNow;
             var successor = AuthorityGrantHash.Apply(current with
             {
                 Revision = GrantRevision(current.Revision.Value + 1),
@@ -658,6 +652,16 @@ public sealed class GovernedLoopRuntimeTests
         }
 
         public void Dispose() => _workspace.Dispose();
+
+        private CodexRuntimeStatus CompatibleRuntimeStatus()
+            => new(
+                CodexRuntimeCompatibility.Compatible,
+                _codexPath,
+                _codexPath,
+                "codex-cli compatible-governed-test",
+                "test-model",
+                "controlled test",
+                "The exact fake app-server and provider path remains exercised; redundant compatibility probes are covered separately.");
 
         private static async Task<ContextualRoleRevision> CreateRoleAsync(WorkspacePaths paths)
         {
