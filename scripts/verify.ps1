@@ -101,7 +101,9 @@ function Get-TestProjectLanes {
     if ($TestProject.Name -eq "EmbodySense.Core.Startup.Tests.csproj") {
         return @(
             [pscustomobject]@{ Name = "capabilities"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Capabilities)&$nonStress" }
-            [pscustomobject]@{ Name = "loop-execution"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Loops.Execution)&$nonStress" }
+            [pscustomobject]@{ Name = "loop-execution-custom-runtime"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTests)&$nonStress" }
+            [pscustomobject]@{ Name = "loop-execution-governed-runtime"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTests)&$nonStress" }
+            [pscustomobject]@{ Name = "loop-execution-remainder"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Loops.Execution)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTests)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTests)&$nonStress" }
             [pscustomobject]@{ Name = "loops-other"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Loops)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Loops.Execution)&$nonStress" }
             [pscustomobject]@{ Name = "runtime-triggers"; Filter = "((FullyQualifiedName~EmbodySense.Core.Startup.Tests.Runtime)|(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Triggers))&$nonStress" }
             [pscustomobject]@{ Name = "remainder"; Filter = "(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Capabilities)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Loops)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Runtime)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Triggers)&$nonStress" }
@@ -241,7 +243,9 @@ function Add-TestExecutionPhase {
 
     $priority = switch -Wildcard ($Lane.Name) {
         "EmbodySense.Core.Persistence.Tests-human-input-responses" { 2200; break }
+        "EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime" { 2150; break }
         "EmbodySense.Core.Persistence.Tests-triggers" { 2100; break }
+        "EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime" { 2075; break }
         "EmbodySense.Core.Persistence.Tests-custom-run-trace" { 2050; break }
         "EmbodySense.Core.Startup.Tests-*" { 2000; break }
         "EmbodySense.IntegrationTests-*" { 1950; break }
