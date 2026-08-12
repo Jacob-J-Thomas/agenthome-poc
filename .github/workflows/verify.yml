@@ -12,23 +12,13 @@ permissions:
 jobs:
   verify:
     runs-on: windows-latest
-    timeout-minutes: 75
+    # Tool setup and diagnostic upload are outside the repository verifier budget.
+    # scripts/verify-with-watchdog.ps1 owns the exact inclusive 600-second child deadline.
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-
-      - name: Test verifier SDK diagnostics
-        shell: pwsh
-        run: ./tests/scripts/verify-sdk-diagnostics.tests.ps1
-
-      - name: Test coverage aggregation contracts
-        shell: pwsh
-        run: ./tests/scripts/verify-coverage.tests.ps1
-
-      - name: Test bounded verifier contracts
-        shell: pwsh
-        run: ./tests/scripts/verify-bounded-phases.tests.ps1
 
       - name: Install pinned .NET SDK
         uses: actions/setup-dotnet@v6
@@ -43,4 +33,16 @@ jobs:
 
       - name: Verify solution
         shell: pwsh
-        run: ./scripts/verify.ps1 -Configuration Release
+        run: ./scripts/verify-with-watchdog.ps1 -Configuration Release
+
+      - name: Upload verification diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: verification-diagnostics-${{ github.run_attempt }}
+          path: |
+            tests/VerificationResults/**
+            tests/**/TestResults/**/*.trx
+            tests/**/TestResults/**/coverage.cobertura.xml
+          if-no-files-found: error
+          retention-days: 30

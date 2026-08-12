@@ -1,5 +1,8 @@
 param(
-    [DateTime]$MinimumWriteTimeUtc = [DateTime]::MinValue
+    [DateTime]$MinimumWriteTimeUtc = [DateTime]::MinValue,
+    [string]$ResultsRoot,
+    [string]$ManifestPath,
+    [string]$ReportPath
 )
 
 Set-StrictMode -Version Latest
@@ -10,30 +13,63 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $testsPath = Join-Path $repoRoot "tests"
 
 $coverageFiles = @()
-$testProjectDirectories = Get-ChildItem -Path $testsPath -Directory | Where-Object {
-    Test-Path (Join-Path $_.FullName ($_.Name + ".csproj"))
-}
-
-foreach ($testProjectDirectory in $testProjectDirectories) {
-    $testResultsPath = Join-Path $testProjectDirectory.FullName "TestResults"
-    if (-not (Test-Path $testResultsPath)) {
-        continue
+if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
+    $fullManifestPath = [IO.Path]::GetFullPath($ManifestPath)
+    if (-not (Test-Path -LiteralPath $fullManifestPath -PathType Leaf)) {
+        throw "Coverage report manifest is missing: $fullManifestPath"
     }
-
-    $projectCoverageFiles = @(Get-ChildItem -Path $testResultsPath -Recurse -Filter "coverage.cobertura.xml" |
-        Where-Object { $_.LastWriteTimeUtc -ge $MinimumWriteTimeUtc } |
-        Sort-Object FullName)
-
-    if ($projectCoverageFiles.Count -gt 0) {
-        $coverageFiles += $projectCoverageFiles
+    try {
+        $manifest = Get-Content -LiteralPath $fullManifestPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "Coverage report manifest is corrupt: $fullManifestPath. $($_.Exception.Message)"
+    }
+    $fullResultsRoot = [IO.Path]::GetFullPath($ResultsRoot)
+    if ($manifest.schemaVersion -ne 1 -or -not ([IO.Path]::GetFullPath([string]$manifest.resultsRoot)).Equals($fullResultsRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Coverage report manifest does not bind the requested schema-1 results root: $fullResultsRoot"
+    }
+    $manifestReports = @($manifest.reports)
+    if ($manifestReports.Count -eq 0) {
+        throw "Coverage report manifest contains no reports: $fullManifestPath"
+    }
+    $manifestPaths = @()
+    foreach ($entry in $manifestReports) {
+        $path = [IO.Path]::GetFullPath([string]$entry.path)
+        if (-not $path.StartsWith($fullResultsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Coverage report manifest references a missing or out-of-root report: $path"
+        }
+        $file = Get-Item -LiteralPath $path
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($file.Length -ne [long]$entry.length -or $hash -cne [string]$entry.sha256 -or $file.LastWriteTimeUtc -lt $MinimumWriteTimeUtc) {
+            throw "Coverage report manifest evidence does not match the fresh report: $path"
+        }
+        $manifestPaths += $path
+        $coverageFiles += $file
+    }
+    if (@($manifestPaths | Sort-Object -Unique).Count -ne $manifestPaths.Count) {
+        throw "Coverage report manifest contains duplicate report paths."
+    }
+    $actualPaths = @(Get-ChildItem -LiteralPath $fullResultsRoot -Recurse -Filter "coverage.cobertura.xml" -File | ForEach-Object { $_.FullName } | Sort-Object -Unique)
+    if (@(Compare-Object -ReferenceObject @($manifestPaths | Sort-Object) -DifferenceObject $actualPaths -CaseSensitive).Count -ne 0) {
+        throw "Coverage results contain missing, stale, or unexpected reports outside the exact manifest."
+    }
+}
+else {
+    $testProjectDirectories = Get-ChildItem -Path $testsPath -Directory | Where-Object { Test-Path (Join-Path $_.FullName ($_.Name + ".csproj")) }
+    foreach ($testProjectDirectory in $testProjectDirectories) {
+        $testResultsPath = Join-Path $testProjectDirectory.FullName "TestResults"
+        if (Test-Path $testResultsPath) {
+            $coverageFiles += @(Get-ChildItem -Path $testResultsPath -Recurse -Filter "coverage.cobertura.xml" | Where-Object { $_.LastWriteTimeUtc -ge $MinimumWriteTimeUtc } | Sort-Object FullName)
+        }
     }
 }
 
 if ($coverageFiles.Count -eq 0) {
-    throw "Coverage output was not found under split test project TestResults folders. Run dotnet test --collect:`"XPlat Code Coverage`" /p:RestoreIgnoreFailedSources=true first."
+    throw "Coverage output was not found in the exact current-run report inventory. Run the canonical verifier first."
 }
 
 $failures = @()
+$packageSummaries = [Collections.Generic.List[object]]::new()
 $packageFileLines = @{}
 $sourceProjectDirectories = @{}
 Get-ChildItem -Path (Join-Path $repoRoot "src") -Directory -Recurse | Where-Object {
@@ -144,6 +180,13 @@ foreach ($expectedPackage in $expectedPackages) {
     $lineRate = $coveredLineCount / $lineCount
     $percent = [math]::Round($lineRate * 100, 2)
     Write-Output ("{0}: {1}%" -f $expectedPackage, $percent)
+    $packageSummaries.Add([pscustomobject][ordered]@{
+        package = $expectedPackage
+        coveredLines = $coveredLineCount
+        totalLines = $lineCount
+        lineRate = [math]::Round($lineRate, 8)
+        percent = $percent
+    })
 
     if ($lineRate -lt $threshold) {
         $normalizedRepoRoot = [IO.Path]::GetFullPath($repoRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).ToUpperInvariant()
@@ -175,6 +218,20 @@ foreach ($expectedPackage in $expectedPackages) {
 
         $failures += "{0} line coverage {1}% is below {2}%" -f $expectedPackage, $percent, ($threshold * 100)
     }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+    $fullReportPath = [IO.Path]::GetFullPath($ReportPath)
+    New-Item -ItemType Directory -Path (Split-Path -Parent $fullReportPath) -Force | Out-Null
+    $report = [ordered]@{
+        schemaVersion = 1
+        threshold = $threshold
+        reports = @($coverageFiles | Sort-Object FullName | ForEach-Object { $_.FullName })
+        packages = @($packageSummaries | Sort-Object -Property package)
+        failures = @($failures)
+    }
+    [IO.File]::WriteAllText($fullReportPath, ($report | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+    Write-Output "VERIFY_COVERAGE_REPORT reports=$($coverageFiles.Count) packages=$($packageSummaries.Count) path=$fullReportPath"
 }
 
 if ($failures.Count -gt 0) {

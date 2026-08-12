@@ -168,7 +168,10 @@ function Write-CoverageReport {
 function Invoke-CoverageVerification {
     param(
         [string]$RepositoryRoot,
-        [DateTime]$MinimumWriteTimeUtc
+        [DateTime]$MinimumWriteTimeUtc,
+        [string]$ResultsRoot,
+        [string]$ManifestPath,
+        [string]$ReportPath
     )
 
     $arguments = @("-NoLogo", "-NoProfile")
@@ -177,6 +180,12 @@ function Invoke-CoverageVerification {
     }
 
     $arguments += @("-File", (Join-Path $RepositoryRoot "scripts\verify-coverage.ps1"), "-MinimumWriteTimeUtc", $MinimumWriteTimeUtc.ToString("O"))
+    if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
+        $arguments += @("-ResultsRoot", $ResultsRoot, "-ManifestPath", $ManifestPath)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+        $arguments += @("-ReportPath", $ReportPath)
+    }
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $powerShellExecutable
     $startInfo.WorkingDirectory = $RepositoryRoot
@@ -214,6 +223,19 @@ function Invoke-CoverageVerification {
     }
 }
 
+function Write-CoverageManifest {
+    param([string]$ResultsRoot, [string]$ManifestPath)
+
+    $fullRoot = [IO.Path]::GetFullPath($ResultsRoot)
+    $files = @(Get-ChildItem -LiteralPath $fullRoot -Recurse -Filter "coverage.cobertura.xml" -File | Sort-Object FullName)
+    $manifest = [ordered]@{
+        schemaVersion = 1
+        resultsRoot = $fullRoot
+        reports = @($files | ForEach-Object { [ordered]@{ path = $_.FullName; length = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
+    }
+    [IO.File]::WriteAllText($ManifestPath, ($manifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+}
+
 $scenarioRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-coverage-verifier-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scenarioRoot | Out-Null
 try {
@@ -248,6 +270,50 @@ try {
     Assert-Contains -Actual $passingResult.Output -Expected "Fixture.One: 90%" -Message "Path aliases and duplicate lines must merge by maximum hits."
     Assert-Contains -Actual $passingResult.Output -Expected "Fixture.Two: 90%" -Message "Every expected package must be evaluated."
     Assert-NotContains -Actual $passingResult.Output -Unexpected "Fixture.One: 100%" -Message "Reports older than the supplied minimum write time must be ignored."
+
+    $manifestRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-passing"
+    Write-CoverageReport -RepositoryRoot $manifestRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    $manifestAliasClass = New-CoverageClass -Name "Fixture.One.Alias" -FileName (Join-Path $manifestRepository "src\Fixture.One\File.cs") -Lines @((New-CoverageLine -Number 1 -Hits 0), (New-CoverageLine -Number 9 -Hits 7))
+    Write-CoverageReport -RepositoryRoot $manifestRepository -Name "alias" -Packages @((New-CoveragePackage -Name "Fixture.One" -Classes @($manifestAliasClass))) -LastWriteTimeUtc $freshWriteTimeUtc
+    $manifestResultsRoot = Join-Path $manifestRepository "tests\Fixture.Tests\TestResults"
+    $manifestPath = Join-Path $manifestRepository "coverage-manifest.json"
+    $summaryPath = Join-Path $manifestRepository "coverage-summary.json"
+    Write-CoverageManifest -ResultsRoot $manifestResultsRoot -ManifestPath $manifestPath
+    $manifestPassing = Invoke-CoverageVerification -RepositoryRoot $manifestRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $manifestResultsRoot -ManifestPath $manifestPath -ReportPath $summaryPath
+    Assert-True -Condition ($manifestPassing.ExitCode -eq 0) -Message "An exact fresh coverage manifest must pass. Actual: $($manifestPassing.Output)"
+    Assert-Contains -Actual $manifestPassing.Output -Expected "VERIFY_COVERAGE_REPORT reports=2 packages=2" -Message "Manifest-backed coverage must retain exact counts."
+    $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+    Assert-True -Condition ($summary.threshold -eq 0.90 -and @($summary.packages).Count -eq 2) -Message "The deterministic summary must retain the unchanged threshold and every package."
+
+    $unexpectedDirectory = Join-Path $manifestResultsRoot "unexpected"
+    New-Item -ItemType Directory -Path $unexpectedDirectory | Out-Null
+    Copy-Item -LiteralPath (Join-Path $manifestResultsRoot "primary\coverage.cobertura.xml") -Destination (Join-Path $unexpectedDirectory "coverage.cobertura.xml")
+    $unexpectedManifestResult = Invoke-CoverageVerification -RepositoryRoot $manifestRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $manifestResultsRoot -ManifestPath $manifestPath
+    Assert-True -Condition ($unexpectedManifestResult.ExitCode -ne 0) -Message "Coverage outside the exact manifest must fail closed."
+    Assert-Contains -Actual $unexpectedManifestResult.Output -Expected "missing, stale, or unexpected reports" -Message "Unexpected-report diagnostics must be actionable."
+
+    $duplicateManifestRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "duplicate-manifest"
+    Write-CoverageReport -RepositoryRoot $duplicateManifestRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    $duplicateResultsRoot = Join-Path $duplicateManifestRepository "tests\Fixture.Tests\TestResults"
+    $duplicateManifestPath = Join-Path $duplicateManifestRepository "coverage-manifest.json"
+    Write-CoverageManifest -ResultsRoot $duplicateResultsRoot -ManifestPath $duplicateManifestPath
+    $duplicateManifest = Get-Content -LiteralPath $duplicateManifestPath -Raw | ConvertFrom-Json
+    $duplicateManifest.reports = @($duplicateManifest.reports[0], $duplicateManifest.reports[0])
+    [IO.File]::WriteAllText($duplicateManifestPath, ($duplicateManifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+    $duplicateManifestResult = Invoke-CoverageVerification -RepositoryRoot $duplicateManifestRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $duplicateResultsRoot -ManifestPath $duplicateManifestPath
+    Assert-True -Condition ($duplicateManifestResult.ExitCode -ne 0) -Message "Duplicate report paths in a manifest must fail closed."
+    Assert-Contains -Actual $duplicateManifestResult.Output -Expected "duplicate report paths" -Message "Duplicate-manifest diagnostics must be actionable."
+
+    $corruptRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "corrupt-report"
+    $corruptResultsRoot = Join-Path $corruptRepository "tests\Fixture.Tests\TestResults\corrupt"
+    New-Item -ItemType Directory -Path $corruptResultsRoot -Force | Out-Null
+    $corruptReportPath = Join-Path $corruptResultsRoot "coverage.cobertura.xml"
+    Set-Content -LiteralPath $corruptReportPath -Value "<coverage" -Encoding UTF8
+    [IO.File]::SetLastWriteTimeUtc($corruptReportPath, $freshWriteTimeUtc)
+    $corruptManifestPath = Join-Path $corruptRepository "coverage-manifest.json"
+    Write-CoverageManifest -ResultsRoot (Split-Path -Parent $corruptResultsRoot) -ManifestPath $corruptManifestPath
+    $corruptResult = Invoke-CoverageVerification -RepositoryRoot $corruptRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot (Split-Path -Parent $corruptResultsRoot) -ManifestPath $corruptManifestPath
+    Assert-True -Condition ($corruptResult.ExitCode -ne 0) -Message "Corrupt coverage XML must fail closed."
 
     $failingRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "below-threshold"
     $oneFailingClass = New-CoverageClass -Name "Fixture.One.Failing" -FileName "src/Fixture.One/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 0, 0))

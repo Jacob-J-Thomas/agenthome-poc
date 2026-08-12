@@ -105,6 +105,8 @@ function Invoke-VerifierScenario {
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verify.ps1") -Destination $scriptsPath
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verify-sdk.ps1") -Destination $scriptsPath
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-phase.ps1") -Destination $scriptsPath
+    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-parallel.ps1") -Destination $scriptsPath
+    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-artifacts.ps1") -Destination $scriptsPath
     Copy-Item -LiteralPath (Join-Path $repoRoot "global.json") -Destination $scenarioRoot
 
     $sentinelPath = Join-Path $testResultsPath "sentinel.txt"
@@ -154,7 +156,7 @@ set "EMBODYSENSE_VERIFY_FAKE_VERSION_EXIT=$VersionExitCode"
 set "EMBODYSENSE_VERIFY_FAKE_LIST_STDOUT=$listOutputPath"
 set "EMBODYSENSE_VERIFY_FAKE_LIST_STDERR=$listErrorPath"
 set "EMBODYSENSE_VERIFY_FAKE_LIST_EXIT=$ListExitCode"
-"$powershellPath" -NoProfile -ExecutionPolicy Bypass -File "$verifierPath" -SkipCoverage $verifierArgumentText
+"$powershellPath" -NoProfile -ExecutionPolicy Bypass -File "$verifierPath" -SkipCoverage -VerificationTier Stress $verifierArgumentText
 exit /b %ERRORLEVEL%
 "@
     Set-ScenarioFile -Path $launcherPath -Content $launcher

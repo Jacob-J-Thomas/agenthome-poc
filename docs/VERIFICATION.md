@@ -10,10 +10,10 @@ The contract keeps failures recoverable and diagnosable, preserves maximum-bound
 
 | Tier | Invocation | Ownership |
 | --- | --- | --- |
-| `PullRequest` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1` | Required for pull requests and pushes to `main`. It runs every test except cases explicitly carrying `VerificationTier=Stress`. The required maximum-artifact round-trip remains in this tier. |
+| `PullRequest` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-with-watchdog.ps1 -Configuration Release` | Required for pull requests and pushes to `main`. One external monotonic watchdog owns the complete repository-controlled gate, including the script contract tests, build, discovery, tests, formatting, frontend checks, inventory reconciliation, and coverage. It runs every test except cases explicitly carrying `VerificationTier=Stress`. |
 | `Stress` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -VerificationTier Stress` | Runs the two exact adversarial maximum/capacity cases separately. `.github/workflows/verification-stress.yml` owns a Monday 07:17 UTC schedule and manual dispatch. |
 
-The verifier defaults to `Release`; required workflows pass `-Configuration Release` explicitly. `Debug` remains an explicit local opt-in through `-Configuration Debug`. The stress workflow always runs its diagnostic-upload step, retains available TRX timing and failure diagnostics for 30 days, and fails if the expected artifacts are absent. Exact fully qualified filters plus `TreatNoTestsAsError` make removal, renaming, or trait loss fail the job instead of silently producing an empty pass. Pull-request selection also uses `TreatNoTestsAsError`.
+The verifier defaults to `Release`; required workflows pass `-Configuration Release` explicitly. `Debug` remains an explicit local opt-in through `-Configuration Debug`. The watchdog accepts a smaller diagnostic deadline but rejects any value above 600 seconds. Exactly 600.000 seconds is inside the inclusive contract; any later tick, cancellation, child timeout, nonzero exit, or missing/duplicate terminal marker fails closed. Tool setup and diagnostic upload remain outside that measured child and the workflow's 15-minute job ceiling. The stress workflow always runs its diagnostic-upload step, retains available TRX timing and failure diagnostics for 30 days, and fails if the expected artifacts are absent. Exact filters plus `TreatNoTestsAsError` make removal, renaming, or trait loss fail the job instead of silently producing an empty pass.
 
 The stress tier contains:
 
@@ -22,9 +22,17 @@ The stress tier contains:
 
 The required maximum-contract test still constructs the declared 65-attempt/30-model-visible-tool-request terminal shape, validates it, verifies its 15 MiB contract, round-trips the canonical representation, and exercises cold/warm monitor, list, reload, inspection/hash, and quota projections. It omits only test-harness amplification: retaining and revalidating every intermediate transition, repeatedly replacing representative artifacts in fresh workspaces, and mutating four full JSON envelopes.
 
-## Bounds and progress
+## Bounds, partition integrity, and progress
 
-Every native build, format, frontend, browser, test-project, coverage, and stress phase emits `VERIFY_PHASE_START` and `VERIFY_PHASE_COMPLETE` records. Nonzero exits and timeouts name the failed phase, elapsed time, and last completed phase. Pull-request runsettings cap each test session at 25 minutes. Native test and coverage processes retain a 15-minute bound except Persistence coverage, which has a 26-minute process bound. Stress sessions are bounded at 25 minutes; the maximum-artifact process bound is 30 minutes and the deletion-capacity process bound is 20 minutes. The outer required and stress jobs remain bounded at 45 and 75 minutes respectively.
+The required gate has a five-minute target and an immutable ten-minute limit. `scripts/verify-with-watchdog.ps1` measures the child with `System.Diagnostics.Stopwatch`, terminates its process tree after 600 seconds, captures combined output, and accepts exactly one terminal record of the form `VERIFY_COMPLETE schema_version=1 status=passed elapsed_seconds=...`. The child emits structured phase, parallel-worker, timeout, and artifact paths throughout; the always-uploaded `tests/VerificationResults` tree retains per-phase logs, TRX, manifests, slow-test evidence, coverage summaries, and watchdog output. A breach is a verifier incident to investigate, not authority to increase the deadline, remove tests, reduce coverage, or weaken assertions.
+
+Required tests use a bounded eight-worker queue. Costly Persistence and Startup lanes are admitted first so their critical paths overlap shorter assemblies, formatting, `git diff --check`, and frontend tests. Every test assembly is discovered once as a canonical selection and again through its declared lanes. The partition reconciler uses xUnit's stable test-case unique ID to require exact, disjoint, nonempty lane coverage; execution reconciliation then requires every VSTest test-case ID in the expected inventory and rejects missing, unexpected, failed, or cross-report duplicate executions. Dynamic data may produce multiple execution rows for one discovered case only within its one admitted lane report.
+
+Each lane executes an immutable copy of the exact Release build under `<isolation>/<project>/<lane>/bin/Release/net10.0`, preserving helper-host path semantics. Collectors, results, and process environment are lane-scoped. Persistence child-process coverage receives a process-scoped immutable source and never mutates the shared build output. After execution, SHA-256 manifests prove the source, canonical copy, and every lane copy unchanged.
+
+Coverage aggregation accepts only fresh Cobertura files named by a schema-1 manifest containing exact path, length, and SHA-256 evidence. Missing, stale, duplicate, substituted, corrupt, or extra reports fail closed. Split reports still merge duplicate source lines by maximum hit count, and every production assembly retains the unchanged 90 percent line-coverage floor.
+
+Stress sessions remain separately bounded at 25 minutes; the maximum-artifact process bound is 30 minutes and the deletion-capacity process bound is 20 minutes. Browser-only verification retains its separate installed-browser process bound and is not smuggled into the standard watchdog child.
 
 The two profiled tests also emit JSON records:
 
@@ -63,6 +71,10 @@ The async persistence boundaries accept cancellation tokens and pass them throug
 The required tier bounds each test project so one workspace cannot occupy the verifier indefinitely. Expensive adversarial amplification runs in its own scheduled job, with each owned test in a separate bounded process. This ticket does not change production cancellation, limits, persistence algorithms, or integrity behavior.
 
 ## Baseline ledger
+
+The pre-orchestration Windows `Verify` run 31519078581 spent 46 minutes 6 seconds in repository-controlled verification. Its longest serial work was Persistence governance (938.808 s), Startup (589.992 s), Persistence loops (546.536 s), Integration (144.770 s), Web (133.144 s), coverage reconciliation (55.410 s), and the two format gates (25.701 s and 46.016 s). Build was 70.447 s. This evidence determines the longest-first lane ordering; it is not permission to omit work.
+
+Exact-head acceptance requires repeated Windows runs at or below the five-minute target, with cold/warm variance recorded from retained manifests and per-phase logs. The hard contract remains 600 seconds even if a transient runner misses the target. Any over-limit run fails and must be escalated with its critical path before this baseline is revised.
 
 Baseline records must include the emitted context, artifact/count class, phase records, configuration, tier, and whether the discovery index was warm or repaired. Do not compare aggregate test duration to one production API operation.
 
