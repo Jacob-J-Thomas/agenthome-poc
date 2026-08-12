@@ -111,6 +111,161 @@ function Read-VerificationCoverageSnapshot {
     }
 }
 
+function Read-VerificationCoverageHashSnapshot {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [string]$Root,
+        [Parameter(Mandatory = $true)] [string]$Description
+    )
+
+    $before = Assert-VerificationCoverageOrdinaryPath -Path $Path -Root $Root -PathType Leaf -Description $Description
+    $stream = $null
+    $algorithm = $null
+    try {
+        $stream = [IO.FileStream]::new(
+            $before.FullName,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read,
+            131072,
+            [IO.FileOptions]::SequentialScan)
+        if ($stream.Length -ne $before.Length) {
+            throw "$Description changed before its immutable hash snapshot was captured: $($before.FullName)"
+        }
+
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        $hash = $algorithm.ComputeHash($stream)
+    }
+    finally {
+        if ($null -ne $algorithm) { $algorithm.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+
+    $after = Assert-VerificationCoverageOrdinaryPath -Path $before.FullName -Root $Root -PathType Leaf -Description $Description
+    if ($before.Length -ne $after.Length -or $before.LastWriteTimeUtc -ne $after.LastWriteTimeUtc) {
+        throw "$Description changed while its immutable hash snapshot was captured: $($before.FullName)"
+    }
+
+    return [pscustomobject]@{
+        FullName = $after.FullName
+        Length = $after.Length
+        LastWriteTimeUtc = $after.LastWriteTimeUtc
+        Sha256 = ([BitConverter]::ToString($hash)).Replace("-", "").ToLowerInvariant()
+    }
+}
+
+function Get-VerificationCoverageFileKey {
+    param(
+        [Parameter(Mandatory = $true)] [string]$PackageName,
+        [Parameter(Mandatory = $true)] [string]$FileName,
+        [Parameter(Mandatory = $true)] [string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)] [Collections.Generic.Dictionary[string, string]]$SourceProjectDirectories
+    )
+
+    $directorySeparator = [IO.Path]::DirectorySeparatorChar
+    $normalizedFileName = $FileName.Replace("/", $directorySeparator).Replace("\", $directorySeparator)
+    $sourceSegment = "src$directorySeparator"
+    $sourceIndex = $normalizedFileName.IndexOf($sourceSegment, [StringComparison]::OrdinalIgnoreCase)
+
+    if ([IO.Path]::IsPathRooted($normalizedFileName)) {
+        $candidatePath = $normalizedFileName
+    }
+    elseif ($normalizedFileName.StartsWith("src$directorySeparator", [StringComparison]::OrdinalIgnoreCase)) {
+        $candidatePath = Join-Path $RepositoryRoot $normalizedFileName
+    }
+    elseif ($sourceIndex -ge 0) {
+        $candidatePath = Join-Path $RepositoryRoot $normalizedFileName.Substring($sourceIndex)
+    }
+    elseif ($normalizedFileName -match "^\d{2}-") {
+        $candidatePath = Join-Path (Join-Path $RepositoryRoot "src") $normalizedFileName
+    }
+    elseif ($normalizedFileName.StartsWith("$PackageName$directorySeparator", [StringComparison]::OrdinalIgnoreCase) -and $SourceProjectDirectories.ContainsKey($PackageName)) {
+        $relativeProjectFileName = $normalizedFileName.Substring($PackageName.Length + 1)
+        $candidatePath = Join-Path $SourceProjectDirectories[$PackageName] $relativeProjectFileName
+    }
+    else {
+        $candidatePath = Join-Path $RepositoryRoot $normalizedFileName
+    }
+
+    return [IO.Path]::GetFullPath($candidatePath).ToUpperInvariant()
+}
+
+function Read-VerificationCoverageReductionSnapshot {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [string]$Root,
+        [Parameter(Mandatory = $true)] [string]$Description,
+        [Parameter(Mandatory = $true)] [string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)] [Collections.Generic.Dictionary[string, string]]$SourceProjectDirectories,
+        [Collections.Generic.Dictionary[string, object]]$Destination
+    )
+
+    $captured = Read-VerificationCoverageSnapshot -Path $Path -Root $Root -Description $Description
+    $coverage = ConvertFrom-VerificationCoverageXmlSnapshot -Snapshot $captured -Description $Description
+    if ($null -eq $coverage.DocumentElement -or $coverage.DocumentElement.LocalName -cne "coverage") {
+        throw "$Description has an invalid document root: $($captured.FullName)"
+    }
+
+    $expectedPackages = [Collections.Generic.HashSet[string]]::new($SourceProjectDirectories.Keys, [StringComparer]::Ordinal)
+    $packageFileLines = if ($null -eq $Destination) {
+        [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    }
+    else {
+        $Destination
+    }
+    foreach ($package in $coverage.coverage.packages.package) {
+        $packageName = [string]$package.name
+        if (-not $expectedPackages.Contains($packageName)) { continue }
+        if (-not $packageFileLines.ContainsKey($packageName)) {
+            $packageFileLines.Add($packageName, [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal))
+        }
+
+        $packageFiles = $packageFileLines[$packageName]
+        foreach ($class in $package.classes.class) {
+            $classLines = $class.SelectNodes("lines/line")
+            if ($classLines.Count -eq 0) { continue }
+            $fileKey = Get-VerificationCoverageFileKey -PackageName $packageName -FileName ([string]$class.filename) -RepositoryRoot $RepositoryRoot -SourceProjectDirectories $SourceProjectDirectories
+            if (-not $packageFiles.ContainsKey($fileKey)) {
+                $packageFiles.Add($fileKey, [Collections.Generic.Dictionary[int, int]]::new())
+            }
+            $fileLines = $packageFiles[$fileKey]
+            foreach ($line in $classLines) {
+                $lineNumber = [int]$line.number
+                $hits = [int]$line.hits
+                if (-not $fileLines.ContainsKey($lineNumber) -or $hits -gt $fileLines[$lineNumber]) {
+                    $fileLines[$lineNumber] = $hits
+                }
+            }
+        }
+    }
+
+    $lines = [Collections.Generic.List[object]]::new()
+    if ($null -eq $Destination) {
+        foreach ($packageEntry in @($packageFileLines.GetEnumerator() | Sort-Object Key -CaseSensitive)) {
+            foreach ($fileEntry in @($packageEntry.Value.GetEnumerator() | Sort-Object Key -CaseSensitive)) {
+                foreach ($lineEntry in @($fileEntry.Value.GetEnumerator() | Sort-Object Key)) {
+                    $lines.Add([pscustomobject][ordered]@{
+                        package = $packageEntry.Key
+                        file = $fileEntry.Key
+                        line = $lineEntry.Key
+                        hits = $lineEntry.Value
+                    })
+                }
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Snapshot = [pscustomobject]@{
+            FullName = $captured.FullName
+            Length = $captured.Length
+            LastWriteTimeUtc = $captured.LastWriteTimeUtc
+            Sha256 = $captured.Sha256
+        }
+        Lines = @($lines)
+    }
+}
+
 function ConvertFrom-VerificationCoverageXmlSnapshot {
     param(
         [Parameter(Mandatory = $true)] [object]$Snapshot,
@@ -364,5 +519,388 @@ function Assert-VerificationCoverageEvidenceEntry {
     $hash = [string]$Entry.sha256
     if ($length -ne $Snapshot.Length -or $hash -cnotmatch '^[0-9a-f]{64}$' -or $hash -cne $Snapshot.Sha256 -or $Snapshot.LastWriteTimeUtc -lt $MinimumWriteTimeUtc) {
         throw "$Description evidence does not match its fresh immutable byte snapshot: $($Snapshot.FullName)"
+    }
+}
+
+function Initialize-VerificationCoverageParallelProcessor {
+    if ($null -ne ("VerificationCoverageParallelProcessor" -as [type])) { return }
+
+    Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Threading.Tasks;
+using System.Xml;
+
+public sealed class VerificationCoverageParallelWorkItem
+{
+    public int Index { get; set; }
+    public string Path { get; set; }
+    public string Description { get; set; }
+    public bool Reduce { get; set; }
+}
+
+public sealed class VerificationCoverageParallelSnapshot
+{
+    public int Index { get; set; }
+    public string FullName { get; set; }
+    public long Length { get; set; }
+    public DateTime LastWriteTimeUtc { get; set; }
+    public string Sha256 { get; set; }
+}
+
+public sealed class VerificationCoverageParallelLine
+{
+    public string Package { get; set; }
+    public string File { get; set; }
+    public int Line { get; set; }
+    public int Hits { get; set; }
+}
+
+public sealed class VerificationCoverageParallelResult
+{
+    public VerificationCoverageParallelSnapshot[] Snapshots { get; set; }
+    public VerificationCoverageParallelLine[] Lines { get; set; }
+    public string[] Packages { get; set; }
+}
+
+internal sealed class VerificationCoverageParallelItemResult
+{
+    public VerificationCoverageParallelSnapshot Snapshot { get; set; }
+    public Dictionary<string, Dictionary<string, Dictionary<int, int>>> Lines { get; private set; }
+    public Exception Error { get; set; }
+
+    public VerificationCoverageParallelItemResult()
+    {
+        Lines = new Dictionary<string, Dictionary<string, Dictionary<int, int>>>(StringComparer.Ordinal);
+    }
+}
+
+public static class VerificationCoverageParallelProcessor
+{
+    public static VerificationCoverageParallelResult Process(
+        VerificationCoverageParallelWorkItem[] items,
+        string repositoryRoot,
+        Dictionary<string, string> sourceProjectDirectories,
+        int maximumWorkers)
+    {
+        if (items == null || items.Length == 0) throw new ArgumentException("Coverage work must not be empty.", "items");
+        if (maximumWorkers < 1 || maximumWorkers > 2) throw new ArgumentOutOfRangeException("maximumWorkers");
+        var ordered = items.OrderBy(item => item.Index).ToArray();
+        for (var index = 0; index < ordered.Length; index++)
+        {
+            if (ordered[index].Index != index) throw new InvalidDataException("Coverage work item indexes must be contiguous and unique.");
+        }
+
+        var itemResults = new VerificationCoverageParallelItemResult[ordered.Length];
+        var merged = new SortedDictionary<string, SortedDictionary<string, SortedDictionary<int, int>>>(StringComparer.Ordinal);
+        Parallel.ForEach(
+            ordered,
+            new ParallelOptions { MaxDegreeOfParallelism = maximumWorkers },
+            item =>
+            {
+                try
+                {
+                    var itemResult = ProcessItem(item, repositoryRoot, sourceProjectDirectories);
+                    lock (merged)
+                    {
+                        Merge(itemResult.Lines, merged);
+                    }
+                    itemResult.Lines.Clear();
+                    itemResults[item.Index] = itemResult;
+                }
+                catch (Exception exception) { itemResults[item.Index] = new VerificationCoverageParallelItemResult { Error = exception }; }
+            });
+
+        for (var index = 0; index < itemResults.Length; index++)
+        {
+            if (itemResults[index].Error != null)
+            {
+                throw new InvalidDataException(
+                    string.Format(CultureInfo.InvariantCulture, "Coverage worker failure for '{0}': {1}", ordered[index].Path, itemResults[index].Error.Message),
+                    itemResults[index].Error);
+            }
+        }
+
+        var lines = new List<VerificationCoverageParallelLine>();
+        foreach (var package in merged)
+        foreach (var file in package.Value)
+        foreach (var line in file.Value)
+        {
+            lines.Add(new VerificationCoverageParallelLine
+            {
+                Package = package.Key,
+                File = file.Key,
+                Line = line.Key,
+                Hits = line.Value
+            });
+        }
+
+        return new VerificationCoverageParallelResult
+        {
+            Snapshots = itemResults.Select(result => result.Snapshot).ToArray(),
+            Lines = lines.ToArray(),
+            Packages = merged.Keys.ToArray()
+        };
+    }
+
+    private static void Merge(
+        Dictionary<string, Dictionary<string, Dictionary<int, int>>> source,
+        SortedDictionary<string, SortedDictionary<string, SortedDictionary<int, int>>> destination)
+    {
+        foreach (var package in source)
+        {
+            SortedDictionary<string, SortedDictionary<int, int>> packageFiles;
+            if (!destination.TryGetValue(package.Key, out packageFiles))
+            {
+                packageFiles = new SortedDictionary<string, SortedDictionary<int, int>>(StringComparer.Ordinal);
+                destination.Add(package.Key, packageFiles);
+            }
+            foreach (var file in package.Value)
+            {
+                SortedDictionary<int, int> fileLines;
+                if (!packageFiles.TryGetValue(file.Key, out fileLines))
+                {
+                    fileLines = new SortedDictionary<int, int>();
+                    packageFiles.Add(file.Key, fileLines);
+                }
+                foreach (var line in file.Value)
+                {
+                    int existingHits;
+                    if (!fileLines.TryGetValue(line.Key, out existingHits) || line.Value > existingHits)
+                    {
+                        fileLines[line.Key] = line.Value;
+                    }
+                }
+            }
+        }
+    }
+
+    private static VerificationCoverageParallelItemResult ProcessItem(
+        VerificationCoverageParallelWorkItem item,
+        string repositoryRoot,
+        Dictionary<string, string> sourceProjectDirectories)
+    {
+        var before = new FileInfo(item.Path);
+        before.Refresh();
+        if (!before.Exists) throw new FileNotFoundException(string.Format(CultureInfo.InvariantCulture, "{0} is missing or is not a leaf: {1}", item.Description, item.Path), item.Path);
+        if (before.Length > int.MaxValue) throw new InvalidDataException(string.Format(CultureInfo.InvariantCulture, "{0} exceeds the bounded report size: {1}", item.Description, item.Path));
+
+        byte[] bytes = null;
+        byte[] hash;
+        using (var stream = new FileStream(item.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 131072, FileOptions.SequentialScan))
+        {
+            if (stream.Length != before.Length) throw new InvalidDataException(string.Format(CultureInfo.InvariantCulture, "{0} changed before capture: {1}", item.Description, item.Path));
+            using (var algorithm = SHA256.Create())
+            {
+                if (item.Reduce)
+                {
+                    bytes = new byte[(int)stream.Length];
+                    var offset = 0;
+                    while (offset < bytes.Length)
+                    {
+                        var read = stream.Read(bytes, offset, bytes.Length - offset);
+                        if (read == 0) throw new EndOfStreamException(string.Format(CultureInfo.InvariantCulture, "{0} ended before its declared length: {1}", item.Description, item.Path));
+                        offset += read;
+                    }
+                    if (stream.ReadByte() != -1) throw new InvalidDataException(string.Format(CultureInfo.InvariantCulture, "{0} grew while captured: {1}", item.Description, item.Path));
+                    hash = algorithm.ComputeHash(bytes);
+                }
+                else
+                {
+                    hash = algorithm.ComputeHash(stream);
+                }
+            }
+        }
+
+        var after = new FileInfo(item.Path);
+        after.Refresh();
+        if (!after.Exists || before.Length != after.Length || before.LastWriteTimeUtc != after.LastWriteTimeUtc)
+        {
+            throw new InvalidDataException(string.Format(CultureInfo.InvariantCulture, "{0} changed while its immutable byte snapshot was captured: {1}", item.Description, item.Path));
+        }
+
+        var result = new VerificationCoverageParallelItemResult
+        {
+            Snapshot = new VerificationCoverageParallelSnapshot
+            {
+                Index = item.Index,
+                FullName = after.FullName,
+                Length = after.Length,
+                LastWriteTimeUtc = after.LastWriteTimeUtc,
+                Sha256 = BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant()
+            }
+        };
+        if (bytes != null) Reduce(bytes, item, repositoryRoot, sourceProjectDirectories, result.Lines);
+        return result;
+    }
+
+    private static void Reduce(
+        byte[] bytes,
+        VerificationCoverageParallelWorkItem item,
+        string repositoryRoot,
+        Dictionary<string, string> sourceProjectDirectories,
+        Dictionary<string, Dictionary<string, Dictionary<int, int>>> destination)
+    {
+        var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null };
+        var document = new XmlDocument { XmlResolver = null };
+        try
+        {
+            using (var stream = new MemoryStream(bytes, false))
+            using (var reader = XmlReader.Create(stream, settings))
+            {
+                document.Load(reader);
+            }
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidDataException(string.Format(CultureInfo.InvariantCulture, "{0} is malformed XML: {1}. {2}", item.Description, item.Path, exception.Message), exception);
+        }
+        if (document.DocumentElement == null || !string.Equals(document.DocumentElement.LocalName, "coverage", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(string.Format(CultureInfo.InvariantCulture, "{0} has an invalid document root: {1}", item.Description, item.Path));
+        }
+
+        var packages = document.DocumentElement.SelectNodes("packages/package");
+        if (packages == null) return;
+        foreach (XmlNode package in packages)
+        {
+            var packageName = package.Attributes != null && package.Attributes["name"] != null ? package.Attributes["name"].Value : "";
+            if (!sourceProjectDirectories.ContainsKey(packageName)) continue;
+            Dictionary<string, Dictionary<int, int>> packageFiles;
+            if (!destination.TryGetValue(packageName, out packageFiles))
+            {
+                packageFiles = new Dictionary<string, Dictionary<int, int>>(StringComparer.Ordinal);
+                destination.Add(packageName, packageFiles);
+            }
+
+            var classes = package.SelectNodes("classes/class");
+            if (classes == null) continue;
+            foreach (XmlNode coverageClass in classes)
+            {
+                var classLines = coverageClass.SelectNodes("lines/line");
+                if (classLines == null || classLines.Count == 0) continue;
+                var fileName = coverageClass.Attributes != null && coverageClass.Attributes["filename"] != null ? coverageClass.Attributes["filename"].Value : "";
+                var fileKey = GetFileKey(packageName, fileName, repositoryRoot, sourceProjectDirectories);
+                Dictionary<int, int> fileLines;
+                if (!packageFiles.TryGetValue(fileKey, out fileLines))
+                {
+                    fileLines = new Dictionary<int, int>();
+                    packageFiles.Add(fileKey, fileLines);
+                }
+                foreach (XmlNode line in classLines)
+                {
+                    var lineNumber = int.Parse(line.Attributes != null && line.Attributes["number"] != null ? line.Attributes["number"].Value : "", NumberStyles.Integer, CultureInfo.InvariantCulture);
+                    var hits = int.Parse(line.Attributes != null && line.Attributes["hits"] != null ? line.Attributes["hits"].Value : "", NumberStyles.Integer, CultureInfo.InvariantCulture);
+                    int existingHits;
+                    if (!fileLines.TryGetValue(lineNumber, out existingHits) || hits > existingHits) fileLines[lineNumber] = hits;
+                }
+            }
+        }
+    }
+
+    private static string GetFileKey(
+        string packageName,
+        string fileName,
+        string repositoryRoot,
+        Dictionary<string, string> sourceProjectDirectories)
+    {
+        var normalized = fileName.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
+        var sourceSegment = "src" + Path.DirectorySeparatorChar;
+        var sourceIndex = normalized.IndexOf(sourceSegment, StringComparison.OrdinalIgnoreCase);
+        string candidatePath;
+        if (Path.IsPathRooted(normalized)) candidatePath = normalized;
+        else if (normalized.StartsWith(sourceSegment, StringComparison.OrdinalIgnoreCase)) candidatePath = Path.Combine(repositoryRoot, normalized);
+        else if (sourceIndex >= 0) candidatePath = Path.Combine(repositoryRoot, normalized.Substring(sourceIndex));
+        else if (normalized.Length >= 3 && char.IsDigit(normalized[0]) && char.IsDigit(normalized[1]) && normalized[2] == '-') candidatePath = Path.Combine(repositoryRoot, "src", normalized);
+        else if (normalized.StartsWith(packageName + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) && sourceProjectDirectories.ContainsKey(packageName))
+        {
+            var projectDirectory = sourceProjectDirectories[packageName];
+            candidatePath = Path.Combine(projectDirectory, normalized.Substring(packageName.Length + 1));
+        }
+        else candidatePath = Path.Combine(repositoryRoot, normalized);
+        return Path.GetFullPath(candidatePath).ToUpperInvariant();
+    }
+}
+'@
+}
+
+function Invoke-VerificationCoverageWorkers {
+    param(
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]]$WorkItems,
+        [Parameter(Mandatory = $true)] [string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)] [Collections.Generic.Dictionary[string, string]]$SourceProjectDirectories,
+        [ValidateRange(1, 2)] [int]$MaximumWorkers = 2
+    )
+
+    if ($WorkItems.Count -eq 0) { return [pscustomobject]@{ Snapshots = @(); Lines = @(); Packages = @() } }
+    if ($WorkItems.Count -lt 4) {
+        $snapshots = [Collections.Generic.List[object]]::new()
+        $packageFileLines = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+        $paths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
+        for ($index = 0; $index -lt $WorkItems.Count; $index++) {
+            $item = $WorkItems[$index]
+            $path = [IO.Path]::GetFullPath([string]$item.Path)
+            if (-not $paths.Add($path)) { throw "Coverage worker input contains a duplicate path: $path" }
+            if ([bool]$item.Reduce) {
+                $reduction = Read-VerificationCoverageReductionSnapshot -Path $path -Root ([string]$item.Root) -Description ([string]$item.Description) -RepositoryRoot $RepositoryRoot -SourceProjectDirectories $SourceProjectDirectories -Destination $packageFileLines
+                $snapshot = $reduction.Snapshot
+            }
+            else {
+                $snapshot = Read-VerificationCoverageHashSnapshot -Path $path -Root ([string]$item.Root) -Description ([string]$item.Description)
+            }
+            $snapshot | Add-Member -NotePropertyName Index -NotePropertyValue $index
+            $snapshots.Add($snapshot)
+        }
+
+        $lines = [Collections.Generic.List[object]]::new()
+        foreach ($packageEntry in @($packageFileLines.GetEnumerator() | Sort-Object Key -CaseSensitive)) {
+            foreach ($fileEntry in @($packageEntry.Value.GetEnumerator() | Sort-Object Key -CaseSensitive)) {
+                foreach ($lineEntry in @($fileEntry.Value.GetEnumerator() | Sort-Object Key)) {
+                    $lines.Add([pscustomobject]@{ Package = $packageEntry.Key; File = $fileEntry.Key; Line = $lineEntry.Key; Hits = $lineEntry.Value })
+                }
+            }
+        }
+        return [pscustomobject]@{
+            Snapshots = @($snapshots)
+            Lines = @($lines)
+            Packages = @($packageFileLines.Keys | Sort-Object)
+        }
+    }
+
+    Initialize-VerificationCoverageParallelProcessor
+    $typedItems = [Collections.Generic.List[VerificationCoverageParallelWorkItem]]::new()
+    $roots = [Collections.Generic.List[string]]::new()
+    $paths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
+    for ($index = 0; $index -lt $WorkItems.Count; $index++) {
+        $item = $WorkItems[$index]
+        $path = [IO.Path]::GetFullPath([string]$item.Path)
+        $root = [IO.Path]::GetFullPath([string]$item.Root)
+        if ([string]::IsNullOrWhiteSpace([string]$item.Description)) { throw "Coverage worker item $index is missing its description." }
+        if (-not $paths.Add($path)) { throw "Coverage worker input contains a duplicate path: $path" }
+        [void](Assert-VerificationCoverageOrdinaryPath -Path $path -Root $root -PathType Leaf -Description ([string]$item.Description))
+        $typedItems.Add([VerificationCoverageParallelWorkItem]@{
+            Index = $index
+            Path = $path
+            Description = [string]$item.Description
+            Reduce = [bool]$item.Reduce
+        })
+        $roots.Add($root)
+    }
+
+    $result = [VerificationCoverageParallelProcessor]::Process($typedItems.ToArray(), [IO.Path]::GetFullPath($RepositoryRoot), $SourceProjectDirectories, $MaximumWorkers)
+    foreach ($snapshot in $result.Snapshots) {
+        $after = Assert-VerificationCoverageOrdinaryPath -Path $snapshot.FullName -Root $roots[$snapshot.Index] -PathType Leaf -Description ([string]$WorkItems[$snapshot.Index].Description)
+        if ($after.Length -ne $snapshot.Length -or $after.LastWriteTimeUtc -ne $snapshot.LastWriteTimeUtc) {
+            throw "Coverage worker result changed before reconciliation: $($snapshot.FullName)"
+        }
+    }
+    return [pscustomobject]@{
+        Snapshots = @($result.Snapshots | Sort-Object Index)
+        Lines = @($result.Lines)
+        Packages = @($result.Packages)
     }
 }

@@ -2,7 +2,8 @@ param(
     [DateTime]$MinimumWriteTimeUtc = [DateTime]::MinValue,
     [string]$ResultsRoot,
     [string]$ManifestPath,
-    [string]$ReportPath
+    [string]$ReportPath,
+    [ValidateRange(1, 2)] [int]$MaximumCoverageWorkers = 2
 )
 
 Set-StrictMode -Version Latest
@@ -13,7 +14,17 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $testsPath = Join-Path $repoRoot "tests"
 . (Join-Path $PSScriptRoot "verification-coverage-evidence.ps1")
 
+$sourceProjectDirectories = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+Get-ChildItem -Path (Join-Path $repoRoot "src") -Directory -Recurse | Where-Object {
+    Test-Path (Join-Path $_.FullName ($_.Name + ".csproj"))
+} | ForEach-Object {
+    $sourceProjectDirectories.Add($_.Name, $_.FullName)
+}
+$expectedPackages = @($sourceProjectDirectories.Keys | Sort-Object)
+
 $coverageFiles = @()
+$coverageReductionLines = @()
+$coverageObservedPackages = @()
 if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
     $fullResultsRoot = [IO.Path]::GetFullPath($ResultsRoot)
     [void](Assert-VerificationCoverageOrdinaryPath -Path $fullResultsRoot -Root $fullResultsRoot -PathType Container -Description "Coverage results root")
@@ -110,11 +121,9 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
         if (-not (Test-VerificationCoverageDescendantPath -Path $path -Root $fullResultsRoot)) {
             throw "Coverage report manifest references a missing or out-of-root report: $path"
         }
-        $snapshot = Read-VerificationCoverageSnapshot -Path $path -Root $fullResultsRoot -Description "Coverage report manifest report"
-        Assert-VerificationCoverageEvidenceEntry -Entry $entry -Snapshot $snapshot -MinimumWriteTimeUtc $MinimumWriteTimeUtc -Description "Coverage report manifest report"
         if (-not $manifestPaths.Add($path)) { throw "Coverage report manifest contains duplicate report paths." }
 
-        $reportRecord = [pscustomobject]@{ Entry = $entry; Snapshot = $snapshot }
+        $reportRecord = [pscustomobject]@{ Entry = $entry; Path = $path; Snapshot = $null }
         if ([string]$entry.kind -ceq "lane") {
             if ([string]::IsNullOrWhiteSpace([string]$entry.laneName) -or [string]::IsNullOrWhiteSpace([string]$entry.laneResultsRoot) -or [string]::IsNullOrWhiteSpace([string]$entry.trxPath) -or [string]::IsNullOrWhiteSpace([string]$entry.deploymentRoot)) {
                 throw "Coverage lane report entry is missing exact lane or TRX provenance."
@@ -158,12 +167,12 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
             else { $childProjectsByRoot.Add($childResultsRoot, $projectName) }
         }
         $reportEvidenceByPath.Add($path, $reportRecord)
-        $coverageFiles += $snapshot
     }
     if ($actualLaneCount -ne $laneReportCount -or $actualChildCount -ne $childReportCount) { throw "Coverage report manifest report-kind counts do not match its schema-1 totals." }
 
     $aliasPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
     $aliasedCanonicalPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
+    $aliasEvidenceByPath = [Collections.Generic.Dictionary[string, object]]::new((Get-VerificationCoveragePathComparer))
     foreach ($entry in $manifestAliases) {
         Assert-VerificationCoverageExactProperties -Value $entry -Expected @("path", "canonicalPath", "length", "sha256") -Description "Coverage staging alias entry"
         $pathText = [string]$entry.path
@@ -186,14 +195,10 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
             throw "Coverage report manifest contains duplicate or overlapping staging alias paths."
         }
 
-        $snapshot = Read-VerificationCoverageSnapshot -Path $path -Root $fullResultsRoot -Description "Coverage report manifest staging alias"
-        Assert-VerificationCoverageEvidenceEntry -Entry $entry -Snapshot $snapshot -MinimumWriteTimeUtc $MinimumWriteTimeUtc -Description "Coverage report manifest staging alias"
         if (-not (Test-VerificationCoverageStagingAliasPath -Path $path -DeploymentRoot $canonicalRecord.DeploymentPath)) {
             throw "Coverage report manifest staging alias is outside its exact TRX deployment path: $path"
         }
-        if ($snapshot.Length -ne $canonicalRecord.Snapshot.Length -or $snapshot.Sha256 -cne $canonicalRecord.Snapshot.Sha256) {
-            throw "Coverage report manifest staging alias does not byte-match its canonical report: $path"
-        }
+        $aliasEvidenceByPath.Add($path, [pscustomobject]@{ Entry = $entry; CanonicalPath = $canonicalPath })
     }
 
     $expectedPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
@@ -207,16 +212,51 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
     if (-not $expectedPaths.SetEquals($actualPaths)) {
         throw "Coverage results contain missing, stale, or unexpected reports outside the exact manifest."
     }
+
+    $workItems = [Collections.Generic.List[object]]::new()
+    foreach ($path in @($manifestPaths | Sort-Object)) {
+        $workItems.Add([pscustomobject]@{ Path = $path; Root = $fullResultsRoot; Description = "Coverage report manifest report"; Reduce = $true })
+    }
+    foreach ($path in @($aliasPaths | Sort-Object)) {
+        $workItems.Add([pscustomobject]@{ Path = $path; Root = $fullResultsRoot; Description = "Coverage report manifest staging alias"; Reduce = $false })
+    }
+    $workerResult = Invoke-VerificationCoverageWorkers -WorkItems @($workItems) -RepositoryRoot $repoRoot -SourceProjectDirectories $sourceProjectDirectories -MaximumWorkers $MaximumCoverageWorkers
+    $snapshotsByPath = [Collections.Generic.Dictionary[string, object]]::new((Get-VerificationCoveragePathComparer))
+    foreach ($snapshot in $workerResult.Snapshots) { $snapshotsByPath.Add($snapshot.FullName, $snapshot) }
+    foreach ($record in $reportEvidenceByPath.Values) {
+        $snapshot = $snapshotsByPath[$record.Path]
+        Assert-VerificationCoverageEvidenceEntry -Entry $record.Entry -Snapshot $snapshot -MinimumWriteTimeUtc $MinimumWriteTimeUtc -Description "Coverage report manifest report"
+        $record.Snapshot = $snapshot
+        $coverageFiles += $snapshot
+    }
+    foreach ($path in $aliasEvidenceByPath.Keys) {
+        $aliasRecord = $aliasEvidenceByPath[$path]
+        $snapshot = $snapshotsByPath[$path]
+        Assert-VerificationCoverageEvidenceEntry -Entry $aliasRecord.Entry -Snapshot $snapshot -MinimumWriteTimeUtc $MinimumWriteTimeUtc -Description "Coverage report manifest staging alias"
+        $canonicalSnapshot = $reportEvidenceByPath[$aliasRecord.CanonicalPath].Snapshot
+        if ($snapshot.Length -ne $canonicalSnapshot.Length -or $snapshot.Sha256 -cne $canonicalSnapshot.Sha256) {
+            throw "Coverage report manifest staging alias does not byte-match its canonical report: $path"
+        }
+    }
+    $coverageReductionLines = @($workerResult.Lines)
+    $coverageObservedPackages = @($workerResult.Packages)
 }
 else {
     $testProjectDirectories = Get-ChildItem -Path $testsPath -Directory | Where-Object { Test-Path (Join-Path $_.FullName ($_.Name + ".csproj")) }
+    $workItems = [Collections.Generic.List[object]]::new()
     foreach ($testProjectDirectory in $testProjectDirectories) {
         $testResultsPath = Join-Path $testProjectDirectory.FullName "TestResults"
         if (Test-Path $testResultsPath) {
             foreach ($file in @(Get-ChildItem -Path $testResultsPath -Recurse -Filter "coverage.cobertura.xml" -File | Where-Object { $_.LastWriteTimeUtc -ge $MinimumWriteTimeUtc } | Sort-Object FullName)) {
-                $coverageFiles += Read-VerificationCoverageSnapshot -Path $file.FullName -Root $testResultsPath -Description "Coverage report"
+                $workItems.Add([pscustomobject]@{ Path = $file.FullName; Root = $testResultsPath; Description = "Coverage report"; Reduce = $true })
             }
         }
+    }
+    if ($workItems.Count -gt 0) {
+        $workerResult = Invoke-VerificationCoverageWorkers -WorkItems @($workItems) -RepositoryRoot $repoRoot -SourceProjectDirectories $sourceProjectDirectories -MaximumWorkers $MaximumCoverageWorkers
+        $coverageFiles = @($workerResult.Snapshots)
+        $coverageReductionLines = @($workerResult.Lines)
+        $coverageObservedPackages = @($workerResult.Packages)
     }
 }
 
@@ -227,89 +267,14 @@ if ($coverageFiles.Count -eq 0) {
 $failures = @()
 $packageSummaries = [Collections.Generic.List[object]]::new()
 $packageFileLines = @{}
-$sourceProjectDirectories = @{}
-Get-ChildItem -Path (Join-Path $repoRoot "src") -Directory -Recurse | Where-Object {
-    Test-Path (Join-Path $_.FullName ($_.Name + ".csproj"))
-} | ForEach-Object {
-    $sourceProjectDirectories[$_.Name] = $_.FullName
-}
-$expectedPackages = @($sourceProjectDirectories.Keys | Sort-Object)
-
-function Get-CoverageFileKey {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$PackageName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$FileName
-    )
-
-    $directorySeparator = [IO.Path]::DirectorySeparatorChar
-    $normalizedFileName = $FileName.Replace("/", $directorySeparator).Replace("\", $directorySeparator)
-    $sourceSegment = "src$directorySeparator"
-    $sourceIndex = $normalizedFileName.IndexOf($sourceSegment, [StringComparison]::OrdinalIgnoreCase)
-
-    if ([IO.Path]::IsPathRooted($normalizedFileName)) {
-        $candidatePath = $normalizedFileName
-    }
-    elseif ($normalizedFileName.StartsWith("src$directorySeparator", [StringComparison]::OrdinalIgnoreCase)) {
-        $candidatePath = Join-Path $repoRoot $normalizedFileName
-    }
-    elseif ($sourceIndex -ge 0) {
-        $candidatePath = Join-Path $repoRoot $normalizedFileName.Substring($sourceIndex)
-    }
-    elseif ($normalizedFileName -match "^\d{2}-") {
-        $candidatePath = Join-Path (Join-Path $repoRoot "src") $normalizedFileName
-    }
-    elseif ($normalizedFileName.StartsWith("$PackageName$directorySeparator", [StringComparison]::OrdinalIgnoreCase) -and $sourceProjectDirectories.ContainsKey($PackageName)) {
-        $relativeProjectFileName = $normalizedFileName.Substring($PackageName.Length + 1)
-        $candidatePath = Join-Path $sourceProjectDirectories[$PackageName] $relativeProjectFileName
-    }
-    else {
-        $candidatePath = Join-Path $repoRoot $normalizedFileName
-    }
-
-    return [IO.Path]::GetFullPath($candidatePath).ToUpperInvariant()
-}
-
-foreach ($coverageFile in $coverageFiles) {
-    $coverage = ConvertFrom-VerificationCoverageXmlSnapshot -Snapshot $coverageFile -Description "Coverage report"
-    if ($null -eq $coverage.DocumentElement -or $coverage.DocumentElement.LocalName -cne "coverage") {
-        throw "Coverage report has an invalid document root: $($coverageFile.FullName)"
-    }
-
-    foreach ($package in $coverage.coverage.packages.package) {
-        $packageName = [string]$package.name
-
-        if (-not $expectedPackages.Contains($packageName)) {
-            continue
-        }
-
-        if (-not $packageFileLines.ContainsKey($packageName)) {
-            $packageFileLines[$packageName] = @{}
-        }
-
-        $packageFiles = $packageFileLines[$packageName]
-        foreach ($class in $package.classes.class) {
-            $classLines = $class.SelectNodes("lines/line")
-            if ($classLines.Count -eq 0) {
-                continue
-            }
-
-            $fileKey = Get-CoverageFileKey -PackageName $packageName -FileName $class.filename
-            if (-not $packageFiles.ContainsKey($fileKey)) {
-                $packageFiles[$fileKey] = @{}
-            }
-
-            $fileLines = $packageFiles[$fileKey]
-            foreach ($line in $classLines) {
-                $lineNumber = [int]$line.number
-                $hits = [int]$line.hits
-                if (-not $fileLines.ContainsKey($lineNumber) -or $hits -gt $fileLines[$lineNumber]) {
-                    $fileLines[$lineNumber] = $hits
-                }
-            }
-        }
+foreach ($package in $coverageObservedPackages) { $packageFileLines[$package] = @{} }
+foreach ($line in $coverageReductionLines) {
+    if (-not $packageFileLines.ContainsKey($line.Package)) { $packageFileLines[$line.Package] = @{} }
+    $packageFiles = $packageFileLines[$line.Package]
+    if (-not $packageFiles.ContainsKey($line.File)) { $packageFiles[$line.File] = @{} }
+    $fileLines = $packageFiles[$line.File]
+    if (-not $fileLines.ContainsKey($line.Line) -or $line.Hits -gt $fileLines[$line.Line]) {
+        $fileLines[$line.Line] = $line.Hits
     }
 }
 

@@ -31,17 +31,14 @@ function Get-VerificationCoverageLaneInventory {
         throw "Coverage lane '$laneName' produced $($deploymentReports.Count) VSTest staging reports; at most one is allowed."
     }
 
-    $canonical = Read-VerificationCoverageSnapshot -Path $canonicalReports[0].FullName -Root $resultsRoot -Description "Coverage lane '$laneName' canonical report"
-    Assert-VerificationCoverageCollectorPath -Path $canonical.FullName -CollectorRoot $resultsRoot -Description "Coverage lane '$laneName' canonical report"
+    $canonicalPath = [IO.Path]::GetFullPath($canonicalReports[0].FullName)
+    Assert-VerificationCoverageCollectorPath -Path $canonicalPath -CollectorRoot $resultsRoot -Description "Coverage lane '$laneName' canonical report"
 
-    $alias = $null
+    $aliasPath = $null
     if ($deploymentReports.Count -eq 1) {
-        $alias = Read-VerificationCoverageSnapshot -Path $deploymentReports[0].FullName -Root $resultsRoot -Description "Coverage lane '$laneName' staging alias"
-        if (-not (Test-VerificationCoverageStagingAliasPath -Path $alias.FullName -DeploymentRoot $deploymentRoot)) {
-            throw "Coverage lane '$laneName' produced a report outside the single allowed VSTest staging alias path: $($alias.FullName)"
-        }
-        if ($alias.Length -ne $canonical.Length -or $alias.Sha256 -cne $canonical.Sha256) {
-            throw "Coverage lane '$laneName' VSTest staging alias does not byte-match its canonical report."
+        $aliasPath = [IO.Path]::GetFullPath($deploymentReports[0].FullName)
+        if (-not (Test-VerificationCoverageStagingAliasPath -Path $aliasPath -DeploymentRoot $deploymentRoot)) {
+            throw "Coverage lane '$laneName' produced a report outside the single allowed VSTest staging alias path: $aliasPath"
         }
     }
 
@@ -50,8 +47,8 @@ function Get-VerificationCoverageLaneInventory {
         LaneResultsRoot = $resultsRoot
         TrxPath = $trxSnapshot.FullName
         DeploymentRoot = $deploymentRootName
-        Canonical = $canonical
-        Alias = $alias
+        CanonicalPath = $canonicalPath
+        AliasPath = $aliasPath
     }
 }
 
@@ -73,7 +70,8 @@ function Write-CoverageManifest {
         [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]]$Isolations,
         [Parameter(Mandatory = $true)] [DateTime]$MinimumWriteTimeUtc,
         [Parameter(Mandatory = $true)] [string]$VerificationResultsPath,
-        [Parameter(Mandatory = $true)] [string]$ManifestPath
+        [Parameter(Mandatory = $true)] [string]$ManifestPath,
+        [ValidateRange(1, 2)] [int]$MaximumCoverageWorkers = 2
     )
 
     $fullVerificationResultsPath = [IO.Path]::GetFullPath($VerificationResultsPath)
@@ -90,12 +88,12 @@ function Write-CoverageManifest {
     $laneTrxPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
     foreach ($result in $TestResults) {
         $inventory = Get-VerificationCoverageLaneInventory -Result $result -MinimumWriteTimeUtc $MinimumWriteTimeUtc
-        Assert-VerificationCoverageLaneProvenance -LaneName $inventory.LaneName -LaneResultsRoot $inventory.LaneResultsRoot -TrxPath $inventory.TrxPath -CanonicalPath $inventory.Canonical.FullName -ResultsRoot $fullVerificationResultsPath
+        Assert-VerificationCoverageLaneProvenance -LaneName $inventory.LaneName -LaneResultsRoot $inventory.LaneResultsRoot -TrxPath $inventory.TrxPath -CanonicalPath $inventory.CanonicalPath -ResultsRoot $fullVerificationResultsPath
         if (-not $laneNames.Add($inventory.LaneName) -or -not $laneRoots.Add($inventory.LaneResultsRoot) -or -not $laneTrxPaths.Add($inventory.TrxPath)) {
             throw "Coverage inventory contains a duplicate lane name, results root, or exact TRX path."
         }
         $laneReports.Add($inventory)
-        if ($null -ne $inventory.Alias) { $laneAliases.Add($inventory) }
+        if ($null -ne $inventory.AliasPath) { $laneAliases.Add($inventory) }
     }
 
     $childReports = [Collections.Generic.List[object]]::new()
@@ -116,17 +114,17 @@ function Write-CoverageManifest {
             $childReports.Add([pscustomobject]@{
                 ProjectName = $projectName
                 ChildResultsRoot = $childRoot
-                Snapshot = Read-VerificationCoverageSnapshot -Path $file.FullName -Root $childRoot -Description "Coverage child-process report"
+                Path = [IO.Path]::GetFullPath($file.FullName)
             })
         }
     }
 
     $expectedPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
     foreach ($lane in $laneReports) {
-        Add-VerificationCoverageInventoryPath -Paths $expectedPaths -Path $lane.Canonical.FullName -Description "canonical report"
-        if ($null -ne $lane.Alias) { Add-VerificationCoverageInventoryPath -Paths $expectedPaths -Path $lane.Alias.FullName -Description "staging alias" }
+        Add-VerificationCoverageInventoryPath -Paths $expectedPaths -Path $lane.CanonicalPath -Description "canonical report"
+        if ($null -ne $lane.AliasPath) { Add-VerificationCoverageInventoryPath -Paths $expectedPaths -Path $lane.AliasPath -Description "staging alias" }
     }
-    foreach ($child in $childReports) { Add-VerificationCoverageInventoryPath -Paths $expectedPaths -Path $child.Snapshot.FullName -Description "child-process report" }
+    foreach ($child in $childReports) { Add-VerificationCoverageInventoryPath -Paths $expectedPaths -Path $child.Path -Description "child-process report" }
 
     $actualPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
     foreach ($file in @(Get-ChildItem -LiteralPath $fullVerificationResultsPath -Recurse -Filter "coverage.cobertura.xml" -File | Sort-Object FullName)) {
@@ -137,9 +135,34 @@ function Write-CoverageManifest {
         throw "Coverage results contain stale or unexpected reports outside the successful lane/child report inventory."
     }
 
+    $workItems = @($expectedPaths | Sort-Object | ForEach-Object {
+        [pscustomobject]@{
+            Path = $_
+            Root = $fullVerificationResultsPath
+            Description = "Coverage manifest report"
+            Reduce = $false
+        }
+    })
+    $sourceProjectDirectories = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    $workerResult = Invoke-VerificationCoverageWorkers -WorkItems $workItems -RepositoryRoot (Split-Path -Parent $PSScriptRoot) -SourceProjectDirectories $sourceProjectDirectories -MaximumWorkers $MaximumCoverageWorkers
+    $snapshotsByPath = [Collections.Generic.Dictionary[string, object]]::new((Get-VerificationCoveragePathComparer))
+    foreach ($snapshot in $workerResult.Snapshots) {
+        if ($snapshot.LastWriteTimeUtc -lt $MinimumWriteTimeUtc) {
+            throw "Coverage manifest report is stale: $($snapshot.FullName)"
+        }
+        $snapshotsByPath.Add($snapshot.FullName, $snapshot)
+    }
+    foreach ($lane in $laneAliases) {
+        $canonicalSnapshot = $snapshotsByPath[$lane.CanonicalPath]
+        $aliasSnapshot = $snapshotsByPath[$lane.AliasPath]
+        if ($aliasSnapshot.Length -ne $canonicalSnapshot.Length -or $aliasSnapshot.Sha256 -cne $canonicalSnapshot.Sha256) {
+            throw "Coverage lane '$($lane.LaneName)' VSTest staging alias does not byte-match its canonical report."
+        }
+    }
+
     $reports = [Collections.Generic.List[object]]::new()
-    foreach ($lane in @($laneReports | Sort-Object { $_.Canonical.FullName })) {
-        $evidence = Get-VerificationCoverageEvidence -Snapshot $lane.Canonical
+    foreach ($lane in @($laneReports | Sort-Object CanonicalPath)) {
+        $evidence = Get-VerificationCoverageEvidence -Snapshot $snapshotsByPath[$lane.CanonicalPath]
         $reports.Add([ordered]@{
             kind = "lane"
             laneName = $lane.LaneName
@@ -151,8 +174,8 @@ function Write-CoverageManifest {
             sha256 = $evidence.sha256
         })
     }
-    foreach ($child in @($childReports | Sort-Object { $_.Snapshot.FullName })) {
-        $evidence = Get-VerificationCoverageEvidence -Snapshot $child.Snapshot
+    foreach ($child in @($childReports | Sort-Object Path)) {
+        $evidence = Get-VerificationCoverageEvidence -Snapshot $snapshotsByPath[$child.Path]
         $reports.Add([ordered]@{
             kind = "child"
             projectName = $child.ProjectName
@@ -163,9 +186,9 @@ function Write-CoverageManifest {
         })
     }
 
-    $aliases = @($laneAliases | Sort-Object { $_.Alias.FullName } | ForEach-Object {
-        $evidence = Get-VerificationCoverageEvidence -Snapshot $_.Alias
-        [ordered]@{ path = $evidence.path; canonicalPath = $_.Canonical.FullName; length = $evidence.length; sha256 = $evidence.sha256 }
+    $aliases = @($laneAliases | Sort-Object AliasPath | ForEach-Object {
+        $evidence = Get-VerificationCoverageEvidence -Snapshot $snapshotsByPath[$_.AliasPath]
+        [ordered]@{ path = $evidence.path; canonicalPath = $_.CanonicalPath; length = $evidence.length; sha256 = $evidence.sha256 }
     })
     $manifest = [ordered]@{
         schemaVersion = 1

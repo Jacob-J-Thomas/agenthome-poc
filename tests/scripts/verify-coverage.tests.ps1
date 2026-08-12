@@ -196,7 +196,8 @@ function Invoke-CoverageVerification {
         [DateTime]$MinimumWriteTimeUtc,
         [string]$ResultsRoot,
         [string]$ManifestPath,
-        [string]$ReportPath
+        [string]$ReportPath,
+        [int]$MaximumCoverageWorkers = 2
     )
 
     $arguments = @("-NoLogo", "-NoProfile")
@@ -211,6 +212,7 @@ function Invoke-CoverageVerification {
     if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
         $arguments += @("-ReportPath", $ReportPath)
     }
+    $arguments += @("-MaximumCoverageWorkers", [string]$MaximumCoverageWorkers)
     $startInfo = New-VerificationProcessStartInfo -FileName $powerShellExecutable -Arguments $arguments -WorkingDirectory $RepositoryRoot
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
@@ -563,6 +565,38 @@ try {
     Assert-Contains -Actual $passingResult.Output -Expected "Fixture.One: 90%" -Message "Path aliases and duplicate lines must merge by maximum hits."
     Assert-Contains -Actual $passingResult.Output -Expected "Fixture.Two: 90%" -Message "Every expected package must be evaluated."
     Assert-NotContains -Actual $passingResult.Output -Unexpected "Fixture.One: 100%" -Message "Reports older than the supplied minimum write time must be ignored."
+
+    $overCapResult = Invoke-CoverageVerification -RepositoryRoot $passingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -MaximumCoverageWorkers 3
+    Assert-True -Condition ($overCapResult.ExitCode -ne 0) -Message "Coverage verification must reject worker counts above the two-worker hosted bound."
+    Assert-Contains -Actual $overCapResult.Output -Expected "MaximumCoverageWorkers" -Message "Worker-bound failures must identify the bounded parameter."
+
+    Write-CoverageReport -RepositoryRoot $passingRepository -Name "parallel-probe" -Packages @($aliasPackage) -LastWriteTimeUtc $freshWriteTimeUtc
+    $parallelSourceProjects = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    foreach ($packageName in @("Fixture.One", "Fixture.Two")) { $parallelSourceProjects.Add($packageName, (Join-Path $passingRepository "src\$packageName")) }
+    $parallelRoot = Join-Path $passingRepository "tests\Fixture.Tests\TestResults"
+    $parallelFiles = @(Get-ChildItem -LiteralPath $parallelRoot -Recurse -Filter "coverage.cobertura.xml" -File | Sort-Object FullName)
+    $parallelItems = @($parallelFiles | ForEach-Object { [pscustomobject]@{ Path = $_.FullName; Root = $parallelRoot; Description = "Coverage parallel equivalence report"; Reduce = $true } })
+    $singleWorkerReduction = Invoke-VerificationCoverageWorkers -WorkItems $parallelItems -RepositoryRoot $passingRepository -SourceProjectDirectories $parallelSourceProjects -MaximumWorkers 1
+    $twoWorkerReduction = Invoke-VerificationCoverageWorkers -WorkItems $parallelItems -RepositoryRoot $passingRepository -SourceProjectDirectories $parallelSourceProjects -MaximumWorkers 2
+    $singleWorkerEvidence = [ordered]@{ snapshots = @($singleWorkerReduction.Snapshots | ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.Sha256)" }); packages = @($singleWorkerReduction.Packages); lines = @($singleWorkerReduction.Lines) } | ConvertTo-Json -Depth 5 -Compress
+    $twoWorkerEvidence = [ordered]@{ snapshots = @($twoWorkerReduction.Snapshots | ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.Sha256)" }); packages = @($twoWorkerReduction.Packages); lines = @($twoWorkerReduction.Lines) } | ConvertTo-Json -Depth 5 -Compress
+    Assert-True -Condition ($singleWorkerEvidence -ceq $twoWorkerEvidence) -Message "One- and two-worker authenticated reductions must be deterministic and equivalent."
+    Invoke-ExpectedFailure -ExpectedMessage "MaximumWorkers" -Action {
+        Invoke-VerificationCoverageWorkers -WorkItems $parallelItems -RepositoryRoot $passingRepository -SourceProjectDirectories $parallelSourceProjects -MaximumWorkers 3
+    }
+
+    $missingParallelItems = @($parallelItems[0..2]) + @([pscustomobject]@{ Path = (Join-Path $parallelRoot "missing\coverage.cobertura.xml"); Root = $parallelRoot; Description = "Coverage missing parallel report"; Reduce = $true })
+    Invoke-ExpectedFailure -ExpectedMessage "missing or is not a leaf" -Action {
+        Invoke-VerificationCoverageWorkers -WorkItems $missingParallelItems -RepositoryRoot $passingRepository -SourceProjectDirectories $parallelSourceProjects -MaximumWorkers 2
+    }
+
+    $corruptParallelPath = Join-Path $parallelRoot "parallel-corrupt\coverage.cobertura.xml"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $corruptParallelPath) -Force | Out-Null
+    Set-Content -LiteralPath $corruptParallelPath -Value "<coverage" -Encoding UTF8
+    $corruptParallelItems = @($parallelItems[0..2]) + @([pscustomobject]@{ Path = $corruptParallelPath; Root = $parallelRoot; Description = "Coverage corrupt parallel report"; Reduce = $true })
+    Invoke-ExpectedFailure -ExpectedMessage "Coverage worker failure" -Action {
+        Invoke-VerificationCoverageWorkers -WorkItems $corruptParallelItems -RepositoryRoot $passingRepository -SourceProjectDirectories $parallelSourceProjects -MaximumWorkers 2
+    }
 
     $manifestRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-passing"
     Write-CoverageReport -RepositoryRoot $manifestRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $freshWriteTimeUtc
