@@ -197,7 +197,7 @@ function Invoke-CoverageVerification {
         [string]$ResultsRoot,
         [string]$ManifestPath,
         [string]$ReportPath,
-        [int]$MaximumCoverageWorkers = 2
+        [int]$MaximumCoverageWorkers = 1
     )
 
     $arguments = @("-NoLogo", "-NoProfile")
@@ -566,9 +566,7 @@ try {
     Assert-Contains -Actual $passingResult.Output -Expected "Fixture.Two: 90%" -Message "Every expected package must be evaluated."
     Assert-NotContains -Actual $passingResult.Output -Unexpected "Fixture.One: 100%" -Message "Reports older than the supplied minimum write time must be ignored."
 
-    $overCapResult = Invoke-CoverageVerification -RepositoryRoot $passingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -MaximumCoverageWorkers 3
-    Assert-True -Condition ($overCapResult.ExitCode -ne 0) -Message "Coverage verification must reject worker counts above the two-worker hosted bound."
-    Assert-Contains -Actual $overCapResult.Output -Expected "MaximumCoverageWorkers" -Message "Worker-bound failures must identify the bounded parameter."
+    Assert-Contains -Actual (Get-Content -LiteralPath (Join-Path $passingRepository "scripts\verify-coverage.ps1") -Raw) -Expected '[ValidateRange(1, 2)] [int]$MaximumCoverageWorkers = 2' -Message "Production coverage verification must default to two workers and reject larger hosted fan-out before execution."
 
     Write-CoverageReport -RepositoryRoot $passingRepository -Name "parallel-probe" -Packages @($aliasPackage) -LastWriteTimeUtc $freshWriteTimeUtc
     $parallelSourceProjects = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)

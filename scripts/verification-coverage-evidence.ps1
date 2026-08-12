@@ -837,7 +837,7 @@ function Invoke-VerificationCoverageWorkers {
     )
 
     if ($WorkItems.Count -eq 0) { return [pscustomobject]@{ Snapshots = @(); Lines = @(); Packages = @() } }
-    if ($WorkItems.Count -lt 4) {
+    if ($MaximumWorkers -eq 1 -or $WorkItems.Count -lt 4) {
         $snapshots = [Collections.Generic.List[object]]::new()
         $packageFileLines = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
         $paths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
