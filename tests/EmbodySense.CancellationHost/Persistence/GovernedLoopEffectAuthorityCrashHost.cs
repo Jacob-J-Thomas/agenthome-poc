@@ -58,7 +58,7 @@ internal static class GovernedLoopEffectAuthorityCrashHost
             new FileCapabilityCatalogTrustProvider(trustRoot),
             options);
         _ = await store.AppendAsync(CreateDecision(operationId));
-        return 4;
+        return 0;
     }
 
     private static GovernedLoopEffectAuthorityDecision CreateDecision(string operationId)
