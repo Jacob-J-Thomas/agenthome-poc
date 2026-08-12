@@ -52,6 +52,16 @@ function Write-DiscoveryInventory {
     [IO.File]::WriteAllText($Path, ($value | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
 }
 
+function Write-LaneDefinitions {
+    param([string]$Path, [object[]]$Lanes)
+    [IO.File]::WriteAllText($Path, ([ordered]@{ schemaVersion = 1; lanes = @($Lanes) } | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+}
+
+function New-LaneDefinition {
+    param([string]$Name, [string]$Filter)
+    return [ordered]@{ name = $Name; projectName = "project"; filter = $Filter }
+}
+
 function New-DiscoveryTest {
     param([string]$Id, [string]$XunitId, [string]$Name)
     return [ordered]@{ id = $Id; xunitTestCaseUniqueId = $XunitId; fullyQualifiedName = "Suite.$Name"; displayName = "duplicate display"; executorUri = "executor://xunit/VsTestRunner3/netcore/"; source = "fixture.dll" }
@@ -94,75 +104,78 @@ try {
     $idB = "22222222-2222-2222-2222-222222222222"
     $testA = New-DiscoveryTest -Id $idA -XunitId "xunit-a" -Name "A"
     $testB = New-DiscoveryTest -Id $idB -XunitId "xunit-b" -Name "B"
-
     $canonicalRoot = Join-Path $scenarioRoot "canonical"
-    $laneRoot = Join-Path $scenarioRoot "lanes"
-    New-Item -ItemType Directory -Path $canonicalRoot, $laneRoot | Out-Null
+    New-Item -ItemType Directory -Path $canonicalRoot | Out-Null
     Write-DiscoveryInventory -Path (Join-Path $canonicalRoot "project.json") -Tests @($testA, $testB)
-    $laneA = New-DiscoveryTest -Id "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" -XunitId "xunit-a" -Name "A"
-    $laneB = New-DiscoveryTest -Id "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" -XunitId "xunit-b" -Name "B"
-    Write-DiscoveryInventory -Path (Join-Path $laneRoot "lane-a.json") -Tests @($laneA)
-    Write-DiscoveryInventory -Path (Join-Path $laneRoot "lane-b.json") -Tests @($laneB)
+    $laneDefinitionsPath = Join-Path $scenarioRoot "lanes.json"
     $expectedPath = Join-Path $scenarioRoot "expected.json"
     $partitionReport = Join-Path $scenarioRoot "partition.json"
-    $partition = Invoke-Script -ScriptPath $partitionScriptPath -Arguments @("-CanonicalInventoryRoot", $canonicalRoot, "-LaneInventoryRoot", $laneRoot, "-ExpectedExecutionInventoryPath", $expectedPath, "-ReportPath", $partitionReport)
-    Assert-True -Condition ($partition.ExitCode -eq 0) -Message "An exhaustive disjoint stable-ID partition must pass. Actual: $($partition.Output)"
-    Assert-Contains -Actual $partition.Output -Expected "VERIFY_TEST_PARTITION_COMPLETE canonical=2 execution=2 lanes=2" -Message "Partition counts must be explicit."
+    $partitionArguments = @("-CanonicalInventoryRoot", $canonicalRoot, "-LaneDefinitionPath", $laneDefinitionsPath, "-ExpectedExecutionInventoryPath", $expectedPath, "-ReportPath", $partitionReport)
 
-    $overlapRoot = Join-Path $scenarioRoot "overlap"
-    New-Item -ItemType Directory -Path $overlapRoot | Out-Null
-    Write-DiscoveryInventory -Path (Join-Path $overlapRoot "lane-a.json") -Tests @($laneA)
-    Write-DiscoveryInventory -Path (Join-Path $overlapRoot "lane-b.json") -Tests @($laneA, $laneB)
-    $overlap = Invoke-Script -ScriptPath $partitionScriptPath -Arguments @("-CanonicalInventoryRoot", $canonicalRoot, "-LaneInventoryRoot", $overlapRoot, "-ExpectedExecutionInventoryPath", (Join-Path $scenarioRoot "overlap-expected.json"), "-ReportPath", (Join-Path $scenarioRoot "overlap-report.json"))
-    Assert-True -Condition ($overlap.ExitCode -ne 0) -Message "A test selected by two lanes must fail closed."
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
+        (New-LaneDefinition -Name "lane-a" -Filter "((FullyQualifiedName~Suite.A))&(VerificationTier!=Stress)"),
+        (New-LaneDefinition -Name "lane-b" -Filter "((FullyQualifiedName~Suite.B))&(VerificationTier!=Stress)"))
+    $partition = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($partition.ExitCode -eq 0) -Message "An exhaustive disjoint declarative partition must pass. Actual: $($partition.Output)"
+    Assert-Contains -Actual $partition.Output -Expected "VERIFY_TEST_PARTITION_COMPLETE canonical=2 execution=2 lanes=2" -Message "Partition counts must be explicit."
+    $partitionInventory = Get-Content -LiteralPath $expectedPath -Raw | ConvertFrom-Json
+    Assert-True -Condition (@($partitionInventory.tests | Where-Object { $_.lane -ceq "lane-a" -and $_.fullyQualifiedName -ceq "Suite.A" }).Count -eq 1) -Message "The declarative include predicate must bind Suite.A to lane-a."
+
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
+        (New-LaneDefinition -Name "lane-a" -Filter "((FullyQualifiedName~Suite))&(VerificationTier!=Stress)"),
+        (New-LaneDefinition -Name "lane-b" -Filter "((FullyQualifiedName~Suite.B))&(VerificationTier!=Stress)"))
+    $overlap = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($overlap.ExitCode -ne 0) -Message "A test selected by two declarative lanes must fail closed."
     Assert-Contains -Actual $overlap.Output -Expected "overlap=1" -Message "Overlap diagnostics must be exact."
 
-    $omissionRoot = Join-Path $scenarioRoot "omission"
-    New-Item -ItemType Directory -Path $omissionRoot | Out-Null
-    Write-DiscoveryInventory -Path (Join-Path $omissionRoot "lane-a.json") -Tests @($laneA)
-    $omission = Invoke-Script -ScriptPath $partitionScriptPath -Arguments @("-CanonicalInventoryRoot", $canonicalRoot, "-LaneInventoryRoot", $omissionRoot, "-ExpectedExecutionInventoryPath", (Join-Path $scenarioRoot "omission-expected.json"), "-ReportPath", (Join-Path $scenarioRoot "omission-report.json"))
-    Assert-True -Condition ($omission.ExitCode -ne 0) -Message "A test omitted by every lane must fail closed."
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @((New-LaneDefinition -Name "lane-a" -Filter "((FullyQualifiedName~Suite.A))&(VerificationTier!=Stress)"))
+    $omission = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($omission.ExitCode -ne 0) -Message "A test omitted by every declarative lane must fail closed."
     Assert-Contains -Actual $omission.Output -Expected "missing=1" -Message "Omission diagnostics must be exact."
 
-    $emptyLaneRoot = Join-Path $scenarioRoot "empty-lane"
-    New-Item -ItemType Directory -Path $emptyLaneRoot | Out-Null
-    Write-DiscoveryInventory -Path (Join-Path $emptyLaneRoot "lane.json") -Tests @()
-    $emptyLane = Invoke-Script -ScriptPath $partitionScriptPath -Arguments @("-CanonicalInventoryRoot", $canonicalRoot, "-LaneInventoryRoot", $emptyLaneRoot, "-ExpectedExecutionInventoryPath", (Join-Path $scenarioRoot "empty-expected.json"), "-ReportPath", (Join-Path $scenarioRoot "empty-report.json"))
-    Assert-True -Condition ($emptyLane.ExitCode -ne 0) -Message "An empty lane must fail closed."
-    Assert-Contains -Actual $emptyLane.Output -Expected "empty or malformed" -Message "Empty-lane diagnostics must be actionable."
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
+        (New-LaneDefinition -Name "lane-a" -Filter "((FullyQualifiedName~Suite.A))&(VerificationTier!=Stress)"),
+        (New-LaneDefinition -Name "lane-empty" -Filter "((FullyQualifiedName~Suite.Z))&(VerificationTier!=Stress)"))
+    $emptyLane = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($emptyLane.ExitCode -ne 0) -Message "An empty declarative lane must fail closed."
+    Assert-Contains -Actual $emptyLane.Output -Expected "empty_lanes=1" -Message "Empty-lane diagnostics must be actionable."
+
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @((New-LaneDefinition -Name "lane-a" -Filter "((DisplayName~A))&(VerificationTier!=Stress)"))
+    $unsupported = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($unsupported.ExitCode -ne 0) -Message "A lane predicate outside the exact supported grammar must fail closed."
+    Assert-Contains -Actual $unsupported.Output -Expected "contains no fully-qualified-name partition" -Message "Unsupported-predicate diagnostics must be actionable."
 
     $executionTests = @(
-        [ordered]@{ id = $laneA.id; xunitTestCaseUniqueId = $laneA.xunitTestCaseUniqueId; fullyQualifiedName = $laneA.fullyQualifiedName; displayName = $laneA.displayName; source = $laneA.source; lane = "lane-a" },
-        [ordered]@{ id = $laneB.id; xunitTestCaseUniqueId = $laneB.xunitTestCaseUniqueId; fullyQualifiedName = $laneB.fullyQualifiedName; displayName = $laneB.displayName; source = $laneB.source; lane = "lane-b" })
+        [ordered]@{ id = $testA.id; xunitTestCaseUniqueId = $testA.xunitTestCaseUniqueId; fullyQualifiedName = $testA.fullyQualifiedName; displayName = $testA.displayName; source = $testA.source; lane = "lane-a" },
+        [ordered]@{ id = $testB.id; xunitTestCaseUniqueId = $testB.xunitTestCaseUniqueId; fullyQualifiedName = $testB.fullyQualifiedName; displayName = $testB.displayName; source = $testB.source; lane = "lane-b" })
     Write-ExecutionInventory -Path $expectedPath -Tests $executionTests
     $passingRoot = Join-Path $scenarioRoot "passing"
     New-Item -ItemType Directory -Path $passingRoot | Out-Null
     Write-Trx -Path (Join-Path $passingRoot "lane-a.trx") -Results @(
-        [pscustomobject]@{ TestId = $laneA.id; ExecutionId = "00000000-0000-0000-0000-000000000001"; Name = "dynamic row 1"; Outcome = "Passed"; DurationMilliseconds = 10 },
-        [pscustomobject]@{ TestId = $laneA.id; ExecutionId = "00000000-0000-0000-0000-000000000002"; Name = "dynamic row 2"; Outcome = "Passed"; DurationMilliseconds = 250 })
-    Write-Trx -Path (Join-Path $passingRoot "lane-b.trx") -Results @(
-        [pscustomobject]@{ TestId = $laneB.id; ExecutionId = "00000000-0000-0000-0000-000000000003"; Name = "duplicate display"; Outcome = "Passed"; DurationMilliseconds = 20 })
+        [pscustomobject]@{ TestId = $testA.id; ExecutionId = "00000000-0000-0000-0000-000000000001"; Name = "dynamic row 1"; Outcome = "Passed"; DurationMilliseconds = 10 },
+        [pscustomobject]@{ TestId = $testA.id; ExecutionId = "00000000-0000-0000-0000-000000000002"; Name = "dynamic row 2"; Outcome = "Passed"; DurationMilliseconds = 250 })
+    Write-Trx -Path (Join-Path $passingRoot "lane-b.trx") -Results @([pscustomobject]@{ TestId = $testB.id; ExecutionId = "00000000-0000-0000-0000-000000000003"; Name = "duplicate display"; Outcome = "Passed"; DurationMilliseconds = 20 })
     $executionReport = Join-Path $scenarioRoot "execution.json"
     $passing = Invoke-Script -ScriptPath $inventoryScriptPath -Arguments @("-ExpectedInventoryPath", $expectedPath, "-ResultsRoot", $passingRoot, "-ReportPath", $executionReport)
-    Assert-True -Condition ($passing.ExitCode -eq 0) -Message "One report per discovered ID with dynamic data rows must pass. Actual: $($passing.Output)"
+    Assert-True -Condition ($passing.ExitCode -eq 0) -Message "One report per canonical ID with dynamic data rows must pass. Actual: $($passing.Output)"
     Assert-Contains -Actual $passing.Output -Expected "expected=2 executed_rows=3 unique_tests=2" -Message "Dynamic row multiplicity must remain visible."
     Assert-Contains -Actual $passing.Output -Expected "duration_milliseconds=250" -Message "Slowest-row diagnostics must be emitted."
 
     $overlapResults = Join-Path $scenarioRoot "cross-report"
     New-Item -ItemType Directory -Path $overlapResults | Out-Null
-    Write-Trx -Path (Join-Path $overlapResults "one.trx") -Results @([pscustomobject]@{ TestId = $laneA.id; ExecutionId = "00000000-0000-0000-0000-000000000011"; Name = "A"; Outcome = "Passed"; DurationMilliseconds = 1 })
+    Write-Trx -Path (Join-Path $overlapResults "one.trx") -Results @([pscustomobject]@{ TestId = $testA.id; ExecutionId = "00000000-0000-0000-0000-000000000011"; Name = "A"; Outcome = "Passed"; DurationMilliseconds = 1 })
     Write-Trx -Path (Join-Path $overlapResults "two.trx") -Results @(
-        [pscustomobject]@{ TestId = $laneA.id; ExecutionId = "00000000-0000-0000-0000-000000000012"; Name = "A"; Outcome = "Passed"; DurationMilliseconds = 1 },
-        [pscustomobject]@{ TestId = $laneB.id; ExecutionId = "00000000-0000-0000-0000-000000000013"; Name = "B"; Outcome = "Passed"; DurationMilliseconds = 1 })
+        [pscustomobject]@{ TestId = $testA.id; ExecutionId = "00000000-0000-0000-0000-000000000012"; Name = "A"; Outcome = "Passed"; DurationMilliseconds = 1 },
+        [pscustomobject]@{ TestId = $testB.id; ExecutionId = "00000000-0000-0000-0000-000000000013"; Name = "B"; Outcome = "Passed"; DurationMilliseconds = 1 })
     $crossReport = Invoke-Script -ScriptPath $inventoryScriptPath -Arguments @("-ExpectedInventoryPath", $expectedPath, "-ResultsRoot", $overlapResults, "-ReportPath", (Join-Path $scenarioRoot "cross-report.json"))
-    Assert-True -Condition ($crossReport.ExitCode -ne 0) -Message "The same discovered ID in two shard reports must fail closed."
+    Assert-True -Condition ($crossReport.ExitCode -ne 0) -Message "The same canonical ID in two shard reports must fail closed."
     Assert-Contains -Actual $crossReport.Output -Expected "cross_report_overlap=1" -Message "Cross-report overlap diagnostics must be exact."
 
     foreach ($scenario in @(
-        [pscustomobject]@{ Name = "missing"; Rows = @([pscustomobject]@{ TestId = $laneA.id; ExecutionId = "00000000-0000-0000-0000-000000000021"; Name = "A"; Outcome = "Passed"; DurationMilliseconds = 1 }); Expected = "missing=1" },
-        [pscustomobject]@{ Name = "unexpected"; Rows = @([pscustomobject]@{ TestId = $laneA.id; ExecutionId = "00000000-0000-0000-0000-000000000022"; Name = "A"; Outcome = "Passed"; DurationMilliseconds = 1 }, [pscustomobject]@{ TestId = "cccccccc-cccc-cccc-cccc-cccccccccccc"; ExecutionId = "00000000-0000-0000-0000-000000000023"; Name = "C"; Outcome = "Passed"; DurationMilliseconds = 1 }); Expected = "unexpected=1" },
-        [pscustomobject]@{ Name = "failed"; Rows = @([pscustomobject]@{ TestId = $laneA.id; ExecutionId = "00000000-0000-0000-0000-000000000024"; Name = "A"; Outcome = "Failed"; DurationMilliseconds = 1 }, [pscustomobject]@{ TestId = $laneB.id; ExecutionId = "00000000-0000-0000-0000-000000000025"; Name = "B"; Outcome = "Passed"; DurationMilliseconds = 1 }); Expected = "non_passing=1" },
-        [pscustomobject]@{ Name = "duplicate-execution"; Rows = @([pscustomobject]@{ TestId = $laneA.id; ExecutionId = "00000000-0000-0000-0000-000000000026"; Name = "A"; Outcome = "Passed"; DurationMilliseconds = 1 }, [pscustomobject]@{ TestId = $laneB.id; ExecutionId = "00000000-0000-0000-0000-000000000026"; Name = "B"; Outcome = "Passed"; DurationMilliseconds = 1 }); Expected = "duplicate_execution_ids=1" })) {
+        [pscustomobject]@{ Name = "missing"; Rows = @([pscustomobject]@{ TestId = $testA.id; ExecutionId = "00000000-0000-0000-0000-000000000021"; Name = "A"; Outcome = "Passed"; DurationMilliseconds = 1 }); Expected = "missing=1" },
+        [pscustomobject]@{ Name = "unexpected"; Rows = @([pscustomobject]@{ TestId = $testA.id; ExecutionId = "00000000-0000-0000-0000-000000000022"; Name = "A"; Outcome = "Passed"; DurationMilliseconds = 1 }, [pscustomobject]@{ TestId = "cccccccc-cccc-cccc-cccc-cccccccccccc"; ExecutionId = "00000000-0000-0000-0000-000000000023"; Name = "C"; Outcome = "Passed"; DurationMilliseconds = 1 }); Expected = "unexpected=1" },
+        [pscustomobject]@{ Name = "failed"; Rows = @([pscustomobject]@{ TestId = $testA.id; ExecutionId = "00000000-0000-0000-0000-000000000024"; Name = "A"; Outcome = "Failed"; DurationMilliseconds = 1 }, [pscustomobject]@{ TestId = $testB.id; ExecutionId = "00000000-0000-0000-0000-000000000025"; Name = "B"; Outcome = "Passed"; DurationMilliseconds = 1 }); Expected = "non_passing=1" },
+        [pscustomobject]@{ Name = "duplicate-execution"; Rows = @([pscustomobject]@{ TestId = $testA.id; ExecutionId = "00000000-0000-0000-0000-000000000026"; Name = "A"; Outcome = "Passed"; DurationMilliseconds = 1 }, [pscustomobject]@{ TestId = $testB.id; ExecutionId = "00000000-0000-0000-0000-000000000026"; Name = "B"; Outcome = "Passed"; DurationMilliseconds = 1 }); Expected = "duplicate_execution_ids=1" })) {
         $root = Join-Path $scenarioRoot $scenario.Name
         New-Item -ItemType Directory -Path $root | Out-Null
         Write-Trx -Path (Join-Path $root "result.trx") -Results $scenario.Rows

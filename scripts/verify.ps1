@@ -43,6 +43,7 @@ $testLaneTimeoutSeconds = 480
 . (Join-Path $PSScriptRoot "verification-parallel.ps1")
 . (Join-Path $PSScriptRoot "verification-artifacts.ps1")
 . (Join-Path $PSScriptRoot "verification-temp.ps1")
+. (Join-Path $PSScriptRoot "verification-test-lanes.ps1")
 $verificationPhysicalTempRoot = Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())
 $verificationLaneFixtureRoot = Join-Path $verificationPhysicalTempRoot ("embodysense-verification-fixtures-" + [Guid]::NewGuid().ToString("N"))
 Reset-VerificationPhaseState
@@ -75,42 +76,6 @@ function Get-TestProjectFilter {
     }
 
     return "VerificationTier!=Stress"
-}
-
-function Get-TestProjectLanes {
-    param([System.IO.FileInfo]$TestProject)
-
-    $nonStress = "(VerificationTier!=Stress)"
-    if ($TestProject.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") {
-        return @(
-            [pscustomobject]@{ Name = "graph-authoring"; Filter = "(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring)&$nonStress" }
-            [pscustomobject]@{ Name = "capabilities"; Filter = "(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Capabilities)&$nonStress" }
-            [pscustomobject]@{ Name = "authority-context"; Filter = "((FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Audit)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Authority)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.ContextualRoles)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.ToolResults))&$nonStress" }
-            [pscustomobject]@{ Name = "credentials"; Filter = "(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Credentials)&$nonStress" }
-            [pscustomobject]@{ Name = "human-input-requests"; Filter = "(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputRequest)&$nonStress" }
-            [pscustomobject]@{ Name = "human-input-responses"; Filter = "(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputResponse)&$nonStress" }
-            [pscustomobject]@{ Name = "default-conversation"; Filter = "(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurn)&$nonStress" }
-            [pscustomobject]@{ Name = "custom-definition-control"; Filter = "((FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.CustomLoopDefinition)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.CustomLoopControl)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.CustomLoopInvocation))&$nonStress" }
-            [pscustomobject]@{ Name = "custom-run-trace"; Filter = "((FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRun)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTrace)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.CustomLoopWorkspace)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.PersistencePublicBoundaryCoverage))&$nonStress" }
-            [pscustomobject]@{ Name = "governed-lifecycle"; Filter = "((FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.Admission)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.Revisions))&$nonStress" }
-            [pscustomobject]@{ Name = "triggers"; Filter = "(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Triggers)&$nonStress" }
-            [pscustomobject]@{ Name = "remainder"; Filter = "(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Capabilities)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Audit)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Authority)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.ContextualRoles)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.ToolResults)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Credentials)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputRequest)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputResponse)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurn)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.CustomLoopDefinition)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.CustomLoopControl)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.CustomLoopInvocation)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRun)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTrace)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.CustomLoopWorkspace)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.PersistencePublicBoundaryCoverage)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.Admission)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.Revisions)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Triggers)&$nonStress" }
-        )
-    }
-
-    if ($TestProject.Name -eq "EmbodySense.Core.Startup.Tests.csproj") {
-        return @(
-            [pscustomobject]@{ Name = "capabilities"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Capabilities)&$nonStress" }
-            [pscustomobject]@{ Name = "loop-execution-custom-runtime"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTests)&$nonStress" }
-            [pscustomobject]@{ Name = "loop-execution-governed-runtime"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTests)&$nonStress" }
-            [pscustomobject]@{ Name = "loop-execution-remainder"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Loops.Execution)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTests)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTests)&$nonStress" }
-            [pscustomobject]@{ Name = "loops-other"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Loops)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Loops.Execution)&$nonStress" }
-            [pscustomobject]@{ Name = "runtime-triggers"; Filter = "((FullyQualifiedName~EmbodySense.Core.Startup.Tests.Runtime)|(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Triggers))&$nonStress" }
-            [pscustomobject]@{ Name = "remainder"; Filter = "(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Capabilities)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Loops)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Runtime)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Triggers)&$nonStress" }
-        )
-    }
-
-    return @([pscustomobject]@{ Name = "all"; Filter = Get-TestProjectFilter -TestProject $TestProject })
 }
 
 function Get-ProjectCoverageIsolation {
@@ -189,7 +154,7 @@ function Get-ProjectCoverageIsolation {
             Name = "$($TestProject.BaseName)-$($lane.Name)"
             ProjectName = $TestProject.BaseName
             ShardName = $lane.Name
-            Filter = $lane.Filter
+            Filter = if ($TestProject.Name -eq "EmbodySense.E2ETests.csproj") { Get-VerificationTestLaneFilter -Lane $lane -AdditionalExclusions @("BrowserFlowTests") } else { Get-VerificationTestLaneFilter -Lane $lane }
             AssemblyPath = Join-Path $laneDirectory $testAssemblyName
             Directory = $laneDirectory
             Manifest = $laneManifest
@@ -398,22 +363,32 @@ try {
     $testProjects = @(Get-ChildItem -Path $testsPath -Recurse -Filter "*.csproj" | Where-Object { $_.Name -ne "EmbodySense.CancellationHost.csproj" -and $_.Name -ne "EmbodySense.Tests.Support.csproj" } | Sort-Object FullName)
     $isolations = [Collections.Generic.List[object]]::new()
     foreach ($testProject in $testProjects) {
-        $isolations.Add((Get-ProjectCoverageIsolation -TestProject $testProject -Lanes @(Get-TestProjectLanes -TestProject $testProject)))
+        $isolations.Add((Get-ProjectCoverageIsolation -TestProject $testProject -Lanes @(Get-VerificationTestProjectLanes -TestProject $testProject)))
     }
 
     foreach ($isolation in $isolations) {
         Add-TestDiscoveryPhase -Name "canonical-$($isolation.Project.BaseName)" -AssemblyPath $isolation.CanonicalAssemblyPath -Filter (Get-TestProjectFilter -TestProject $isolation.Project) -OutputPath (Join-Path $canonicalInventoryRoot "$($isolation.Project.BaseName).json")
-        foreach ($lane in $isolation.Lanes) {
-            Add-TestDiscoveryPhase -Name "lane-$($lane.Name)" -AssemblyPath $lane.AssemblyPath -Filter $lane.Filter -OutputPath (Join-Path $laneInventoryRoot "$($lane.Name).json")
-        }
     }
     Write-Output "VERIFY_PARALLEL_PLAN kind=discovery phases=$($script:VerificationParallelPhases.Count) maximum_workers=$MaximumTestWorkers"
     Invoke-VerificationParallelPhases -MaximumWorkers $MaximumTestWorkers | Out-Null
     Reset-VerificationParallelPhaseState
 
+    $laneDefinitions = @($isolations | ForEach-Object {
+        $projectName = $_.Project.BaseName
+        foreach ($lane in $_.Lanes) {
+            [ordered]@{
+                name = $lane.Name
+                projectName = $projectName
+                filter = $lane.Filter
+            }
+        }
+    })
+    $laneDefinitionPath = Join-Path $verificationResultsPath "required-test-lanes.json"
+    [IO.File]::WriteAllText($laneDefinitionPath, ([ordered]@{ schemaVersion = 1; lanes = $laneDefinitions } | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+
     $partitionArguments = @("-NoProfile")
     if ($runningOnWindows) { $partitionArguments += @("-ExecutionPolicy", "Bypass") }
-    $partitionArguments += @("-File", (Join-Path $PSScriptRoot "verify-test-partition.ps1"), "-CanonicalInventoryRoot", $canonicalInventoryRoot, "-LaneInventoryRoot", $laneInventoryRoot, "-ExpectedExecutionInventoryPath", $verificationInventoryPath, "-ReportPath", $verificationPartitionReportPath)
+    $partitionArguments += @("-File", (Join-Path $PSScriptRoot "verify-test-partition.ps1"), "-CanonicalInventoryRoot", $canonicalInventoryRoot, "-LaneDefinitionPath", $laneDefinitionPath, "-ExpectedExecutionInventoryPath", $verificationInventoryPath, "-ReportPath", $verificationPartitionReportPath)
     Invoke-CheckedNativePhase -Name "test-partition-reconciliation" -FileName $powerShellExecutable -Arguments $partitionArguments -TimeoutSeconds 120
 
     $coverageStartedUtc = [DateTime]::UtcNow

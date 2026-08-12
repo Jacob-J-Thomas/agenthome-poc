@@ -98,6 +98,7 @@ $verifyScript = Get-Content -LiteralPath $verifyScriptPath -Raw
 $watchdogScript = Get-Content -LiteralPath $watchdogScriptPath -Raw
 $phaseScript = Get-Content -LiteralPath $phaseScriptPath -Raw
 $parallelScript = Get-Content -LiteralPath $parallelScriptPath -Raw
+$laneScript = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\verification-test-lanes.ps1") -Raw
 $coverageScript = Get-Content -LiteralPath $coverageScriptPath -Raw
 $verifyWorkflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
 $stressWorkflow = Get-Content -LiteralPath $stressWorkflowPath -Raw
@@ -129,14 +130,14 @@ foreach ($tempVariable in @("TEMP", "TMP", "TMPDIR")) {
 }
 Assert-Contains -Actual $verifyScript -Expected 'Remove-Item -LiteralPath $verificationLaneFixtureRoot -Recurse -Force' -Message "Lane fixture roots must be cleaned after ordinary verifier completion."
 Assert-Contains -Actual $verifyScript -Expected '"vstest", $Lane.AssemblyPath' -Message "Test lanes must execute isolated assemblies."
-Assert-Contains -Actual $verifyScript -Expected '[pscustomobject]@{ Name = "loop-execution-custom-runtime"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTests)&$nonStress" }' -Message "Custom loop runtime tests must retain their independently scheduled Startup lane."
-Assert-Contains -Actual $verifyScript -Expected '[pscustomobject]@{ Name = "loop-execution-governed-runtime"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTests)&$nonStress" }' -Message "Governed loop runtime tests must retain their independently scheduled Startup lane."
-Assert-Contains -Actual $verifyScript -Expected '[pscustomobject]@{ Name = "loop-execution-remainder"; Filter = "(FullyQualifiedName~EmbodySense.Core.Startup.Tests.Loops.Execution)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTests)&(FullyQualifiedName!~EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTests)&$nonStress" }' -Message "The Startup execution remainder must explicitly exclude both dedicated runtime lanes."
+Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "loop-execution-custom-runtime" -IncludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTests")' -Message "Custom loop runtime tests must retain their independently scheduled Startup lane."
+Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "loop-execution-governed-runtime" -IncludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTests")' -Message "Governed loop runtime tests must retain their independently scheduled Startup lane."
+Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "loop-execution-remainder" -IncludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Loops.Execution") -ExcludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTests", "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTests")' -Message "The Startup execution remainder must explicitly exclude both dedicated runtime lanes."
 Assert-True -Condition ($verifyScript.IndexOf('[pscustomobject]@{ Name = "loop-execution";', [StringComparison]::Ordinal) -lt 0) -Message "The oversized serial Startup execution lane must not be restored."
 Assert-Contains -Actual $verifyScript -Expected '"EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime" { 2150; break }' -Message "The longest measured Startup execution lane must enter the worker queue early."
 Assert-Contains -Actual $verifyScript -Expected '"EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime" { 2075; break }' -Message "The Windows-dependent custom runtime lane must enter the worker queue before general Startup work."
 Assert-Contains -Actual $verifyScript -Expected 'identity=TestCase.Id partition_identity=XunitTestCaseUniqueID' -Message "Stable inventory identities must remain explicit."
-Assert-Contains -Actual $verifyScript -Expected 'verify-test-partition.ps1' -Message "Canonical and lane discovery must be reconciled."
+Assert-Contains -Actual $verifyScript -Expected 'verify-test-partition.ps1' -Message "Canonical discovery and declarative lane selection must be reconciled."
 Assert-Contains -Actual $verifyScript -Expected 'Write-CoverageManifest' -Message "Coverage must be bound to an exact fresh report manifest."
 Assert-Contains -Actual $verifyScript -Expected 'kind=reconciliation' -Message "Inventory and coverage aggregation must overlap safely."
 Assert-Contains -Actual $verifyScript -Expected '-Name "git-diff-check"' -Message "The canonical verifier must retain git diff validation."
