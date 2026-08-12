@@ -1,5 +1,19 @@
 Set-StrictMode -Version Latest
 
+function Test-VerificationDeadlineExceeded {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, [long]::MaxValue)]
+        [long]$ElapsedTicks,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, [long]::MaxValue)]
+        [long]$DeadlineTicks
+    )
+
+    return $ElapsedTicks -gt $DeadlineTicks
+}
+
 function Get-VerificationCompletionMarkerCount {
     param(
         [AllowEmptyString()]
@@ -49,7 +63,7 @@ function Get-VerificationDeadlineDisposition {
         return [pscustomobject]@{ Succeeded = $false; Code = "child-timeout"; Message = "A verifier child phase reported a timeout." }
     }
 
-    if ($ElapsedTicks -gt $DeadlineTicks) {
+    if (Test-VerificationDeadlineExceeded -ElapsedTicks $ElapsedTicks -DeadlineTicks $DeadlineTicks) {
         return [pscustomobject]@{ Succeeded = $false; Code = "deadline-exceeded"; Message = "Verification exceeded its inclusive deadline." }
     }
 

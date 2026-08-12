@@ -35,6 +35,9 @@ Assert-Equal -Actual (Get-VerificationCompletionMarkerCount -StandardOutput "pre
 Assert-Equal -Actual (Get-VerificationCompletionMarkerCount -StandardOutput ($lfMarker + $crlfMarker)) -Expected 2 -Message "Duplicate exact completion markers must remain visible to fail-closed disposition."
 
 $deadlineTicks = [TimeSpan]::FromSeconds(600).Ticks
+Assert-True -Condition (-not (Test-VerificationDeadlineExceeded -ElapsedTicks $deadlineTicks -DeadlineTicks $deadlineTicks)) -Message "The live watchdog decision must retain the inclusive exact 600-second boundary."
+Assert-True -Condition (Test-VerificationDeadlineExceeded -ElapsedTicks ($deadlineTicks + 1) -DeadlineTicks $deadlineTicks) -Message "The live watchdog decision must reject the first timer tick over 600 seconds."
+
 $exactDeadline = Get-VerificationDeadlineDisposition -ElapsedTicks $deadlineTicks -DeadlineTicks $deadlineTicks -ProcessExited $true -ExitCode 0 -CompletionMarkerCount 1 -ChildTimedOut $false -CancellationRequested $false
 Assert-True -Condition $exactDeadline.Succeeded -Message "Exactly 600 seconds must remain inside the inclusive deadline."
 Assert-Equal -Actual $exactDeadline.Code -Expected "passed" -Message "Successful disposition code mismatch."
@@ -65,6 +68,7 @@ $verifyScript = Get-Content -LiteralPath $verifyScriptPath -Raw
 $workflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
 Assert-True -Condition ($watchdogScript.IndexOf('[int]$DeadlineSeconds = 600', [StringComparison]::Ordinal) -ge 0) -Message "The external watchdog must default to exactly 600 seconds."
 Assert-True -Condition ($watchdogScript.IndexOf('[ValidateRange(1, 600)]', [StringComparison]::Ordinal) -ge 0) -Message "No accepted watchdog override may exceed 600 seconds."
+Assert-True -Condition ($watchdogScript.IndexOf('Test-VerificationDeadlineExceeded -ElapsedTicks $stopwatch.Elapsed.Ticks -DeadlineTicks $deadlineTicks', [StringComparison]::Ordinal) -ge 0) -Message "The running watchdog must use the tested inclusive deadline decision."
 Assert-True -Condition ($watchdogScript.IndexOf('Stop-VerificationProcessTree $process', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must terminate the full verifier process tree."
 Assert-True -Condition ($verifyScript.IndexOf('VERIFY_COMPLETE schema_version=1 status=passed', [StringComparison]::Ordinal) -ge 0) -Message "The verifier must emit an exact terminal marker only after successful completion."
 Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release', [StringComparison]::Ordinal) -ge 0) -Message "Standard CI must invoke the external watchdog."

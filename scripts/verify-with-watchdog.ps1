@@ -52,9 +52,9 @@ try {
     $processStarted = $true
     $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
     $standardErrorTask = $process.StandardError.ReadToEndAsync()
-    $deadline = [TimeSpan]::FromSeconds($DeadlineSeconds)
+    $deadlineTicks = [TimeSpan]::FromSeconds($DeadlineSeconds).Ticks
     while (-not $process.HasExited) {
-        if ($stopwatch.Elapsed -gt $deadline) {
+        if (Test-VerificationDeadlineExceeded -ElapsedTicks $stopwatch.Elapsed.Ticks -DeadlineTicks $deadlineTicks) {
             $deadlineExceeded = $true
             Stop-VerificationProcessTree $process
             break
@@ -80,9 +80,9 @@ try {
 
     $completionMarkerCount = Get-VerificationCompletionMarkerCount -StandardOutput $standardOutput
     $childTimedOut = [regex]::IsMatch($combinedOutput, '(?m)^VERIFY_CHILD_TIMEOUT name=')
-    $elapsedTicks = if ($deadlineExceeded) { $deadline.Ticks + 1L } else { $stopwatch.Elapsed.Ticks }
+    $elapsedTicks = if ($deadlineExceeded) { $deadlineTicks + 1L } else { $stopwatch.Elapsed.Ticks }
     $exitCode = if ($deadlineExceeded) { $null } else { $process.ExitCode }
-    $disposition = Get-VerificationDeadlineDisposition -ElapsedTicks $elapsedTicks -DeadlineTicks $deadline.Ticks -ProcessExited $process.HasExited -ExitCode $exitCode -CompletionMarkerCount $completionMarkerCount -ChildTimedOut $childTimedOut -CancellationRequested $cancellationRequested
+    $disposition = Get-VerificationDeadlineDisposition -ElapsedTicks $elapsedTicks -DeadlineTicks $deadlineTicks -ProcessExited $process.HasExited -ExitCode $exitCode -CompletionMarkerCount $completionMarkerCount -ChildTimedOut $childTimedOut -CancellationRequested $cancellationRequested
     Write-Output "VERIFY_WATCHDOG_COMPLETE schema_version=1 status=$($disposition.Code) elapsed_seconds=$([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) marker_count=$completionMarkerCount child_exit_code=$($process.ExitCode) log=$watchdogLogPath"
     if (-not $disposition.Succeeded) {
         throw "Verification watchdog failed closed: $($disposition.Code). $($disposition.Message) Log: $watchdogLogPath"
