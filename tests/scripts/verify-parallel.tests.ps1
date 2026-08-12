@@ -33,8 +33,10 @@ function Assert-Contains {
 . $laneScriptPath
 
 $requiredGateProfiles = @(Get-VerificationRequiredGateScheduleProfiles)
-Assert-True -Condition ((Get-VerificationRequiredGateResourceCapacity) -eq 6) -Message "Required gates must use the explicit six-unit logical resource capacity."
-Assert-True -Condition ($requiredGateProfiles.Count -eq 38) -Message "The exact 34-lane test plan and four non-test gates must have checked-in duration/resource profiles."
+Assert-True -Condition ((Get-VerificationRequiredGateResourceCapacity) -eq 8) -Message "Required gates must use the explicit eight-unit logical resource capacity."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumProcessHeavyWorkers) -eq 2) -Message "Required gates must admit at most two helper-process-heavy phases."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumCpuBoundWorkers) -eq 1) -Message "Required gates must admit at most one CPU-bound non-test gate."
+Assert-True -Condition ($requiredGateProfiles.Count -eq 50) -Message "The exact 46-lane test plan and four non-test gates must have checked-in duration/resource profiles."
 Assert-True -Condition (@($requiredGateProfiles | Group-Object Name -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Required gate scheduling profiles must have exact unique names."
 Assert-VerificationRequiredGateSchedule -Phases $requiredGateProfiles
 $declaredRequiredGateNames = [Collections.Generic.List[string]]::new()
@@ -51,7 +53,7 @@ $declaredRequiredGateProfiles = @($declaredRequiredGateNames | ForEach-Object { 
 Assert-VerificationRequiredGateSchedule -Phases $declaredRequiredGateProfiles
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $declaredRequiredGateNames.Count) -Message "Every dynamically declared required gate must resolve to one checked-in profile."
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $requiredGateProfiles.Count) -Message "The checked-in scheduling catalog cannot retain stale profiles for gates outside the current plan."
-foreach ($splitGateName in @("tests-EmbodySense.Core.Persistence.Tests-contextual-roles", "tests-EmbodySense.Core.Persistence.Tests-authority", "tests-EmbodySense.Core.Persistence.Tests-tool-results-audit", "tests-EmbodySense.Core.Persistence.Tests-default-conversation-recovery", "tests-EmbodySense.Core.Persistence.Tests-default-conversation-remainder", "tests-EmbodySense.IntegrationTests-governance", "tests-EmbodySense.IntegrationTests-cli", "tests-EmbodySense.IntegrationTests-codex-app-server", "tests-EmbodySense.IntegrationTests-remainder", "tests-EmbodySense.Web.Tests-runtime-host", "tests-EmbodySense.Web.Tests-loop-api-run", "tests-EmbodySense.Web.Tests-remainder")) {
+foreach ($splitGateName in @("tests-EmbodySense.Core.Application.Tests-loops-execution", "tests-EmbodySense.Core.Application.Tests-loops-remainder", "tests-EmbodySense.Core.Common.Tests-loops-execution", "tests-EmbodySense.Core.Common.Tests-loops-remainder", "tests-EmbodySense.Core.Persistence.Tests-contextual-roles", "tests-EmbodySense.Core.Persistence.Tests-authority-grants-process", "tests-EmbodySense.Core.Persistence.Tests-authority-remainder", "tests-EmbodySense.Core.Persistence.Tests-audit-process", "tests-EmbodySense.Core.Persistence.Tests-credentials-external-process", "tests-EmbodySense.Core.Persistence.Tests-credentials-remainder", "tests-EmbodySense.Core.Persistence.Tests-custom-control-process", "tests-EmbodySense.Core.Persistence.Tests-effect-authority-process", "tests-EmbodySense.Core.Persistence.Tests-sequential-evidence-process", "tests-EmbodySense.Core.Persistence.Tests-default-conversation-recovery", "tests-EmbodySense.Core.Persistence.Tests-default-conversation-remainder", "tests-EmbodySense.IntegrationTests-governance", "tests-EmbodySense.IntegrationTests-cli", "tests-EmbodySense.IntegrationTests-codex-app-server", "tests-EmbodySense.IntegrationTests-remainder", "tests-EmbodySense.Web.Tests-runtime-host", "tests-EmbodySense.Web.Tests-loop-api-run", "tests-EmbodySense.Web.Tests-remainder")) {
     Assert-True -Condition ((Get-VerificationRequiredGateScheduleProfile -Name $splitGateName).EstimatedDurationSeconds -gt 0) -Message "Downstream split gate '$splitGateName' must be ready for duration-estimate LPT scheduling."
 }
 try {
@@ -153,6 +155,37 @@ finally {
     Assert-True -Condition ($weightedResults.Count -eq 4) -Message "Every weighted phase must be scheduled and aggregated."
     Assert-True -Condition (@($weightedResults | Where-Object { $_.Weight -eq $heavyWeight -and $_.EffectiveWeight -eq $heavyWeight -and $_.ResourceClass -ceq "ProcessHeavy" }).Count -eq 4) -Message "Weighted result evidence must preserve the declared process-heavy posture without adapting its weight downward."
 
+    foreach ($resourceClassScenario in @(
+        [pscustomobject]@{ Name = "process-heavy"; ResourceClass = "ProcessHeavy"; Weight = 3; Maximum = 2; Count = 4 },
+        [pscustomobject]@{ Name = "cpu-bound"; ResourceClass = "CpuBound"; Weight = 2; Maximum = 1; Count = 3 }
+    )) {
+        $resourceClassRoot = Join-Path $scenarioRoot "$($resourceClassScenario.Name)-active"
+        New-Item -ItemType Directory -Path $resourceClassRoot | Out-Null
+        Reset-VerificationParallelPhaseState
+        foreach ($index in 1..$resourceClassScenario.Count) {
+            $name = "$($resourceClassScenario.Name)-$index"
+            Add-VerificationParallelPhase -Name $name -FileName $powerShellExecutable -Arguments ($weightedArguments + @($name, $resourceClassRoot, $resourceClassScenario.Maximum.ToString([Globalization.CultureInfo]::InvariantCulture), $resourceClassScenario.Maximum.ToString([Globalization.CultureInfo]::InvariantCulture))) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log") -Weight $resourceClassScenario.Weight -ResourceClass $resourceClassScenario.ResourceClass
+        }
+
+        $resourceClassResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 6 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
+        Assert-True -Condition ($resourceClassResults.Count -eq $resourceClassScenario.Count) -Message "The $($resourceClassScenario.Name) concurrency-limit proof must drain every phase."
+    }
+
+    Reset-VerificationParallelPhaseState
+    Add-VerificationParallelPhase -Name "one-worker-heavy" -FileName $powerShellExecutable -Arguments ($baseArguments + @("one-worker-heavy", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "one-worker-heavy.log") -Weight 3 -ResourceClass ProcessHeavy
+    $oneWorkerResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 1 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 1 -MaximumCpuBoundWorkers 1)
+    Assert-True -Condition ($oneWorkerResults.Count -eq 1 -and $oneWorkerResults[0].ResourceClass -ceq "ProcessHeavy") -Message "One-worker hosts must preserve process-heavy execution after effective class-limit capping."
+
+    Reset-VerificationParallelPhaseState
+    Add-VerificationParallelPhase -Name "invalid-resource-limit" -FileName $powerShellExecutable -Arguments ($baseArguments + @("invalid-resource-limit", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "invalid-resource-limit.log")
+    try {
+        Invoke-VerificationParallelPhases -MaximumWorkers 2 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 3 | Out-Null
+        throw "Expected invalid resource-class concurrency limit failure."
+    }
+    catch {
+        Assert-Contains -Actual $_.Exception.Message -Expected "resource-class limits cannot exceed the maximum worker count" -Message "Resource-class concurrency limits must fail closed when they exceed the worker ceiling."
+    }
+
     $workerBoundRoot = Join-Path $scenarioRoot "worker-bound-active"
     New-Item -ItemType Directory -Path $workerBoundRoot | Out-Null
     $workerBound = 2
@@ -176,6 +209,13 @@ finally {
     Assert-True -Condition ($heavy.Name -ceq "heavy") -Message "A previously bypassed heavy phase must run as soon as its required capacity is available."
     $lastOrdinary = Select-VerificationParallelPhase -Pending $fairPending -AvailableCapacity 1
     Assert-True -Condition ($lastOrdinary.Name -ceq "ordinary-two" -and $fairPending.Count -eq 0) -Message "Fair reservation cannot lose or strand the remaining ordinary phase."
+
+    $classLimitedPending = [Collections.Generic.List[object]]::new()
+    $classLimitedPending.Add([pscustomobject]@{ Name = "saturated-heavy"; EffectiveWeight = 3; ResourceClass = "ProcessHeavy"; SchedulingDeferrals = 0 })
+    $classLimitedPending.Add([pscustomobject]@{ Name = "ordinary-backfill"; EffectiveWeight = 1; ResourceClass = "Ordinary"; SchedulingDeferrals = 0 })
+    $classBackfill = Select-VerificationParallelPhase -Pending $classLimitedPending -AvailableCapacity 5 -AvailableResourceClassSlots @{ Ordinary = 6; CpuBound = 1; ProcessHeavy = 0 }
+    Assert-True -Condition ($classBackfill.Name -ceq "ordinary-backfill") -Message "A saturated resource class cannot reserve capacity needed by an admissible ordinary phase."
+    Assert-True -Condition ($classLimitedPending[0].SchedulingDeferrals -eq 0) -Message "Class saturation must not count as capacity backfill against fairness accounting."
 
     $oversizedOutput = Join-Path $scenarioRoot "oversized.log"
     Reset-VerificationParallelPhaseState

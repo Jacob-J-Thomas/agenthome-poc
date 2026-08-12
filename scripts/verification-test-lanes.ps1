@@ -27,23 +27,47 @@ function New-VerificationTestLane {
 function Get-VerificationTestProjectLanes {
     param([System.IO.FileInfo]$TestProject)
 
+    if ($TestProject.Name -eq "EmbodySense.Core.Application.Tests.csproj") {
+        return @(
+            (New-VerificationTestLane -Name "loops-execution" -IncludeFullyQualifiedName @("EmbodySense.Core.Application.Tests.Loops.Execution"))
+            (New-VerificationTestLane -Name "loops-remainder" -IncludeFullyQualifiedName @("EmbodySense.Core.Application.Tests.Loops") -ExcludeFullyQualifiedName @("EmbodySense.Core.Application.Tests.Loops.Execution"))
+            (New-VerificationTestLane -Name "capabilities-human-input" -IncludeFullyQualifiedName @("EmbodySense.Core.Application.Tests.Capabilities", "EmbodySense.Core.Application.Tests.HumanInput"))
+            (New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName @("EmbodySense.Core.Application.Tests.Loops", "EmbodySense.Core.Application.Tests.Capabilities", "EmbodySense.Core.Application.Tests.HumanInput"))
+        )
+    }
+
+    if ($TestProject.Name -eq "EmbodySense.Core.Common.Tests.csproj") {
+        return @(
+            (New-VerificationTestLane -Name "loops-execution" -IncludeFullyQualifiedName @("EmbodySense.Core.Common.Tests.Loops.Execution"))
+            (New-VerificationTestLane -Name "loops-remainder" -IncludeFullyQualifiedName @("EmbodySense.Core.Common.Tests.Loops") -ExcludeFullyQualifiedName @("EmbodySense.Core.Common.Tests.Loops.Execution"))
+            (New-VerificationTestLane -Name "human-input" -IncludeFullyQualifiedName @("EmbodySense.Core.Common.Tests.HumanInput"))
+            (New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName @("EmbodySense.Core.Common.Tests.Loops", "EmbodySense.Core.Common.Tests.HumanInput"))
+        )
+    }
+
     if ($TestProject.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") {
         return @(
             (New-VerificationTestLane -Name "graph-authoring" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring"))
             (New-VerificationTestLane -Name "capabilities" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Capabilities"))
             (New-VerificationTestLane -Name "contextual-roles" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.ContextualRoles"))
-            (New-VerificationTestLane -Name "authority" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Authority"))
-            (New-VerificationTestLane -Name "tool-results-audit" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.ToolResults", "EmbodySense.Core.Persistence.Tests.Audit"))
-            (New-VerificationTestLane -Name "credentials" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Credentials"))
+            (New-VerificationTestLane -Name "authority-grants-process" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Authority.AuthorityGrantStoreTests"))
+            (New-VerificationTestLane -Name "authority-remainder" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Authority") -ExcludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Authority.AuthorityGrantStoreTests"))
+            (New-VerificationTestLane -Name "tool-results" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.ToolResults"))
+            (New-VerificationTestLane -Name "audit-process" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Audit"))
+            (New-VerificationTestLane -Name "credentials-external-process" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Credentials.WindowsCredentialValueProviderTests"))
+            (New-VerificationTestLane -Name "credentials-remainder" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Credentials") -ExcludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Credentials.WindowsCredentialValueProviderTests"))
             (New-VerificationTestLane -Name "human-input-requests" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputRequest"))
             (New-VerificationTestLane -Name "human-input-responses" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputResponse"))
             (New-VerificationTestLane -Name "default-conversation-recovery" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurnRecoveryTests"))
             (New-VerificationTestLane -Name "default-conversation-remainder" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurn") -ExcludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurnRecoveryTests"))
-            (New-VerificationTestLane -Name "custom-definition-control" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.CustomLoopDefinition", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopControl", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopInvocation"))
+            (New-VerificationTestLane -Name "custom-control-process" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.CustomLoopControlOperationStoreTests"))
+            (New-VerificationTestLane -Name "custom-definition-control-remainder" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.CustomLoopDefinition", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopControl", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopInvocation") -ExcludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.CustomLoopControlOperationStoreTests"))
             (New-VerificationTestLane -Name "custom-run-trace" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRun", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTrace", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopWorkspace", "EmbodySense.Core.Persistence.Tests.Loops.PersistencePublicBoundaryCoverage"))
             (New-VerificationTestLane -Name "governed-lifecycle" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.Admission", "EmbodySense.Core.Persistence.Tests.Loops.Revisions"))
             (New-VerificationTestLane -Name "triggers" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Triggers"))
-            (New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring", "EmbodySense.Core.Persistence.Tests.Capabilities", "EmbodySense.Core.Persistence.Tests.Audit", "EmbodySense.Core.Persistence.Tests.Authority", "EmbodySense.Core.Persistence.Tests.ContextualRoles", "EmbodySense.Core.Persistence.Tests.ToolResults", "EmbodySense.Core.Persistence.Tests.Credentials", "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputRequest", "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputResponse", "EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurn", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopDefinition", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopControl", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopInvocation", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRun", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTrace", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopWorkspace", "EmbodySense.Core.Persistence.Tests.Loops.PersistencePublicBoundaryCoverage", "EmbodySense.Core.Persistence.Tests.Loops.Admission", "EmbodySense.Core.Persistence.Tests.Loops.Revisions", "EmbodySense.Core.Persistence.Tests.Triggers"))
+            (New-VerificationTestLane -Name "effect-authority-process" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.Execution.Authority.GovernedLoopEffectAuthorityEvidenceStoreTests"))
+            (New-VerificationTestLane -Name "sequential-evidence-process" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.CustomLoopSequentialEvidenceStoreTests"))
+            (New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring", "EmbodySense.Core.Persistence.Tests.Capabilities", "EmbodySense.Core.Persistence.Tests.Audit", "EmbodySense.Core.Persistence.Tests.Authority", "EmbodySense.Core.Persistence.Tests.ContextualRoles", "EmbodySense.Core.Persistence.Tests.ToolResults", "EmbodySense.Core.Persistence.Tests.Credentials", "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputRequest", "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputResponse", "EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurn", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopDefinition", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopControl", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopInvocation", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRun", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTrace", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopWorkspace", "EmbodySense.Core.Persistence.Tests.Loops.PersistencePublicBoundaryCoverage", "EmbodySense.Core.Persistence.Tests.Loops.Admission", "EmbodySense.Core.Persistence.Tests.Loops.Revisions", "EmbodySense.Core.Persistence.Tests.Triggers", "EmbodySense.Core.Persistence.Tests.Loops.Execution.Authority.GovernedLoopEffectAuthorityEvidenceStoreTests", "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopSequentialEvidenceStoreTests"))
         )
     }
 
