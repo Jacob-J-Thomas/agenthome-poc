@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $phaseScriptPath = Join-Path $repoRoot "scripts\verification-phase.ps1"
 $parallelScriptPath = Join-Path $repoRoot "scripts\verification-parallel.ps1"
+$scheduleScriptPath = Join-Path $repoRoot "scripts\verification-schedule.ps1"
 $tempScriptPath = Join-Path $repoRoot "scripts\verification-temp.ps1"
 $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
 $watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
@@ -104,6 +105,7 @@ $verifyScript = Get-Content -LiteralPath $verifyScriptPath -Raw
 $watchdogScript = Get-Content -LiteralPath $watchdogScriptPath -Raw
 $phaseScript = Get-Content -LiteralPath $phaseScriptPath -Raw
 $parallelScript = Get-Content -LiteralPath $parallelScriptPath -Raw
+$scheduleScript = Get-Content -LiteralPath $scheduleScriptPath -Raw
 $laneScript = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\verification-test-lanes.ps1") -Raw
 $coverageScript = Get-Content -LiteralPath $coverageScriptPath -Raw
 $verifyWorkflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
@@ -121,9 +123,11 @@ Assert-Contains -Actual $watchdogScript -Expected '[int]$MaximumTestWorkers = [M
 Assert-Contains -Actual $phaseScript -Expected 'if ($null -ne $commandScriptPath) {' -Message "Windows batch phases must preserve cmd.exe quoting."
 Assert-Contains -Actual $phaseScript -Expected 'elseif ($null -ne $startInfo.PSObject.Properties["ArgumentList"]) {' -Message "Non-batch phases must use ArgumentList when available."
 Assert-Contains -Actual $phaseScript -Expected 'VERIFY_CHILD_TIMEOUT name=$Name' -Message "Sequential timeouts must emit structured watchdog evidence."
-Assert-Contains -Actual $parallelScript -Expected 'Sort-Object -Property @{ Expression = "Priority"; Descending = $true }' -Message "Parallel phase priority must be deterministic and longest-first capable."
-Assert-Contains -Actual $parallelScript -Expected '[Math]::Min($MaximumWorkers, [Math]::Max(1, [Environment]::ProcessorCount))' -Message "Parallel resource capacity must never exceed the available processor count."
-Assert-Contains -Actual $parallelScript -Expected '$phase.EffectiveWeight = [Math]::Min($phase.Weight, $maximumResourceCapacity)' -Message "Declared phase weight must adapt to constrained hosts instead of making verification unschedulable."
+Assert-Contains -Actual $parallelScript -Expected 'Sort-Object -Property @{ Expression = "EstimatedDurationSeconds"; Descending = $true }' -Message "Parallel phases must use deterministic longest-processing-time-first ordering."
+Assert-Contains -Actual $verifyScript -Expected '$hardwareBoundedResourceCapacity = [Math]::Min($MaximumTestWorkers, [Math]::Max(1, [Environment]::ProcessorCount))' -Message "Non-required parallel phases must retain hardware-bounded resource capacity."
+Assert-Contains -Actual $parallelScript -Expected 'cannot schedule phases beyond logical resource capacity' -Message "Declared phase weight must fail closed instead of adapting down to available capacity."
+Assert-Contains -Actual $parallelScript -Expected 'resource classes are underweighted' -Message "CPU-bound and process-heavy phases must fail closed when their declared weight is too small."
+Assert-Contains -Actual $parallelScript -Expected '$phase.EffectiveWeight = $phase.Weight' -Message "Scheduler evidence must preserve declared weights exactly."
 Assert-Contains -Actual $parallelScript -Expected 'Select-VerificationParallelPhase -Pending $pending -AvailableCapacity $availableCapacity' -Message "The scheduler must select a fitting phase instead of blocking behind the queue head."
 Assert-Contains -Actual $parallelScript -Expected 'if ($Pending[$index].SchedulingDeferrals -ge 1)' -Message "Backfill must reserve a later fitting opportunity for bypassed phases."
 Assert-Contains -Actual $parallelScript -Expected 'VERIFY_CHILD_TIMEOUT name=$($result.Name)' -Message "Parallel timeouts must emit structured watchdog evidence."
@@ -158,13 +162,17 @@ Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "r
 Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "runtime-host" -IncludeFullyQualifiedName @("EmbodySense.Web.Tests.WebAgentRuntimeHostTests")' -Message "Web runtime-host tests must have an independently scheduled lane."
 Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "loop-api-run" -IncludeFullyQualifiedName @("EmbodySense.Web.Tests.LoopApiControllerTests", "EmbodySense.Web.Tests.LoopRunApiControllerTests")' -Message "Loop definition and run API tests must share an independently scheduled lane."
 Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName @("EmbodySense.Web.Tests.WebAgentRuntimeHostTests", "EmbodySense.Web.Tests.LoopApiControllerTests", "EmbodySense.Web.Tests.LoopRunApiControllerTests")' -Message "The Web remainder must explicitly exclude every dedicated lane."
-Assert-Contains -Actual $verifyScript -Expected '"EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime" { 2150; break }' -Message "The longest measured Startup execution lane must enter the worker queue early."
-Assert-Contains -Actual $verifyScript -Expected '"EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime" { 2075; break }' -Message "The Windows-dependent custom runtime lane must enter the worker queue before general Startup work."
 foreach ($heavyLane in @("EmbodySense.Core.Persistence.Tests-human-input-responses", "EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime", "EmbodySense.Core.Persistence.Tests-triggers", "EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime")) {
-    Assert-Contains -Actual $verifyScript -Expected "`"$heavyLane`" { `$true; break }" -Message "Measured process-heavy lane '$heavyLane' must consume two resource units."
+    Assert-Contains -Actual $scheduleScript -Expected "Name = `"tests-$heavyLane`";" -Message "Measured process-heavy lane '$heavyLane' must have a checked-in scheduling profile."
 }
-Assert-Contains -Actual $verifyScript -Expected '-Weight $weight -ResourceClass $resourceClass' -Message "Every required test lane must declare explicit scheduler resource metadata."
-Assert-Contains -Actual $verifyScript -Expected 'kind=required-gates phases=$($script:VerificationParallelPhases.Count) maximum_resource_capacity=$MaximumTestWorkers' -Message "The required-gate plan must report capacity semantics instead of implying each child consumes one worker."
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateResourceCapacity = 6' -Message "Required gates must use the explicit six-unit logical resource capacity."
+Assert-Contains -Actual $scheduleScript -Expected 'Weight = 3; ResourceClass = "ProcessHeavy"' -Message "Process-heavy required gates must preserve a maximum concurrency of two."
+Assert-Contains -Actual $scheduleScript -Expected 'Weight = 2; ResourceClass = "CpuBound"' -Message "CPU-bound non-test gates must consume multiple logical resource units."
+Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationRequiredGateScheduleProfile -Name $Name' -Message "Every required gate must obtain checked-in duration and resource metadata by exact name."
+Assert-Contains -Actual $verifyScript -Expected '-EstimatedDurationSeconds $profile.EstimatedDurationSeconds -Weight $profile.Weight -ResourceClass $profile.ResourceClass' -Message "Every required gate must pass its exact checked-in scheduler profile."
+Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases)' -Message "The complete required gate plan must fail closed before execution when a profile is missing or mismatched."
+Assert-Contains -Actual $verifyScript -Expected 'kind=required-gates phases=$($script:VerificationParallelPhases.Count) maximum_workers=$requiredGateMaximumWorkers maximum_resource_capacity=$requiredGateResourceCapacity scheduling=duration-estimate-lpt' -Message "The required-gate plan must report separate worker and six-unit duration-estimate LPT resource limits."
+Assert-Contains -Actual $parallelScript -Expected '$running.Count -lt $MaximumWorkers' -Message "Logical resource capacity cannot bypass the explicit child-process ceiling."
 Assert-Contains -Actual $verifyScript -Expected 'identity=TestCase.Id partition_identity=XunitTestCaseUniqueID' -Message "Stable inventory identities must remain explicit."
 Assert-Contains -Actual $verifyScript -Expected 'verify-test-partition.ps1' -Message "Canonical discovery and declarative lane selection must be reconciled."
 Assert-Contains -Actual $verifyScript -Expected 'Write-CoverageManifest' -Message "Coverage must be bound to an exact fresh report manifest."
