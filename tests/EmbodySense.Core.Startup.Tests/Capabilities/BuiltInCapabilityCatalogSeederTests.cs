@@ -97,7 +97,7 @@ public sealed class BuiltInCapabilityCatalogSeederTests
         var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
         var service = new CapabilityCatalogService(new CapabilityCatalogStore(paths, provider));
         var template = BuiltInCapabilityCatalog.Descriptors[0];
-        await SeedAuthenticatedCatalogPagesAsync(paths, provider, service, template);
+        await SeedAuthenticatedCatalogPagesAsync(paths, provider, template);
 
         var firstPage = await service.ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
         Assert.Equal(CapabilityCatalogReadStatus.Available, firstPage.Status);
@@ -105,13 +105,17 @@ public sealed class BuiltInCapabilityCatalogSeederTests
         Assert.NotNull(firstPage.Page.NextCursor);
         var secondPage = await service.ReadAsync(firstPage.Page.NextCursor, CapabilityCatalogLimits.MaximumPageSize);
         Assert.Equal(CapabilityCatalogReadStatus.Available, secondPage.Status);
-        Assert.Single(secondPage.Page!.Entries);
+        Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, secondPage.Page!.Entries.Count);
+        Assert.Equal(
+            BuiltInCapabilityCatalog.Descriptors.Select(descriptor => descriptor.Id).OrderBy(id => id.Value, StringComparer.Ordinal),
+            secondPage.Page.Entries.Select(entry => entry.Descriptor.Id).OrderBy(id => id.Value, StringComparer.Ordinal));
 
+        var originalArtifact = await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath);
         await new BuiltInCapabilityCatalogSeeder(provider).SeedAsync(paths);
-        var firstArtifact = await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath);
+        Assert.Equal(originalArtifact, await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath));
         await new BuiltInCapabilityCatalogSeeder(provider).SeedAsync(paths);
 
-        Assert.Equal(firstArtifact, await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath));
+        Assert.Equal(originalArtifact, await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath));
         var builtIns = await ReadBuiltInsAsync(new CapabilityCatalogStore(paths, provider));
         Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, builtIns.Count);
         Assert.All(builtIns, entry =>
@@ -123,24 +127,25 @@ public sealed class BuiltInCapabilityCatalogSeederTests
         });
     }
 
-    private static async Task SeedAuthenticatedCatalogPagesAsync(WorkspacePaths paths, FileCapabilityCatalogTrustProvider provider, CapabilityCatalogService service, CapabilityDescriptor template)
+    private static async Task SeedAuthenticatedCatalogPagesAsync(WorkspacePaths paths, FileCapabilityCatalogTrustProvider provider, CapabilityDescriptor template)
     {
-        // Pagination is the behavior under test. Bootstrap one real catalog generation, then prepare the remaining
-        // authenticated fixture as one direct successor so setup does not perform 101 unrelated durable mutations.
-        Assert.True(CapabilityId.TryParse("aaa.example/capability-000", out var firstId, out _));
-        var declared = await service.DeclareAsync(template with { Id = firstId! }, 0, "declare-prefill-000");
-        Assert.Equal(CapabilityCatalogMutationStatus.Applied, declared.Status);
+        // Pagination is the behavior under test. Bootstrap the real built-in while the catalog is small, then place
+        // it after one full page in one authenticated successor generation. This avoids repeatedly rewriting a
+        // maximum-size catalog during fixture setup while retaining the same durable, authenticated page boundary.
+        await new BuiltInCapabilityCatalogSeeder(provider).SeedAsync(paths);
 
         var primaryJson = await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath);
         var current = JsonSerializer.Deserialize<CapabilityCatalogFixtureDocument>(primaryJson, _catalogArtifactJsonOptions)!;
-        var sourceEntry = Assert.Single(current.Entries);
-        var entries = new List<CapabilityCatalogFixtureEntry>();
-        for (var index = 0; index <= CapabilityCatalogLimits.MaximumPageSize; index++)
+        Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, current.Entries.Count);
+        var sourceEntry = current.Entries[0];
+        var entries = new List<CapabilityCatalogFixtureEntry>(CapabilityCatalogLimits.MaximumPageSize + current.Entries.Count);
+        for (var index = 0; index < CapabilityCatalogLimits.MaximumPageSize; index++)
         {
             Assert.True(CapabilityId.TryParse($"aaa.example/capability-{index:D3}", out var id, out _));
             Assert.True(CapabilityDescriptorJson.TrySerialize(template with { Id = id! }, out var descriptorJson, out _));
             entries.Add(sourceEntry with { DescriptorJson = descriptorJson!, LastOperationId = $"declare-prefill-{index:D3}" });
         }
+        entries.AddRange(current.Entries);
 
         var candidateGeneration = checked(current.Generation + 1);
         var candidate = current with { Generation = candidateGeneration, CatalogRevision = entries.Count, Entries = entries, ContentDigest = string.Empty, AuthenticationTag = string.Empty };
