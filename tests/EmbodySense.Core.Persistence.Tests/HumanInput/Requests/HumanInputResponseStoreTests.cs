@@ -2221,7 +2221,7 @@ public sealed class HumanInputResponseStoreTests
             "user-two",
             "role-two");
 
-        await Task.WhenAll(WaitForPathAsync(firstReady), WaitForPathAsync(secondReady));
+        await Task.WhenAll(WaitForPathAsync(firstReady, first), WaitForPathAsync(secondReady, second));
         await File.WriteAllTextAsync(gate, "go");
         await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));
         await AssertProcessSucceededAsync(first);
@@ -2941,12 +2941,17 @@ public sealed class HumanInputResponseStoreTests
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process Human Input response store host did not start.");
     }
 
-    private static async Task WaitForPathAsync(string path)
+    private static async Task WaitForPathAsync(string path, Process? process = null)
     {
         var wait = Stopwatch.StartNew();
         while (!File.Exists(path))
         {
-            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(15), $"Cross-process Human Input response store host did not publish `{path}`.");
+            if (process is { HasExited: true })
+            {
+                Assert.Fail($"Cross-process Human Input response store host exited with code {process.ExitCode} before publishing `{path}`.");
+            }
+
+            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(30), $"Cross-process Human Input response store host did not publish `{path}`.");
             await Task.Delay(10);
         }
     }

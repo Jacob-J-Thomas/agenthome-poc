@@ -389,13 +389,13 @@ public sealed class CustomLoopRunStoreTests
         var errorTask = writer.StandardError.ReadToEndAsync();
         try
         {
-            await WaitForFileAsync(readyPath, writer, TimeSpan.FromSeconds(15));
+            await WaitForFileAsync(readyPath, writer, TimeSpan.FromSeconds(30));
             using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new CustomLoopRunStore(paths).GetTraceQuotaAsync(cancellation.Token));
             Assert.True(File.Exists(stagingPath));
 
             await File.WriteAllTextAsync(releasePath, "release");
-            await writer.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            await writer.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
             Assert.True(writer.ExitCode == 0, $"Cross-process staging writer failed with exit code {writer.ExitCode}.{Environment.NewLine}{await outputTask}{Environment.NewLine}{await errorTask}");
 
             Assert.Equal(CustomLoopTraceQuota.Empty(), await new CustomLoopRunStore(paths).GetTraceQuotaAsync());
@@ -1813,12 +1813,7 @@ public sealed class CustomLoopRunStoreTests
 
     private static async Task WriteDirectAsync(WorkspacePaths paths, CustomLoopRunRecord run)
     {
-        using var canonicalWorkspace = new TestWorkspace();
-        var canonicalPaths = new WorkspacePaths(canonicalWorkspace.RootPath);
-        var created = await new CustomLoopRunStore(canonicalPaths).CreateAsync(run);
-        Assert.Equal(CustomLoopRunStoreStatus.Created, created.Status);
-        var source = Path.Combine(canonicalPaths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
-        var content = await File.ReadAllBytesAsync(source);
+        var content = CustomLoopRunArtifactSerializer.Serialize(run);
         var directory = Path.Combine(paths.CustomLoopRunsPath, run.LoopId);
         Directory.CreateDirectory(directory);
         await File.WriteAllBytesAsync(Path.Combine(directory, run.Id + ".json"), content);

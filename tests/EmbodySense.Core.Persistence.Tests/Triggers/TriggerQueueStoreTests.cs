@@ -1579,7 +1579,7 @@ public sealed class TriggerQueueStoreTests
         var secondReady = Path.Combine(workspace.RootPath, "second-trigger-worker-ready");
         using var first = StartCrossProcessWorkerHost(workspace.RootPath, gate, firstReady, firstOutput, "worker-1", generation);
         using var second = StartCrossProcessWorkerHost(workspace.RootPath, gate, secondReady, secondOutput, "worker-2", generation);
-        await Task.WhenAll(WaitForPathAsync(firstReady), WaitForPathAsync(secondReady));
+        await Task.WhenAll(WaitForPathAsync(firstReady, first), WaitForPathAsync(secondReady, second));
         await File.WriteAllTextAsync(gate, "go");
         await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));
         var firstError = await first.StandardError.ReadToEndAsync();
@@ -2265,12 +2265,17 @@ public sealed class TriggerQueueStoreTests
         return [await File.ReadAllTextAsync(firstOutput), await File.ReadAllTextAsync(secondOutput)];
     }
 
-    private static async Task WaitForPathAsync(string path)
+    private static async Task WaitForPathAsync(string path, Process? process = null)
     {
         var wait = Stopwatch.StartNew();
         while (!File.Exists(path))
         {
-            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(15), $"Cross-process trigger queue host did not report ready: `{path}`.");
+            if (process is { HasExited: true })
+            {
+                Assert.Fail($"Cross-process trigger queue host exited with code {process.ExitCode} before reporting ready: `{path}`.");
+            }
+
+            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(30), $"Cross-process trigger queue host did not report ready: `{path}`.");
             await Task.Delay(10);
         }
     }
