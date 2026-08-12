@@ -60,11 +60,54 @@ function Add-VerificationParallelPhase {
         TrxPath = if ([string]::IsNullOrWhiteSpace($TrxPath)) { $null } else { [IO.Path]::GetFullPath($TrxPath) }
         Environment = if ($null -eq $Environment) { @{} } else { $Environment.Clone() }
         EstimatedDurationSeconds = $EstimatedDurationSeconds
+        SchedulingPrioritySeconds = $EstimatedDurationSeconds
         Weight = $Weight
         EffectiveWeight = $Weight
         ResourceClass = $ResourceClass
         SchedulingDeferrals = 0
     }
+}
+
+function Get-VerificationParallelPhaseSchedulingOrder {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Phases,
+
+        [ValidateRange(1, 32)]
+        [int]$MaximumProcessHeavyWorkers,
+
+        [ValidateRange(1, 32)]
+        [int]$MaximumCpuBoundWorkers
+    )
+
+    $singletonBacklogSeconds = @{}
+    foreach ($resourceClassLimit in @(
+        [pscustomobject]@{ ResourceClass = "CpuBound"; MaximumWorkers = $MaximumCpuBoundWorkers }
+        [pscustomobject]@{ ResourceClass = "ProcessHeavy"; MaximumWorkers = $MaximumProcessHeavyWorkers }
+    )) {
+        if ($resourceClassLimit.MaximumWorkers -ne 1) {
+            continue
+        }
+
+        $resourceClassPhases = @($Phases | Where-Object { $_.ResourceClass -ceq $resourceClassLimit.ResourceClass })
+        if ($resourceClassPhases.Count -gt 0) {
+            $singletonBacklogSeconds[$resourceClassLimit.ResourceClass] = [int](($resourceClassPhases | Measure-Object -Property EstimatedDurationSeconds -Sum).Sum)
+        }
+    }
+
+    foreach ($phase in $Phases) {
+        if ($null -eq $phase.PSObject.Properties["SchedulingPrioritySeconds"]) {
+            $phase | Add-Member -NotePropertyName SchedulingPrioritySeconds -NotePropertyValue $phase.EstimatedDurationSeconds
+        }
+        else {
+            $phase.SchedulingPrioritySeconds = $phase.EstimatedDurationSeconds
+        }
+        if ($singletonBacklogSeconds.ContainsKey($phase.ResourceClass)) {
+            $phase.SchedulingPrioritySeconds = [Math]::Max($phase.EstimatedDurationSeconds, [int]$singletonBacklogSeconds[$phase.ResourceClass])
+        }
+    }
+
+    return @($Phases | Sort-Object -Property @{ Expression = "SchedulingPrioritySeconds"; Descending = $true }, @{ Expression = "EstimatedDurationSeconds"; Descending = $true }, @{ Expression = "Name"; Descending = $false })
 }
 
 function Select-VerificationParallelPhase {
@@ -163,7 +206,8 @@ function Invoke-VerificationParallelPhases {
     }
 
     $pending = [Collections.Generic.List[object]]::new()
-    foreach ($phase in @($script:VerificationParallelPhases | Sort-Object -Property @{ Expression = "EstimatedDurationSeconds"; Descending = $true }, @{ Expression = "Name"; Descending = $false })) {
+    $schedulingOrder = @(Get-VerificationParallelPhaseSchedulingOrder -Phases @($script:VerificationParallelPhases) -MaximumProcessHeavyWorkers $MaximumProcessHeavyWorkers -MaximumCpuBoundWorkers $MaximumCpuBoundWorkers)
+    foreach ($phase in $schedulingOrder) {
         $phase.EffectiveWeight = $phase.Weight
         $phase.SchedulingDeferrals = 0
         $pending.Add($phase)
@@ -205,7 +249,7 @@ function Invoke-VerificationParallelPhases {
                 $process.StartInfo = $startInfo
                 $startedAtUtc = [DateTimeOffset]::UtcNow
                 $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-                Write-Host "VERIFY_PARALLEL_PHASE_START name=$($phase.Name) duration_estimate_seconds=$($phase.EstimatedDurationSeconds) resource_class=$($phase.ResourceClass) declared_weight=$($phase.Weight) effective_weight=$($phase.EffectiveWeight) started_at_utc=$($startedAtUtc.ToString("O")) timeout_seconds=$($phase.TimeoutSeconds) active_workers=$($running.Count + 1) maximum_workers=$MaximumWorkers active_capacity=$($activeResourceCapacity + $phase.EffectiveWeight) maximum_capacity=$MaximumResourceCapacity active_process_heavy=$($activeResourceClassCounts.ProcessHeavy + [int]($phase.ResourceClass -ceq "ProcessHeavy")) maximum_process_heavy=$MaximumProcessHeavyWorkers active_cpu_bound=$($activeResourceClassCounts.CpuBound + [int]($phase.ResourceClass -ceq "CpuBound")) maximum_cpu_bound=$MaximumCpuBoundWorkers"
+                Write-Host "VERIFY_PARALLEL_PHASE_START name=$($phase.Name) duration_estimate_seconds=$($phase.EstimatedDurationSeconds) scheduling_priority_seconds=$($phase.SchedulingPrioritySeconds) resource_class=$($phase.ResourceClass) declared_weight=$($phase.Weight) effective_weight=$($phase.EffectiveWeight) started_at_utc=$($startedAtUtc.ToString("O")) timeout_seconds=$($phase.TimeoutSeconds) active_workers=$($running.Count + 1) maximum_workers=$MaximumWorkers active_capacity=$($activeResourceCapacity + $phase.EffectiveWeight) maximum_capacity=$MaximumResourceCapacity active_process_heavy=$($activeResourceClassCounts.ProcessHeavy + [int]($phase.ResourceClass -ceq "ProcessHeavy")) maximum_process_heavy=$MaximumProcessHeavyWorkers active_cpu_bound=$($activeResourceClassCounts.CpuBound + [int]($phase.ResourceClass -ceq "CpuBound")) maximum_cpu_bound=$MaximumCpuBoundWorkers"
                 try {
                     if (-not $process.Start()) {
                         throw "The process API returned false."
@@ -261,13 +305,14 @@ function Invoke-VerificationParallelPhases {
                     EffectiveWeight = $entry.Phase.EffectiveWeight
                     ResourceClass = $entry.Phase.ResourceClass
                     EstimatedDurationSeconds = $entry.Phase.EstimatedDurationSeconds
+                    SchedulingPrioritySeconds = $entry.Phase.SchedulingPrioritySeconds
                 }
                 $results.Add($result)
                 $status = if ($timedOut) { "timeout" } elseif ($result.ExitCode -eq 0) { "passed" } else { "failed" }
                 if ($timedOut) {
                     Write-Host "VERIFY_CHILD_TIMEOUT name=$($result.Name) timeout_seconds=$($entry.Phase.TimeoutSeconds) elapsed_seconds=$($result.ElapsedSeconds)"
                 }
-                Write-Host "VERIFY_PARALLEL_PHASE_COMPLETE name=$($result.Name) status=$status exit_code=$($result.ExitCode) duration_estimate_seconds=$($result.EstimatedDurationSeconds) resource_class=$($result.ResourceClass) declared_weight=$($result.Weight) effective_weight=$($result.EffectiveWeight) elapsed_seconds=$($result.ElapsedSeconds) output_path=$($result.OutputPath) completed_at_utc=$([DateTimeOffset]::UtcNow.ToString("O"))"
+                Write-Host "VERIFY_PARALLEL_PHASE_COMPLETE name=$($result.Name) status=$status exit_code=$($result.ExitCode) duration_estimate_seconds=$($result.EstimatedDurationSeconds) scheduling_priority_seconds=$($result.SchedulingPrioritySeconds) resource_class=$($result.ResourceClass) declared_weight=$($result.Weight) effective_weight=$($result.EffectiveWeight) elapsed_seconds=$($result.ElapsedSeconds) output_path=$($result.OutputPath) completed_at_utc=$([DateTimeOffset]::UtcNow.ToString("O"))"
                 [void]$running.Remove($entry)
                 $activeResourceCapacity -= $entry.Phase.EffectiveWeight
                 $activeResourceClassCounts[$entry.Phase.ResourceClass]--

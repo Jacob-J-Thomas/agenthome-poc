@@ -19,11 +19,11 @@ $script:VerificationRequiredGateScheduleProfiles = @(
     [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-remainder"; EstimatedDurationSeconds = 72; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-capabilities"; EstimatedDurationSeconds = 68; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-definition-control"; EstimatedDurationSeconds = 65; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-default-conversation"; EstimatedDurationSeconds = 65; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-default-conversation"; EstimatedDurationSeconds = 65; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-credentials"; EstimatedDurationSeconds = 62; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-authority"; EstimatedDurationSeconds = 60; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-human-input"; EstimatedDurationSeconds = 60; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle"; EstimatedDurationSeconds = 55; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle"; EstimatedDurationSeconds = 55; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-tool-results-audit"; EstimatedDurationSeconds = 50; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-cli"; EstimatedDurationSeconds = 50; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-all"; EstimatedDurationSeconds = 45; Weight = 1; ResourceClass = "Ordinary" }

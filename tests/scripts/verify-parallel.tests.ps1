@@ -32,6 +32,78 @@ function Assert-Contains {
 . $scheduleScriptPath
 . $laneScriptPath
 
+function Get-VirtualVerificationSchedule {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Profiles,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaximumWorkers,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaximumResourceCapacity,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaximumProcessHeavyWorkers,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaximumCpuBoundWorkers
+    )
+
+    $phases = @($Profiles | ForEach-Object {
+        [pscustomobject]@{
+            Name = $_.Name
+            EstimatedDurationSeconds = $_.EstimatedDurationSeconds
+            SchedulingPrioritySeconds = $_.EstimatedDurationSeconds
+            Weight = $_.Weight
+            EffectiveWeight = $_.Weight
+            ResourceClass = $_.ResourceClass
+            SchedulingDeferrals = 0
+        }
+    })
+    $pending = [Collections.Generic.List[object]]::new()
+    foreach ($phase in @(Get-VerificationParallelPhaseSchedulingOrder -Phases $phases -MaximumProcessHeavyWorkers $MaximumProcessHeavyWorkers -MaximumCpuBoundWorkers $MaximumCpuBoundWorkers)) {
+        $pending.Add($phase)
+    }
+
+    $running = [Collections.Generic.List[object]]::new()
+    $starts = [ordered]@{}
+    $activeResourceCapacity = 0
+    $activeResourceClassCounts = @{ Ordinary = 0; CpuBound = 0; ProcessHeavy = 0 }
+    $elapsedSeconds = 0
+    while ($pending.Count -gt 0 -or $running.Count -gt 0) {
+        while ($pending.Count -gt 0 -and $running.Count -lt $MaximumWorkers -and $activeResourceCapacity -lt $MaximumResourceCapacity) {
+            $availableResourceClassSlots = @{
+                Ordinary = $MaximumWorkers
+                CpuBound = $MaximumCpuBoundWorkers - $activeResourceClassCounts.CpuBound
+                ProcessHeavy = $MaximumProcessHeavyWorkers - $activeResourceClassCounts.ProcessHeavy
+            }
+            $phase = Select-VerificationParallelPhase -Pending $pending -AvailableCapacity ($MaximumResourceCapacity - $activeResourceCapacity) -AvailableResourceClassSlots $availableResourceClassSlots
+            if ($null -eq $phase) {
+                break
+            }
+
+            $starts[$phase.Name] = $elapsedSeconds
+            $activeResourceCapacity += $phase.EffectiveWeight
+            $activeResourceClassCounts[$phase.ResourceClass]++
+            $running.Add([pscustomobject]@{ Phase = $phase; CompletesAtSeconds = $elapsedSeconds + $phase.EstimatedDurationSeconds })
+        }
+
+        if ($running.Count -eq 0) {
+            throw "Virtual verification scheduler made no progress."
+        }
+
+        $elapsedSeconds = [int](($running | Measure-Object -Property CompletesAtSeconds -Minimum).Minimum)
+        foreach ($entry in @($running | Where-Object { $_.CompletesAtSeconds -eq $elapsedSeconds })) {
+            $activeResourceCapacity -= $entry.Phase.EffectiveWeight
+            $activeResourceClassCounts[$entry.Phase.ResourceClass]--
+            [void]$running.Remove($entry)
+        }
+    }
+
+    return [pscustomobject]@{ MakespanSeconds = $elapsedSeconds; Starts = $starts }
+}
+
 $requiredGateProfiles = @(Get-VerificationRequiredGateScheduleProfiles)
 Assert-True -Condition ((Get-VerificationRequiredGateResourceCapacity) -eq 8) -Message "Required gates must use the explicit eight-unit logical resource capacity."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumProcessHeavyWorkers) -eq 2) -Message "Required gates must admit at most two helper-process-heavy phases."
@@ -54,8 +126,36 @@ Assert-VerificationRequiredGateSchedule -Phases $declaredRequiredGateProfiles
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $declaredRequiredGateNames.Count) -Message "Every dynamically declared required gate must resolve to one checked-in profile."
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $requiredGateProfiles.Count) -Message "The checked-in scheduling catalog cannot retain stale profiles for gates outside the current plan."
 foreach ($splitGateName in @("tests-EmbodySense.Core.Persistence.Tests-contextual-roles", "tests-EmbodySense.Core.Persistence.Tests-authority", "tests-EmbodySense.Core.Persistence.Tests-credentials", "tests-EmbodySense.Core.Persistence.Tests-human-input", "tests-EmbodySense.Core.Persistence.Tests-default-conversation", "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle", "tests-EmbodySense.IntegrationTests-governance", "tests-EmbodySense.IntegrationTests-cli", "tests-EmbodySense.IntegrationTests-codex-app-server", "tests-EmbodySense.IntegrationTests-remainder", "tests-EmbodySense.Web.Tests-runtime-host", "tests-EmbodySense.Web.Tests-loop-api-run", "tests-EmbodySense.Web.Tests-remainder")) {
-    Assert-True -Condition ((Get-VerificationRequiredGateScheduleProfile -Name $splitGateName).EstimatedDurationSeconds -gt 0) -Message "Downstream split gate '$splitGateName' must be ready for duration-estimate LPT scheduling."
+    Assert-True -Condition ((Get-VerificationRequiredGateScheduleProfile -Name $splitGateName).EstimatedDurationSeconds -gt 0) -Message "Downstream split gate '$splitGateName' must be ready for singleton-class backlog-priority scheduling."
 }
+foreach ($processHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-default-conversation", "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle")) {
+    $processHeavyProfile = Get-VerificationRequiredGateScheduleProfile -Name $processHeavyGateName
+    Assert-True -Condition ($processHeavyProfile.Weight -eq 3 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "Nested-process persistence gate '$processHeavyGateName' must retain process-heavy weight and concurrency protection."
+}
+
+$requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 6 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
+Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -eq 409) -Message "The checked-in required-gate estimates must retain the bounded 409-second virtual makespan."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-naming-style"] -eq 0) -Message "The first singleton CPU-bound gate must begin at virtual second zero."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-whitespace"] -eq 45) -Message "The second singleton CPU-bound gate must begin immediately after the first estimate."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["frontend-tests"] -eq 90) -Message "The final singleton CPU-bound gate must begin immediately after both formatting estimates."
+
+$counterexamplePhases = @(
+    [pscustomobject]@{ Name = "long-ordinary"; EstimatedDurationSeconds = 100; SchedulingPrioritySeconds = 100; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "long-heavy"; EstimatedDurationSeconds = 90; SchedulingPrioritySeconds = 90; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "short-cpu"; EstimatedDurationSeconds = 5; SchedulingPrioritySeconds = 5; ResourceClass = "CpuBound" }
+)
+$counterexampleOrder = @(Get-VerificationParallelPhaseSchedulingOrder -Phases $counterexamplePhases -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
+Assert-True -Condition ($counterexampleOrder[0].Name -ceq "long-ordinary" -and $counterexampleOrder[1].Name -ceq "long-heavy" -and $counterexampleOrder[2].Name -ceq "short-cpu") -Message "A singleton CPU class with no backlog cannot jump ahead of longer ordinary or process-heavy work unconditionally."
+Assert-True -Condition ($counterexampleOrder[2].SchedulingPrioritySeconds -eq 5) -Message "A singleton class's static priority must equal its initial backlog rather than an unconditional class boost."
+
+$priorityTiePhases = @(
+    [pscustomobject]@{ Name = "ordinary-long"; EstimatedDurationSeconds = 100; SchedulingPrioritySeconds = 100; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "cpu-zulu"; EstimatedDurationSeconds = 50; SchedulingPrioritySeconds = 50; ResourceClass = "CpuBound" }
+    [pscustomobject]@{ Name = "cpu-alpha"; EstimatedDurationSeconds = 50; SchedulingPrioritySeconds = 50; ResourceClass = "CpuBound" }
+)
+$priorityTieOrder = @(Get-VerificationParallelPhaseSchedulingOrder -Phases $priorityTiePhases -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
+Assert-True -Condition ($priorityTieOrder[0].Name -ceq "ordinary-long" -and $priorityTieOrder[1].Name -ceq "cpu-alpha" -and $priorityTieOrder[2].Name -ceq "cpu-zulu") -Message "Scheduling priority ties must fall back to duration and then exact name deterministically."
+Assert-True -Condition ($priorityTieOrder[1].SchedulingPrioritySeconds -eq 100 -and $priorityTieOrder[2].SchedulingPrioritySeconds -eq 100) -Message "Every phase in a singleton-limited class must receive the same initial static backlog priority."
 try {
     Get-VerificationRequiredGateScheduleProfile -Name "tests-unprofiled-gate" | Out-Null
     throw "Expected missing scheduling profile failure."
@@ -274,7 +374,7 @@ finally {
     Add-VerificationParallelPhase -Name "high" -FileName $powerShellExecutable -Arguments ($baseArguments + @("high", "10", "0", $orderPath)) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "high.log") -EstimatedDurationSeconds 100
     Invoke-VerificationParallelPhases -MaximumResourceCapacity 1 | Out-Null
     $order = @(Get-Content -LiteralPath $orderPath)
-    Assert-True -Condition ($order.Count -eq 4 -and $order[0] -ceq "high" -and $order[1] -ceq "tie-alpha" -and $order[2] -ceq "tie-zulu" -and $order[3] -ceq "low") -Message "Longest-estimated phases must start first, with exact-name ordering for deterministic ties."
+    Assert-True -Condition ($order.Count -eq 4 -and $order[0] -ceq "high" -and $order[1] -ceq "tie-alpha" -and $order[2] -ceq "tie-zulu" -and $order[3] -ceq "low") -Message "Ordinary phases must retain longest-estimate ordering, with exact-name ordering for deterministic ties."
 
     Reset-VerificationParallelPhaseState
     Add-VerificationParallelPhase -Name "timeout" -FileName $powerShellExecutable -Arguments ($baseArguments + @("timeout", "5000", "0")) -TimeoutSeconds 1 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "timeout.log")
