@@ -9,6 +9,7 @@ $tempScriptPath = Join-Path $repoRoot "scripts\verification-temp.ps1"
 $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
 $watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
 $coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
+$coverageEvidenceScriptPath = Join-Path $repoRoot "scripts\verification-coverage-evidence.ps1"
 $verifyWorkflowPath = Join-Path $repoRoot ".github\workflows\verify.yml"
 $stressWorkflowPath = Join-Path $repoRoot ".github\workflows\verification-stress.yml"
 $pullRequestSettingsPath = Join-Path $repoRoot "tests\verification-pull-request.runsettings"
@@ -108,6 +109,7 @@ $parallelScript = Get-Content -LiteralPath $parallelScriptPath -Raw
 $scheduleScript = Get-Content -LiteralPath $scheduleScriptPath -Raw
 $laneScript = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\verification-test-lanes.ps1") -Raw
 $coverageScript = Get-Content -LiteralPath $coverageScriptPath -Raw
+$coverageEvidenceScript = Get-Content -LiteralPath $coverageEvidenceScriptPath -Raw
 $verifyWorkflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
 $stressWorkflow = Get-Content -LiteralPath $stressWorkflowPath -Raw
 $pullRequestSettings = Get-Content -LiteralPath $pullRequestSettingsPath -Raw
@@ -202,7 +204,7 @@ Assert-Contains -Actual $verifyScript -Expected 'kind=reconciliation' -Message "
 Assert-Contains -Actual $verifyScript -Expected '-Name "git-diff-check"' -Message "The canonical verifier must retain git diff validation."
 Assert-Contains -Actual $verifyScript -Expected 'VERIFY_COMPLETE schema_version=1 status=passed' -Message "A successful standard run must emit exact terminal evidence."
 Assert-Contains -Actual $gitIgnore -Expected 'tests/VerificationResults/' -Message "Generated verifier diagnostics must remain uploadable without dirtying a local worktree."
-Assert-Contains -Actual $coverageScript -Expected 'if (-not $fileLines.ContainsKey($lineNumber) -or $hits -gt $fileLines[$lineNumber]) {' -Message "Split coverage must merge duplicate source lines by maximum hits."
+Assert-Contains -Actual $coverageEvidenceScript -Expected 'if (!fileLines.TryGetValue(line.Key, out existingHits) || line.Value > existingHits)' -Message "Split coverage must merge duplicate source lines by maximum hits in the authenticated reduction owner."
 Assert-Contains -Actual $coverageScript -Expected 'Coverage report manifest contains duplicate report paths.' -Message "Duplicate report evidence must fail closed."
 Assert-Contains -Actual $coverageScript -Expected 'missing, stale, or unexpected reports' -Message "Coverage manifest reconciliation must reject extra or missing files."
 Assert-Contains -Actual $pullRequestSettings -Expected '<TreatNoTestsAsError>true</TreatNoTestsAsError>' -Message "Required verification cannot accept an empty test selection."
