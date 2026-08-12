@@ -98,19 +98,22 @@ function Test-FullyQualifiedNameFilter {
         throw "Required-test lane filter contains no fully-qualified-name partition predicate: $Filter"
     }
 
-    $normalized = $expression
-    foreach ($term in $terms) {
-        $normalized = $normalized.Replace($term.Value, "P")
+    $includeMatches = @($terms | Where-Object { -not $_.Value.StartsWith("(FullyQualifiedName!~", [StringComparison]::Ordinal) } | ForEach-Object { $_.Groups[1].Value })
+    $excludeMatches = @($terms | Where-Object { $_.Value.StartsWith("(FullyQualifiedName!~", [StringComparison]::Ordinal) } | ForEach-Object { $_.Groups[1].Value })
+    $canonicalParts = [Collections.Generic.List[string]]::new()
+    if ($includeMatches.Count -gt 0) {
+        $includeExpression = @($includeMatches | ForEach-Object { "(FullyQualifiedName~$_)" }) -join "|"
+        $canonicalParts.Add("($includeExpression)")
     }
-    $normalized = $normalized.Replace("(", "").Replace(")", "").Replace("&", "").Replace("|", "").Replace("P", "")
-    if (-not [string]::IsNullOrEmpty($normalized)) {
+    foreach ($excludeMatch in $excludeMatches) {
+        $canonicalParts.Add("(FullyQualifiedName!~$excludeMatch)")
+    }
+    if ($expression -cne ($canonicalParts -join "&")) {
         throw "Required-test lane filter contains an unsupported predicate shape: $Filter"
     }
 
-    $includeMatches = @($terms | Where-Object { -not $_.Value.StartsWith("(FullyQualifiedName!~", [StringComparison]::Ordinal) } | ForEach-Object { $_.Groups[1].Value })
-    $excludeMatches = @($terms | Where-Object { $_.Value.StartsWith("(FullyQualifiedName!~", [StringComparison]::Ordinal) } | ForEach-Object { $_.Groups[1].Value })
-    $included = $includeMatches.Count -eq 0 -or @($includeMatches | Where-Object { $FullyQualifiedName.Contains($_, [StringComparison]::Ordinal) }).Count -gt 0
-    $excluded = @($excludeMatches | Where-Object { $FullyQualifiedName.Contains($_, [StringComparison]::Ordinal) }).Count -gt 0
+    $included = $includeMatches.Count -eq 0 -or @($includeMatches | Where-Object { $FullyQualifiedName.Contains($_, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+    $excluded = @($excludeMatches | Where-Object { $FullyQualifiedName.Contains($_, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
     return $included -and -not $excluded
 }
 

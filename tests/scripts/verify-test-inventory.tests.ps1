@@ -122,6 +122,15 @@ try {
     Assert-True -Condition (@($partitionInventory.tests | Where-Object { $_.lane -ceq "lane-a" -and $_.fullyQualifiedName -ceq "Suite.A" }).Count -eq 1) -Message "The declarative include predicate must bind Suite.A to lane-a."
 
     Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
+        (New-LaneDefinition -Name "lane-a" -Filter "((FullyQualifiedName~suite.a))&(VerificationTier!=Stress)"),
+        (New-LaneDefinition -Name "lane-b" -Filter "(FullyQualifiedName!~suite.a)&(VerificationTier!=Stress)"))
+    $caseInsensitive = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($caseInsensitive.ExitCode -eq 0) -Message "Declarative name matching must preserve VSTest's case-insensitive contains semantics. Actual: $($caseInsensitive.Output)"
+    $caseInsensitiveInventory = Get-Content -LiteralPath $expectedPath -Raw | ConvertFrom-Json
+    Assert-True -Condition (@($caseInsensitiveInventory.tests | Where-Object { $_.lane -ceq "lane-a" -and $_.fullyQualifiedName -ceq "Suite.A" }).Count -eq 1) -Message "A differently cased include predicate must select the VSTest test case."
+    Assert-True -Condition (@($caseInsensitiveInventory.tests | Where-Object { $_.lane -ceq "lane-b" -and $_.fullyQualifiedName -ceq "Suite.B" }).Count -eq 1) -Message "A differently cased exclusion predicate must leave only the complementary VSTest test case."
+
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
         (New-LaneDefinition -Name "lane-a" -Filter "((FullyQualifiedName~Suite))&(VerificationTier!=Stress)"),
         (New-LaneDefinition -Name "lane-b" -Filter "((FullyQualifiedName~Suite.B))&(VerificationTier!=Stress)"))
     $overlap = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
@@ -144,6 +153,13 @@ try {
     $unsupported = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
     Assert-True -Condition ($unsupported.ExitCode -ne 0) -Message "A lane predicate outside the exact supported grammar must fail closed."
     Assert-Contains -Actual $unsupported.Output -Expected "contains no fully-qualified-name partition" -Message "Unsupported-predicate diagnostics must be actionable."
+
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
+        (New-LaneDefinition -Name "lane-a" -Filter "((FullyQualifiedName~Suite.A)&(FullyQualifiedName~Never))&(VerificationTier!=Stress)"),
+        (New-LaneDefinition -Name "lane-b" -Filter "((FullyQualifiedName~Suite.B))&(VerificationTier!=Stress)"))
+    $hostileGrammar = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($hostileGrammar.ExitCode -ne 0) -Message "A filter that changes the generated OR group into an AND group must fail closed."
+    Assert-Contains -Actual $hostileGrammar.Output -Expected "contains an unsupported predicate shape" -Message "Hostile operator placement diagnostics must be actionable."
 
     $executionTests = @(
         [ordered]@{ id = $testA.id; xunitTestCaseUniqueId = $testA.xunitTestCaseUniqueId; fullyQualifiedName = $testA.fullyQualifiedName; displayName = $testA.displayName; source = $testA.source; lane = "lane-a" },
