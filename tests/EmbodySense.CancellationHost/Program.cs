@@ -25,6 +25,11 @@ using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
 
+if (args is ["custom-loop-run-stage", var runLockPath, var runStagingPath, var runReadyMarker, var runReleaseMarker])
+{
+    return await CustomLoopRunStagingWriterHost.RunAsync(runLockPath, runStagingPath, runReadyMarker, runReleaseMarker);
+}
+
 if (args is ["trigger-queue-admit", var queueWorkspaceRoot, var queueReleaseMarker, var queueReadyMarker, var queueResultMarker, var deliveryId, var deduplicationId, var loopId, var crashBoundary])
 {
     return await TriggerQueueCrossProcessHost.RunAdmissionAsync(queueWorkspaceRoot, queueReleaseMarker, queueReadyMarker, queueResultMarker, deliveryId, deduplicationId, loopId, crashBoundary);

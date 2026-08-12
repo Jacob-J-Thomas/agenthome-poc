@@ -21,10 +21,6 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 
 public sealed class CustomLoopRunStoreTests
 {
-    private const string CrossProcessLockPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_LOCK_PATH";
-    private const string CrossProcessReadyPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_READY_PATH";
-    private const string CrossProcessReleasePathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_RELEASE_PATH";
-    private const string CrossProcessStagingPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_STAGING_PATH";
     private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
     private static readonly JsonSerializerOptions _artifactJsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -409,30 +405,6 @@ public sealed class CustomLoopRunStoreTests
                 writer.Kill(entireProcessTree: true);
                 await writer.WaitForExitAsync();
             }
-        }
-    }
-
-    [Fact]
-    public async Task Cross_process_staging_writer_holds_mutation_lease_for_recovery_test()
-    {
-        var lockPath = Environment.GetEnvironmentVariable(CrossProcessLockPathVariable);
-        if (string.IsNullOrWhiteSpace(lockPath))
-        {
-            return;
-        }
-
-        var stagingPath = Environment.GetEnvironmentVariable(CrossProcessStagingPathVariable) ?? throw new InvalidOperationException("The cross-process staging path is required.");
-        var readyPath = Environment.GetEnvironmentVariable(CrossProcessReadyPathVariable) ?? throw new InvalidOperationException("The cross-process ready path is required.");
-        var releasePath = Environment.GetEnvironmentVariable(CrossProcessReleasePathVariable) ?? throw new InvalidOperationException("The cross-process release path is required.");
-        Directory.CreateDirectory(Path.GetDirectoryName(lockPath)!);
-        Directory.CreateDirectory(Path.GetDirectoryName(stagingPath)!);
-        await using var lease = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.WriteThrough);
-        await File.WriteAllTextAsync(stagingPath, "active staging content");
-        await File.WriteAllTextAsync(readyPath, "ready");
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        while (!File.Exists(releasePath))
-        {
-            await Task.Delay(TimeSpan.FromMilliseconds(15), cancellation.Token);
         }
     }
 
@@ -1838,6 +1810,11 @@ public sealed class CustomLoopRunStoreTests
 
     private static Process StartCrossProcessStagingWriter(string lockPath, string stagingPath, string readyPath, string releasePath)
     {
+        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+        var targetFramework = outputDirectory.Name;
+        var configuration = outputDirectory.Parent?.Name ?? throw new DirectoryNotFoundException("The active test build configuration could not be resolved.");
+        var hostAssembly = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", configuration, targetFramework, "EmbodySense.CancellationHost.dll");
+        Assert.True(File.Exists(hostAssembly), $"Cancellation host assembly was not built at `{hostAssembly}`.");
         var startInfo = new ProcessStartInfo
         {
             FileName = "dotnet",
@@ -1847,16 +1824,26 @@ public sealed class CustomLoopRunStoreTests
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(CustomLoopRunStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunStoreTests.Cross_process_staging_writer_holds_mutation_lease_for_recovery_test");
+        startInfo.ArgumentList.Add("exec");
+        startInfo.ArgumentList.Add(hostAssembly);
+        startInfo.ArgumentList.Add("custom-loop-run-stage");
+        startInfo.ArgumentList.Add(lockPath);
+        startInfo.ArgumentList.Add(stagingPath);
+        startInfo.ArgumentList.Add(readyPath);
+        startInfo.ArgumentList.Add(releasePath);
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        startInfo.Environment[CrossProcessLockPathVariable] = lockPath;
-        startInfo.Environment[CrossProcessStagingPathVariable] = stagingPath;
-        startInfo.Environment[CrossProcessReadyPathVariable] = readyPath;
-        startInfo.Environment[CrossProcessReleasePathVariable] = releasePath;
         return Process.Start(startInfo) ?? throw new InvalidOperationException("The cross-process staging writer did not start.");
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "EmbodySense.sln")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName ?? throw new DirectoryNotFoundException("The repository root could not be located from the test output directory.");
     }
 
     private static async Task WaitForFileAsync(string path, Process process, TimeSpan timeout)

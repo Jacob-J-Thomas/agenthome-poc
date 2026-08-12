@@ -37,7 +37,7 @@ Assert-NotContains -Actual $verifyScript -Expected 'Invoke-CheckedNativePhase -N
 $preflightCompletionIndex = $verifyScript.IndexOf('$script:LastCompletedVerificationPhase = "pull-request-preflight"', [StringComparison]::Ordinal)
 $browserIndex = $verifyScript.IndexOf('if ($RunBrowserE2E) {', [StringComparison]::Ordinal)
 $isolationIndex = $verifyScript.IndexOf('Write-Output "VERIFY_REQUIRED_TEST_CONTRACT', [StringComparison]::Ordinal)
-$frontendIndex = $verifyScript.IndexOf('Add-VerificationParallelPhase -Name "frontend-tests"', [StringComparison]::Ordinal)
+$frontendIndex = $verifyScript.IndexOf('Add-ProfiledRequiredGatePhase -Name "frontend-tests"', [StringComparison]::Ordinal)
 Assert-True -Condition ($preflightCompletionIndex -ge 0 -and $preflightCompletionIndex -lt $browserIndex) -Message "Browser execution must wait for a successful build preflight."
 Assert-True -Condition ($preflightCompletionIndex -lt $isolationIndex) -Message "Isolation and discovery must wait for a successful build preflight."
 Assert-True -Condition ($preflightCompletionIndex -lt $frontendIndex) -Message "Frontend tests must wait for a successful npm restore preflight."

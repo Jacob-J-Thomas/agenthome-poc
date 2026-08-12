@@ -2,15 +2,12 @@ Set-StrictMode -Version Latest
 
 $script:VerificationRequiredGateResourceCapacity = 6
 $script:VerificationRequiredGateScheduleProfiles = @(
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-authority-context"; EstimatedDurationSeconds = 220; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-contextual-roles"; EstimatedDurationSeconds = 85; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-authority"; EstimatedDurationSeconds = 80; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-tool-results-audit"; EstimatedDurationSeconds = 70; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 180; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-loop-api-run"; EstimatedDurationSeconds = 75; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-runtime-host"; EstimatedDurationSeconds = 70; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-remainder"; EstimatedDurationSeconds = 70; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 165; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-codex-app-server"; EstimatedDurationSeconds = 65; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-governance"; EstimatedDurationSeconds = 55; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-cli"; EstimatedDurationSeconds = 45; Weight = 1; ResourceClass = "Ordinary" }
@@ -22,7 +19,6 @@ $script:VerificationRequiredGateScheduleProfiles = @(
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-runtime-triggers"; EstimatedDurationSeconds = 90; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"; EstimatedDurationSeconds = 85; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime"; EstimatedDurationSeconds = 85; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-default-conversation"; EstimatedDurationSeconds = 80; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-default-conversation-recovery"; EstimatedDurationSeconds = 55; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-default-conversation-remainder"; EstimatedDurationSeconds = 35; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-capabilities"; EstimatedDurationSeconds = 75; Weight = 1; ResourceClass = "Ordinary" }
@@ -110,8 +106,9 @@ function Assert-VerificationRequiredGateSchedule {
     $duplicateProfiles = @($profileNames | Group-Object -CaseSensitive | Where-Object Count -gt 1 | ForEach-Object Name | Sort-Object)
     $duplicatePhases = @($declaredNames | Group-Object -CaseSensitive | Where-Object Count -gt 1 | ForEach-Object Name | Sort-Object)
     $missingProfiles = @($declaredNames | Where-Object { $candidate = $_; @($profileNames | Where-Object { $_ -ceq $candidate }).Count -eq 0 } | Sort-Object)
-    if ($duplicateProfiles.Count -gt 0 -or $duplicatePhases.Count -gt 0 -or $missingProfiles.Count -gt 0) {
-        throw "Required verification scheduling profiles do not cover every declared gate exactly once. duplicate_profiles=[$($duplicateProfiles -join ',')] duplicate_gates=[$($duplicatePhases -join ',')] missing_profiles=[$($missingProfiles -join ',')]"
+    $unexpectedProfiles = @($profileNames | Where-Object { $candidate = $_; @($declaredNames | Where-Object { $_ -ceq $candidate }).Count -eq 0 } | Sort-Object)
+    if ($duplicateProfiles.Count -gt 0 -or $duplicatePhases.Count -gt 0 -or $missingProfiles.Count -gt 0 -or $unexpectedProfiles.Count -gt 0) {
+        throw "Required verification scheduling profiles must equal the declared gate set exactly once. duplicate_profiles=[$($duplicateProfiles -join ',')] duplicate_gates=[$($duplicatePhases -join ',')] missing_profiles=[$($missingProfiles -join ',')] unexpected_profiles=[$($unexpectedProfiles -join ',')]"
     }
 
     foreach ($phase in $Phases) {
