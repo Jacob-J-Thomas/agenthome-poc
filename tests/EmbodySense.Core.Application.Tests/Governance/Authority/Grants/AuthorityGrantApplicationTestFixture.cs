@@ -145,8 +145,11 @@ internal static class AuthorityGrantApplicationTestFixture
             publication,
             irreversible);
 
-    internal static AuthorityGrantBoundary Boundary(DateTimeOffset? effective = null, DateTimeOffset? expires = null)
-        => new(effective ?? Now.AddMinutes(-1), expires ?? Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None);
+    internal static AuthorityGrantBoundary Boundary(
+        DateTimeOffset? effective = null,
+        DateTimeOffset? expires = null,
+        AuthorityGrantCompletionConstraintKind completionConstraint = AuthorityGrantCompletionConstraintKind.None)
+        => new(effective ?? Now.AddMinutes(-1), expires ?? Now.AddHours(1), completionConstraint);
 
     internal static AuthorityProfile Profile(
         AuthorityProfileStatus status = AuthorityProfileStatus.Active,

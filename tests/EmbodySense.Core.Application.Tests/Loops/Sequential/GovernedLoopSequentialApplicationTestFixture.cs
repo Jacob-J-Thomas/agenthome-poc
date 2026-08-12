@@ -1,9 +1,19 @@
 using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants;
+using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Loops.Admission;
+using EmbodySense.Core.Common.Loops.Admission.Models;
+using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 
@@ -166,6 +176,56 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             valueSchemas ?? source.ValueSchemas,
             outputContract ?? source.OutputContract,
             authorityCeiling ?? source.AuthorityCeiling);
+
+    internal static GovernedLoopAdmissionReceipt AdmissionReceipt(
+        GovernedLoopGraphRevisionArtifact artifact,
+        GovernedLoopExecutionBinding execution,
+        string workspaceId,
+        string operationId,
+        string requestHash,
+        string graphArtifactHash,
+        string graphLayoutHash)
+    {
+        Assert.True(AuthorityGrantId.TryParse("grant-sequential", out var grantId, out _));
+        Assert.True(AuthorityGrantRevision.TryParse("1", out var grantRevision, out _));
+        Assert.True(AuthorityProfileId.TryParse("profile-sequential", out var profileId, out _));
+        Assert.True(AuthorityProfileRevision.TryParse("1", out var profileRevision, out _));
+        Assert.True(AuthorityProfileHash.TryParse("sha256:" + Hash('b'), out var profileHash, out _));
+        Assert.True(AuthorityActorId.TryParse("user-owner", out var actorId, out _));
+        var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, execution.Revision, "publish-sequential", Hash('7'));
+        var intent = new GovernedLoopAdmissionIntent(
+            GovernedLoopAdmissionIntent.CurrentSchemaVersion,
+            workspaceId,
+            operationId,
+            requestHash,
+            publication,
+            new AuthorityGrantReference(grantId!, grantRevision!, "sha256:" + Hash('a')),
+            artifact.Graph.OwningRole,
+            actorId!,
+            "test",
+            graphArtifactHash,
+            graphLayoutHash);
+        var capabilityAdmission = TestCapabilityAdmissionFactory.Create(LoopCapabilityRequirements.CreateDefaultConversationManifest(), Now) with { WorkspaceScopeId = workspaceId };
+        var effectiveAuthority = AuthorityCeilingIntersection.EmptyCeiling();
+        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
+            GovernedLoopAdmissionEvidence.CurrentSchemaVersion,
+            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+            execution,
+            new AuthorityGrantProfilePin(new AuthorityProfileReference(profileId!, profileRevision!), profileHash!),
+            new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
+            Hash('9'),
+            effectiveAuthority,
+            capabilityAdmission,
+            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilityAdmission),
+            Now,
+            string.Empty));
+        return GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
+            GovernedLoopAdmissionReceipt.CurrentSchemaVersion,
+            intent,
+            evidence,
+            Now,
+            string.Empty));
+    }
 
     internal static GovernedLoopPortDefinition Port(
         string id,

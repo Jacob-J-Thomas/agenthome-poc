@@ -51,6 +51,13 @@ public sealed class GovernedLoopAdmissionStoreTests
         Assert.Equal(1, read.StoreGeneration);
         Assert.Equal(mutation.Outcome.ContentHash, read.Outcome!.ContentHash);
         Assert.NotSame(mutation.Outcome, read.Outcome);
+        var expectedEvidence = Assert.IsType<GovernedLoopAdmissionReceipt>(mutation.Outcome.Receipt).Evidence;
+        var restoredEvidence = Assert.IsType<GovernedLoopAdmissionReceipt>(read.Outcome.Receipt).Evidence;
+        Assert.Equal(expectedEvidence.GrantProfile, restoredEvidence.GrantProfile);
+        Assert.Equal(expectedEvidence.GrantBoundary, restoredEvidence.GrantBoundary);
+        Assert.Equal(expectedEvidence.GrantDependencyEvidenceHash, restoredEvidence.GrantDependencyEvidenceHash);
+        Assert.NotSame(expectedEvidence.GrantProfile, restoredEvidence.GrantProfile);
+        Assert.NotSame(expectedEvidence.GrantBoundary, restoredEvidence.GrantBoundary);
         Assert.Equal(GovernedLoopAdmissionStoreCommitStatus.AlreadyCommitted, replayed.Status);
         Assert.Equal(read.Outcome.ContentHash, replayed.Outcome!.ContentHash);
         Assert.True(File.Exists(PrimaryPath(paths)));
@@ -443,6 +450,9 @@ public sealed class GovernedLoopAdmissionStoreTests
             originalEvidence.SchemaVersion,
             originalEvidence.IntentHash,
             originalEvidence.Binding,
+            originalEvidence.GrantProfile,
+            originalEvidence.GrantBoundary,
+            originalEvidence.GrantDependencyEvidenceHash,
             originalEvidence.EffectiveAuthority,
             capabilityAdmission,
             originalEvidence.References,

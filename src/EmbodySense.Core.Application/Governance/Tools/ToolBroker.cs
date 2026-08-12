@@ -11,6 +11,7 @@ using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Application.LocalWorkspace;
+using EmbodySense.Core.Common.LocalWorkspace.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
 
@@ -37,7 +38,7 @@ public sealed class ToolBroker : IToolBroker
     private readonly LoopDefinition _loopDefinition;
     private readonly ToolResultRetentionService _toolResultRetention;
     private readonly IToolGovernanceObserver? _governanceObserver;
-    private readonly IToolActuationAuthorityRevalidator? _actuationAuthorityRevalidator;
+    private readonly IToolActuationAuthorityBoundary? _actuationAuthorityBoundary;
     private readonly ToolAuditMetadataFactory _auditMetadataFactory;
     private readonly TimeSpan _postActuationIntegrityTimeout;
 
@@ -52,8 +53,9 @@ public sealed class ToolBroker : IToolBroker
     /// <param name="loopDefinition">The loop definition.</param>
     /// <param name="toolResultRetentionStore">The tool result retention store.</param>
     /// <param name="governanceObserver">The governance observer.</param>
-    /// <param name="actuationAuthorityRevalidator">The actuation authority revalidator.</param>
+    /// <param name="actuationAuthorityRevalidator">The temporary legacy authority revalidator used while existing custom-loop composition converges.</param>
     /// <param name="postActuationIntegrityTimeout">The post actuation integrity timeout.</param>
+    /// <param name="actuationAuthorityBoundary">The continuation-inverting current-authority boundary.</param>
     public ToolBroker(
         WorkspacePaths paths,
         IToolPermissionService permissionService,
@@ -64,7 +66,8 @@ public sealed class ToolBroker : IToolBroker
         IToolResultRetentionStore toolResultRetentionStore,
         IToolGovernanceObserver? governanceObserver = null,
         IToolActuationAuthorityRevalidator? actuationAuthorityRevalidator = null,
-        TimeSpan? postActuationIntegrityTimeout = null)
+        TimeSpan? postActuationIntegrityTimeout = null,
+        IToolActuationAuthorityBoundary? actuationAuthorityBoundary = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(permissionService);
@@ -73,6 +76,10 @@ public sealed class ToolBroker : IToolBroker
         ArgumentNullException.ThrowIfNull(auditLog);
         ArgumentNullException.ThrowIfNull(loopDefinition);
         ArgumentNullException.ThrowIfNull(toolResultRetentionStore);
+        if (actuationAuthorityRevalidator is not null && actuationAuthorityBoundary is not null)
+        {
+            throw new ArgumentException("Specify either the legacy revalidator or the continuation-inverting authority boundary, not both.");
+        }
 
         _paths = paths;
         _permissionService = permissionService;
@@ -82,7 +89,7 @@ public sealed class ToolBroker : IToolBroker
         _loopDefinition = loopDefinition;
         _toolResultRetention = new ToolResultRetentionService(auditLog, loopDefinition, toolResultRetentionStore);
         _governanceObserver = governanceObserver;
-        _actuationAuthorityRevalidator = actuationAuthorityRevalidator;
+        _actuationAuthorityBoundary = actuationAuthorityBoundary ?? (actuationAuthorityRevalidator is null ? null : new LegacyToolActuationAuthorityBoundaryAdapter(actuationAuthorityRevalidator));
         AvailableCommands = GetAvailableCommands(_loopDefinition);
         _auditMetadataFactory = new ToolAuditMetadataFactory(_paths, _loopDefinition, AvailableCommands);
         _postActuationIntegrityTimeout = postActuationIntegrityTimeout ?? _defaultPostActuationIntegrityTimeout;
@@ -156,54 +163,77 @@ public sealed class ToolBroker : IToolBroker
         }
 
         var approvalDecision = approvedByHuman ? ToolApprovalDecision.Approved : ToolApprovalDecision.NotRequired;
-        if (_actuationAuthorityRevalidator is not null)
-        {
-            // Approval is evidence for one decision, not permanent authority. Revalidate mutable authority
-            // immediately before touching the workspace to close the time-of-check/time-of-use window.
-            var revalidation = await _actuationAuthorityRevalidator.RevalidateAsync(request, cancellationToken);
-            ArgumentNullException.ThrowIfNull(revalidation);
-            ArgumentException.ThrowIfNullOrWhiteSpace(revalidation.Detail);
-            ArgumentNullException.ThrowIfNull(revalidation.AuditMetadata);
-            await RecordActuationAuthorityAsync(requestId, request, check, revalidation, cancellationToken);
-            if (!revalidation.Allowed)
+        var authorizedEvidence = DecisionEvidence(check, approvalDecision, approvalResponse);
+        using var actuation = new ToolActuationCallbackGuard(
+            async (directExecution, actuatorCancellationToken) =>
             {
-                var evidence = RevalidationDeniedEvidence(check, approvalDecision, approvalResponse, revalidation.Detail);
-                return await FinalizeTerminalOutcomeAsync(requestId, request, check, approvedByHuman, new ToolTerminalOutcome(ToolExecutionOutcome.Denied, $"denied: {revalidation.Detail}", evidence, AuditSchema.Outcomes.Denied, revalidation.AuditMetadata), cancellationToken);
-            }
+                if (_actuationAuthorityBoundary is not null)
+                {
+                    await RecordActuationAuthorityAsync(requestId, request, check, directExecution, actuatorCancellationToken);
+                }
+                await RecordExecutionIntentAsync(requestId, request, check, approvedByHuman, actuatorCancellationToken);
+                await ObserveDecisionAsync(requestId, request, check.ResolvedPath, authorizedEvidence, actuatorCancellationToken);
+            },
+            actuatorCancellationToken => ExecuteWorkspaceActuatorAsync(request, check, actuatorCancellationToken),
+            cancellationToken);
+        ToolActuationAuthorityExecution authorityExecution;
+        try
+        {
+            authorityExecution = _actuationAuthorityBoundary is null
+                ? await ExecuteWithoutDynamicBoundaryAsync(request, actuation, cancellationToken)
+                : await _actuationAuthorityBoundary.ExecuteAsync(request, check.ResolvedPath, actuation.ExecuteAsync, cancellationToken);
+        }
+        finally
+        {
+            actuation.Close();
         }
 
-        var authorizedEvidence = DecisionEvidence(check, approvalDecision, approvalResponse);
-        await RecordExecutionIntentAsync(requestId, request, check, approvedByHuman, cancellationToken);
-        await ObserveDecisionAsync(requestId, request, check.ResolvedPath, authorizedEvidence, cancellationToken);
-        return await ExecuteAuthorizedAsync(requestId, request, check, approvedByHuman, authorizedEvidence, cancellationToken);
+        ValidateAuthorityExecution(authorityExecution);
+        if (authorityExecution.Disposition == ToolActuationAuthorityDisposition.Denied)
+        {
+            actuation.ValidateNoActuation();
+            await RecordActuationAuthorityAsync(requestId, request, check, authorityExecution, cancellationToken);
+            var evidence = RevalidationDeniedEvidence(check, approvalDecision, approvalResponse, authorityExecution.Detail);
+            return await FinalizeTerminalOutcomeAsync(requestId, request, check, approvedByHuman, new ToolTerminalOutcome(ToolExecutionOutcome.Denied, $"denied: {authorityExecution.Detail}", evidence, AuditSchema.Outcomes.Denied, authorityExecution.AuditMetadata), cancellationToken);
+        }
+
+        if (authorityExecution.Disposition is ToolActuationAuthorityDisposition.ReviewRequired or ToolActuationAuthorityDisposition.Ambiguous)
+        {
+            actuation.ValidateNoActuation();
+            Exception? auditFailure = null;
+            try
+            {
+                await RecordActuationAuthorityAsync(requestId, request, check, authorityExecution, cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                auditFailure = exception;
+            }
+
+            throw new ToolActuationReviewRequiredException(authorityExecution.Disposition, authorityExecution.Detail, auditFailure);
+        }
+
+        var expectedFailure = actuation.GetExpectedFailure(authorityExecution);
+        LocalWorkspaceResult? output = expectedFailure is null ? actuation.GetCommittedResult(authorityExecution) : null;
+        return await FinalizeCommittedAsync(requestId, request, check, approvedByHuman, authorizedEvidence, output, expectedFailure, cancellationToken);
     }
 
-    private async Task<ToolResult> ExecuteAuthorizedAsync(string requestId, ToolRequest request, ToolPermissionCheck check, bool approvedByHuman, ToolGovernanceEvidence governance, CancellationToken cancellationToken)
+    private async Task<ToolResult> FinalizeCommittedAsync(string requestId, ToolRequest request, ToolPermissionCheck check, bool approvedByHuman, ToolGovernanceEvidence governance, LocalWorkspaceResult? output, Exception? expectedFailure, CancellationToken cancellationToken)
     {
         ToolResult result;
         IReadOnlyDictionary<string, object?> executionMetadata;
         string executionOutcome;
-        try
+        if (expectedFailure is null)
         {
-            var output = request.Command switch
-            {
-                ToolCommand.List => await _workspaceToolExecutor.ListAsync(check.ResolvedPath, cancellationToken),
-                ToolCommand.Read => await _workspaceToolExecutor.ReadAsync(check.ResolvedPath, cancellationToken),
-                ToolCommand.Search => await _workspaceToolExecutor.SearchAsync(check.ResolvedPath, request.Pattern ?? request.Content, cancellationToken),
-                ToolCommand.Append => await _workspaceToolExecutor.AppendAsync(check.ResolvedPath, request.Content, cancellationToken),
-                ToolCommand.Write => await _workspaceToolExecutor.WriteAsync(check.ResolvedPath, request.Content, cancellationToken),
-                ToolCommand.Delete => await _workspaceToolExecutor.DeleteAsync(check.ResolvedPath, cancellationToken),
-                _ => throw new ArgumentOutOfRangeException(nameof(request), request.Command, "Unsupported tool command.")
-            };
-
+            ArgumentNullException.ThrowIfNull(output);
             result = new ToolResult(ToolExecutionOutcome.Succeeded, output.Text, requestId, check.ResolvedPath, request, governance);
             executionMetadata = output.Metadata;
             executionOutcome = AuditSchema.Outcomes.Succeeded;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        else
         {
-            result = new ToolResult(ToolExecutionOutcome.Failed, $"failed: {exception.Message}", requestId, check.ResolvedPath, request, governance);
-            executionMetadata = ToolAuditMetadataFactory.ForError(exception);
+            result = new ToolResult(ToolExecutionOutcome.Failed, $"failed: {expectedFailure.Message}", requestId, check.ResolvedPath, request, governance);
+            executionMetadata = ToolAuditMetadataFactory.ForError(expectedFailure);
             executionOutcome = AuditSchema.Outcomes.Failed;
         }
 
@@ -238,6 +268,39 @@ public sealed class ToolBroker : IToolBroker
         }
 
         return result;
+    }
+
+    private Task<LocalWorkspaceResult> ExecuteWorkspaceActuatorAsync(ToolRequest request, ToolPermissionCheck check, CancellationToken cancellationToken)
+    {
+        return request.Command switch
+        {
+            ToolCommand.List => _workspaceToolExecutor.ListAsync(check.ResolvedPath, cancellationToken),
+            ToolCommand.Read => _workspaceToolExecutor.ReadAsync(check.ResolvedPath, cancellationToken),
+            ToolCommand.Search => _workspaceToolExecutor.SearchAsync(check.ResolvedPath, request.Pattern ?? request.Content, cancellationToken),
+            ToolCommand.Append => _workspaceToolExecutor.AppendAsync(check.ResolvedPath, request.Content, cancellationToken),
+            ToolCommand.Write => _workspaceToolExecutor.WriteAsync(check.ResolvedPath, request.Content, cancellationToken),
+            ToolCommand.Delete => _workspaceToolExecutor.DeleteAsync(check.ResolvedPath, cancellationToken),
+            _ => throw new ArgumentOutOfRangeException(nameof(request), request.Command, "Unsupported tool command.")
+        };
+    }
+
+    private static async Task<ToolActuationAuthorityExecution> ExecuteWithoutDynamicBoundaryAsync(ToolRequest request, ToolActuationCallbackGuard actuation, CancellationToken cancellationToken)
+    {
+        _ = request;
+        var direct = new ToolActuationAuthorityExecution(
+            ToolActuationAuthorityDisposition.Direct,
+            "No dynamic authority source was configured; admitted loop and permission authority allow direct actuation.",
+            new Dictionary<string, object?> { ["dynamic_authority_configured"] = false });
+        _ = await actuation.ExecuteAsync(direct, cancellationToken);
+        return direct;
+    }
+
+    private static void ValidateAuthorityExecution(ToolActuationAuthorityExecution execution)
+    {
+        if (execution is null || string.IsNullOrWhiteSpace(execution.Detail) || execution.AuditMetadata is null || !Enum.IsDefined(execution.Disposition))
+        {
+            throw new ToolActuationAuthorityProtocolException("The authority boundary returned a malformed or unknown disposition.");
+        }
     }
 
     private async Task<ToolResult> FinalizeTerminalOutcomeAsync(string requestId, ToolRequest request, ToolPermissionCheck check, bool approvedByHuman, ToolTerminalOutcome outcome, CancellationToken cancellationToken)
@@ -425,11 +488,12 @@ public sealed class ToolBroker : IToolBroker
             metadata: metadata), cancellationToken);
     }
 
-    private Task RecordActuationAuthorityAsync(string requestId, ToolRequest request, ToolPermissionCheck check, ToolActuationAuthorityRevalidation revalidation, CancellationToken cancellationToken)
+    private Task RecordActuationAuthorityAsync(string requestId, ToolRequest request, ToolPermissionCheck check, ToolActuationAuthorityExecution execution, CancellationToken cancellationToken)
     {
         var metadata = _auditMetadataFactory.CreateBase(requestId, request, check);
-        metadata["authority_phase"] = "pre_actuation_revalidation";
-        foreach (var item in revalidation.AuditMetadata)
+        metadata["authority_phase"] = "actuation_boundary";
+        metadata["authority_disposition"] = execution.Disposition.ToString();
+        foreach (var item in execution.AuditMetadata)
         {
             metadata[item.Key] = item.Value;
         }
@@ -438,8 +502,14 @@ public sealed class ToolBroker : IToolBroker
             AuditSchema.Actors.Tool,
             AuditSchema.Actions.ToolLoopAuthorityEvaluate,
             check.ResolvedPath,
-            revalidation.Allowed ? AuditSchema.Outcomes.Allowed : AuditSchema.Outcomes.Denied,
-            revalidation.Detail,
+            execution.Disposition switch
+            {
+                ToolActuationAuthorityDisposition.Direct => AuditSchema.Outcomes.Allowed,
+                ToolActuationAuthorityDisposition.Denied => AuditSchema.Outcomes.Denied,
+                ToolActuationAuthorityDisposition.ReviewRequired or ToolActuationAuthorityDisposition.Ambiguous => AuditSchema.Outcomes.NeedsReview,
+                _ => AuditSchema.Outcomes.Unknown
+            },
+            execution.Detail,
             metadata), cancellationToken);
     }
 

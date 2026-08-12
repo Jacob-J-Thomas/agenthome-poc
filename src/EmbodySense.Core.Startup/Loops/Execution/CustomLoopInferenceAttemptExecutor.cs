@@ -1,12 +1,20 @@
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Inference;
+using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Execution.Authority;
+using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Clients.LocalWorkspace;
+using EmbodySense.Core.Common.Authority.Grants;
+using EmbodySense.Core.Common.Authority.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
@@ -14,6 +22,10 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Admission;
+using EmbodySense.Core.Common.Loops.Execution.Authority;
+using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
+using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
@@ -42,6 +54,8 @@ public delegate ILlmInferenceClient CustomLoopInferenceClientFactory(LlmInferenc
 /// </summary>
 public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAttemptExecutor, ICustomLoopModelAvailability
 {
+    private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const string WorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
     private readonly LlmInferenceClientOptions _options;
     private readonly WorkspacePaths _paths;
     private readonly IToolApprovalPrompt _approvalPrompt;
@@ -52,6 +66,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     private readonly ToolResultRetentionStore _toolResultRetentionStore;
     private readonly ICapabilityAdmissionService _capabilityAdmissionService;
     private readonly ICapabilityAuthorityTransaction _capabilityAuthorityTransaction;
+    private readonly IGovernedLoopEffectAuthorityBoundary? _effectAuthorityBoundary;
 
     /// <summary>
     /// Creates the production attempt executor over the workspace's live role authority and run evidence.
@@ -77,7 +92,8 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             new CustomLoopRunToolEvidenceSink(new CustomLoopRunStore(composition.Paths)),
             composition.Admission,
             clientFactory,
-            composition.Authority)
+            composition.Authority,
+            effectAuthorityBoundary: null)
     {
     }
 
@@ -92,7 +108,15 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         LlmInferenceClientOptions options,
         IToolApprovalPrompt approvalPrompt,
         CustomLoopInferenceClientFactory? clientFactory,
-        (WorkspacePaths Paths, ICapabilityAuthorityTransaction Authority, ICapabilityAdmissionService Admission) composition) : this(options, approvalPrompt, new AdmittedMaximumAuthorityProvider(), new NullToolEvidenceSink(), composition.Admission, clientFactory, composition.Authority)
+        (WorkspacePaths Paths, ICapabilityAuthorityTransaction Authority, ICapabilityAdmissionService Admission) composition) : this(
+            options,
+            approvalPrompt,
+            new AdmittedMaximumAuthorityProvider(),
+            new NullToolEvidenceSink(),
+            composition.Admission,
+            clientFactory,
+            composition.Authority,
+            effectAuthorityBoundary: null)
     {
     }
 
@@ -106,6 +130,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     /// <param name="capabilityAdmissionService">The exact capability effect-boundary revalidator.</param>
     /// <param name="clientFactory">The client factory.</param>
     /// <param name="capabilityAuthorityTransaction">The optional capability-authority transaction shared with admission and governed skill mutation.</param>
+    /// <param name="effectAuthorityBoundary">The fresh exact-reference authority boundary that fences provider transport.</param>
     public CustomLoopInferenceAttemptExecutor(
         LlmInferenceClientOptions options,
         IToolApprovalPrompt approvalPrompt,
@@ -113,7 +138,8 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         ICustomLoopToolEvidenceSink evidenceSink,
         ICapabilityAdmissionService capabilityAdmissionService,
         CustomLoopInferenceClientFactory? clientFactory = null,
-        ICapabilityAuthorityTransaction? capabilityAuthorityTransaction = null)
+        ICapabilityAuthorityTransaction? capabilityAuthorityTransaction = null,
+        IGovernedLoopEffectAuthorityBoundary? effectAuthorityBoundary = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(approvalPrompt);
@@ -134,6 +160,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         _evidenceSink = evidenceSink;
         _capabilityAdmissionService = capabilityAdmissionService;
         _capabilityAuthorityTransaction = capabilityAuthorityTransaction ?? new CapabilityAuthorityTransaction(_paths);
+        _effectAuthorityBoundary = effectAuthorityBoundary;
         _toolResultRetentionStore = new ToolResultRetentionStore(_paths);
     }
 
@@ -172,17 +199,29 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
     {
         ArgumentNullException.ThrowIfNull(request);
-        ArgumentNullException.ThrowIfNull(request.CapabilityAdmission);
-        var allowedCapabilities = LoopCapabilityRequirements.GetAssignedCapabilityIds(request.CapabilityAdmission.Requirements);
-        var currentCapabilities = await _capabilityAdmissionService.RevalidateAsync(request.CapabilityAdmission, allowedCapabilities, cancellationToken);
-        if (!currentCapabilities.IsValid)
+        ValidateRequestEnvelope(request, _options.Surface);
+        var legacyDispatch = IsLegacyDispatch(request);
+        GovernedLoopEffectAuthorityRequest? providerAuthorityRequest = null;
+        if (legacyDispatch)
         {
-            throw new InvalidOperationException($"Capability authority changed before provider dispatch: {currentCapabilities.Detail}");
+            var allowedCapabilities = LoopCapabilityRequirements.GetAssignedCapabilityIds(request.CapabilityAdmission!.Requirements);
+            var currentCapabilities = await _capabilityAdmissionService.RevalidateAsync(
+                request.CapabilityAdmission,
+                allowedCapabilities,
+                cancellationToken);
+            if (!currentCapabilities.IsValid)
+            {
+                throw new InvalidOperationException($"Capability authority changed before provider dispatch: {currentCapabilities.Detail}");
+            }
+        }
+        else
+        {
+            providerAuthorityRequest = ResolveProviderAuthorityRequest(request);
         }
 
         var authority = request.AuthoritySnapshot ?? await _authorityProvider.ResolveAsync(request.RoleId, request.AdmittedToolAssignments, cancellationToken);
         request = request with { AuthoritySnapshot = authority };
-        ValidateRequest(request, _options.Surface);
+        ValidateAuthoritySnapshot(request);
         BoundedCorrelatedToolBroker? boundedBroker = null;
         IToolBroker? toolBroker = null;
         if (request.AllowTools)
@@ -191,10 +230,64 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             var permissionService = new ReloadingToolPermissionService(_paths, new PermissionPolicyStore());
             var observer = new CorrelatedToolEvidenceObserver(_evidenceSink, request);
             var retention = new ToolResultRetentionService(_auditLog, loopDefinition, _toolResultRetentionStore);
-            var revalidator = new CustomLoopToolActuationAuthorityRevalidator(_authorityProvider, request, observer, _capabilityAdmissionService);
             var mutationBoundary = new CapabilityAuthorityWorkspaceMutationCommitBoundary(_paths, _capabilityAuthorityTransaction);
-            var broker = new ToolBroker(_paths, permissionService, _approvalPrompt, new LocalWorkspaceClient(_paths, mutationBoundary), _auditLog, loopDefinition, _toolResultRetentionStore, observer, revalidator);
-            boundedBroker = new BoundedCorrelatedToolBroker(broker, _auditLog, _authorityProvider, retention, observer, _paths, request);
+            if (legacyDispatch)
+            {
+                var revalidator = new CustomLoopToolActuationAuthorityRevalidator(
+                    _authorityProvider,
+                    request,
+                    observer,
+                    _capabilityAdmissionService);
+                var broker = new ToolBroker(
+                    _paths,
+                    permissionService,
+                    _approvalPrompt,
+                    new LocalWorkspaceClient(_paths, mutationBoundary),
+                    _auditLog,
+                    loopDefinition,
+                    _toolResultRetentionStore,
+                    governanceObserver: observer,
+                    actuationAuthorityRevalidator: revalidator);
+                boundedBroker = new BoundedCorrelatedToolBroker(
+                    broker,
+                    _auditLog,
+                    _authorityProvider,
+                    retention,
+                    observer,
+                    _paths,
+                    request);
+            }
+            else
+            {
+                var actuationAuthorityBoundary = new GovernedLoopToolActuationAuthorityBoundary(
+                    _effectAuthorityBoundary!,
+                    request.AdmissionReceipt!,
+                    request.ExecutionBinding!,
+                    request.GraphArtifact!,
+                    request.StepId,
+                    request.Attempt,
+                    request.AttemptCorrelationId);
+                var broker = new ToolBroker(
+                    _paths,
+                    permissionService,
+                    _approvalPrompt,
+                    new LocalWorkspaceClient(_paths, mutationBoundary),
+                    _auditLog,
+                    loopDefinition,
+                    _toolResultRetentionStore,
+                    governanceObserver: observer,
+                    actuationAuthorityBoundary: actuationAuthorityBoundary);
+                boundedBroker = new BoundedCorrelatedToolBroker(
+                    broker,
+                    _auditLog,
+                    _authorityProvider,
+                    retention,
+                    observer,
+                    _effectAuthorityBoundary!,
+                    _paths,
+                    request);
+            }
+
             toolBroker = boundedBroker;
         }
 
@@ -202,7 +295,9 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         var usesInjectedFactory = _clientFactory is not null;
         var client = usesInjectedFactory
             ? _clientFactory!(effectiveOptions, toolBroker)
-            : new LlmInferenceClient(effectiveOptions, toolBroker, providerRequestStarted: providerRequestStarted);
+            : legacyDispatch
+                ? new LlmInferenceClient(effectiveOptions, toolBroker, providerRequestStarted: providerRequestStarted)
+                : new LlmInferenceClient(effectiveOptions, toolBroker);
         if (client is null)
         {
             throw new InvalidOperationException("The custom-loop inference client factory returned null.");
@@ -214,12 +309,25 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
 
         try
         {
-            if (usesInjectedFactory)
+            LlmInferenceResponse response;
+            if (legacyDispatch)
             {
-                providerRequestStarted?.Invoke();
+                if (usesInjectedFactory)
+                {
+                    providerRequestStarted?.Invoke();
+                }
+
+                response = await client.GenerateAsync(request.InferenceRequest, cancellationToken: cancellationToken);
+            }
+            else
+            {
+                response = await client.GenerateAsync(
+                    request.InferenceRequest,
+                    responseChunkHandler: null,
+                    cancellationToken,
+                    CreateProviderTransportBoundary(providerAuthorityRequest!, providerRequestStarted));
             }
 
-            var response = await client.GenerateAsync(request.InferenceRequest, cancellationToken: cancellationToken);
             return new CustomLoopInferenceAttemptResult(
                 response.OutputText,
                 response.Surface.ToString(),
@@ -245,6 +353,274 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
                 // Attempt outcome is authoritative; per-attempt transport cleanup must not replace it.
             }
         }
+    }
+
+    private bool IsLegacyDispatch(CustomLoopInferenceAttemptRequest request)
+        => _effectAuthorityBoundary is null
+            && request.AdmissionReceipt is null
+            && request.ExecutionBinding is null
+            && request.GraphArtifact is null;
+
+    private GovernedLoopEffectAuthorityRequest ResolveProviderAuthorityRequest(CustomLoopInferenceAttemptRequest request)
+    {
+        var hasAdmission = request.AdmissionReceipt is not null;
+        var hasExecution = request.ExecutionBinding is not null;
+        var hasArtifact = request.GraphArtifact is not null;
+        if (!hasAdmission && !hasExecution && !hasArtifact)
+        {
+            throw Stopped(
+                "Canonical provider dispatch requires the complete immutable admission, execution-binding, and graph-artifact proof.",
+                GovernedLoopEffectAuthorityExecutionStatus.InvalidRequest,
+                GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown,
+                decision: null);
+        }
+
+        if (!hasAdmission || !hasExecution || !hasArtifact || !TryCreateProviderAuthorityRequest(request, out var authorityRequest))
+        {
+            throw Stopped(
+                "The canonical provider authority proof was incomplete, substituted, or inconsistent; no transport was created.",
+                GovernedLoopEffectAuthorityExecutionStatus.InvalidRequest,
+                GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown,
+                decision: null);
+        }
+
+        if (_effectAuthorityBoundary is null)
+        {
+            throw Stopped(
+                "No fresh execution-authority boundary was composed for canonical provider dispatch.",
+                GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable,
+                GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown,
+                decision: null);
+        }
+
+        return authorityRequest!;
+    }
+
+    private static bool TryCreateProviderAuthorityRequest(
+        CustomLoopInferenceAttemptRequest request,
+        out GovernedLoopEffectAuthorityRequest? authorityRequest)
+    {
+        authorityRequest = null;
+        try
+        {
+            var admission = request.AdmissionReceipt!;
+            var execution = request.ExecutionBinding!;
+            var artifact = request.GraphArtifact!;
+            if (!GovernedLoopAdmissionValidator.Validate(admission).IsValid
+                || !Equals(execution, admission.Evidence.Binding)
+                || !string.Equals(execution.RunId, request.RunId, StringComparison.Ordinal)
+                || !string.Equals(artifact.Graph.GraphId, request.LoopId, StringComparison.Ordinal)
+                || !string.Equals(artifact.Graph.OwningRole.Identity.RoleId, request.RoleId, StringComparison.Ordinal)
+                || !string.Equals(GovernedLoopGraphRevisionContractHash.ComputeArtifactHash(artifact), artifact.ArtifactHash, StringComparison.Ordinal)
+                || !string.Equals(artifact.ArtifactHash, admission.Intent.GraphArtifactHash, StringComparison.Ordinal)
+                || !string.Equals(artifact.LayoutHash, admission.Intent.GraphLayoutHash, StringComparison.Ordinal)
+                || !Equals(artifact.RevisionArtifact.Revision, execution.Revision)
+                || !Equals(admission.Intent.Publication.Revision, execution.Revision)
+                || !Equals(artifact.Graph.OwningRole, admission.Intent.Role)
+                || !CapabilityAdmissionMatches(request.CapabilityAdmission, admission.Evidence.CapabilityAdmission)
+                || request.IsExit
+                || !CustomLoopArtifactIdentifier.IsValid(request.StepId, GovernedLoopEffectAuthorityContractLimits.MaxIdentifierCharacters)
+                || !CustomLoopArtifactIdentifier.IsValid(request.AttemptCorrelationId, GovernedLoopEffectAuthorityContractLimits.MaxIdentifierCharacters)
+                || request.Attempt is < 1 or > GovernedLoopEffectAuthorityContractLimits.MaxNodeAttempt)
+            {
+                return false;
+            }
+
+            var node = artifact.Graph.Nodes.SingleOrDefault(candidate => string.Equals(candidate.Id, request.StepId, StringComparison.Ordinal));
+            if (node is null || !Equals(node.Descriptor, EmbodySense.Core.Application.Loops.Sequential.GovernedLoopSequentialNodeDescriptors.ProviderInference))
+            {
+                return false;
+            }
+
+            var nodeCapabilities = node.AuthorityCeiling.CapabilityIds;
+            var requiresWorkspace = nodeCapabilities.Contains(WorkspaceCommandCapabilityId, StringComparer.Ordinal);
+            if (!nodeCapabilities.Contains(ModelInferenceCapabilityId, StringComparer.Ordinal)
+                || nodeCapabilities.Any(value => !string.Equals(value, ModelInferenceCapabilityId, StringComparison.Ordinal)
+                    && !string.Equals(value, WorkspaceCommandCapabilityId, StringComparison.Ordinal))
+                || request.AllowTools && !requiresWorkspace)
+            {
+                return false;
+            }
+
+            var requiredIds = requiresWorkspace
+                ? new[] { ModelInferenceCapabilityId, WorkspaceCommandCapabilityId }
+                : [ModelInferenceCapabilityId];
+            var pins = requiredIds.Select(id => admission.Evidence.CapabilityAdmission.Pins.SingleOrDefault(pin => string.Equals(pin.DescriptorIdentity.Id.Value, id, StringComparison.Ordinal))).ToArray();
+            if (pins.Any(pin => pin is null)
+                || pins.Select(pin => pin!.DescriptorIdentity.Id.Value).Distinct(StringComparer.Ordinal).Count() != requiredIds.Length)
+            {
+                return false;
+            }
+
+            var requiredPins = pins.Select(pin => pin!).ToArray();
+            var requiredIdentities = requiredPins.Select(pin => pin.DescriptorIdentity).ToArray();
+            if (!admission.Evidence.EffectiveAuthority.Capabilities.ToHashSet().IsSupersetOf(requiredIdentities))
+            {
+                return false;
+            }
+
+            var admittedAuthority = admission.Evidence.EffectiveAuthority;
+            var requiredAuthority = new AuthorityCeiling(
+                requiredIdentities,
+                admittedAuthority.DataClasses,
+                MaxTargetCount: requiresWorkspace ? 1 : 0,
+                requiresWorkspace ? CapabilitySideEffectClass.ReadOnly : CapabilitySideEffectClass.None,
+                AllowsRecurrence: false,
+                AllowsExternalPublication: false,
+                AllowsIrreversibleAction: false);
+            var effectOperationId = "provider-" + CustomLoopTraceContentHash.Compute(
+                $"provider-transport-v1\n{request.RunId}\n{request.StepId}\n{request.Attempt}\n{request.AttemptCorrelationId}");
+            authorityRequest = new GovernedLoopEffectAuthorityRequest(
+                admission,
+                execution,
+                artifact,
+                request.StepId,
+                request.Attempt,
+                effectOperationId,
+                request.AttemptCorrelationId,
+                GovernedLoopEffectBoundaryKind.ProviderTransport,
+                requiredAuthority,
+                requiredPins);
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or NotSupportedException)
+        {
+            authorityRequest = null;
+            return false;
+        }
+    }
+
+    private InferenceProviderTransportCommitBoundary CreateProviderTransportBoundary(
+        GovernedLoopEffectAuthorityRequest authorityRequest,
+        Action? injectedProviderRequestStarted)
+    {
+        return async (commitTransportWrite, cancellationToken) =>
+        {
+            ArgumentNullException.ThrowIfNull(commitTransportWrite);
+            var boundaryOpen = 1;
+            var commitCount = 0;
+            var commitCompleted = 0;
+            GovernedLoopEffectAuthorityExecutionResult<bool>? result = null;
+            using var boundaryLifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            try
+            {
+                result = await _effectAuthorityBoundary!.ExecuteAsync(
+                    authorityRequest,
+                    async token =>
+                    {
+                        // Yield before crossing transport so a boundary that captures or starts the callback
+                        // without awaiting it closes first and cannot dispatch after returning.
+                        await Task.Yield();
+                        if (Volatile.Read(ref boundaryOpen) == 0 || Interlocked.Increment(ref commitCount) != 1)
+                        {
+                            throw new InvalidOperationException("The provider transport callback may run exactly once and only while its authority boundary is open.");
+                        }
+
+                        using var commitLifetime = CancellationTokenSource.CreateLinkedTokenSource(token, boundaryLifetime.Token);
+                        try
+                        {
+                            commitLifetime.Token.ThrowIfCancellationRequested();
+                            injectedProviderRequestStarted?.Invoke();
+                            await commitTransportWrite(commitLifetime.Token);
+                            return true;
+                        }
+                        finally
+                        {
+                            Volatile.Write(ref commitCompleted, 1);
+                        }
+                    },
+                    cancellationToken);
+            }
+            finally
+            {
+                Volatile.Write(ref boundaryOpen, 0);
+                await boundaryLifetime.CancelAsync();
+            }
+
+            if (result is null)
+            {
+                throw AuthorityProtocolStopped();
+            }
+
+            var observedCommitCount = Volatile.Read(ref commitCount);
+            var observedCommitCompleted = Volatile.Read(ref commitCompleted);
+            if (result.Status == GovernedLoopEffectAuthorityExecutionStatus.Decided
+                && GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(result.Decision, authorityRequest)
+                && result.Decision!.Disposition == GovernedLoopEffectAuthorityDisposition.Direct
+                && result.EvidenceStatus == GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended
+                && result.CommitInvoked
+                && result.Result is true
+                && observedCommitCount == 1
+                && observedCommitCompleted == 1)
+            {
+                return;
+            }
+
+            if (!IsCoherentStoppedResult(result, authorityRequest, observedCommitCount, observedCommitCompleted))
+            {
+                throw AuthorityProtocolStopped();
+            }
+
+            throw Stopped(result.Detail, result.Status, result.EvidenceStatus, result.Decision);
+        };
+    }
+
+    private static bool IsCoherentStoppedResult(
+        GovernedLoopEffectAuthorityExecutionResult<bool> result,
+        GovernedLoopEffectAuthorityRequest request,
+        int commitCount,
+        int commitCompleted)
+    {
+        if (commitCount != 0 || commitCompleted != 0 || result.CommitInvoked || result.Result is true)
+        {
+            return false;
+        }
+
+        var exactDecision = GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(result.Decision, request);
+        return result.Status switch
+        {
+            GovernedLoopEffectAuthorityExecutionStatus.InvalidRequest
+                or GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable => result.Decision is null
+                    && result.EvidenceStatus == GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown,
+            GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected => exactDecision
+                && result.Decision!.Disposition != GovernedLoopEffectAuthorityDisposition.Direct
+                && result.EvidenceStatus != GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown
+                && Enum.IsDefined(result.EvidenceStatus),
+            GovernedLoopEffectAuthorityExecutionStatus.Decided => exactDecision
+                && result.Decision!.Disposition != GovernedLoopEffectAuthorityDisposition.Direct
+                && result.EvidenceStatus is GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended
+                    or GovernedLoopEffectAuthorityEvidenceStoreStatus.AlreadyPresent,
+            _ => false,
+        };
+    }
+
+    private static GovernedLoopEffectAuthorityStoppedException AuthorityProtocolStopped()
+        => Stopped(
+            "The provider authority boundary returned a missing, malformed, mismatched, or incomplete protocol result; the exact transport outcome could not be proved.",
+            GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable,
+            GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown,
+            decision: null);
+
+    private static bool CapabilityAdmissionMatches(CapabilityAdmissionSnapshot? left, CapabilityAdmissionSnapshot right)
+    {
+        return left is not null
+            && CapabilityAdmissionSnapshotValidator.Validate(left) is null
+            && left.SchemaVersion == right.SchemaVersion
+            && string.Equals(left.WorkspaceScopeId, right.WorkspaceScopeId, StringComparison.Ordinal)
+            && string.Equals(left.RequirementsHash, right.RequirementsHash, StringComparison.Ordinal)
+            && left.AdmittedAtUtc == right.AdmittedAtUtc
+            && left.Pins.SequenceEqual(right.Pins)
+            && left.Evidence.SequenceEqual(right.Evidence);
+    }
+
+    private static GovernedLoopEffectAuthorityStoppedException Stopped(
+        string detail,
+        GovernedLoopEffectAuthorityExecutionStatus status,
+        GovernedLoopEffectAuthorityEvidenceStoreStatus evidenceStatus,
+        GovernedLoopEffectAuthorityDecision? decision)
+    {
+        var safeDetail = string.IsNullOrWhiteSpace(detail) ? "The governed provider effect was stopped before transport." : detail;
+        return new GovernedLoopEffectAuthorityStoppedException(safeDetail, status, evidenceStatus, decision);
     }
 
     /// <summary>
@@ -289,7 +665,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         };
     }
 
-    private static void ValidateRequest(CustomLoopInferenceAttemptRequest request, LlmInferenceSurface configuredSurface)
+    private static void ValidateRequestEnvelope(CustomLoopInferenceAttemptRequest request, LlmInferenceSurface configuredSurface)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(request.RunId);
@@ -302,7 +678,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         ArgumentException.ThrowIfNullOrWhiteSpace(request.ModelSnapshot.Provider);
         ArgumentNullException.ThrowIfNull(request.AdmittedToolAssignments);
         ArgumentNullException.ThrowIfNull(request.InferenceRequest);
-        ArgumentNullException.ThrowIfNull(request.AuthoritySnapshot);
+        ArgumentNullException.ThrowIfNull(request.CapabilityAdmission);
 
         if (request.DefinitionVersion < 1 || request.Iteration < 1 || request.Attempt < 1)
         {
@@ -330,13 +706,9 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             throw new ArgumentException("Admitted tool assignments must be unique implemented list, read, or search values.", nameof(request));
         }
 
-        if (!request.AuthoritySnapshot.IsValid
-            || !string.Equals(request.AuthoritySnapshot.RoleId, request.RoleId, StringComparison.Ordinal)
-            || request.AuthoritySnapshot.AdmittedMaximum.Length != request.AdmittedToolAssignments.Count
-            || request.AuthoritySnapshot.AdmittedMaximum.Any(value => !request.AdmittedToolAssignments.Contains(value))
-            || request.AuthoritySnapshot.EffectiveAssignments.Any(value => !request.AdmittedToolAssignments.Contains(value)))
+        if (request.AllowTools && request.AdmittedToolAssignments.Count == 0)
         {
-            throw new ArgumentException("The attempt authority snapshot is invalid or widens the immutable admitted maximum.", nameof(request));
+            throw new ArgumentException("Tool exposure requires at least one immutable admitted tool assignment.", nameof(request));
         }
 
         if (request.IsExit)
@@ -346,7 +718,25 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
                 throw new ArgumentException("Exit attempts must be tool-less and use the deterministic `exit` step id.", nameof(request));
             }
         }
-        else if (request.AllowTools != request.AuthoritySnapshot.EffectiveAssignments.Length > 0 || string.Equals(request.StepId, "exit", StringComparison.Ordinal))
+        else if (string.Equals(request.StepId, "exit", StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Inference attempts cannot use the deterministic `exit` step id.", nameof(request));
+        }
+    }
+
+    private static void ValidateAuthoritySnapshot(CustomLoopInferenceAttemptRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request.AuthoritySnapshot);
+        if (!request.AuthoritySnapshot.IsValid
+            || !string.Equals(request.AuthoritySnapshot.RoleId, request.RoleId, StringComparison.Ordinal)
+            || request.AuthoritySnapshot.AdmittedMaximum.Length != request.AdmittedToolAssignments.Count
+            || request.AuthoritySnapshot.AdmittedMaximum.Any(value => !request.AdmittedToolAssignments.Contains(value))
+            || request.AuthoritySnapshot.EffectiveAssignments.Any(value => !request.AdmittedToolAssignments.Contains(value)))
+        {
+            throw new ArgumentException("The attempt authority snapshot is invalid or widens the immutable admitted maximum.", nameof(request));
+        }
+
+        if (request.AllowTools != request.AuthoritySnapshot.EffectiveAssignments.Length > 0)
         {
             throw new ArgumentException("Inference attempt tool exposure must exactly match the current effective intersection.", nameof(request));
         }

@@ -1,3 +1,7 @@
+using System.Globalization;
+using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
+using EmbodySense.Core.Application.Loops.Execution.Authority;
+using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
@@ -11,6 +15,9 @@ using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Authority.Grants;
+using EmbodySense.Core.Common.Loops.Execution.Authority;
+using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -31,6 +38,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
     private readonly ToolResultRetentionService _toolResultRetention;
     private readonly CorrelatedToolEvidenceObserver _observer;
+    private readonly IGovernedLoopEffectAuthorityBoundary? _effectAuthorityBoundary;
     private readonly WorkspacePaths _paths;
     private readonly CustomLoopInferenceAttemptRequest _attempt;
     private readonly int _toolRequestsUsedInRun;
@@ -48,6 +56,39 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
     /// <param name="authorityProvider">The authority provider.</param>
     /// <param name="toolResultRetention">The tool result retention.</param>
     /// <param name="observer">The observer.</param>
+    /// <param name="effectAuthorityBoundary">The exact durable effect-authority boundary used only for tool intake.</param>
+    /// <param name="paths">The paths.</param>
+    /// <param name="request">The request.</param>
+    public BoundedCorrelatedToolBroker(
+        IToolBroker inner,
+        IAuditLog auditLog,
+        ICustomLoopToolAuthorityProvider authorityProvider,
+        ToolResultRetentionService toolResultRetention,
+        CorrelatedToolEvidenceObserver observer,
+        IGovernedLoopEffectAuthorityBoundary effectAuthorityBoundary,
+        WorkspacePaths paths,
+        CustomLoopInferenceAttemptRequest request)
+        : this(
+            inner,
+            auditLog,
+            authorityProvider,
+            toolResultRetention,
+            observer,
+            effectAuthorityBoundary ?? throw new ArgumentNullException(nameof(effectAuthorityBoundary)),
+            paths,
+            request,
+            governedAuthorityRequired: true)
+    {
+    }
+
+    /// <summary>
+    /// Wraps the retained legacy custom-loop broker without adding canonical graph authority semantics.
+    /// </summary>
+    /// <param name="inner">The inner.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="authorityProvider">The authority provider.</param>
+    /// <param name="toolResultRetention">The tool result retention.</param>
+    /// <param name="observer">The observer.</param>
     /// <param name="paths">The paths.</param>
     /// <param name="request">The request.</param>
     public BoundedCorrelatedToolBroker(
@@ -58,15 +99,43 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         CorrelatedToolEvidenceObserver observer,
         WorkspacePaths paths,
         CustomLoopInferenceAttemptRequest request)
+        : this(
+            inner,
+            auditLog,
+            authorityProvider,
+            toolResultRetention,
+            observer,
+            effectAuthorityBoundary: null,
+            paths,
+            request,
+            governedAuthorityRequired: false)
     {
-        _inner = inner;
-        _auditLog = auditLog;
-        _authorityProvider = authorityProvider;
-        _toolResultRetention = toolResultRetention;
-        _observer = observer;
-        _paths = paths;
-        _attempt = request;
+    }
+
+    private BoundedCorrelatedToolBroker(
+        IToolBroker inner,
+        IAuditLog auditLog,
+        ICustomLoopToolAuthorityProvider authorityProvider,
+        ToolResultRetentionService toolResultRetention,
+        CorrelatedToolEvidenceObserver observer,
+        IGovernedLoopEffectAuthorityBoundary? effectAuthorityBoundary,
+        WorkspacePaths paths,
+        CustomLoopInferenceAttemptRequest request,
+        bool governedAuthorityRequired)
+    {
+        _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+        _auditLog = auditLog ?? throw new ArgumentNullException(nameof(auditLog));
+        _authorityProvider = authorityProvider ?? throw new ArgumentNullException(nameof(authorityProvider));
+        _toolResultRetention = toolResultRetention ?? throw new ArgumentNullException(nameof(toolResultRetention));
+        _observer = observer ?? throw new ArgumentNullException(nameof(observer));
+        _effectAuthorityBoundary = effectAuthorityBoundary;
+        _paths = paths ?? throw new ArgumentNullException(nameof(paths));
+        _attempt = request ?? throw new ArgumentNullException(nameof(request));
         _toolRequestsUsedInRun = request.ToolRequestsUsedInRun;
+        if (governedAuthorityRequired && _effectAuthorityBoundary is null)
+        {
+            throw new ArgumentNullException(nameof(effectAuthorityBoundary));
+        }
     }
 
     /// <summary>
@@ -111,7 +180,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         ToolRequest boundedRequest;
         try
         {
-            boundedRequest = BoundRequest(request);
+            boundedRequest = BoundRequest(request, requestOrdinal);
         }
         catch (CustomLoopToolEvidenceIntegrityException exception)
         {
@@ -175,10 +244,163 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
             return await DenyAuthorityAsync(correlatedRequest, authority, resolvedTarget, requestOrdinal, cancellationToken);
         }
 
+        if (_effectAuthorityBoundary is not null)
+        {
+            var intake = await EvaluateIntakeAuthorityAsync(correlatedRequest, resolvedTarget, cancellationToken);
+            if (intake.Decision!.Disposition == GovernedLoopEffectAuthorityDisposition.Deny)
+            {
+                var detail = $"Current governed-loop authority denied the exact workspace-tool intake ({intake.Decision.Reason.ToString().ToLowerInvariant()}).";
+                return await DenyAuthorityAsync(correlatedRequest, authority, resolvedTarget, requestOrdinal, cancellationToken, detail);
+            }
+
+            if (intake.Decision.Disposition != GovernedLoopEffectAuthorityDisposition.Direct)
+            {
+                throw Stopped(intake);
+            }
+        }
+
         var result = await _inner.ExecuteAsync(correlatedRequest, cancellationToken);
         await _observer.RecordReturnedAsync(result, cancellationToken);
         return result;
     }
+
+    private async Task<GovernedLoopEffectAuthorityExecutionResult<bool>> EvaluateIntakeAuthorityAsync(
+        ToolRequest request,
+        string resolvedTarget,
+        CancellationToken cancellationToken)
+    {
+        var authorityRequest = WorkspaceToolEffectAuthorityRequestFactory.Create(
+            _attempt.AdmissionReceipt!,
+            _attempt.ExecutionBinding!,
+            _attempt.GraphArtifact!,
+            _attempt.StepId,
+            _attempt.Attempt,
+            _attempt.AttemptCorrelationId,
+            request,
+            resolvedTarget,
+            GovernedLoopEffectBoundaryKind.WorkspaceToolIntake);
+        var callbackOpen = 1;
+        var callbackCount = 0;
+        GovernedLoopEffectAuthorityExecutionResult<bool>? result;
+        try
+        {
+            result = await _effectAuthorityBoundary!.ExecuteAsync(
+                authorityRequest,
+                token =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    if (Volatile.Read(ref callbackOpen) == 0 || Interlocked.Increment(ref callbackCount) != 1)
+                    {
+                        throw AuthorityProtocolStopped("The workspace-tool intake callback ran more than once or after its authority boundary returned.");
+                    }
+
+                    return Task.FromResult(true);
+                },
+                cancellationToken);
+        }
+        finally
+        {
+            Volatile.Write(ref callbackOpen, 0);
+        }
+
+        ValidateIntakeProtocol(authorityRequest, result, Volatile.Read(ref callbackCount));
+        if (result!.Status != GovernedLoopEffectAuthorityExecutionStatus.Decided
+            || result.Decision!.Disposition == GovernedLoopEffectAuthorityDisposition.Pause)
+        {
+            throw Stopped(result);
+        }
+
+        return result;
+    }
+
+    private static void ValidateIntakeProtocol(
+        GovernedLoopEffectAuthorityRequest request,
+        GovernedLoopEffectAuthorityExecutionResult<bool>? result,
+        int callbackCount)
+    {
+        if (result is null
+            || !Enum.IsDefined(result.Status)
+            || !Enum.IsDefined(result.EvidenceStatus)
+            || callbackCount is < 0 or > 1
+            || result.CommitInvoked != (callbackCount == 1)
+            || result.Result != (callbackCount == 1))
+        {
+            throw AuthorityProtocolStopped("The workspace-tool intake boundary returned a malformed or callback-inconsistent result.");
+        }
+
+        if (result.Status == GovernedLoopEffectAuthorityExecutionStatus.Decided)
+        {
+            if (result.Decision is null
+                || !GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(result.Decision, request)
+                || result.EvidenceStatus != GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended)
+            {
+                throw AuthorityProtocolStopped("A decided workspace-tool intake did not carry exact newly appended authority evidence.");
+            }
+
+            if (result.Decision.Disposition == GovernedLoopEffectAuthorityDisposition.Direct)
+            {
+                if (callbackCount != 1 || !result.CommitInvoked || !result.Result)
+                {
+                    throw AuthorityProtocolStopped("Direct workspace-tool intake did not complete its exact single-use callback.");
+                }
+            }
+            else if (callbackCount != 0 || result.CommitInvoked || result.Result)
+            {
+                throw AuthorityProtocolStopped("A denied or paused workspace-tool intake invoked its direct callback.");
+            }
+
+            return;
+        }
+
+        if (callbackCount != 0 || result.CommitInvoked || result.Result)
+        {
+            throw AuthorityProtocolStopped("A stopped workspace-tool intake crossed its direct callback.");
+        }
+
+        if (result.Status is GovernedLoopEffectAuthorityExecutionStatus.InvalidRequest or GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable)
+        {
+            if (result.Decision is not null || result.EvidenceStatus != GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown)
+            {
+                throw AuthorityProtocolStopped("An invalid or unavailable workspace-tool intake carried contradictory authority evidence.");
+            }
+
+            return;
+        }
+
+        if (result.Status == GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected)
+        {
+            if (result.EvidenceStatus == GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown
+                || result.Decision is not null && !GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(result.Decision, request))
+            {
+                throw AuthorityProtocolStopped("An evidence-rejected workspace-tool intake carried malformed or mismatched evidence.");
+            }
+
+            return;
+        }
+
+        throw AuthorityProtocolStopped("The workspace-tool intake boundary returned an unsupported execution status.");
+    }
+
+    private static GovernedLoopEffectAuthorityStoppedException Stopped(GovernedLoopEffectAuthorityExecutionResult<bool> result)
+        => new(
+            BoundedStopDetail(result.Detail),
+            result.Status,
+            result.EvidenceStatus,
+            result.Decision);
+
+    private static string BoundedStopDetail(string? detail)
+        => string.IsNullOrWhiteSpace(detail)
+            || detail.Length > CustomLoopLimits.MaxToolGovernanceDetailCharacters
+            || detail.IndexOf('\0') >= 0
+                ? "The workspace-tool intake stopped before inner governance or actuation."
+                : detail;
+
+    private static GovernedLoopEffectAuthorityStoppedException AuthorityProtocolStopped(string detail)
+        => new(
+            detail,
+            GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable,
+            GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown,
+            decision: null);
 
     private Task AuditMalformedRequestAsync(ToolRequest request, int requestOrdinal, string detail, CancellationToken cancellationToken)
     {
@@ -237,12 +459,18 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         return result;
     }
 
-    private async Task<ToolResult> DenyAuthorityAsync(ToolRequest request, CustomLoopToolAuthoritySnapshot authority, string resolvedTarget, int requestOrdinal, CancellationToken cancellationToken)
+    private async Task<ToolResult> DenyAuthorityAsync(
+        ToolRequest request,
+        CustomLoopToolAuthoritySnapshot authority,
+        string resolvedTarget,
+        int requestOrdinal,
+        CancellationToken cancellationToken,
+        string? detailOverride = null)
     {
         var requestId = Guid.NewGuid().ToString("N");
-        var detail = !authority.IsValid
+        var detail = detailOverride ?? (!authority.IsValid
             ? authority.Detail
-            : "The requested command is outside the immutable admitted maximum, current directory-role ceiling, implemented catalog, or attempt-start authority.";
+            : "The requested command is outside the immutable admitted maximum, current directory-role ceiling, implemented catalog, or attempt-start authority.");
         await RecordAuthorityAsync(requestId, request, authority, resolvedTarget, requestOrdinal, AuditSchema.Outcomes.Denied, detail, null, null, cancellationToken);
         var governance = new ToolGovernanceEvidence(ToolAuthorityDecision.Denied, detail, null, null, null, null, ToolApprovalDecision.NotEvaluated, null, null);
         await _observer.ObserveDecisionAsync(requestId, request, resolvedTarget, governance, cancellationToken);
@@ -317,7 +545,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
             authority.CatalogHash);
     }
 
-    private ToolRequest BoundRequest(ToolRequest request)
+    private ToolRequest BoundRequest(ToolRequest request, int requestOrdinal)
     {
         if (!Enum.IsDefined(request.Command))
         {
@@ -327,9 +555,24 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         ValidateBounded(request.TargetPath, nameof(request.TargetPath), CustomLoopLimits.MaxGovernedToolTargetCharacters, required: true);
         ValidateBounded(request.Content, nameof(request.Content), CustomLoopLimits.MaxGovernedToolArgumentCharacters, required: false);
         ValidateBounded(request.Pattern, nameof(request.Pattern), CustomLoopLimits.MaxGovernedToolArgumentCharacters, required: false);
-        var correlationId = string.IsNullOrWhiteSpace(request.CorrelationId) ? Guid.NewGuid().ToString("N") : request.CorrelationId;
+        var correlationId = string.IsNullOrWhiteSpace(request.CorrelationId)
+            ? CreateDeterministicCorrelationId(requestOrdinal)
+            : request.CorrelationId;
         ValidateBounded(correlationId, nameof(request.CorrelationId), CustomLoopLimits.MaxArtifactIdCharacters, required: true);
         return request with { CorrelationId = correlationId, AuditCorrelation = null };
+    }
+
+    private string CreateDeterministicCorrelationId(int requestOrdinal)
+    {
+        var canonical = string.Join(
+            '\n',
+            "workspace-tool-correlation-v1",
+            _attempt.RunId,
+            _attempt.StepId,
+            _attempt.Attempt.ToString(CultureInfo.InvariantCulture),
+            _attempt.AttemptCorrelationId,
+            requestOrdinal.ToString(CultureInfo.InvariantCulture));
+        return "workspace-tool-correlation-" + CustomLoopTraceContentHash.Compute(canonical);
     }
 
     private string ResolveTarget(string targetPath)

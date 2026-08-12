@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.Loops.Admission.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Tests.Loops.Admission;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
@@ -57,21 +58,21 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
     }
 
     [Fact]
-    public async Task Guard_rejects_each_adapter_coordinate_substitution_with_a_valid_recomputed_binding_hash()
+    public async Task Guard_rejects_each_adapter_coordinate_substitution_against_the_retained_receipt()
     {
         var context = await ContextAsync();
         var original = context.AdapterBinding;
         var substitutions = new (GovernedLoopSequentialRunAnchorStatus Status, GovernedLoopSequentialAdapterBinding Binding)[]
         {
-            (GovernedLoopSequentialRunAnchorStatus.WorkspaceMismatch, Rehash(original with { WorkspaceId = WorkspaceId('b') })),
-            (GovernedLoopSequentialRunAnchorStatus.OperationMismatch, Rehash(original with { AdmissionOperationId = "admit-other" })),
-            (GovernedLoopSequentialRunAnchorStatus.RequestMismatch, Rehash(original with { AdmissionRequestHash = Hash('b') })),
-            (GovernedLoopSequentialRunAnchorStatus.ReceiptMismatch, Rehash(original with { AdmissionReceiptHash = Hash('c') })),
+            (GovernedLoopSequentialRunAnchorStatus.InvalidAdapterBinding, original with { WorkspaceId = WorkspaceId('b') }),
+            (GovernedLoopSequentialRunAnchorStatus.InvalidAdapterBinding, original with { AdmissionOperationId = "admit-other" }),
+            (GovernedLoopSequentialRunAnchorStatus.InvalidAdapterBinding, original with { AdmissionRequestHash = Hash('b') }),
+            (GovernedLoopSequentialRunAnchorStatus.InvalidAdapterBinding, original with { AdmissionReceiptHash = Hash('c') }),
             (GovernedLoopSequentialRunAnchorStatus.InvocationMismatch, Rehash(original with { InvocationPayloadHash = Hash('d') })),
-            (GovernedLoopSequentialRunAnchorStatus.GraphArtifactMismatch, Rehash(original with { GraphArtifactHash = Hash('e') })),
-            (GovernedLoopSequentialRunAnchorStatus.GraphLayoutMismatch, Rehash(original with { GraphLayoutHash = Hash('f') })),
-            (GovernedLoopSequentialRunAnchorStatus.RunBindingMismatch, Rebind(original, GovernedLoopExecutionBinding.Create(1, "run-other", original.ExecutionBinding.Revision, 1))),
-            (GovernedLoopSequentialRunAnchorStatus.RunBindingMismatch, Rebind(original, GovernedLoopExecutionBinding.Create(1, original.ExecutionBinding.RunId, original.ExecutionBinding.Revision, 2))),
+            (GovernedLoopSequentialRunAnchorStatus.InvalidAdapterBinding, original with { GraphArtifactHash = Hash('e') }),
+            (GovernedLoopSequentialRunAnchorStatus.InvalidAdapterBinding, original with { GraphLayoutHash = Hash('f') }),
+            (GovernedLoopSequentialRunAnchorStatus.InvalidAdapterBinding, Rebind(original, GovernedLoopExecutionBinding.Create(1, "run-other", original.ExecutionBinding.Revision, 1))),
+            (GovernedLoopSequentialRunAnchorStatus.InvalidAdapterBinding, Rebind(original, GovernedLoopExecutionBinding.Create(1, original.ExecutionBinding.RunId, original.ExecutionBinding.Revision, 2))),
         };
 
         foreach (var substitution in substitutions)
@@ -320,6 +321,12 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             1,
             GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
             execution,
+            seedReceipt.Evidence.GrantProfile,
+            new AuthorityGrantBoundary(
+                GovernedLoopSequentialApplicationTestFixture.Now.AddHours(-1),
+                GovernedLoopSequentialApplicationTestFixture.Now.AddHours(1),
+                seedReceipt.Evidence.GrantBoundary.CompletionConstraint),
+            seedReceipt.Evidence.GrantDependencyEvidenceHash,
             seedReceipt.Evidence.EffectiveAuthority,
             seedReceipt.Evidence.CapabilityAdmission,
             GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, seedReceipt.Evidence.EffectiveAuthority, seedReceipt.Evidence.CapabilityAdmission),
@@ -337,6 +344,7 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             intent.WorkspaceId,
             execution,
             request.OperationId,
+            receipt,
             receipt.ContentHash,
             request.RequestHash,
             invocation.ContentHash,
@@ -362,17 +370,18 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
     private static GovernedLoopSequentialAdapterBinding Rebind(
         GovernedLoopSequentialAdapterBinding source,
         GovernedLoopExecutionBinding execution)
-        => GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
+        => new GovernedLoopSequentialAdapterBinding(
             source.SchemaVersion,
             source.WorkspaceId,
             execution,
             source.AdmissionOperationId,
+            source.AdmissionReceipt,
             source.AdmissionReceiptHash,
             source.AdmissionRequestHash,
             source.InvocationPayloadHash,
             source.GraphArtifactHash,
             source.GraphLayoutHash,
-            string.Empty));
+            source.ContentHash);
 
     private static GovernedLoopSequentialNodeEvidenceReceipt Evidence(
         TestContext context,

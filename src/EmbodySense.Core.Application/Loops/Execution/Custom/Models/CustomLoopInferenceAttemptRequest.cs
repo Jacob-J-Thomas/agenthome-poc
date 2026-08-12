@@ -4,6 +4,9 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Loops.Admission.Models;
+using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 
@@ -46,4 +49,13 @@ public sealed record CustomLoopInferenceAttemptRequest(
 {
     /// <summary>Gets the immutable capability pins and resolution evidence admitted for the owning run.</summary>
     public CapabilityAdmissionSnapshot CapabilityAdmission { get; init; } = null!;
+
+    /// <summary>Gets the complete immutable canonical admission proof retained by the sequential binding.</summary>
+    public GovernedLoopAdmissionReceipt? AdmissionReceipt { get; init; }
+
+    /// <summary>Gets the exact canonical run, graph revision, and execution generation.</summary>
+    public GovernedLoopExecutionBinding? ExecutionBinding { get; init; }
+
+    /// <summary>Gets the exact immutable graph artifact whose node ceiling governs this attempt.</summary>
+    public GovernedLoopGraphRevisionArtifact? GraphArtifact { get; init; }
 }

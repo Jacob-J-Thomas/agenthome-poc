@@ -87,6 +87,9 @@ public sealed class GovernedLoopAdmissionContractHashTests
     [Theory]
     [InlineData("intent")]
     [InlineData("binding")]
+    [InlineData("grant-profile")]
+    [InlineData("grant-boundary")]
+    [InlineData("grant-dependencies")]
     [InlineData("authority")]
     [InlineData("capabilities")]
     [InlineData("references")]
@@ -103,6 +106,18 @@ public sealed class GovernedLoopAdmissionContractHashTests
             "binding" => NewEvidence(
                 evidence,
                 binding: GovernedLoopExecutionBinding.Create(1, "run-2", evidence.Binding.Revision, 1)),
+            "grant-profile" => NewEvidence(
+                evidence,
+                grantProfile: AuthorityGrantTestFixture.Binding(profileHash: 'f').Profile),
+            "grant-boundary" => NewEvidence(
+                evidence,
+                grantBoundary: new AuthorityGrantBoundary(
+                    evidence.GrantBoundary.EffectiveAtUtc.AddSeconds(-1),
+                    evidence.GrantBoundary.ExpiresAtUtc,
+                    evidence.GrantBoundary.CompletionConstraint)),
+            "grant-dependencies" => NewEvidence(
+                evidence,
+                grantDependencyEvidenceHash: GovernedLoopAdmissionTestFixture.Hash('8')),
             "authority" => NewEvidence(
                 evidence,
                 effectiveAuthority: GovernedLoopAdmissionTestFixture.EffectiveAuthority(maxTargetCount: 3)),
@@ -256,6 +271,9 @@ public sealed class GovernedLoopAdmissionContractHashTests
         GovernedLoopAdmissionEvidence value,
         string? intentHash = null,
         GovernedLoopExecutionBinding? binding = null,
+        AuthorityGrantProfilePin? grantProfile = null,
+        AuthorityGrantBoundary? grantBoundary = null,
+        string? grantDependencyEvidenceHash = null,
         AuthorityCeiling? effectiveAuthority = null,
         CapabilityAdmissionSnapshot? capabilityAdmission = null,
         IReadOnlyList<GovernedLoopAdmissionEvidenceReference>? references = null,
@@ -264,6 +282,9 @@ public sealed class GovernedLoopAdmissionContractHashTests
             value.SchemaVersion,
             intentHash ?? value.IntentHash,
             binding ?? value.Binding,
+            grantProfile ?? value.GrantProfile,
+            grantBoundary ?? value.GrantBoundary,
+            grantDependencyEvidenceHash ?? value.GrantDependencyEvidenceHash,
             effectiveAuthority ?? value.EffectiveAuthority,
             capabilityAdmission ?? value.CapabilityAdmission,
             references ?? value.References,

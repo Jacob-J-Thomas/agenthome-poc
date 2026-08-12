@@ -9,7 +9,7 @@ public enum GovernedLoopSequentialInvocationStatus
     /// <summary>The exact admitted run was offered to the fenced ordered runtime.</summary>
     Executed = 1,
 
-    /// <summary>The exact durable run was already terminal and no execution was repeated.</summary>
+    /// <summary>The exact durable run was already terminal; a Completed run may have reconciled grant-completion evidence without repeating graph execution.</summary>
     Terminal = 2,
 
     /// <summary>Canonical admission committed or replayed a definitive rejection.</summary>

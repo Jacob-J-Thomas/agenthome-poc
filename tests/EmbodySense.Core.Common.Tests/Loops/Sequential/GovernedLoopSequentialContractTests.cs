@@ -1,11 +1,15 @@
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Admission;
+using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Loops.Revisions;
+using EmbodySense.Core.Common.Tests.Loops.Admission;
 
 namespace EmbodySense.Core.Common.Tests.Loops.Sequential;
 
@@ -91,6 +95,28 @@ public sealed class GovernedLoopSequentialContractTests
         Assert.False(GovernedLoopSequentialContractHash.Matches(binding with { InvocationPayloadHash = Hash('d') }));
         Assert.False(GovernedLoopSequentialContractHash.Matches(binding with { GraphArtifactHash = Hash('e') }));
         Assert.False(GovernedLoopSequentialContractHash.Matches(binding with { GraphLayoutHash = Hash('f') }));
+    }
+
+    [Fact]
+    public void Adapter_binding_retains_a_defensive_complete_receipt_and_rejects_nested_substitution()
+    {
+        var valid = AdapterBinding();
+        var copied = NewBinding(valid, valid.AdmissionReceipt);
+        var substituted = NewBinding(valid, valid.AdmissionReceipt with { ContentHash = Hash('f') });
+        var malformed = NewBinding(valid, valid.AdmissionReceipt with { Evidence = null! });
+
+        Assert.Equal(valid.AdmissionReceipt.ContentHash, copied.AdmissionReceipt.ContentHash);
+        Assert.NotSame(valid.AdmissionReceipt, copied.AdmissionReceipt);
+        Assert.NotSame(valid.AdmissionReceipt.Evidence, copied.AdmissionReceipt.Evidence);
+        Assert.NotSame(valid.AdmissionReceipt.Evidence.GrantProfile, copied.AdmissionReceipt.Evidence.GrantProfile);
+        Assert.NotSame(valid.AdmissionReceipt.Evidence.GrantBoundary, copied.AdmissionReceipt.Evidence.GrantBoundary);
+        Assert.True(GovernedLoopSequentialContractValidator.Validate(copied with { ContentHash = valid.ContentHash }).IsValid);
+        Assert.Contains(
+            GovernedLoopSequentialContractValidator.Validate(substituted).Errors,
+            error => error.Path == "$.admissionReceipt");
+        Assert.Contains(
+            GovernedLoopSequentialContractValidator.Validate(malformed).Errors,
+            error => error.Path == "$.admissionReceipt");
     }
 
     [Fact]
@@ -217,7 +243,7 @@ public sealed class GovernedLoopSequentialContractTests
         Assert.True(GovernedLoopSequentialContractValidator.Validate(dotted).IsValid);
         foreach (var invalid in new[] { "-admit", "_admit", ".admit", "admit-", "admit_", "admit." })
         {
-            var candidate = CopyBinding(valid, valid.ExecutionBinding, invalid);
+            var candidate = valid with { AdmissionOperationId = invalid };
             Assert.Contains(GovernedLoopSequentialContractValidator.Validate(candidate).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidIdentity && error.Path == "$.admissionOperationId");
         }
     }
@@ -228,7 +254,7 @@ public sealed class GovernedLoopSequentialContractTests
         var validSnapshot = Snapshot();
         var validBinding = AdapterBinding();
         var missingSnapshotValues = new GovernedLoopSequentialInvocationSnapshot(1, "Prompt.", null!, null, default, null!, Hash('f'));
-        var missingBindingValues = new GovernedLoopSequentialAdapterBinding(1, validBinding.WorkspaceId, null!, "admit-1", Hash('1'), Hash('2'), Hash('3'), Hash('4'), Hash('5'), Hash('6'));
+        var missingBindingValues = new GovernedLoopSequentialAdapterBinding(1, validBinding.WorkspaceId, null!, "admit-1", null!, Hash('1'), Hash('2'), Hash('3'), Hash('4'), Hash('5'), Hash('6'));
         var futureConversation = CopySnapshot(validSnapshot, conversation: validSnapshot.InvokingConversation! with { CapturedAtUtc = validSnapshot.ContextCapturedAtUtc.AddSeconds(1) });
 
         Assert.Contains(GovernedLoopSequentialContractValidator.Validate((GovernedLoopSequentialInvocationSnapshot?)null).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.Required && error.Path == "$");
@@ -354,12 +380,22 @@ public sealed class GovernedLoopSequentialContractTests
             "run-1",
             GovernedLoopRevisionReference.Create(1, "graph-1", "revision-1", Hash('1')),
             1);
+        var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, execution.Revision, "publish-1", Hash('7'));
+        var intent = GovernedLoopAdmissionTestFixture.Intent(
+            workspaceId: WorkspaceId('a'),
+            operationId: "admit-1",
+            requestHash: Hash('3'),
+            publication: publication,
+            graphArtifactHash: Hash('5'),
+            graphLayoutHash: Hash('6'));
+        var receipt = GovernedLoopAdmissionTestFixture.Receipt(intent, GovernedLoopAdmissionTestFixture.Evidence(intent, binding: execution));
         return GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
             GovernedLoopSequentialAdapterBinding.CurrentSchemaVersion,
             WorkspaceId('a'),
             execution,
             "admit-1",
-            Hash('2'),
+            receipt,
+            receipt.ContentHash,
             Hash('3'),
             Hash('4'),
             Hash('5'),
@@ -385,11 +421,44 @@ public sealed class GovernedLoopSequentialContractTests
         GovernedLoopSequentialAdapterBinding source,
         GovernedLoopExecutionBinding execution,
         string? operationId = null)
-        => new(
+    {
+        var exactOperationId = operationId ?? source.AdmissionOperationId;
+        var intent = source.AdmissionReceipt.Intent with { OperationId = exactOperationId };
+        var evidence = GovernedLoopAdmissionContractHash.Apply(source.AdmissionReceipt.Evidence with
+        {
+            IntentHash = GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+            Binding = execution,
+            ContentHash = string.Empty,
+        });
+        var receipt = GovernedLoopAdmissionContractHash.Apply(source.AdmissionReceipt with
+        {
+            Intent = intent,
+            Evidence = evidence,
+            ContentHash = string.Empty,
+        });
+        return new GovernedLoopSequentialAdapterBinding(
             source.SchemaVersion,
             source.WorkspaceId,
             execution,
-            operationId ?? source.AdmissionOperationId,
+            exactOperationId,
+            receipt,
+            receipt.ContentHash,
+            source.AdmissionRequestHash,
+            source.InvocationPayloadHash,
+            source.GraphArtifactHash,
+            source.GraphLayoutHash,
+            source.ContentHash);
+    }
+
+    private static GovernedLoopSequentialAdapterBinding NewBinding(
+        GovernedLoopSequentialAdapterBinding source,
+        GovernedLoopAdmissionReceipt receipt)
+        => new(
+            source.SchemaVersion,
+            source.WorkspaceId,
+            source.ExecutionBinding,
+            source.AdmissionOperationId,
+            receipt,
             source.AdmissionReceiptHash,
             source.AdmissionRequestHash,
             source.InvocationPayloadHash,

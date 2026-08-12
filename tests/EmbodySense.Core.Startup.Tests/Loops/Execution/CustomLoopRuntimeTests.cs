@@ -514,6 +514,42 @@ public sealed class CustomLoopRuntimeTests
     }
 
     [Fact]
+    public async Task Production_factory_keeps_saved_custom_loop_invocation_on_the_legacy_runtime_without_canonical_proof()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var definition = await CreateInvocationLoopAsync(
+            workspace,
+            includeInvokingConversation: false,
+            "create-runtime-legacy-composition",
+            "update-runtime-legacy-composition");
+        var executable = await CreatePortableCodexExecutableAsync(workspace);
+        await using var runtime = await AgentRuntimeFactory
+            .ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath)
+            .CreateAsync(
+                "test-model",
+                workspace.RootPath,
+                executable,
+                "read-only",
+                AgentRuntimeSurface.Cli);
+
+        var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(
+            definition.Id,
+            definition.DefinitionVersion,
+            definition.ContentHash,
+            "invoke-runtime-legacy-composition",
+            "execute through the retained custom-loop surface"));
+
+        Assert.True(response.WasDispatched, response.Detail);
+        Assert.Equal("Admitted", response.AdmissionStatus);
+        Assert.Equal("Completed", response.ExecutionStatus);
+        var durable = Assert.IsType<CustomLoopRunRecord>(
+            await new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)).GetAsync(response.Run!.Id));
+        Assert.Null(durable.SequentialAdapterBinding);
+        Assert.Null(durable.SequentialInvocationSnapshot);
+    }
+
+    [Fact]
     public async Task Public_runtime_refreshes_durable_conversation_before_custom_loop_context_capture()
     {
         using var workspace = new TestWorkspace();
@@ -816,7 +852,7 @@ public sealed class CustomLoopRuntimeTests
     }
 
     [Fact]
-    public async Task Conversation_publication_recognizes_the_exact_expected_prefix_plus_one_output_as_already_published()
+    public async Task Conversation_publication_rejects_matching_content_without_the_exact_publication_identity()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -835,11 +871,12 @@ public sealed class CustomLoopRuntimeTests
 
         Assert.Equal("CommandHandled", history.Status.ToString());
         Assert.Equal("CommandHandled", loaded.Status.ToString());
-        Assert.Equal("Completed", response.ExecutionStatus);
-        Assert.Equal(expectedOutput, response.Run!.FinalOutput);
-        Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.Detail.Contains("already committed", StringComparison.Ordinal));
+        Assert.Equal("Failed", response.ExecutionStatus);
+        Assert.Null(response.Run!.FinalOutput);
+        Assert.Equal("conversation_publication_failed", response.Run.FailureCode);
+        Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.PublishedToInvokingConversation == false);
         var disposition = Assert.Single(response.Run.ConversationPublicationDispositions);
-        Assert.Equal("AlreadyPublished", disposition.Disposition);
+        Assert.Equal("DefinitelyFailed", disposition.Disposition);
         Assert.True(disposition.IsDefinite);
         Assert.Collection(persistedConversation, message => Assert.Equal(expectedOutput, message.Content));
     }
@@ -1469,6 +1506,90 @@ public sealed class CustomLoopRuntimeTests
             @echo off
             powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-custom-loop-codex.ps1" %*
             """);
+
+        return commandPath;
+    }
+
+    private static async Task<string> CreatePortableCodexExecutableAsync(TestWorkspace workspace)
+    {
+        var scriptPath = workspace.File("fake-portable-custom-loop-codex.js");
+        var commandPath = workspace.File(OperatingSystem.IsWindows()
+            ? "fake-portable-custom-loop-codex.cmd"
+            : "fake-portable-custom-loop-codex");
+        await File.WriteAllTextAsync(scriptPath, """
+            const readline = require("node:readline");
+
+            if (process.argv.slice(2).includes("--version")) {
+              process.stdout.write("codex-cli compatible-custom-loop-test\n");
+              process.exit(0);
+            }
+
+            const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+            let threadNumber = 0;
+            let turnNumber = 0;
+
+            function write(value) {
+              process.stdout.write(`${JSON.stringify(value)}\n`);
+            }
+
+            input.on("line", line => {
+              const message = JSON.parse(line);
+              switch (message.method) {
+                case "initialize":
+                  write({ id: message.id, result: {} });
+                  break;
+                case "model/list":
+                  write({ id: message.id, result: { data: [{ id: "test-model", model: "test-model" }], nextCursor: null } });
+                  break;
+                case "thread/start": {
+                  const threadId = `thread-custom-${++threadNumber}`;
+                  write({ id: message.id, result: { thread: { id: threadId } } });
+                  break;
+                }
+                case "turn/start": {
+                  const threadId = String(message.params?.threadId ?? `thread-custom-${threadNumber}`);
+                  const turnId = `turn-custom-${++turnNumber}`;
+                  const text = "portable custom-loop response";
+                  write({ id: message.id, result: { turn: { id: turnId } } });
+                  write({ method: "item/agentMessage/delta", params: { threadId, turnId, delta: text } });
+                  write({
+                    method: "turn/completed",
+                    params: {
+                      threadId,
+                      turnId,
+                      turn: {
+                        id: turnId,
+                        status: "completed",
+                        items: [{ type: "agentMessage", phase: "final_answer", text }]
+                      }
+                    }
+                  });
+                  break;
+                }
+                default:
+                  break;
+              }
+            });
+            """);
+        if (OperatingSystem.IsWindows())
+        {
+            await File.WriteAllTextAsync(commandPath, """
+                @echo off
+                node "%~dp0fake-portable-custom-loop-codex.js" %*
+                """);
+        }
+        else
+        {
+            var escaped = scriptPath
+                .Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("\"", "\\\"", StringComparison.Ordinal)
+                .Replace("$", "\\$", StringComparison.Ordinal)
+                .Replace("`", "\\`", StringComparison.Ordinal);
+            await File.WriteAllTextAsync(commandPath, $"#!/bin/sh\nexec node \"{escaped}\" \"$@\"\n");
+            File.SetUnixFileMode(
+                commandPath,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
 
         return commandPath;
     }

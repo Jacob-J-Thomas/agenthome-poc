@@ -6,7 +6,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution.Models;
 /// <param name="LoopId">The loop identifier.</param>
 /// <param name="ExpectedDefinitionVersion">The expected definition version.</param>
 /// <param name="ExpectedDefinitionHash">The expected definition hash.</param>
-/// <param name="OperationId">The operation identifier.</param>
+/// <param name="OperationId">The operation identifier. Human invocation cannot use the reserved canonical trigger-worker identity namespace.</param>
 /// <param name="InvocationPrompt">The invocation prompt.</param>
 public sealed record LoopRunInvocationInput(
     string LoopId,

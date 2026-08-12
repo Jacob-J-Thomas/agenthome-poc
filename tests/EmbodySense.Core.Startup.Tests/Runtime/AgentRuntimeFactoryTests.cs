@@ -9,6 +9,7 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Inference.Models;
@@ -19,9 +20,14 @@ using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Common.Runtime;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Audit;
+using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Capabilities;
+using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Loops.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
@@ -126,7 +132,7 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task Trigger_worker_admission_uses_exact_revalidated_trigger_identity_instead_of_retained_chat_identity()
+    public async Task Trigger_worker_retains_exact_revalidated_identity_but_refuses_ambient_default_role_authority()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -159,8 +165,17 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(CustomLoopDefinitionStoreStatus.Created, created.Status);
         Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, audited);
         Assert.Equal(TriggerQueueAdmissionStatus.Queued, admission.Status);
-        Assert.True(entry.State == "Dispatched", $"state={entry.State}; outcome={entry.DispatchOutcome}; detail={entry.DispatchDetail}");
-        var run = await runtime.GetCustomLoopRunAsync(entry.GovernedRunId!);
+        Assert.Equal("NeedsReview", entry.State);
+        Assert.Equal("NeedsReview", entry.DispatchOutcome);
+        Assert.Contains("ProviderDispatched=False", entry.DispatchDetail, StringComparison.Ordinal);
+        Assert.Null(entry.GovernedRunId);
+        var run = await new CustomLoopRunStore(paths).GetByAdmissionOperationAsync(entry.DispatchOperationId!);
+        Assert.NotNull(run);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, run.Status);
+        Assert.DoesNotContain(run.Events, runEvent => runEvent.Kind == CustomLoopRunEventKind.NodeAttemptCompleted);
+        Assert.DoesNotContain(run.Events, runEvent => runEvent.Kind is CustomLoopRunEventKind.ToolRequestReserved
+            or CustomLoopRunEventKind.ToolGovernanceDecided
+            or CustomLoopRunEventKind.ToolOutcomeObserved);
         Assert.Equal(exactTriggerActorContext.ActorId.Value, run!.AdmissionActor);
         Assert.Equal(exactTriggerActorContext.SurfaceId, run.Surface);
         Assert.Equal(exactTriggerActorContext.RoleId, run.AdmittedDefinition.RoleId);
@@ -170,6 +185,78 @@ public sealed class AgentRuntimeFactoryTests
         Assert.NotEqual(WorkspaceActors.Cli, run.AdmissionActor);
         Assert.NotEqual(AgentRuntimeSurface.Cli.Id, run.Surface);
         Assert.NotEqual("default-assistant", run.AdmittedDefinition.RoleId);
+    }
+
+    [Fact]
+    public async Task Restarted_trigger_origin_resume_without_canonical_handoff_fails_closed_before_provider_dispatch()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Assert.True(TriggerDeliveryId.TryParse("delivery-trigger-resume-restart", out var deliveryId));
+        var operationId = TriggerWorkerRequestHash.ComputeOperationId(deliveryId!, 1);
+        var interrupted = TriggerRunningRun("run-trigger-resume-restart", operationId);
+        await PersistRunningRunAsync(new CustomLoopRunStore(paths), interrupted);
+        var providerMarkerPath = workspace.File("trigger-resume-provider.marker");
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnStartMarkerPath: providerMarkerPath);
+
+        await using var restarted = await CreateRuntimeAsync(workspace, codexPath: codexPath);
+        var recovered = Assert.IsType<LoopRunSnapshot>(await restarted.GetCustomLoopRunAsync(interrupted.Id));
+        var resumed = await restarted.ResumeCustomLoopAsync(new LoopRunControlInput(recovered.Id, recovered.LifecycleVersion, "resume-trigger-origin-after-restart"));
+        var durable = Assert.IsType<CustomLoopRunRecord>(await new CustomLoopRunStore(paths).GetAsync(interrupted.Id));
+
+        Assert.Equal("Paused", recovered.Status);
+        Assert.Equal("NeedsReview", resumed.Status);
+        Assert.Equal("NeedsReview", resumed.Run!.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, durable.Status);
+        Assert.Equal(operationId, durable.AdmissionOperationId);
+        Assert.Contains("TriggerOriginCanonicalHandoffRequiredException", resumed.Detail, StringComparison.Ordinal);
+        Assert.Contains("TriggerOriginCanonicalHandoffRequiredException", durable.Events[^1].Detail, StringComparison.Ordinal);
+        Assert.Null(durable.SequentialAdapterBinding);
+        Assert.Null(durable.SequentialInvocationSnapshot);
+        Assert.False(File.Exists(providerMarkerPath));
+        Assert.DoesNotContain(durable.Events, runEvent => runEvent.Kind == CustomLoopRunEventKind.NodeAttemptCompleted);
+        Assert.DoesNotContain(durable.Events, runEvent => runEvent.Kind is CustomLoopRunEventKind.ToolRequestReserved
+            or CustomLoopRunEventKind.ToolGovernanceDecided
+            or CustomLoopRunEventKind.ToolOutcomeObserved);
+    }
+
+    [Fact]
+    public async Task Restarted_human_legacy_resume_without_canonical_handoff_remains_functional()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var interrupted = await AdmitLegacyRunAsync(workspace, "invoke-human-resume-restart");
+        var providerMarkerPath = workspace.File("human-resume-provider.marker");
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnStartMarkerPath: providerMarkerPath);
+
+        await using var restarted = await CreateRuntimeAsync(workspace, codexPath: codexPath);
+        var recovered = Assert.IsType<LoopRunSnapshot>(await restarted.GetCustomLoopRunAsync(interrupted.Id));
+        var resumed = await restarted.ResumeCustomLoopAsync(new LoopRunControlInput(recovered.Id, recovered.LifecycleVersion, "resume-human-origin-after-restart"));
+
+        Assert.Equal("Paused", recovered.Status);
+        Assert.Equal("Completed", resumed.Status);
+        Assert.Equal("Completed", resumed.Run!.Status);
+        Assert.True(File.Exists(providerMarkerPath));
+    }
+
+    [Fact]
+    public async Task Human_invocation_rejects_the_reserved_trigger_operation_identity_before_admission()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        Assert.True(TriggerDeliveryId.TryParse("delivery-human-reserved-operation", out var deliveryId));
+        var operationId = TriggerWorkerRequestHash.ComputeOperationId(deliveryId!, 1);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+
+        var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("missing-loop", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), operationId, "must not admit"));
+
+        Assert.Equal("Invalid", response.AdmissionStatus);
+        Assert.False(response.WasDispatched);
+        Assert.Null(response.Run);
+        Assert.Contains("reserved", response.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(await new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath)).GetAsync(operationId));
+        Assert.Null(await new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)).GetByAdmissionOperationAsync(operationId));
     }
 
     [Fact]
@@ -648,6 +735,52 @@ public sealed class AgentRuntimeFactoryTests
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 
+    private static CustomLoopRunRecord TriggerRunningRun(string runId, string operationId)
+    {
+        var candidate = RunningRun(runId) with
+        {
+            Surface = "webhook",
+            ModelSnapshot = new CustomLoopModelSnapshot(LlmInferenceSurface.OpenAiCodex.ToString(), "test-model"),
+            AdmissionOperationId = operationId,
+            AdmissionActor = "trigger-owner",
+            AdmissionRequestHash = string.Empty
+        };
+        return CustomLoopAdmissionRequestHash.Apply(candidate);
+    }
+
+    private static async Task<CustomLoopRunRecord> AdmitLegacyRunAsync(TestWorkspace workspace, string operationId)
+    {
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var authoring = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
+        var created = Assert.IsType<LoopDefinitionSnapshot>((await authoring.CreateAsync("create-human-resume-restart")).Definition);
+        var definitionStore = new CustomLoopDefinitionStore(paths);
+        var definition = Assert.IsType<CustomLoopDefinition>(await definitionStore.GetAsync(created.Id));
+        var now = DateTimeOffset.UtcNow;
+        var context = CustomLoopContextSnapshot.CreateEmpty(now);
+        var trustProvider = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
+        var admission = await new CustomLoopAdmissionService(
+            definitionStore,
+            new CustomLoopRunStore(paths),
+            new AuditLog(paths),
+            new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths)),
+            CapabilityAdmissionFactory.Create(paths, trustProvider)).AdmitAsync(
+                new CustomLoopAdmissionRequest(
+                    definition.Id,
+                    definition.DefinitionVersion,
+                    definition.ContentHash,
+                    operationId,
+                    WorkspaceActors.Cli,
+                    AgentRuntimeSurface.Cli.Id,
+                    definition.RoleId,
+                    "resume after an interrupted human admission",
+                    new CustomLoopModelSnapshot(LlmInferenceSurface.OpenAiCodex.ToString(), "test-model"),
+                    null,
+                    context));
+
+        Assert.Equal(CustomLoopAdmissionStatus.Admitted, admission.Status);
+        return Assert.IsType<CustomLoopRunRecord>(admission.Run);
+    }
+
     private static async Task PersistRunningRunAsync(CustomLoopRunStore store, CustomLoopRunRecord running)
     {
         var admitted = running with
@@ -937,7 +1070,7 @@ public sealed class AgentRuntimeFactoryTests
         return record;
     }
 
-    private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace, string? turnFailureMessage = null)
+    private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace, string? turnFailureMessage = null, string? turnStartMarkerPath = null)
     {
         var scriptPath = workspace.File("fake-codex.ps1");
         var commandPath = workspace.File(OperatingSystem.IsWindows() ? "fake-codex.cmd" : "fake-codex");
@@ -950,6 +1083,7 @@ public sealed class AgentRuntimeFactoryTests
             $threadId = "thread-test"
             $developerInstructions = ""
             $turnFailureMessage = {{FormatPowerShellStringLiteral(turnFailureMessage)}}
+            $turnStartMarkerPath = {{FormatPowerShellStringLiteral(turnStartMarkerPath)}}
 
             function Write-ProtocolJson($value) {
                 $value | ConvertTo-Json -Compress -Depth 20
@@ -977,6 +1111,9 @@ public sealed class AgentRuntimeFactoryTests
                     }
 
                     "turn/start" {
+                        if ($turnStartMarkerPath) {
+                            [System.IO.File]::AppendAllText($turnStartMarkerPath, "started`n")
+                        }
                         $turnId = "turn-test"
                         $userText = [string]$message.params.input[0].text
                         $prefix = if ($developerInstructions.Contains("runtime guide") -or $userText.Contains("runtime guide")) { "runtime guide observed" } else { "runtime guide missing" }

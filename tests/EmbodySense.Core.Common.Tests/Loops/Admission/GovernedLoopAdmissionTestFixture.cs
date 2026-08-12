@@ -70,6 +70,9 @@ internal static class GovernedLoopAdmissionTestFixture
     internal static GovernedLoopAdmissionEvidence Evidence(
         GovernedLoopAdmissionIntent? intent = null,
         GovernedLoopExecutionBinding? binding = null,
+        AuthorityGrantProfilePin? grantProfile = null,
+        AuthorityGrantBoundary? grantBoundary = null,
+        string? grantDependencyEvidenceHash = null,
         AuthorityCeiling? effectiveAuthority = null,
         CapabilityAdmissionSnapshot? capabilityAdmission = null,
         IReadOnlyList<GovernedLoopAdmissionEvidenceReference>? references = null,
@@ -78,13 +81,17 @@ internal static class GovernedLoopAdmissionTestFixture
         bool applyHash = true)
     {
         var exactIntent = intent ?? Intent();
+        var exactGrant = AuthorityGrantTestFixture.Grant();
         var authority = effectiveAuthority ?? EffectiveAuthority();
-        var capabilities = capabilityAdmission ?? CapabilityAdmission();
+        var capabilities = capabilityAdmission ?? CapabilityAdmission() with { WorkspaceScopeId = exactIntent.WorkspaceId };
         var exactReferences = references ?? GovernedLoopAdmissionContractHash.CreateEvidenceReferences(exactIntent, authority, capabilities);
         var candidate = new GovernedLoopAdmissionEvidence(
             GovernedLoopAdmissionLimits.CurrentSchemaVersion,
             intentHash ?? GovernedLoopAdmissionContractHash.ComputeIntentHash(exactIntent),
             binding ?? GovernedLoopExecutionBinding.Create(1, "run-1", exactIntent.Publication.Revision, 1),
+            grantProfile ?? exactGrant.Binding.Profile,
+            grantBoundary ?? exactGrant.Boundary,
+            grantDependencyEvidenceHash ?? Hash('9'),
             authority,
             capabilities,
             exactReferences,

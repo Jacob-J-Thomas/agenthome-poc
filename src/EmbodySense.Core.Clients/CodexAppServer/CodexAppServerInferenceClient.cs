@@ -81,51 +81,54 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
         CancellationToken cancellationToken = default)
     {
-        return GenerateAsync(request, responseChunkHandler, cancellationToken, providerRequestStarting: null);
+        return GenerateCoreAsync(request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary: null);
     }
 
     /// <inheritdoc />
-    public async Task<LlmInferenceResponse> GenerateAsync(
+    public Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler,
         CancellationToken cancellationToken,
-        Func<CancellationToken, Task>? providerRequestStarting)
+        InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(providerTransportCommitBoundary);
+        return GenerateCoreAsync(request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary);
+    }
+
+    private async Task<LlmInferenceResponse> GenerateCoreAsync(
+        LlmInferenceRequest request,
+        Func<string, CancellationToken, Task>? responseChunkHandler,
+        CancellationToken cancellationToken,
+        InferenceProviderTransportCommitBoundary? providerTransportCommitBoundary)
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        _toolBridge?.SetInferenceCorrelation(request.Correlation);
-        _requestHandler.SetInferenceCorrelation(request.Correlation);
         try
         {
-
-            await EnsureThreadAsync(request, cancellationToken);
-
-            var requestId = NextRequestId();
-            var userText = _contextBuilder.CreateTurnInput(request);
-            await SendRequestAsync("turn/start", requestId, new JsonObject
+            int requestId;
+            if (providerTransportCommitBoundary is null)
             {
-                ["threadId"] = _threadId,
-                ["input"] = new JsonArray
-            {
-                new JsonObject
-                {
-                    ["type"] = "text",
-                    ["text"] = userText
-                }
+                _toolBridge?.SetInferenceCorrelation(request.Correlation);
+                _requestHandler.SetInferenceCorrelation(request.Correlation);
+                await EnsureThreadAsync(request, cancellationToken);
+                requestId = NextRequestId();
+                await SendTurnStartAsync(request, requestId, cancellationToken, CommitLegacyProviderWriteAsync);
             }
-            }, cancellationToken, async token =>
+            else
             {
-                if (providerRequestStarting is not null)
-                {
-                    await providerRequestStarting(token);
-                }
-                else
-                {
-                    _providerRequestStarted?.Invoke();
-                }
-            });
-            if (providerRequestStarting is not null)
-            {
+                requestId = 0;
+                await ExecuteProviderTransportCommitBoundaryAsync(
+                    providerTransportCommitBoundary,
+                    async token =>
+                    {
+                        _toolBridge?.SetInferenceCorrelation(request.Correlation);
+                        _requestHandler.SetInferenceCorrelation(request.Correlation);
+                        await EnsureThreadAsync(request, token);
+                        requestId = NextRequestId();
+                        await SendTurnStartAfterDispatchCheckpointAsync(request, requestId, token);
+                    },
+                    cancellationToken);
                 _providerRequestStarted?.Invoke();
             }
 
@@ -432,14 +435,14 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         int requestId,
         JsonObject parameters,
         CancellationToken cancellationToken,
-        Func<CancellationToken, Task>? beforeTransportWrite = null)
+        InferenceProviderTransportCommitBoundary? transportCommitBoundary = null)
     {
         await SendAsync(new JsonObject
         {
             ["id"] = requestId,
             ["method"] = method,
             ["params"] = parameters
-        }, cancellationToken, beforeTransportWrite);
+        }, cancellationToken, transportCommitBoundary);
     }
 
     private async Task SendNotificationAsync(string method, JsonObject parameters, CancellationToken cancellationToken)
@@ -451,22 +454,207 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         }, cancellationToken);
     }
 
-    private async Task SendAsync(JsonObject message, CancellationToken cancellationToken, Func<CancellationToken, Task>? beforeTransportWrite = null)
+    private async Task SendAsync(JsonObject message, CancellationToken cancellationToken, InferenceProviderTransportCommitBoundary? transportCommitBoundary = null)
     {
-        var transport = GetTransport();
-        if (beforeTransportWrite is not null)
+        var line = message.ToJsonString();
+        if (transportCommitBoundary is not null)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await beforeTransportWrite(CancellationToken.None);
-            await WriteAfterDispatchCheckpointAsync(transport, message.ToJsonString(), cancellationToken);
+            var guardedTransport = GetTransport();
+            await ExecuteProviderTransportCommitBoundaryAsync(
+                transportCommitBoundary,
+                token => WriteAfterDispatchCheckpointAsync(guardedTransport, line, token),
+                cancellationToken);
             return;
         }
 
-        await transport.WriteLineAsync(message.ToJsonString(), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        var transport = GetTransport();
+        await transport.WriteLineAsync(line, cancellationToken);
+    }
+
+    private Task SendTurnStartAsync(
+        LlmInferenceRequest request,
+        int requestId,
+        CancellationToken cancellationToken,
+        InferenceProviderTransportCommitBoundary transportCommitBoundary)
+    {
+        return SendRequestAsync("turn/start", requestId, CreateTurnStartParams(request), cancellationToken, transportCommitBoundary);
+    }
+
+    private async Task SendTurnStartAfterDispatchCheckpointAsync(
+        LlmInferenceRequest request,
+        int requestId,
+        CancellationToken cancellationToken)
+    {
+        var message = new JsonObject
+        {
+            ["id"] = requestId,
+            ["method"] = "turn/start",
+            ["params"] = CreateTurnStartParams(request)
+        };
+        await WriteAfterDispatchCheckpointAsync(GetTransport(), message.ToJsonString(), cancellationToken);
+    }
+
+    private JsonObject CreateTurnStartParams(LlmInferenceRequest request)
+    {
+        return new JsonObject
+        {
+            ["threadId"] = _threadId,
+            ["input"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["type"] = "text",
+                    ["text"] = _contextBuilder.CreateTurnInput(request)
+                }
+            }
+        };
+    }
+
+    private async Task ExecuteProviderTransportCommitBoundaryAsync(
+        InferenceProviderTransportCommitBoundary transportCommitBoundary,
+        Func<CancellationToken, Task> commitProviderDispatch,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var gate = new object();
+        var boundaryOpen = true;
+        var commitCount = 0;
+        var commitCompleted = 0;
+        var commitSucceeded = 0;
+        var boundaryReturnedBeforeCommitCompleted = 0;
+        Task? firstCommit = null;
+        var boundaryLifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var boundaryLifetimeToken = boundaryLifetime.Token;
+
+        Task CommitOnceAsync(CancellationToken token)
+        {
+            lock (gate)
+            {
+                if (!boundaryOpen)
+                {
+                    AbandonCurrentTransport();
+                    return Task.FromException(new InvalidOperationException("The provider transport commit callback cannot be invoked after its boundary returns."));
+                }
+
+                if (Interlocked.Increment(ref commitCount) != 1)
+                {
+                    AbandonCurrentTransport();
+                    return Task.FromException(new InvalidOperationException("The provider transport commit callback may be invoked at most once."));
+                }
+
+                firstCommit = CommitAndTrackAsync(token);
+                return firstCommit;
+            }
+        }
+
+        async Task CommitAndTrackAsync(CancellationToken token)
+        {
+            try
+            {
+                using var commitCancellation = CancellationTokenSource.CreateLinkedTokenSource(token, boundaryLifetimeToken);
+                await commitProviderDispatch(commitCancellation.Token);
+                Volatile.Write(ref commitSucceeded, 1);
+            }
+            finally
+            {
+                Volatile.Write(ref commitCompleted, 1);
+            }
+        }
+
+        try
+        {
+            await transportCommitBoundary(CommitOnceAsync, cancellationToken);
+        }
+        catch
+        {
+            if (Volatile.Read(ref commitCount) > 0)
+            {
+                AbandonCurrentTransport();
+            }
+
+            throw;
+        }
+        finally
+        {
+            lock (gate)
+            {
+                boundaryOpen = false;
+                if (commitCount == 1 && Volatile.Read(ref commitCompleted) == 0)
+                {
+                    boundaryReturnedBeforeCommitCompleted = 1;
+                }
+            }
+
+            try
+            {
+                await boundaryLifetime.CancelAsync();
+            }
+            catch (AggregateException)
+            {
+            }
+
+            if (firstCommit is null || firstCommit.IsCompleted)
+            {
+                boundaryLifetime.Dispose();
+            }
+            else
+            {
+                _ = DisposeBoundaryLifetimeAfterCommitAsync(firstCommit, boundaryLifetime);
+            }
+        }
+
+        var observedCommitCount = Volatile.Read(ref commitCount);
+        if (observedCommitCount == 0)
+        {
+            throw new InvalidOperationException("The provider transport commit boundary returned without invoking its write callback.");
+        }
+
+        if (observedCommitCount != 1)
+        {
+            AbandonCurrentTransport();
+            throw new InvalidOperationException("The provider transport commit callback may be invoked at most once.");
+        }
+
+        if (Volatile.Read(ref boundaryReturnedBeforeCommitCompleted) != 0)
+        {
+            AbandonCurrentTransport();
+            throw new InvalidOperationException("The provider transport commit boundary returned before its write callback completed.");
+        }
+
+        if (Volatile.Read(ref commitSucceeded) == 0)
+        {
+            AbandonCurrentTransport();
+            throw new InvalidOperationException("The provider transport commit boundary suppressed a failed transport write.");
+        }
+    }
+
+    private static async Task DisposeBoundaryLifetimeAfterCommitAsync(Task commit, CancellationTokenSource boundaryLifetime)
+    {
+        try
+        {
+            await commit;
+        }
+        catch (Exception)
+        {
+        }
+        finally
+        {
+            boundaryLifetime.Dispose();
+        }
+    }
+
+    private async Task CommitLegacyProviderWriteAsync(Func<CancellationToken, Task> commitTransportWrite, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _providerRequestStarted?.Invoke();
+        await commitTransportWrite(cancellationToken);
     }
 
     private async Task WriteAfterDispatchCheckpointAsync(ICodexAppServerTransport transport, string line, CancellationToken callerCancellationToken)
     {
+        callerCancellationToken.ThrowIfCancellationRequested();
         using var writeCancellation = CancellationTokenSource.CreateLinkedTokenSource(callerCancellationToken);
         writeCancellation.CancelAfter(_postCheckpointWriteDeadline);
         Task? writeTask = null;
@@ -516,6 +704,14 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         _toolBridge?.SetInferenceCorrelation(null);
         _injectedTransportQuarantined = _transportWasInjected;
         _ = DisposeAbandonedTransportAsync(transport);
+    }
+
+    private void AbandonCurrentTransport()
+    {
+        if (_transport is { } transport)
+        {
+            AbandonAmbiguousTransport(transport);
+        }
     }
 
     private async Task DisposeAbandonedTransportAsync(ICodexAppServerTransport transport)
@@ -611,6 +807,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
     private async Task<JsonDocument> ReadMessageAsync(CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var transport = GetTransport();
         // Link the caller token with a protocol deadline, then translate only deadline cancellation
         // into TimeoutException. Caller cancellation keeps its OperationCanceledException identity.
@@ -620,6 +817,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         try
         {
             line = await transport.ReadLineAsync(timeout.Token);
+            cancellationToken.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {

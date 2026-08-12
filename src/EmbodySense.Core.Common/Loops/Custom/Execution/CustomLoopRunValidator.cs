@@ -8,6 +8,7 @@ using EmbodySense.Core.Common.Inference.Models;
 using static EmbodySense.Core.Common.Loops.Custom.Execution.CustomLoopRunValidationRules;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Sequential;
+using EmbodySense.Core.Common.Loops.Admission;
 using System.Text.Json;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
@@ -391,6 +392,21 @@ public static class CustomLoopRunValidator
             || !string.Equals(binding.AdmissionOperationId, run.AdmissionOperationId, StringComparison.Ordinal))
         {
             Add(errors, "sequential_binding_identity_mismatch", "sequentialAdapterBinding", "Sequential adapter coordinates must bind the exact run, invocation operation, and immutable invocation payload.");
+        }
+
+        try
+        {
+            if (!string.Equals(
+                GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(binding.AdmissionReceipt.Evidence.CapabilityAdmission),
+                GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(run.CapabilityAdmission),
+                StringComparison.Ordinal))
+            {
+                Add(errors, "sequential_admission_capability_mismatch", "capabilityAdmission", "The durable capability resolution must exactly match the complete retained admission receipt.");
+            }
+        }
+        catch (ArgumentException)
+        {
+            Add(errors, "sequential_admission_capability_mismatch", "capabilityAdmission", "The durable capability resolution must exactly match the complete retained admission receipt.");
         }
 
         if (!Equals(snapshot.ModelSnapshot, run.ModelSnapshot)

@@ -10,24 +10,33 @@ using EmbodySense.Core.Persistence.Loops;
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
 /// <summary>Revalidates a default-turn exact capability pin and current loop authority immediately before tool actuation.</summary>
-public sealed class DefaultConversationCapabilityAuthorityRevalidator : IToolActuationAuthorityRevalidator
+public sealed class DefaultConversationCapabilityAuthorityRevalidator : IToolActuationAuthorityBoundary
 {
     private readonly IDefaultConversationTurnStore _turnStore;
     private readonly LoopDefinitionStore _definitionStore;
     private readonly ICapabilityAdmissionService _capabilityAdmissionService;
+    private readonly ICapabilityAuthorityTransaction _authorityTransaction;
 
     /// <summary>Creates the default-conversation pre-actuation authority boundary.</summary>
-    public DefaultConversationCapabilityAuthorityRevalidator(IDefaultConversationTurnStore turnStore, LoopDefinitionStore definitionStore, ICapabilityAdmissionService capabilityAdmissionService)
+    public DefaultConversationCapabilityAuthorityRevalidator(IDefaultConversationTurnStore turnStore, LoopDefinitionStore definitionStore, ICapabilityAdmissionService capabilityAdmissionService, ICapabilityAuthorityTransaction authorityTransaction)
     {
         _turnStore = turnStore ?? throw new ArgumentNullException(nameof(turnStore));
         _definitionStore = definitionStore ?? throw new ArgumentNullException(nameof(definitionStore));
         _capabilityAdmissionService = capabilityAdmissionService ?? throw new ArgumentNullException(nameof(capabilityAdmissionService));
+        _authorityTransaction = authorityTransaction ?? throw new ArgumentNullException(nameof(authorityTransaction));
     }
 
     /// <inheritdoc />
-    public async Task<ToolActuationAuthorityRevalidation> RevalidateAsync(ToolRequest request, CancellationToken cancellationToken = default)
+    public Task<ToolActuationAuthorityExecution> ExecuteAsync<TResult>(ToolRequest request, string resolvedTargetPath, Func<ToolActuationAuthorityExecution, CancellationToken, Task<TResult>> executeActuatorAsync, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resolvedTargetPath);
+        ArgumentNullException.ThrowIfNull(executeActuatorAsync);
+        return _authorityTransaction.ExecuteAsync(transactionCancellationToken => ExecuteUnderAuthorityAsync(request, executeActuatorAsync, transactionCancellationToken), cancellationToken);
+    }
+
+    private async Task<ToolActuationAuthorityExecution> ExecuteUnderAuthorityAsync<TResult>(ToolRequest request, Func<ToolActuationAuthorityExecution, CancellationToken, Task<TResult>> executeActuatorAsync, CancellationToken cancellationToken)
+    {
         var correlation = request.AuditCorrelation;
         if (correlation is null || !string.Equals(correlation.LoopId, BuiltInLoopIds.DefaultConversation, StringComparison.Ordinal) || !correlation.RunId.StartsWith("run-", StringComparison.Ordinal))
         {
@@ -50,13 +59,15 @@ public sealed class DefaultConversationCapabilityAuthorityRevalidator : IToolAct
             return Denied("The admitted workspace-command capability is no longer exact and currently available.");
         }
 
-        return new ToolActuationAuthorityRevalidation(true, "Current loop authority and the immutable workspace-command capability pin allow actuation.", new Dictionary<string, object?>
+        var direct = new ToolActuationAuthorityExecution(ToolActuationAuthorityDisposition.Direct, "Current loop authority and the immutable workspace-command capability pin allow actuation.", new Dictionary<string, object?>
         {
             ["capability_authority_valid"] = true,
             ["capability_id"] = LoopCapabilityRequirements.WorkspaceCommandId.Value,
             ["capability_descriptor_hash"] = current.EffectivePins.Single(pin => pin.DescriptorIdentity.Id.Equals(LoopCapabilityRequirements.WorkspaceCommandId)).DescriptorIdentity.Hash.Value
         });
+        _ = await executeActuatorAsync(direct, cancellationToken);
+        return direct;
     }
 
-    private static ToolActuationAuthorityRevalidation Denied(string detail) => new(false, detail, new Dictionary<string, object?> { ["capability_authority_valid"] = false });
+    private static ToolActuationAuthorityExecution Denied(string detail) => new(ToolActuationAuthorityDisposition.Denied, detail, new Dictionary<string, object?> { ["capability_authority_valid"] = false });
 }

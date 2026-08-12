@@ -235,7 +235,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// <summary>
     /// Admits and synchronously invokes one published custom-loop definition.
     /// </summary>
-    /// <param name="input">The immutable definition and operation identity used for admission.</param>
+    /// <param name="input">The immutable definition and operation identity used for admission. The canonical trigger-worker operation namespace is reserved for authenticated trigger dispatch.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A task whose result contains the durable admission receipt and projected run evidence.</returns>
     public Task<LoopRunInvocationResponse> InvokeCustomLoopAsync(LoopRunInvocationInput input, CancellationToken cancellationToken = default)

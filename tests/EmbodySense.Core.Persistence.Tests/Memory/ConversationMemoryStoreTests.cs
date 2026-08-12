@@ -155,6 +155,58 @@ public sealed class ConversationMemoryStoreTests
     }
 
     [Fact]
+    public async Task Identity_bearing_publication_replays_only_the_exact_identity_without_a_duplicate()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("seed"));
+        var expected = await store.LoadCurrentConversationSnapshotAsync();
+        var publication = new ConversationMessagePublication("message-loop-output", "publication-loop-output", LlmMessage.Assistant("exact output"));
+
+        var appended = await store.TryPublishMessageAsync(expected.ConversationId, expected.Version, expected.Messages, publication);
+        var replayed = await store.TryPublishMessageAsync(expected.ConversationId, expected.Version, expected.Messages, publication);
+        var sameContentWithDifferentIdentity = await store.TryPublishMessageAsync(
+            expected.ConversationId,
+            expected.Version,
+            expected.Messages,
+            new ConversationMessagePublication("message-other", "publication-other", publication.Message));
+
+        Assert.Equal(ConversationPublicationAppendStatus.Appended, appended.Status);
+        Assert.Equal(ConversationPublicationAppendStatus.AlreadyPresent, replayed.Status);
+        Assert.Equal(ConversationPublicationAppendStatus.Conflict, sameContentWithDifferentIdentity.Status);
+        Assert.Equal(2, (await store.LoadCurrentConversationAsync()).Count);
+        var entries = (await File.ReadAllLinesAsync(paths.CurrentConversationPath))
+            .Select(line => JsonSerializer.Deserialize<ConversationMemoryEntry>(line, _jsonOptions)!)
+            .ToArray();
+        var committed = Assert.Single(entries, entry => string.Equals(entry.PublicationId, publication.PublicationId, StringComparison.Ordinal));
+        Assert.Equal(publication.MessageId, committed.MessageId);
+        Assert.Equal("exact output", committed.Content);
+    }
+
+    [Fact]
+    public async Task Identity_bearing_publication_conflict_preserves_an_interleaving_append()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        await store.AppendMessageAsync(LlmMessage.User("seed"));
+        var expected = await store.LoadCurrentConversationSnapshotAsync();
+        await store.AppendMessageAsync(LlmMessage.Assistant("interleaving output"));
+
+        var result = await store.TryPublishMessageAsync(
+            expected.ConversationId,
+            expected.Version,
+            expected.Messages,
+            new ConversationMessagePublication("message-loop-output", "publication-loop-output", LlmMessage.Assistant("must not append")));
+
+        Assert.Equal(ConversationPublicationAppendStatus.Conflict, result.Status);
+        Assert.Collection(
+            await store.LoadCurrentConversationAsync(),
+            message => Assert.Equal("seed", message.Content),
+            message => Assert.Equal("interleaving output", message.Content));
+    }
+
+    [Fact]
     public async Task Atomic_expected_prefix_append_refuses_to_race_an_existing_external_writer()
     {
         using var workspace = new TestWorkspace();
