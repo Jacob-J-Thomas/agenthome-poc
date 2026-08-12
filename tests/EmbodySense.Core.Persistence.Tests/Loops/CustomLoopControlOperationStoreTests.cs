@@ -154,7 +154,25 @@ public sealed class CustomLoopControlOperationStoreTests
 
             process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync();
-            var recovered = await new CustomLoopControlOperationStore(new WorkspacePaths(workspace.RootPath)).BeginAsync(pending);
+            var recoveryWait = Stopwatch.StartNew();
+            CustomLoopControlOperationStoreResult recovered;
+            do
+            {
+                recovered = await new CustomLoopControlOperationStore(new WorkspacePaths(workspace.RootPath)).BeginAsync(pending);
+                if (recovered.Lease is not null)
+                {
+                    break;
+                }
+
+                Assert.Equal(CustomLoopControlOperationStoreStatus.OwnershipUnproven, recovered.Status);
+                Assert.Equal(process.Id, recovered.Operation!.OwnerProcessId);
+                Assert.Equal(liveRetry.Operation.OwnerGenerationId, recovered.Operation.OwnerGenerationId);
+                Assert.True(
+                    recoveryWait.Elapsed < TimeSpan.FromSeconds(5),
+                    "The terminated control-operation owner did not release its cross-process lock within the bounded recovery window.");
+                await Task.Delay(10);
+            }
+            while (true);
             using var recoveredLease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(recovered.Lease);
 
             Assert.Equal(CustomLoopControlOperationStoreStatus.Replayed, recovered.Status);
