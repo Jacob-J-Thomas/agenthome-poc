@@ -109,7 +109,7 @@ public static class GovernedLoopSequentialFrontierMachine
         return frontier.Payload.Status switch
         {
             GovernedLoopFrontierStatus.Active => last.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running,
-            GovernedLoopFrontierStatus.ReviewBlocked => last.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked,
+            GovernedLoopFrontierStatus.ReviewBlocked => last.Status is GovernedLoopNodeExecutionStatus.ReviewBlocked or GovernedLoopNodeExecutionStatus.Ready,
             GovernedLoopFrontierStatus.Completed => reached.Count == plan.Nodes.Count && last.Status == GovernedLoopNodeExecutionStatus.Completed,
             GovernedLoopFrontierStatus.Failed => last.Status == GovernedLoopNodeExecutionStatus.Failed,
             GovernedLoopFrontierStatus.Cancelled => true,
@@ -193,6 +193,38 @@ public static class GovernedLoopSequentialFrontierMachine
             outcomeEvidenceId,
             outcomeEvidenceHash,
             updatedAtUtc);
+
+    /// <summary>Blocks an undispatched bound frontier for review without fabricating or claiming a Ready attempt.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult ReviewBlockAggregate(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        DateTimeOffset updatedAtUtc)
+    {
+        if (!ValidateBoundPrefix(frontier, binding)
+            || frontier!.Payload.Status != GovernedLoopFrontierStatus.Active
+            || frontier.Payload.Nodes.Any(node => node.Status == GovernedLoopNodeExecutionStatus.Running)
+            || frontier.Payload.Nodes.All(node => node.Status != GovernedLoopNodeExecutionStatus.Ready))
+        {
+            return Invalid("Only an active undispatched bound frontier with Ready work can enter aggregate review.");
+        }
+
+        try
+        {
+            var successor = CreatePosture(
+                binding!,
+                checked(frontier.Payload.FrontierVersion + 1),
+                GovernedLoopFrontierStatus.ReviewBlocked,
+                frontier.Payload.Nodes,
+                updatedAtUtc);
+            return GovernedLoopExecutionValidator.ValidateTransition(frontier, successor).IsValid
+                ? Applied(successor, "The undispatched bound frontier entered review without inventing a node attempt.")
+                : Invalid("The aggregate review successor violates the bound frontier transition contract.");
+        }
+        catch (Exception exception) when (IsContractFailure(exception))
+        {
+            return Invalid($"The aggregate review transition was rejected by its bounded contract: {exception.GetType().Name}.");
+        }
+    }
 
     /// <summary>Cancels one exact bound reached prefix without needing unreached plan nodes.</summary>
     public static GovernedLoopSequentialFrontierTransitionResult CancelCurrent(

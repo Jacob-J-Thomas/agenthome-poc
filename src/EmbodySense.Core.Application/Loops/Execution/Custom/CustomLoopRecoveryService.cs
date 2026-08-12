@@ -111,7 +111,7 @@ public sealed class CustomLoopRecoveryService
         };
         var now = Now(run);
         var failureCode = !admissionAuditComplete ? "recovery_incomplete_admission_audit" : target == CustomLoopRunStatus.NeedsReview ? "recovery_open_attempt" : null;
-        var candidate = CreateCandidate(run, target, failureCode, detail, now, hasOpenAttempt);
+        var candidate = CreateCandidate(run, target, failureCode, detail, now);
         var metadata = RecoveryMetadata(run, candidate, hasOpenAttempt, admissionAuditComplete);
 
         // Record intent before the lifecycle mutation so a crash never produces an unexplained
@@ -208,8 +208,7 @@ public sealed class CustomLoopRecoveryService
         CustomLoopRunStatus status,
         string? failureCode,
         string detail,
-        DateTimeOffset now,
-        bool hasOpenAttempt)
+        DateTimeOffset now)
     {
         var terminal = status is CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview;
         var lifecycle = new CustomLoopRunEvent(run.Events.Length + 1, $"recovery-{Guid.NewGuid():N}", now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, detail, [], null, null, null, null, null, null, null, null, null, null);
@@ -224,36 +223,42 @@ public sealed class CustomLoopRecoveryService
             FinalOutput = null,
             FailureCode = status == CustomLoopRunStatus.NeedsReview ? failureCode : null,
             FailureDetail = status == CustomLoopRunStatus.NeedsReview ? detail : null,
-            Frontier = ProjectCanonicalFrontier(run, status, now, hasOpenAttempt),
+            Frontier = ProjectCanonicalFrontier(run, status, now),
         };
     }
 
     private static GovernedLoopFrontierPosture? ProjectCanonicalFrontier(
         CustomLoopRunRecord run,
         CustomLoopRunStatus status,
-        DateTimeOffset now,
-        bool hasOpenAttempt)
+        DateTimeOffset now)
     {
-        if (status != CustomLoopRunStatus.NeedsReview
-            || !hasOpenAttempt
-            || run.SequentialAdapterBinding is not { } binding
+        if (run.SequentialAdapterBinding is not { } binding
             || run.Frontier is not { } frontier
-            || frontier.Payload.Status == GovernedLoopFrontierStatus.ReviewBlocked)
+            || status == CustomLoopRunStatus.NeedsReview && frontier.Payload.Status == GovernedLoopFrontierStatus.ReviewBlocked)
         {
             return run.Frontier;
         }
 
-        var blocked = GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(
-            frontier,
-            binding,
-            null,
-            null,
-            now);
-        return blocked.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied
-            && blocked.Frontier is not null
-                ? blocked.Frontier
+        var transition = status switch
+        {
+            CustomLoopRunStatus.NeedsReview when frontier.Payload.Nodes[^1].Status == GovernedLoopNodeExecutionStatus.Running
+                => GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(frontier, binding, null, null, now),
+            CustomLoopRunStatus.NeedsReview when frontier.Payload.Nodes.All(node => node.Status != GovernedLoopNodeExecutionStatus.Running)
+                => GovernedLoopSequentialFrontierMachine.ReviewBlockAggregate(frontier, binding, now),
+            CustomLoopRunStatus.Cancelled
+                => GovernedLoopSequentialFrontierMachine.CancelCurrent(frontier, binding, now),
+            _ => null,
+        };
+        if (transition is null)
+        {
+            return run.Frontier;
+        }
+
+        return transition.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied
+            && transition.Frontier is not null
+                ? transition.Frontier
                 : throw new InvalidOperationException(
-                    "Restart recovery could not atomically quarantine the exact open canonical attempt.");
+                    "Restart recovery could not atomically project the canonical frontier to its lifecycle posture.");
     }
 
     private static bool HasOpenAttemptSinceCheckpoint(CustomLoopRunRecord run)

@@ -1626,6 +1626,83 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Restart_recovery_quarantines_an_incomplete_canonical_admission_at_its_undispatched_ready_checkpoint()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var interrupted = PausedAtCanonicalReadyCheckpoint(context.Run, retainAdmissionAudit: false);
+        var ready = interrupted.Frontier!.Payload.Nodes[^1];
+        var store = new FakeRunStore(interrupted);
+        var audit = new RecordingAuditLog();
+
+        var recovered = Assert.Single(await new CustomLoopRecoveryService(
+            store,
+            audit,
+            new FixedTimeProvider(interrupted.UpdatedAtUtc.AddSeconds(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.NeedsReview, recovered.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store.Current.Status);
+        Assert.Equal("recovery_incomplete_admission_audit", store.Current.FailureCode);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, store.Current.Frontier!.Payload.Status);
+        var blocked = store.Current.Frontier.Payload.Nodes[^1];
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, blocked.Status);
+        Assert.Equal(ready.Attempt, blocked.Attempt);
+        Assert.Equal(ready.AttemptOperationId, blocked.AttemptOperationId);
+        Assert.Equal(ready.OutcomeEvidenceId, blocked.OutcomeEvidenceId);
+        Assert.Equal(ready.OutcomeEvidenceHash, blocked.OutcomeEvidenceHash);
+        Assert.DoesNotContain(store.Current.Events, item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.NodeAttemptCompleted);
+        Assert.All(audit.Events, item => Assert.Equal(false, item.Metadata["admissionAuditComplete"]));
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Restart_recovery_completes_cancellation_from_an_undispatched_canonical_ready_checkpoint()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var running = ResumeReady(PausedAtCanonicalReadyCheckpoint(context.Run), "resume-canonical-ready-for-recovery");
+        var store = new FakeRunStore(running);
+        var executor = new QueueExecutor(Result("must not run"));
+        var lifecycleAudit = new RecordingAuditLog();
+        var runner = Runner(store, executor, audit: lifecycleAudit);
+        var cancellationSignal = new NoActiveAttemptCancellationSignal();
+        var lifecycle = new CustomLoopLifecycleService(
+            store,
+            new FakeControlOperationStore(),
+            runner,
+            new AvailableModel(),
+            cancellationSignal,
+            lifecycleAudit,
+            new TestExecutionGate(),
+            new FixedTimeProvider(running.UpdatedAtUtc.AddSeconds(1)));
+        var cancel = await lifecycle.CancelAsync(new CustomLoopCancelRequest(
+            running.Id,
+            running.LifecycleVersion,
+            "cancel-canonical-ready-for-recovery",
+            AuditSchema.Actors.Web));
+
+        Assert.True(cancel.Status == CustomLoopControlStatus.CancelRequested, cancel.Detail);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, store.Current.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Active, store.Current.Frontier!.Payload.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, store.Current.Frontier.Payload.Nodes[^1].Status);
+
+        var recoveryAudit = new RecordingAuditLog();
+        var recovered = Assert.Single(await new CustomLoopRecoveryService(
+            store,
+            recoveryAudit,
+            new FixedTimeProvider(store.Current.UpdatedAtUtc.AddSeconds(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.Cancelled, recovered.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, store.Current.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Cancelled, store.Current.Frontier!.Payload.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, store.Current.Frontier.Payload.Nodes[^1].Status);
+        Assert.Null(store.Current.FailureCode);
+        Assert.DoesNotContain(store.Current.Events, item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.NodeAttemptCompleted);
+        Assert.All(recoveryAudit.Events, item => Assert.Equal(false, item.Metadata["openAttemptAfterCheckpoint"]));
+        Assert.Equal(1, cancellationSignal.RequestCount);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
     public async Task Canonical_resume_failure_after_the_exact_attempt_claim_projects_review_without_provider_dispatch_or_synthetic_outcome()
     {
         var context = await SequentialContextAsync(Run(SequentialDefinition()));
@@ -5887,6 +5964,28 @@ public sealed class CustomLoopOrderedRunnerTests
             }
 
             return (CustomLoopInferenceAttemptResult)outcome;
+        }
+    }
+
+    private sealed class NoActiveAttemptCancellationSignal : ICustomLoopExecutionCancellationSignal
+    {
+        public int RequestCount { get; private set; }
+
+        public IDisposable? TryRegisterActiveRun(string runId) => null;
+
+        public void CancelActiveAttempt(string runId)
+        {
+        }
+
+        public Task<CustomLoopAttemptCancellationResult> RequestActiveAttemptCancellationAsync(
+            string runId,
+            string operationId,
+            CancellationToken cancellationToken = default)
+        {
+            RequestCount++;
+            return Task.FromResult(new CustomLoopAttemptCancellationResult(
+                CustomLoopAttemptCancellationStatus.NoActiveAttempt,
+                "The undispatched Ready checkpoint has no active provider attempt."));
         }
     }
 

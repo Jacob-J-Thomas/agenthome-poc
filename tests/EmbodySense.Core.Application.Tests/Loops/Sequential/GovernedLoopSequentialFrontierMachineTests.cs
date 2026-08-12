@@ -190,6 +190,32 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
     }
 
     [Fact]
+    public async Task Undispatched_ready_frontier_can_enter_aggregate_review_or_cancellation_without_fabricating_an_attempt()
+    {
+        var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync();
+        var initial = Frontier(Initialize(context));
+
+        var review = Frontier(GovernedLoopSequentialFrontierMachine.ReviewBlockAggregate(
+            initial,
+            context.AdapterBinding,
+            _startedAtUtc.AddSeconds(1)));
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, review.Payload.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, review.Payload.Nodes[^1].Status);
+        Assert.Null(review.Payload.Nodes[^1].Attempt);
+        Assert.True(GovernedLoopSequentialFrontierMachine.Validate(review, context.AdapterBinding, context.Plan));
+
+        var cancelled = Frontier(GovernedLoopSequentialFrontierMachine.CancelCurrent(
+            initial,
+            context.AdapterBinding,
+            _startedAtUtc.AddSeconds(1)));
+        Assert.Equal(GovernedLoopFrontierStatus.Cancelled, cancelled.Payload.Status);
+        Assert.Equal(
+            initial.Payload.Nodes.Select(node => (node.PlanOrdinal, node.NodeId, node.Status, node.Attempt, node.AttemptOperationId, node.OutcomeEvidenceId, node.OutcomeEvidenceHash)),
+            cancelled.Payload.Nodes.Select(node => (node.PlanOrdinal, node.NodeId, node.Status, node.Attempt, node.AttemptOperationId, node.OutcomeEvidenceId, node.OutcomeEvidenceHash)));
+        Assert.True(GovernedLoopSequentialFrontierMachine.Validate(cancelled, context.AdapterBinding, context.Plan));
+    }
+
+    [Fact]
     public async Task Substituted_node_attempt_and_evidence_cannot_advance_running_frontier()
     {
         var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync();
