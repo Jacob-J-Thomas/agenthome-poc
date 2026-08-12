@@ -1072,90 +1072,121 @@ public sealed class AgentRuntimeFactoryTests
 
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace, string? turnFailureMessage = null, string? turnStartMarkerPath = null)
     {
-        var scriptPath = workspace.File("fake-codex.ps1");
+        var scriptPath = workspace.File("fake-codex.js");
         var commandPath = workspace.File(OperatingSystem.IsWindows() ? "fake-codex.cmd" : "fake-codex");
+        var serializedTurnFailureMessage = System.Text.Json.JsonSerializer.Serialize(turnFailureMessage);
+        var serializedTurnStartMarkerPath = System.Text.Json.JsonSerializer.Serialize(turnStartMarkerPath);
         await File.WriteAllTextAsync(scriptPath, $$"""
-            if ($args -contains "--version") {
-                Write-Output "codex-cli 999.0.0-test"
-                exit 0
+            const fs = require("node:fs");
+            const readline = require("node:readline");
+
+            if (process.argv.slice(2).includes("--version")) {
+              process.stdout.write("codex-cli 999.0.0-test\n");
+              process.exit(0);
             }
 
-            $threadId = "thread-test"
-            $developerInstructions = ""
-            $turnFailureMessage = {{FormatPowerShellStringLiteral(turnFailureMessage)}}
-            $turnStartMarkerPath = {{FormatPowerShellStringLiteral(turnStartMarkerPath)}}
+            const threadId = "thread-test";
+            const turnFailureMessage = {{serializedTurnFailureMessage}};
+            const turnStartMarkerPath = {{serializedTurnStartMarkerPath}};
+            const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+            let developerInstructions = "";
 
-            function Write-ProtocolJson($value) {
-                $value | ConvertTo-Json -Compress -Depth 20
-                [Console]::Out.Flush()
+            function write(value) {
+              process.stdout.write(`${JSON.stringify(value)}\n`);
             }
 
-            while (($line = [Console]::In.ReadLine()) -ne $null) {
-                $message = $line | ConvertFrom-Json
-
-                switch ($message.method) {
-                    "initialize" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{} }
+            input.on("line", line => {
+              const message = JSON.parse(line);
+              switch (message.method) {
+                case "initialize":
+                  write({ id: message.id, result: {} });
+                  break;
+                case "initialized":
+                  break;
+                case "model/list":
+                  write({
+                    id: message.id,
+                    result: {
+                      data: [
+                        { id: "test-model", model: "test-model" },
+                        { id: "gpt-test", model: "gpt-test" }
+                      ]
                     }
+                  });
+                  break;
+                case "thread/start":
+                  developerInstructions = String(message.params?.developerInstructions ?? "");
+                  write({ id: message.id, result: { thread: { id: threadId } } });
+                  break;
+                case "turn/start": {
+                  if (turnStartMarkerPath) {
+                    fs.appendFileSync(turnStartMarkerPath, "started\n");
+                  }
+                  const turnId = "turn-test";
+                  let userText = String(message.params?.input?.[0]?.text ?? "");
+                  const prefix = developerInstructions.includes("runtime guide") || userText.includes("runtime guide")
+                    ? "runtime guide observed"
+                    : "runtime guide missing";
+                  const currentUserMarker = "Current user message:";
+                  const currentUserIndex = userText.indexOf(currentUserMarker);
+                  if (currentUserIndex >= 0) {
+                    userText = userText.slice(currentUserIndex + currentUserMarker.length).trim();
+                  }
+                  const text = `${prefix}: ${userText}`;
 
-                    "initialized" {
-                    }
-
-                    "model/list" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } }
-                    }
-
-                    "thread/start" {
-                        $developerInstructions = [string]$message.params.developerInstructions
-                        Write-ProtocolJson @{ id = $message.id; result = @{ thread = @{ id = $threadId } } }
-                    }
-
-                    "turn/start" {
-                        if ($turnStartMarkerPath) {
-                            [System.IO.File]::AppendAllText($turnStartMarkerPath, "started`n")
+                  write({ id: message.id, result: { turn: { id: turnId } } });
+                  if (turnFailureMessage) {
+                    write({
+                      method: "turn/completed",
+                      params: {
+                        threadId,
+                        turnId,
+                        turn: {
+                          id: turnId,
+                          status: "failed",
+                          error: { message: turnFailureMessage },
+                          items: []
                         }
-                        $turnId = "turn-test"
-                        $userText = [string]$message.params.input[0].text
-                        $prefix = if ($developerInstructions.Contains("runtime guide") -or $userText.Contains("runtime guide")) { "runtime guide observed" } else { "runtime guide missing" }
-                        $currentUserMarker = "Current user message:"
-                        $currentUserIndex = $userText.IndexOf($currentUserMarker)
-                        if ($currentUserIndex -ge 0) {
-                            $userText = $userText.Substring($currentUserIndex + $currentUserMarker.Length).Trim()
-                        }
-                        $text = "${prefix}: $userText"
+                      }
+                    });
+                    break;
+                  }
 
-                        Write-ProtocolJson @{ id = $message.id; result = @{ turn = @{ id = $turnId } } }
-                        if ($turnFailureMessage) {
-                            Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = $turnId; turn = @{ id = $turnId; status = "failed"; error = @{ message = $turnFailureMessage }; items = @() } } }
-                            break
-                        }
-
-                        Write-ProtocolJson @{ method = "item/agentMessage/delta"; params = @{ threadId = $threadId; turnId = $turnId; delta = $text } }
-                        Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = $turnId; turn = @{ id = $turnId; status = "completed"; items = @(@{ type = "agentMessage"; phase = "final_answer"; text = $text }) } } }
+                  write({ method: "item/agentMessage/delta", params: { threadId, turnId, delta: text } });
+                  write({
+                    method: "turn/completed",
+                    params: {
+                      threadId,
+                      turnId,
+                      turn: {
+                        id: turnId,
+                        status: "completed",
+                        items: [{ type: "agentMessage", phase: "final_answer", text }]
+                      }
                     }
+                  });
+                  break;
                 }
-            }
+                default:
+                  break;
+              }
+            });
             """);
         if (OperatingSystem.IsWindows())
         {
             await File.WriteAllTextAsync(commandPath, """
                 @echo off
-                powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-codex.ps1" %*
+                node "%~dp0fake-codex.js" %*
                 """);
         }
         else
         {
             var quotedScriptPath = scriptPath.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal).Replace("$", "\\$", StringComparison.Ordinal).Replace("`", "\\`", StringComparison.Ordinal);
-            await File.WriteAllTextAsync(commandPath, $"#!/bin/sh\nexec pwsh -NoProfile -ExecutionPolicy Bypass -File \"{quotedScriptPath}\" \"$@\"\n");
+            await File.WriteAllTextAsync(commandPath, $"#!/bin/sh\nexec node \"{quotedScriptPath}\" \"$@\"\n");
             File.SetUnixFileMode(commandPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
 
         return commandPath;
-    }
-
-    private static string FormatPowerShellStringLiteral(string? value)
-    {
-        return value is null ? "$null" : "'" + value.Replace("'", "''") + "'";
     }
 
     private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, AgentRuntimeSurface? runtimeSurface = null, string? codexPath = null)

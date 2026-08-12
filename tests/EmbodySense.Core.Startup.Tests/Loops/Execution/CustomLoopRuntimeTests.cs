@@ -1404,8 +1404,12 @@ public sealed class CustomLoopRuntimeTests
 
     private static async Task<AgentRuntime> CreateRuntimeWithoutProviderAsync(TestWorkspace workspace)
     {
-        var executable = OperatingSystem.IsWindows() ? await CreateFakeCodexExecutableAsync(workspace) : "/usr/bin/false";
-        return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath).CreateAsync("test-model", workspace.RootPath, executable, "read-only", AgentRuntimeSurface.Cli);
+        return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath).CreateAsync(
+            "test-model",
+            workspace.RootPath,
+            await CreateFakeCodexExecutableAsync(workspace),
+            "read-only",
+            AgentRuntimeSurface.Cli);
     }
 
     private sealed class RecordingConversationPublicationObserver : IAgentRuntimeConversationPublicationObserver
@@ -1433,104 +1437,150 @@ public sealed class CustomLoopRuntimeTests
 
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("The fake Codex app-server executable is currently implemented as a Windows command script.");
-        }
-
-        var scriptPath = workspace.File("fake-custom-loop-codex.ps1");
-        var commandPath = workspace.File("fake-custom-loop-codex.cmd");
+        var scriptPath = workspace.File("fake-custom-loop-codex.js");
+        var commandPath = workspace.File(OperatingSystem.IsWindows()
+            ? "fake-custom-loop-codex.cmd"
+            : "fake-custom-loop-codex");
         await File.WriteAllTextAsync(scriptPath, """
-            if ($args -contains "--version") {
-                Write-Output "codex-cli 999.0.0-test"
-                exit 0
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const readline = require("node:readline");
+
+            if (process.argv.slice(2).includes("--version")) {
+              process.stdout.write("codex-cli 999.0.0-test\n");
+              process.exit(0);
             }
 
-            $threadId = "thread-test"
+            const threadId = "thread-test";
+            const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 
-            function Write-ProtocolJson($value) {
-                $value | ConvertTo-Json -Compress -Depth 20
-                [Console]::Out.Flush()
+            function write(value) {
+              process.stdout.write(`${JSON.stringify(value)}\n`);
             }
 
-            while (($line = [Console]::In.ReadLine()) -ne $null) {
-                $message = $line | ConvertFrom-Json
+            function delay(milliseconds) {
+              return new Promise(resolve => setTimeout(resolve, milliseconds));
+            }
 
-                switch ($message.method) {
-                    "initialize" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{} }
-                    }
-
-                    "initialized" {
-                    }
-
-                    "model/list" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } }
-                    }
-
-                    "thread/start" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{ thread = @{ id = $threadId } } }
-                    }
-
-                    "turn/start" {
-                        $turnId = "turn-test"
-                        $userText = [string]$message.params.input[0].text
-                        $heldOnceMarker = Join-Path $PSScriptRoot "custom-attempt-held-once.marker"
-                        $shouldHold = $userText.Contains("held") -and (-not $userText.Contains("held-once") -or -not (Test-Path $heldOnceMarker))
-                        if ($shouldHold) {
-                            if ($userText.Contains("held-once")) {
-                                [IO.File]::WriteAllText($heldOnceMarker, "held")
-                            }
-                            [IO.File]::WriteAllText((Join-Path $PSScriptRoot "custom-attempt-started.marker"), "started")
-                            $releaseMarker = Join-Path $PSScriptRoot "custom-attempt-release.marker"
-                            $releaseDeadline = [DateTime]::UtcNow.AddSeconds(10)
-                            while (-not (Test-Path $releaseMarker)) {
-                                if ([DateTime]::UtcNow -ge $releaseDeadline) {
-                                    throw "Timed out waiting for the test to release the held custom-loop attempt."
-                                }
-                                Start-Sleep -Milliseconds 25
-                            }
-                            while ($true) {
-                                try {
-                                    Remove-Item -LiteralPath $releaseMarker -ErrorAction Stop
-                                    break
-                                }
-                                catch [IO.IOException] {
-                                    if ([DateTime]::UtcNow -ge $releaseDeadline) {
-                                        throw "Timed out consuming the test release marker for the held custom-loop attempt."
-                                    }
-                                    Start-Sleep -Milliseconds 25
-                                }
-                            }
-                        }
-                        elseif ($userText.Contains("delayed")) {
-                            [IO.File]::WriteAllText((Join-Path $PSScriptRoot "custom-attempt-started.marker"), "started")
-                            Start-Sleep -Milliseconds 1500
-                        }
-                        $triggerMatch = [regex]::Match($userText, '(?s)(\[EmbodySense untrusted trigger prompt data\]\r?\n.*?)\r?\n\[/restored user message\]')
-                        if ($triggerMatch.Success) {
-                            $userText = $triggerMatch.Groups[1].Value
-                        }
-                        else {
-                            $currentUserMarker = "Current user message:"
-                            $currentUserIndex = $userText.IndexOf($currentUserMarker)
-                            if ($currentUserIndex -ge 0) {
-                                $userText = $userText.Substring($currentUserIndex + $currentUserMarker.Length).Trim()
-                            }
-                        }
-                        $text = "fake response: $userText"
-
-                        Write-ProtocolJson @{ id = $message.id; result = @{ turn = @{ id = $turnId } } }
-                        Write-ProtocolJson @{ method = "item/agentMessage/delta"; params = @{ threadId = $threadId; turnId = $turnId; delta = $text } }
-                        Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = $turnId; turn = @{ id = $turnId; status = "completed"; items = @(@{ type = "agentMessage"; phase = "final_answer"; text = $text }) } } }
-                    }
+            async function waitForReleaseMarker(releaseMarker) {
+              const deadline = Date.now() + 10000;
+              while (!fs.existsSync(releaseMarker)) {
+                if (Date.now() >= deadline) {
+                  throw new Error("Timed out waiting for the test to release the held custom-loop attempt.");
                 }
+                await delay(25);
+              }
+
+              while (true) {
+                try {
+                  fs.rmSync(releaseMarker);
+                  return;
+                } catch (error) {
+                  if (Date.now() >= deadline) {
+                    throw new Error("Timed out consuming the test release marker for the held custom-loop attempt.", { cause: error });
+                  }
+                  await delay(25);
+                }
+              }
             }
+
+            async function handle(message) {
+              switch (message.method) {
+                case "initialize":
+                  write({ id: message.id, result: {} });
+                  break;
+                case "model/list":
+                  write({
+                    id: message.id,
+                    result: {
+                      data: [
+                        { id: "test-model", model: "test-model" },
+                        { id: "gpt-test", model: "gpt-test" }
+                      ],
+                      nextCursor: null
+                    }
+                  });
+                  break;
+                case "thread/start":
+                  write({ id: message.id, result: { thread: { id: threadId } } });
+                  break;
+                case "turn/start": {
+                  const turnId = "turn-test";
+                  let userText = String(message.params.input[0].text);
+                  const heldOnceMarker = path.join(__dirname, "custom-attempt-held-once.marker");
+                  const shouldHold = userText.includes("held")
+                    && (!userText.includes("held-once") || !fs.existsSync(heldOnceMarker));
+                  if (shouldHold) {
+                    if (userText.includes("held-once")) {
+                      fs.writeFileSync(heldOnceMarker, "held");
+                    }
+                    fs.writeFileSync(path.join(__dirname, "custom-attempt-started.marker"), "started");
+                    await waitForReleaseMarker(path.join(__dirname, "custom-attempt-release.marker"));
+                  } else if (userText.includes("delayed")) {
+                    fs.writeFileSync(path.join(__dirname, "custom-attempt-started.marker"), "started");
+                    await delay(1500);
+                  }
+
+                  const triggerMatch = userText.match(/(\[EmbodySense untrusted trigger prompt data\]\r?\n[\s\S]*?)\r?\n\[\/restored user message\]/);
+                  if (triggerMatch) {
+                    userText = triggerMatch[1];
+                  } else {
+                    const currentUserMarker = "Current user message:";
+                    const currentUserIndex = userText.indexOf(currentUserMarker);
+                    if (currentUserIndex >= 0) {
+                      userText = userText.slice(currentUserIndex + currentUserMarker.length).trim();
+                    }
+                  }
+                  const text = `fake response: ${userText}`;
+                  write({ id: message.id, result: { turn: { id: turnId } } });
+                  write({ method: "item/agentMessage/delta", params: { threadId, turnId, delta: text } });
+                  write({
+                    method: "turn/completed",
+                    params: {
+                      threadId,
+                      turnId,
+                      turn: {
+                        id: turnId,
+                        status: "completed",
+                        items: [{ type: "agentMessage", phase: "final_answer", text }]
+                      }
+                    }
+                  });
+                  break;
+                }
+                default:
+                  break;
+              }
+            }
+
+            let queue = Promise.resolve();
+            input.on("line", line => {
+              queue = queue.then(() => handle(JSON.parse(line))).catch(error => {
+                process.stderr.write(`${error.stack ?? error}\n`);
+                process.exitCode = 1;
+                input.close();
+              });
+            });
             """);
-        await File.WriteAllTextAsync(commandPath, """
-            @echo off
-            powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-custom-loop-codex.ps1" %*
-            """);
+        if (OperatingSystem.IsWindows())
+        {
+            await File.WriteAllTextAsync(commandPath, """
+                @echo off
+                node "%~dp0fake-custom-loop-codex.js" %*
+                """);
+        }
+        else
+        {
+            var escaped = scriptPath
+                .Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("\"", "\\\"", StringComparison.Ordinal)
+                .Replace("$", "\\$", StringComparison.Ordinal)
+                .Replace("`", "\\`", StringComparison.Ordinal);
+            await File.WriteAllTextAsync(commandPath, $"#!/bin/sh\nexec node \"{escaped}\" \"$@\"\n");
+            File.SetUnixFileMode(
+                commandPath,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
 
         return commandPath;
     }
