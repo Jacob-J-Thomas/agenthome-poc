@@ -10,6 +10,29 @@ namespace EmbodySense.Core.Persistence.Tests.Capabilities;
 public sealed class FileCapabilityCatalogTrustProviderTests
 {
     [Fact]
+    public void Default_provider_uses_only_an_exact_absolute_process_configured_root()
+    {
+        using var configuredRoot = new TestWorkspace();
+        var previous = Environment.GetEnvironmentVariable(FileCapabilityCatalogTrustProvider.DefaultRootEnvironmentVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(FileCapabilityCatalogTrustProvider.DefaultRootEnvironmentVariable, configuredRoot.RootPath);
+            var provider = FileCapabilityCatalogTrustProvider.CreateDefault();
+
+            Assert.Equal(configuredRoot.RootPath, provider.RootPath);
+            Assert.False(File.Exists(provider.AuthenticationKeyPath));
+
+            Environment.SetEnvironmentVariable(FileCapabilityCatalogTrustProvider.DefaultRootEnvironmentVariable, "relative/server-state");
+            var failure = Assert.Throws<InvalidOperationException>(FileCapabilityCatalogTrustProvider.CreateDefault);
+            Assert.Contains(FileCapabilityCatalogTrustProvider.DefaultRootEnvironmentVariable, failure.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(FileCapabilityCatalogTrustProvider.DefaultRootEnvironmentVariable, previous);
+        }
+    }
+
+    [Fact]
     public async Task Provider_read_of_an_existing_empty_root_is_absent_without_initializing_trust()
     {
         using var trustRoot = new TestWorkspace();

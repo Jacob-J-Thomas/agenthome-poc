@@ -4,7 +4,7 @@ param(
     [switch]$RunBrowserE2E,
     [switch]$BrowserE2EOnly,
     [ValidateRange(1, 8)]
-    [int]$MaximumTestWorkers = 8,
+    [int]$MaximumTestWorkers = [Math]::Min(8, [Environment]::ProcessorCount),
     [ValidateSet("PullRequest", "Stress")]
     [string]$VerificationTier = "PullRequest",
     [ValidateSet("Debug", "Release")]
@@ -33,6 +33,11 @@ $coverageIsolationRoot = Join-Path $verificationResultsPath "CoverageIsolation"
 $standardTestResultsRoot = Join-Path $verificationResultsPath "StandardTests"
 $coverageManifestPath = Join-Path $verificationResultsPath "coverage-manifest.json"
 $coverageSummaryPath = Join-Path $verificationResultsPath "coverage-summary.json"
+$verificationPhysicalTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX) -and ($verificationPhysicalTempRoot -eq "/var" -or $verificationPhysicalTempRoot.StartsWith("/var/", [StringComparison]::Ordinal))) {
+    $verificationPhysicalTempRoot = "/private" + $verificationPhysicalTempRoot
+}
+$verificationLaneTrustRoot = Join-Path $verificationPhysicalTempRoot ("embodysense-verification-trust-" + [Guid]::NewGuid().ToString("N"))
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
 $maximumArtifactStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunArtifactMaximumShapeTests.Adversarial_maximum_transition_reservations_and_canonical_order_checks_remain_bounded"
@@ -169,6 +174,12 @@ function Get-ProjectCoverageIsolation {
     foreach ($lane in $Lanes) {
         $laneDirectory = Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework
         $laneManifest = @(Copy-VerifiedDirectory -SourceDirectory $pristineDirectory -DestinationDirectory $laneDirectory -Description "$($TestProject.BaseName)/$($lane.Name) lane copy")
+        $laneEnvironment = @{
+            EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $verificationLaneTrustRoot "$($TestProject.BaseName)-$($lane.Name)"
+        }
+        if (-not $SkipCoverage -and $TestProject.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") {
+            $laneEnvironment.EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory
+        }
         $laneCopies.Add([pscustomobject]@{
             Name = "$($TestProject.BaseName)-$($lane.Name)"
             ProjectName = $TestProject.BaseName
@@ -178,7 +189,7 @@ function Get-ProjectCoverageIsolation {
             Directory = $laneDirectory
             Manifest = $laneManifest
             ResultsPath = Join-Path $standardTestResultsRoot "$($TestProject.BaseName)-$($lane.Name)"
-            Environment = if (-not $SkipCoverage -and $TestProject.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") { @{ EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory } } else { @{} }
+            Environment = $laneEnvironment
         })
     }
 
@@ -445,6 +456,9 @@ try {
 }
 finally {
     Pop-Location
+    if (Test-Path -LiteralPath $verificationLaneTrustRoot) {
+        Remove-Item -LiteralPath $verificationLaneTrustRoot -Recurse -Force
+    }
 }
 
 $verificationStopwatch.Stop()

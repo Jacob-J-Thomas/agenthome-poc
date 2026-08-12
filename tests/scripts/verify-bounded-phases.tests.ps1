@@ -5,6 +5,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $phaseScriptPath = Join-Path $repoRoot "scripts\verification-phase.ps1"
 $parallelScriptPath = Join-Path $repoRoot "scripts\verification-parallel.ps1"
 $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
+$watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
 $coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
 $verifyWorkflowPath = Join-Path $repoRoot ".github\workflows\verify.yml"
 $stressWorkflowPath = Join-Path $repoRoot ".github\workflows\verification-stress.yml"
@@ -84,6 +85,7 @@ finally {
 }
 
 $verifyScript = Get-Content -LiteralPath $verifyScriptPath -Raw
+$watchdogScript = Get-Content -LiteralPath $watchdogScriptPath -Raw
 $phaseScript = Get-Content -LiteralPath $phaseScriptPath -Raw
 $parallelScript = Get-Content -LiteralPath $parallelScriptPath -Raw
 $coverageScript = Get-Content -LiteralPath $coverageScriptPath -Raw
@@ -97,7 +99,8 @@ $retentionTest = Get-Content -LiteralPath $retentionTestPath -Raw
 
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "Stress")]' -Message "The verifier must expose only the two owned tiers."
 Assert-Contains -Actual $verifyScript -Expected '[string]$Configuration = "Release"' -Message "The canonical verifier must default to Release."
-Assert-Contains -Actual $verifyScript -Expected '[int]$MaximumTestWorkers = 8' -Message "The required gate must expose one bounded worker ceiling."
+Assert-Contains -Actual $verifyScript -Expected '[int]$MaximumTestWorkers = [Math]::Min(8, [Environment]::ProcessorCount)' -Message "The required gate must bound parallel workers to available processors and an absolute ceiling."
+Assert-Contains -Actual $watchdogScript -Expected '[int]$MaximumTestWorkers = [Math]::Min(8, [Environment]::ProcessorCount)' -Message "The external watchdog must preserve the hardware-aware worker ceiling."
 Assert-Contains -Actual $phaseScript -Expected 'if ($null -ne $commandScriptPath) {' -Message "Windows batch phases must preserve cmd.exe quoting."
 Assert-Contains -Actual $phaseScript -Expected 'elseif ($null -ne $startInfo.PSObject.Properties["ArgumentList"]) {' -Message "Non-batch phases must use ArgumentList when available."
 Assert-Contains -Actual $phaseScript -Expected 'VERIFY_CHILD_TIMEOUT name=$Name' -Message "Sequential timeouts must emit structured watchdog evidence."
@@ -108,6 +111,11 @@ Assert-Contains -Actual $verifyScript -Expected 'Get-ProjectCoverageIsolation' -
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework' -Message "Every lane must preserve its bin/<Configuration>/<TargetFramework> AppContext suffix."
 Assert-Contains -Actual $verifyScript -Expected 'Copy-VerifiedDirectory -SourceDirectory $pristineDirectory -DestinationDirectory $laneDirectory' -Message "Every lane copy must be verified before use."
 Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory' -Message "Persistence child-process coverage must receive a process-scoped immutable source."
+Assert-Contains -Actual $verifyScript -Expected '$verificationPhysicalTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())' -Message "Lane trust isolation must begin from the system temporary root."
+Assert-Contains -Actual $verifyScript -Expected '$verificationPhysicalTempRoot = "/private" + $verificationPhysicalTempRoot' -Message "macOS lane trust isolation must avoid the synthetic /var alias."
+Assert-Contains -Actual $verifyScript -Expected '$verificationLaneTrustRoot = Join-Path $verificationPhysicalTempRoot' -Message "Lane trust isolation must remain outside retained repository artifacts."
+Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $verificationLaneTrustRoot "$($TestProject.BaseName)-$($lane.Name)"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."
+Assert-Contains -Actual $verifyScript -Expected 'Remove-Item -LiteralPath $verificationLaneTrustRoot -Recurse -Force' -Message "Lane trust roots must be cleaned after ordinary verifier completion."
 Assert-Contains -Actual $verifyScript -Expected '"vstest", $Lane.AssemblyPath' -Message "Test lanes must execute isolated assemblies."
 Assert-Contains -Actual $verifyScript -Expected 'identity=TestCase.Id partition_identity=XunitTestCaseUniqueID' -Message "Stable inventory identities must remain explicit."
 Assert-Contains -Actual $verifyScript -Expected 'verify-test-partition.ps1' -Message "Canonical and lane discovery must be reconciled."

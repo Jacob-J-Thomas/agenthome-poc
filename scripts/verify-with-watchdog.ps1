@@ -3,7 +3,7 @@ param(
     [string]$Configuration = "Release",
 
     [ValidateRange(1, 8)]
-    [int]$MaximumTestWorkers = 8,
+    [int]$MaximumTestWorkers = [Math]::Min(8, [Environment]::ProcessorCount),
 
     [ValidateRange(1, 600)]
     [int]$DeadlineSeconds = 600
