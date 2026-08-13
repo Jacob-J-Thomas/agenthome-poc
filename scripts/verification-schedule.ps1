@@ -1,8 +1,8 @@
 Set-StrictMode -Version Latest
 
 $script:VerificationRequiredGateResourceCapacity = 12
-$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 4
-$script:VerificationRequiredGateMaximumCpuBoundWorkers = 2
+$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 3
+$script:VerificationRequiredGateMaximumCpuBoundWorkers = 1
 $script:VerificationRequiredGateScheduleProfiles = @(
     # One VSTest process per assembly lets the test runner schedule isolated classes itself and
     # removes repeated deployment, discovery, instrumentation, and report-write overhead.
