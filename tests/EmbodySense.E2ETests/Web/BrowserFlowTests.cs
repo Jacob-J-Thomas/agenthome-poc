@@ -197,12 +197,12 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("!document.getElementById('loopName').disabled && document.querySelector('#loopCanvas .node-card.inference')");
             Assert.Contains("Unsaved draft", await browser.EvaluateStringAsync("document.getElementById('saveState').textContent"), StringComparison.Ordinal);
             Assert.Contains("Not durable", await browser.EvaluateStringAsync("document.getElementById('loopList').textContent"), StringComparison.Ordinal);
-            Assert.Equal(0, await GetCustomDefinitionCountAsync(workspace.RootPath));
+            Assert.Equal(0, await GetCustomDefinitionCountAsync(browser));
             await browser.EvaluateAsync("window.confirm = () => true");
             await ClickAsync(browser, "#reloadButton");
             await browser.WaitForExpressionAsync("document.getElementById('saveState').textContent.includes('System managed')");
             Assert.False(await browser.EvaluateBooleanAsync("[...document.querySelectorAll('#loopList .loop-list-item')].some((item) => item.textContent.includes('Untitled loop'))"));
-            Assert.Equal(0, await GetCustomDefinitionCountAsync(workspace.RootPath));
+            Assert.Equal(0, await GetCustomDefinitionCountAsync(browser));
 
             await ClickAsync(browser, "#createLoopButton");
             await browser.WaitForExpressionAsync("!document.getElementById('loopName').disabled && document.querySelector('#loopCanvas .node-card.inference')");
@@ -216,7 +216,7 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#loopsNav");
             await browser.WaitForExpressionAsync("document.getElementById('loopName').value === 'Browser governed loop' && document.getElementById('saveState').textContent.includes('Unsaved draft')");
             Assert.Equal("Description survives validation correction and reload.", await browser.EvaluateStringAsync("document.getElementById('loopDescription').value"));
-            Assert.Equal(0, await GetCustomDefinitionCountAsync(workspace.RootPath));
+            Assert.Equal(0, await GetCustomDefinitionCountAsync(browser));
 
             browser.BeginExpectedServerRestart();
             await app.DisposeAsync();
@@ -230,7 +230,7 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#loopsNav");
             await browser.WaitForExpressionAsync("document.getElementById('loopName').value === 'Browser governed loop' && document.getElementById('saveState').textContent.includes('Unsaved draft')");
             Assert.Equal("Description survives validation correction and reload.", await browser.EvaluateStringAsync("document.getElementById('loopDescription').value"));
-            Assert.Equal(0, await GetCustomDefinitionCountAsync(workspace.RootPath));
+            Assert.Equal(0, await GetCustomDefinitionCountAsync(browser));
 
             await ClickAsync(browser, "#loopCanvas .node-card.inference");
             await SetValueAsync(browser, "#inspectorContent input:not([type='checkbox'])", "Browser step");
@@ -241,7 +241,7 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("!document.getElementById('saveButton').disabled && document.getElementById('validationBanner').textContent.includes('ready for first save')");
             await ClickAsync(browser, "#saveButton");
             await browser.WaitForExpressionAsync("document.getElementById('saveState').textContent.includes('Saved') && document.getElementById('loopHeaderMeta').textContent.includes('Definition v1')");
-            Assert.Equal(1, await GetCustomDefinitionCountAsync(workspace.RootPath));
+            Assert.Equal(1, await GetCustomDefinitionCountAsync(browser));
 
             await browser.ReloadAsync();
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
@@ -250,7 +250,7 @@ public sealed class BrowserFlowTests
             await ClickLoopByNameAsync(browser, LoopName);
             Assert.Equal(LoopName, await browser.EvaluateStringAsync("document.getElementById('loopName').value"));
             Assert.Equal("Description survives validation correction and reload.", await browser.EvaluateStringAsync("document.getElementById('loopDescription').value"));
-            Assert.Equal(1, await GetCustomDefinitionCountAsync(workspace.RootPath));
+            Assert.Equal(1, await GetCustomDefinitionCountAsync(browser));
 
             await InvokeLoopAsync(browser, "browser-approval-approve");
             await browser.WaitForExpressionAsync("!document.getElementById('loopApprovalPanel').hidden && [...document.querySelectorAll('#loopApprovals button')].some((button) => button.textContent.includes('Approve'))");
@@ -291,7 +291,7 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#loopsNav");
             await browser.WaitForExpressionAsync("document.getElementById('loopList').textContent.includes('System loop')");
             Assert.False(await browser.EvaluateBooleanAsync("[...document.querySelectorAll('#loopList .loop-list-item')].some((item) => item.textContent.includes('Browser governed loop'))"));
-            Assert.Equal(0, await GetCustomDefinitionCountAsync(workspace.RootPath));
+            Assert.Equal(0, await GetCustomDefinitionCountAsync(browser));
             app.AssertHealthy();
             await browser.AssertHealthyAsync();
         }
@@ -342,7 +342,7 @@ public sealed class BrowserFlowTests
 
             Assert.True(File.Exists(workspace.File(".agent", "ROLE.md")));
             Assert.True(File.Exists(workspace.File(".agent", "permissions.json")));
-            Assert.Equal(0, await GetCustomDefinitionCountAsync(workspace.RootPath));
+            Assert.Equal(0, await GetCustomDefinitionCountAsync(browser));
             var customRunPath = workspace.File(".agent", "loops", "runs", "custom");
             Assert.False(Directory.Exists(customRunPath) && Directory.EnumerateFiles(customRunPath, "*", SearchOption.AllDirectories).Any());
             Assert.Contains("initialization completed", await browser.EvaluateStringAsync("document.getElementById('loopInitializationAnnouncement').textContent"), StringComparison.OrdinalIgnoreCase);
@@ -582,19 +582,10 @@ public sealed class BrowserFlowTests
         await browser.WaitForExpressionAsync("document.getElementById('configContent').textContent.includes('compatible-test')");
     }
 
-    private static async Task<int> GetCustomDefinitionCountAsync(string workspaceRoot)
+    private static Task<int> GetCustomDefinitionCountAsync(HeadlessBrowserSession browser)
     {
-        for (var attempt = 0; ; attempt++)
-        {
-            try
-            {
-                return (await new CustomLoopDefinitionStore(new WorkspacePaths(workspaceRoot)).ListAsync()).Count;
-            }
-            catch (InvalidOperationException exception) when (attempt < 39 && exception.InnerException is IOException && exception.Message.Contains("locked by another process", StringComparison.Ordinal))
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(50));
-            }
-        }
+        const string Expression = "(async () => { const response = await fetch('/api/loops', { cache: 'no-store' }); if (!response.ok) throw new Error(`Loop catalog request failed with HTTP ${response.status}.`); const catalog = await response.json(); if (!Array.isArray(catalog.customDefinitions)) throw new Error('Loop catalog did not expose custom definitions.'); return catalog.customDefinitions.length; })()";
+        return browser.EvaluateInt32Async(Expression);
     }
 
     private static async Task SubmitMessageAsync(HeadlessBrowserSession browser, string message)
