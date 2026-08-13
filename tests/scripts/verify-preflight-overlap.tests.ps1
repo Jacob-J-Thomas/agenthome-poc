@@ -132,9 +132,7 @@ param([string]$Role, [string]$SynchronizationRoot)
 Write-Output "start=$([DateTime]::UtcNow.Ticks)"
 if ($Role -ceq "build") {
     $releasePath = Join-Path $SynchronizationRoot "release-build"
-    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     while (-not (Test-Path -LiteralPath $releasePath)) {
-        if ($stopwatch.Elapsed -ge [TimeSpan]::FromSeconds(5)) { exit 41 }
         Start-Sleep -Milliseconds 10
     }
 }
