@@ -28,8 +28,8 @@ public sealed class GovernedLoopSequentialBindingResolverTests
 
         Assert.False(result.IsResolved);
         Assert.Empty(result.Inputs);
-        Assert.Equal("pure-node.context-invalid", result.FailureCode);
-        Assert.Equal("$", result.FailurePath);
+        Assert.Equal("canonical-binding.activation-invalid", result.FailureCode);
+        Assert.Equal("$.frontier", result.FailurePath);
     }
 
     [Fact]
