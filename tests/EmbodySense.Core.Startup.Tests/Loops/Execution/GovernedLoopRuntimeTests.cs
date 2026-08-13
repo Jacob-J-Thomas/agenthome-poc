@@ -49,13 +49,14 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
-public sealed class GovernedLoopRuntimeTests
+// Scenario methods stay centralized so the scheduling wrappers preserve the exact existing behavior.
+// Every scenario owns its fixture and provider process; this type must not gain mutable shared state.
+internal static class GovernedLoopRuntimeTests
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
 
-    [Fact]
-    public async Task Public_runtime_executes_exact_canonical_inputs_and_terminal_replay_precedes_workspace_busy_and_restart()
+    internal static async Task Public_runtime_executes_exact_canonical_inputs_and_terminal_replay_precedes_workspace_busy_and_restart()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync();
         var input = fixture.Input("invoke-canonical-success", "answer through the governed graph");
@@ -108,8 +109,7 @@ public sealed class GovernedLoopRuntimeTests
         }
     }
 
-    [Fact]
-    public async Task First_bound_completion_replays_after_restart_and_rejects_a_second_run_without_provider_dispatch()
+    internal static async Task First_bound_completion_replays_after_restart_and_rejects_a_second_run_without_provider_dispatch()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(
             completionConstraint: AuthorityGrantCompletionConstraintKind.FirstBoundRunCompletion);
@@ -149,8 +149,7 @@ public sealed class GovernedLoopRuntimeTests
         Assert.Equal(1, fixture.ProviderAttempts);
     }
 
-    [Fact]
-    public async Task Failed_provider_attempt_does_not_consume_first_bound_completion()
+    internal static async Task Failed_provider_attempt_does_not_consume_first_bound_completion()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(
             completionConstraint: AuthorityGrantCompletionConstraintKind.FirstBoundRunCompletion,
@@ -172,8 +171,7 @@ public sealed class GovernedLoopRuntimeTests
         Assert.Equal(2, fixture.ProviderAttempts);
     }
 
-    [Fact]
-    public async Task Paused_then_cancelled_run_does_not_consume_first_bound_completion()
+    internal static async Task Paused_then_cancelled_run_does_not_consume_first_bound_completion()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(
             pauseProvider: true,
@@ -206,8 +204,7 @@ public sealed class GovernedLoopRuntimeTests
         Assert.Equal(2, fixture.ProviderAttempts);
     }
 
-    [Fact]
-    public async Task Publication_conflict_does_not_consume_first_bound_completion()
+    internal static async Task Publication_conflict_does_not_consume_first_bound_completion()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(
             pauseProvider: true,
@@ -239,8 +236,7 @@ public sealed class GovernedLoopRuntimeTests
         Assert.Equal(2, fixture.ProviderAttempts);
     }
 
-    [Fact]
-    public async Task Definitive_authority_rejection_replays_after_restart_without_materialization_or_provider_work()
+    internal static async Task Definitive_authority_rejection_replays_after_restart_without_materialization_or_provider_work()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(includeRestrictedGrant: true);
         var input = fixture.Input("invoke-canonical-rejected", "must be rejected", fixture.RestrictedGrant!);
@@ -271,8 +267,7 @@ public sealed class GovernedLoopRuntimeTests
         Assert.Equal(0, fixture.ProviderAttempts);
     }
 
-    [Fact]
-    public async Task Begin_before_snapshot_bind_recovers_only_when_the_exact_snapshot_can_be_reproduced()
+    internal static async Task Begin_before_snapshot_bind_recovers_only_when_the_exact_snapshot_can_be_reproduced()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync();
         var input = fixture.Input("invoke-crash-window-exact", "recover the exact prepared snapshot");
@@ -306,8 +301,7 @@ public sealed class GovernedLoopRuntimeTests
         Assert.Equal(durable.CreatedAtUtc, durable.SequentialInvocationSnapshot!.ContextCapturedAtUtc);
     }
 
-    [Fact]
-    public async Task Begin_before_snapshot_bind_conflicts_when_context_changes_and_does_zero_provider_work()
+    internal static async Task Begin_before_snapshot_bind_conflicts_when_context_changes_and_does_zero_provider_work()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync();
         var input = fixture.Input("invoke-crash-window-changed", "do not substitute changed context");
@@ -335,8 +329,7 @@ public sealed class GovernedLoopRuntimeTests
         Assert.Null(durable.SequentialInvocationSnapshot);
     }
 
-    [Fact]
-    public async Task Public_pause_and_resume_reconstructs_the_canonical_plan_from_durable_evidence()
+    internal static async Task Public_pause_and_resume_reconstructs_the_canonical_plan_from_durable_evidence()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(pauseProvider: true, inferenceSteps: 2);
         var input = fixture.Input("invoke-canonical-pause", "pause-at-boundary");
@@ -368,13 +361,7 @@ public sealed class GovernedLoopRuntimeTests
         Assert.Equal(paused.SequentialAdapterBinding?.ContentHash, (await runStore.GetAsync(paused.Id))?.SequentialAdapterBinding?.ContentHash);
     }
 
-    [Theory]
-    [InlineData(AuthorityGrantOperationKind.Narrow)]
-    [InlineData(AuthorityGrantOperationKind.Suspend)]
-    [InlineData(AuthorityGrantOperationKind.Replace)]
-    [InlineData(AuthorityGrantOperationKind.Revoke)]
-    [InlineData(AuthorityGrantOperationKind.Expire)]
-    public async Task Public_resume_revalidates_the_exact_grant_before_the_next_provider_effect(
+    internal static async Task Public_resume_revalidates_the_exact_grant_before_the_next_provider_effect(
         AuthorityGrantOperationKind transition)
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(
@@ -413,8 +400,7 @@ public sealed class GovernedLoopRuntimeTests
         await AssertNoToolExecutionAsync(fixture.Paths);
     }
 
-    [Fact]
-    public async Task Public_absent_exact_grant_is_rejected_without_provider_or_tool_effects()
+    internal static async Task Public_absent_exact_grant_is_rejected_without_provider_or_tool_effects()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync();
         var missing = fixture.MissingGrantReference();
