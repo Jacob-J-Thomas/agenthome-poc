@@ -7,6 +7,7 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Capabilities;
 
+[Collection(Verification.ProcessEnvironmentCollection.Name)]
 public sealed class FileCapabilityCatalogTrustProviderTests
 {
     [Fact]

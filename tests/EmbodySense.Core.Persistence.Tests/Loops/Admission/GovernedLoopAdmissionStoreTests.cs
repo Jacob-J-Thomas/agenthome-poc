@@ -20,6 +20,7 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops.Admission;
 
+[Collection(Verification.ProcessEnvironmentCollection.Name)]
 public sealed class GovernedLoopAdmissionStoreTests
 {
     private const string CrossProcessMode = "EMBODYSENSE_ADMISSION_STORE_MODE";

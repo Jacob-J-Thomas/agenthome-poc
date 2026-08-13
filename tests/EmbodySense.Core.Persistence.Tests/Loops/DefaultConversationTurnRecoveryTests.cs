@@ -747,31 +747,6 @@ public sealed class DefaultConversationTurnRecoveryTests
     }
 
     [Fact]
-    public async Task Normal_archival_and_arbitrary_loads_leave_only_the_single_active_set_lease_artifact()
-    {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var turns = new DefaultConversationTurnStore(paths);
-        for (var index = 0; index < 140; index++)
-        {
-            var admitted = await CreateAdmittedRecordAsync(paths, $"request-normal-history-{index:D3}");
-            var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
-            var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
-            Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await turns.CreateAsync(admitted)).Status);
-            Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
-            Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(terminal, prepared.LifecycleVersion)).Status);
-            Assert.Null(await turns.LoadAsync($"missing-{index:D3}"));
-        }
-
-        Assert.Equal(140, Directory.EnumerateFiles(paths.DefaultConversationTurnHistoryPath, "*.json").Count());
-        Assert.Equal(140, Directory.EnumerateFiles(paths.DefaultConversationTurnHistoryPath, "*.archive-source-proof").Count());
-        Assert.Equal(140, Directory.EnumerateFiles(paths.DefaultConversationTurnHistoryPath, "*.archive-source-proof-publication.*.completed").Count());
-        Assert.Equal(420, Directory.EnumerateFiles(paths.DefaultConversationTurnHistoryPath).Count());
-        Assert.Empty(Directory.EnumerateFiles(paths.DefaultConversationActiveTurnsPath, "*.json"));
-        Assert.Collection(Directory.EnumerateFiles(paths.DefaultConversationActiveTurnsPath).Select(Path.GetFileName).Order(StringComparer.Ordinal), file => Assert.Equal(".active-set.lock", file));
-    }
-
-    [Fact]
     public async Task Review_resolution_archives_replays_conflicts_and_releases_active_capacity()
     {
         using var workspace = new TestWorkspace();
@@ -2099,80 +2074,6 @@ public sealed class DefaultConversationTurnRecoveryTests
         Assert.Single(GetCompletedSourceProofPublicationPaths(paths, terminal.TurnId));
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Restart_excludes_the_pending_history_stage_before_applying_the_bounded_retirement_evidence_count(bool overCapacity)
-    {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var terminal = await CreateTerminalRecordAsync(paths, $"request-bounded-retirement-evidence-{overCapacity}", needsReview: false);
-        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
-        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, terminal.TurnId + ".json");
-        var pendingSourcePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{terminal.TurnId}.json.archive-source");
-        var pendingHistoryPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-history.tmp");
-        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
-        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-source-proof");
-        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
-        await File.WriteAllBytesAsync(activePath, bytes);
-        await CreateHistoryStageRetirementEvidencePairsAsync(paths, terminal.TurnId, 128);
-        File.Move(activePath, pendingSourcePath, overwrite: false);
-        await File.WriteAllBytesAsync(pendingHistoryPath, bytes);
-        Assert.False(File.Exists(activePath));
-        Assert.True(File.Exists(pendingSourcePath));
-        Assert.True(File.Exists(pendingHistoryPath));
-
-        if (overCapacity)
-        {
-            await File.WriteAllBytesAsync(Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-history.unexpected"), [1]);
-        }
-
-        var store = new DefaultConversationTurnStore(paths);
-        if (overCapacity)
-        {
-            await Assert.ThrowsAsync<FormatException>(() => store.ListIncompleteAsync());
-            Assert.True(File.Exists(pendingSourcePath));
-            Assert.True(File.Exists(pendingHistoryPath));
-            Assert.False(File.Exists(historyPath));
-            Assert.False(File.Exists(sourceProofPath));
-            return;
-        }
-
-        Assert.Empty(await store.ListIncompleteAsync());
-        Assert.False(File.Exists(pendingSourcePath));
-        Assert.False(File.Exists(pendingHistoryPath));
-        Assert.Equal(bytes, await File.ReadAllBytesAsync(historyPath));
-        Assert.Equal(bytes, await File.ReadAllBytesAsync(sourceProofPath));
-    }
-
-    [Fact]
-    public async Task Active_archive_reserves_one_retirement_pair_before_claiming_another_source()
-    {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var terminal = await CreateTerminalRecordAsync(paths, "request-retirement-evidence-capacity-reservation", needsReview: false);
-        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
-        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, terminal.TurnId + ".json");
-        var pendingSourcePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{terminal.TurnId}.json.archive-source");
-        var pendingHistoryPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-history.tmp");
-        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
-        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-source-proof");
-        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
-        await File.WriteAllBytesAsync(activePath, bytes);
-        await CreateHistoryStageRetirementEvidencePairsAsync(paths, terminal.TurnId, 128);
-
-        var exception = await Assert.ThrowsAsync<IOException>(() => new DefaultConversationTurnStore(paths).ListIncompleteAsync());
-
-        Assert.Contains("retirement-evidence capacity", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(bytes, await File.ReadAllBytesAsync(activePath));
-        Assert.False(File.Exists(pendingSourcePath));
-        Assert.False(File.Exists(pendingHistoryPath));
-        Assert.False(File.Exists(historyPath));
-        Assert.False(File.Exists(sourceProofPath));
-        Assert.Equal(128, GetHistoryStageRetirementEvidencePaths(paths, terminal.TurnId, ".retirement-intent").Count);
-        Assert.Equal(128, GetHistoryStageRetirementEvidencePaths(paths, terminal.TurnId, ".retired").Count);
-    }
-
     [Fact]
     public async Task Sequential_incomplete_history_stage_retirements_preserve_each_attempt_and_allow_a_later_restart()
     {
@@ -3398,7 +3299,7 @@ public sealed class DefaultConversationTurnRecoveryTests
         }
     }
 
-    private static async Task<DefaultConversationTurnRecord> CreateAdmittedRecordAsync(WorkspacePaths paths, string requestId)
+    internal static async Task<DefaultConversationTurnRecord> CreateAdmittedRecordAsync(WorkspacePaths paths, string requestId)
     {
         var conversation = await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync();
         var now = DateTimeOffset.UtcNow;
@@ -3441,7 +3342,7 @@ public sealed class DefaultConversationTurnRecoveryTests
         }
     }
 
-    private static async Task<DefaultConversationTurnRecord> CreateTerminalRecordAsync(WorkspacePaths paths, string requestId, bool needsReview)
+    internal static async Task<DefaultConversationTurnRecord> CreateTerminalRecordAsync(WorkspacePaths paths, string requestId, bool needsReview)
     {
         var admitted = await CreateAdmittedRecordAsync(paths, requestId);
         return CreateTerminalRecord(admitted, needsReview);
@@ -3472,7 +3373,7 @@ public sealed class DefaultConversationTurnRecoveryTests
         return prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
     }
 
-    private static DefaultConversationTurnRecord CreateTerminalPreparedRecord(DefaultConversationTurnRecord admitted, bool needsReview)
+    internal static DefaultConversationTurnRecord CreateTerminalPreparedRecord(DefaultConversationTurnRecord admitted, bool needsReview)
     {
         var terminalTime = admitted.Transitions[^1].OccurredAtUtc.AddSeconds(1);
         const string Detail = "Terminal evidence.";
@@ -3491,7 +3392,7 @@ public sealed class DefaultConversationTurnRecoveryTests
         return candidate;
     }
 
-    private static JsonSerializerOptions CreateTurnJsonOptions()
+    internal static JsonSerializerOptions CreateTurnJsonOptions()
     {
         return new JsonSerializerOptions(JsonSerializerDefaults.Web)
         {
@@ -3522,7 +3423,7 @@ public sealed class DefaultConversationTurnRecoveryTests
         RecordingInferenceClient Client,
         InterruptingFailpoint? Failpoint);
 
-    private static IReadOnlyList<string> GetHistoryStageRetirementEvidencePaths(WorkspacePaths paths, string turnId, string suffix)
+    internal static IReadOnlyList<string> GetHistoryStageRetirementEvidencePaths(WorkspacePaths paths, string turnId, string suffix)
     {
         return Directory.EnumerateFileSystemEntries(paths.DefaultConversationTurnHistoryPath, $".{turnId}.json.archive-history.*{suffix}", SearchOption.TopDirectoryOnly)
             .Order(StringComparer.Ordinal)
@@ -3582,7 +3483,7 @@ public sealed class DefaultConversationTurnRecoveryTests
         return (bytes, pendingSourcePath, historyPath, sourceProofPath, temporaryIntentPath);
     }
 
-    private static async Task CreateHistoryStageRetirementEvidencePairsAsync(WorkspacePaths paths, string turnId, int count)
+    internal static async Task CreateHistoryStageRetirementEvidencePairsAsync(WorkspacePaths paths, string turnId, int count)
     {
         for (var index = 0; index < count; index++)
         {
