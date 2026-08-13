@@ -1790,7 +1790,9 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal("pause_boundary_audit_failed", result.Run.FailureCode);
         Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, result.Run.Frontier!.Payload.Status);
         var current = result.Run.Frontier.Payload.Nodes[^1];
-        Assert.Equal(GovernedLoopNodeExecutionStatus.ReviewBlocked, current.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, current.Status);
+        Assert.Null(current.Attempt);
+        Assert.Null(current.AttemptOperationId);
         Assert.Null(current.OutcomeEvidenceId);
         Assert.Null(current.OutcomeEvidenceHash);
         Assert.Empty(executor.Requests);
@@ -2015,27 +2017,30 @@ public sealed class CustomLoopOrderedRunnerTests
             AuditSchema.Actors.Web));
 
         Assert.Empty(firstExecutor.Requests);
-        var resumable = ResumeReady(Assert.IsType<CustomLoopRunRecord>(retainedClaim), "resume-open-frontier-claim");
-        var resumedStore = new FakeRunStore(resumable);
-        var resumedExecutor = new QueueExecutor(Result("must not run"));
-        var resumedEvidence = new SequentialEvidenceHarness(resumedStore, context.Evidence);
-        var resumedAdapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(resumedStore, resumedExecutor), resumedEvidence, resumedEvidence);
+        var retained = Assert.IsType<CustomLoopRunRecord>(retainedClaim);
+        var retainedAttempt = retained.Frontier!.Payload.Nodes[^1];
+        var recoveryStore = new FakeRunStore(retained);
+        var recoveryAudit = new RecordingAuditLog();
+        var recovery = new CustomLoopRecoveryService(recoveryStore, recoveryAudit, new FixedTimeProvider(retained.UpdatedAtUtc.AddSeconds(1)));
 
-        var result = await resumedAdapter.ResumeAsync(new GovernedLoopSequentialOrderedResumeRequest(
-            1,
-            context.Anchor,
-            context.Plan,
-            context.Artifact,
-            resumable.LifecycleVersion,
-            "resume-open-frontier-claim",
-            AuditSchema.Actors.Cli));
+        var result = Assert.Single(await recovery.RecoverAsync(AuditSchema.Actors.Web));
 
-        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
-        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run!.Status);
+        Assert.Equal(CustomLoopRecoveryStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run.Status);
+        Assert.Equal("recovery_open_attempt", result.Run.FailureCode);
         Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, result.Run.Frontier!.Payload.Status);
-        Assert.Empty(resumedExecutor.Requests);
+        var blocked = result.Run.Frontier.Payload.Nodes[^1];
+        Assert.Equal(GovernedLoopNodeExecutionStatus.ReviewBlocked, blocked.Status);
+        Assert.Equal(retainedAttempt.Attempt, blocked.Attempt);
+        Assert.Equal(retainedAttempt.AttemptOperationId, blocked.AttemptOperationId);
+        Assert.Null(blocked.OutcomeEvidenceId);
+        Assert.Null(blocked.OutcomeEvidenceHash);
         Assert.DoesNotContain(result.Run.Events, item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted });
-        Assert.Single(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.LifecycleChanged && item.Detail.Contains("open Running attempt", StringComparison.Ordinal));
+        Assert.All(recoveryAudit.Events, item => Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]));
+        Assert.Empty(firstExecutor.Requests);
+        Assert.Equal(["trigger"], firstEvidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.Empty(recoveryStore.ValidationFailures);
+        Assert.Empty(await recovery.RecoverAsync(AuditSchema.Actors.Web));
     }
 
     [Fact]

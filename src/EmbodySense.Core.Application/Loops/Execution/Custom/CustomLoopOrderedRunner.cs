@@ -3917,7 +3917,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         var terminalStatus = status;
-        if (run.SequentialAdapterBinding is { } binding && run.Frontier is { } currentFrontier)
+        if (run.SequentialAdapterBinding is not null && run.Frontier is { } currentFrontier)
         {
             // This is a schema-1 honesty guard, not failure-taxonomy policy. Failed frontier state
             // requires one exact current-node rejection; post-node finalization failures therefore
@@ -3925,36 +3925,6 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             if (terminalStatus == CustomLoopRunStatus.Failed && !HasExactDefinitiveFrontierOutcome(run, currentFrontier))
             {
                 terminalStatus = CustomLoopRunStatus.NeedsReview;
-            }
-
-            if (terminalStatus == CustomLoopRunStatus.NeedsReview
-                && currentFrontier.Payload.Status == GovernedLoopFrontierStatus.Active
-                && currentFrontier.Payload.Nodes[^1].Status == GovernedLoopNodeExecutionStatus.Ready)
-            {
-                var preparedAt = Now(run);
-                var prepared = GovernedLoopSequentialFrontierMachine.StartCurrent(
-                    currentFrontier,
-                    binding,
-                    NewCorrelationId("frontier-review"),
-                    preparedAt);
-                if (prepared.Status != GovernedLoopSequentialFrontierTransitionStatus.Applied || prepared.Frontier is null)
-                {
-                    return Result(CustomLoopOrderedRunStatus.InvalidState, run, prepared.Detail);
-                }
-
-                var preparationCandidate = run with
-                {
-                    LifecycleVersion = checked(run.LifecycleVersion + 1),
-                    UpdatedAtUtc = preparedAt,
-                    Frontier = prepared.Frontier,
-                };
-                var persistedPreparation = await PersistAsync(run, preparationCandidate, IntegrityToken(), outcomeMayExist: false);
-                if (persistedPreparation.Run is null)
-                {
-                    return persistedPreparation.Terminal ?? Result(CustomLoopOrderedRunStatus.NeedsReview, run, "The terminal-review frontier claim could not be committed safely.");
-                }
-
-                run = persistedPreparation.Run;
             }
         }
 
@@ -4117,6 +4087,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 binding,
                 exactOutcome?.EventId,
                 exactOutcome?.SequentialNodeEvidence?.OutcomeArtifactHash,
+                terminalEvent.TimestampUtc);
+        }
+        else if (status == CustomLoopRunStatus.NeedsReview && last.Status == GovernedLoopNodeExecutionStatus.Ready)
+        {
+            transition = GovernedLoopSequentialFrontierMachine.ReviewBlockAggregate(
+                frontier,
+                binding,
                 terminalEvent.TimestampUtc);
         }
         else if (status == CustomLoopRunStatus.Failed && exactOutcome?.SequentialNodeEvidence is
