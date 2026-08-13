@@ -1,7 +1,10 @@
 Set-StrictMode -Version Latest
 
 $script:VerificationRequiredGateResourceCapacity = 12
-$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 3
+# Coverage-instrumented assembly lanes each host internally parallel tests and descendant
+# processes. Two may overlap on the four-core Windows runner; a third waits while ordinary
+# and CPU-bound gates may still backfill the remaining physical slots and logical capacity.
+$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 2
 $script:VerificationRequiredGateMaximumCpuBoundWorkers = 1
 $script:VerificationRequiredGateScheduleProfiles = @(
     # One VSTest process per assembly lets the test runner schedule isolated classes itself and
