@@ -1,5 +1,6 @@
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
+[Collection(LoopRuntimeIntegrationCollection.Name)]
 public sealed class CustomLoopRuntimeTestsAdmissionAndContext
 {
     [Fact]

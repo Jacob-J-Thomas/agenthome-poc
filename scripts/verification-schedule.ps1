@@ -1,38 +1,22 @@
 Set-StrictMode -Version Latest
 
-$script:VerificationRequiredGateResourceCapacity = 8
-$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 2
-$script:VerificationRequiredGateMaximumCpuBoundWorkers = 1
+$script:VerificationRequiredGateResourceCapacity = 12
+$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 4
+$script:VerificationRequiredGateMaximumCpuBoundWorkers = 2
 $script:VerificationRequiredGateScheduleProfiles = @(
-    # The prior Startup remainder profiles totaled 312 seconds; two xUnit workers imply
-    # a 156-second floor, with 24 seconds retained for collection imbalance and setup.
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime"; EstimatedDurationSeconds = 140; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"; EstimatedDurationSeconds = 140; Weight = 3; ResourceClass = "ProcessHeavy" }
-    # Hosted Loop API plus Web remainder observations totaled about 220 seconds;
-    # 130 seconds allows for their serialized API collection under two xUnit workers.
-    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-remainder"; EstimatedDurationSeconds = 130; Weight = 3; ResourceClass = "ProcessHeavy" }
-    # The prior non-Codex Integration profiles totaled 190 seconds; two xUnit workers
-    # imply a 95-second floor, with 25 seconds retained for imbalance and setup.
-    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-remainder"; EstimatedDurationSeconds = 120; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-runtime-host"; EstimatedDurationSeconds = 120; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime"; EstimatedDurationSeconds = 115; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-codex-app-server"; EstimatedDurationSeconds = 92; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-remainder-triggers"; EstimatedDurationSeconds = 78; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-contextual-roles"; EstimatedDurationSeconds = 75; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-capabilities"; EstimatedDurationSeconds = 68; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-definition-control"; EstimatedDurationSeconds = 65; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-default-conversation"; EstimatedDurationSeconds = 65; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-credentials"; EstimatedDurationSeconds = 62; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-authority"; EstimatedDurationSeconds = 60; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-human-input"; EstimatedDurationSeconds = 60; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle"; EstimatedDurationSeconds = 55; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-tool-results-audit"; EstimatedDurationSeconds = 50; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-all"; EstimatedDurationSeconds = 45; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-all"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Clients.Tests-all"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.E2ETests-all"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Cli.Command.Tests-all"; EstimatedDurationSeconds = 10; Weight = 1; ResourceClass = "Ordinary" }
+    # One VSTest process per assembly lets the test runner schedule isolated classes itself and
+    # removes repeated deployment, discovery, instrumentation, and report-write overhead.
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 300; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-all"; EstimatedDurationSeconds = 240; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "format-naming-style"; EstimatedDurationSeconds = 65; Weight = 2; ResourceClass = "CpuBound" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-all"; EstimatedDurationSeconds = 50; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "format-whitespace"; EstimatedDurationSeconds = 35; Weight = 2; ResourceClass = "CpuBound" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-all"; EstimatedDurationSeconds = 25; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Clients.Tests-all"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.E2ETests-all"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Cli.Command.Tests-all"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "git-diff-check"; EstimatedDurationSeconds = 5; Weight = 1; ResourceClass = "Ordinary" }
 )
 

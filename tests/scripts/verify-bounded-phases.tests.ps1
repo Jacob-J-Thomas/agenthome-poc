@@ -20,6 +20,9 @@ $maximumTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests
 $retentionTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopTraceRetentionStoreTests.cs"
 $coverageChildProcessPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\CoverageChildProcessAssembly.cs"
 $admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTests.cs"
+$persistenceEnvironmentCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\ProcessEnvironmentCollection.cs"
+$persistenceCapabilityCatalogTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Capabilities\FileCapabilityCatalogTrustProviderTests.cs"
+$startupRuntimeCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\LoopRuntimeIntegrationCollection.cs"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $assertionCount = 0
 
@@ -149,6 +152,9 @@ $maximumTest = Get-Content -LiteralPath $maximumTestPath -Raw
 $retentionTest = Get-Content -LiteralPath $retentionTestPath -Raw
 $coverageChildProcess = Get-Content -LiteralPath $coverageChildProcessPath -Raw
 $admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
+$persistenceEnvironmentCollection = Get-Content -LiteralPath $persistenceEnvironmentCollectionPath -Raw
+$persistenceCapabilityCatalogTest = Get-Content -LiteralPath $persistenceCapabilityCatalogTestPath -Raw
+$startupRuntimeCollection = Get-Content -LiteralPath $startupRuntimeCollectionPath -Raw
 
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "Stress")]' -Message "The verifier must expose only the two owned tiers."
 Assert-Contains -Actual $verifyScript -Expected '[string]$Configuration = "Release"' -Message "The canonical verifier must default to Release."
@@ -190,52 +196,60 @@ foreach ($tempVariable in @("TEMP", "TMP", "TMPDIR")) {
 }
 Assert-Contains -Actual $verifyScript -Expected 'Remove-Item -LiteralPath $laneFixtureRoot -Recurse -Force' -Message "Lane fixture roots must be cleaned after ordinary verifier completion."
 Assert-Contains -Actual $verifyScript -Expected '"vstest", $Lane.AssemblyPath' -Message "Test lanes must execute isolated assemblies."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "loop-execution-custom-runtime" -IncludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTests")' -Message "Custom loop runtime tests must retain their independently scheduled Startup lane."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "loop-execution-governed-runtime" -IncludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTests")' -Message "Governed loop runtime tests must retain their independently scheduled Startup lane."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName @("EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTests", "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTests")' -Message "The internally parallel Startup remainder must exclude both dedicated serial runtime families and absorb every other Startup test exactly once."
-Assert-True -Condition ($verifyScript.IndexOf('[pscustomobject]@{ Name = "loop-execution";', [StringComparison]::Ordinal) -lt 0) -Message "The oversized serial Startup execution lane must not be restored."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "contextual-roles" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.ContextualRoles")' -Message "Contextual-role persistence tests must have an independently scheduled lane."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "authority" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Authority")' -Message "Purpose-built external hosts must allow authority persistence coverage to return to one report-producing lane."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "credentials" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Credentials")' -Message "Purpose-built external hosts must allow credential persistence coverage to return to one report-producing lane."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "tool-results-audit" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.ToolResults", "EmbodySense.Core.Persistence.Tests.Audit")' -Message "Short-lived audit hosts must not force a duplicate coverage lane."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "human-input" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputRequest", "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputResponse")' -Message "Human Input request and response tests must share one exact report-producing lane after nested-VSTest removal."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "default-conversation" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurn")' -Message "Default-conversation recovery must return to its complete family after nested-VSTest removal."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "graph-lifecycle" -IncludeFullyQualifiedName @("EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring", "EmbodySense.Core.Persistence.Tests.Loops.Admission", "EmbodySense.Core.Persistence.Tests.Loops.Revisions")' -Message "Graph and lifecycle persistence tests must share a coverage-report-aware lane."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "remainder-triggers" -ExcludeFullyQualifiedName @(' -Message "Trigger coverage must be absorbed by the exact persistence remainder after nested-VSTest removal."
-Assert-True -Condition ($laneScript.IndexOf('New-VerificationTestLane -Name "authority-context"', [StringComparison]::Ordinal) -lt 0) -Message "The oversized authority-context lane must not be restored."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "codex-app-server" -IncludeFullyQualifiedName @("EmbodySense.IntegrationTests.CodexAppServer")' -Message "Codex app-server integration tests must have an independently scheduled lane."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName @("EmbodySense.IntegrationTests.CodexAppServer")' -Message "The internally parallel Integration remainder must exclude the serial Codex app-server family and absorb every other Integration test exactly once."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "runtime-host" -IncludeFullyQualifiedName @("EmbodySense.Web.Tests.WebAgentRuntimeHostTests")' -Message "Web runtime-host tests must have an independently scheduled lane."
-Assert-Contains -Actual $laneScript -Expected 'New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName @("EmbodySense.Web.Tests.WebAgentRuntimeHostTests")' -Message "The internally parallel Web remainder must exclude the serial runtime host and absorb every other Web test exactly once."
-foreach ($heavyLane in @("EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime", "EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime")) {
-    Assert-Contains -Actual $scheduleScript -Expected "Name = `"tests-$heavyLane`";" -Message "Measured process-heavy lane '$heavyLane' must have a checked-in scheduling profile."
-}
-foreach ($nestedProcessProfile in @(
-    'Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.IntegrationTests-remainder"; EstimatedDurationSeconds = 120; Weight = 3; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.Web.Tests-remainder"; EstimatedDurationSeconds = 130; Weight = 3; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"; EstimatedDurationSeconds = 140; Weight = 3; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.Core.Persistence.Tests-default-conversation"; EstimatedDurationSeconds = 65; Weight = 3; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle"; EstimatedDurationSeconds = 55; Weight = 3; ResourceClass = "ProcessHeavy"'
+Assert-Contains -Actual $laneScript -Expected 'return @((New-VerificationTestLane -Name "all"))' -Message "Each test assembly must execute through one exact stable-ID lane."
+Assert-True -Condition ($laneScript.IndexOf('$TestProject.', [StringComparison]::Ordinal) -lt 0) -Message "Assembly-wide execution must not inspect project identity or retain project-specific sharding branches."
+Assert-True -Condition ([regex]::Matches($laneScript, 'New-VerificationTestLane -Name "all"').Count -eq 1) -Message "The one-lane policy must have exactly one scheduler declaration."
+foreach ($parallelAssemblyInfoPath in @(
+    "tests\EmbodySense.Core.Persistence.Tests\AssemblyInfo.cs",
+    "tests\EmbodySense.Core.Startup.Tests\AssemblyInfo.cs",
+    "tests\EmbodySense.IntegrationTests\AssemblyInfo.cs",
+    "tests\EmbodySense.Web.Tests\AssemblyInfo.cs"
 )) {
-    Assert-Contains -Actual $scheduleScript -Expected $nestedProcessProfile -Message "Internally parallel and nested-process lanes must retain exact conservative process-heavy scheduling profiles."
+    $parallelAssemblyInfo = Get-Content -LiteralPath (Join-Path $repoRoot $parallelAssemblyInfoPath) -Raw
+    Assert-Contains -Actual $parallelAssemblyInfo -Expected '[assembly: CollectionBehavior(MaxParallelThreads = 2)]' -Message "Assembly-wide lane '$parallelAssemblyInfoPath' must retain the explicit two-thread xUnit ceiling."
 }
-foreach ($retiredMicroLane in @("authority-grants-process", "credentials-external-process", "default-conversation-recovery", "effect-authority-process", "sequential-evidence-process")) {
-    Assert-True -Condition ($laneScript.IndexOf("New-VerificationTestLane -Name `"$retiredMicroLane`"", [StringComparison]::Ordinal) -lt 0) -Message "Purpose-built hosts must retire report-amplifying lane '$retiredMicroLane'."
+Assert-Contains -Actual $startupRuntimeCollection -Expected '[CollectionDefinition(Name)]' -Message "Startup runtime wrappers must retain one shared serial xUnit collection."
+foreach ($startupRuntimeWrapper in @(
+    "CustomLoopRuntimeTestsAdmissionAndContext.cs",
+    "CustomLoopRuntimeTestsDurabilityAndRecovery.cs",
+    "CustomLoopRuntimeTestsPublicationAndConcurrency.cs",
+    "GovernedLoopRuntimeTestsAdmissionAndBinding.cs",
+    "GovernedLoopRuntimeTestsCompletionConstraints.cs",
+    "GovernedLoopRuntimeTestsResumeAndAuthority.cs"
+)) {
+    $startupRuntimeWrapperSource = Get-Content -LiteralPath (Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\$startupRuntimeWrapper") -Raw
+    Assert-Contains -Actual $startupRuntimeWrapperSource -Expected '[Collection(LoopRuntimeIntegrationCollection.Name)]' -Message "Startup runtime wrapper '$startupRuntimeWrapper' must serialize shared file-backed runtime state."
 }
-foreach ($retiredProfile in @("loops-other", "runtime-triggers", "remainder-capabilities", "loop-execution-remainder", "governance", "cli", "loop-api-run")) {
-    Assert-True -Condition ($scheduleScript.IndexOf("Tests-$retiredProfile`"", [StringComparison]::Ordinal) -lt 0) -Message "The scheduling catalog must not retain retired lane profile '$retiredProfile'."
+Assert-Contains -Actual $persistenceEnvironmentCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Persistence process-environment mutation must remain exclusive of all assembly tests."
+Assert-Contains -Actual $persistenceCapabilityCatalogTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Capability-catalog trust-root mutation must retain process-environment serialization."
+Assert-Contains -Actual $admissionStoreTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Coverage child-directory mutation must retain process-environment serialization."
+foreach ($assemblyProfile in @(
+    'Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 300; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Core.Startup.Tests-all"; EstimatedDurationSeconds = 240; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy"'
+)) {
+    Assert-Contains -Actual $scheduleScript -Expected $assemblyProfile -Message "Internally parallel assembly gates must retain exact conservative process-heavy scheduling profiles."
 }
-Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateResourceCapacity = 8' -Message "Required gates must retain eight logical resource units independently of the four-process host ceiling."
-Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 2' -Message "Required gates must enforce an explicit two-process-heavy concurrency ceiling."
-Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumCpuBoundWorkers = 1' -Message "Required gates must enforce an explicit one-CPU-bound concurrency ceiling."
+foreach ($assemblyName in @("EmbodySense.Cli.Command.Tests", "EmbodySense.Core.Application.Tests", "EmbodySense.Core.Clients.Tests", "EmbodySense.Core.Common.Tests", "EmbodySense.Core.Persistence.Tests", "EmbodySense.Core.Startup.Tests", "EmbodySense.E2ETests", "EmbodySense.IntegrationTests", "EmbodySense.Web.Tests")) {
+    Assert-Contains -Actual $scheduleScript -Expected "Name = `"tests-$assemblyName-all`";" -Message "Every production test assembly must have exactly one checked-in required-gate profile."
+}
+foreach ($retiredLane in @("loop-execution-custom-runtime", "loop-execution-governed-runtime", "contextual-roles", "codex-app-server", "runtime-host", "remainder-triggers")) {
+    Assert-True -Condition ($laneScript.IndexOf("New-VerificationTestLane -Name `"$retiredLane`"", [StringComparison]::Ordinal) -lt 0) -Message "Assembly-wide execution must not retain report-amplifying lane '$retiredLane'."
+}
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateResourceCapacity = 12' -Message "Required gates must retain twelve logical resource units independently of the four-process host ceiling."
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 4' -Message "Required gates must enforce an explicit four-process-heavy concurrency ceiling."
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumCpuBoundWorkers = 2' -Message "Required gates must enforce an explicit two-CPU-bound concurrency ceiling."
 Assert-Contains -Actual $scheduleScript -Expected 'Weight = 3; ResourceClass = "ProcessHeavy"' -Message "Process-heavy required gates must retain their evidence-backed logical weight."
 Assert-Contains -Actual $scheduleScript -Expected '"ProcessHeavy" { 3; break }' -Message "Required-gate profile validation must reject underweighted process-heavy gates."
-Assert-True -Condition ($scheduleScript.IndexOf('Name = "format-whitespace"', [StringComparison]::Ordinal) -lt 0 -and $scheduleScript.IndexOf('Name = "format-naming-style"', [StringComparison]::Ordinal) -lt 0) -Message "Read-only C# format gates must not retain stale required-gate schedule profiles after moving to post-build preflight."
+Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-whitespace"; EstimatedDurationSeconds = 35; Weight = 2; ResourceClass = "CpuBound"' -Message "Whitespace formatting must retain one checked-in CPU-bound required-gate profile."
+Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-naming-style"; EstimatedDurationSeconds = 65; Weight = 2; ResourceClass = "CpuBound"' -Message "Naming/style formatting must retain one checked-in CPU-bound required-gate profile."
+Assert-Contains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-whitespace"' -Message "Whitespace formatting must overlap only immutable required-gate test execution."
+Assert-Contains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-naming-style"' -Message "Naming/style formatting must overlap only immutable required-gate test execution."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationRequiredGateScheduleProfile -Name $Name' -Message "Every required gate must obtain checked-in duration and resource metadata by exact name."
 Assert-Contains -Actual $verifyScript -Expected '-EstimatedDurationSeconds $profile.EstimatedDurationSeconds -Weight $profile.Weight -ResourceClass $profile.ResourceClass' -Message "Every required gate must pass its exact checked-in scheduler profile."
 Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases)' -Message "The complete required gate plan must fail closed before execution when a profile is missing or mismatched."
-Assert-Contains -Actual $scheduleScript -Expected '$actualProcessCeiling = [Math]::Min(4, [Math]::Min($script:VerificationRequiredGateResourceCapacity, $HardwareProcessorCount))' -Message "Required gates must separate eight logical resource units from the hard four-process execution ceiling."
+Assert-Contains -Actual $scheduleScript -Expected '$actualProcessCeiling = [Math]::Min(4, [Math]::Min($script:VerificationRequiredGateResourceCapacity, $HardwareProcessorCount))' -Message "Required gates must separate twelve logical resource units from the hard four-process execution ceiling."
 Assert-Contains -Actual $scheduleScript -Expected 'return [Math]::Min($MaximumTestWorkers, $actualProcessCeiling)' -Message "Required gates must preserve lower explicit worker requests without bypassing the four-process ceiling."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers $MaximumTestWorkers -HardwareProcessorCount $hardwareProcessorCount' -Message "Required gate execution must use the behavior-tested worker derivation."
 Assert-Contains -Actual $verifyScript -Expected '$effectiveRequiredGateMaximumProcessHeavyWorkers = [Math]::Min($requiredGateMaximumProcessHeavyWorkers, $requiredGateMaximumWorkers)' -Message "Low-core execution must cap the process-heavy limit at the effective worker ceiling."

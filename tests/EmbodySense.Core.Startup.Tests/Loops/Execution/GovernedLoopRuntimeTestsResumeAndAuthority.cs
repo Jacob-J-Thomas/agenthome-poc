@@ -2,6 +2,7 @@ using EmbodySense.Core.Common.Authority.Grants.Models;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
+[Collection(LoopRuntimeIntegrationCollection.Name)]
 public sealed class GovernedLoopRuntimeTestsResumeAndAuthority
 {
     [Fact]

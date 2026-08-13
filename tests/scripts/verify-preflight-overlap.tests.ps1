@@ -59,8 +59,6 @@ Assert-Contains -Actual $verifyScript -Expected '$preflightResourceCapacity = $p
 Assert-Contains -Actual $verifyScript -Expected '$preflightCoverageContractWeight = Get-VerificationPreflightCoverageContractWeight -ResourceCapacity $preflightResourceCapacity' -Message "The coverage contract must use the behavior-tested adaptive resource-weight derivation."
 Assert-Contains -Actual $verifyScript -Expected '$preflightFrontendWeight = Get-VerificationPreflightFrontendWeight -ResourceCapacity $preflightResourceCapacity' -Message "The composed frontend phase must use a behavior-tested adaptive physical-capacity weight."
 Assert-Contains -Actual $verifyScript -Expected '$preflightNestedProcessContractWeight = Get-VerificationPreflightNestedProcessContractWeight -ResourceCapacity $preflightResourceCapacity' -Message "Nested-process script contracts must reserve the behavior-tested full preflight capacity."
-Assert-Contains -Actual $verifyScript -Expected '$preflightFormatWeight = [Math]::Min(2, $preflightResourceCapacity)' -Message "Each read-only format gate must reserve two of four physical units while remaining admissible on smaller hosts."
-Assert-Contains -Actual $verifyScript -Expected '$preflightMaximumCpuBoundWorkers = [Math]::Min(2, $preflightMaximumWorkers)' -Message "Post-build preflight must admit at most two CPU-bound children."
 Assert-Contains -Actual $verifyScript -Expected '$preflightMaximumProcessHeavyWorkers = 1' -Message "Each bounded schedule must admit no more than one process-heavy preflight worker."
 Assert-Contains -Actual $scheduleScript -Expected 'return [Math]::Min(3, $ResourceCapacity)' -Message "The shared preflight coverage derivation must clamp its weight to the available capacity."
 Assert-Contains -Actual $scheduleScript -Expected 'return [Math]::Min(2, $ResourceCapacity)' -Message "The shared frontend derivation must use two physical units where available and remain admissible on smaller hosts."
@@ -86,15 +84,15 @@ Assert-Contains -Actual $verifyScript -Expected 'throw "Preflight script contrac
 Assert-NotContains -Actual $verifyScript -Expected '-TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"' -Message "Coverage timeout headroom cannot become a blanket extension for Ordinary contracts."
 Assert-Contains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "frontend-preflight" -FileName $powerShellExecutable -Arguments $frontendArguments -TimeoutSeconds 590 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "frontend-preflight.log") -EstimatedDurationSeconds 70 -Weight $preflightFrontendWeight -ResourceClass "CpuBound"' -Message "The install-and-test frontend dependency chain must own one bounded CPU profile during preflight."
 Assert-OccurrenceCount -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "frontend-preflight"' -ExpectedCount 1 -Message "The composed frontend phase must be declared exactly once."
-Assert-Contains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -TimeoutSeconds 240 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "format-whitespace.log") -EstimatedDurationSeconds 45 -Weight $preflightFormatWeight -ResourceClass "CpuBound"' -Message "The authoritative whitespace gate must run read-only inside bounded post-build preflight."
-Assert-Contains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -TimeoutSeconds 240 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "format-naming-style.log") -EstimatedDurationSeconds 45 -Weight $preflightFormatWeight -ResourceClass "CpuBound"' -Message "The authoritative naming/style gate must run read-only inside bounded post-build preflight."
-Assert-OccurrenceCount -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "format-whitespace"' -ExpectedCount 1 -Message "Whitespace format validation must have exactly one scheduler owner."
-Assert-OccurrenceCount -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "format-naming-style"' -ExpectedCount 1 -Message "Naming/style format validation must have exactly one scheduler owner."
-Assert-NotContains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-whitespace"' -Message "Whitespace formatting must not be duplicated in required gates."
-Assert-NotContains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-naming-style"' -Message "Naming/style formatting must not be duplicated in required gates."
-Assert-Contains -Actual $verifyScript -Expected 'kind=pull-request-post-build-preflight phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers maximum_cpu_bound=$preflightMaximumCpuBoundWorkers format_weight=$preflightFormatWeight coverage_contract_weight=$preflightCoverageContractWeight nested_process_contract_weight=$preflightNestedProcessContractWeight nested_process_contracts=$($preflightNestedProcessContractScripts.Count) nested_process_isolation=full-resource-capacity configuration=$Configuration' -Message "Post-build work must publish its four-process, resource-class, descendant-isolation, and evidence-weight bounds."
+Assert-Contains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-whitespace.log")' -Message "The authoritative whitespace gate must use the checked-in required-gate profile after immutable test outputs exist."
+Assert-Contains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-naming-style.log")' -Message "The authoritative naming/style gate must use the checked-in required-gate profile after immutable test outputs exist."
+Assert-OccurrenceCount -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-whitespace"' -ExpectedCount 1 -Message "Whitespace format validation must have exactly one scheduler owner."
+Assert-OccurrenceCount -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-naming-style"' -ExpectedCount 1 -Message "Naming/style format validation must have exactly one scheduler owner."
+Assert-NotContains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "format-whitespace"' -Message "Whitespace formatting must not be duplicated in preflight."
+Assert-NotContains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "format-naming-style"' -Message "Naming/style formatting must not be duplicated in preflight."
+Assert-Contains -Actual $verifyScript -Expected 'kind=pull-request-post-build-contracts phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers coverage_contract_weight=$preflightCoverageContractWeight nested_process_contract_weight=$preflightNestedProcessContractWeight nested_process_contracts=$($preflightNestedProcessContractScripts.Count) nested_process_isolation=full-resource-capacity configuration=$Configuration' -Message "Post-build contract work must publish its four-process, descendant-isolation, and evidence-weight bounds."
 Assert-Contains -Actual $verifyScript -Expected 'kind=discovery phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$hardwareBoundedResourceCapacity maximum_resource_capacity=$hardwareBoundedResourceCapacity' -Message "Canonical discovery must publish the same hardware-bounded worker and resource limits."
-Assert-Contains -Actual $verifyScript -Expected 'Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers $preflightMaximumCpuBoundWorkers | Out-Null' -Message "Post-build preflight work must apply all four fail-closed process and resource-class bounds."
+Assert-Contains -Actual $verifyScript -Expected 'Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers | Out-Null' -Message "Post-build contract work must apply fail-closed process and process-heavy bounds."
 Assert-Contains -Actual $verifyScript -Expected '$script:LastCompletedVerificationPhase = "pull-request-preflight"' -Message "Later failures must identify the successful preflight dependency boundary."
 Assert-Contains -Actual $verifyScript -Expected 'Invoke-CheckedNativePhase -Name "build-$($VerificationTier.ToLowerInvariant())" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900' -Message "Stress and browser-only verification must retain the sequential canonical build path."
 Assert-NotContains -Actual $verifyScript -Expected 'Invoke-CheckedNativePhase -Name "npm-ci"' -Message "npm restore cannot be repeated after the post-build preflight."
@@ -215,8 +213,6 @@ Write-Output "end=$([DateTime]::UtcNow.Ticks)"
     $buildOutputPath = Join-Path $behaviorRoot "build.log"
     $coverageOutputPath = Join-Path $behaviorRoot "coverage.log"
     $frontendOutputPath = Join-Path $behaviorRoot "frontend.log"
-    $formatWhitespaceOutputPath = Join-Path $behaviorRoot "format-whitespace.log"
-    $formatNamingStyleOutputPath = Join-Path $behaviorRoot "format-naming-style.log"
     $ordinaryOutputPath = Join-Path $behaviorRoot "ordinary.log"
     $nestedFirstOutputPath = Join-Path $behaviorRoot "nested-first.log"
     $nestedSecondOutputPath = Join-Path $behaviorRoot "nested-second.log"
@@ -231,32 +227,24 @@ Write-Output "end=$([DateTime]::UtcNow.Ticks)"
     Add-VerificationParallelPhase -Name "nested-first" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-first" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $nestedFirstOutputPath -EstimatedDurationSeconds 60 -Weight 4 -ResourceClass "ProcessHeavy"
     Add-VerificationParallelPhase -Name "nested-second" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-second" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $nestedSecondOutputPath -EstimatedDurationSeconds 60 -Weight 4 -ResourceClass "ProcessHeavy"
     Add-VerificationParallelPhase -Name "coverage" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "coverage" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $coverageOutputPath -EstimatedDurationSeconds 75 -Weight 3 -ResourceClass "ProcessHeavy"
-    Add-VerificationParallelPhase -Name "format-whitespace" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "format-whitespace" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $formatWhitespaceOutputPath -EstimatedDurationSeconds 45 -Weight 2 -ResourceClass "CpuBound"
-    Add-VerificationParallelPhase -Name "format-naming-style" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "format-naming-style" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $formatNamingStyleOutputPath -EstimatedDurationSeconds 45 -Weight 2 -ResourceClass "CpuBound"
-
-    $postBuildResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 4 -MaximumProcessHeavyWorkers 1 -MaximumCpuBoundWorkers 2)
-    Assert-True -Condition ($postBuildResults.Count -eq 5 -and @($postBuildResults | Where-Object { $_.ExitCode -ne 0 }).Count -eq 0) -Message "The bounded post-build schedule must complete every declared phase exactly once and successfully."
-    Assert-True -Condition (@($postBuildResults | Select-Object -ExpandProperty Name | Sort-Object) -join "," -ceq "coverage,format-naming-style,format-whitespace,nested-first,nested-second") -Message "Post-build execution must contain the exact declared phase set without omissions or duplicates."
+    $postBuildResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 4 -MaximumProcessHeavyWorkers 1)
+    Assert-True -Condition ($postBuildResults.Count -eq 3 -and @($postBuildResults | Where-Object { $_.ExitCode -ne 0 }).Count -eq 0) -Message "The bounded post-build contract schedule must complete every declared phase exactly once and successfully."
+    Assert-True -Condition (@($postBuildResults | Select-Object -ExpandProperty Name | Sort-Object) -join "," -ceq "coverage,nested-first,nested-second") -Message "Post-build contract execution must contain the exact declared phase set without omissions or duplicates."
 
     $buildTiming = Read-PreflightTiming -Path $buildOutputPath
     $coverageTiming = Read-PreflightTiming -Path $coverageOutputPath
     $frontendTiming = Read-PreflightTiming -Path $frontendOutputPath
-    $formatWhitespaceTiming = Read-PreflightTiming -Path $formatWhitespaceOutputPath
-    $formatNamingStyleTiming = Read-PreflightTiming -Path $formatNamingStyleOutputPath
     $ordinaryTiming = Read-PreflightTiming -Path $ordinaryOutputPath
     $nestedFirstTiming = Read-PreflightTiming -Path $nestedFirstOutputPath
     $nestedSecondTiming = Read-PreflightTiming -Path $nestedSecondOutputPath
     Assert-True -Condition ($frontendTiming.Start -lt $buildTiming.End -and $buildTiming.Start -lt $frontendTiming.End) -Message "The independent frontend chain must overlap the canonical build."
     Assert-True -Condition ($ordinaryTiming.Start -lt $buildTiming.End) -Message "A build-safe contract must backfill capacity after the faster frontend chain completes."
     Assert-True -Condition ($coverageTiming.Start -ge $buildTiming.End) -Message "The coverage contract must start only after the canonical build completes."
-    Assert-True -Condition ($formatWhitespaceTiming.Start -ge $buildTiming.End) -Message "Whitespace format validation must start only after the canonical build completes."
-    Assert-True -Condition ($formatNamingStyleTiming.Start -ge $buildTiming.End) -Message "Naming/style format validation must start only after the canonical build completes."
-    Assert-True -Condition ($formatWhitespaceTiming.Start -lt $formatNamingStyleTiming.End -and $formatNamingStyleTiming.Start -lt $formatWhitespaceTiming.End) -Message "The two post-build format gates must use the admitted pair of CPU slots concurrently."
-    $nonNestedTimings = @($coverageTiming, $formatWhitespaceTiming, $formatNamingStyleTiming)
+    $nonNestedTimings = @($coverageTiming)
     Assert-True -Condition ($nestedFirstTiming.End -le $nestedSecondTiming.Start -or $nestedSecondTiming.End -le $nestedFirstTiming.Start) -Message "Full-capacity nested-process contracts must execute serially rather than multiplying their descendants."
     foreach ($nestedTiming in @($nestedFirstTiming, $nestedSecondTiming)) {
         foreach ($otherTiming in $nonNestedTimings) {
-            Assert-True -Condition ($nestedTiming.End -le $otherTiming.Start -or $otherTiming.End -le $nestedTiming.Start) -Message "A full-capacity nested-process contract must not overlap format or coverage work."
+            Assert-True -Condition ($nestedTiming.End -le $otherTiming.Start -or $otherTiming.End -le $nestedTiming.Start) -Message "A full-capacity nested-process contract must not overlap coverage work."
         }
     }
 }
@@ -408,16 +396,18 @@ $isolationIndex = $verifyScript.IndexOf('Write-Output "VERIFY_REQUIRED_TEST_CONT
 $buildIndex = $verifyScript.IndexOf('Add-VerificationParallelPhase -Name "build-pullrequest"', [StringComparison]::Ordinal)
 $frontendIndex = $verifyScript.IndexOf('Add-VerificationParallelPhase -Name "frontend-preflight"', [StringComparison]::Ordinal)
 $coverageIndex = $verifyScript.IndexOf('if ($contractScript -ceq "verify-coverage.tests.ps1") {', [StringComparison]::Ordinal)
-$formatWhitespaceIndex = $verifyScript.IndexOf('Add-VerificationParallelPhase -Name "format-whitespace"', [StringComparison]::Ordinal)
-$formatNamingStyleIndex = $verifyScript.IndexOf('Add-VerificationParallelPhase -Name "format-naming-style"', [StringComparison]::Ordinal)
+$partitionIndex = $verifyScript.IndexOf('Invoke-CheckedNativePhase -Name "test-partition-reconciliation"', [StringComparison]::Ordinal)
+$formatWhitespaceIndex = $verifyScript.IndexOf('Add-ProfiledRequiredGatePhase -Name "format-whitespace"', [StringComparison]::Ordinal)
+$formatNamingStyleIndex = $verifyScript.IndexOf('Add-ProfiledRequiredGatePhase -Name "format-naming-style"', [StringComparison]::Ordinal)
+$requiredGateInvocationIndex = $verifyScript.IndexOf('Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases)', [StringComparison]::Ordinal)
 Assert-True -Condition ($contractManifestIndex -ge 0 -and $contractManifestIndex -lt $buildIndex) -Message "Every script contract must be classified before any overlap phase is admitted."
 Assert-True -Condition ($buildIndex -lt $buildInvocationIndex -and $frontendIndex -lt $buildInvocationIndex) -Message "Build and frontend must enter the same bounded overlap schedule."
 Assert-True -Condition ($buildInvocationIndex -lt $buildCompletionIndex) -Message "The build-overlap schedule must complete before its dependency boundary is recorded."
 Assert-True -Condition ($buildCompletionIndex -lt $coverageIndex) -Message "Coverage and nested-process contracts may be admitted only after build overlap succeeds."
-Assert-True -Condition ($buildCompletionIndex -lt $formatWhitespaceIndex -and $buildCompletionIndex -lt $formatNamingStyleIndex) -Message "Neither read-only format gate may be admitted before the canonical build succeeds."
 Assert-True -Condition ($preflightCompletionIndex -ge 0 -and $preflightCompletionIndex -lt $browserIndex) -Message "Browser execution must wait for the complete split preflight."
 Assert-True -Condition ($preflightCompletionIndex -lt $isolationIndex) -Message "Isolation and discovery must wait for the complete split preflight."
 Assert-True -Condition ($frontendIndex -ge 0 -and $frontendIndex -lt $buildCompletionIndex) -Message "Frontend install and tests must complete inside build overlap."
-Assert-True -Condition ($formatWhitespaceIndex -lt $preflightCompletionIndex -and $formatNamingStyleIndex -lt $preflightCompletionIndex) -Message "Both authoritative format gates must complete inside post-build preflight."
+Assert-True -Condition ($partitionIndex -ge 0 -and $partitionIndex -lt $formatWhitespaceIndex -and $partitionIndex -lt $formatNamingStyleIndex) -Message "Both read-only format gates must be admitted only after immutable lane creation, discovery, and exact partition reconciliation."
+Assert-True -Condition ($formatWhitespaceIndex -lt $requiredGateInvocationIndex -and $formatNamingStyleIndex -lt $requiredGateInvocationIndex) -Message "Both authoritative format gates must execute inside the bounded required-gate schedule."
 
 Write-Output "Verifier preflight overlap and dependency-boundary contract tests passed ($assertionCount assertions)."
