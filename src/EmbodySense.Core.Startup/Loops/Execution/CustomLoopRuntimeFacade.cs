@@ -37,6 +37,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     private readonly CustomLoopOrderedRunner _humanInvocationRunner;
     private readonly CustomLoopOrderedRunner _triggerInvocationRunner;
     private readonly CustomLoopRuntimeContext _runtimeContext;
+    private readonly ICustomLoopExecutionActivation _executionActivation;
     private readonly SemaphoreSlim _executionAvailabilityGate = new(1, 1);
     private readonly string _surface;
     private readonly string _actor;
@@ -63,6 +64,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     /// <param name="humanInvocationRunner">The retained compatibility runner used only for intentional human invocation.</param>
     /// <param name="triggerInvocationRunner">The governed runner used for explicit trigger-adapter invocation.</param>
     /// <param name="runtimeContext">The runtime context.</param>
+    /// <param name="executionActivation">The composition-owned dependencies activated only after host recovery.</param>
     /// <param name="customExecutionAvailable">The custom execution available.</param>
     /// <param name="customExecutionReacquisitionAllowed">The custom execution reacquisition allowed.</param>
     /// <param name="customRecoveryRequired">The custom recovery required.</param>
@@ -84,6 +86,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         CustomLoopOrderedRunner humanInvocationRunner,
         CustomLoopOrderedRunner triggerInvocationRunner,
         CustomLoopRuntimeContext runtimeContext,
+        ICustomLoopExecutionActivation executionActivation,
         bool customExecutionAvailable,
         bool customExecutionReacquisitionAllowed,
         bool customRecoveryRequired,
@@ -105,6 +108,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         _humanInvocationRunner = humanInvocationRunner ?? throw new ArgumentNullException(nameof(humanInvocationRunner));
         _triggerInvocationRunner = triggerInvocationRunner ?? throw new ArgumentNullException(nameof(triggerInvocationRunner));
         _runtimeContext = runtimeContext ?? throw new ArgumentNullException(nameof(runtimeContext));
+        _executionActivation = executionActivation ?? throw new ArgumentNullException(nameof(executionActivation));
         _customExecutionAvailable = customExecutionAvailable;
         _customExecutionReacquisitionAllowed = customExecutionReacquisitionAllowed;
         _customRecoveryRequired = customRecoveryRequired;
@@ -116,6 +120,10 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     }
 
     internal bool CustomRecoveryRequired => Volatile.Read(ref _customRecoveryRequired);
+
+    internal Task<CustomExecutionAvailability> EnsureCustomExecutionAvailableAsync(
+        CancellationToken cancellationToken)
+        => EnsureCustomExecutionAvailableAsync(_actor, cancellationToken);
 
     /// <summary>
     /// Reconciles or admits one idempotent custom-loop invocation and, only after durable admission,
@@ -730,6 +738,28 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
                     _executionGate.RelinquishWorkspaceHost();
                     return new CustomExecutionAvailability(false, "Failed", $"custom_loop_recovery_failed: durable conversation reconciliation could not be read safely ({exception.GetType().Name}); hosting was released and the request may be retried.");
                 }
+            }
+
+            CustomLoopExecutionActivationResult activation;
+            try
+            {
+                activation = await _executionActivation.ActivateAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                _executionGate.RelinquishWorkspaceHost();
+                return new CustomExecutionAvailability(false, "Failed", $"custom_loop_activation_failed: retained execution dependencies could not be activated safely ({exception.GetType().Name}); hosting was released and the request may be retried.");
+            }
+
+            if (!activation.Available)
+            {
+                _customExecutionReacquisitionAllowed = activation.RetryAllowed;
+                _executionGate.RelinquishWorkspaceHost();
+                return new CustomExecutionAvailability(false, activation.Status, activation.Detail);
             }
 
             Volatile.Write(ref _customExecutionAvailable, true);

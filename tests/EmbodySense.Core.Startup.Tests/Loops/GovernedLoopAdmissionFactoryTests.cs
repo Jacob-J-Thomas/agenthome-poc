@@ -8,6 +8,8 @@ using EmbodySense.Core.Application.Loops.Admission;
 using EmbodySense.Core.Application.Loops.Admission.Models;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Application.Loops.GraphValidation;
+using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
@@ -22,6 +24,7 @@ using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -124,6 +127,53 @@ public sealed class GovernedLoopAdmissionFactoryTests
             snapshot.Pins.Select(item => item.DescriptorIdentity),
             snapshot.Evidence.Select(item => item.SelectedIdentity));
         Assert.Equal("sha256:" + fixture.GraphRead.Artifact!.ArtifactHash, snapshot.Requirements.Artifact.Checksum?.Value);
+    }
+
+    [Fact]
+    public async Task Admission_accepts_each_application_owned_wait_descriptor_after_public_plan_validation()
+    {
+        Assert.Equal(2, GovernedLoopWaitNodeCatalogContract.Descriptors.Count);
+
+        foreach (var descriptor in GovernedLoopWaitNodeCatalogContract.Descriptors)
+        {
+            using var workspace = new TestWorkspace();
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var trustProvider = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
+            await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+            var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+            var fixture = AdmissionFixture.CreateWait(workspaceId, descriptor);
+            Assert.Equal(
+                GovernedLoopSequentialPlanBuildStatus.Ready,
+                GovernedLoopSequentialPlanBuilder.Build(fixture.GraphRead.Artifact).Status);
+            var transaction = new CapabilityAuthorityTransaction(paths);
+            var ports = new MutableAdmissionPorts(fixture);
+            var store = new GovernedLoopAdmissionStore(paths, trustProvider, authorityTransaction: transaction);
+            var capabilityAdmission = CapabilityAdmissionFactory.Create(
+                paths,
+                trustProvider,
+                transaction,
+                new FixedTimeProvider(AdmissionFixture.Now.AddMinutes(1)));
+            using var facade = GovernedLoopAdmissionFactory.Create(
+                workspaceId,
+                store,
+                ports,
+                ports,
+                ports,
+                ports,
+                capabilityAdmission,
+                transaction,
+                ports,
+                new FixedTimeProvider(AdmissionFixture.Now.AddMinutes(1)));
+
+            var admitted = await facade.AdmitAsync(fixture.Request);
+
+            Assert.Equal(GovernedLoopAdmissionStatus.Admitted, admitted.Status);
+            var outcome = Assert.IsType<GovernedLoopAdmissionTerminalOutcome>(admitted.Outcome);
+            var receipt = Assert.IsType<GovernedLoopAdmissionReceipt>(outcome.Receipt);
+            Assert.Equal(
+                [ConversationTurnCapabilityId],
+                receipt.Evidence.CapabilityAdmission.Pins.Select(item => item.DescriptorIdentity.Id.Value));
+        }
     }
 
     [Fact]
@@ -411,14 +461,25 @@ public sealed class GovernedLoopAdmissionFactoryTests
 
         internal static AdmissionFixture CreateFirstWave(string workspaceId) => Create(workspaceId, includeModelInference: true);
 
-        private static AdmissionFixture Create(string workspaceId, bool includeModelInference)
+        internal static AdmissionFixture CreateWait(string workspaceId, GovernedLoopNodeCatalogDescriptor descriptor)
+            => Create(workspaceId, includeModelInference: false, descriptor);
+
+        private static AdmissionFixture Create(
+            string workspaceId,
+            bool includeModelInference,
+            GovernedLoopNodeCatalogDescriptor? waitDescriptor = null)
         {
+            var includeConversationTurn = includeModelInference || waitDescriptor is not null;
             var capabilityIdentities = includeModelInference
                 ? new[] { CapabilityIdentity(ConversationTurnCapabilityId), CapabilityIdentity(ModelInferenceCapabilityId) }
-                : [];
-            var role = CreateRole(workspaceId, includeModelInference);
+                : includeConversationTurn
+                    ? new[] { CapabilityIdentity(ConversationTurnCapabilityId) }
+                    : [];
+            var role = CreateRole(workspaceId, includeConversationTurn, includeModelInference);
             var rolePin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
-            var graph = CreateGraph(rolePin, includeModelInference);
+            var graph = waitDescriptor is null
+                ? CreateGraph(rolePin, includeModelInference)
+                : CreateWaitGraph(rolePin, waitDescriptor);
             var revisionArtifact = GovernedLoopRevisionArtifactFactory.Create(
                 1,
                 graph.RevisionReference,
@@ -497,7 +558,10 @@ public sealed class GovernedLoopAdmissionFactoryTests
                     Now));
         }
 
-        private static ContextualRoleRevision CreateRole(string workspaceId, bool includeModelInference)
+        private static ContextualRoleRevision CreateRole(
+            string workspaceId,
+            bool includeConversationTurn,
+            bool includeModelInference)
         {
             var role = new ContextualRoleRevision(
                 1,
@@ -515,7 +579,9 @@ public sealed class GovernedLoopAdmissionFactoryTests
                 new ContextualRolePolicyMaxima(
                     includeModelInference
                         ? ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId)
-                        : ImmutableArray<string>.Empty));
+                        : includeConversationTurn
+                            ? ImmutableArray.Create(ConversationTurnCapabilityId)
+                            : ImmutableArray<string>.Empty));
             return ContextualRoleRevisionContentHash.Apply(role);
         }
 
@@ -628,6 +694,69 @@ public sealed class GovernedLoopAdmissionFactoryTests
                     [
                         new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Start.", 0, 0),
                         new GovernedLoopNodeDisplayMetadata("inference", "Inference", "Infer.", 100, 0),
+                        new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 200, 0),
+                    ]));
+            return Assert.IsType<GovernedLoopGraphDefinition>(GovernedLoopGraphNormalizer.Normalize(candidate).Graph);
+        }
+
+        private static GovernedLoopGraphDefinition CreateWaitGraph(
+            ContextualRoleRevisionPin owningRole,
+            GovernedLoopNodeCatalogDescriptor descriptor)
+        {
+            var parameter = Assert.Single(descriptor.Parameters);
+            var parameterValue = descriptor.Descriptor.TypeId == GovernedLoopWaitVocabulary.Timestamp
+                ? Now.AddMinutes(5).ToString(GovernedLoopWaitVocabulary.CanonicalUtcTimestampFormat, System.Globalization.CultureInfo.InvariantCulture)
+                : "authenticated-event-1";
+            var candidate = new GovernedLoopGraphCandidate(
+                1,
+                $"governed-{descriptor.Descriptor.TypeId}-loop",
+                "revision-1",
+                "Wait durably before completing one admitted operation.",
+                owningRole,
+                "trigger",
+                ["exit"],
+                GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]),
+                [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
+                [
+                    new GovernedLoopNodeDefinition(
+                        "trigger",
+                        new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Trigger, "manual-trigger", 1),
+                        [
+                            new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                            new GovernedLoopPortDefinition("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context, "text", true),
+                        ],
+                        GovernedLoopAuthorityCeiling.Create([]),
+                        new Dictionary<string, string>()),
+                    new GovernedLoopNodeDefinition(
+                        "wait",
+                        descriptor.Descriptor,
+                        [],
+                        GovernedLoopAuthorityCeiling.Create([]),
+                        new Dictionary<string, string>(StringComparer.Ordinal) { [parameter.Id] = parameterValue }),
+                    new GovernedLoopNodeDefinition(
+                        "exit",
+                        new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
+                        [
+                            new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                            new GovernedLoopPortDefinition("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                        ],
+                        GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]),
+                        new Dictionary<string, string>()),
+                ],
+                [
+                    new GovernedLoopControlEdgeDefinition("trigger-to-wait", "trigger", "wait", GovernedLoopControlCondition.Always),
+                    new GovernedLoopControlEdgeDefinition("wait-to-exit", "wait", "exit", GovernedLoopControlCondition.Success),
+                ],
+                [new GovernedLoopBindingDefinition("request-binding", GovernedLoopBindingKind.Data, "trigger", "request", "exit", "result")],
+                new GovernedLoopOutputContract(
+                    "Return the admitted result.",
+                    [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
+                new GovernedLoopDisplayMetadata(
+                    "Governed Wait loop",
+                    "Test-only governed Wait loop.",
+                    [
+                        new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Start.", 0, 0),
+                        new GovernedLoopNodeDisplayMetadata("wait", "Wait", "Sleep.", 100, 0),
                         new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 200, 0),
                     ]));
             return Assert.IsType<GovernedLoopGraphDefinition>(GovernedLoopGraphNormalizer.Normalize(candidate).Graph);

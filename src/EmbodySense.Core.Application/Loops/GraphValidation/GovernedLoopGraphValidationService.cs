@@ -7,6 +7,7 @@ using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
 
@@ -211,6 +212,18 @@ public sealed class GovernedLoopGraphValidationService
                 path,
                 "Reserved Condition and Join descriptor keys must retain their complete canonical executable contract.");
         }
+
+        if (GovernedLoopWaitNodeCatalogContract.TryResolve(descriptor.Descriptor, out _)
+            && !GovernedLoopWaitNodeCatalogContract.HasExactCatalogSemantics(descriptor))
+        {
+            Add(
+                errors,
+                "catalog.wait-contract.mismatch",
+                GovernedLoopGraphElementKind.Catalog,
+                id,
+                path,
+                "Reserved Wait descriptor keys must retain their complete canonical executable contract.");
+        }
     }
 
     private static void ValidateParameterContracts(GovernedLoopNodeCatalogDescriptor descriptor, string descriptorPath, List<GovernedLoopGraphValidationError> errors)
@@ -355,6 +368,7 @@ public sealed class GovernedLoopGraphValidationService
             ValidateNodeParameters(node, descriptor, errors);
             ValidatePureNodeSchemaSemantics(graph, node, errors);
             ValidateTopologyNodeSchemaSemantics(graph, node, descriptor, errors);
+            ValidateWaitNodeSemantics(node, descriptor, errors);
             ValidateNodeAuthority(node, descriptor, errors);
         }
 
@@ -410,6 +424,35 @@ public sealed class GovernedLoopGraphValidationService
                 node.Id,
                 $"graph.nodes[{node.Id}]",
                 "The Condition or Join schema, parameter relationship, nullability, or exact executable topology contract is incompatible.");
+        }
+    }
+
+    private static void ValidateWaitNodeSemantics(
+        GovernedLoopNodeDefinition node,
+        GovernedLoopNodeCatalogDescriptor admittedDescriptor,
+        List<GovernedLoopGraphValidationError> errors)
+    {
+        if (!GovernedLoopWaitNodeCatalogContract.TryResolve(node.Descriptor, out _)
+            || !GovernedLoopWaitNodeCatalogContract.HasExactCatalogSemantics(admittedDescriptor))
+        {
+            return;
+        }
+
+        var conditionParameterId = node.Descriptor.TypeId == GovernedLoopWaitVocabulary.Timestamp
+            ? GovernedLoopWaitVocabulary.DeadlineUtcParameter
+            : GovernedLoopWaitVocabulary.EventReferenceParameter;
+        if (!node.Parameters.TryGetValue(conditionParameterId, out var value)
+            || !GovernedLoopWaitContractValidator.ValidateDescriptor(
+                node.Descriptor,
+                new Dictionary<string, string>(StringComparer.Ordinal) { [conditionParameterId] = value }).IsValid)
+        {
+            Add(
+                errors,
+                "node.wait-contract.incompatible",
+                GovernedLoopGraphElementKind.Node,
+                node.Id,
+                $"graph.nodes[{node.Id}]",
+                "The Wait condition is not one exact canonical UTC timestamp or bounded governed event reference.");
         }
     }
 

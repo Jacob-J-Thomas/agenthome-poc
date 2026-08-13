@@ -12,6 +12,8 @@ using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Wait;
+using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using System.Text;
 using System.Text.Json;
@@ -75,6 +77,7 @@ public static class CustomLoopRunValidator
         ValidateContextSnapshot(run.ContextSnapshot, run.UpdatedAtUtc, errors);
         ValidateExecutionClock(run, errors);
         ValidateEvents(run, errors);
+        ValidateWaitEvidence(run, errors);
         ValidateCheckpoint(run, errors);
         ValidateOutcome(run, errors);
         return new CustomLoopValidationResult(errors);
@@ -148,6 +151,7 @@ public static class CustomLoopRunValidator
         ValidateExecutionFrontierUpdate(current, candidate, errors);
         ValidateLifecycleTransition(current, candidate, errors);
         ValidateAppendOnlyEvents(current, candidate, errors);
+        ValidateAppendOnlyWaitEvidence(current, candidate, errors);
         ValidateAppendedControlOwnership(current, candidate, errors);
         ValidateSequentialCheckpointAdvance(current, candidate, errors);
         ValidateMonotonicCheckpoint(current, candidate, errors);
@@ -182,7 +186,8 @@ public static class CustomLoopRunValidator
             || !string.Equals(expected.FinalOutput, actual.FinalOutput, StringComparison.Ordinal)
             || !string.Equals(expected.FailureCode, actual.FailureCode, StringComparison.Ordinal)
             || !string.Equals(expected.FailureDetail, actual.FailureDetail, StringComparison.Ordinal)
-            || !FrontiersEqual(expected.Frontier, actual.Frontier))
+            || !FrontiersEqual(expected.Frontier, actual.Frontier)
+            || !WaitEvidenceEqual(expected.WaitEvidence, actual.WaitEvidence))
         {
             return false;
         }
@@ -217,7 +222,8 @@ public static class CustomLoopRunValidator
             || !Validate(actual).IsValid
             || actual.LifecycleVersion < expectedPrefix.LifecycleVersion
             || actual.UpdatedAtUtc < expectedPrefix.UpdatedAtUtc
-            || expectedPrefix.Events.Length > actual.Events.Length)
+            || expectedPrefix.Events.Length > actual.Events.Length
+            || !HasWaitEvidencePrefix(expectedPrefix.WaitEvidence, actual.WaitEvidence))
         {
             return false;
         }
@@ -295,7 +301,7 @@ public static class CustomLoopRunValidator
             || warning.RetainedForLoopReasoning is not null || warning.PublishedToInvokingConversation is not null || warning.ConversationPublicationId is not null
             || warning.Provider is not null || warning.Model is not null || warning.ProviderResponseId is not null || warning.ExitDecision is not null
             || warning.ToolAuthority is not null || warning.ToolEvidence is not null || warning.TraceReservationUtf8Bytes is not null || warning.ControlExpectedLifecycleVersion is not null
-            || warning.SequentialNodeEvidence is not null || warning.PureNodeOutcomeJson is not null)
+            || warning.SequentialNodeEvidence is not null || warning.PureNodeOutcomeJson is not null || warning.WaitContinuationEvidenceHash is not null)
         {
             Add(errors, "invalid_terminal_integrity_warning", "warning", "The post-terminal integrity warning can carry only its sequence, id, timestamp, kind, detail, and an empty context-block list.");
         }
@@ -326,9 +332,10 @@ public static class CustomLoopRunValidator
         return current switch
         {
             CustomLoopRunStatus.Admitted => next is CustomLoopRunStatus.Running or CustomLoopRunStatus.Paused or CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview,
-            CustomLoopRunStatus.Running => next is CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.Paused or CustomLoopRunStatus.CancelRequested or CustomLoopRunStatus.Completed or CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview,
+            CustomLoopRunStatus.Running => next is CustomLoopRunStatus.Waiting or CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.Paused or CustomLoopRunStatus.CancelRequested or CustomLoopRunStatus.Completed or CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview,
+            CustomLoopRunStatus.Waiting => next is CustomLoopRunStatus.Running or CustomLoopRunStatus.Paused or CustomLoopRunStatus.CancelRequested or CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview,
             CustomLoopRunStatus.PauseRequested => next is CustomLoopRunStatus.Paused or CustomLoopRunStatus.CancelRequested or CustomLoopRunStatus.Completed or CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview,
-            CustomLoopRunStatus.Paused => next is CustomLoopRunStatus.Running or CustomLoopRunStatus.CancelRequested or CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview,
+            CustomLoopRunStatus.Paused => next is CustomLoopRunStatus.Running or CustomLoopRunStatus.Waiting or CustomLoopRunStatus.CancelRequested or CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview,
             CustomLoopRunStatus.CancelRequested => next is CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview,
             _ => false
         };
@@ -655,6 +662,126 @@ public static class CustomLoopRunValidator
             or (CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected)
             or (CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention, CustomLoopSequentialNodeDisposition.NeedsReview);
 
+    private static void ValidateWaitEvidence(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
+    {
+        if (run.WaitEvidence is null)
+        {
+            Add(errors, "wait_evidence_required", "waitEvidence", "The canonical activation-scoped Wait evidence collection is required, including when empty.");
+            return;
+        }
+
+        if (run.WaitEvidence.Count > GovernedLoopExecutionLimits.MaxFrontierNodes)
+        {
+            Add(errors, "too_many_wait_evidence_items", "waitEvidence", $"A run cannot retain more than {GovernedLoopExecutionLimits.MaxFrontierNodes} Wait activations.");
+        }
+
+        var previousActivationOrdinal = -1;
+        for (var index = 0; index < run.WaitEvidence.Count; index++)
+        {
+            var item = run.WaitEvidence[index];
+            var field = $"waitEvidence[{index}]";
+            if (item is null || !GovernedLoopWaitContractValidator.Validate(item).IsValid)
+            {
+                Add(errors, "invalid_wait_evidence", field, "Wait evidence must be a bounded, hash-valid schema-1 activation record.");
+                continue;
+            }
+
+            if (item.ActivationOrdinal <= previousActivationOrdinal)
+            {
+                Add(errors, "unordered_wait_evidence", $"{field}.activationOrdinal", "Wait evidence must be uniquely ordered by increasing activation ordinal.");
+            }
+
+            previousActivationOrdinal = item.ActivationOrdinal;
+            if (run.SequentialAdapterBinding is not { } binding
+                || run.Frontier?.Payload.Nodes.ElementAtOrDefault(item.ActivationOrdinal) is not { } activation
+                || activation.ActivationOrdinal != item.ActivationOrdinal
+                || activation.Descriptor.Kind != GovernedLoopNodeKind.Wait
+                || !Equals(activation.Descriptor, item.Condition.Descriptor)
+                || !string.Equals(activation.NodeId, item.NodeId, StringComparison.Ordinal)
+                || activation.VisitOrdinal != item.NodeVisitOrdinal
+                || !string.Equals(activation.CycleId, item.CycleId, StringComparison.Ordinal)
+                || activation.CycleIteration != item.CycleIteration
+                || activation.Attempt != item.WaitAttempt
+                || !string.Equals(activation.AttemptOperationId, item.WaitOperationId, StringComparison.Ordinal)
+                || run.Frontier.Payload.FrontierVersion < item.ParkedFrontierVersion
+                || run.Frontier.Payload.FrontierVersion == item.ParkedFrontierVersion
+                    && !string.Equals(run.Frontier.Payload.ContentHash, item.ParkedFrontierHash, StringComparison.Ordinal)
+                || item.ParkedAtUtc < run.CreatedAtUtc
+                || item.ParkedAtUtc > run.UpdatedAtUtc)
+            {
+                Add(errors, "wait_evidence_frontier_mismatch", field, "Wait evidence must identify one exact Wait activation in the retained canonical frontier.");
+                continue;
+            }
+
+            if (item.ParkEvidence is { } park
+                && (!Equals(park.Checkpoint.Binding.Execution, binding.ExecutionBinding)
+                    || !Equals(park.Checkpoint.Binding.Publication, binding.AdmissionReceipt.Intent.Publication)
+                    || park.Checkpoint.PublishedAtUtc > run.UpdatedAtUtc))
+            {
+                Add(errors, "wait_evidence_binding_mismatch", $"{field}.parkEvidence", "Published Wait evidence must retain the run's exact execution and immutable publication binding.");
+            }
+
+            if (item.ContinuationEvidence?.ResumedAtUtc > run.UpdatedAtUtc)
+            {
+                Add(errors, "wait_continuation_timestamp_mismatch", $"{field}.continuationEvidence.resumedAtUtc", "Wait continuation evidence cannot postdate the retained run update.");
+            }
+
+            var compatible = activation.Status switch
+            {
+                GovernedLoopNodeExecutionStatus.Waiting => item.ContinuationEvidence is null
+                    && activation.ControlOutcome is null
+                    && activation.OutcomeEvidenceId is null
+                    && activation.OutcomeEvidenceHash is null,
+                GovernedLoopNodeExecutionStatus.ReviewBlocked => item.ContinuationEvidence is null,
+                GovernedLoopNodeExecutionStatus.Failed => item.ContinuationEvidence is null,
+                GovernedLoopNodeExecutionStatus.Running => item.ContinuationEvidence is { } continuation
+                    && item.ParkEvidence is not null
+                    && run.Frontier.Payload.FrontierVersion == continuation.ResumedFrontierVersion
+                    && string.Equals(run.Frontier.Payload.ContentHash, continuation.ResumedFrontierHash, StringComparison.Ordinal)
+                    && activation.ControlOutcome is null
+                    && activation.OutcomeEvidenceId is null
+                    && activation.OutcomeEvidenceHash is null,
+                GovernedLoopNodeExecutionStatus.Completed => item.ContinuationEvidence is { } continuation
+                    && item.ParkEvidence is not null
+                    && run.Frontier.Payload.FrontierVersion > continuation.ResumedFrontierVersion
+                    && activation.ControlOutcome == GovernedLoopControlCondition.Success
+                    && run.Events.Count(runEvent => runEvent is not null
+                        && string.Equals(runEvent.EventId, activation.OutcomeEvidenceId, StringComparison.Ordinal)
+                        && string.Equals(runEvent.SequentialNodeEvidence?.OutcomeArtifactHash, activation.OutcomeEvidenceHash, StringComparison.Ordinal)
+                        && string.Equals(runEvent.WaitContinuationEvidenceHash, continuation.ContentHash, StringComparison.Ordinal)) == 1,
+                _ => false,
+            };
+            if (!compatible)
+            {
+                Add(errors, "wait_evidence_lifecycle_mismatch", field, "Wait evidence phase must match the exact retained activation and frontier lifecycle.");
+            }
+        }
+
+        var retained = run.WaitEvidence.Where(item => item is not null).ToArray();
+        var waitingActivations = run.Frontier?.Payload.Nodes
+            .Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Wait && node.Status == GovernedLoopNodeExecutionStatus.Waiting)
+            .ToArray() ?? [];
+        var completedActivations = run.Frontier?.Payload.Nodes
+            .Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Wait && node.Status == GovernedLoopNodeExecutionStatus.Completed)
+            .ToArray() ?? [];
+        if (waitingActivations.Any(node => retained.Count(item => item.ActivationOrdinal == node.ActivationOrdinal) != 1))
+        {
+            Add(errors, "waiting_run_evidence_required", "waitEvidence", "Every Waiting frontier activation requires exactly one activation-scoped Wait evidence record, regardless of aggregate lifecycle status.");
+        }
+
+        if (completedActivations.Any(node => retained.Count(item => item.ActivationOrdinal == node.ActivationOrdinal
+            && item.ParkEvidence is not null
+            && item.ContinuationEvidence is not null) != 1))
+        {
+            Add(errors, "completed_wait_evidence_required", "waitEvidence", "Every completed Wait activation requires exactly one retained park and continuation evidence chain.");
+        }
+
+        if (run.Status == CustomLoopRunStatus.Waiting && waitingActivations.Length == 0)
+        {
+            Add(errors, "waiting_run_evidence_required", "waitEvidence", "A Waiting run requires at least one Waiting frontier activation with exact evidence.");
+        }
+    }
+
     private static void ValidateExecutionFrontierUpdate(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
     {
         if ((current.Frontier is null) != (candidate.Frontier is null))
@@ -687,6 +814,7 @@ public static class CustomLoopRunValidator
         return status switch
         {
             CustomLoopRunStatus.Admitted or CustomLoopRunStatus.Running => frontierStatus == GovernedLoopFrontierStatus.Active,
+            CustomLoopRunStatus.Waiting => frontierStatus == GovernedLoopFrontierStatus.Waiting,
             CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.CancelRequested => frontierStatus is GovernedLoopFrontierStatus.Active or GovernedLoopFrontierStatus.Waiting or GovernedLoopFrontierStatus.ReviewBlocked,
             CustomLoopRunStatus.Paused => frontierStatus is GovernedLoopFrontierStatus.Waiting or GovernedLoopFrontierStatus.ReviewBlocked
                 || frontierStatus == GovernedLoopFrontierStatus.Active
@@ -886,7 +1014,7 @@ public static class CustomLoopRunValidator
             Add(errors, "invalid_active_since_timestamp", "executionClock.activeSinceUtc", "Active-since timestamp must be a UTC value within the run timestamp range.");
         }
 
-        if (run.Status is CustomLoopRunStatus.Admitted or CustomLoopRunStatus.Paused or CustomLoopRunStatus.Completed or CustomLoopRunStatus.Failed or CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview && run.ExecutionClock.ActiveSinceUtc is not null)
+        if (run.Status is CustomLoopRunStatus.Admitted or CustomLoopRunStatus.Waiting or CustomLoopRunStatus.Paused or CustomLoopRunStatus.Completed or CustomLoopRunStatus.Failed or CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview && run.ExecutionClock.ActiveSinceUtc is not null)
         {
             Add(errors, "unexpected_active_execution_clock", "executionClock.activeSinceUtc", "Admitted, safely paused, and terminal runs cannot retain an active execution-clock timestamp.");
         }
@@ -1204,6 +1332,7 @@ public static class CustomLoopRunValidator
             ValidateToolEvidence(item.ToolEvidence, $"{field}.toolEvidence", run, errors);
             ValidatePureNodeOutcome(item, field, run, errors);
             ValidateSequentialNodeEvidence(item, index, field, run, sequentialStarts, sequentialTerminals, latestSequentialVisits, errors);
+            ValidateWaitContinuationEvent(item, field, run, errors);
             ValidateTraceReservation(item, field, run, errors);
             var isToolEvent = item.Kind is CustomLoopRunEventKind.ToolRequestReserved or CustomLoopRunEventKind.ToolGovernanceDecided or CustomLoopRunEventKind.ToolOutcomeObserved or CustomLoopRunEventKind.ToolIntegrityFailed;
             if (isToolEvent && (item.ToolAuthority is null || item.ToolEvidence is null || !ToolAuthoritiesEqual(item.ToolAuthority, item.ToolEvidence.Authority)))
@@ -1275,7 +1404,7 @@ public static class CustomLoopRunValidator
                 || marker.CanonicalOutput is not null || marker.OriginalOutputCharacterCount is not null || marker.CanonicalOutputTruncated is not null
                 || marker.RetainedForLoopReasoning is not null || marker.PublishedToInvokingConversation is not null || marker.ConversationPublicationId is not null
                 || marker.Provider is not null || marker.Model is not null || marker.ProviderResponseId is not null || marker.ExitDecision is not null || marker.ToolAuthority is not null || marker.ToolEvidence is not null || marker.TraceReservationUtf8Bytes is not null || marker.ControlExpectedLifecycleVersion is not null
-                || marker.SequentialNodeEvidence is not null || marker.PureNodeOutcomeJson is not null)
+                || marker.SequentialNodeEvidence is not null || marker.PureNodeOutcomeJson is not null || marker.WaitContinuationEvidenceHash is not null)
             {
                 Add(errors, "invalid_admission_audit_marker", $"events[{markerIndex}]", "The admission-audit completion marker cannot carry prompt, output, provider, publication, or node-attempt data.");
             }
@@ -1337,6 +1466,37 @@ public static class CustomLoopRunValidator
             || item.ControlExpectedLifecycleVersion is not null)
         {
             Add(errors, "invalid_pure_node_outcome_payload", field, "A pure-node completion cannot carry provider, context, publication, exit, tool, control, or legacy model-output payload.");
+        }
+    }
+
+    private static void ValidateWaitContinuationEvent(
+        CustomLoopRunEvent item,
+        string field,
+        CustomLoopRunRecord run,
+        List<CustomLoopValidationError> errors)
+    {
+        if (item.WaitContinuationEvidenceHash is not { } continuationHash)
+        {
+            return;
+        }
+
+        ValidateHash(continuationHash, $"{field}.waitContinuationEvidenceHash", errors);
+        if (item is not
+            {
+                Kind: CustomLoopRunEventKind.NodeAttemptCompleted,
+                SequentialNodeEvidence:
+                {
+                    Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                    Disposition: CustomLoopSequentialNodeDisposition.Completed,
+                    ControlOutcome: GovernedLoopControlCondition.Success,
+                } sequential,
+            }
+            || run.Frontier?.Payload.Nodes.ElementAtOrDefault(sequential.ActivationOrdinal)?.Descriptor.Kind != GovernedLoopNodeKind.Wait
+            || run.WaitEvidence?.Count(wait => wait is not null
+                && wait.ActivationOrdinal == sequential.ActivationOrdinal
+                && string.Equals(wait.ContinuationEvidence?.ContentHash, continuationHash, StringComparison.Ordinal)) != 1)
+        {
+            Add(errors, "invalid_wait_continuation_event", $"{field}.waitContinuationEvidenceHash", "Only the exact completed Wait event may carry the retained activation's continuation evidence hash.");
         }
     }
 
@@ -1624,6 +1784,7 @@ public static class CustomLoopRunValidator
         {
             var isPureNode = IsPureNodeEvent(run, item);
             var isTopologyNode = IsTopologyNodeEvent(run, item);
+            var isWaitNode = IsWaitNodeEvent(run, item);
             var hasValidPureEventShape = item.Kind switch
             {
                 CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
@@ -1655,6 +1816,28 @@ public static class CustomLoopRunValidator
                     || !hasValidTopologyShape)
                 {
                     Add(errors, "sequential_topology_node_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential Condition or Join evidence must identify its exact activation, cycle iteration, and deterministic start, completion, or failure envelope.");
+                }
+
+                return;
+            }
+
+            if (isWaitNode)
+            {
+                var hasValidWaitShape = item.Kind switch
+                {
+                    CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes
+                        && item.WaitContinuationEvidenceHash is null,
+                    CustomLoopRunEventKind.NodeAttemptCompleted => item.PureNodeOutcomeJson is null
+                        && item.WaitContinuationEvidenceHash is not null,
+                    CustomLoopRunEventKind.NodeAttemptFailed => HasPriorSequentialDispatch(run.Events, eventIndex, evidence, CustomLoopRunEventKind.NodeAttemptStarted)
+                        && item.WaitContinuationEvidenceHash is null,
+                    _ => false,
+                };
+                if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal)
+                    || item.Iteration != (evidence.CycleIteration ?? 1)
+                    || !hasValidWaitShape)
+                {
+                    Add(errors, "sequential_wait_node_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential Wait evidence must identify its exact activation and use the canonical start, completion, or failure envelope.");
                 }
 
                 return;
@@ -1781,6 +1964,16 @@ public static class CustomLoopRunValidator
 
         var node = run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal);
         return node?.Descriptor.Kind is GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Join;
+    }
+
+    private static bool IsWaitNodeEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        if (item.SequentialNodeEvidence is not { ActivationOrdinal: var activationOrdinal })
+        {
+            return false;
+        }
+
+        return run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal)?.Descriptor.Kind == GovernedLoopNodeKind.Wait;
     }
 
     private static bool ToolPhaseMatchesEventKind(CustomLoopToolEvidencePhase phase, CustomLoopRunEventKind kind)
@@ -2342,6 +2535,80 @@ public static class CustomLoopRunValidator
         }
     }
 
+    private static void ValidateAppendOnlyWaitEvidence(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
+    {
+        if (current.WaitEvidence is null || candidate.WaitEvidence is null || candidate.WaitEvidence.Count < current.WaitEvidence.Count)
+        {
+            Add(errors, "wait_evidence_history_truncated", "waitEvidence", "Persisted Wait activation evidence is append-only.");
+            return;
+        }
+
+        var changed = 0;
+        for (var index = 0; index < current.WaitEvidence.Count; index++)
+        {
+            var currentItem = current.WaitEvidence[index];
+            var candidateItem = candidate.WaitEvidence[index];
+            if (!HasSameWaitIdentity(currentItem, candidateItem))
+            {
+                Add(errors, "wait_evidence_history_changed", $"waitEvidence[{index}]", "Retained Wait coordinates and evidence phases are immutable; only missing checkpoint or continuation evidence may be appended.");
+                continue;
+            }
+
+            if (string.Equals(currentItem.ContentHash, candidateItem.ContentHash, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            changed++;
+            var currentActivation = current.Frontier?.Payload.Nodes.ElementAtOrDefault(currentItem.ActivationOrdinal);
+            var candidateActivation = candidate.Frontier?.Payload.Nodes.ElementAtOrDefault(candidateItem.ActivationOrdinal);
+            var attachedPark = currentItem.ParkEvidence is null
+                && currentItem.ContinuationEvidence is null
+                && candidateItem.ParkEvidence is not null
+                && candidateItem.ContinuationEvidence is null
+                && currentActivation?.Status == GovernedLoopNodeExecutionStatus.Waiting
+                && candidateActivation?.Status == GovernedLoopNodeExecutionStatus.Waiting
+                && current.Frontier?.Payload.FrontierVersion == candidate.Frontier?.Payload.FrontierVersion
+                && string.Equals(current.Frontier?.Payload.ContentHash, candidate.Frontier?.Payload.ContentHash, StringComparison.Ordinal);
+            var attachedContinuation = currentItem.ParkEvidence is not null
+                && string.Equals(currentItem.ParkEvidence.ContentHash, candidateItem.ParkEvidence?.ContentHash, StringComparison.Ordinal)
+                && currentItem.ContinuationEvidence is null
+                && candidateItem.ContinuationEvidence is { } continuation
+                && currentActivation?.Status == GovernedLoopNodeExecutionStatus.Waiting
+                && candidateActivation?.Status == GovernedLoopNodeExecutionStatus.Running
+                && continuation.PreResumeFrontierVersion == current.Frontier?.Payload.FrontierVersion
+                && string.Equals(continuation.PreResumeFrontierHash, current.Frontier?.Payload.ContentHash, StringComparison.Ordinal)
+                && continuation.ResumedFrontierVersion == candidate.Frontier?.Payload.FrontierVersion
+                && string.Equals(continuation.ResumedFrontierHash, candidate.Frontier?.Payload.ContentHash, StringComparison.Ordinal);
+            if (!attachedPark && !attachedContinuation)
+            {
+                Add(errors, "invalid_wait_evidence_phase_advance", $"waitEvidence[{index}]", "A retained Wait may append only its checkpoint while Waiting or its continuation on the exact Waiting-to-Running successor.");
+            }
+        }
+
+        foreach (var item in candidate.WaitEvidence.Skip(current.WaitEvidence.Count))
+        {
+            changed++;
+            var currentActivation = item is null ? null : current.Frontier?.Payload.Nodes.ElementAtOrDefault(item.ActivationOrdinal);
+            var activation = item is null ? null : candidate.Frontier?.Payload.Nodes.ElementAtOrDefault(item.ActivationOrdinal);
+            if (item is null
+                || item.ParkEvidence is not null
+                || item.ContinuationEvidence is not null
+                || currentActivation?.Status != GovernedLoopNodeExecutionStatus.Running
+                || activation?.Status != GovernedLoopNodeExecutionStatus.Waiting
+                || item.ParkedFrontierVersion != candidate.Frontier?.Payload.FrontierVersion
+                || !string.Equals(item.ParkedFrontierHash, candidate.Frontier?.Payload.ContentHash, StringComparison.Ordinal))
+            {
+                Add(errors, "invalid_initial_wait_evidence_phase", "waitEvidence", "A new Wait record may retain only its exact Waiting-frontier coordinates; checkpoint and continuation evidence are later append-only phases.");
+            }
+        }
+
+        if (changed > 1)
+        {
+            Add(errors, "multiple_wait_evidence_advances", "waitEvidence", "One lifecycle successor may advance at most one activation-scoped Wait evidence record.");
+        }
+    }
+
     private static void ValidateToolAttemptBinding(CustomLoopRunEvent[] events, int eventIndex, CustomLoopRunEvent item, string field, List<CustomLoopValidationError> errors)
     {
         var attemptStart = events.Take(eventIndex).LastOrDefault(candidate => candidate is not null
@@ -2483,7 +2750,8 @@ public static class CustomLoopRunValidator
             && left.TraceReservationUtf8Bytes == right.TraceReservationUtf8Bytes
             && left.ControlExpectedLifecycleVersion == right.ControlExpectedLifecycleVersion
             && Equals(left.SequentialNodeEvidence, right.SequentialNodeEvidence)
-            && string.Equals(left.PureNodeOutcomeJson, right.PureNodeOutcomeJson, StringComparison.Ordinal);
+            && string.Equals(left.PureNodeOutcomeJson, right.PureNodeOutcomeJson, StringComparison.Ordinal)
+            && string.Equals(left.WaitContinuationEvidenceHash, right.WaitContinuationEvidenceHash, StringComparison.Ordinal);
     }
 
     private static bool ToolAuthoritiesEqual(CustomLoopToolAuthoritySnapshot? left, CustomLoopToolAuthoritySnapshot? right)
@@ -2555,5 +2823,61 @@ public static class CustomLoopRunValidator
             && string.Equals(left.AdmissionReceiptHash, right.AdmissionReceiptHash, StringComparison.Ordinal)
             && string.Equals(left.Payload.ContentHash, right.Payload.ContentHash, StringComparison.Ordinal);
     }
+
+    private static bool WaitEvidenceEqual(
+        IReadOnlyList<GovernedLoopWaitExecutionEvidence>? left,
+        IReadOnlyList<GovernedLoopWaitExecutionEvidence>? right)
+        => left is not null
+            && right is not null
+            && left.Count == right.Count
+            && left.Select(item => item?.ContentHash).SequenceEqual(right.Select(item => item?.ContentHash), StringComparer.Ordinal);
+
+    private static bool HasWaitEvidencePrefix(
+        IReadOnlyList<GovernedLoopWaitExecutionEvidence>? expectedPrefix,
+        IReadOnlyList<GovernedLoopWaitExecutionEvidence>? actual)
+        => expectedPrefix is not null
+            && actual is not null
+            && expectedPrefix.Count <= actual.Count
+            && expectedPrefix.Select((item, index) => IsWaitEvidenceSuccessor(item, actual[index])).All(value => value);
+
+    private static bool IsWaitEvidenceSuccessor(
+        GovernedLoopWaitExecutionEvidence? current,
+        GovernedLoopWaitExecutionEvidence? candidate)
+        => current is not null
+            && candidate is not null
+            && current.SchemaVersion == candidate.SchemaVersion
+            && current.ActivationOrdinal == candidate.ActivationOrdinal
+            && string.Equals(current.NodeId, candidate.NodeId, StringComparison.Ordinal)
+            && current.NodeVisitOrdinal == candidate.NodeVisitOrdinal
+            && string.Equals(current.CycleId, candidate.CycleId, StringComparison.Ordinal)
+            && current.CycleIteration == candidate.CycleIteration
+            && current.WaitAttempt == candidate.WaitAttempt
+            && string.Equals(current.WaitOperationId, candidate.WaitOperationId, StringComparison.Ordinal)
+            && string.Equals(current.Condition?.ContentHash, candidate.Condition?.ContentHash, StringComparison.Ordinal)
+            && current.ParkedAtUtc == candidate.ParkedAtUtc
+            && current.ParkedFrontierVersion == candidate.ParkedFrontierVersion
+            && string.Equals(current.ParkedFrontierHash, candidate.ParkedFrontierHash, StringComparison.Ordinal)
+            && (current.ParkEvidence is null
+                || string.Equals(current.ParkEvidence.ContentHash, candidate.ParkEvidence?.ContentHash, StringComparison.Ordinal))
+            && (current.ContinuationEvidence is null
+                || string.Equals(current.ContinuationEvidence.ContentHash, candidate.ContinuationEvidence?.ContentHash, StringComparison.Ordinal));
+
+    private static bool HasSameWaitIdentity(
+        GovernedLoopWaitExecutionEvidence? current,
+        GovernedLoopWaitExecutionEvidence? candidate)
+        => current is not null
+            && candidate is not null
+            && current.SchemaVersion == candidate.SchemaVersion
+            && current.ActivationOrdinal == candidate.ActivationOrdinal
+            && string.Equals(current.NodeId, candidate.NodeId, StringComparison.Ordinal)
+            && current.NodeVisitOrdinal == candidate.NodeVisitOrdinal
+            && string.Equals(current.CycleId, candidate.CycleId, StringComparison.Ordinal)
+            && current.CycleIteration == candidate.CycleIteration
+            && current.WaitAttempt == candidate.WaitAttempt
+            && string.Equals(current.WaitOperationId, candidate.WaitOperationId, StringComparison.Ordinal)
+            && string.Equals(current.Condition?.ContentHash, candidate.Condition?.ContentHash, StringComparison.Ordinal)
+            && current.ParkedAtUtc == candidate.ParkedAtUtc
+            && current.ParkedFrontierVersion == candidate.ParkedFrontierVersion
+            && string.Equals(current.ParkedFrontierHash, candidate.ParkedFrontierHash, StringComparison.Ordinal);
 
 }

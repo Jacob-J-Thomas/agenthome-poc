@@ -18,9 +18,16 @@ internal sealed class TestExecutionGate : ICustomLoopWorkspaceExecutionGate
 
     public int ReleasedLeaseCount { get; private set; }
 
+    public Exception? AcquisitionException { get; set; }
+
     public CustomLoopExecutionLeaseResult TryAcquire(string operationId, string requestHash)
     {
         AcquisitionCount++;
+        if (AcquisitionException is not null)
+        {
+            throw AcquisitionException;
+        }
+
         var lease = Status == CustomLoopExecutionLeaseStatus.Acquired ? new Lease(operationId, () => ReleasedLeaseCount++) : null;
         return new CustomLoopExecutionLeaseResult(Status, lease, "Test execution ownership outcome.");
     }

@@ -121,6 +121,8 @@ public static class GovernedLoopSequentialFrontierMachine
         return frontier.Payload.Status switch
         {
             GovernedLoopFrontierStatus.Active => nodes.Any(node => node.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running),
+            GovernedLoopFrontierStatus.Waiting => nodes.Any(node => node.Status == GovernedLoopNodeExecutionStatus.Waiting)
+                && nodes.All(node => node.Status is not GovernedLoopNodeExecutionStatus.Ready and not GovernedLoopNodeExecutionStatus.Running and not GovernedLoopNodeExecutionStatus.ReviewBlocked),
             GovernedLoopFrontierStatus.ReviewBlocked => nodes.All(node => node.Status != GovernedLoopNodeExecutionStatus.Running)
                 && (nodes.Any(node => node.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked)
                     || nodes.Any(node => node.Status == GovernedLoopNodeExecutionStatus.Ready)),
@@ -145,6 +147,11 @@ public static class GovernedLoopSequentialFrontierMachine
         if (frontier!.Payload.Status == GovernedLoopFrontierStatus.ReviewBlocked)
         {
             return Selection(GovernedLoopSequentialFrontierSelectionStatus.ReviewBlocked, null, null, null, null, "The canonical frontier is durably blocked on review.");
+        }
+
+        if (frontier.Payload.Status == GovernedLoopFrontierStatus.Waiting)
+        {
+            return Selection(GovernedLoopSequentialFrontierSelectionStatus.Waiting, null, null, null, null, "The canonical frontier is durably parked pending an exact wake continuation.");
         }
 
         if (frontier.Payload.Status is GovernedLoopFrontierStatus.Completed or GovernedLoopFrontierStatus.Failed or GovernedLoopFrontierStatus.Cancelled)
@@ -237,6 +244,124 @@ public static class GovernedLoopSequentialFrontierMachine
         catch (Exception exception) when (IsContractFailure(exception))
         {
             return Invalid($"The Ready-to-Running transition was rejected by its bounded contract: {exception.GetType().Name}.");
+        }
+    }
+
+    /// <summary>Parks only the exact Running Wait activation while preserving its attempt and operation identity.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult ParkRunning(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
+        int attempt,
+        string? attemptOperationId,
+        DateTimeOffset updatedAtUtc)
+    {
+        var selected = Select(frontier, binding, plan);
+        if (selected.Status != GovernedLoopSequentialFrontierSelectionStatus.Running
+            || !SamePlanNode(selected.Node, node)
+            || !SameActivation(selected.Activation, activation)
+            || selected.Attempt != attempt
+            || !string.Equals(selected.AttemptOperationId, attemptOperationId, StringComparison.Ordinal)
+            || !GovernedLoopSequentialNodeDescriptors.IsWait(node?.Descriptor))
+        {
+            return Invalid("Only the exact committed Running Wait activation can enter durable Waiting posture.");
+        }
+
+        try
+        {
+            var waiting = CopyActivation(activation!, GovernedLoopNodeExecutionStatus.Waiting, attempt, attemptOperationId, null, null, null, [], []);
+            var aggregate = frontier!.Payload.Nodes.Any(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Ready)
+                ? GovernedLoopFrontierStatus.Active
+                : GovernedLoopFrontierStatus.Waiting;
+            var successor = ReplaceActivation(frontier, binding!, waiting, aggregate, updatedAtUtc);
+            return TransitionIsValid(frontier, successor, binding, plan)
+                ? Applied(successor, "The exact Wait activation entered Waiting before checkpoint publication.")
+                : Invalid("The Running-to-Waiting successor violates the canonical frontier transition contract.");
+        }
+        catch (Exception exception) when (IsContractFailure(exception))
+        {
+            return Invalid($"The Running-to-Waiting transition was rejected by its bounded contract: {exception.GetType().Name}.");
+        }
+    }
+
+    /// <summary>Resumes only one exact Waiting activation under its unchanged attempt and operation identity.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult ResumeWaiting(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopNodeExecutionEvidence? activation,
+        int attempt,
+        string? attemptOperationId,
+        DateTimeOffset updatedAtUtc)
+    {
+        if (!Validate(frontier, binding, plan)
+            || frontier!.Payload.Status is not (GovernedLoopFrontierStatus.Active or GovernedLoopFrontierStatus.Waiting)
+            || activation is null
+            || activation.Status != GovernedLoopNodeExecutionStatus.Waiting
+            || activation.Attempt != attempt
+            || !string.Equals(activation.AttemptOperationId, attemptOperationId, StringComparison.Ordinal)
+            || !GovernedLoopSequentialNodeDescriptors.IsWait(activation.Descriptor)
+            || frontier.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is not { } retained
+            || !SameActivation(retained, activation))
+        {
+            return Invalid("Only the exact durable Waiting activation can resume under its retained attempt operation.");
+        }
+
+        try
+        {
+            var running = CopyActivation(activation, GovernedLoopNodeExecutionStatus.Running, attempt, attemptOperationId, null, null, null, [], []);
+            var successor = ReplaceActivation(frontier, binding!, running, GovernedLoopFrontierStatus.Active, updatedAtUtc);
+            return TransitionIsValid(frontier, successor, binding, plan)
+                ? Applied(successor, "The exact Waiting activation resumed once under the retained wake operation.")
+                : Invalid("The Waiting-to-Running successor violates the canonical frontier transition contract.");
+        }
+        catch (Exception exception) when (IsContractFailure(exception))
+        {
+            return Invalid($"The Waiting-to-Running transition was rejected by its bounded contract: {exception.GetType().Name}.");
+        }
+    }
+
+    /// <summary>Moves one exact Waiting activation to durable review without inventing completion or route evidence.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult ReviewBlockWaiting(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopNodeExecutionEvidence? activation,
+        string? attentionEvidenceId,
+        string? attentionEvidenceHash,
+        DateTimeOffset updatedAtUtc)
+    {
+        if (!Validate(frontier, binding, plan)
+            || activation is null
+            || activation.Status != GovernedLoopNodeExecutionStatus.Waiting
+            || frontier!.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is not { } retained
+            || !SameActivation(retained, activation))
+        {
+            return Invalid("Only an exact durable Waiting activation can enter review.");
+        }
+
+        try
+        {
+            var blocked = CopyActivation(
+                activation,
+                GovernedLoopNodeExecutionStatus.ReviewBlocked,
+                activation.Attempt,
+                activation.AttemptOperationId,
+                attentionEvidenceId,
+                attentionEvidenceHash,
+                null,
+                [],
+                []);
+            var successor = ReplaceActivation(frontier, binding!, blocked, GovernedLoopFrontierStatus.ReviewBlocked, updatedAtUtc);
+            return TransitionIsValid(frontier, successor, binding, plan)
+                ? Applied(successor, "The exact Waiting activation entered durable review without completing its Wait.")
+                : Invalid("The Waiting-to-review successor violates the canonical frontier transition contract.");
+        }
+        catch (Exception exception) when (IsContractFailure(exception))
+        {
+            return Invalid($"The Waiting-to-review transition was rejected by its bounded contract: {exception.GetType().Name}.");
         }
     }
 
@@ -594,6 +719,7 @@ public static class GovernedLoopSequentialFrontierMachine
                 GovernedLoopNodeExecutionStatus.ReviewBlocked => GovernedLoopFrontierStatus.ReviewBlocked,
                 GovernedLoopNodeExecutionStatus.Failed => GovernedLoopFrontierStatus.Failed,
                 GovernedLoopNodeExecutionStatus.Completed when nodes.Any(item => item.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running) => GovernedLoopFrontierStatus.Active,
+                GovernedLoopNodeExecutionStatus.Completed when nodes.Any(item => item.Status == GovernedLoopNodeExecutionStatus.Waiting) => GovernedLoopFrontierStatus.Waiting,
                 GovernedLoopNodeExecutionStatus.Completed when resolved.Descriptor.Kind == GovernedLoopNodeKind.Exit => GovernedLoopFrontierStatus.Completed,
                 _ => throw new InvalidOperationException("A completed non-Exit route ended without an eligible successor."),
             };
@@ -621,12 +747,12 @@ public static class GovernedLoopSequentialFrontierMachine
         DateTimeOffset updatedAtUtc)
     {
         if (!ValidateBoundFrontier(frontier, binding)
-            || frontier!.Payload.Status is not (GovernedLoopFrontierStatus.Active or GovernedLoopFrontierStatus.ReviewBlocked))
+            || frontier!.Payload.Status is not (GovernedLoopFrontierStatus.Active or GovernedLoopFrontierStatus.Waiting or GovernedLoopFrontierStatus.ReviewBlocked))
         {
             return Invalid("Only a valid active bound frontier can enter a terminal posture.");
         }
 
-        var claimed = frontier.Payload.Nodes.Where(node => node.Status is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.ReviewBlocked).ToArray();
+        var claimed = frontier.Payload.Nodes.Where(node => node.Status is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Waiting or GovernedLoopNodeExecutionStatus.ReviewBlocked).ToArray();
         var candidates = claimed.Length == 0
             ? frontier.Payload.Nodes.Where(node => node.Status == GovernedLoopNodeExecutionStatus.Ready).ToArray()
             : claimed;
@@ -638,8 +764,9 @@ public static class GovernedLoopSequentialFrontierMachine
         var current = candidates[0];
         var permitted = resolution switch
         {
-            GovernedLoopNodeExecutionStatus.Failed => current.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.ReviewBlocked,
-            GovernedLoopNodeExecutionStatus.ReviewBlocked => frontier.Payload.Status == GovernedLoopFrontierStatus.Active && current.Status == GovernedLoopNodeExecutionStatus.Running,
+            GovernedLoopNodeExecutionStatus.Failed => current.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Waiting or GovernedLoopNodeExecutionStatus.ReviewBlocked,
+            GovernedLoopNodeExecutionStatus.ReviewBlocked => (current.Status is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Waiting)
+                && (frontier.Payload.Status is GovernedLoopFrontierStatus.Active or GovernedLoopFrontierStatus.Waiting),
             _ => false,
         };
         if (!permitted)

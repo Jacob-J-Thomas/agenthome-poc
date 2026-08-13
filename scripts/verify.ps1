@@ -39,6 +39,10 @@ $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([
 $maximumArtifactStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunArtifactMaximumShapeTests.Adversarial_maximum_transition_reservations_and_canonical_order_checks_remain_bounded"
 $deletionCapacityStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTraceRetentionStoreTests.Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible"
 $testLaneTimeoutSeconds = 480
+$coverageChildProcessTestProjects = @(
+    "EmbodySense.Core.Persistence.Tests.csproj",
+    "EmbodySense.Core.Startup.Tests.csproj"
+)
 
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 . (Join-Path $PSScriptRoot "verification-parallel.ps1")
@@ -173,7 +177,7 @@ function Get-ProjectCoverageIsolation {
             TMP = $laneFixtureRoot
             TMPDIR = $laneFixtureRoot
         }
-        if (-not $SkipCoverage -and $TestProject.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") {
+        if (-not $SkipCoverage -and $coverageChildProcessTestProjects.Contains($TestProject.Name)) {
             $laneEnvironment.EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory
         }
         $laneCopies.Add([pscustomobject]@{

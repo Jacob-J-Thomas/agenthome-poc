@@ -149,12 +149,13 @@ public sealed class GovernedLoopSleepStore : IGovernedLoopSleepStore
         {
             using var mutationLock = await _guard.AcquireMutationLockAsync(_observer, cancellationToken).ConfigureAwait(false);
             var (catalog, _) = await LoadAsync(mutationLock, cancellationToken).ConfigureAwait(false);
-            var evidence = catalog.Entries.Where(entry => entry.WakeEvidence.Count > 0)
-                .Select(entry => entry.WakeEvidence[^1])
-                .SingleOrDefault(candidate => candidate is not null && string.Equals(candidate.Identity.WakeId, wakeId, StringComparison.Ordinal));
+            var entry = catalog.Entries
+                .SingleOrDefault(candidate => candidate.WakeEvidence.Any(evidence => string.Equals(evidence.Identity.WakeId, wakeId, StringComparison.Ordinal)));
+            var evidence = entry?.WakeEvidence[^1];
+            var prepared = entry?.WakeEvidence.SingleOrDefault(candidate => candidate.Disposition == GovernedLoopWakeDisposition.Prepared);
             return evidence is null
                 ? WakeRead(GovernedLoopSleepStoreReadStatus.NotFound)
-                : WakeRead(GovernedLoopSleepStoreReadStatus.Found, evidence);
+                : WakeRead(GovernedLoopSleepStoreReadStatus.Found, evidence, prepared);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -619,8 +620,12 @@ public sealed class GovernedLoopSleepStore : IGovernedLoopSleepStore
 
     private static GovernedLoopWakeEvidenceReadResult WakeRead(
         GovernedLoopSleepStoreReadStatus status,
-        GovernedLoopWakeEvidence? evidence = null)
-        => new(status, evidence is null ? null : Copy(evidence));
+        GovernedLoopWakeEvidence? evidence = null,
+        GovernedLoopWakeEvidence? preparedEvidence = null)
+        => new(
+            status,
+            evidence is null ? null : Copy(evidence),
+            preparedEvidence is null ? null : Copy(preparedEvidence));
 
     private static GovernedLoopBackgroundWorkReadResult Background(
         GovernedLoopBackgroundWorkReadStatus status,

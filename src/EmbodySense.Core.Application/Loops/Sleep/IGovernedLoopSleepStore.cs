@@ -19,7 +19,7 @@ public interface IGovernedLoopSleepStore
     /// <summary>Reads one checkpoint by its deterministic identity.</summary>
     Task<GovernedLoopSleepCheckpointReadResult?> ReadCheckpointAsync(string checkpointId, CancellationToken cancellationToken = default);
 
-    /// <summary>Reads one wake delivery by its deterministic identity.</summary>
+    /// <summary>Reads one wake delivery and its exact retained Prepared predecessor by deterministic identity.</summary>
     Task<GovernedLoopWakeEvidenceReadResult?> ReadWakeAsync(string wakeId, CancellationToken cancellationToken = default);
 
     /// <summary>Claims one checkpoint with its initial terminal disposition or durable prepared continuation intent.</summary>

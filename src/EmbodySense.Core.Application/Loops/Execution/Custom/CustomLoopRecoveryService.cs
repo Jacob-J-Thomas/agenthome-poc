@@ -7,6 +7,7 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Application.Loops.Wait;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -79,9 +80,27 @@ public sealed class CustomLoopRecoveryService
         var admissionAuditComplete = CustomLoopRunValidator.HasCompleteAdmissionAudit(run);
         var hasRestartSafeDeterministicAttempt = HasRestartSafeDeterministicAttemptSinceCheckpoint(run);
         var hasOpenAttempt = HasOpenAttemptSinceCheckpoint(run);
+        var recoverableWaitClaims = GovernedLoopWaitClaimEvidence.FindExactRecoverableClaims(run);
+        var recoverableWaitContinuations = GovernedLoopWaitClaimEvidence.FindExactRecoverableContinuations(run);
         if (run.Status == CustomLoopRunStatus.Paused && admissionAuditComplete && !hasOpenAttempt)
         {
             return Result(CustomLoopRecoveryStatus.Unchanged, run, "The run is already Paused; restart recovery never starts execution automatically.");
+        }
+
+        if (run.Status == CustomLoopRunStatus.Running
+            && admissionAuditComplete
+            && recoverableWaitClaims.Count + recoverableWaitContinuations.Count == 1
+            && !hasOpenAttempt)
+        {
+            return Result(CustomLoopRecoveryStatus.Unchanged, run, "The run retains one exact restart-safe Wait recovery state for the canonical Wait recovery service; generic recovery did not replace its frontier or lifecycle truth.");
+        }
+
+        if (run.Status == CustomLoopRunStatus.Waiting
+            && admissionAuditComplete
+            && IsExactCanonicalWaitingCheckpoint(run)
+            && !hasOpenAttempt)
+        {
+            return Result(CustomLoopRecoveryStatus.Unchanged, run, "The run retains exact canonical Waiting frontier and Wait evidence for the canonical Wait recovery service; generic recovery did not replace its checkpoint or lifecycle truth.");
         }
 
         // Open canonical-attempt evidence makes the outcome uncertain. This includes a durable
@@ -194,6 +213,30 @@ public sealed class CustomLoopRecoveryService
         return Result(status, recovered, detail);
     }
 
+    private static bool IsExactCanonicalWaitingCheckpoint(CustomLoopRunRecord run)
+    {
+        if (run.SequentialAdapterBinding is null
+            || run.Frontier?.Payload.Status != GovernedLoopFrontierStatus.Waiting)
+        {
+            return false;
+        }
+
+        var waiting = run.Frontier.Payload.Nodes
+            .Where(node => node.Status == GovernedLoopNodeExecutionStatus.Waiting)
+            .ToArray();
+        return waiting.Length > 0
+            && waiting.All(node => run.WaitEvidence.Count(wait =>
+                wait.ActivationOrdinal == node.ActivationOrdinal
+                && string.Equals(wait.NodeId, node.NodeId, StringComparison.Ordinal)
+                && wait.NodeVisitOrdinal == node.VisitOrdinal
+                && wait.WaitAttempt == node.Attempt
+                && string.Equals(wait.WaitOperationId, node.AttemptOperationId, StringComparison.Ordinal)
+                && wait.ContinuationEvidence is null) == 1
+                && run.Events.Count(started =>
+                    started.SequentialNodeEvidence?.ActivationOrdinal == node.ActivationOrdinal
+                    && IsExactWaitingAttemptStart(run, started)) == 1);
+    }
+
     private static Dictionary<string, object?> RecoveryMetadata(
         CustomLoopRunRecord current,
         CustomLoopRunRecord candidate,
@@ -294,7 +337,10 @@ public sealed class CustomLoopRecoveryService
         var hasUnresolvedDispatch = run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence
             && (item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
             && !HasAuthenticatedTerminalSequentialOutcome(run, item)
-            && !IsRestartSafeDeterministicAttemptStart(run, item));
+            && !IsRestartSafeDeterministicAttemptStart(run, item)
+            && !GovernedLoopWaitClaimEvidence.IsExactRecoverableClaimStart(run, item)
+            && !GovernedLoopWaitClaimEvidence.IsExactRecoverableContinuationStart(run, item)
+            && !IsExactWaitingAttemptStart(run, item));
         return hasUnresolvedDispatch || HasUnresolvedRunningFrontierClaim(run);
     }
 
@@ -321,7 +367,41 @@ public sealed class CustomLoopRecoveryService
             .ToArray();
         return exactStarts.Length != 1
             || (!HasAuthenticatedTerminalSequentialOutcome(run, exactStarts[0])
-                && !IsRestartSafeDeterministicAttemptStart(run, exactStarts[0]));
+                && !IsRestartSafeDeterministicAttemptStart(run, exactStarts[0])
+                && !GovernedLoopWaitClaimEvidence.IsExactRecoverableClaimStart(run, exactStarts[0])
+                && !GovernedLoopWaitClaimEvidence.IsExactRecoverableContinuationStart(run, exactStarts[0])
+                && !IsExactWaitingAttemptStart(run, exactStarts[0]));
+    }
+
+    private static bool IsExactWaitingAttemptStart(CustomLoopRunRecord run, CustomLoopRunEvent started)
+    {
+        if (run.Status != CustomLoopRunStatus.Waiting
+            || run.Frontier?.Payload.Status != GovernedLoopFrontierStatus.Waiting
+            || started.Kind != CustomLoopRunEventKind.NodeAttemptStarted
+            || started.SequentialNodeEvidence is not
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+                Disposition: CustomLoopSequentialNodeDisposition.Unknown,
+            } dispatch
+            || run.SequentialAdapterBinding is not { } binding
+            || !SequentialBindingMatchesRun(dispatch, run, binding)
+            || !CustomLoopSequentialNodeEvidenceHash.Matches(dispatch)
+            || !CustomLoopSequentialOutcomeArtifactHash.Matches(started)
+            || !StartedAttemptMatchesFrontier(run, started, dispatch))
+        {
+            return false;
+        }
+
+        var activation = run.Frontier.Payload.Nodes.SingleOrDefault(node =>
+            node.ActivationOrdinal == dispatch.ActivationOrdinal);
+        return activation?.Status == GovernedLoopNodeExecutionStatus.Waiting
+            && run.WaitEvidence.Count(wait =>
+                wait.ActivationOrdinal == dispatch.ActivationOrdinal
+                && string.Equals(wait.NodeId, dispatch.NodeId, StringComparison.Ordinal)
+                && wait.NodeVisitOrdinal == dispatch.VisitOrdinal
+                && wait.WaitAttempt == dispatch.Attempt
+                && string.Equals(wait.WaitOperationId, started.EventId, StringComparison.Ordinal)
+                && wait.ContinuationEvidence is null) == 1;
     }
 
     private static bool HasAuthenticatedTerminalSequentialOutcome(CustomLoopRunRecord run, CustomLoopRunEvent started)

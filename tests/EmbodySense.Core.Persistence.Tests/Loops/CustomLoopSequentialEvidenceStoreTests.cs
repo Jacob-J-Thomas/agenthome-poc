@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Loops.Sequential;
@@ -17,6 +18,10 @@ using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Sleep;
+using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
+using EmbodySense.Core.Common.Loops.Execution.Wait;
+using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -84,6 +89,103 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         Assert.Equal(first, replay);
         Assert.Equal(loaded.LifecycleVersion, afterReplay.LifecycleVersion);
         Assert.Equal(loaded.Events, afterReplay.Events);
+    }
+
+    [Fact]
+    public async Task Canonical_wait_compare_and_swap_is_atomic_restart_safe_and_phase_ordered()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var stages = CreateWaitStages();
+        using var first = new CustomLoopRunStore(paths);
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await first.CreateAsync(stages.Admitted)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await first.UpdateAsync(stages.InferenceRunning, stages.Admitted.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await first.UpdateAsync(stages.ReadyForWait, stages.InferenceRunning.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await first.UpdateAsync(stages.WaitRunning, stages.ReadyForWait.LifecycleVersion)).Status);
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var parked = await restarted.UpdateAsync(stages.Waiting, stages.WaitRunning.LifecycleVersion);
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, parked.Status);
+        var retainedWaiting = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(stages.Admitted.Id));
+        Assert.Equal(CustomLoopRunStatus.Waiting, retainedWaiting.Status);
+        Assert.Equal(stages.Waiting.Frontier!.Payload.ContentHash, retainedWaiting.Frontier!.Payload.ContentHash);
+        Assert.Equal(
+            CustomLoopRunArtifactSerializer.Serialize(stages.Waiting),
+            CustomLoopRunArtifactSerializer.Serialize(retainedWaiting));
+
+        using var staleWriter = new CustomLoopRunStore(paths);
+        var stale = await staleWriter.UpdateAsync(stages.Waiting, stages.WaitRunning.LifecycleVersion);
+        Assert.Equal(CustomLoopRunStoreStatus.Conflict, stale.Status);
+        Assert.Equal(stages.WaitRunning.LifecycleVersion, stale.Conflict?.ExpectedLifecycleVersion);
+        Assert.Equal(stages.Waiting.LifecycleVersion, stale.Conflict?.ActualLifecycleVersion);
+
+        Assert.True(CustomLoopRunValidator.Validate(stages.SkippedParkPhase).IsValid);
+        await Assert.ThrowsAsync<FormatException>(() => restarted.UpdateAsync(stages.SkippedParkPhase, stages.Waiting.LifecycleVersion));
+        Assert.Equal(stages.Waiting.LifecycleVersion, (await restarted.GetAsync(stages.Admitted.Id))?.LifecycleVersion);
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await restarted.UpdateAsync(stages.Checkpointed, stages.Waiting.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await restarted.UpdateAsync(stages.Continued, stages.Checkpointed.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await restarted.UpdateAsync(stages.Completed, stages.Continued.LifecycleVersion)).Status);
+
+        using var restartedAfterCompletion = new CustomLoopRunStore(paths);
+        var completed = Assert.IsType<CustomLoopRunRecord>(await restartedAfterCompletion.GetAsync(stages.Admitted.Id));
+        var wait = Assert.Single(completed.WaitEvidence);
+        var completion = Assert.Single(completed.Events, item => item.WaitContinuationEvidenceHash is not null);
+        Assert.Equal(stages.Completed.Frontier!.Payload.ContentHash, completed.Frontier!.Payload.ContentHash);
+        Assert.Equal(
+            CustomLoopRunArtifactSerializer.Serialize(stages.Completed),
+            CustomLoopRunArtifactSerializer.Serialize(completed));
+        Assert.Equal(wait.ContinuationEvidence?.ContentHash, completion.WaitContinuationEvidenceHash);
+        Assert.Equal(stages.Completed.Events[^1].EventId, completion.EventId);
+        Assert.Equal(stages.Completed.Events[^1].SequentialNodeEvidence?.EvidenceHash, completion.SequentialNodeEvidence?.EvidenceHash);
+
+        var corruptWait = GovernedLoopWaitContractHash.Apply(wait with { ContentHash = string.Empty }) with { ContentHash = Hash('0') };
+        var corruptCandidate = completed with
+        {
+            LifecycleVersion = completed.LifecycleVersion + 1,
+            UpdatedAtUtc = completed.UpdatedAtUtc.AddTicks(1),
+            WaitEvidence = [corruptWait],
+        };
+        await Assert.ThrowsAsync<FormatException>(() => restartedAfterCompletion.UpdateAsync(corruptCandidate, completed.LifecycleVersion));
+        Assert.Equal(
+            CustomLoopRunArtifactSerializer.Serialize(completed),
+            CustomLoopRunArtifactSerializer.Serialize(Assert.IsType<CustomLoopRunRecord>(await restartedAfterCompletion.GetAsync(completed.Id))));
+    }
+
+    [Fact]
+    public async Task Canonical_wait_reader_rejects_omitted_required_evidence_properties()
+    {
+        using var sourceWorkspace = new TestWorkspace();
+        var sourcePaths = new WorkspacePaths(sourceWorkspace.RootPath);
+        var stages = CreateWaitStages();
+        using (var source = new CustomLoopRunStore(sourcePaths))
+        {
+            await PersistWaitStagesAsync(source, stages);
+        }
+
+        var sourcePath = Path.Combine(sourcePaths.CustomLoopRunsPath, stages.Admitted.LoopId, stages.Admitted.Id + ".json");
+        var canonical = JsonNode.Parse(await File.ReadAllTextAsync(sourcePath))!.AsObject();
+        var mutations = new Action<JsonObject>[]
+        {
+            run => run.Remove("waitEvidence"),
+            run => run["events"]!.AsArray()[^1]!.AsObject().Remove("waitContinuationEvidenceHash"),
+        };
+
+        foreach (var mutate in mutations)
+        {
+            using var workspace = new TestWorkspace();
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var envelope = canonical.DeepClone().AsObject();
+            mutate(envelope["run"]!.AsObject());
+            var directory = Path.Combine(paths.CustomLoopRunsPath, stages.Admitted.LoopId);
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, stages.Admitted.Id + ".json");
+            await File.WriteAllBytesAsync(path, [.. Encoding.UTF8.GetBytes(envelope.ToJsonString()), (byte)'\n']);
+
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync(stages.Admitted.Id));
+        }
     }
 
     [Fact]
@@ -718,8 +820,14 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     }
 
     internal static SequentialContext CreateContext(GovernedLoopSequentialTriggerOrigin? triggerOrigin = null, string identity = "sequential", bool scheduleTrigger = false)
+        => CreateContext(LinearGraph(scheduleTrigger), triggerOrigin, identity, scheduleTrigger);
+
+    private static SequentialContext CreateContext(
+        GovernedLoopGraphDefinition graph,
+        GovernedLoopSequentialTriggerOrigin? triggerOrigin = null,
+        string identity = "sequential",
+        bool scheduleTrigger = false)
     {
-        var graph = LinearGraph(scheduleTrigger);
         var revisionArtifact = GovernedLoopRevisionArtifactFactory.Create(
             1,
             graph.RevisionReference,
@@ -844,6 +952,311 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         run = CustomLoopAdmissionRequestHash.Apply(run);
         Assert.True(CustomLoopRunValidator.Validate(run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(run).Errors));
         return new SequentialContext(run, invocation, binding, anchor, plan);
+    }
+
+    private static WaitRunStages CreateWaitStages()
+    {
+        var context = CreateContext(WaitGraph());
+        var admitted = context.Run;
+        var inferenceSelection = GovernedLoopSequentialFrontierMachine.Select(admitted.Frontier, context.Binding, context.Plan);
+        var inferenceNode = Assert.IsType<GovernedLoopSequentialPlanNode>(inferenceSelection.Node);
+        var inferenceReady = Assert.IsType<GovernedLoopNodeExecutionEvidence>(inferenceSelection.Activation);
+        var runningEvent = Event(2, "event-running", CustomLoopRunEventKind.LifecycleChanged);
+        var inferenceStart = WithWaitEvidence(
+            Event(3, "inference-attempt-1", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 1),
+            context.Binding,
+            inferenceReady.ActivationOrdinal,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown,
+            "step-to-wait");
+        var inferenceStartedTransition = GovernedLoopSequentialFrontierMachine.Start(
+            admitted.Frontier,
+            context.Binding,
+            context.Plan,
+            inferenceNode,
+            inferenceReady,
+            1,
+            inferenceStart.EventId,
+            inferenceStart.TimestampUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, inferenceStartedTransition.Status);
+        var inferenceRunningFrontier = Assert.IsType<GovernedLoopFrontierPosture>(inferenceStartedTransition.Frontier);
+        var inferenceRunning = admitted with
+        {
+            LifecycleVersion = 2,
+            Status = CustomLoopRunStatus.Running,
+            UpdatedAtUtc = inferenceStart.TimestampUtc,
+            ExecutionClock = new CustomLoopExecutionClock(0, inferenceStart.TimestampUtc),
+            Frontier = inferenceRunningFrontier,
+            Events = [.. admitted.Events, runningEvent, inferenceStart],
+        };
+
+        var inferenceCompletion = WithWaitEvidence(
+            Event(4, "inference-completed-1", CustomLoopRunEventKind.NodeAttemptCompleted, "step-1", 1),
+            context.Binding,
+            inferenceReady.ActivationOrdinal,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed,
+            "step-to-wait");
+        var inferenceCompletedTransition = GovernedLoopSequentialFrontierMachine.CompleteRunning(
+            inferenceRunningFrontier,
+            context.Binding,
+            context.Plan,
+            inferenceNode,
+            inferenceRunningFrontier.Payload.Nodes[inferenceReady.ActivationOrdinal],
+            1,
+            inferenceStart.EventId,
+            inferenceCompletion.EventId,
+            inferenceCompletion.SequentialNodeEvidence!.OutcomeArtifactHash,
+            GovernedLoopControlCondition.Success,
+            [],
+            inferenceCompletion.TimestampUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, inferenceCompletedTransition.Status);
+        var readyForWaitFrontier = Assert.IsType<GovernedLoopFrontierPosture>(inferenceCompletedTransition.Frontier);
+        var readyForWait = inferenceRunning with
+        {
+            LifecycleVersion = 3,
+            UpdatedAtUtc = inferenceCompletion.TimestampUtc,
+            Frontier = readyForWaitFrontier,
+            Events = [.. inferenceRunning.Events, inferenceCompletion],
+        };
+
+        var waitSelection = GovernedLoopSequentialFrontierMachine.Select(readyForWaitFrontier, context.Binding, context.Plan);
+        var node = Assert.IsType<GovernedLoopSequentialPlanNode>(waitSelection.Node);
+        var ready = Assert.IsType<GovernedLoopNodeExecutionEvidence>(waitSelection.Activation);
+        var start = WithWaitEvidence(
+            Event(5, "wait-attempt-1", CustomLoopRunEventKind.NodeAttemptStarted, "wait-1", 1),
+            context.Binding,
+            ready.ActivationOrdinal,
+            "wait-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown,
+            "wait-to-exit");
+        var startedTransition = GovernedLoopSequentialFrontierMachine.Start(
+            readyForWaitFrontier,
+            context.Binding,
+            context.Plan,
+            node,
+            ready,
+            1,
+            start.EventId,
+            start.TimestampUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, startedTransition.Status);
+        var runningFrontier = Assert.IsType<GovernedLoopFrontierPosture>(startedTransition.Frontier);
+        var running = readyForWait with
+        {
+            LifecycleVersion = 4,
+            UpdatedAtUtc = start.TimestampUtc,
+            Frontier = runningFrontier,
+            Events = [.. readyForWait.Events, start],
+        };
+
+        var parkedAtUtc = _timestamp.AddMinutes(5);
+        var runningActivation = runningFrontier.Payload.Nodes[ready.ActivationOrdinal];
+        var parkedTransition = GovernedLoopSequentialFrontierMachine.ParkRunning(
+            runningFrontier,
+            context.Binding,
+            context.Plan,
+            node,
+            runningActivation,
+            1,
+            start.EventId,
+            parkedAtUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, parkedTransition.Status);
+        var waitingFrontier = Assert.IsType<GovernedLoopFrontierPosture>(parkedTransition.Frontier);
+        Assert.True(GovernedLoopWaitContractValidator.TryCreateCondition(
+            node.Descriptor,
+            node.Parameters,
+            out var condition,
+            out var conditionValidation));
+        Assert.True(conditionValidation.IsValid);
+        var wait = GovernedLoopWaitContractHash.Apply(new GovernedLoopWaitExecutionEvidence(
+            1,
+            runningActivation.ActivationOrdinal,
+            runningActivation.NodeId,
+            runningActivation.VisitOrdinal,
+            runningActivation.CycleId,
+            runningActivation.CycleIteration,
+            runningActivation.Attempt!.Value,
+            runningActivation.AttemptOperationId!,
+            condition!,
+            parkedAtUtc,
+            waitingFrontier.Payload.FrontierVersion,
+            waitingFrontier.Payload.ContentHash,
+            null,
+            null,
+            string.Empty));
+        var waitingEvent = Event(6, "event-waiting", CustomLoopRunEventKind.LifecycleChanged);
+        var waiting = running with
+        {
+            LifecycleVersion = 5,
+            Status = CustomLoopRunStatus.Waiting,
+            UpdatedAtUtc = parkedAtUtc,
+            ExecutionClock = new CustomLoopExecutionClock(60_000, null),
+            Frontier = waitingFrontier,
+            WaitEvidence = [wait],
+            Events = [.. running.Events, waitingEvent],
+        };
+
+        var publishedAtUtc = parkedAtUtc.AddTicks(1);
+        var sleepBinding = new GovernedLoopSleepBinding(
+            context.Binding.ExecutionBinding,
+            context.Binding.AdmissionReceipt.Intent.Publication,
+            waitingFrontier.Payload.FrontierVersion,
+            waitingFrontier.Payload.ContentHash,
+            wait.ActivationOrdinal,
+            wait.CycleId,
+            wait.CycleIteration,
+            wait.NodeId,
+            wait.NodeVisitOrdinal,
+            wait.WaitAttempt,
+            wait.WaitOperationId);
+        var checkpoint = GovernedLoopSleepContractHash.Apply(new GovernedLoopSleepCheckpoint(
+            1,
+            string.Empty,
+            sleepBinding,
+            GovernedLoopWakeMode.Timestamp,
+            condition!.WakeDeadlineUtc,
+            null,
+            publishedAtUtc,
+            string.Empty));
+        var parkEvidence = GovernedLoopWaitContractHash.Apply(new GovernedLoopWaitParkEvidence(
+            1,
+            condition,
+            checkpoint,
+            parkedAtUtc,
+            string.Empty));
+        var checkpointedWait = GovernedLoopWaitContractHash.Apply(wait with
+        {
+            ParkEvidence = parkEvidence,
+            ContentHash = string.Empty,
+        });
+        var checkpointed = waiting with
+        {
+            LifecycleVersion = 6,
+            UpdatedAtUtc = publishedAtUtc,
+            WaitEvidence = [checkpointedWait],
+        };
+
+        var resumedAtUtc = condition.WakeDeadlineUtc!.Value;
+        var wakeIdentity = GovernedLoopSleepContractHash.Apply(new GovernedLoopWakeIdentity(
+            1,
+            string.Empty,
+            checkpoint.CheckpointId,
+            checkpoint.ContentHash,
+            checkpoint.WakeMode,
+            checkpoint.AuthenticatedEventReference,
+            null,
+            string.Empty));
+        var preparedWake = GovernedLoopSleepContractHash.Apply(new GovernedLoopWakeEvidence(
+            1,
+            1,
+            wakeIdentity,
+            GovernedLoopWakeDisposition.Prepared,
+            "continue-wait-1",
+            null,
+            null,
+            resumedAtUtc,
+            string.Empty));
+        var resumedTransition = GovernedLoopSequentialFrontierMachine.ResumeWaiting(
+            waitingFrontier,
+            context.Binding,
+            context.Plan,
+            waitingFrontier.Payload.Nodes[wait.ActivationOrdinal],
+            wait.WaitAttempt,
+            wait.WaitOperationId,
+            resumedAtUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, resumedTransition.Status);
+        var resumedFrontier = Assert.IsType<GovernedLoopFrontierPosture>(resumedTransition.Frontier);
+        var continuation = GovernedLoopWaitContractHash.Apply(new GovernedLoopWaitContinuationEvidence(
+            1,
+            parkEvidence.ContentHash,
+            preparedWake,
+            waitingFrontier.Payload.FrontierVersion,
+            waitingFrontier.Payload.ContentHash,
+            resumedFrontier.Payload.FrontierVersion,
+            resumedFrontier.Payload.ContentHash,
+            resumedAtUtc,
+            string.Empty));
+        var continuedWait = GovernedLoopWaitContractHash.Apply(checkpointedWait with
+        {
+            ContinuationEvidence = continuation,
+            ContentHash = string.Empty,
+        });
+        var resumedEvent = Event(7, "event-resumed", CustomLoopRunEventKind.LifecycleChanged) with
+        {
+            TimestampUtc = resumedAtUtc,
+        };
+        var continued = checkpointed with
+        {
+            LifecycleVersion = 7,
+            Status = CustomLoopRunStatus.Running,
+            UpdatedAtUtc = resumedAtUtc,
+            ExecutionClock = new CustomLoopExecutionClock(checkpointed.ExecutionClock.AccumulatedRunningMilliseconds, resumedAtUtc),
+            Frontier = resumedFrontier,
+            WaitEvidence = [continuedWait],
+            Events = [.. checkpointed.Events, resumedEvent],
+        };
+        var skippedParkPhase = continued with { LifecycleVersion = 6 };
+
+        var completionSeed = Event(8, "event-wait-completed", CustomLoopRunEventKind.NodeAttemptCompleted, "wait-1", 1) with
+        {
+            WaitContinuationEvidenceHash = continuation.ContentHash,
+        };
+        var completion = WithWaitEvidence(
+            completionSeed,
+            context.Binding,
+            wait.ActivationOrdinal,
+            "wait-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed,
+            "wait-to-exit");
+        var completedTransition = GovernedLoopSequentialFrontierMachine.CompleteRunning(
+            resumedFrontier,
+            context.Binding,
+            context.Plan,
+            node,
+            resumedFrontier.Payload.Nodes[wait.ActivationOrdinal],
+            wait.WaitAttempt,
+            wait.WaitOperationId,
+            completion.EventId,
+            completion.SequentialNodeEvidence!.OutcomeArtifactHash,
+            completion.SequentialNodeEvidence.ControlOutcome!.Value,
+            [],
+            completion.TimestampUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, completedTransition.Status);
+        var completed = continued with
+        {
+            LifecycleVersion = 8,
+            UpdatedAtUtc = completion.TimestampUtc,
+            Frontier = completedTransition.Frontier!,
+            Events = [.. continued.Events, completion],
+        };
+
+        foreach (var run in new[] { admitted, inferenceRunning, readyForWait, running, waiting, checkpointed, skippedParkPhase, continued, completed })
+        {
+            var validation = CustomLoopRunValidator.Validate(run);
+            Assert.True(validation.IsValid, $"Lifecycle {run.LifecycleVersion}:{Environment.NewLine}{string.Join(Environment.NewLine, validation.Errors)}");
+        }
+
+        return new WaitRunStages(admitted, inferenceRunning, readyForWait, running, waiting, checkpointed, skippedParkPhase, continued, completed);
+    }
+
+    private static async Task PersistWaitStagesAsync(CustomLoopRunStore store, WaitRunStages stages)
+    {
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(stages.Admitted)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(stages.InferenceRunning, stages.Admitted.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(stages.ReadyForWait, stages.InferenceRunning.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(stages.WaitRunning, stages.ReadyForWait.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(stages.Waiting, stages.WaitRunning.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(stages.Checkpointed, stages.Waiting.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(stages.Continued, stages.Checkpointed.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(stages.Completed, stages.Continued.LifecycleVersion)).Status);
     }
 
     private static async Task<CustomLoopRunRecord> CompleteCanonicalInferenceAsync(
@@ -1114,7 +1527,70 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
                 nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()));
     }
 
-    private static CapabilityAdmissionSnapshot SequentialCapabilityAdmission(string graphArtifactHash, bool scheduleTrigger)
+    private static GovernedLoopGraphDefinition WaitGraph()
+    {
+        var role = new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("sequential-role", 1), Hash('a'));
+        var nodes = new[]
+        {
+            new GovernedLoopNodeDefinition(
+                "trigger",
+                GovernedLoopSequentialNodeDescriptors.ManualTrigger,
+                [Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context)],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>()),
+            new GovernedLoopNodeDefinition(
+                "step-1",
+                GovernedLoopSequentialNodeDescriptors.ProviderInference,
+                [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
+                new Dictionary<string, string> { ["instruction"] = "Answer safely before waiting." }),
+            new GovernedLoopNodeDefinition(
+                "wait-1",
+                GovernedLoopSequentialNodeDescriptors.TimestampWait,
+                [],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [GovernedLoopWaitVocabulary.DeadlineUtcParameter] = _timestamp.AddMinutes(7).ToString(
+                        GovernedLoopWaitVocabulary.CanonicalUtcTimestampFormat,
+                        CultureInfo.InvariantCulture),
+                }),
+            new GovernedLoopNodeDefinition(
+                "exit",
+                GovernedLoopSequentialNodeDescriptors.SuccessExit,
+                [Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]),
+                new Dictionary<string, string>()),
+        };
+        return GovernedLoopGraphDefinition.Create(
+            1,
+            "sequential-loop",
+            "revision-1",
+            "Execute one exact supported sequential governed Wait graph.",
+            role,
+            "trigger",
+            ["exit"],
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
+            [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
+            nodes,
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-step", "trigger", "step-1", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("step-to-wait", "step-1", "wait-1", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("wait-to-exit", "wait-1", "exit", GovernedLoopControlCondition.Success),
+            ],
+            [
+                new GovernedLoopBindingDefinition("data-to-step", GovernedLoopBindingKind.Data, "trigger", "request", "step-1", "request"),
+                new GovernedLoopBindingDefinition("context-to-step", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "step-1", "invocation-context"),
+                new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, "step-1", "result", "exit", "result"),
+            ],
+            new GovernedLoopOutputContract("Return the exact bounded result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
+            new GovernedLoopDisplayMetadata(
+                "Wait loop",
+                "Display metadata is not execution order.",
+                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()));
+    }
+
+    private static CapabilityAdmissionSnapshot SequentialCapabilityAdmission(string graphArtifactHash, bool scheduleTrigger = false)
     {
         Assert.True(CapabilityId.TryParse("org.embodysense/loop-sequential", out var subject, out _));
         Assert.True(CapabilityId.TryParse(ConversationTurnCapabilityId, out var conversationTurn, out _));
@@ -1215,6 +1691,44 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         return runEvent with { SequentialNodeEvidence = evidence };
     }
 
+    private static CustomLoopRunEvent WithWaitEvidence(
+        CustomLoopRunEvent runEvent,
+        GovernedLoopSequentialAdapterBinding binding,
+        int activationOrdinal,
+        string nodeId,
+        int attempt,
+        CustomLoopSequentialNodeEvidenceKind kind,
+        CustomLoopSequentialNodeDisposition disposition,
+        string outgoingEdgeId)
+    {
+        var controlOutcome = kind == CustomLoopSequentialNodeEvidenceKind.DispatchStarted
+            ? (GovernedLoopControlCondition?)null
+            : GovernedLoopControlCondition.Success;
+        var outgoing = new[] { outgoingEdgeId };
+        var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
+            1,
+            kind,
+            binding.WorkspaceId,
+            binding.ExecutionBinding.RunId,
+            binding.ExecutionBinding.Revision,
+            binding.ExecutionBinding.ExecutionGeneration,
+            activationOrdinal,
+            1,
+            nodeId,
+            attempt,
+            null,
+            null,
+            controlOutcome,
+            controlOutcome is null ? [] : outgoing,
+            [],
+            null,
+            null,
+            disposition,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
+            string.Empty));
+        return runEvent with { SequentialNodeEvidence = evidence };
+    }
+
     private static CustomLoopRunEvent PureEvent(
         long sequence,
         string eventId,
@@ -1295,6 +1809,17 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     }
 
     private static string Hash(char value) => new(value, 64);
+
+    private sealed record WaitRunStages(
+        CustomLoopRunRecord Admitted,
+        CustomLoopRunRecord InferenceRunning,
+        CustomLoopRunRecord ReadyForWait,
+        CustomLoopRunRecord WaitRunning,
+        CustomLoopRunRecord Waiting,
+        CustomLoopRunRecord Checkpointed,
+        CustomLoopRunRecord SkippedParkPhase,
+        CustomLoopRunRecord Continued,
+        CustomLoopRunRecord Completed);
 
     internal sealed record SequentialContext(
         CustomLoopRunRecord Run,

@@ -15,6 +15,9 @@ public enum GovernedLoopSequentialFrontierSelectionStatus
     /// <summary>The frontier is durably blocked on review and cannot dispatch.</summary>
     ReviewBlocked,
 
+    /// <summary>The frontier is durably parked and cannot dispatch until an exact wake continuation commits.</summary>
+    Waiting,
+
     /// <summary>The frontier is terminal and cannot dispatch.</summary>
     Terminal
 }

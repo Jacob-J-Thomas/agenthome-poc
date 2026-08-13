@@ -182,7 +182,7 @@ public sealed class GovernedLoopSleepService
             }
 
             return existingRead.Evidence!.Disposition is GovernedLoopWakeDisposition.Prepared or GovernedLoopWakeDisposition.AmbiguousAttempt
-                ? await ReconcileExistingAsync(checkpoint, existingRead.Evidence, cancellationToken).ConfigureAwait(false)
+                ? await ReconcileExistingAsync(checkpoint, existingRead.Evidence, existingRead.PreparedEvidence, cancellationToken).ConfigureAwait(false)
                 : FromEvidence(existingRead.Evidence, duplicateCommitted: true);
         }
 
@@ -273,13 +273,14 @@ public sealed class GovernedLoopSleepService
         }
 
         return wakeRead.Evidence!.Disposition is GovernedLoopWakeDisposition.Prepared or GovernedLoopWakeDisposition.AmbiguousAttempt
-            ? await ReconcileExistingAsync(checkpointRead.Checkpoint!, wakeRead.Evidence, cancellationToken).ConfigureAwait(false)
+            ? await ReconcileExistingAsync(checkpointRead.Checkpoint!, wakeRead.Evidence, wakeRead.PreparedEvidence, cancellationToken).ConfigureAwait(false)
             : FromEvidence(wakeRead.Evidence, duplicateCommitted: false);
     }
 
     private async Task<GovernedLoopWakeResult> ReconcileExistingAsync(
         GovernedLoopSleepCheckpoint checkpoint,
         GovernedLoopWakeEvidence current,
+        GovernedLoopWakeEvidence? preparedEvidence,
         CancellationToken cancellationToken)
     {
         var operationId = current.ContinuationOperationId;
@@ -292,7 +293,7 @@ public sealed class GovernedLoopSleepService
         try
         {
             reconciliation = await _continuation.ReconcileAsync(
-                new GovernedLoopWakeContinuationRequest(checkpoint, current.Identity, operationId, null),
+                new GovernedLoopWakeContinuationRequest(checkpoint, current.Identity, operationId, Copy(preparedEvidence), null),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -330,12 +331,15 @@ public sealed class GovernedLoopSleepService
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        return await RetryAfterConclusiveNonCommitAsync(checkpoint, current, cancellationToken).ConfigureAwait(false);
+        return preparedEvidence is null
+            ? FromEvidence(current, duplicateCommitted: false)
+            : await RetryAfterConclusiveNonCommitAsync(checkpoint, current, preparedEvidence, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<GovernedLoopWakeResult> RetryAfterConclusiveNonCommitAsync(
         GovernedLoopSleepCheckpoint checkpoint,
         GovernedLoopWakeEvidence current,
+        GovernedLoopWakeEvidence preparedEvidence,
         CancellationToken cancellationToken)
     {
         if (!TryGetUtcNow(out var readStartedAtUtc))
@@ -390,7 +394,7 @@ public sealed class GovernedLoopSleepService
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        return await InvokeContinuationAsync(checkpoint, current, posture!.PostureHash).ConfigureAwait(false);
+        return await InvokeContinuationAsync(checkpoint, current, preparedEvidence, posture!.PostureHash).ConfigureAwait(false);
     }
 
     private async Task<GovernedLoopWakeResult> PersistInitialAsync(
@@ -466,10 +470,15 @@ public sealed class GovernedLoopSleepService
         {
             if (!invokeContinuation || replayed)
             {
-                return await ReconcileExistingAsync(checkpoint, evidence, CancellationToken.None).ConfigureAwait(false);
+                var read = evidence.Disposition == GovernedLoopWakeDisposition.Prepared
+                    ? new GovernedLoopWakeEvidenceReadResult(GovernedLoopSleepStoreReadStatus.Found, evidence, evidence)
+                    : await ReadWakeAsync(evidence.Identity.WakeId, CancellationToken.None).ConfigureAwait(false);
+                return read.Status == GovernedLoopSleepStoreReadStatus.Found
+                    ? await ReconcileExistingAsync(checkpoint, evidence, read.PreparedEvidence, CancellationToken.None).ConfigureAwait(false)
+                    : Wake(MapRead(read.Status), evidence);
             }
 
-            return await InvokeContinuationAsync(checkpoint, evidence, expectedPostureHash).ConfigureAwait(false);
+            return await InvokeContinuationAsync(checkpoint, evidence, evidence, expectedPostureHash).ConfigureAwait(false);
         }
 
         return FromEvidence(evidence, duplicateCommitted: replayed);
@@ -477,25 +486,31 @@ public sealed class GovernedLoopSleepService
 
     private async Task<GovernedLoopWakeResult> InvokeContinuationAsync(
         GovernedLoopSleepCheckpoint checkpoint,
-        GovernedLoopWakeEvidence prepared,
+        GovernedLoopWakeEvidence current,
+        GovernedLoopWakeEvidence preparedEvidence,
         string expectedPostureHash)
     {
         if (!TryGetUtcNow(out var continuationAtUtc))
         {
-            return Wake(GovernedLoopWakeResultStatus.Unavailable, prepared);
+            return Wake(GovernedLoopWakeResultStatus.Unavailable, current);
         }
 
         if (continuationAtUtc < checkpoint.PublishedAtUtc
-            || continuationAtUtc < prepared.RecordedAtUtc)
+            || continuationAtUtc < current.RecordedAtUtc)
         {
-            return Wake(GovernedLoopWakeResultStatus.NotEligible, prepared);
+            return Wake(GovernedLoopWakeResultStatus.NotEligible, current);
         }
 
         GovernedLoopWakeContinuationResult? continuation;
         try
         {
             continuation = await _continuation.ContinueAsync(
-                new GovernedLoopWakeContinuationRequest(checkpoint, prepared.Identity, prepared.ContinuationOperationId!, expectedPostureHash),
+                new GovernedLoopWakeContinuationRequest(
+                    checkpoint,
+                    current.Identity,
+                    current.ContinuationOperationId!,
+                    Copy(preparedEvidence),
+                    expectedPostureHash),
                 CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception)
@@ -508,7 +523,7 @@ public sealed class GovernedLoopSleepService
             continuation = new GovernedLoopWakeContinuationResult(GovernedLoopWakeContinuationStatus.Ambiguous, EvidenceReference: MalformedContinuationReference);
         }
 
-        return await AdvanceAfterContinuationAsync(checkpoint, prepared, continuation!, continuationInvoked: true).ConfigureAwait(false);
+        return await AdvanceAfterContinuationAsync(checkpoint, current, continuation!, continuationInvoked: true).ConfigureAwait(false);
     }
 
     private async Task<GovernedLoopWakeResult> AdvanceAfterContinuationAsync(
@@ -671,14 +686,53 @@ public sealed class GovernedLoopSleepService
 
         var found = read.Status == GovernedLoopSleepStoreReadStatus.Found;
         if (found != (read.Evidence is not null)
+            || !found && read.PreparedEvidence is not null
             || found && (!GovernedLoopSleepContractValidator.Validate(read.Evidence).IsValid
-                || !string.Equals(read.Evidence!.Identity.WakeId, wakeId, StringComparison.Ordinal)))
+                || !string.Equals(read.Evidence!.Identity.WakeId, wakeId, StringComparison.Ordinal)
+                || read.PreparedEvidence is not null && !IsExactPreparedPredecessor(read.Evidence, read.PreparedEvidence)))
         {
             return new GovernedLoopWakeEvidenceReadResult(GovernedLoopSleepStoreReadStatus.Conflict);
         }
 
-        return read;
+        return read.Evidence?.Disposition == GovernedLoopWakeDisposition.Prepared && read.PreparedEvidence is null
+            ? read with { PreparedEvidence = read.Evidence }
+            : read;
     }
+
+    private static bool IsExactPreparedPredecessor(
+        GovernedLoopWakeEvidence current,
+        GovernedLoopWakeEvidence prepared)
+        => prepared.Disposition == GovernedLoopWakeDisposition.Prepared
+            && GovernedLoopSleepContractValidator.Validate(prepared).IsValid
+            && string.Equals(prepared.Identity.ContentHash, current.Identity.ContentHash, StringComparison.Ordinal)
+            && string.Equals(prepared.Identity.WakeId, current.Identity.WakeId, StringComparison.Ordinal)
+            && string.Equals(prepared.ContinuationOperationId, current.ContinuationOperationId, StringComparison.Ordinal)
+            && prepared.EvidenceVersion <= current.EvidenceVersion
+            && prepared.RecordedAtUtc <= current.RecordedAtUtc
+            && (current.Disposition != GovernedLoopWakeDisposition.Prepared
+                || string.Equals(prepared.ContentHash, current.ContentHash, StringComparison.Ordinal));
+
+    private static GovernedLoopWakeEvidence? Copy(GovernedLoopWakeEvidence? evidence)
+        => evidence is null
+            ? null
+            : new GovernedLoopWakeEvidence(
+                evidence.SchemaVersion,
+                evidence.EvidenceVersion,
+                new GovernedLoopWakeIdentity(
+                    evidence.Identity.SchemaVersion,
+                    evidence.Identity.WakeId,
+                    evidence.Identity.CheckpointId,
+                    evidence.Identity.CheckpointHash,
+                    evidence.Identity.WakeMode,
+                    evidence.Identity.AuthenticatedEventReference,
+                    evidence.Identity.AuthenticationEvidenceHash,
+                    evidence.Identity.ContentHash),
+                evidence.Disposition,
+                evidence.ContinuationOperationId,
+                evidence.ContinuationEvidenceHash,
+                evidence.DispositionEvidenceReference,
+                evidence.RecordedAtUtc,
+                evidence.ContentHash);
 
     private async Task<GovernedLoopSleepCurrentPostureReadResult?> ReadPostureAsync(
         GovernedLoopExecutionBinding binding,
@@ -854,7 +908,11 @@ public sealed class GovernedLoopSleepService
         out GovernedLoopSleepCheckpoint checkpoint)
     {
         checkpoint = null!;
-        if (request?.Binding is null || !GovernedLoopSleepPosturePolicy.IsUtc(publishedAtUtc))
+        var preparedAtUtc = request?.CheckpointPreparedAtUtc ?? publishedAtUtc;
+        if (request?.Binding is null
+            || !GovernedLoopSleepPosturePolicy.IsUtc(publishedAtUtc)
+            || !GovernedLoopSleepPosturePolicy.IsUtc(preparedAtUtc)
+            || preparedAtUtc > publishedAtUtc)
         {
             return false;
         }
@@ -868,7 +926,7 @@ public sealed class GovernedLoopSleepService
                 request.WakeMode,
                 request.WakeDeadlineUtc,
                 request.AuthenticatedEventReference,
-                publishedAtUtc,
+                preparedAtUtc,
                 string.Empty));
             return GovernedLoopSleepContractValidator.Validate(checkpoint).IsValid;
         }

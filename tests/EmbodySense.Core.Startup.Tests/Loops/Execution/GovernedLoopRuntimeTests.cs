@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Capabilities;
@@ -15,6 +16,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
+using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.Sleep.Models;
 using EmbodySense.Core.Application.Triggers;
@@ -37,6 +39,10 @@ using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Sleep;
+using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
+using EmbodySense.Core.Common.Loops.Execution.Wait;
+using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -51,6 +57,7 @@ using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
 using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Core.Persistence.Memory;
@@ -78,9 +85,349 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 // Every scenario owns its fixture and provider process; this type must not gain mutable shared state.
 internal static class GovernedLoopRuntimeTests
 {
+    private const string WaitRestartChildMode = "EMBODYSENSE_WAIT_RESTART_CHILD";
+    private const string WaitRestartCodexPath = "EMBODYSENSE_WAIT_RESTART_CODEX_PATH";
+    private const string WaitRestartRunId = "EMBODYSENSE_WAIT_RESTART_RUN_ID";
+    private const string WaitRestartTrustRoot = "EMBODYSENSE_WAIT_RESTART_TRUST_ROOT";
+    private const string WaitRestartWorkspace = "EMBODYSENSE_WAIT_RESTART_WORKSPACE";
+    private const string WaitHostHolderChildMode = "EMBODYSENSE_WAIT_HOST_HOLDER_CHILD";
+    private const string WaitHostHolderReadyPath = "EMBODYSENSE_WAIT_HOST_HOLDER_READY_PATH";
+    private const string WaitHostHolderReleasePath = "EMBODYSENSE_WAIT_HOST_HOLDER_RELEASE_PATH";
+    private const string WaitHostHolderWorkspace = "EMBODYSENSE_WAIT_HOST_HOLDER_WORKSPACE";
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
     private const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
+
+    internal static async Task Production_runtime_parks_and_wakes_a_canonical_wait_after_restart()
+    {
+        if (string.Equals(Environment.GetEnvironmentVariable(WaitRestartChildMode), "1", StringComparison.Ordinal))
+        {
+            await RunWaitRestartChildAsync();
+            return;
+        }
+
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(
+            waitDelay: TimeSpan.FromSeconds(12));
+        var deadline = Assert.IsType<DateTimeOffset>(fixture.WaitDeadlineUtc);
+        var input = fixture.Input("invoke-canonical-wait", "produce a result and then wait durably");
+        string runId;
+
+        await using (var runtime = await fixture.CreateRuntimeAsync())
+        {
+            var invocationTargetUtc = deadline - TimeSpan.FromSeconds(3);
+            Assert.True(
+                DateTimeOffset.UtcNow < invocationTargetUtc,
+                "The external restart fixture did not retain enough future time to prove pre-due parking.");
+            await WaitUntilUtcAsync(invocationTargetUtc);
+            var waiting = await runtime.InvokeGovernedLoopAsync(input);
+
+            Assert.True(string.Equals("Executed", waiting.Status, StringComparison.Ordinal), waiting.Detail);
+            Assert.True(
+                string.Equals("Waiting", waiting.ExecutionStatus, StringComparison.Ordinal),
+                $"{waiting.Detail} Run failure: {waiting.Run?.FailureCode}/{waiting.Run?.FailureDetail}");
+            Assert.Equal(CustomLoopRunStatus.Waiting.ToString(), waiting.Run?.Status);
+            Assert.NotEqual("canonical_wait_executor_unavailable", waiting.Run?.FailureCode);
+            runId = Assert.IsType<string>(waiting.Run?.Id);
+            using var store = new CustomLoopRunStore(fixture.Paths);
+            var durable = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(runId));
+            var wait = Assert.Single(durable.WaitEvidence);
+            var park = Assert.IsType<GovernedLoopWaitParkEvidence>(wait.ParkEvidence);
+            Assert.Null(wait.ContinuationEvidence);
+            Assert.Equal(deadline, park.Checkpoint.WakeDeadlineUtc);
+            Assert.True(park.ParkedAtUtc < deadline);
+            Assert.Equal(GovernedLoopFrontierStatus.Waiting, durable.Frontier?.Payload.Status);
+            var coordinator = await new GovernedLoopCoordinatorEvidenceStore(fixture.Paths)
+                .ReadAsync("local-background");
+            Assert.Equal(GovernedLoopCoordinatorReadStatus.NotFound, coordinator?.Status);
+        }
+
+        using var child = StartWaitRestartChild(fixture, runId);
+        var standardOutput = child.StandardOutput.ReadToEndAsync();
+        var standardError = child.StandardError.ReadToEndAsync();
+        using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+        {
+            try
+            {
+                await child.WaitForExitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                child.Kill(entireProcessTree: true);
+                throw new Xunit.Sdk.XunitException("The external governed Wait restart host did not finish within 30 seconds.");
+            }
+        }
+
+        Assert.True(child.ExitCode == 0, await standardError + Environment.NewLine + await standardOutput);
+        using (var store = new CustomLoopRunStore(fixture.Paths))
+        {
+            var completed = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(runId));
+            Assert.Equal(CustomLoopRunStatus.Completed, completed.Status);
+            Assert.Null(completed.FailureCode);
+            var wait = Assert.Single(completed.WaitEvidence);
+            var park = Assert.IsType<GovernedLoopWaitParkEvidence>(wait.ParkEvidence);
+            var continuation = Assert.IsType<GovernedLoopWaitContinuationEvidence>(wait.ContinuationEvidence);
+            var wake = await new GovernedLoopSleepStore(fixture.Paths)
+                .ReadWakeAsync(continuation.PreparedWakeEvidence.Identity.WakeId);
+            Assert.Equal(GovernedLoopSleepStoreReadStatus.Found, wake?.Status);
+            var prepared = Assert.IsType<GovernedLoopWakeEvidence>(wake?.PreparedEvidence);
+            var committed = Assert.IsType<GovernedLoopWakeEvidence>(wake?.Evidence);
+            Assert.Equal(GovernedLoopWakeDisposition.Prepared, prepared.Disposition);
+            Assert.Equal(GovernedLoopWakeDisposition.Committed, committed.Disposition);
+            Assert.Equal(1, prepared.EvidenceVersion);
+            Assert.Equal(2, committed.EvidenceVersion);
+            Assert.Equal(continuation.PreparedWakeEvidence.ContentHash, prepared.ContentHash);
+            Assert.Equal(prepared.ContinuationOperationId, committed.ContinuationOperationId);
+            Assert.Equal(continuation.ContentHash, committed.ContinuationEvidenceHash);
+            Assert.True(prepared.RecordedAtUtc >= deadline);
+            Assert.True(committed.RecordedAtUtc >= prepared.RecordedAtUtc);
+            Assert.True(GovernedLoopWaitContractValidator.ValidateComposition(park, continuation, committed).IsValid);
+            Assert.Equal(GovernedLoopFrontierStatus.Completed, completed.Frontier?.Payload.Status);
+        }
+
+        Assert.Equal(1, fixture.ProviderAttempts);
+    }
+
+    internal static async Task Explicit_background_request_activates_once_after_late_workspace_host_reacquisition()
+    {
+        if (string.Equals(Environment.GetEnvironmentVariable(WaitHostHolderChildMode), "1", StringComparison.Ordinal))
+        {
+            await RunWaitHostHolderChildAsync();
+            return;
+        }
+
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(
+            waitDelay: TimeSpan.FromMinutes(5));
+        var readyPath = Path.Combine(fixture.Paths.RootPath, "wait-host-holder.ready");
+        var releasePath = Path.Combine(fixture.Paths.RootPath, "wait-host-holder.release");
+        using var child = StartWaitHostHolderChild(fixture, readyPath, releasePath);
+        try
+        {
+            await WaitForFileAsync(readyPath, TimeSpan.FromSeconds(15));
+            await using var runtime = await fixture.CreateRuntimeAsync();
+
+            var unavailable = await runtime.StartGovernedWaitBackgroundAsync();
+            var beforeReacquisition = await new GovernedLoopCoordinatorEvidenceStore(fixture.Paths)
+                .ReadAsync("local-background");
+
+            Assert.False(unavailable.Available);
+            Assert.Equal("WorkspaceHostUnavailable", unavailable.Status);
+            Assert.Equal(GovernedLoopCoordinatorReadStatus.NotFound, beforeReacquisition?.Status);
+
+            await File.WriteAllTextAsync(releasePath, "release");
+            await WaitForChildAsync(child, TimeSpan.FromSeconds(15), "The external custom-loop host holder did not exit.");
+
+            var waiting = await runtime.InvokeGovernedLoopAsync(
+                fixture.Input("invoke-late-wait-host", "activate the explicitly requested Wait host after reacquisition"));
+            var activated = await new GovernedLoopCoordinatorEvidenceStore(fixture.Paths)
+                .ReadAsync("local-background");
+            var lifecycleVersion = activated?.Snapshot?.LatestLifecycle.LifecycleVersion;
+            var repeated = await runtime.StartGovernedWaitBackgroundAsync();
+            var afterRepeatedStart = await new GovernedLoopCoordinatorEvidenceStore(fixture.Paths)
+                .ReadAsync("local-background");
+
+            Assert.True(string.Equals("Executed", waiting.Status, StringComparison.Ordinal), waiting.Detail);
+            Assert.Equal("Waiting", waiting.ExecutionStatus);
+            Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, activated?.Status);
+            Assert.Equal(GovernedLoopCoordinatorStatus.Running, activated?.Snapshot?.LatestLifecycle.Status);
+            Assert.Equal(1, activated?.Snapshot?.Ownership.OwnershipEpoch);
+            Assert.True(repeated.Available, repeated.Detail);
+            Assert.Equal(lifecycleVersion, afterRepeatedStart?.Snapshot?.LatestLifecycle.LifecycleVersion);
+            Assert.Equal(1, fixture.ProviderAttempts);
+        }
+        finally
+        {
+            if (!child.HasExited)
+            {
+                await File.WriteAllTextAsync(releasePath, "release");
+                await WaitForChildAsync(child, TimeSpan.FromSeconds(5), "The external custom-loop host holder did not stop during cleanup.");
+            }
+        }
+    }
+
+    private static async Task RunWaitRestartChildAsync()
+    {
+        var workspace = Environment.GetEnvironmentVariable(WaitRestartWorkspace);
+        var trustRoot = Environment.GetEnvironmentVariable(WaitRestartTrustRoot);
+        var codexPath = Environment.GetEnvironmentVariable(WaitRestartCodexPath);
+        var runId = Environment.GetEnvironmentVariable(WaitRestartRunId);
+        Assert.False(string.IsNullOrWhiteSpace(workspace));
+        Assert.False(string.IsNullOrWhiteSpace(trustRoot));
+        Assert.False(string.IsNullOrWhiteSpace(codexPath));
+        Assert.False(string.IsNullOrWhiteSpace(runId));
+
+        await using var runtime = await AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+                new RejectingApprovalPrompt(),
+                trustRoot!)
+            .CreateAsync(
+                "test-model",
+                workspace!,
+                codexPath,
+                "read-only",
+                AgentRuntimeSurface.Cli,
+                preserveCurrentConversation: true);
+        var activation = await runtime.StartGovernedWaitBackgroundAsync();
+        Assert.True(activation.Available, activation.Detail);
+        var paths = new WorkspacePaths(workspace!);
+        var coordinator = await new GovernedLoopCoordinatorEvidenceStore(paths)
+            .ReadAsync("local-background");
+        Assert.True(
+            coordinator?.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Running,
+            $"Restart coordinator was not active: read={coordinator?.Status}, lifecycle={coordinator?.Snapshot?.LatestLifecycle.Status}, lease={coordinator?.Snapshot?.LatestHeartbeat.LeaseExpiresAtUtc:O}.");
+        using var store = new CustomLoopRunStore(paths);
+        CustomLoopRunRecord completed;
+        try
+        {
+            completed = await WaitForRunAsync(store, runId!, CustomLoopRunStatus.Completed);
+        }
+        catch (Exception exception)
+        {
+            var failedCoordinator = await new GovernedLoopCoordinatorEvidenceStore(paths)
+                .ReadAsync("local-background");
+            var current = await store.GetAsync(runId!);
+            var checkpoint = current?.WaitEvidence.SingleOrDefault()?.ParkEvidence?.Checkpoint;
+            GovernedLoopWakeEvidenceReadResult? wake = null;
+            if (checkpoint is not null)
+            {
+                var identity = GovernedLoopSleepContractHash.Apply(new GovernedLoopWakeIdentity(
+                    GovernedLoopWakeIdentity.CurrentSchemaVersion,
+                    string.Empty,
+                    checkpoint.CheckpointId,
+                    checkpoint.ContentHash,
+                    checkpoint.WakeMode,
+                    null,
+                    null,
+                    string.Empty));
+                wake = await new GovernedLoopSleepStore(paths).ReadWakeAsync(identity.WakeId);
+            }
+
+            var candidates = await new GovernedLoopBackgroundWorkSource(
+                    new ScheduleStore(paths),
+                    new GovernedLoopSleepStore(paths))
+                .ReadAsync(
+                    GovernedLoopBackgroundWorkFamily.Wake,
+                    DateTimeOffset.UtcNow,
+                    16);
+            var frontier = current?.Frontier?.Payload;
+            var waitNode = frontier?.Nodes.SingleOrDefault(node => node.NodeId == "wait");
+
+            throw new Xunit.Sdk.XunitException(
+                $"{exception.Message} Coordinator read={failedCoordinator?.Status}, lifecycle={failedCoordinator?.Snapshot?.LatestLifecycle.Status}, heartbeat={failedCoordinator?.Snapshot?.LatestHeartbeat.HeartbeatSequence}, failure={failedCoordinator?.Snapshot?.LatestFailureSequence}/{failedCoordinator?.Snapshot?.LatestFailureHash}; wake={wake?.Status}/{wake?.Evidence?.Disposition}/{wake?.Evidence?.DispositionEvidenceReference}; candidates={candidates?.WakeStatus}/{candidates?.WakeCandidates.Count}; run/frontier/node={current?.Status}/{frontier?.Status}/{waitNode?.Status}; now/deadline={DateTimeOffset.UtcNow:O}/{checkpoint?.WakeDeadlineUtc:O}.");
+        }
+
+        Assert.NotNull(Assert.Single(completed.WaitEvidence).ContinuationEvidence);
+    }
+
+    private static Process StartWaitRestartChild(GovernedRuntimeFixture fixture, string runId)
+    {
+        var startInfo = new ProcessStartInfo("dotnet")
+        {
+            WorkingDirectory = Path.GetTempPath(),
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+            startInfo,
+            typeof(GovernedLoopRuntimeTests).Assembly.Location,
+            $"{typeof(GovernedLoopRuntimeTestsWait).FullName}.{nameof(GovernedLoopRuntimeTestsWait.Production_runtime_parks_and_wakes_a_canonical_wait_after_restart)}");
+        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
+        startInfo.Environment[WaitRestartChildMode] = "1";
+        startInfo.Environment[WaitRestartWorkspace] = fixture.Paths.RootPath;
+        startInfo.Environment[WaitRestartTrustRoot] = fixture.TrustRootPath;
+        startInfo.Environment[WaitRestartCodexPath] = fixture.CodexPath;
+        startInfo.Environment[WaitRestartRunId] = runId;
+        return Process.Start(startInfo)
+            ?? throw new InvalidOperationException("The external governed Wait restart host did not start.");
+    }
+
+    private static async Task RunWaitHostHolderChildAsync()
+    {
+        var workspace = Environment.GetEnvironmentVariable(WaitHostHolderWorkspace);
+        var readyPath = Environment.GetEnvironmentVariable(WaitHostHolderReadyPath);
+        var releasePath = Environment.GetEnvironmentVariable(WaitHostHolderReleasePath);
+        Assert.False(string.IsNullOrWhiteSpace(workspace));
+        Assert.False(string.IsNullOrWhiteSpace(readyPath));
+        Assert.False(string.IsNullOrWhiteSpace(releasePath));
+
+        await using var gate = new CustomLoopWorkspaceExecutionGate(new WorkspacePaths(workspace!));
+        Assert.True(gate.IsWorkspaceHostAvailable);
+        await File.WriteAllTextAsync(readyPath!, "ready");
+        await WaitForFileAsync(releasePath!, TimeSpan.FromSeconds(20));
+    }
+
+    private static Process StartWaitHostHolderChild(
+        GovernedRuntimeFixture fixture,
+        string readyPath,
+        string releasePath)
+    {
+        var startInfo = new ProcessStartInfo("dotnet")
+        {
+            WorkingDirectory = Path.GetTempPath(),
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+            startInfo,
+            typeof(GovernedLoopRuntimeTests).Assembly.Location,
+            $"{typeof(GovernedLoopRuntimeTestsWait).FullName}.{nameof(GovernedLoopRuntimeTestsWait.Explicit_background_request_activates_once_after_late_workspace_host_reacquisition)}");
+        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
+        startInfo.Environment[WaitHostHolderChildMode] = "1";
+        startInfo.Environment[WaitHostHolderWorkspace] = fixture.Paths.RootPath;
+        startInfo.Environment[WaitHostHolderReadyPath] = readyPath;
+        startInfo.Environment[WaitHostHolderReleasePath] = releasePath;
+        return Process.Start(startInfo)
+            ?? throw new InvalidOperationException("The external custom-loop host holder did not start.");
+    }
+
+    private static async Task WaitForFileAsync(string path, TimeSpan timeout)
+    {
+        using var cancellation = new CancellationTokenSource(timeout);
+        while (!File.Exists(path))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellation.Token);
+        }
+    }
+
+    private static async Task WaitUntilUtcAsync(DateTimeOffset targetUtc)
+    {
+        while (DateTimeOffset.UtcNow < targetUtc)
+        {
+            var remaining = targetUtc - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                return;
+            }
+
+            await Task.Delay(remaining > TimeSpan.FromMilliseconds(25)
+                ? TimeSpan.FromMilliseconds(25)
+                : remaining);
+        }
+    }
+
+    private static async Task WaitForChildAsync(Process child, TimeSpan timeout, string timeoutMessage)
+    {
+        using var cancellation = new CancellationTokenSource(timeout);
+        try
+        {
+            await child.WaitForExitAsync(cancellation.Token);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            child.Kill(entireProcessTree: true);
+            throw new Xunit.Sdk.XunitException(timeoutMessage);
+        }
+
+        if (child.ExitCode != 0)
+        {
+            throw new Xunit.Sdk.XunitException(
+                await child.StandardError.ReadToEndAsync()
+                + Environment.NewLine
+                + await child.StandardOutput.ReadToEndAsync());
+        }
+    }
 
     internal static async Task Public_schedule_queues_and_executes_the_exact_canonical_graph_once_across_restart()
     {
@@ -1222,6 +1569,28 @@ internal static class GovernedLoopRuntimeTests
         throw new Xunit.Sdk.XunitException($"A canonical run did not reach {status} within the test deadline.");
     }
 
+    private static async Task<CustomLoopRunRecord> WaitForRunAsync(
+        CustomLoopRunStore store,
+        string runId,
+        CustomLoopRunStatus status)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var run = await store.GetAsync(runId);
+            if (run?.Status == status)
+            {
+                return run;
+            }
+
+            await Task.Delay(20);
+        }
+
+        var current = await store.GetAsync(runId);
+        throw new Xunit.Sdk.XunitException(
+            $"Canonical run {runId} did not reach {status} within the test deadline; current={current?.Status}, failure={current?.FailureCode}/{current?.FailureDetail}.");
+    }
+
     private static async Task AssertNoToolExecutionAsync(WorkspacePaths paths)
     {
         var events = await new AuditLog(paths).ReadTailAsync(1_000);
@@ -1814,13 +2183,15 @@ internal static class GovernedLoopRuntimeTests
             GovernedLoopRevisionPublicationPin publication,
             AuthorityGrantReference grant,
             AuthorityGrantReference? restrictedGrant,
-            string codexPath)
+            string codexPath,
+            DateTimeOffset? waitDeadlineUtc)
         {
             _workspace = workspace;
             Publication = publication;
             Grant = grant;
             RestrictedGrant = restrictedGrant;
             _codexPath = codexPath;
+            WaitDeadlineUtc = waitDeadlineUtc;
             Paths = new WorkspacePaths(workspace.RootPath);
             _providerCounterPath = workspace.File("governed-provider-attempts.txt");
             _providerStartedPath = workspace.File("governed-provider-started.marker");
@@ -1835,6 +2206,12 @@ internal static class GovernedLoopRuntimeTests
 
         public AuthorityGrantReference? RestrictedGrant { get; }
 
+        public string CodexPath => _codexPath;
+
+        public string TrustRootPath => _workspace.ServerStatePath;
+
+        public DateTimeOffset? WaitDeadlineUtc { get; }
+
         public int ProviderAttempts
             => File.Exists(_providerCounterPath)
                 ? int.Parse(File.ReadAllText(_providerCounterPath), System.Globalization.CultureInfo.InvariantCulture)
@@ -1847,17 +2224,33 @@ internal static class GovernedLoopRuntimeTests
             TimeSpan? grantLifetime = null,
             AuthorityGrantCompletionConstraintKind completionConstraint = AuthorityGrantCompletionConstraintKind.None,
             int failFirstAttempts = 0,
-            bool scheduleTrigger = false)
+            bool scheduleTrigger = false,
+            TimeSpan? waitDelay = null)
         {
             Assert.InRange(inferenceSteps, 1, 2);
             Assert.InRange(failFirstAttempts, 0, 2);
+            if (waitDelay is { } delay)
+            {
+                Assert.InRange(delay, TimeSpan.FromSeconds(5), TimeSpan.FromMinutes(10));
+            }
+
             var workspace = new TestWorkspace();
             try
             {
                 await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
                 var paths = new WorkspacePaths(workspace.RootPath);
                 var role = await CreateRoleAsync(paths, scheduleTrigger);
-                var publication = await CreatePublishedGraphAsync(workspace, paths, role, inferenceSteps, scheduleTrigger);
+                var codexPath = await CreateCodexExecutableAsync(workspace, pauseProvider, failFirstAttempts);
+                var waitDeadlineUtc = waitDelay is { } exactDelay
+                    ? DateTimeOffset.UtcNow.Add(exactDelay)
+                    : (DateTimeOffset?)null;
+                var publication = await CreatePublishedGraphAsync(
+                    workspace,
+                    paths,
+                    role,
+                    inferenceSteps,
+                    scheduleTrigger,
+                    waitDeadlineUtc);
                 var grant = await CreateGrantAsync(
                     workspace,
                     paths,
@@ -1880,8 +2273,7 @@ internal static class GovernedLoopRuntimeTests
                         null,
                         AuthorityGrantCompletionConstraintKind.None)
                     : null;
-                var codexPath = await CreateCodexExecutableAsync(workspace, pauseProvider, failFirstAttempts);
-                return new GovernedRuntimeFixture(workspace, publication, grant, restricted, codexPath);
+                return new GovernedRuntimeFixture(workspace, publication, grant, restricted, codexPath, waitDeadlineUtc);
             }
             catch
             {
@@ -2048,9 +2440,14 @@ internal static class GovernedLoopRuntimeTests
             WorkspacePaths paths,
             ContextualRoleRevision role,
             int inferenceSteps,
-            bool scheduleTrigger)
+            bool scheduleTrigger,
+            DateTimeOffset? waitDeadlineUtc)
         {
-            var candidate = Candidate(new ContextualRoleRevisionPin(role.Identity, role.ContentHash), inferenceSteps, scheduleTrigger);
+            var candidate = Candidate(
+                new ContextualRoleRevisionPin(role.Identity, role.ContentHash),
+                inferenceSteps,
+                scheduleTrigger,
+                waitDeadlineUtc);
             var normalized = GovernedLoopGraphNormalizer.Normalize(candidate);
             Assert.True(normalized.IsValid);
             var revision = normalized.Graph!.RevisionReference;
@@ -2266,7 +2663,11 @@ internal static class GovernedLoopRuntimeTests
             Assert.Equal(AuthorityGrantResolutionStatus.Active, grantResult.Status);
         }
 
-        private static GovernedLoopGraphCandidate Candidate(ContextualRoleRevisionPin role, int inferenceSteps, bool scheduleTrigger)
+        private static GovernedLoopGraphCandidate Candidate(
+            ContextualRoleRevisionPin role,
+            int inferenceSteps,
+            bool scheduleTrigger,
+            DateTimeOffset? waitDeadlineUtc)
         {
             var nodes = new List<GovernedLoopNodeDefinition>
             {
@@ -2306,15 +2707,38 @@ internal static class GovernedLoopRuntimeTests
                 dataSourcePortId = "result";
             }
 
+            var controlSourceNodeId = dataSourceNodeId;
+            if (waitDeadlineUtc is { } waitDeadline)
+            {
+                nodes.Add(new GovernedLoopNodeDefinition(
+                    "wait",
+                    GovernedLoopSequentialNodeDescriptors.TimestampWait,
+                    [],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        [GovernedLoopWaitVocabulary.DeadlineUtcParameter] = waitDeadline.ToUniversalTime().ToString(
+                            GovernedLoopWaitVocabulary.CanonicalUtcTimestampFormat,
+                            System.Globalization.CultureInfo.InvariantCulture),
+                    }));
+                controlEdges.Add(new GovernedLoopControlEdgeDefinition(
+                    "inference-to-wait",
+                    dataSourceNodeId,
+                    "wait",
+                    GovernedLoopControlCondition.Success));
+                display.Add(new GovernedLoopNodeDisplayMetadata("wait", "Wait", "Sleep durably.", (inferenceSteps + 1) * 100, 0));
+                controlSourceNodeId = "wait";
+            }
+
             nodes.Add(new GovernedLoopNodeDefinition(
                 "exit",
                 new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
                 [Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
                 GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]),
                 new Dictionary<string, string>()));
-            controlEdges.Add(new GovernedLoopControlEdgeDefinition("inference-to-exit", dataSourceNodeId, "exit", GovernedLoopControlCondition.Success));
+            controlEdges.Add(new GovernedLoopControlEdgeDefinition("inference-to-exit", controlSourceNodeId, "exit", GovernedLoopControlCondition.Success));
             bindings.Add(new GovernedLoopBindingDefinition("result-binding", GovernedLoopBindingKind.Data, dataSourceNodeId, dataSourcePortId, "exit", "result"));
-            display.Add(new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", (inferenceSteps + 1) * 100, 0));
+            display.Add(new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", (inferenceSteps + (waitDeadlineUtc is null ? 1 : 2)) * 100, 0));
 
             return new GovernedLoopGraphCandidate(
                 1,
@@ -2350,6 +2774,11 @@ internal static class GovernedLoopRuntimeTests
             var terminal = candidate.TerminalNodeIds!.ToHashSet(StringComparer.Ordinal);
             var descriptors = candidate.Nodes!.DistinctBy(node => node!.Descriptor).Select(node =>
             {
+                if (GovernedLoopWaitNodeCatalogContract.TryResolve(node!.Descriptor, out var waitContract))
+                {
+                    return waitContract!;
+                }
+
                 var outcomes = candidate.ControlEdges!
                     .Where(edge => string.Equals(edge!.FromNodeId, node!.Id, StringComparison.Ordinal))
                     .Select(edge => edge!.Condition)

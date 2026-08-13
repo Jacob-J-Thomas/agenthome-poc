@@ -45,6 +45,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly GovernedLoopRuntimeFacade _governedLoops;
     private readonly IScheduleDeliveryProvenancePort _scheduleDeliveryProvenance;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
+    private readonly GovernedLoopWaitRuntimeHost? _governedWaitRuntimeHost;
 
     internal AgentRuntime(
         WorkspacePaths paths,
@@ -58,7 +59,8 @@ public sealed class AgentRuntime : IAsyncDisposable
         GovernedLoopRuntimeFacade governedLoops,
         IScheduleDeliveryProvenancePort scheduleDeliveryProvenance,
         DefaultConversationTurnReviewService defaultConversationReviews,
-        CodexRuntimeStatus codexRuntimeStatus)
+        CodexRuntimeStatus codexRuntimeStatus,
+        GovernedLoopWaitRuntimeHost? governedWaitRuntimeHost = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(surface);
@@ -83,6 +85,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _governedLoops = governedLoops;
         _scheduleDeliveryProvenance = scheduleDeliveryProvenance ?? throw new ArgumentNullException(nameof(scheduleDeliveryProvenance));
         _defaultConversationReviews = defaultConversationReviews;
+        _governedWaitRuntimeHost = governedWaitRuntimeHost;
         _commandService = new RuntimeCommandService(conversationMemory, startupContext);
         CodexRuntimeStatus = codexRuntimeStatus;
     }
@@ -399,6 +402,41 @@ public sealed class AgentRuntime : IAsyncDisposable
     }
 
     /// <summary>
+    /// Explicitly activates this process as the browser-independent local host for canonical governed Wait recovery and wake delivery.
+    /// </summary>
+    /// <remarks>
+    /// Normal Web, CLI, and request runtimes are inert until their process-level host calls this member. The returned activation
+    /// outcome never changes whether ordinary custom-loop invocation is available when another live coordinator owns delivery.
+    /// </remarks>
+    /// <param name="cancellationToken">The token used to cancel recovery and coordinator acquisition.</param>
+    /// <returns>The coordinator activation outcome projected through the shared Startup boundary.</returns>
+    public async Task<CustomLoopExecutionActivationResult> StartGovernedWaitBackgroundAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (_governedWaitRuntimeHost is null)
+        {
+            return new CustomLoopExecutionActivationResult(
+                false,
+                false,
+                "Failed",
+                "governed_wait_background_unavailable: this runtime was not composed with canonical Wait background support.");
+        }
+
+        _governedWaitRuntimeHost.RequestActivation();
+        var availability = await _customLoops.EnsureCustomExecutionAvailableAsync(cancellationToken);
+        if (!availability.Available)
+        {
+            return new CustomLoopExecutionActivationResult(
+                false,
+                true,
+                availability.Status,
+                availability.Detail);
+        }
+
+        return await _governedWaitRuntimeHost.ActivateAsync(cancellationToken);
+    }
+
+    /// <summary>
     /// Attempts to handle a runtime command that does not require an initialized runtime instance.
     /// </summary>
     /// <param name="input">The candidate command text.</param>
@@ -417,9 +455,19 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// <returns>A task that represents the asynchronous operation.</returns>
     public async ValueTask DisposeAsync()
     {
-        _governedLoops.Dispose();
-        await _customLoops.DisposeAsync();
-        await _inferenceClient.DisposeAsync();
+        try
+        {
+            if (_governedWaitRuntimeHost is not null)
+            {
+                await _governedWaitRuntimeHost.DisposeAsync();
+            }
+        }
+        finally
+        {
+            _governedLoops.Dispose();
+            await _customLoops.DisposeAsync();
+            await _inferenceClient.DisposeAsync();
+        }
     }
 
     private async Task<AgentRuntimeTurnResult> RunModelTurnAsync(

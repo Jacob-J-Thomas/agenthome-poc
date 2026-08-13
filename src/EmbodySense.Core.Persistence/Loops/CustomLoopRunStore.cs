@@ -2939,7 +2939,7 @@ public sealed class CustomLoopRunStore :
         }
 
         var startedModelAttempts = run.Events.Count(item => (item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
-                && !IsPureNodeEvent(run, item))
+                && !IsCanonicalNonProviderNodeEvent(run, item))
             - canonicalExitStarts;
         if (startedModelAttempts > maximumAttempts)
         {
@@ -3040,6 +3040,21 @@ public sealed class CustomLoopRunStore :
 
         var node = run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal);
         return node?.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate;
+    }
+
+    private static bool IsCanonicalNonProviderNodeEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        if (item.SequentialNodeEvidence is not { ActivationOrdinal: var activationOrdinal })
+        {
+            return false;
+        }
+
+        return run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal)?.Descriptor.Kind is
+            GovernedLoopNodeKind.Transform
+            or GovernedLoopNodeKind.Validate
+            or GovernedLoopNodeKind.Condition
+            or GovernedLoopNodeKind.Join
+            or GovernedLoopNodeKind.Wait;
     }
 
     /// <summary>

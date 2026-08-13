@@ -226,7 +226,11 @@ public sealed class GovernedLoopWakeRecoveryServiceTests
         var current = ambiguous
             ? GovernedLoopSleepApplicationTestFixture.Ambiguous(prepared, evidenceAtUtc)
             : prepared;
-        harness.Store.SeedWake(current);
+        harness.Store.SeedWake(prepared);
+        if (ambiguous)
+        {
+            harness.Store.SeedWake(current);
+        }
 
         var rolledBack = await harness.Service.ReconcileAsync(new GovernedLoopWakeReconciliationRequest(
             checkpoint.CheckpointId,

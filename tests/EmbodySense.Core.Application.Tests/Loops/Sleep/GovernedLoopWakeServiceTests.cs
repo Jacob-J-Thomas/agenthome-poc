@@ -47,9 +47,13 @@ public sealed class GovernedLoopWakeServiceTests
         GovernedLoopWakeDisposition? observed = null;
         harness.Continuation.OnContinue = (request, cancellationToken) =>
         {
-            observed = harness.Store.GetWake(request.Identity.WakeId).Disposition;
+            var stored = harness.Store.GetWake(request.Identity.WakeId);
+            observed = stored.Disposition;
             Assert.False(cancellationToken.CanBeCanceled);
             Assert.Equal(harness.Posture.PostureHash, request.ExpectedPostureHash);
+            Assert.NotSame(stored, request.PreparedWakeEvidence);
+            Assert.NotSame(stored.Identity, request.PreparedWakeEvidence!.Identity);
+            Assert.Equal(stored.ContentHash, request.PreparedWakeEvidence.ContentHash);
         };
 
         var result = await harness.Service.WakeAsync(new GovernedLoopWakeRequest(checkpoint.CheckpointId, checkpoint.ContentHash));
@@ -61,6 +65,53 @@ public sealed class GovernedLoopWakeServiceTests
         Assert.Equal(2, result.Evidence.EvidenceVersion);
         Assert.Equal(1, harness.Continuation.CommittedOperationCount);
         Assert.Equal(0, harness.AuthenticatedWakeVerification.VerifyCount);
+    }
+
+    [Fact]
+    public async Task Ambiguous_retry_carries_the_exact_retained_prepared_predecessor()
+    {
+        var harness = new GovernedLoopSleepApplicationHarness();
+        var checkpoint = await harness.PublishAsync();
+        harness.Continuation.ContinueException = new InvalidOperationException("simulated continuation crash");
+
+        var first = await harness.Service.WakeAsync(new GovernedLoopWakeRequest(checkpoint.CheckpointId, checkpoint.ContentHash));
+        var ambiguous = Assert.IsType<GovernedLoopWakeEvidence>(first.Evidence);
+        var prepared = harness.Store.GetPreparedWake(ambiguous.Identity.WakeId);
+        GovernedLoopWakeContinuationRequest? retried = null;
+        harness.Continuation.ContinueException = null;
+        harness.Continuation.OnContinue = (request, _) => retried = request;
+
+        var recovered = await harness.Service.WakeAsync(new GovernedLoopWakeRequest(checkpoint.CheckpointId, checkpoint.ContentHash));
+
+        Assert.Equal(GovernedLoopWakeResultStatus.AmbiguousAttempt, first.Status);
+        Assert.Equal(GovernedLoopWakeDisposition.AmbiguousAttempt, ambiguous.Disposition);
+        Assert.Equal(GovernedLoopWakeResultStatus.Committed, recovered.Status);
+        Assert.NotNull(retried);
+        Assert.Equal(prepared.ContentHash, retried.PreparedWakeEvidence?.ContentHash);
+        Assert.NotEqual(ambiguous.ContentHash, retried.PreparedWakeEvidence?.ContentHash);
+        Assert.Equal(2, harness.Continuation.ContinueCount);
+        Assert.Equal(1, harness.Continuation.ReconcileCount);
+    }
+
+    [Fact]
+    public async Task Wake_rejects_a_substituted_prepared_predecessor_before_reconciliation()
+    {
+        var harness = new GovernedLoopSleepApplicationHarness();
+        var checkpoint = await harness.PublishAsync();
+        harness.Continuation.ContinueException = new InvalidOperationException("simulated continuation crash");
+        var first = await harness.Service.WakeAsync(new GovernedLoopWakeRequest(checkpoint.CheckpointId, checkpoint.ContentHash));
+        var ambiguous = Assert.IsType<GovernedLoopWakeEvidence>(first.Evidence);
+        var prepared = harness.Store.GetPreparedWake(ambiguous.Identity.WakeId);
+        harness.Store.WakeReadOverride = new GovernedLoopWakeEvidenceReadResult(
+            GovernedLoopSleepStoreReadStatus.Found,
+            ambiguous,
+            prepared with { ContentHash = GovernedLoopSleepApplicationTestFixture.Hash('9') });
+
+        var rejected = await harness.Service.WakeAsync(new GovernedLoopWakeRequest(checkpoint.CheckpointId, checkpoint.ContentHash));
+
+        Assert.Equal(GovernedLoopWakeResultStatus.Conflict, rejected.Status);
+        Assert.Equal(1, harness.Continuation.ContinueCount);
+        Assert.Equal(0, harness.Continuation.ReconcileCount);
     }
 
     [Fact]

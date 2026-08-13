@@ -783,6 +783,7 @@ public sealed class CustomLoopLifecycleServiceTests
     [InlineData(CustomLoopOrderedRunStatus.Completed, CustomLoopControlStatus.Completed)]
     [InlineData(CustomLoopOrderedRunStatus.Cancelled, CustomLoopControlStatus.Cancelled)]
     [InlineData(CustomLoopOrderedRunStatus.Paused, CustomLoopControlStatus.Paused)]
+    [InlineData(CustomLoopOrderedRunStatus.Waiting, CustomLoopControlStatus.Waiting)]
     [InlineData(CustomLoopOrderedRunStatus.NeedsReview, CustomLoopControlStatus.NeedsReview)]
     [InlineData(CustomLoopOrderedRunStatus.Conflict, CustomLoopControlStatus.NeedsReview)]
     [InlineData(CustomLoopOrderedRunStatus.NotFound, CustomLoopControlStatus.NeedsReview)]

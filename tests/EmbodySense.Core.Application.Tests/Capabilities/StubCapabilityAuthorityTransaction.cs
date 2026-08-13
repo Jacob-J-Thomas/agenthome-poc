@@ -6,9 +6,16 @@ internal sealed class StubCapabilityAuthorityTransaction : ICapabilityAuthorityT
 {
     internal int Executions { get; private set; }
 
+    internal Exception? Exception { get; set; }
+
     public async Task<TResult> ExecuteAsync<TResult>(Func<CancellationToken, Task<TResult>> operation, CancellationToken cancellationToken = default)
     {
         Executions++;
+        if (Exception is not null)
+        {
+            throw Exception;
+        }
+
         return await operation(cancellationToken);
     }
 

@@ -200,7 +200,9 @@ Assert-Contains -Actual $verifyScript -Expected '$testLaneTimeoutSeconds = 480' 
 Assert-Contains -Actual $verifyScript -Expected 'Get-ProjectCoverageIsolation' -Message "Every test project must execute from isolated exact-build copies."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework' -Message "Every lane must preserve its bin/<Configuration>/<TargetFramework> AppContext suffix."
 Assert-Contains -Actual $verifyScript -Expected 'Copy-VerifiedDirectoryFromManifest -SourceDirectory $pristineDirectory -SourceManifest $pristineManifest -DestinationDirectory $laneDirectory' -Message "Every lane copy must use and verify the already authenticated pristine manifest."
-Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory' -Message "Persistence child-process coverage must receive a process-scoped immutable source."
+Assert-Contains -Actual $verifyScript -Expected '$coverageChildProcessTestProjects = @(' -Message "External-child coverage projects must remain a statically inspectable inventory."
+Assert-Contains -Actual $verifyScript -Expected 'if (-not $SkipCoverage -and $coverageChildProcessTestProjects.Contains($TestProject.Name)) {' -Message "Every declared external-child coverage project must receive its immutable pristine source."
+Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory' -Message "External-child coverage must receive a process-scoped immutable source."
 Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationDirectoryManifest -Expected $isolation.PristineManifest -Directory $isolation.PristineDirectory' -Message "Every verifier run must re-hash the immutable pristine source after all child processes exit."
 Assert-Contains -Actual $coverageChildProcess -Expected 'AddExpectedTerminationVstestArguments' -Message "Intentional process-loss cases must retain an exact VSTest testhost path instead of a custom executable helper."
 Assert-Contains -Actual $coverageChildProcess -Expected 'startInfo.ArgumentList.Add(isolatedPath);' -Message "Expected-termination VSTest must read the immutable pristine test assembly directly."
@@ -211,6 +213,19 @@ Assert-Contains -Actual $admissionStoreTest -Expected 'public async Task Cross_p
 Assert-Contains -Actual $verifyScript -Expected 'Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())' -Message "Hosted verification must select the runner-owned ephemeral volume with a local fallback."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot' -Message "Lane fixture isolation must remain short, disjoint, and outside retained repository artifacts."
 Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."
+
+$expectedCoverageChildProcessProjects = @(
+    "EmbodySense.Core.Persistence.Tests.csproj",
+    "EmbodySense.Core.Startup.Tests.csproj"
+)
+$coverageChildProjectDeclaration = [regex]::Match($verifyScript, '(?ms)^\$coverageChildProcessTestProjects = @\(\r?\n(?<body>.*?)^\)')
+Assert-True -Condition $coverageChildProjectDeclaration.Success -Message "The external-child coverage project inventory must remain statically inspectable."
+$declaredCoverageChildProjects = @([regex]::Matches($coverageChildProjectDeclaration.Groups["body"].Value, '^\s+"(?<name>[^"]+)",?$', [Text.RegularExpressions.RegexOptions]::Multiline))
+Assert-True -Condition ($declaredCoverageChildProjects.Count -eq $expectedCoverageChildProcessProjects.Count) -Message "External-child coverage must retain exactly the Persistence and Startup test projects."
+for ($index = 0; $index -lt $expectedCoverageChildProcessProjects.Count; $index++) {
+    Assert-True -Condition ($declaredCoverageChildProjects[$index].Groups["name"].Value -ceq $expectedCoverageChildProcessProjects[$index]) -Message "External-child coverage project order and names must remain deterministic."
+}
+
 foreach ($tempVariable in @("TEMP", "TMP", "TMPDIR")) {
     Assert-Contains -Actual $verifyScript -Expected "$tempVariable = `$laneFixtureRoot" -Message "Every lane and descendant must use the fast isolated '$tempVariable' fixture root."
 }

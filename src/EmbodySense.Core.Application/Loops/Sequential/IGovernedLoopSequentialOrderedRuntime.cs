@@ -15,4 +15,16 @@ public interface IGovernedLoopSequentialOrderedRuntime
     Task<CustomLoopOrderedRunResult> ResumeAsync(
         GovernedLoopSequentialOrderedResumeRequest request,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Re-enters ordered execution from an exact durable Wait continuation.</summary>
+    Task<CustomLoopOrderedRunResult> ResumeWaitAsync(
+        GovernedLoopSequentialOrderedWaitResumeRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new CustomLoopOrderedRunResult(
+            CustomLoopOrderedRunStatus.InvalidState,
+            null,
+            "This ordered runtime does not support canonical Wait re-entry."));
+    }
 }

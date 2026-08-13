@@ -15,6 +15,7 @@ public sealed class GovernedLoopSequentialPlanNode
         int componentTraversalOrdinal,
         IReadOnlyList<string> incomingControlEdgeIds,
         IReadOnlyList<string> outgoingControlEdgeIds,
+        IReadOnlyDictionary<string, string> parameters,
         string? incomingControlEdgeId,
         string? outgoingControlEdgeId)
     {
@@ -27,6 +28,7 @@ public sealed class GovernedLoopSequentialPlanNode
         ComponentTraversalOrdinal = componentTraversalOrdinal;
         IncomingControlEdgeIds = incomingControlEdgeIds;
         OutgoingControlEdgeIds = outgoingControlEdgeIds;
+        Parameters = parameters;
         IncomingControlEdgeId = incomingControlEdgeId;
         OutgoingControlEdgeId = outgoingControlEdgeId;
     }
@@ -57,6 +59,9 @@ public sealed class GovernedLoopSequentialPlanNode
 
     /// <summary>Gets every exact outgoing control-edge identity in canonical order.</summary>
     public IReadOnlyList<string> OutgoingControlEdgeIds { get; }
+
+    /// <summary>Gets the immutable bounded descriptor parameters admitted with this exact plan node.</summary>
+    public IReadOnlyDictionary<string, string> Parameters { get; }
 
     /// <summary>Gets the sole incoming edge for a linear node, or <see langword="null"/> for an entry or non-linear node.</summary>
     public string? IncomingControlEdgeId { get; }
