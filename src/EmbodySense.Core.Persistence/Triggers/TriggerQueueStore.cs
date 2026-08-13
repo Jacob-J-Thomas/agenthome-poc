@@ -1069,14 +1069,14 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
             entries.Length,
             entries.Sum(entry => (long)entry.SerializedEntryBytes),
             entries.Sum(entry => (long)entry.RetainedReservationBytes),
-            identity.TombstoneCount,
+            identity.Tombstones.Count,
             !CanPersist(identity),
             entries);
     }
 
     private bool CanPersist(TriggerQueueReadResult identity)
     {
-        var reservedArtifacts = identity.Precursors.Count + (OperatingSystem.IsWindows() ? 0 : identity.TombstoneCount + Math.Max(1, identity.Artifacts.Count));
+        var reservedArtifacts = identity.Precursors.Count + (OperatingSystem.IsWindows() ? 0 : identity.Tombstones.Count + Math.Max(1, identity.Artifacts.Count));
         return reservedArtifacts <= _quota.MaxDurabilityTombstones;
     }
 

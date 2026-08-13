@@ -5,8 +5,4 @@ internal sealed record TriggerQueueReadResult(
     IReadOnlyList<TriggerQueueArtifactSnapshot> Artifacts,
     byte[]? LatestContent,
     IReadOnlyList<TriggerQueueArtifactSnapshot> Tombstones,
-    IReadOnlyList<TriggerQueueArtifactSnapshot> Precursors)
-{
-    /// <summary>Gets the authenticated Unix cleanup-artifact count.</summary>
-    public int TombstoneCount => Tombstones.Count;
-}
+    IReadOnlyList<TriggerQueueArtifactSnapshot> Precursors);
