@@ -374,6 +374,7 @@ public sealed class CustomLoopFrontierStoreTests
         {
             await WaitForCrashProbeReadyAsync(
                 readyPath,
+                candidate.Frontier!.Payload.ContentHash,
                 child,
                 outputTask,
                 errorTask,
@@ -431,6 +432,18 @@ public sealed class CustomLoopFrontierStoreTests
             _ = await outputTask;
             _ = await errorTask;
         }
+    }
+
+    [Fact]
+    public void Crash_probe_ready_marker_accepts_only_complete_expected_evidence()
+    {
+        const string Expected = "0123456789abcdef";
+
+        Assert.False(IsCompleteCrashProbeReadyMarker(string.Empty, Expected));
+        Assert.False(IsCompleteCrashProbeReadyMarker("01234567", Expected));
+        Assert.True(IsCompleteCrashProbeReadyMarker(Expected, Expected));
+        Assert.Throws<InvalidDataException>(() => IsCompleteCrashProbeReadyMarker("0123456x", Expected));
+        Assert.Throws<InvalidDataException>(() => IsCompleteCrashProbeReadyMarker(Expected + "0", Expected));
     }
 
     [Fact]
@@ -917,14 +930,21 @@ public sealed class CustomLoopFrontierStoreTests
 
     private static async Task WaitForCrashProbeReadyAsync(
         string readyPath,
+        string expectedMarker,
         Process process,
         Task<string> outputTask,
         Task<string> errorTask,
         TimeSpan timeout)
     {
         var wait = Stopwatch.StartNew();
-        while (!File.Exists(readyPath))
+        while (true)
         {
+            if (File.Exists(readyPath)
+                && IsCompleteCrashProbeReadyMarker(await File.ReadAllTextAsync(readyPath), expectedMarker))
+            {
+                return;
+            }
+
             if (process.HasExited)
             {
                 throw new InvalidOperationException(
@@ -939,6 +959,21 @@ public sealed class CustomLoopFrontierStoreTests
 
             await Task.Delay(TimeSpan.FromMilliseconds(15));
         }
+    }
+
+    private static bool IsCompleteCrashProbeReadyMarker(string marker, string expectedMarker)
+    {
+        if (string.Equals(marker, expectedMarker, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (marker.Length < expectedMarker.Length && expectedMarker.StartsWith(marker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        throw new InvalidDataException("The frontier crash-probe ready marker contains malformed evidence.");
     }
 
     private static string RequireCrashProbePath(string variable)
