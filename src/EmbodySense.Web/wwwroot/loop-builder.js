@@ -5791,19 +5791,20 @@ async function reconcileInvocationOperation(
     if (attempt + 1 < invocationReconciliationMaximumAttempts) {
       const remainingMilliseconds = deadline - performance.now();
       if (remainingMilliseconds <= 0) break;
-      await new Promise((resolve) =>
-        setTimeout(
-          resolve,
-          Math.min(
-            invocationReconciliationDelayMilliseconds,
-            remainingMilliseconds,
-          ),
+      await waitForInvocationReconciliationRetry(
+        Math.min(
+          invocationReconciliationDelayMilliseconds,
+          remainingMilliseconds,
         ),
       );
     }
   }
 
   return { kind: "unknown" };
+}
+
+async function waitForInvocationReconciliationRetry(milliseconds) {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function requestJsonBeforeDeadline(url, deadline) {
