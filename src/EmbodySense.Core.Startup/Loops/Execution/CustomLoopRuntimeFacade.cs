@@ -1471,6 +1471,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             run.FailureDetail)
         {
             Frontier = run.Frontier is null ? null : Map(run.Frontier),
+            GovernedAdmissionRequestHash = run.SequentialAdapterBinding?.AdmissionRequestHash,
             ConversationPublicationDispositions = LoopRunConversationPublicationDispositionProjector.Project(run)
         };
     }

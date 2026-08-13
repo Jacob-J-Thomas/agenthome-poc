@@ -208,7 +208,8 @@ public sealed class TriggerWorkerRuntimeFacadeTests
     private static LoopRunSnapshot Run(TriggerDeliveryEnvelope envelope, string operationId, string status)
     {
         DateTimeOffset? terminalAtUtc = status is "Completed" or "Failed" or "Cancelled" or "NeedsReview" ? _workerAtUtc : null;
-        var definition = new LoopDefinitionSnapshot(1, envelope.Loop.LoopId, envelope.Loop.DefinitionVersion, envelope.Loop.ContentHash, _createdAtUtc, _createdAtUtc, "Loop", "Trigger test", "operator", null!, null!, [], [], null!, "mutation-1");
+        var legacy = Assert.IsType<TriggerLegacyLoopDefinitionReference>(envelope.Loop.LegacyDefinition);
+        var definition = new LoopDefinitionSnapshot(1, legacy.LoopId, legacy.DefinitionVersion, legacy.ContentHash, _createdAtUtc, _createdAtUtc, "Loop", "Trigger test", "operator", null!, null!, [], [], null!, "mutation-1");
         return new LoopRunSnapshot(1, "run-1", envelope.Loop.LoopId, 1, status, _workerAtUtc, _workerAtUtc, terminalAtUtc, "trigger", null!, operationId, "worker", new string('d', 64), definition, "dispatch", null, null!, null!, null!, [], status == "Completed" ? "completed" : null, status == "Failed" ? "failed" : null, null);
     }
 

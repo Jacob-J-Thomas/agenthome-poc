@@ -1,6 +1,9 @@
+using System.Globalization;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Triggers.Models;
 
 namespace EmbodySense.Core.Common.Triggers;
@@ -33,6 +36,7 @@ public static class TriggerDeliveryValidator
             errors.Add(Error("unsupported_trigger_kind", "kind"));
         }
 
+        errors.AddRange(ValidateLoopReference(envelope.Loop).Errors);
         errors.AddRange(ValidateAdapterReference(envelope.Adapter).Errors);
         errors.AddRange(ValidateAuthorityEvidence(envelope.Authority).Errors);
         if (envelope.Redelivery.Attempt == 1 && !envelope.Redelivery.OriginalDeliveryId.Equals(envelope.DeliveryId))
@@ -53,6 +57,38 @@ public static class TriggerDeliveryValidator
         }
 
         return new TriggerContractValidationResult(errors);
+    }
+
+    /// <summary>
+    /// Validates that exactly one closed legacy-definition or governed-publication target arm is populated.
+    /// </summary>
+    /// <param name="loop">The candidate target reference.</param>
+    /// <returns>The structured validation result.</returns>
+    public static TriggerContractValidationResult ValidateLoopReference(TriggerLoopReference? loop)
+    {
+        if (loop is null || !Enum.IsDefined(loop.Kind) || loop.Kind == TriggerLoopTargetKind.Unknown)
+        {
+            return Result(Error("invalid_loop_reference", "loop"));
+        }
+
+        var valid = loop.Kind switch
+        {
+            TriggerLoopTargetKind.LegacyDefinition => loop.LegacyDefinition is { } legacy
+                && loop.GovernedPublication is null
+                && loop.AuthorityGrant is null
+                && CustomLoopArtifactIdentifier.IsValid(legacy.LoopId, TriggerDeliveryLimits.MaxLoopIdCharacters)
+                && legacy.DefinitionVersion is >= 1 and <= TriggerDeliveryLimits.MaxLoopDefinitionVersion
+                && TriggerTextRules.IsSha256(legacy.ContentHash),
+            TriggerLoopTargetKind.GovernedPublication => loop.LegacyDefinition is null
+                && GovernedLoopRevisionContractValidator.Validate(loop.GovernedPublication).IsValid
+                && loop.AuthorityGrant?.GrantId is not null
+                && loop.AuthorityGrant.Revision is not null
+                && AuthorityGrantId.TryParse(loop.AuthorityGrant.GrantId.Value, out _, out _)
+                && AuthorityGrantRevision.TryParse(loop.AuthorityGrant.Revision.Value.ToString(CultureInfo.InvariantCulture), out _, out _)
+                && AuthorityGrantHash.IsCanonical(loop.AuthorityGrant.ContentHash),
+            _ => false
+        };
+        return valid ? Result() : Result(Error("invalid_loop_reference", "loop"));
     }
 
     internal static IReadOnlyList<TriggerContractError> ValidateTemporal(TriggerTemporalEvidence? temporal)

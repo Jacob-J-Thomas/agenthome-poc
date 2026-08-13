@@ -1822,7 +1822,8 @@ public sealed class TriggerQueueStoreTests
         var terminal = Terminal(intent, begun.Entry!, TriggerQueueTestData.CreatedAtUtc.AddSeconds(6));
 
         var completed = await store.CompleteDispatchAsync(selected.Entry.DeliveryId, "worker-1", 1, begun.Entry!.Revision, terminal);
-        var restarted = Assert.Single((await new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(7))).Entries);
+        var restartedSnapshot = await new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(7));
+        var restarted = Assert.Single(restartedSnapshot.Entries);
         var replayed = await new TriggerQueueStore(paths, timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddMinutes(1))).CompleteDispatchAsync(selected.Entry.DeliveryId, "worker-1", 1, completed.Entry!.Revision, terminal);
 
         Assert.Equal(TriggerWorkerMutationStatus.Committed, completed.Status);
@@ -1831,6 +1832,51 @@ public sealed class TriggerQueueStoreTests
         Assert.Equal(intent.OperationId, restarted.Dispatch!.GovernedInvocation!.OperationId);
         Assert.Equal("run-1", restarted.Dispatch.GovernedInvocation.RunId);
         Assert.Equal(new string('d', 64), restarted.Dispatch.GovernedInvocation.AdmissionRequestHash);
+        Assert.True(TriggerLoopReferenceHash.TryCompute(TriggerQueueTestData.Envelope().Loop, out var loopReferenceHash, out _));
+        Assert.Equal(loopReferenceHash, restarted.Dispatch.GovernedInvocation.LoopReferenceHash);
+        var ledger = await File.ReadAllTextAsync(GenerationPath(QueueRoot(paths), restartedSnapshot.Generation));
+        Assert.Contains("\"governedLoopReferenceHash\"", ledger, StringComparison.Ordinal);
+        Assert.DoesNotContain("governedDefinitionVersion", ledger, StringComparison.Ordinal);
+        Assert.DoesNotContain("governedDefinitionHash", ledger, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Full_canonical_target_and_exact_receipt_roundtrip_across_queue_and_dispatch_restarts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var envelope = TriggerQueueTestData.Envelope(loop: TriggerQueueTestData.GovernedLoop());
+        var store = new TriggerQueueStore(paths, timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(6)));
+        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(envelope));
+
+        var admittedSnapshot = await new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4));
+        var admitted = Assert.Single(admittedSnapshot.Entries);
+        var admittedHistory = await new TriggerQueueStore(paths).FindAsync(envelope.DeliveryId, envelope.DeduplicationId);
+        var admittedEnvelope = Assert.IsType<TriggerDeliveryEnvelope>(admittedHistory.DeliveryMatch?.Envelope);
+        Assert.Equal(TriggerLoopTargetKind.GovernedPublication, admittedEnvelope.Loop.Kind);
+        Assert.Equal(envelope.Loop, admittedEnvelope.Loop);
+        Assert.Null(admittedEnvelope.Loop.LegacyDefinition);
+        Assert.NotNull(admittedEnvelope.Loop.GovernedPublication);
+        Assert.NotNull(admittedEnvelope.Loop.AuthorityGrant);
+
+        store = new TriggerQueueStore(paths, timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(6)));
+        var selected = await store.SelectAsync(new TriggerWorkerSelectionRequest("worker-1", admittedSnapshot.Generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(10), [], 2));
+        var selectedEntry = Assert.IsType<TriggerQueueEntry>(selected.Entry);
+        var intent = Intent(selectedEntry, TriggerQueueTestData.CreatedAtUtc.AddSeconds(5), envelope);
+        var begun = await store.BeginDispatchAsync(selectedEntry.DeliveryId, "worker-1", 1, selectedEntry.Revision, intent);
+        var begunEntry = Assert.IsType<TriggerQueueEntry>(begun.Entry);
+        var terminal = Terminal(intent, begunEntry, TriggerQueueTestData.CreatedAtUtc.AddSeconds(6), envelope);
+        var completed = await store.CompleteDispatchAsync(selectedEntry.DeliveryId, "worker-1", 1, begunEntry.Revision, terminal);
+
+        var completedSnapshot = await new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(7));
+        var restarted = Assert.Single(completedSnapshot.Entries);
+        var replayed = await new TriggerQueueStore(paths, timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddMinutes(1))).CompleteDispatchAsync(restarted.DeliveryId, "worker-1", 1, restarted.Revision, terminal);
+
+        Assert.Equal(TriggerWorkerMutationStatus.Committed, completed.Status);
+        Assert.Equal(TriggerWorkerMutationStatus.Replayed, replayed.Status);
+        Assert.Equal(terminal.GovernedInvocation, restarted.Dispatch!.GovernedInvocation);
+        Assert.True(TriggerLoopReferenceHash.TryCompute(envelope.Loop, out var expectedReferenceHash, out _));
+        Assert.Equal(expectedReferenceHash, restarted.Dispatch.GovernedInvocation!.LoopReferenceHash);
     }
 
     [Fact]
@@ -1893,7 +1939,7 @@ public sealed class TriggerQueueStoreTests
         });
         var store = new TriggerQueueStore(paths, observer: observer, timeProvider: time);
         var dispatcher = new AcceptedDispatcher();
-        var service = new TriggerWorkerService(store, new AuthorizedAuthorizer(), dispatcher, time);
+        var service = new TriggerWorkerService(store, new AuthorizedAuthorizer(), dispatcher, new ReadyDispatchPort(), time);
 
         var result = await service.RunOnceAsync(new TriggerWorkerRunRequest(new TriggerWorkerSelectionRequest("worker-1", snapshot.Generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(3), [], 2)));
 
@@ -1925,7 +1971,7 @@ public sealed class TriggerQueueStoreTests
         }), timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(5)));
         var dispatcher = new AcceptedDispatcher();
         var time = new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(5));
-        var service = new TriggerWorkerService(responseLossStore, new AuthorizedAuthorizer(), dispatcher, time);
+        var service = new TriggerWorkerService(responseLossStore, new AuthorizedAuthorizer(), dispatcher, new ReadyDispatchPort(), time);
 
         var result = await service.RunOnceAsync(new TriggerWorkerRunRequest(new TriggerWorkerSelectionRequest("worker-1", snapshot.Generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(3), [], 2)));
 
@@ -1939,8 +1985,7 @@ public sealed class TriggerQueueStoreTests
     [Theory]
     [InlineData("operation")]
     [InlineData("loop")]
-    [InlineData("version")]
-    [InlineData("definition")]
+    [InlineData("reference")]
     public async Task Stale_or_fabricated_governed_receipt_binding_cannot_complete_dispatch(string mismatch)
     {
         using var workspace = new TestWorkspace();
@@ -1957,12 +2002,43 @@ public sealed class TriggerQueueStoreTests
             {
                 "operation" => terminal.GovernedInvocation! with { OperationId = "other-operation" },
                 "loop" => terminal.GovernedInvocation! with { LoopId = "other-loop" },
-                "version" => terminal.GovernedInvocation! with { DefinitionVersion = terminal.GovernedInvocation.DefinitionVersion + 1 },
-                _ => terminal.GovernedInvocation! with { DefinitionHash = new string('f', 64) }
+                _ => terminal.GovernedInvocation! with { LoopReferenceHash = new string('f', 64) }
             }
         };
 
         var result = await store.CompleteDispatchAsync(selected.Entry.DeliveryId, "worker-1", 1, begun.Entry!.Revision, terminal);
+
+        Assert.Equal(TriggerWorkerMutationStatus.InvalidState, result.Status);
+        Assert.Equal(TriggerQueueEntryState.Dispatching, result.Entry!.State);
+    }
+
+    [Theory]
+    [InlineData("revision")]
+    [InlineData("grant")]
+    public async Task Canonical_receipt_cannot_substitute_another_revision_or_grant_pin(string substitution)
+    {
+        using var workspace = new TestWorkspace();
+        var store = new TriggerQueueStore(new WorkspacePaths(workspace.RootPath), timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(6)));
+        var envelope = TriggerQueueTestData.Envelope(loop: TriggerQueueTestData.GovernedLoop());
+        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(envelope));
+        var snapshot = await store.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4));
+        var selected = await store.SelectAsync(new TriggerWorkerSelectionRequest("worker-1", snapshot.Generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(10), [], 2));
+        var selectedEntry = Assert.IsType<TriggerQueueEntry>(selected.Entry);
+        var intent = Intent(selectedEntry, TriggerQueueTestData.CreatedAtUtc.AddSeconds(5), envelope);
+        var begun = await store.BeginDispatchAsync(selectedEntry.DeliveryId, "worker-1", 1, selectedEntry.Revision, intent);
+        var begunEntry = Assert.IsType<TriggerQueueEntry>(begun.Entry);
+        var substitutedTarget = substitution == "revision"
+            ? TriggerQueueTestData.GovernedLoop(revisionId: "revision-4")
+            : TriggerQueueTestData.GovernedLoop(grantRevision: 3);
+        Assert.Equal(envelope.Loop.LoopId, substitutedTarget.LoopId);
+        Assert.True(TriggerLoopReferenceHash.TryCompute(substitutedTarget, out var substitutedHash, out _));
+        var exactTerminal = Terminal(intent, begunEntry, TriggerQueueTestData.CreatedAtUtc.AddSeconds(6), envelope);
+        var terminal = exactTerminal with
+        {
+            GovernedInvocation = exactTerminal.GovernedInvocation! with { LoopReferenceHash = substitutedHash! }
+        };
+
+        var result = await store.CompleteDispatchAsync(selectedEntry.DeliveryId, "worker-1", 1, begunEntry.Revision, terminal);
 
         Assert.Equal(TriggerWorkerMutationStatus.InvalidState, result.Status);
         Assert.Equal(TriggerQueueEntryState.Dispatching, result.Entry!.State);
@@ -2013,24 +2089,33 @@ public sealed class TriggerQueueStoreTests
     [InlineData("receiptless-worker-evidence")]
     [InlineData("governed-operation")]
     [InlineData("governed-partial")]
+    [InlineData("governed-reference-substitution")]
+    [InlineData("canonical-governed-reference-substitution")]
+    [InlineData("governed-reference-invalid")]
+    [InlineData("governed-reference-oversize")]
+    [InlineData("governed-old-shape")]
+    [InlineData("governed-duplicate-member")]
     public async Task Malformed_worker_ownership_and_dispatch_evidence_fail_closed(string mutation)
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new TriggerQueueStore(paths, timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(6)));
-        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
+        var envelope = mutation.StartsWith("canonical-", StringComparison.Ordinal)
+            ? TriggerQueueTestData.Envelope(loop: TriggerQueueTestData.GovernedLoop())
+            : TriggerQueueTestData.Envelope();
+        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(envelope));
         var generation = (await store.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4))).Generation;
         var selected = await store.SelectAsync(new TriggerWorkerSelectionRequest("worker-1", generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(10), [], 2));
         if (mutation is "dispatch-request-hash" or "dispatch-partial")
         {
             await store.BeginDispatchAsync(selected.Entry!.DeliveryId, "worker-1", 1, selected.Entry.Revision, Intent(selected.Entry, TriggerQueueTestData.CreatedAtUtc.AddSeconds(5)));
         }
-        else if (mutation is "governed-operation" or "governed-partial")
+        else if (mutation.Contains("governed-", StringComparison.Ordinal))
         {
             var entry = selected.Entry!;
-            var intent = Intent(entry, TriggerQueueTestData.CreatedAtUtc.AddSeconds(5));
+            var intent = Intent(entry, TriggerQueueTestData.CreatedAtUtc.AddSeconds(5), envelope);
             var begun = await store.BeginDispatchAsync(entry.DeliveryId, "worker-1", 1, entry.Revision, intent);
-            await store.CompleteDispatchAsync(entry.DeliveryId, "worker-1", 1, begun.Entry!.Revision, Terminal(intent, begun.Entry, TriggerQueueTestData.CreatedAtUtc.AddSeconds(6)));
+            await store.CompleteDispatchAsync(entry.DeliveryId, "worker-1", 1, begun.Entry!.Revision, Terminal(intent, begun.Entry, TriggerQueueTestData.CreatedAtUtc.AddSeconds(6), envelope));
         }
 
         var snapshot = await store.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(5));
@@ -2039,6 +2124,13 @@ public sealed class TriggerQueueStoreTests
         if (mutation == "duplicate-worker-property")
         {
             content = content.Replace("\"leaseGeneration\":1", "\"leaseGeneration\":1,\"leaseGeneration\":1", StringComparison.Ordinal);
+        }
+        else if (mutation == "governed-duplicate-member")
+        {
+            var root = JsonNode.Parse(content)!.AsObject();
+            var referenceHash = root["entries"]!.AsArray()[0]!["governedLoopReferenceHash"]!.GetValue<string>();
+            var member = $"\"governedLoopReferenceHash\":\"{referenceHash}\"";
+            content = content.Replace(member, $"{member},{member}", StringComparison.Ordinal);
         }
         else
         {
@@ -2060,6 +2152,25 @@ public sealed class TriggerQueueStoreTests
             else if (mutation == "governed-partial")
             {
                 entry["governedRunId"] = null;
+            }
+            else if (mutation.EndsWith("governed-reference-substitution", StringComparison.Ordinal))
+            {
+                Assert.True(TriggerLoopReferenceHash.TryCompute(TriggerQueueTestData.GovernedLoop(revisionId: "revision-4"), out var substitutedHash, out _));
+                entry["governedLoopReferenceHash"] = substitutedHash;
+            }
+            else if (mutation == "governed-reference-invalid")
+            {
+                entry["governedLoopReferenceHash"] = new string('F', 64);
+            }
+            else if (mutation == "governed-reference-oversize")
+            {
+                entry["governedLoopReferenceHash"] = new string('f', 65);
+            }
+            else if (mutation == "governed-old-shape")
+            {
+                entry.Remove("governedLoopReferenceHash");
+                entry["governedDefinitionVersion"] = 1;
+                entry["governedDefinitionHash"] = new string('b', 64);
             }
             else if (mutation == "dispatch-partial")
             {
@@ -2118,17 +2229,18 @@ public sealed class TriggerQueueStoreTests
         return entry;
     }
 
-    private static TriggerDispatchEvidence Intent(TriggerQueueEntry entry, DateTimeOffset recordedAtUtc)
+    private static TriggerDispatchEvidence Intent(TriggerQueueEntry entry, DateTimeOffset recordedAtUtc, TriggerDeliveryEnvelope? envelope = null)
     {
         var authorityHash = new string('a', 64);
         var lease = Assert.IsType<TriggerWorkerLease>(entry.WorkerLease);
-        var requestHash = TriggerWorkerRequestHash.Compute(TriggerQueueTestData.Envelope(), lease, authorityHash);
+        var requestHash = TriggerWorkerRequestHash.Compute(envelope ?? TriggerQueueTestData.Envelope(), lease, authorityHash);
         return new TriggerDispatchEvidence(TriggerWorkerRequestHash.ComputeOperationId(entry.DeliveryId, lease.Generation), requestHash, authorityHash, recordedAtUtc, TriggerDispatchOutcome.IntentRecorded, null, "intent");
     }
 
-    private static TriggerDispatchEvidence Terminal(TriggerDispatchEvidence intent, TriggerQueueEntry entry, DateTimeOffset recordedAtUtc)
+    private static TriggerDispatchEvidence Terminal(TriggerDispatchEvidence intent, TriggerQueueEntry entry, DateTimeOffset recordedAtUtc, TriggerDeliveryEnvelope? envelope = null)
     {
-        var governed = new TriggerGovernedInvocationEvidence(intent.OperationId, "run-1", new string('d', 64), entry.LoopId, TriggerQueueTestData.Envelope().Loop.DefinitionVersion, TriggerQueueTestData.Envelope().Loop.ContentHash);
+        Assert.True(TriggerLoopReferenceHash.TryCompute((envelope ?? TriggerQueueTestData.Envelope()).Loop, out var loopReferenceHash, out _));
+        var governed = new TriggerGovernedInvocationEvidence(intent.OperationId, "run-1", new string('d', 64), entry.LoopId, loopReferenceHash!);
         return intent with { Outcome = TriggerDispatchOutcome.Terminal, OutcomeRecordedAtUtc = recordedAtUtc, Detail = "exact terminal receipt", GovernedInvocation = governed };
     }
 
@@ -2315,6 +2427,14 @@ public sealed class TriggerQueueStoreTests
         }
     }
 
+    private sealed class ReadyDispatchPort : ITriggerWorkerDispatchReadinessPort
+    {
+        public Task<TriggerWorkerDispatchReadinessResult> CheckAsync(
+            TriggerDeliveryEnvelope envelope,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(new TriggerWorkerDispatchReadinessResult(TriggerWorkerDispatchReadinessStatus.Ready));
+    }
+
     private sealed class AcceptedDispatcher : ITriggerWorkerDispatcher
     {
         internal int Calls { get; private set; }
@@ -2322,7 +2442,8 @@ public sealed class TriggerQueueStoreTests
         public Task<TriggerWorkerDispatchResult> DispatchAsync(TriggerDeliveryEnvelope envelope, TriggerDispatchEvidence intent, CancellationToken cancellationToken = default)
         {
             Calls++;
-            var governed = new TriggerGovernedInvocationEvidence(intent.OperationId, "run-1", new string('d', 64), envelope.Loop.LoopId, envelope.Loop.DefinitionVersion, envelope.Loop.ContentHash);
+            Assert.True(TriggerLoopReferenceHash.TryCompute(envelope.Loop, out var loopReferenceHash, out _));
+            var governed = new TriggerGovernedInvocationEvidence(intent.OperationId, "run-1", new string('d', 64), envelope.Loop.LoopId, loopReferenceHash!);
             return Task.FromResult(new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Accepted, "governed invocation accepted", governed));
         }
     }

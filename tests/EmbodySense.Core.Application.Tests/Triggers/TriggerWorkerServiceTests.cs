@@ -24,6 +24,92 @@ public sealed class TriggerWorkerServiceTests
     }
 
     [Fact]
+    public async Task Pending_schedule_finalization_releases_ownership_before_authority_intent_or_dispatch()
+    {
+        var state = new WorkerStateStub();
+        var authorizer = new AuthorizerStub(Authorized());
+        var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Accepted, "unexpected"));
+        var readiness = new ReadinessStub(TriggerWorkerDispatchReadinessStatus.RetryAfterScheduleFinalization);
+
+        var result = await Service(state, authorizer, dispatcher, readiness: readiness).RunOnceAsync(Request());
+
+        Assert.Equal(TriggerWorkerSelectionStatus.Acquired, result.SelectionStatus);
+        Assert.Equal(TriggerWorkerMutationStatus.Committed, result.MutationStatus);
+        Assert.Equal(TriggerQueueEntryState.Queued, result.Entry!.State);
+        Assert.Equal(1, readiness.Calls);
+        Assert.Equal(1, state.ReleaseCalls);
+        Assert.Equal(0, authorizer.Calls);
+        Assert.Equal(0, state.BeginCalls);
+        Assert.Equal(0, dispatcher.Calls);
+        Assert.Null(result.Entry.Dispatch);
+    }
+
+    [Theory]
+    [InlineData(TriggerWorkerDispatchReadinessStatus.RequiresAttention)]
+    [InlineData(TriggerWorkerDispatchReadinessStatus.Unknown)]
+    public async Task Unproved_readiness_records_bounded_attention_without_release_or_provider(
+        TriggerWorkerDispatchReadinessStatus status)
+    {
+        var state = new WorkerStateStub();
+        var authorizer = new AuthorizerStub(Authorized());
+        var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Accepted, "unexpected"));
+
+        var result = await Service(
+            state,
+            authorizer,
+            dispatcher,
+            readiness: new ReadinessStub(status)).RunOnceAsync(Request());
+
+        Assert.Equal(0, state.ReleaseCalls);
+        Assert.Equal(1, authorizer.Calls);
+        Assert.Equal(1, state.BeginCalls);
+        Assert.Equal(0, dispatcher.Calls);
+        Assert.Equal(1, state.CompleteCalls);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, result.Entry!.State);
+        Assert.Equal(TriggerDispatchOutcome.NeedsReview, result.Entry.Dispatch!.Outcome);
+        Assert.Contains("readiness", result.Entry.Dispatch.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Readiness_exception_records_bounded_attention_without_release_or_provider()
+    {
+        var state = new WorkerStateStub();
+        var authorizer = new AuthorizerStub(Authorized());
+        var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Accepted, "unexpected"));
+
+        var result = await Service(
+            state,
+            authorizer,
+            dispatcher,
+            readiness: new ReadinessStub(new IOException("schedule evidence unavailable"))).RunOnceAsync(Request());
+
+        Assert.Equal(0, state.ReleaseCalls);
+        Assert.Equal(1, authorizer.Calls);
+        Assert.Equal(1, state.BeginCalls);
+        Assert.Equal(0, dispatcher.Calls);
+        Assert.Equal(1, state.CompleteCalls);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, result.Entry!.State);
+    }
+
+    [Fact]
+    public async Task Missing_readiness_result_records_bounded_attention_without_release_or_provider()
+    {
+        var state = new WorkerStateStub();
+        var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Accepted, "unexpected"));
+
+        var result = await Service(
+            state,
+            new AuthorizerStub(Authorized()),
+            dispatcher,
+            readiness: new ReadinessStub()).RunOnceAsync(Request());
+
+        Assert.Equal(0, state.ReleaseCalls);
+        Assert.Equal(1, state.BeginCalls);
+        Assert.Equal(0, dispatcher.Calls);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, result.Entry!.State);
+    }
+
+    [Fact]
     public async Task Authorized_entry_records_intent_before_exactly_one_dispatch_and_terminal_acceptance()
     {
         var state = new WorkerStateStub();
@@ -164,6 +250,24 @@ public sealed class TriggerWorkerServiceTests
     }
 
     [Fact]
+    public async Task Noncommitted_completion_with_exact_current_intent_retries_as_needs_review()
+    {
+        var state = new WorkerStateStub(firstCompleteStatus: TriggerWorkerMutationStatus.RevisionConflict);
+        var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(
+            TriggerDispatchOutcome.Accepted,
+            "accepted before optimistic completion conflict",
+            Governed()));
+
+        var result = await Service(state, new AuthorizerStub(Authorized()), dispatcher).RunOnceAsync(Request());
+
+        Assert.Equal(1, dispatcher.Calls);
+        Assert.Equal(2, state.CompleteCalls);
+        Assert.Equal(TriggerWorkerMutationStatus.Committed, result.MutationStatus);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, result.Entry!.State);
+        Assert.Contains("RevisionConflict", result.Entry.Dispatch!.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Caller_cancellation_after_intent_is_not_forwarded_as_proof_of_non_dispatch()
     {
         using var cancellation = new CancellationTokenSource();
@@ -276,6 +380,55 @@ public sealed class TriggerWorkerServiceTests
     }
 
     [Fact]
+    public async Task Dispatch_completion_cancels_a_renewal_already_inside_the_state_boundary()
+    {
+        var time = new ControlledTimeProvider(_now);
+        var state = new WorkerStateStub(blockRenewUntilCancellation: true);
+        var dispatchCompletion = new TaskCompletionSource<TriggerWorkerDispatchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dispatcher = new DispatcherStub(_ => dispatchCompletion.Task);
+        var running = Service(state, new AuthorizerStub(Authorized()), dispatcher, time).RunOnceAsync(Request());
+        await state.WaitForBeginAsync();
+
+        time.Advance(TimeSpan.FromSeconds(31));
+        await state.WaitForRenewalsAsync(1);
+        dispatchCompletion.SetResult(new TriggerWorkerDispatchResult(
+            TriggerDispatchOutcome.Accepted,
+            "accepted while renewal was pending",
+            Governed()));
+
+        var result = await running;
+
+        Assert.Equal(1, state.RenewCalls);
+        Assert.Equal(TriggerWorkerMutationStatus.Committed, result.MutationStatus);
+        Assert.Equal(TriggerQueueEntryState.Dispatched, result.Entry!.State);
+        Assert.Equal(TriggerDispatchOutcome.Accepted, result.Entry.Dispatch!.Outcome);
+    }
+
+    [Fact]
+    public async Task Malformed_overflowing_renewal_coordinates_fail_closed_before_dispatch_completion()
+    {
+        var time = new ControlledTimeProvider(_now);
+        var state = new WorkerStateStub(overflowRenewalValidation: true);
+        var dispatcher = new DispatcherStub(async cancellationToken =>
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Accepted, "unreachable", Governed());
+        });
+        var running = Service(state, new AuthorizerStub(Authorized()), dispatcher, time).RunOnceAsync(Request());
+        await state.WaitForBeginAsync();
+
+        time.Advance(TimeSpan.FromSeconds(31));
+        var result = await running;
+
+        Assert.True(dispatcher.ObservedCancellation);
+        Assert.Equal(1, state.RenewCalls);
+        Assert.Equal(TriggerWorkerMutationStatus.Committed, result.MutationStatus);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, result.Entry!.State);
+        Assert.Equal(TriggerDispatchOutcome.NeedsReview, result.Entry.Dispatch!.Outcome);
+        Assert.Contains("renewal validation failed closed", result.Entry.Dispatch.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Expired_ownership_immediately_after_intent_never_starts_governed_dispatch()
     {
         var time = new ControlledTimeProvider(_now);
@@ -316,6 +469,93 @@ public sealed class TriggerWorkerServiceTests
     }
 
     [Fact]
+    public async Task Ownership_expiring_while_dispatch_settles_is_durably_needs_review()
+    {
+        var time = new ControlledTimeProvider(_now);
+        var state = new WorkerStateStub();
+        var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(
+            TriggerDispatchOutcome.Accepted,
+            "accepted after ownership expiry",
+            Governed()),
+            onDispatch: () => time.AdvanceClockWithoutFiringTimers(TimeSpan.FromMinutes(2)));
+
+        var result = await Service(state, new AuthorizerStub(Authorized()), dispatcher, time).RunOnceAsync(Request());
+
+        Assert.Equal(1, dispatcher.Calls);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, result.Entry!.State);
+        Assert.Equal(TriggerDispatchOutcome.NeedsReview, result.Entry.Dispatch!.Outcome);
+        Assert.Contains("ownership expired", result.Entry.Dispatch.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Completion_retry_uses_the_later_trusted_clock_without_redispatch()
+    {
+        var time = new ControlledTimeProvider(_now);
+        var state = new WorkerStateStub(
+            completeException: new IOException("completion unavailable"),
+            onComplete: (attempt, _) =>
+            {
+                if (attempt == 1)
+                {
+                    time.Advance(TimeSpan.FromSeconds(1));
+                }
+            });
+        var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(
+            TriggerDispatchOutcome.Accepted,
+            "accepted before completion failure",
+            Governed()));
+
+        var result = await Service(state, new AuthorizerStub(Authorized()), dispatcher, time).RunOnceAsync(Request());
+
+        Assert.Equal(1, dispatcher.Calls);
+        Assert.Equal(2, state.CompleteCalls);
+        Assert.Equal(TriggerDispatchOutcome.Accepted, state.CompletionAttempts[0].Outcome);
+        Assert.Equal(_now, state.CompletionAttempts[0].OutcomeRecordedAtUtc);
+        Assert.Equal(TriggerDispatchOutcome.NeedsReview, state.CompletionAttempts[1].Outcome);
+        Assert.Equal(_now.AddSeconds(1), state.CompletionAttempts[1].OutcomeRecordedAtUtc);
+        Assert.Equal(_now.AddSeconds(1), result.Entry!.Dispatch!.OutcomeRecordedAtUtc);
+        Assert.Equal(TriggerDispatchOutcome.NeedsReview, result.Entry.Dispatch.Outcome);
+    }
+
+    [Fact]
+    public async Task Completion_retry_clock_failure_is_bounded_and_preserves_the_known_intent_time()
+    {
+        var state = new WorkerStateStub(completeException: new IOException("completion unavailable"));
+        var time = new ThrowOnCallTimeProvider(_now, throwOnCall: 6);
+        var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(
+            TriggerDispatchOutcome.Accepted,
+            "accepted before completion failure",
+            Governed()));
+
+        var result = await Service(state, new AuthorizerStub(Authorized()), dispatcher, time).RunOnceAsync(Request());
+
+        Assert.Equal(1, dispatcher.Calls);
+        Assert.Equal(2, state.CompleteCalls);
+        Assert.Equal(_now, result.Entry!.Dispatch!.OutcomeRecordedAtUtc);
+        Assert.Contains("retry clock IOException", result.Entry.Dispatch.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Renewal_timer_failure_prevents_dispatch_and_records_attention()
+    {
+        var state = new WorkerStateStub();
+        var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(
+            TriggerDispatchOutcome.Accepted,
+            "must not dispatch",
+            Governed()));
+
+        var result = await Service(
+            state,
+            new AuthorizerStub(Authorized()),
+            dispatcher,
+            new ThrowingTimerTimeProvider(_now)).RunOnceAsync(Request());
+
+        Assert.Equal(0, dispatcher.Calls);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, result.Entry!.State);
+        Assert.Contains("renewal scheduling failed closed", result.Entry.Dispatch!.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Malformed_dispatch_result_after_intent_becomes_needs_review()
     {
         var state = new WorkerStateStub();
@@ -329,7 +569,10 @@ public sealed class TriggerWorkerServiceTests
     [Theory]
     [InlineData("missing")]
     [InlineData("operation")]
-    [InlineData("definition")]
+    [InlineData("run")]
+    [InlineData("admission")]
+    [InlineData("loop")]
+    [InlineData("reference")]
     public async Task Accepted_result_without_exact_governed_receipt_binding_becomes_needs_review(string mismatch)
     {
         var state = new WorkerStateStub();
@@ -337,7 +580,10 @@ public sealed class TriggerWorkerServiceTests
         {
             "missing" => null,
             "operation" => Governed() with { OperationId = "other-operation" },
-            _ => Governed() with { DefinitionHash = new string('f', 64) }
+            "run" => Governed() with { RunId = "../run" },
+            "admission" => Governed() with { AdmissionRequestHash = new string('F', 64) },
+            "loop" => Governed() with { LoopId = "other-loop" },
+            _ => Governed() with { LoopReferenceHash = new string('f', 64) }
         };
         var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Accepted, "fabricated or stale", governed));
 
@@ -345,6 +591,43 @@ public sealed class TriggerWorkerServiceTests
 
         Assert.Equal(TriggerDispatchOutcome.NeedsReview, result.Entry!.Dispatch!.Outcome);
         Assert.Null(result.Entry.Dispatch.GovernedInvocation);
+    }
+
+    [Fact]
+    public async Task Canonical_governed_target_is_accepted_only_with_its_full_reference_hash()
+    {
+        var envelope = TriggerAdmissionTestData.Envelope(loop: TriggerAdmissionTestData.GovernedLoop());
+        var state = new WorkerStateStub(envelope: envelope);
+        var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Accepted, "canonical governed target accepted", Governed(envelope)));
+
+        var result = await Service(state, new AuthorizerStub(Authorized()), dispatcher).RunOnceAsync(Request());
+
+        Assert.Equal(TriggerQueueEntryState.Dispatched, result.Entry!.State);
+        Assert.Equal(envelope.Loop.LoopId, result.Entry.Dispatch!.GovernedInvocation!.LoopId);
+        Assert.True(TriggerLoopReferenceHash.TryCompute(envelope.Loop, out var expectedHash, out _));
+        Assert.Equal(expectedHash, result.Entry.Dispatch.GovernedInvocation.LoopReferenceHash);
+        Assert.Contains(typeof(TriggerGovernedInvocationEvidence).GetProperties(), property => property.Name == nameof(TriggerGovernedInvocationEvidence.LoopReferenceHash));
+        Assert.DoesNotContain(typeof(TriggerGovernedInvocationEvidence).GetProperties(), property => property.Name.Contains("Definition", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("revision")]
+    [InlineData("grant")]
+    public async Task Canonical_target_hash_rejects_same_graph_with_different_exact_pin(string mismatch)
+    {
+        var envelope = TriggerAdmissionTestData.Envelope(loop: TriggerAdmissionTestData.GovernedLoop());
+        var otherLoop = mismatch == "revision"
+            ? TriggerAdmissionTestData.GovernedLoop(revisionId: "revision-4")
+            : TriggerAdmissionTestData.GovernedLoop(grantRevision: 3);
+        var forgedEnvelope = TriggerAdmissionTestData.Envelope(loop: otherLoop);
+        var state = new WorkerStateStub(envelope: envelope);
+        var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Accepted, "same graph but stale exact pin", Governed(forgedEnvelope)));
+
+        var result = await Service(state, new AuthorizerStub(Authorized()), dispatcher).RunOnceAsync(Request());
+
+        Assert.Equal(envelope.Loop.LoopId, forgedEnvelope.Loop.LoopId);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, result.Entry!.State);
+        Assert.Null(result.Entry.Dispatch!.GovernedInvocation);
     }
 
     [Theory]
@@ -370,9 +653,11 @@ public sealed class TriggerWorkerServiceTests
         var authorizer = new AuthorizerStub(Authorized());
         var dispatcher = new DispatcherStub(new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Accepted, "accepted"));
 
-        Assert.Throws<ArgumentNullException>(() => new TriggerWorkerService(null!, authorizer, dispatcher));
-        Assert.Throws<ArgumentNullException>(() => new TriggerWorkerService(state, null!, dispatcher));
-        Assert.Throws<ArgumentNullException>(() => new TriggerWorkerService(state, authorizer, null!));
+        var readiness = new ReadinessStub(TriggerWorkerDispatchReadinessStatus.Ready);
+        Assert.Throws<ArgumentNullException>(() => new TriggerWorkerService(null!, authorizer, dispatcher, readiness));
+        Assert.Throws<ArgumentNullException>(() => new TriggerWorkerService(state, null!, dispatcher, readiness));
+        Assert.Throws<ArgumentNullException>(() => new TriggerWorkerService(state, authorizer, null!, readiness));
+        Assert.Throws<ArgumentNullException>(() => new TriggerWorkerService(state, authorizer, dispatcher, null!));
     }
 
     [Fact]
@@ -393,9 +678,19 @@ public sealed class TriggerWorkerServiceTests
         Assert.Throws<ArgumentNullException>(() => TriggerWorkerRequestHash.ComputeOperationId(null!, 1));
     }
 
-    private static TriggerWorkerService Service(WorkerStateStub state, AuthorizerStub authorizer, DispatcherStub dispatcher, TimeProvider? timeProvider = null)
+    private static TriggerWorkerService Service(
+        WorkerStateStub state,
+        AuthorizerStub authorizer,
+        DispatcherStub dispatcher,
+        TimeProvider? timeProvider = null,
+        ITriggerWorkerDispatchReadinessPort? readiness = null)
     {
-        return new TriggerWorkerService(state, authorizer, dispatcher, timeProvider ?? new FixedTimeProvider(_now));
+        return new TriggerWorkerService(
+            state,
+            authorizer,
+            dispatcher,
+            readiness ?? new ReadinessStub(TriggerWorkerDispatchReadinessStatus.Ready),
+            timeProvider ?? new FixedTimeProvider(_now));
     }
 
     private static TriggerWorkerRunRequest Request()
@@ -408,15 +703,38 @@ public sealed class TriggerWorkerServiceTests
         return new TriggerDispatchAuthorization(TriggerDispatchAuthorizationStatus.Authorized, new string('a', 64), "current evidence matched");
     }
 
-    private static TriggerGovernedInvocationEvidence Governed()
+    private static TriggerGovernedInvocationEvidence Governed(TriggerDeliveryEnvelope? envelope = null)
     {
-        var envelope = TriggerAdmissionTestData.Envelope();
-        return new TriggerGovernedInvocationEvidence(TriggerWorkerRequestHash.ComputeOperationId(envelope.DeliveryId, 1), "run-1", new string('d', 64), envelope.Loop.LoopId, envelope.Loop.DefinitionVersion, envelope.Loop.ContentHash);
+        envelope ??= TriggerAdmissionTestData.Envelope();
+        Assert.True(TriggerLoopReferenceHash.TryCompute(envelope.Loop, out var loopReferenceHash, out _));
+        return new TriggerGovernedInvocationEvidence(TriggerWorkerRequestHash.ComputeOperationId(envelope.DeliveryId, 1), "run-1", new string('d', 64), envelope.Loop.LoopId, loopReferenceHash!);
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private sealed class ThrowOnCallTimeProvider(DateTimeOffset now, int throwOnCall) : TimeProvider
+    {
+        private int _calls;
+
+        public override DateTimeOffset GetUtcNow()
+            => Interlocked.Increment(ref _calls) == throwOnCall
+                ? throw new IOException("clock unavailable")
+                : now;
+    }
+
+    private sealed class ThrowingTimerTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+
+        public override ITimer CreateTimer(
+            TimerCallback callback,
+            object? state,
+            TimeSpan dueTime,
+            TimeSpan period)
+            => throw new InvalidOperationException("timer unavailable");
     }
 
     private sealed class AuthorizerStub : ITriggerDispatchAuthorizer
@@ -434,6 +752,33 @@ public sealed class TriggerWorkerServiceTests
         {
             Calls++;
             return _exception is null ? Task.FromResult(_result!) : Task.FromException<TriggerDispatchAuthorization>(_exception);
+        }
+    }
+
+    private sealed class ReadinessStub : ITriggerWorkerDispatchReadinessPort
+    {
+        private readonly TriggerWorkerDispatchReadinessStatus _status;
+        private readonly Exception? _exception;
+        private readonly bool _returnNull;
+
+        internal ReadinessStub() => _returnNull = true;
+
+        internal ReadinessStub(TriggerWorkerDispatchReadinessStatus status) => _status = status;
+
+        internal ReadinessStub(Exception exception) => _exception = exception;
+
+        internal int Calls { get; private set; }
+
+        public Task<TriggerWorkerDispatchReadinessResult> CheckAsync(
+            TriggerDeliveryEnvelope envelope,
+            CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return _returnNull
+                ? Task.FromResult<TriggerWorkerDispatchReadinessResult>(null!)
+                : _exception is null
+                ? Task.FromResult(new TriggerWorkerDispatchReadinessResult(_status))
+                : Task.FromException<TriggerWorkerDispatchReadinessResult>(_exception);
         }
     }
 
@@ -490,11 +835,16 @@ public sealed class TriggerWorkerServiceTests
         private readonly bool _terminalizeOnRenewLoss;
         private readonly Exception? _completeException;
         private readonly int _completeExceptionCount;
+        private readonly TriggerWorkerMutationStatus? _firstCompleteStatus;
+        private readonly Action<int, TriggerDispatchEvidence>? _onComplete;
         private TriggerQueueEntry _entry;
         private readonly TriggerDeliveryEnvelope _envelope;
         private readonly TaskCompletionSource _begun = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        internal WorkerStateStub(TriggerWorkerSelectionStatus selectionStatus = TriggerWorkerSelectionStatus.Acquired, Action? onBegin = null, Exception? beginException = null, TriggerWorkerMutationStatus beginStatus = TriggerWorkerMutationStatus.Committed, TriggerWorkerMutationStatus renewStatus = TriggerWorkerMutationStatus.Committed, Exception? renewException = null, bool terminalizeOnRenewLoss = false, TimeSpan? initialLeaseDuration = null, Exception? completeException = null, int completeExceptionCount = 1)
+        private readonly bool _blockRenewUntilCancellation;
+        private readonly bool _overflowRenewalValidation;
+
+        internal WorkerStateStub(TriggerWorkerSelectionStatus selectionStatus = TriggerWorkerSelectionStatus.Acquired, Action? onBegin = null, Exception? beginException = null, TriggerWorkerMutationStatus beginStatus = TriggerWorkerMutationStatus.Committed, TriggerWorkerMutationStatus renewStatus = TriggerWorkerMutationStatus.Committed, Exception? renewException = null, bool terminalizeOnRenewLoss = false, TimeSpan? initialLeaseDuration = null, Exception? completeException = null, int completeExceptionCount = 1, TriggerWorkerMutationStatus? firstCompleteStatus = null, TriggerDeliveryEnvelope? envelope = null, Action<int, TriggerDispatchEvidence>? onComplete = null, bool blockRenewUntilCancellation = false, bool overflowRenewalValidation = false)
         {
             _selectionStatus = selectionStatus;
             _onBegin = onBegin;
@@ -505,7 +855,11 @@ public sealed class TriggerWorkerServiceTests
             _terminalizeOnRenewLoss = terminalizeOnRenewLoss;
             _completeException = completeException;
             _completeExceptionCount = completeExceptionCount;
-            _envelope = TriggerAdmissionTestData.Envelope();
+            _firstCompleteStatus = firstCompleteStatus;
+            _onComplete = onComplete;
+            _blockRenewUntilCancellation = blockRenewUntilCancellation;
+            _overflowRenewalValidation = overflowRenewalValidation;
+            _envelope = envelope ?? TriggerAdmissionTestData.Envelope();
             var lease = new TriggerWorkerLease("worker-1", 1, _now, _now + (initialLeaseDuration ?? TimeSpan.FromMinutes(1)), 0);
             _entry = new TriggerQueueEntry(_envelope.DeliveryId, _envelope.DeduplicationId, _envelope.Loop.LoopId, new string('e', 64), 1, 1, 1, TriggerQueueEntryState.WorkerOwned, TriggerQueueTerminalReason.None, new TriggerQueueOrderKey(_now, TriggerQueuePriority.Normal, _now, _envelope.DeliveryId.Value), 2, _now.AddSeconds(-1), null, TriggerAdmissionStatus.Admitted, TriggerAdmissionReason.EvidenceAccepted, lease);
         }
@@ -513,6 +867,8 @@ public sealed class TriggerWorkerServiceTests
         internal int BeginCalls { get; private set; }
 
         internal int CompleteCalls { get; private set; }
+
+        internal List<TriggerDispatchEvidence> CompletionAttempts { get; } = [];
 
         internal long? CompletionExpectedRevision { get; private set; }
 
@@ -530,6 +886,11 @@ public sealed class TriggerWorkerServiceTests
         public Task<TriggerWorkerMutationResult> RenewAsync(TriggerDeliveryId deliveryId, string workerId, long leaseGeneration, long expectedRevision, DateTimeOffset renewedAtUtc, TimeSpan leaseDuration, CancellationToken cancellationToken = default)
         {
             RenewCalls++;
+            if (_blockRenewUntilCancellation)
+            {
+                return WaitForCancellationAsync(cancellationToken);
+            }
+
             if (_renewException is not null)
             {
                 return Task.FromException<TriggerWorkerMutationResult>(_renewException);
@@ -548,7 +909,11 @@ public sealed class TriggerWorkerServiceTests
 
             Assert.Equal(_entry.Revision, expectedRevision);
             var lease = _entry.WorkerLease!;
-            _entry = _entry with { Revision = _entry.Revision + 1, WorkerLease = lease with { ExpiresAtUtc = renewedAtUtc + leaseDuration, RenewalCount = lease.RenewalCount + 1 } };
+            _entry = _entry with
+            {
+                Revision = _overflowRenewalValidation ? long.MinValue : _entry.Revision + 1,
+                WorkerLease = lease with { ExpiresAtUtc = renewedAtUtc + leaseDuration, RenewalCount = lease.RenewalCount + 1 }
+            };
             return Result(_renewStatus);
         }
 
@@ -572,7 +937,12 @@ public sealed class TriggerWorkerServiceTests
                 return Task.FromResult(new TriggerWorkerMutationResult(_beginStatus, 2, _entry));
             }
 
-            _entry = _entry with { State = TriggerQueueEntryState.Dispatching, Revision = _entry.Revision + 1, Dispatch = intent };
+            _entry = _entry with
+            {
+                State = TriggerQueueEntryState.Dispatching,
+                Revision = _overflowRenewalValidation ? long.MaxValue : _entry.Revision + 1,
+                Dispatch = intent
+            };
             _onBegin?.Invoke();
             _begun.TrySetResult();
             return Result();
@@ -588,10 +958,17 @@ public sealed class TriggerWorkerServiceTests
         public Task<TriggerWorkerMutationResult> CompleteDispatchAsync(TriggerDeliveryId deliveryId, string workerId, long leaseGeneration, long expectedRevision, TriggerDispatchEvidence outcome, CancellationToken cancellationToken = default)
         {
             CompleteCalls++;
+            CompletionAttempts.Add(outcome);
+            _onComplete?.Invoke(CompleteCalls, outcome);
             CompletionExpectedRevision = expectedRevision;
             if (_completeException is not null && CompleteCalls <= _completeExceptionCount)
             {
                 return Task.FromException<TriggerWorkerMutationResult>(_completeException);
+            }
+
+            if (CompleteCalls == 1 && _firstCompleteStatus is { } firstCompleteStatus)
+            {
+                return Result(firstCompleteStatus);
             }
 
             if (expectedRevision != _entry.Revision)
@@ -626,6 +1003,12 @@ public sealed class TriggerWorkerServiceTests
         }
 
         private Task<TriggerWorkerMutationResult> Result(TriggerWorkerMutationStatus status = TriggerWorkerMutationStatus.Committed) => Task.FromResult(new TriggerWorkerMutationResult(status, 3, _entry));
+
+        private static async Task<TriggerWorkerMutationResult> WaitForCancellationAsync(CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("A renewal cancellation wait unexpectedly completed.");
+        }
     }
 
     private sealed class ControlledTimeProvider(DateTimeOffset now) : TimeProvider
@@ -689,6 +1072,14 @@ public sealed class TriggerWorkerServiceTests
             foreach (var timer in due)
             {
                 timer.Fire();
+            }
+        }
+
+        internal void AdvanceClockWithoutFiringTimers(TimeSpan duration)
+        {
+            lock (_gate)
+            {
+                _now += duration;
             }
         }
 

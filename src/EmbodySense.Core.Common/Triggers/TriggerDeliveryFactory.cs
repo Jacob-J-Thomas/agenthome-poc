@@ -1,8 +1,13 @@
+using System.Globalization;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Revisions;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Triggers.Models;
 
 namespace EmbodySense.Core.Common.Triggers;
@@ -13,7 +18,7 @@ namespace EmbodySense.Core.Common.Triggers;
 public static class TriggerDeliveryFactory
 {
     /// <summary>
-    /// Creates an exact loop reference.
+    /// Creates an exact legacy custom-loop definition reference.
     /// </summary>
     /// <param name="loopId">The stable custom-loop identifier.</param>
     /// <param name="definitionVersion">The exact positive definition version.</param>
@@ -23,14 +28,56 @@ public static class TriggerDeliveryFactory
     /// <returns><see langword="true"/> when the reference is valid; otherwise, <see langword="false"/>.</returns>
     public static bool TryCreateLoopReference(string? loopId, int definitionVersion, string? contentHash, out TriggerLoopReference? loop, out TriggerContractValidationResult validation)
     {
-        loop = loopId is null || contentHash is null ? null : new TriggerLoopReference(loopId, definitionVersion, contentHash);
-        validation = new TriggerContractValidationResult(loop is null ? [Error("invalid_loop_reference", "loop")] : ValidateLoop(loop));
+        loop = loopId is null || contentHash is null
+            ? null
+            : new TriggerLoopReference(
+                TriggerLoopTargetKind.LegacyDefinition,
+                new TriggerLegacyLoopDefinitionReference(loopId, definitionVersion, contentHash),
+                null,
+                null);
+        validation = TriggerDeliveryValidator.ValidateLoopReference(loop);
         if (!validation.IsValid)
         {
             loop = null;
         }
 
         return validation.IsValid;
+    }
+
+    /// <summary>
+    /// Creates an exact governed-loop publication and authority-grant reference.
+    /// </summary>
+    /// <param name="governedPublication">The exact immutable publication pin.</param>
+    /// <param name="authorityGrant">The exact immutable authority-grant revision reference.</param>
+    /// <param name="loop">The defensively copied immutable loop reference when successful.</param>
+    /// <param name="validation">The structured validation result.</param>
+    /// <returns><see langword="true"/> when both references are exact schema-1 contracts; otherwise, <see langword="false"/>.</returns>
+    public static bool TryCreateGovernedLoopReference(GovernedLoopRevisionPublicationPin? governedPublication, AuthorityGrantReference? authorityGrant, out TriggerLoopReference? loop, out TriggerContractValidationResult validation)
+    {
+        loop = governedPublication is null || authorityGrant is null
+            ? null
+            : new TriggerLoopReference(TriggerLoopTargetKind.GovernedPublication, null, governedPublication, authorityGrant);
+        validation = TriggerDeliveryValidator.ValidateLoopReference(loop);
+        if (!validation.IsValid)
+        {
+            loop = null;
+            return false;
+        }
+
+        if (!TryCopyGrant(authorityGrant!, out var grantCopy))
+        {
+            loop = null;
+            validation = Failure("invalid_loop_reference", "loop.authorityGrant");
+            return false;
+        }
+
+        var publicationCopy = GovernedLoopRevisionPublicationPinFactory.Create(
+            governedPublication!.SchemaVersion,
+            governedPublication.Revision,
+            governedPublication.PublicationOperationId,
+            governedPublication.ValidationEvidenceHash);
+        loop = new TriggerLoopReference(TriggerLoopTargetKind.GovernedPublication, null, publicationCopy, grantCopy);
+        return true;
     }
 
     /// <summary>
@@ -224,14 +271,6 @@ public static class TriggerDeliveryFactory
         return true;
     }
 
-    private static IEnumerable<TriggerContractError> ValidateLoop(TriggerLoopReference loop)
-    {
-        var envelopeValidation = CustomLoopArtifactIdentifier.IsValid(loop.LoopId, TriggerDeliveryLimits.MaxLoopIdCharacters)
-            && loop.DefinitionVersion is >= 1 and <= TriggerDeliveryLimits.MaxLoopDefinitionVersion
-            && TriggerTextRules.IsSha256(loop.ContentHash);
-        return envelopeValidation ? [] : [Error("invalid_loop_reference", "loop")];
-    }
-
     private static IEnumerable<TriggerContractError> ValidateActorContext(TriggerActorContext context)
     {
         var errors = new List<TriggerContractError>();
@@ -256,6 +295,20 @@ public static class TriggerDeliveryFactory
         }
 
         return errors;
+    }
+
+    private static bool TryCopyGrant(AuthorityGrantReference grant, out AuthorityGrantReference? copy)
+    {
+        copy = null;
+        if (!AuthorityGrantId.TryParse(grant.GrantId.Value, out var grantId, out _)
+            || !AuthorityGrantRevision.TryParse(grant.Revision.Value.ToString(CultureInfo.InvariantCulture), out var revision, out _)
+            || !AuthorityGrantHash.IsCanonical(grant.ContentHash))
+        {
+            return false;
+        }
+
+        copy = new AuthorityGrantReference(grantId!, revision!, grant.ContentHash);
+        return true;
     }
 
     private static TriggerContractValidationResult Valid() => new([]);

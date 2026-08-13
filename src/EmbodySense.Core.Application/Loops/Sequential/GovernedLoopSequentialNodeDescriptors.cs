@@ -10,6 +10,9 @@ public static class GovernedLoopSequentialNodeDescriptors
     /// <summary>Gets the exact supported manual-trigger descriptor.</summary>
     public static GovernedLoopNodeDescriptor ManualTrigger { get; } = new(GovernedLoopNodeKind.Trigger, "manual-trigger", 1);
 
+    /// <summary>Gets the exact supported schedule-trigger descriptor.</summary>
+    public static GovernedLoopNodeDescriptor ScheduleTrigger { get; } = new(GovernedLoopNodeKind.Trigger, "schedule-trigger", 1);
+
     /// <summary>Gets the exact supported provider-inference descriptor.</summary>
     public static GovernedLoopNodeDescriptor ProviderInference { get; } = new(GovernedLoopNodeKind.Inference, "provider-inference", 1);
 
@@ -65,10 +68,15 @@ public static class GovernedLoopSequentialNodeDescriptors
     public static bool IsSupported(GovernedLoopNodeDescriptor? descriptor)
         => descriptor is not null
             && (Equals(descriptor, ManualTrigger)
+                || Equals(descriptor, ScheduleTrigger)
                 || Equals(descriptor, ProviderInference)
                 || Equals(descriptor, SuccessExit)
                 || IsTopology(descriptor)
                 || IsPure(descriptor));
+
+    /// <summary>Gets whether a descriptor is one exact supported invocation-entry Trigger.</summary>
+    public static bool IsEntryTrigger(GovernedLoopNodeDescriptor? descriptor)
+        => Equals(descriptor, ManualTrigger) || Equals(descriptor, ScheduleTrigger);
 
     /// <summary>Gets whether a descriptor exactly names one supported deterministic Condition or Join.</summary>
     public static bool IsTopology(GovernedLoopNodeDescriptor? descriptor)

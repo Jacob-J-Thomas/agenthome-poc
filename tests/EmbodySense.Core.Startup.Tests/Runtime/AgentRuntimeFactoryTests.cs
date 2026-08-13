@@ -182,6 +182,7 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(exactTriggerActorContext.ActorId.Value, authorizer.LastInput!.ActorId);
         Assert.Equal(exactTriggerActorContext.SurfaceId, authorizer.LastInput.SurfaceId);
         Assert.Equal(exactTriggerActorContext.RoleId, authorizer.LastInput.RoleId);
+        Assert.Equal(envelope.Loop, authorizer.LastInput.Loop);
         Assert.NotEqual(WorkspaceActors.Cli, run.AdmissionActor);
         Assert.NotEqual(AgentRuntimeSurface.Cli.Id, run.Surface);
         Assert.NotEqual("default-assistant", run.AdmittedDefinition.RoleId);

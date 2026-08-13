@@ -163,7 +163,7 @@ public static class GovernedLoopSequentialBindingResolver
             return false;
         }
 
-        if (Equals(source.Descriptor, GovernedLoopSequentialNodeDescriptors.ManualTrigger))
+        if (GovernedLoopSequentialNodeDescriptors.IsEntryTrigger(source.Descriptor))
         {
             return string.Equals(sourcePortId, "request", StringComparison.Ordinal)
                 && run.SequentialInvocationSnapshot is { TriggerPrompt: { } triggerPrompt }
@@ -267,7 +267,7 @@ public static class GovernedLoopSequentialBindingResolver
             predecessors = [];
             return target.ActivationOrdinal == 0
                 && target.PlanOrdinal == 0
-                && Equals(plan.Nodes[0].Descriptor, GovernedLoopSequentialNodeDescriptors.ManualTrigger);
+                && GovernedLoopSequentialNodeDescriptors.IsEntryTrigger(plan.Nodes[0].Descriptor);
         }
 
         if (target.JoinArrivals.Count > 0)

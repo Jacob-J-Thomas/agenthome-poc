@@ -786,12 +786,75 @@ public sealed class CustomLoopDefinitionStoreTests
         await using var externalLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         var store = new CustomLoopDefinitionStore(paths);
 
-        var getException = await Assert.ThrowsAsync<InvalidOperationException>(() => store.GetAsync("loop-alpha"));
-        var listException = await Assert.ThrowsAsync<InvalidOperationException>(() => store.ListAsync());
+        var getException = await Assert.ThrowsAsync<InvalidOperationException>(() => store.GetAsync("loop-alpha").WaitAsync(TimeSpan.FromSeconds(5)));
+        var listException = await Assert.ThrowsAsync<InvalidOperationException>(() => store.ListAsync().WaitAsync(TimeSpan.FromSeconds(5)));
         var createException = await Assert.ThrowsAsync<InvalidOperationException>(() => store.CreateAsync(CreateDefinition("loop-alpha")));
 
         Assert.All(new[] { getException, listException, createException }, exception => Assert.Contains("locked by another process", exception.Message, StringComparison.Ordinal));
+        Assert.All(new[] { getException, listException }, exception => Assert.IsType<IOException>(exception.InnerException));
         Assert.False(File.Exists(Path.Combine(paths.CustomLoopDefinitionsPath, "loop-alpha.json")));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Reads_tolerate_a_bounded_short_lived_workspace_or_retention_mutation(bool lockRetentionRoot)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var definition = CreateDefinition("loop-alpha");
+        await CreateCommittedAsync(store, definition);
+        var lockRoot = lockRetentionRoot ? paths.CustomLoopReceiptRetentionPath : paths.LoopDefinitionsPath;
+        Directory.CreateDirectory(lockRoot);
+        await using var externalLock = new FileStream(Path.Combine(lockRoot, ".custom-loop-mutations.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        var pendingRead = store.ListAsync();
+
+        await externalLock.DisposeAsync();
+        var definitions = await pendingRead.WaitAsync(TimeSpan.FromSeconds(5));
+        AssertDefinition(definition, Assert.Single(definitions));
+    }
+
+    [Fact]
+    public async Task Read_lock_retry_observes_cancellation_and_releases_the_in_process_gate()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var definition = CreateDefinition("loop-alpha");
+        await CreateCommittedAsync(store, definition);
+        Directory.CreateDirectory(paths.LoopDefinitionsPath);
+        await using var externalLock = new FileStream(Path.Combine(paths.LoopDefinitionsPath, ".custom-loop-mutations.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        using var cancellation = new CancellationTokenSource();
+
+        var pendingRead = store.GetAsync(definition.Id, cancellation.Token);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pendingRead);
+        await externalLock.DisposeAsync();
+        AssertDefinition(definition, await store.GetAsync(definition.Id).WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public async Task Mutation_lock_contention_does_not_use_the_read_retry_budget()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var definition = CreateDefinition("loop-alpha");
+        var created = await store.CreateAsync(definition);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Created, created.Status);
+        Directory.CreateDirectory(paths.LoopDefinitionsPath);
+        await using var externalLock = new FileStream(Path.Combine(paths.LoopDefinitionsPath, ".custom-loop-mutations.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        var mutation = store.MarkOperationOutcomeAuditedAsync(definition.LastMutationOperationId);
+
+        Assert.True(mutation.IsCompleted);
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => mutation);
+        Assert.Contains("mutation failed closed", exception.Message, StringComparison.Ordinal);
+        await externalLock.DisposeAsync();
+        Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, await store.MarkOperationOutcomeAuditedAsync(definition.LastMutationOperationId));
     }
 
     [Fact]

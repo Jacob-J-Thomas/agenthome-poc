@@ -31,6 +31,27 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
     }
 
     [Fact]
+    public void Exact_schedule_entry_builds_only_with_its_closed_time_capability_authority()
+    {
+        var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(scheduleTrigger: true);
+
+        var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, result.Status);
+        Assert.Equal(GovernedLoopSequentialNodeDescriptors.ScheduleTrigger, result.Plan!.Nodes[0].Descriptor);
+        Assert.Equal(
+            [GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.ScheduleTriggerCapabilityId],
+            artifact.Graph.AuthorityCeiling.CapabilityIds);
+        var missingNodeAuthority = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            artifact.Graph,
+            nodes: artifact.Graph.Nodes.Select(node => node.Id == artifact.Graph.EntryNodeId
+                ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([]) }
+                : node).ToArray());
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, GovernedLoopSequentialPlanBuilder.Build(missingNodeAuthority).Status);
+    }
+
+    [Fact]
     public void Exact_workspace_command_assignment_is_supported_only_as_a_graph_and_every_inference_node_subset()
     {
         var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(2, allowWorkspaceTools: true);

@@ -37,6 +37,7 @@ using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Persistence.ToolResults;
+using EmbodySense.Core.Persistence.Triggers.Schedules;
 using EmbodySense.Core.Persistence.Workspace;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Governance;
@@ -456,6 +457,7 @@ public sealed class AgentRuntimeFactory
                 actor,
                 defaultLoop.RoleId,
                 customModelSnapshot);
+            var scheduleDeliveryProvenance = new ScheduleStore(paths);
             var governedLoops = new GovernedLoopRuntimeFacade(
                 governedGraphStore,
                 customRunStore,
@@ -465,8 +467,10 @@ public sealed class AgentRuntimeFactory
                 customExecutionGate,
                 customLoops,
                 customRuntimeContext,
+                scheduleDeliveryProvenance,
                 actor,
                 runtimeSurface.Id,
+                workspaceId,
                 customModelSnapshot,
                 governedRoleStore);
 
@@ -480,6 +484,7 @@ public sealed class AgentRuntimeFactory
                 loopRunner,
                 customLoops,
                 governedLoops,
+                scheduleDeliveryProvenance,
                 defaultConversationReviews,
                 codexRuntimeStatus);
         }

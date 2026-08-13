@@ -61,6 +61,12 @@ public sealed record LoopRunSnapshot(
     public LoopRunFrontierSnapshot? Frontier { get; init; }
 
     /// <summary>
+    /// Gets the exact canonical governed-admission request hash retained by the sequential adapter binding.
+    /// Legacy runs deliberately expose <see langword="null"/> instead of treating their separate admission hash as equivalent.
+    /// </summary>
+    public string? GovernedAdmissionRequestHash { get; init; }
+
+    /// <summary>
     /// Gets the canonical disposition for each correlated conversation-publication operation.
     /// The projection is derived from the ordered durable protocol events; raw events remain available through <see cref="Events"/>.
     /// </summary>

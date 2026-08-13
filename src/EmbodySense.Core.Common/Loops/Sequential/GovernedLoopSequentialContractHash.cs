@@ -24,6 +24,8 @@ public static class GovernedLoopSequentialContractHash
             writer.WriteString("contract", "governed-loop-sequential-invocation-v1");
             writer.WriteNumber("schemaVersion", snapshot.SchemaVersion);
             writer.WriteString("triggerPrompt", Normalize(snapshot.TriggerPrompt));
+            writer.WritePropertyName("triggerOrigin");
+            WriteTriggerOrigin(writer, snapshot.TriggerOrigin);
             writer.WritePropertyName("modelSnapshot");
             WriteModel(writer, snapshot.ModelSnapshot);
             writer.WritePropertyName("invokingConversation");
@@ -97,6 +99,34 @@ public static class GovernedLoopSequentialContractHash
         writer.WriteStartObject();
         writer.WriteString("provider", Normalize(model.Provider));
         WriteNullableString(writer, "model", model.Model);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteTriggerOrigin(Utf8JsonWriter writer, GovernedLoopSequentialTriggerOrigin? origin)
+    {
+        if (origin is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStartObject();
+        writer.WriteNumber("schemaVersion", origin.SchemaVersion);
+        writer.WriteString("scheduleId", Normalize(origin.ScheduleId));
+        writer.WriteNumber("definitionRevision", origin.DefinitionRevision);
+        writer.WriteString("definitionHash", origin.DefinitionHash);
+        writer.WriteStartObject("occurrence");
+        writer.WriteNumber("schemaVersion", origin.Occurrence.SchemaVersion);
+        writer.WriteNumber("ordinal", origin.Occurrence.Ordinal);
+        writer.WriteString("scheduledLocal", origin.Occurrence.ScheduledLocal.ToString("O", CultureInfo.InvariantCulture));
+        writer.WriteString("scheduledAtUtc", Timestamp(origin.Occurrence.ScheduledAtUtc));
+        writer.WriteStartObject("timeZone");
+        writer.WriteString("timeZoneId", Normalize(origin.Occurrence.TimeZone.TimeZoneId));
+        writer.WriteString("rulesFingerprint", origin.Occurrence.TimeZone.RulesFingerprint);
+        writer.WriteEndObject();
+        writer.WriteEndObject();
+        writer.WriteString("canonicalEnvelope", Normalize(origin.CanonicalEnvelope));
+        writer.WriteString("canonicalEnvelopeHash", origin.CanonicalEnvelopeHash);
         writer.WriteEndObject();
     }
 

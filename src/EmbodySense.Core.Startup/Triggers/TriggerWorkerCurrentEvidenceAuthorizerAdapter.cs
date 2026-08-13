@@ -19,9 +19,7 @@ internal sealed class TriggerWorkerCurrentEvidenceAuthorizerAdapter : ITriggerDi
         ArgumentNullException.ThrowIfNull(envelope);
         var input = new TriggerWorkerCurrentEvidenceInput(
             envelope.DeliveryId.Value,
-            envelope.Loop.LoopId,
-            envelope.Loop.DefinitionVersion,
-            envelope.Loop.ContentHash,
+            envelope.Loop,
             envelope.Adapter.Capability.Id.Value,
             envelope.Adapter.Capability.Version.Value,
             envelope.Adapter.Capability.Hash.Value,

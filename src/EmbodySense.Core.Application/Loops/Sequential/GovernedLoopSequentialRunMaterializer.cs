@@ -15,7 +15,7 @@ namespace EmbodySense.Core.Application.Loops.Sequential;
 public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequentialRunMaterializer
 {
     private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
-    private const string AdmissionDetail = "The exact canonical graph, invocation snapshot, admission receipt, and completed Manual Trigger outcome were materialized before provider dispatch.";
+    private const string AdmissionDetail = "The exact canonical graph, invocation snapshot, admission receipt, and completed Trigger outcome were materialized before provider dispatch.";
     private const string AuditMarkerDetail = "The matching canonical admission outcome audit is durable; provider dispatch may now be considered.";
     private readonly ICustomLoopRunStore _runStore;
     private readonly IGovernedLoopSequentialAuditRecorder _auditRecorder;

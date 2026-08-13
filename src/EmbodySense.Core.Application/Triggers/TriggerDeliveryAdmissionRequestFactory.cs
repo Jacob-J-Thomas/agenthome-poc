@@ -32,10 +32,55 @@ public static class TriggerDeliveryAdmissionRequestFactory
         DateTimeOffset evaluatedAtUtc,
         out TriggerDeliveryAdmissionRequest? request,
         out TriggerContractValidationResult validation)
+        => TryCreateCore(
+            envelope,
+            currentLoop,
+            currentAdapter,
+            isAdapterAvailable,
+            currentActorContext,
+            currentAuthority,
+            evaluatedAtUtc,
+            permitsPreparedScheduleRecovery: false,
+            out request,
+            out validation);
+
+    internal static bool TryCreatePreparedScheduleRecovery(
+        TriggerDeliveryEnvelope? envelope,
+        TriggerLoopReference? currentLoop,
+        TriggerAdapterReference? currentAdapter,
+        bool isAdapterAvailable,
+        TriggerActorContext? currentActorContext,
+        TriggerAuthorityEvidence? currentAuthority,
+        DateTimeOffset evaluatedAtUtc,
+        out TriggerDeliveryAdmissionRequest? request,
+        out TriggerContractValidationResult validation)
+        => TryCreateCore(
+            envelope,
+            currentLoop,
+            currentAdapter,
+            isAdapterAvailable,
+            currentActorContext,
+            currentAuthority,
+            evaluatedAtUtc,
+            permitsPreparedScheduleRecovery: true,
+            out request,
+            out validation);
+
+    private static bool TryCreateCore(
+        TriggerDeliveryEnvelope? envelope,
+        TriggerLoopReference? currentLoop,
+        TriggerAdapterReference? currentAdapter,
+        bool isAdapterAvailable,
+        TriggerActorContext? currentActorContext,
+        TriggerAuthorityEvidence? currentAuthority,
+        DateTimeOffset evaluatedAtUtc,
+        bool permitsPreparedScheduleRecovery,
+        out TriggerDeliveryAdmissionRequest? request,
+        out TriggerContractValidationResult validation)
     {
         var errors = new List<TriggerContractError>();
         errors.AddRange(TriggerDeliveryValidator.Validate(envelope).Errors);
-        if (currentLoop is null || currentLoop.DefinitionVersion is < 1 or > TriggerDeliveryLimits.MaxLoopDefinitionVersion || !TriggerDeliveryFactory.TryCreateLoopReference(currentLoop.LoopId, currentLoop.DefinitionVersion, currentLoop.ContentHash, out _, out _))
+        if (!TriggerDeliveryValidator.ValidateLoopReference(currentLoop).IsValid)
         {
             errors.Add(Error("invalid_current_loop", "currentLoop"));
         }
@@ -60,6 +105,11 @@ public static class TriggerDeliveryAdmissionRequestFactory
             errors.Add(Error("utc_required", "evaluatedAtUtc"));
         }
 
+        if (permitsPreparedScheduleRecovery && envelope?.Kind != TriggerKind.Time)
+        {
+            errors.Add(Error("time_trigger_required", "envelope.kind"));
+        }
+
         validation = new TriggerContractValidationResult(errors);
         if (!validation.IsValid)
         {
@@ -67,7 +117,15 @@ public static class TriggerDeliveryAdmissionRequestFactory
             return false;
         }
 
-        request = new TriggerDeliveryAdmissionRequest(envelope!, currentLoop!, currentAdapter!, isAdapterAvailable, currentActorContext!, currentAuthority!, evaluatedAtUtc);
+        request = new TriggerDeliveryAdmissionRequest(
+            envelope!,
+            currentLoop!,
+            currentAdapter!,
+            isAdapterAvailable,
+            currentActorContext!,
+            currentAuthority!,
+            evaluatedAtUtc,
+            permitsPreparedScheduleRecovery);
         return true;
     }
 

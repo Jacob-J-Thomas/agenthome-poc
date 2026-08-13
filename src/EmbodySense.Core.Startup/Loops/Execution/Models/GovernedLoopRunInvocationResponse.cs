@@ -7,6 +7,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution.Models;
 /// <param name="MaterializationStatus">The canonical run-materialization status when admission succeeded.</param>
 /// <param name="ExecutionStatus">The ordered-runtime status when execution was considered.</param>
 /// <param name="WasDispatched">Whether the ordered runtime crossed a provider boundary in this call.</param>
+/// <param name="AdmissionOutcome">The validated exact immutable admission or rejection evidence, when durably proved.</param>
 /// <param name="Run">The latest authenticated public run projection, when available.</param>
 /// <param name="Detail">A bounded non-secret diagnostic.</param>
 public sealed record GovernedLoopRunInvocationResponse(
@@ -16,5 +17,6 @@ public sealed record GovernedLoopRunInvocationResponse(
     string? MaterializationStatus,
     string? ExecutionStatus,
     bool WasDispatched,
+    GovernedLoopAdmissionOutcomeSnapshot? AdmissionOutcome,
     LoopRunSnapshot? Run,
     string Detail);

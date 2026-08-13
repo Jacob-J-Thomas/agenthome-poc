@@ -11,6 +11,7 @@ public static class BuiltInCapabilityCatalog
     {
         Create("org.embodysense/conversation-turn", "conversation-turn", CapabilityKind.GraphNode, CapabilitySideEffectClass.None, "Execute one governed default-conversation inference step."),
         Create("org.embodysense/model-inference", "model-inference", CapabilityKind.GraphNode, CapabilitySideEffectClass.None, "Dispatch one admitted model-inference node through the governed local runtime."),
+        Create("org.embodysense/triggers/time", "triggers/time", CapabilityKind.TriggerAdapter, CapabilitySideEffectClass.None, "Admit deterministic time-schedule occurrences through the governed trigger runtime."),
         Create("org.embodysense/workspace-command", "workspace-command", CapabilityKind.Actuator, CapabilitySideEffectClass.LocalReversible, "Expose governed workspace commands through the runtime tool broker.")
     });
 

@@ -55,6 +55,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private static readonly UTF8Encoding _strictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private const string SequentialConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string SequentialModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const string SequentialScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
     private const string SequentialWorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
     private const string PublicationPublishedDetail = "Canonical output was published to the invoking conversation.";
     private const string PublicationAlreadyPublishedDetail = "Idempotent conversation publication was already committed.";
@@ -8404,10 +8405,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             || !run.ContextSnapshot.SourceManifest.SequenceEqual(invocation.ContextManifest)
             || !string.Equals(run.SequentialAdapterBinding?.ContentHash, binding.ContentHash, StringComparison.Ordinal)
             || !string.Equals(run.SequentialInvocationSnapshot?.ContentHash, invocation.ContentHash, StringComparison.Ordinal)
+            || !TriggerEntryMatches(invocation, context.Plan, run)
             || !GovernedLoopSequentialFrontierMachine.Validate(run.Frontier, binding, context.Plan)
             || !string.Equals(definition.RoleId, graph.OwningRole.Identity.RoleId, StringComparison.Ordinal)
             || definition.InferenceSteps.Length != context.Plan.Nodes.Count(item => Equals(item.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference))
-            || !IsExactSequentialCapabilitySet(context.AllowedCapabilityIds)
+            || !IsExactSequentialCapabilitySet(context.AllowedCapabilityIds, invocation.TriggerOrigin is not null)
             || !run.CapabilityAdmission.Pins.Select(pin => pin.DescriptorIdentity.Id).Order().SequenceEqual(context.AllowedCapabilityIds.Order())
             || !CustomLoopDefinitionContentHash.Matches(definition)
             || !string.Equals(definition.ContentHash, projectedDefinition.ContentHash, StringComparison.Ordinal))
@@ -8418,15 +8420,31 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return true;
     }
 
-    private static bool IsExactSequentialCapabilitySet(IReadOnlyList<CapabilityId> capabilityIds)
+    private static bool TriggerEntryMatches(
+        GovernedLoopSequentialInvocationSnapshot invocation,
+        GovernedLoopSequentialPlan plan,
+        CustomLoopRunRecord run)
+    {
+        var expected = invocation.TriggerOrigin is null
+            ? GovernedLoopSequentialNodeDescriptors.ManualTrigger
+            : GovernedLoopSequentialNodeDescriptors.ScheduleTrigger;
+        return plan.Nodes.Count > 0
+            && Equals(plan.Nodes[0].Descriptor, expected)
+            && run.Frontier?.Payload.Nodes.FirstOrDefault() is { } durableEntry
+            && Equals(durableEntry.Descriptor, expected);
+    }
+
+    private static bool IsExactSequentialCapabilitySet(IReadOnlyList<CapabilityId> capabilityIds, bool scheduled)
     {
         var values = capabilityIds.Select(item => item.Value).ToArray();
-        return values.SequenceEqual(
-                [SequentialConversationTurnCapabilityId, SequentialModelInferenceCapabilityId],
-                StringComparer.Ordinal)
-            || values.SequenceEqual(
-                [SequentialConversationTurnCapabilityId, SequentialModelInferenceCapabilityId, SequentialWorkspaceCommandCapabilityId],
-                StringComparer.Ordinal);
+        var toolFree = scheduled
+            ? new[] { SequentialConversationTurnCapabilityId, SequentialModelInferenceCapabilityId, SequentialScheduleTriggerCapabilityId }
+            : [SequentialConversationTurnCapabilityId, SequentialModelInferenceCapabilityId];
+        var toolEnabled = scheduled
+            ? new[] { SequentialConversationTurnCapabilityId, SequentialModelInferenceCapabilityId, SequentialScheduleTriggerCapabilityId, SequentialWorkspaceCommandCapabilityId }
+            : [SequentialConversationTurnCapabilityId, SequentialModelInferenceCapabilityId, SequentialWorkspaceCommandCapabilityId];
+        return values.SequenceEqual(toolFree, StringComparer.Ordinal)
+            || values.SequenceEqual(toolEnabled, StringComparer.Ordinal);
     }
 
     private static GovernedLoopSequentialNodeHandlerResultStatus SequentialDisposition(CustomLoopSequentialNodeEvidence? evidence)

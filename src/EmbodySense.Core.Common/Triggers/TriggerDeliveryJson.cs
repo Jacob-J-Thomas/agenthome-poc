@@ -3,10 +3,15 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Revisions;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Triggers.Models;
 
 namespace EmbodySense.Core.Common.Triggers;
@@ -26,7 +31,10 @@ public static class TriggerDeliveryJson
     private static readonly string[] _receiptProperties = ["conditions", "decision", "evaluatedAtUtc", "profiles", "schemaVersion"];
     private static readonly string[] _conditionProperties = ["decision", "reason"];
     private static readonly string[] _conversationProperties = ["capturedAtUtc", "capturedVersion", "conversationId"];
-    private static readonly string[] _loopProperties = ["contentHash", "definitionVersion", "loopId"];
+    private static readonly string[] _loopProperties = ["authorityGrant", "governedPublication", "kind", "legacyDefinition"];
+    private static readonly string[] _legacyDefinitionProperties = ["contentHash", "definitionVersion", "loopId"];
+    private static readonly string[] _governedPublicationProperties = ["executableHash", "graphId", "publicationOperationId", "revisionId", "schemaVersion", "validationEvidenceHash"];
+    private static readonly string[] _authorityGrantProperties = ["contentHash", "grantId", "revision"];
     private static readonly string[] _payloadProperties = ["contentHash", "governedReference", "inlineBase64"];
     private static readonly string[] _redeliveryProperties = ["attempt", "count", "originalDeliveryId"];
     private static readonly string[] _temporalProperties = ["admittedAtUtc", "createdAtUtc", "deadlineUtc", "expiresAtUtc", "notBeforeUtc", "observedAtUtc", "receivedAtUtc"];
@@ -116,7 +124,7 @@ public static class TriggerDeliveryJson
 
             return true;
         }
-        catch (Exception exception) when (exception is JsonException or FormatException or OverflowException)
+        catch (Exception exception) when (exception is JsonException or ArgumentException or FormatException or OverflowException)
         {
             validation = Failure("invalid_json", "$");
             return false;
@@ -135,6 +143,27 @@ public static class TriggerDeliveryJson
         {
             json = null;
             error = new TriggerContractError("canonical_document_too_large", "$");
+            return false;
+        }
+
+        json = Encoding.UTF8.GetString(buffer.WrittenSpan);
+        error = null;
+        return true;
+    }
+
+    internal static bool TrySerializeLoopReferenceKnownValid(TriggerLoopReference loop, out string? json, out TriggerContractError? error)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            WriteLoopValue(writer, loop);
+            writer.Flush();
+        }
+
+        if (buffer.WrittenCount > TriggerDeliveryLimits.MaxCanonicalDocumentUtf8Bytes)
+        {
+            json = null;
+            error = new TriggerContractError("canonical_document_too_large", "loop");
             return false;
         }
 
@@ -255,10 +284,67 @@ public static class TriggerDeliveryJson
     private static void WriteLoop(Utf8JsonWriter writer, TriggerLoopReference loop)
     {
         writer.WritePropertyName("loop");
+        WriteLoopValue(writer, loop);
+    }
+
+    private static void WriteLoopValue(Utf8JsonWriter writer, TriggerLoopReference loop)
+    {
         writer.WriteStartObject();
-        writer.WriteString("contentHash", loop.ContentHash);
-        writer.WriteNumber("definitionVersion", loop.DefinitionVersion);
-        writer.WriteString("loopId", loop.LoopId);
+        WriteAuthorityGrant(writer, loop.AuthorityGrant);
+        WriteGovernedPublication(writer, loop.GovernedPublication);
+        writer.WriteString("kind", TriggerVocabulary.ToCanonical(loop.Kind));
+        WriteLegacyDefinition(writer, loop.LegacyDefinition);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteAuthorityGrant(Utf8JsonWriter writer, AuthorityGrantReference? grant)
+    {
+        writer.WritePropertyName("authorityGrant");
+        if (grant is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStartObject();
+        writer.WriteString("contentHash", grant.ContentHash);
+        writer.WriteString("grantId", grant.GrantId.Value);
+        writer.WriteNumber("revision", grant.Revision.Value);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteGovernedPublication(Utf8JsonWriter writer, GovernedLoopRevisionPublicationPin? publication)
+    {
+        writer.WritePropertyName("governedPublication");
+        if (publication is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStartObject();
+        writer.WriteString("executableHash", publication.Revision.ExecutableHash);
+        writer.WriteString("graphId", publication.Revision.GraphId);
+        writer.WriteString("publicationOperationId", publication.PublicationOperationId);
+        writer.WriteString("revisionId", publication.Revision.RevisionId);
+        writer.WriteNumber("schemaVersion", publication.SchemaVersion);
+        writer.WriteString("validationEvidenceHash", publication.ValidationEvidenceHash);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteLegacyDefinition(Utf8JsonWriter writer, TriggerLegacyLoopDefinitionReference? legacy)
+    {
+        writer.WritePropertyName("legacyDefinition");
+        if (legacy is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStartObject();
+        writer.WriteString("contentHash", legacy.ContentHash);
+        writer.WriteNumber("definitionVersion", legacy.DefinitionVersion);
+        writer.WriteString("loopId", legacy.LoopId);
         writer.WriteEndObject();
     }
 
@@ -345,11 +431,86 @@ public static class TriggerDeliveryJson
     private static bool TryLoop(JsonElement element, out TriggerLoopReference? loop)
     {
         loop = null;
-        return IsExactObject(element, _loopProperties)
-            && TryString(element, "loopId", out var loopId)
-            && TryInteger(element, "definitionVersion", out var version)
-            && TryString(element, "contentHash", out var hash)
-            && TriggerDeliveryFactory.TryCreateLoopReference(loopId, version, hash, out loop, out _);
+        if (!IsExactObject(element, _loopProperties)
+            || !TryString(element, "kind", out var kindText)
+            || !TriggerVocabulary.TryParseLoopTargetKind(kindText, out var kind))
+        {
+            return false;
+        }
+
+        var legacyElement = element.GetProperty("legacyDefinition");
+        var publicationElement = element.GetProperty("governedPublication");
+        var grantElement = element.GetProperty("authorityGrant");
+        return kind switch
+        {
+            TriggerLoopTargetKind.LegacyDefinition => publicationElement.ValueKind == JsonValueKind.Null
+                && grantElement.ValueKind == JsonValueKind.Null
+                && TryLegacyDefinition(legacyElement, out var legacy)
+                && TriggerDeliveryFactory.TryCreateLoopReference(legacy!.LoopId, legacy.DefinitionVersion, legacy.ContentHash, out loop, out _),
+            TriggerLoopTargetKind.GovernedPublication => legacyElement.ValueKind == JsonValueKind.Null
+                && TryGovernedPublication(publicationElement, out var publication)
+                && TryAuthorityGrant(grantElement, out var grant)
+                && TriggerDeliveryFactory.TryCreateGovernedLoopReference(publication, grant, out loop, out _),
+            _ => false
+        };
+    }
+
+    private static bool TryLegacyDefinition(JsonElement element, out TriggerLegacyLoopDefinitionReference? legacy)
+    {
+        legacy = null;
+        if (!IsExactObject(element, _legacyDefinitionProperties)
+            || !TryString(element, "loopId", out var loopId)
+            || !TryInteger(element, "definitionVersion", out var version)
+            || !TryString(element, "contentHash", out var hash))
+        {
+            return false;
+        }
+
+        legacy = new TriggerLegacyLoopDefinitionReference(loopId!, version, hash!);
+        return true;
+    }
+
+    private static bool TryGovernedPublication(JsonElement element, out GovernedLoopRevisionPublicationPin? publication)
+    {
+        publication = null;
+        if (!IsExactObject(element, _governedPublicationProperties)
+            || !TryInteger(element, "schemaVersion", out var schemaVersion)
+            || !TryString(element, "graphId", out var graphId)
+            || !TryString(element, "revisionId", out var revisionId)
+            || !TryString(element, "executableHash", out var executableHash)
+            || !TryString(element, "publicationOperationId", out var operationId)
+            || !TryString(element, "validationEvidenceHash", out var validationHash))
+        {
+            return false;
+        }
+
+        try
+        {
+            var revision = GovernedLoopRevisionReference.Create(schemaVersion, graphId!, revisionId!, executableHash!);
+            publication = GovernedLoopRevisionPublicationPinFactory.Create(schemaVersion, revision, operationId!, validationHash!);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryAuthorityGrant(JsonElement element, out AuthorityGrantReference? grant)
+    {
+        grant = null;
+        if (!IsExactObject(element, _authorityGrantProperties)
+            || !TryString(element, "grantId", out var grantIdText)
+            || !AuthorityGrantId.TryParse(grantIdText, out var grantId, out _)
+            || !TryInteger(element, "revision", out var revisionValue)
+            || !AuthorityGrantRevision.TryParse(revisionValue.ToString(CultureInfo.InvariantCulture), out var revision, out _)
+            || !TryString(element, "contentHash", out var contentHash))
+        {
+            return false;
+        }
+
+        grant = new AuthorityGrantReference(grantId!, revision!, contentHash!);
+        return true;
     }
 
     private static bool TryActor(JsonElement element, out TriggerActorContext? context)

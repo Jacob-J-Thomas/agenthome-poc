@@ -8,7 +8,15 @@ namespace EmbodySense.Core.Application.Triggers.Models;
 /// <remarks>The request contains no execution, dispatch, persistence, queue, scheduling, approval, or ambient-catalog capability.</remarks>
 public sealed record TriggerDeliveryAdmissionRequest
 {
-    internal TriggerDeliveryAdmissionRequest(TriggerDeliveryEnvelope envelope, TriggerLoopReference currentLoop, TriggerAdapterReference currentAdapter, bool isAdapterAvailable, TriggerActorContext currentActorContext, TriggerAuthorityEvidence currentAuthority, DateTimeOffset evaluatedAtUtc)
+    internal TriggerDeliveryAdmissionRequest(
+        TriggerDeliveryEnvelope envelope,
+        TriggerLoopReference currentLoop,
+        TriggerAdapterReference currentAdapter,
+        bool isAdapterAvailable,
+        TriggerActorContext currentActorContext,
+        TriggerAuthorityEvidence currentAuthority,
+        DateTimeOffset evaluatedAtUtc,
+        bool permitsPreparedScheduleRecovery)
     {
         Envelope = envelope;
         CurrentLoop = currentLoop;
@@ -17,6 +25,7 @@ public sealed record TriggerDeliveryAdmissionRequest
         CurrentActorContext = currentActorContext;
         CurrentAuthority = currentAuthority;
         EvaluatedAtUtc = evaluatedAtUtc;
+        PermitsPreparedScheduleRecovery = permitsPreparedScheduleRecovery;
     }
 
     /// <summary>Gets the untrusted delivery evidence to evaluate.</summary>
@@ -39,4 +48,7 @@ public sealed record TriggerDeliveryAdmissionRequest
 
     /// <summary>Gets the caller-supplied UTC evaluation instant.</summary>
     public DateTimeOffset EvaluatedAtUtc { get; }
+
+    // Only the durable schedule evaluator can set this through its internal factory path.
+    internal bool PermitsPreparedScheduleRecovery { get; }
 }

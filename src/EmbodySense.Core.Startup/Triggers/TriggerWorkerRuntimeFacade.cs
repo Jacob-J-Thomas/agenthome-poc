@@ -40,6 +40,6 @@ public sealed class TriggerWorkerRuntimeFacade
 
     private static TriggerWorkerEntrySnapshot Map(TriggerQueueEntry entry)
     {
-        return new TriggerWorkerEntrySnapshot(entry.DeliveryId.Value, entry.LoopId, entry.State.ToString(), entry.Revision, entry.WorkerLease?.WorkerId, entry.WorkerLease?.Generation, entry.WorkerLease?.ExpiresAtUtc, entry.WorkerLease?.ReleasedAtUtc, entry.Dispatch?.Outcome.ToString(), entry.Dispatch?.OperationId, entry.Dispatch?.Detail, entry.Dispatch?.GovernedInvocation?.RunId, entry.Dispatch?.GovernedInvocation?.AdmissionRequestHash, entry.Dispatch?.GovernedInvocation?.DefinitionVersion, entry.Dispatch?.GovernedInvocation?.DefinitionHash);
+        return new TriggerWorkerEntrySnapshot(entry.DeliveryId.Value, entry.LoopId, entry.State.ToString(), entry.Revision, entry.WorkerLease?.WorkerId, entry.WorkerLease?.Generation, entry.WorkerLease?.ExpiresAtUtc, entry.WorkerLease?.ReleasedAtUtc, entry.Dispatch?.Outcome.ToString(), entry.Dispatch?.OperationId, entry.Dispatch?.Detail, entry.Dispatch?.GovernedInvocation?.RunId, entry.Dispatch?.GovernedInvocation?.AdmissionRequestHash, entry.Dispatch?.GovernedInvocation?.LoopReferenceHash);
     }
 }

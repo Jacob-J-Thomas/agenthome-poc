@@ -14,6 +14,7 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Application.Triggers;
+using EmbodySense.Core.Application.Triggers.Schedules;
 using EmbodySense.Core.Persistence.Triggers;
 using EmbodySense.Core.Startup.Triggers;
 
@@ -38,6 +39,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly ConversationRuntimeState _conversationState;
     private readonly CustomLoopRuntimeFacade _customLoops;
     private readonly GovernedLoopRuntimeFacade _governedLoops;
+    private readonly IScheduleDeliveryProvenancePort _scheduleDeliveryProvenance;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
 
     internal AgentRuntime(
@@ -50,6 +52,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         IDefaultConversationLoopRunner loopRunner,
         CustomLoopRuntimeFacade customLoops,
         GovernedLoopRuntimeFacade governedLoops,
+        IScheduleDeliveryProvenancePort scheduleDeliveryProvenance,
         DefaultConversationTurnReviewService defaultConversationReviews,
         CodexRuntimeStatus codexRuntimeStatus)
     {
@@ -74,6 +77,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _loopRunner = loopRunner;
         _customLoops = customLoops;
         _governedLoops = governedLoops;
+        _scheduleDeliveryProvenance = scheduleDeliveryProvenance ?? throw new ArgumentNullException(nameof(scheduleDeliveryProvenance));
         _defaultConversationReviews = defaultConversationReviews;
         _commandService = new RuntimeCommandService(conversationMemory, startupContext);
         CodexRuntimeStatus = codexRuntimeStatus;
@@ -244,7 +248,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     }
 
     /// <summary>Invokes one exact published governed-loop revision through canonical admission and the shared durable runtime.</summary>
-    /// <param name="input">The operation, immutable publication and grant pins, and manual-trigger prompt.</param>
+    /// <param name="input">The operation, immutable publication and grant pins, and entry-trigger prompt.</param>
     /// <param name="cancellationToken">The token used until an irreversible or durable integrity boundary is reached.</param>
     /// <returns>The canonical admission, materialization, execution, replay, or recovery-required projection.</returns>
     /// <remarks>
@@ -271,7 +275,12 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(authorizer);
         var clock = timeProvider ?? TimeProvider.System;
         var store = new TriggerQueueStore(Paths, timeProvider: clock);
-        var service = new TriggerWorkerService(store, new TriggerWorkerCurrentEvidenceAuthorizerAdapter(authorizer), new TriggerCustomLoopDispatcher(_customLoops), clock);
+        var service = new TriggerWorkerService(
+            store,
+            new TriggerWorkerCurrentEvidenceAuthorizerAdapter(authorizer),
+            new TriggerCustomLoopDispatcher(_customLoops, _governedLoops),
+            new ScheduleTriggerDispatchReadinessService(_scheduleDeliveryProvenance),
+            clock);
         return new TriggerWorkerRuntimeFacade(store, service);
     }
 

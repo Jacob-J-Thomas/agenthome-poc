@@ -63,6 +63,37 @@ internal sealed class CustomLoopRuntimeContext
         => await CaptureAsync(includeInvokingConversation, _timeProvider.GetUtcNow().ToUniversalTime(), cancellationToken).ConfigureAwait(false);
 
     /// <summary>
+    /// Captures only bounded workspace documents without consulting or representing the ambient conversation.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel document reads.</param>
+    /// <returns>A task whose result is the hashed workspace-only context snapshot.</returns>
+    public async Task<CustomLoopContextSnapshot> CaptureWorkspaceOnlyAsync(CancellationToken cancellationToken)
+        => await CaptureWorkspaceOnlyAsync(_timeProvider.GetUtcNow().ToUniversalTime(), cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Captures only bounded workspace documents at one caller-pinned UTC instant without consulting or
+    /// representing the ambient conversation.
+    /// </summary>
+    /// <param name="capturedAtUtc">The durable UTC instant already bound to the invocation Begin receipt.</param>
+    /// <param name="cancellationToken">The token used to cancel document reads.</param>
+    /// <returns>A task whose result is the hashed workspace-only context snapshot.</returns>
+    public async Task<CustomLoopContextSnapshot> CaptureWorkspaceOnlyAsync(
+        DateTimeOffset capturedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        ValidateCapturedAtUtc(capturedAtUtc);
+        var documents = await _workspaceContextStore.LoadDocumentsAsync(_paths, cancellationToken);
+        var manifest = documents
+            .Select((document, index) => CreateWorkspaceSource(document, capturedAtUtc, index + 1))
+            .ToArray();
+        return CustomLoopContextSnapshotHash.Apply(new CustomLoopContextSnapshot(
+            CustomLoopContextSnapshot.CurrentSchemaVersion,
+            capturedAtUtc,
+            manifest,
+            string.Empty));
+    }
+
+    /// <summary>
     /// Captures context at one caller-pinned UTC instant so an unbound durable invocation can reproduce its exact
     /// immutable snapshot after a crash without treating mutable context as interchangeable.
     /// </summary>
@@ -75,10 +106,7 @@ internal sealed class CustomLoopRuntimeContext
         DateTimeOffset capturedAtUtc,
         CancellationToken cancellationToken)
     {
-        if (capturedAtUtc.Offset != TimeSpan.Zero)
-        {
-            throw new ArgumentException("The pinned context-capture instant must be UTC.", nameof(capturedAtUtc));
-        }
+        ValidateCapturedAtUtc(capturedAtUtc);
 
         var documents = await _workspaceContextStore.LoadDocumentsAsync(_paths, cancellationToken);
         ConversationMemorySnapshot persistedConversation;
@@ -104,6 +132,14 @@ internal sealed class CustomLoopRuntimeContext
         return new CustomLoopRuntimeContextCapture(
             CustomLoopContextSnapshotHash.Apply(snapshot),
             new CustomLoopConversationReference(persistedConversation.Version, conversationVersion, capturedAtUtc));
+    }
+
+    private static void ValidateCapturedAtUtc(DateTimeOffset capturedAtUtc)
+    {
+        if (capturedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("The pinned context-capture instant must be UTC.", nameof(capturedAtUtc));
+        }
     }
 
     /// <summary>

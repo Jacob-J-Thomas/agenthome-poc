@@ -1,9 +1,13 @@
 using EmbodySense.Core.Application.Triggers;
 using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
 
@@ -74,6 +78,25 @@ internal static class TriggerAdmissionTestData
     internal static TriggerLoopReference Loop(string loopId = "loop-1", int version = 3, char hashCharacter = 'b')
     {
         Assert.True(TriggerDeliveryFactory.TryCreateLoopReference(loopId, version, new string(hashCharacter, 64), out var loop, out _));
+        return loop!;
+    }
+
+    internal static TriggerLoopReference GovernedLoop(
+        string graphId = "graph-1",
+        string revisionId = "revision-3",
+        char executableHash = 'c',
+        string publicationOperationId = "publish-3",
+        char validationHash = 'd',
+        string grantId = "grant-1",
+        int grantRevision = 2,
+        char grantHash = 'e')
+    {
+        var revision = GovernedLoopRevisionReference.Create(1, graphId, revisionId, new string(executableHash, 64));
+        var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, revision, publicationOperationId, new string(validationHash, 64));
+        Assert.True(AuthorityGrantId.TryParse(grantId, out var parsedGrantId, out _));
+        Assert.True(AuthorityGrantRevision.TryParse(grantRevision.ToString(System.Globalization.CultureInfo.InvariantCulture), out var parsedGrantRevision, out _));
+        var grant = new AuthorityGrantReference(parsedGrantId!, parsedGrantRevision!, "sha256:" + new string(grantHash, 64));
+        Assert.True(TriggerDeliveryFactory.TryCreateGovernedLoopReference(publication, grant, out var loop, out var validation), string.Join(',', validation.Errors.Select(error => error.Code)));
         return loop!;
     }
 

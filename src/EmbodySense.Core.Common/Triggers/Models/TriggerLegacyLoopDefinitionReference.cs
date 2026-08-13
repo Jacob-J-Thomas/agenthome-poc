@@ -1,18 +1,16 @@
 namespace EmbodySense.Core.Common.Triggers.Models;
 
-/// <summary>
-/// Pins one exact custom-loop definition without authorizing its execution.
-/// </summary>
-public sealed record TriggerLoopReference
+/// <summary>Identifies one exact legacy custom-loop definition without authorizing its execution.</summary>
+public sealed record TriggerLegacyLoopDefinitionReference
 {
-    internal TriggerLoopReference(string loopId, int definitionVersion, string contentHash)
+    internal TriggerLegacyLoopDefinitionReference(string loopId, int definitionVersion, string contentHash)
     {
         LoopId = loopId;
         DefinitionVersion = definitionVersion;
         ContentHash = contentHash;
     }
 
-    /// <summary>Gets the exact loop identifier.</summary>
+    /// <summary>Gets the stable custom-loop identifier.</summary>
     public string LoopId { get; }
 
     /// <summary>Gets the exact positive definition version.</summary>

@@ -37,6 +37,56 @@ public sealed class CustomLoopRunStoreDefaultsTests
         await Assert.ThrowsAsync<OperationCanceledException>(() => store.HasSufficientTraceCapacityForDispatchAsync(run, run.LifecycleVersion, cancellation.Token));
     }
 
+    [Fact]
+    public async Task Default_monitor_projects_known_runs_without_inventing_deletion_or_artifact_evidence()
+    {
+        var run = CreateRun();
+        ICustomLoopRunStore store = new DefaultRunStore { Run = run };
+
+        var monitor = await store.GetMonitorAsync(run.Id);
+        var missing = await store.GetMonitorAsync("missing-run");
+
+        Assert.NotNull(monitor);
+        Assert.Equal(run.Id, monitor.Summary.Id);
+        Assert.Equal(run.LoopId, monitor.Summary.LoopId);
+        Assert.Equal(run.LifecycleVersion, monitor.Summary.LifecycleVersion);
+        Assert.Equal(run.Status, monitor.Summary.Status);
+        Assert.False(monitor.Summary.IsDeleted);
+        Assert.Equal(string.Empty, monitor.ArtifactHash);
+        Assert.Null(missing);
+    }
+
+    [Fact]
+    public async Task Default_page_supports_only_the_unfiltered_first_page()
+    {
+        var run = CreateRun();
+        var expected = new CustomLoopRunSummary(
+            run.Id,
+            run.LoopId,
+            run.AdmissionOperationId,
+            run.AdmittedDefinition.DefinitionVersion,
+            run.LifecycleVersion,
+            run.Status,
+            run.CreatedAtUtc,
+            run.UpdatedAtUtc,
+            run.CompletedAtUtc,
+            run.Checkpoint.Iteration,
+            run.Checkpoint.NextStepIndex,
+            run.FailureCode,
+            false);
+        var implementation = new DefaultRunStore { Recent = [expected] };
+        ICustomLoopRunStore store = implementation;
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() => store.ListPageAsync(null!));
+        await Assert.ThrowsAsync<NotSupportedException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(5, LoopId: run.LoopId)));
+        await Assert.ThrowsAsync<NotSupportedException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(5, Cursor: "next")));
+        var page = await store.ListPageAsync(new CustomLoopRunPageRequest(5));
+
+        Assert.Equal(5, implementation.LastMaximumCount);
+        Assert.Equal(expected, Assert.Single(page.Items));
+        Assert.Null(page.ContinuationCursor);
+    }
+
     private static CustomLoopRunRecord CreateRun()
     {
         var definition = CustomLoopDefinition.CreateSeed("loop-default", "default-role", "step-1", "create-default", _timestamp);
@@ -50,15 +100,26 @@ public sealed class CustomLoopRunStoreDefaultsTests
 
     private sealed class DefaultRunStore : ICustomLoopRunStore
     {
+        public CustomLoopRunRecord? Run { get; init; }
+
+        public IReadOnlyList<CustomLoopRunSummary> Recent { get; init; } = [];
+
+        public int? LastMaximumCount { get; private set; }
+
         public Task<CustomLoopRunStoreResult> CreateAsync(CustomLoopRunRecord run, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
-        public Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default)
+            => Task.FromResult(string.Equals(Run?.Id, runId, StringComparison.Ordinal) ? Run : null);
 
         public Task<CustomLoopRunRecord?> GetByAdmissionOperationAsync(string admissionOperationId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
         public Task<CustomLoopRunRecord?> GetNonterminalByLoopAsync(string loopId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
-        public Task<IReadOnlyList<CustomLoopRunSummary>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<CustomLoopRunSummary>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken = default)
+        {
+            LastMaximumCount = maximumCount;
+            return Task.FromResult(Recent);
+        }
 
         public Task<IReadOnlyList<CustomLoopRunRecord>> ListNonterminalAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
 

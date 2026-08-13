@@ -30,7 +30,7 @@ public static class GovernedLoopSequentialFrontierMachine
     {
         if (!MatchesPlanBinding(binding, plan)
             || plan!.Nodes.Count < 2
-            || !Equals(plan.Nodes[0].Descriptor, GovernedLoopSequentialNodeDescriptors.ManualTrigger))
+            || !GovernedLoopSequentialNodeDescriptors.IsEntryTrigger(plan.Nodes[0].Descriptor))
         {
             return Invalid("The immutable topology binding and plan cannot form an initial frontier.");
         }

@@ -18,6 +18,7 @@ public static class GovernedLoopSequentialPlanBuilder
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
     private const string WorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
 
     /// <summary>Builds one exact Trigger-to-terminal topology containing supported inference, pure, Condition, Join, and bounded-cycle nodes.</summary>
@@ -43,7 +44,7 @@ public static class GovernedLoopSequentialPlanBuilder
 
         var nodeById = graph.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
         if (!nodeById.TryGetValue(graph.EntryNodeId, out var entry)
-            || !Equals(entry.Descriptor, GovernedLoopSequentialNodeDescriptors.ManualTrigger))
+            || !GovernedLoopSequentialNodeDescriptors.IsEntryTrigger(entry.Descriptor))
         {
             return Failure(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, "$.graph.entryNodeId");
         }
@@ -344,7 +345,7 @@ public static class GovernedLoopSequentialPlanBuilder
         foreach (var node in graph.Nodes)
         {
             var outgoing = graph.ControlEdges.Where(edge => string.Equals(edge.FromNodeId, node.Id, StringComparison.Ordinal)).ToArray();
-            if (Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ManualTrigger))
+            if (GovernedLoopSequentialNodeDescriptors.IsEntryTrigger(node.Descriptor))
             {
                 if (outgoing.Length == 0 || outgoing.Any(edge => edge.Condition != GovernedLoopControlCondition.Always))
                 {
@@ -536,13 +537,16 @@ public static class GovernedLoopSequentialPlanBuilder
             return "$.graph.valueSchemas";
         }
 
-        var allowsWorkspaceTools = graph.AuthorityCeiling.CapabilityIds.SequenceEqual(
-            [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId],
-            StringComparer.Ordinal);
+        var scheduleEntry = Equals(planNodes[0].Descriptor, GovernedLoopSequentialNodeDescriptors.ScheduleTrigger);
+        var toolFreeCapabilities = scheduleEntry
+            ? new[] { ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId }
+            : [ConversationTurnCapabilityId, ModelInferenceCapabilityId];
+        var toolEnabledCapabilities = scheduleEntry
+            ? new[] { ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId, WorkspaceCommandCapabilityId }
+            : [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId];
+        var allowsWorkspaceTools = graph.AuthorityCeiling.CapabilityIds.SequenceEqual(toolEnabledCapabilities, StringComparer.Ordinal);
         if (!allowsWorkspaceTools
-            && !graph.AuthorityCeiling.CapabilityIds.SequenceEqual(
-                [ConversationTurnCapabilityId, ModelInferenceCapabilityId],
-                StringComparer.Ordinal))
+            && !graph.AuthorityCeiling.CapabilityIds.SequenceEqual(toolFreeCapabilities, StringComparer.Ordinal))
         {
             return "$.graph.authorityCeiling";
         }
@@ -623,7 +627,10 @@ public static class GovernedLoopSequentialPlanBuilder
     private static bool IsExactTrigger(
         GovernedLoopNodeDefinition node,
         IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas)
-        => node.AuthorityCeiling.CapabilityIds.Count == 0
+        => (Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ManualTrigger)
+                && node.AuthorityCeiling.CapabilityIds.Count == 0
+            || Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ScheduleTrigger)
+                && node.AuthorityCeiling.CapabilityIds.SequenceEqual([ScheduleTriggerCapabilityId], StringComparer.Ordinal))
             && node.Parameters.Count == 0
             && HasExactPortSet(node, schemas,
                 ("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, GovernedLoopValueKind.Text),

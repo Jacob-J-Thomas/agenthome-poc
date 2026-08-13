@@ -13,6 +13,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
     private const int ProviderTransportResourceUnitsPerActivation = 1;
     private const string SourceEvidenceId = "built-in-governed-loop-node-catalog-schema-1-v1";
     private static readonly IReadOnlyList<GovernedLoopControlCondition> _always =
@@ -37,7 +38,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             .Concat(GovernedLoopTopologyNodeCatalogContract.Descriptors)
             .OrderBy(DescriptorKey, StringComparer.Ordinal)
             .ToArray();
-        if (descriptors.Length != 18
+        if (descriptors.Length != 19
             || descriptors.Select(item => item.Descriptor).Distinct().Count() != descriptors.Length
             || descriptors.Any(item => !GovernedLoopSequentialNodeDescriptors.IsSupported(item.Descriptor)))
         {
@@ -73,6 +74,27 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                 }),
                 Array.Empty<GovernedLoopCatalogParameterContract>(),
                 Array.Empty<string>(),
+                ActivationBudget(evidenceItems: 1)),
+            new GovernedLoopNodeCatalogDescriptor(
+                GovernedLoopSequentialNodeDescriptors.ScheduleTrigger,
+                IsAdvertised: true,
+                IsExecutable: true,
+                IsLegalEntry: true,
+                IsLegalTerminal: false,
+                _always,
+                _always,
+                GovernedLoopJoinPolicy.None,
+                MinimumIncomingControlEdges: 0,
+                AllowsCycle: false,
+                CycleIterationBudgetParameterId: null,
+                CycleTimeBudgetMillisecondsParameterId: null,
+                Array.AsReadOnly(new[]
+                {
+                    Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+                    Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context),
+                }),
+                Array.Empty<GovernedLoopCatalogParameterContract>(),
+                Array.AsReadOnly(new[] { ScheduleTriggerCapabilityId }),
                 ActivationBudget(evidenceItems: 1)),
             new GovernedLoopNodeCatalogDescriptor(
                 GovernedLoopSequentialNodeDescriptors.ProviderInference,
