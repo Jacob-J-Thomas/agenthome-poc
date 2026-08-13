@@ -55,7 +55,19 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// <param name="approvalCoordinator">The connection-owned governed approval coordinator.</param>
     /// <exception cref="ArgumentException">The options do not provide a nonblank configured model.</exception>
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
-        : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb(), null)
+        : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb(), null, null)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a Web host with a previously verified compatible Codex runtime status.
+    /// </summary>
+    /// <param name="options">The validated Web host and runtime options.</param>
+    /// <param name="approvalCoordinator">The connection-owned governed approval coordinator.</param>
+    /// <param name="codexRuntimeStatus">The compatible status bound to the exact configured model and executable request.</param>
+    /// <exception cref="ArgumentException">The options or pre-resolved runtime status are incompatible.</exception>
+    public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator, CodexRuntimeStatus codexRuntimeStatus)
+        : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb(), null, codexRuntimeStatus ?? throw new ArgumentNullException(nameof(codexRuntimeStatus)))
     {
     }
 
@@ -67,7 +79,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// <param name="workspaceInitializer">The workspace initializer used by explicit initialization requests.</param>
     /// <exception cref="ArgumentException">The options do not provide a nonblank configured model.</exception>
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator, IWorkspaceInitializer workspaceInitializer)
-        : this(options, approvalCoordinator, workspaceInitializer, null)
+        : this(options, approvalCoordinator, workspaceInitializer, null, null)
     {
     }
 
@@ -86,6 +98,16 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         WebApprovalCoordinator approvalCoordinator,
         IWorkspaceInitializer workspaceInitializer,
         IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver)
+        : this(options, approvalCoordinator, workspaceInitializer, conversationPublicationObserver, null)
+    {
+    }
+
+    private WebAgentRuntimeHost(
+        WebRunOptions options,
+        WebApprovalCoordinator approvalCoordinator,
+        IWorkspaceInitializer workspaceInitializer,
+        IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver,
+        CodexRuntimeStatus? codexRuntimeStatus)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(approvalCoordinator);
@@ -93,6 +115,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         if (string.IsNullOrWhiteSpace(options.Model))
         {
             throw new ArgumentException("Web runtime composition requires a nonblank configured model.", nameof(options));
+        }
+        if (codexRuntimeStatus is not null)
+        {
+            ValidatePreResolvedStatus(options, codexRuntimeStatus);
         }
 
         _options = options;
@@ -104,6 +130,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         _configurationReader = new WorkspaceConfigurationReader();
         _loopRuns = new LoopRunInspectionFacade(options.WorkingDirectory, WorkspaceActors.Web, AgentRuntimeSurface.Web.Id);
         _conversationRequests = new DefaultConversationRequestReconciliationReader(options.WorkingDirectory);
+        if (codexRuntimeStatus is not null)
+        {
+            _codexRuntimeStatusTask = Task.FromResult(codexRuntimeStatus);
+        }
     }
 
     /// <summary>
@@ -845,6 +875,25 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
 
         return statusTask.WaitAsync(cancellationToken);
+    }
+
+    private static void ValidatePreResolvedStatus(WebRunOptions options, CodexRuntimeStatus codexRuntimeStatus)
+    {
+        if (codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible || string.IsNullOrWhiteSpace(codexRuntimeStatus.ResolvedExecutablePath))
+        {
+            throw new ArgumentException("A pre-resolved Codex runtime status must identify a compatible executable.", nameof(codexRuntimeStatus));
+        }
+
+        if (!string.Equals(options.Model, codexRuntimeStatus.ConfiguredModel, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The pre-resolved Codex runtime status was produced for a different configured model.", nameof(codexRuntimeStatus));
+        }
+
+        var pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (!string.Equals(options.CodexExecutablePath, codexRuntimeStatus.RequestedExecutablePath, pathComparison))
+        {
+            throw new ArgumentException("The pre-resolved Codex runtime status was produced for a different explicit executable request.", nameof(codexRuntimeStatus));
+        }
     }
 
     private WorkspaceRuntimeConfiguration CreateRuntimeConfiguration(CodexRuntimeStatus codexRuntimeStatus)

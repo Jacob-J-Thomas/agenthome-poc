@@ -35,6 +35,35 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public void Constructor_rejects_pre_resolved_status_outside_the_exact_runtime_request()
+    {
+        using var workspace = new TestWorkspace();
+        var executablePath = workspace.File("fake-codex.cmd");
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", executablePath]);
+        var status = CreateCompatibleRuntimeStatus(executablePath, "gpt-test");
+
+        Assert.Throws<ArgumentNullException>(() => new WebAgentRuntimeHost(options, new WebApprovalCoordinator(), (CodexRuntimeStatus)null!));
+        Assert.Throws<ArgumentException>(() => new WebAgentRuntimeHost(options, new WebApprovalCoordinator(), status with { Compatibility = CodexRuntimeCompatibility.ProbeFailed }));
+        Assert.Throws<ArgumentException>(() => new WebAgentRuntimeHost(options, new WebApprovalCoordinator(), status with { ResolvedExecutablePath = null }));
+        Assert.Throws<ArgumentException>(() => new WebAgentRuntimeHost(options, new WebApprovalCoordinator(), status with { ConfiguredModel = "different-model" }));
+        Assert.Throws<ArgumentException>(() => new WebAgentRuntimeHost(options, new WebApprovalCoordinator(), status with { RequestedExecutablePath = workspace.File("different-codex.cmd") }));
+    }
+
+    [Fact]
+    public async Task GetConfigurationAsync_reuses_exact_pre_resolved_status_without_probing_the_executable()
+    {
+        using var workspace = new TestWorkspace();
+        var nonexistentExecutable = workspace.File("must-not-be-probed.cmd");
+        await using var host = CreateHost(workspace.RootPath, nonexistentExecutable);
+
+        var configuration = await host.GetConfigurationAsync();
+
+        Assert.Equal(CodexRuntimeCompatibility.Compatible, configuration.Runtime.CodexRuntime!.Compatibility);
+        Assert.Equal(nonexistentExecutable, configuration.Runtime.CodexRuntime.RequestedExecutablePath);
+        Assert.Equal(Path.GetFullPath(nonexistentExecutable), configuration.Runtime.CodexRuntime.ResolvedExecutablePath);
+    }
+
+    [Fact]
     public async Task InitializeWorkspaceAsync_initializes_workspace_with_web_audit_actor()
     {
         using var workspace = new TestWorkspace();
@@ -92,7 +121,7 @@ public sealed class WebAgentRuntimeHostTests
     {
         using var workspace = new TestWorkspace();
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
-        await using var host = CreateHost(workspace.RootPath, codexPath, "gpt-test");
+        await using var host = CreateResolvingHost(workspace.RootPath, codexPath, "gpt-test");
         await host.InitializeWorkspaceAsync();
 
         var configuration = await host.GetConfigurationAsync();
@@ -115,7 +144,7 @@ public sealed class WebAgentRuntimeHostTests
     {
         using var workspace = new TestWorkspace();
         var codexPath = await CreateFakeCodexExecutableAsync(workspace, advertiseConfiguredModels: false);
-        await using var host = CreateHost(workspace.RootPath, codexPath, "gpt-test");
+        await using var host = CreateResolvingHost(workspace.RootPath, codexPath, "gpt-test");
         await host.InitializeWorkspaceAsync();
         await WriteCurrentTranscriptAsync(workspace, "restored while unavailable", "durable answer");
         var transcript = Assert.IsAssignableFrom<IReadOnlyList<WebTranscriptMessage>>(await host.GetCurrentTranscriptAsync());
@@ -449,7 +478,7 @@ public sealed class WebAgentRuntimeHostTests
     public async Task SendMessageAsync_emits_cancelled_event_after_active_turn_is_cancelled()
     {
         using var workspace = new TestWorkspace();
-        var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnDelayMilliseconds: 5000);
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace, holdTurnUntilCancelled: true);
         await using var host = CreateHost(workspace.RootPath, codexPath);
         await host.InitializeWorkspaceAsync();
         var events = new List<WebStreamEvent>();
@@ -459,15 +488,17 @@ public sealed class WebAgentRuntimeHostTests
             events.Add(streamEvent);
             return Task.CompletedTask;
         });
-        var cancelled = false;
-        for (var attempt = 0; attempt < 200 && !cancelled; attempt++)
+        var releasePath = workspace.File("web-turn-cancellation.release");
+        try
         {
-            cancelled = host.CancelCurrentTurn();
-            await Task.Delay(10);
+            await WaitForMarkerAsync(workspace.File("web-turn-cancellation.marker"));
+            Assert.True(host.CancelCurrentTurn());
+            await sendTask.WaitAsync(TimeSpan.FromSeconds(10));
         }
-
-        Assert.True(cancelled);
-        await sendTask;
+        finally
+        {
+            await File.WriteAllTextAsync(releasePath, "released");
+        }
 
         var streamEvent = Assert.Single(events);
         Assert.Equal("cancelled", streamEvent.Type);
@@ -502,7 +533,7 @@ public sealed class WebAgentRuntimeHostTests
         var approvals = new WebApprovalCoordinator();
         approvals.RegisterOwnerConnection("connection-1");
         var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
-        await using var host = new WebAgentRuntimeHost(options, approvals);
+        await using var host = CreateHost(options, approvals);
         await host.InitializeWorkspaceAsync();
         var definition = await CreateInvocationLoopAsync(workspace);
         var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-during-chat-cancel", "host-dispose-custom-loop");
@@ -618,7 +649,7 @@ public sealed class WebAgentRuntimeHostTests
         var approvals = new WebApprovalCoordinator();
         approvals.RegisterOwnerConnection("connection-1");
         var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
-        var host = new WebAgentRuntimeHost(options, approvals);
+        var host = CreateHost(options, approvals);
         await host.InitializeWorkspaceAsync();
         var definition = await CreateInvocationLoopAsync(workspace);
         var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-host-dispose", "host-dispose-custom-loop");
@@ -653,7 +684,7 @@ public sealed class WebAgentRuntimeHostTests
         var approvals = new WebApprovalCoordinator(approvalPublication);
         approvals.RegisterOwnerConnection("connection-1");
         var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
-        await using var host = new WebAgentRuntimeHost(options, approvals);
+        await using var host = CreateHost(options, approvals);
         await host.InitializeWorkspaceAsync();
         await File.WriteAllTextAsync(workspace.File("approval-only-note.txt"), "content-that-must-not-be-returned");
         var definition = await CreateInvocationLoopAsync(workspace, [LoopToolAssignment.Read]);
@@ -688,7 +719,33 @@ public sealed class WebAgentRuntimeHostTests
         }
 
         var options = WebRunOptions.FromArguments(arguments.ToArray());
+        return codexPath is null
+            ? new WebAgentRuntimeHost(options, new WebApprovalCoordinator())
+            : new WebAgentRuntimeHost(options, new WebApprovalCoordinator(), CreateCompatibleRuntimeStatus(codexPath, model));
+    }
+
+    private static WebAgentRuntimeHost CreateHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
+    {
+        var executablePath = options.CodexExecutablePath ?? throw new ArgumentException("The runtime behavior helper requires an explicit fake executable.", nameof(options));
+        return new WebAgentRuntimeHost(options, approvalCoordinator, CreateCompatibleRuntimeStatus(executablePath, options.Model!));
+    }
+
+    private static WebAgentRuntimeHost CreateResolvingHost(string rootPath, string codexPath, string model)
+    {
+        var options = WebRunOptions.FromArguments(["--workdir", rootPath, "--model", model, "--codex-path", codexPath]);
         return new WebAgentRuntimeHost(options, new WebApprovalCoordinator());
+    }
+
+    private static CodexRuntimeStatus CreateCompatibleRuntimeStatus(string executablePath, string model)
+    {
+        return new CodexRuntimeStatus(
+            CodexRuntimeCompatibility.Compatible,
+            executablePath,
+            Path.GetFullPath(executablePath),
+            "codex-cli 999.0.0-test",
+            model,
+            "controlled test",
+            "The isolated fake provider is pre-admitted for this Web runtime behavior test.");
     }
 
     private static CustomLoopRunRecord RunningRun(string runId)
@@ -850,7 +907,8 @@ public sealed class WebAgentRuntimeHostTests
         TestWorkspace workspace,
         string? turnFailureMessage = null,
         int turnDelayMilliseconds = 0,
-        bool advertiseConfiguredModels = true)
+        bool advertiseConfiguredModels = true,
+        bool holdTurnUntilCancelled = false)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -868,6 +926,7 @@ public sealed class WebAgentRuntimeHostTests
             $threadId = "thread-test"
             $turnFailureMessage = {{FormatPowerShellStringLiteral(turnFailureMessage)}}
             $turnDelayMilliseconds = {{turnDelayMilliseconds}}
+            $holdTurnUntilCancelled = {{(holdTurnUntilCancelled ? "$true" : "$false")}}
             $advertisedModels = if ({{(advertiseConfiguredModels ? "$true" : "$false")}}) { @("test-model", "gpt-test") } else { @("older-model") }
             $turnNumber = 0
 
@@ -928,8 +987,12 @@ public sealed class WebAgentRuntimeHostTests
                                 Start-Sleep -Milliseconds 25
                             }
                         }
-                        elseif ($turnDelayMilliseconds -gt 0 -and $userText.Contains("hello from web")) {
-                            Start-Sleep -Milliseconds $turnDelayMilliseconds
+                        elseif ($holdTurnUntilCancelled -and $userText.Contains("hello from web")) {
+                            [IO.File]::WriteAllText((Join-Path $PSScriptRoot "web-turn-cancellation.marker"), "started")
+                            $releasePath = Join-Path $PSScriptRoot "web-turn-cancellation.release"
+                            while (-not [IO.File]::Exists($releasePath)) {
+                                Start-Sleep -Milliseconds 25
+                            }
                         }
 
                         if ($turnFailureMessage) {

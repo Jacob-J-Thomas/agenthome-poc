@@ -51,7 +51,7 @@ public sealed class AgentRuntimeFactoryTests
         var paths = new WorkspacePaths(workspace.RootPath);
         await new ConversationMemoryStore(paths).AppendMessageAsync(LlmMessage.User("old transcript"));
 
-        await using var runtime = await CreateRuntimeAsync(workspace);
+        await using var runtime = await CreateRuntimeWithLiveDiscoveryAsync(workspace);
 
         Assert.Equal(string.Empty, await File.ReadAllTextAsync(paths.CurrentConversationPath));
         Assert.NotEmpty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
@@ -1191,12 +1191,37 @@ public sealed class AgentRuntimeFactoryTests
 
     private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, AgentRuntimeSurface? runtimeSurface = null, string? codexPath = null)
     {
+        var executablePath = codexPath ?? await CreateFakeCodexExecutableAsync(workspace);
+        var status = CreateCompatibleRuntimeStatus(executablePath);
+        return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath, status).CreateAsync(
+            "test-model",
+            workspace.RootPath,
+            executablePath,
+            "read-only",
+            runtimeSurface ?? AgentRuntimeSurface.Cli);
+    }
+
+    private static async Task<AgentRuntime> CreateRuntimeWithLiveDiscoveryAsync(TestWorkspace workspace)
+    {
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace);
         return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath).CreateAsync(
             "test-model",
             workspace.RootPath,
-            codexPath ?? await CreateFakeCodexExecutableAsync(workspace),
+            executablePath,
             "read-only",
-            runtimeSurface ?? AgentRuntimeSurface.Cli);
+            AgentRuntimeSurface.Cli);
+    }
+
+    private static CodexRuntimeStatus CreateCompatibleRuntimeStatus(string executablePath)
+    {
+        return new CodexRuntimeStatus(
+            CodexRuntimeCompatibility.Compatible,
+            executablePath,
+            Path.GetFullPath(executablePath),
+            "codex-cli 999.0.0-test",
+            "test-model",
+            "controlled test",
+            "The isolated fake provider is pre-admitted for this runtime behavior test.");
     }
 
     private sealed class RejectingApprovalPrompt : IAgentToolApprovalPrompt
