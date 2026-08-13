@@ -7,6 +7,7 @@ const appSource = fs.readFileSync(
   new URL("../../src/EmbodySense.Web/wwwroot/app.js", import.meta.url),
   "utf8",
 );
+const appScript = new vm.Script(appSource, { filename: "app.js" });
 const indexSource = fs.readFileSync(
   new URL("../../src/EmbodySense.Web/wwwroot/index.html", import.meta.url),
   "utf8",
@@ -1845,7 +1846,7 @@ async function loadApp(overrides = {}) {
     WebSocket: FakeWebSocket,
   };
   context.globalThis = context;
-  vm.runInNewContext(appSource, context, { filename: "app.js" });
+  appScript.runInNewContext(context);
   for (let attempt = 0; attempt < 4; attempt++) await flushAsyncWork();
   assert.equal(FakeWebSocket.instances.length, 1);
   return {

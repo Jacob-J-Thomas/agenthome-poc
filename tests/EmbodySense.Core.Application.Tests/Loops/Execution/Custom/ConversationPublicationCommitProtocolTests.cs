@@ -85,6 +85,7 @@ public sealed class ConversationPublicationCommitProtocolTests
     public async Task Returning_before_callback_completion_cancels_the_append_lifetime_and_fails_closed()
     {
         var callbackEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackCancellation = new TaskCompletionSource<string>();
         var appendCount = 0;
 
         var result = await ConversationPublicationCommitProtocol.ExecuteAsync(
@@ -95,8 +96,9 @@ public sealed class ConversationPublicationCommitProtocolTests
             },
             async cancellationToken =>
             {
+                using var registration = cancellationToken.Register(() => callbackCancellation.TrySetException(new OperationCanceledException(cancellationToken)));
                 callbackEntered.TrySetResult();
-                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                await callbackCancellation.Task;
                 appendCount++;
                 return "unexpected";
             });
@@ -132,6 +134,70 @@ public sealed class ConversationPublicationCommitProtocolTests
     }
 
     [Fact]
+    public async Task Concurrent_boundary_return_and_callback_admission_have_one_atomic_winner()
+    {
+        for (var iteration = 0; iteration < 500; iteration++)
+        {
+            Func<CancellationToken, Task>? captured = null;
+            var callbackCaptured = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseBoundary = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var race = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var appendCount = 0;
+
+            var execution = ConversationPublicationCommitProtocol.ExecuteAsync(
+                async (commitAppend, _) =>
+                {
+                    captured = commitAppend;
+                    callbackCaptured.TrySetResult();
+                    await releaseBoundary.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                },
+                _ =>
+                {
+                    Interlocked.Increment(ref appendCount);
+                    return Task.FromResult("committed");
+                });
+
+            await callbackCaptured.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var callback = Task.Run(async () =>
+            {
+                await race.Task;
+                try
+                {
+                    await captured!(CancellationToken.None);
+                    return true;
+                }
+                catch (InvalidOperationException)
+                {
+                    return false;
+                }
+            });
+            var close = Task.Run(async () =>
+            {
+                await race.Task;
+                releaseBoundary.TrySetResult();
+            });
+
+            race.TrySetResult();
+            await close;
+            var result = await execution;
+            var callbackWasAdmitted = await callback;
+
+            if (callbackWasAdmitted)
+            {
+                Assert.NotEqual(ConversationPublicationCommitProtocolStatus.CallbackNotInvoked, result.Status);
+                Assert.Equal(1, result.CallbackInvocationCount);
+                Assert.Equal(1, appendCount);
+            }
+            else
+            {
+                Assert.Equal(ConversationPublicationCommitProtocolStatus.CallbackNotInvoked, result.Status);
+                Assert.Equal(0, result.CallbackInvocationCount);
+                Assert.Equal(0, appendCount);
+            }
+        }
+    }
+
+    [Fact]
     public async Task Boundary_failure_after_callback_preserves_only_the_exact_callback_result_as_uncertain_evidence()
     {
         var result = await ConversationPublicationCommitProtocol.ExecuteAsync(
@@ -147,4 +213,5 @@ public sealed class ConversationPublicationCommitProtocolTests
         Assert.IsType<IOException>(result.Failure);
         Assert.Equal(1, result.CallbackInvocationCount);
     }
+
 }

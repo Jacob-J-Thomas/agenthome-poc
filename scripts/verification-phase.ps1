@@ -77,6 +77,61 @@ function Invoke-VerificationPhase {
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     Write-Output "VERIFY_PHASE_START name=$Name started_at_utc=$($startedAtUtc.ToString("O")) timeout_seconds=$TimeoutSeconds last_completed=$script:LastCompletedVerificationPhase"
 
+    $startInfo = New-VerificationProcessStartInfo -FileName $FileName -Arguments $Arguments -WorkingDirectory $WorkingDirectory
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $processStarted = $false
+    try {
+        try {
+            if (-not $process.Start()) {
+                throw "The process API returned false."
+            }
+
+            $processStarted = $true
+        }
+        catch {
+            throw "Verification phase '$Name' could not start '$FileName'. Last completed phase: '$script:LastCompletedVerificationPhase'. $($_.Exception.Message)"
+        }
+
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            Stop-VerificationProcessTree $process
+            $stopwatch.Stop()
+            Write-Output "VERIFY_CHILD_TIMEOUT name=$Name timeout_seconds=$TimeoutSeconds elapsed_seconds=$([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3))"
+            throw "Verification phase '$Name' timed out after $TimeoutSeconds seconds (elapsed $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) seconds). Last completed phase: '$script:LastCompletedVerificationPhase'."
+        }
+
+        $process.WaitForExit()
+        $stopwatch.Stop()
+        if ($process.ExitCode -ne 0) {
+            throw "Verification phase '$Name' exited with code $($process.ExitCode) after $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) seconds. Last completed phase: '$script:LastCompletedVerificationPhase'."
+        }
+
+        $script:LastCompletedVerificationPhase = $Name
+        Write-Output "VERIFY_PHASE_COMPLETE name=$Name elapsed_seconds=$([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) completed_at_utc=$([DateTimeOffset]::UtcNow.ToString("O"))"
+    }
+    finally {
+        if ($processStarted -and -not $process.HasExited) {
+            Stop-VerificationProcessTree $process
+        }
+
+        $process.Dispose()
+    }
+}
+
+function New-VerificationProcessStartInfo {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FileName,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+
+        [string]$WorkingDirectory,
+
+        [hashtable]$Environment
+    )
+
     $effectiveFileName = $FileName
     $effectiveArguments = $Arguments
     $commandScriptPath = $null
@@ -86,10 +141,8 @@ function Invoke-VerificationPhase {
             $resolvedPath = $resolvedCommand.Source
             if (-not [string]::IsNullOrWhiteSpace($resolvedPath)) {
                 if ([IO.Path]::GetExtension($resolvedPath) -in @(".cmd", ".bat")) {
-                    $commandArguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument -Value $_ -ForceQuotes }) -join " "
                     $commandScriptPath = $resolvedPath
                     $effectiveFileName = $env:ComSpec
-                    $effectiveArguments = @("/d", "/s", "/c", "$(ConvertTo-NativeArgument -Value $resolvedPath -ForceQuotes) $commandArguments")
                 }
                 else {
                     $effectiveFileName = $resolvedPath
@@ -110,6 +163,21 @@ function Invoke-VerificationPhase {
         $startInfo.WorkingDirectory = [IO.Path]::GetFullPath($WorkingDirectory)
     }
 
+    if ($null -ne $Environment) {
+        foreach ($key in @($Environment.Keys | Sort-Object)) {
+            if ([string]::IsNullOrWhiteSpace([string]$key)) {
+                throw "Verification process environment names cannot be empty."
+            }
+
+            if ($null -ne $startInfo.PSObject.Properties["Environment"]) {
+                $startInfo.Environment[[string]$key] = [string]$Environment[$key]
+            }
+            else {
+                $startInfo.EnvironmentVariables[[string]$key] = [string]$Environment[$key]
+            }
+        }
+    }
+
     # cmd.exe gives /S /C its own quoting semantics. ProcessStartInfo.ArgumentList escapes the
     # embedded command quotes as literal backslashes on modern PowerShell/.NET, so batch files
     # must use the canonical single command-line string even when ArgumentList is available.
@@ -127,43 +195,7 @@ function Invoke-VerificationPhase {
         $startInfo.Arguments = (($effectiveArguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " ")
     }
 
-    $process = [Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
-    $processStarted = $false
-    try {
-        try {
-            if (-not $process.Start()) {
-                throw "The process API returned false."
-            }
-
-            $processStarted = $true
-        }
-        catch {
-            throw "Verification phase '$Name' could not start '$FileName'. Last completed phase: '$script:LastCompletedVerificationPhase'. $($_.Exception.Message)"
-        }
-
-        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-            Stop-VerificationProcessTree $process
-            $stopwatch.Stop()
-            throw "Verification phase '$Name' timed out after $TimeoutSeconds seconds (elapsed $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) seconds). Last completed phase: '$script:LastCompletedVerificationPhase'."
-        }
-
-        $process.WaitForExit()
-        $stopwatch.Stop()
-        if ($process.ExitCode -ne 0) {
-            throw "Verification phase '$Name' exited with code $($process.ExitCode) after $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) seconds. Last completed phase: '$script:LastCompletedVerificationPhase'."
-        }
-
-        $script:LastCompletedVerificationPhase = $Name
-        Write-Output "VERIFY_PHASE_COMPLETE name=$Name elapsed_seconds=$([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) completed_at_utc=$([DateTimeOffset]::UtcNow.ToString("O"))"
-    }
-    finally {
-        if ($processStarted -and -not $process.HasExited) {
-            Stop-VerificationProcessTree $process
-        }
-
-        $process.Dispose()
-    }
+    return $startInfo
 }
 
 function ConvertTo-NativeArgument {

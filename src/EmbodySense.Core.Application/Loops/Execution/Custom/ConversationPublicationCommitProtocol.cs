@@ -25,7 +25,9 @@ public static class ConversationPublicationCommitProtocol
         Exception? boundaryFailure = null;
         var callbackInvocationCount = 0;
         var callbackCompleted = 0;
-        var boundaryActive = 1;
+        var callbackIncompleteWhenBoundaryClosed = false;
+        var callbackStateSync = new object();
+        var boundaryActive = true;
         using var boundaryLifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         try
         {
@@ -35,14 +37,18 @@ public static class ConversationPublicationCommitProtocol
                     // A yielded continuation prevents a callback captured by a returning boundary from
                     // crossing into the append after the boundary has already closed.
                     await Task.Yield();
-                    if (Volatile.Read(ref boundaryActive) == 0)
+                    lock (callbackStateSync)
                     {
-                        throw new InvalidOperationException("The conversation publication append callback cannot run after its boundary returns.");
-                    }
+                        if (!boundaryActive)
+                        {
+                            throw new InvalidOperationException("The conversation publication append callback cannot run after its boundary returns.");
+                        }
 
-                    if (Interlocked.Increment(ref callbackInvocationCount) != 1)
-                    {
-                        throw new InvalidOperationException("The conversation publication append callback may be invoked at most once.");
+                        callbackInvocationCount++;
+                        if (callbackInvocationCount != 1)
+                        {
+                            throw new InvalidOperationException("The conversation publication append callback may be invoked at most once.");
+                        }
                     }
 
                     using var appendLifetime = CancellationTokenSource.CreateLinkedTokenSource(token, boundaryLifetime.Token);
@@ -68,7 +74,12 @@ public static class ConversationPublicationCommitProtocol
         }
         finally
         {
-            Volatile.Write(ref boundaryActive, 0);
+            lock (callbackStateSync)
+            {
+                boundaryActive = false;
+                callbackIncompleteWhenBoundaryClosed = callbackInvocationCount > 0
+                    && Volatile.Read(ref callbackCompleted) == 0;
+            }
             await boundaryLifetime.CancelAsync();
         }
 
@@ -87,7 +98,7 @@ public static class ConversationPublicationCommitProtocol
             return new ConversationPublicationCommitProtocolResult<T>(ConversationPublicationCommitProtocolStatus.CallbackInvokedMultipleTimes, value, boundaryFailure, observedInvocationCount);
         }
 
-        if (Volatile.Read(ref callbackCompleted) == 0)
+        if (callbackIncompleteWhenBoundaryClosed || Volatile.Read(ref callbackCompleted) == 0)
         {
             return new ConversationPublicationCommitProtocolResult<T>(ConversationPublicationCommitProtocolStatus.CallbackIncomplete, value, boundaryFailure, observedInvocationCount);
         }

@@ -14,6 +14,7 @@ using Microsoft.Extensions.Options;
 
 namespace EmbodySense.Web.Tests;
 
+[Collection(ProcessGlobalStateCollection.Name)]
 public sealed class ProgramTests
 {
     [Fact]

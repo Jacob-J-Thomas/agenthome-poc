@@ -3,57 +3,61 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $phaseScriptPath = Join-Path $repoRoot "scripts\verification-phase.ps1"
+$parallelScriptPath = Join-Path $repoRoot "scripts\verification-parallel.ps1"
+$scheduleScriptPath = Join-Path $repoRoot "scripts\verification-schedule.ps1"
+$tempScriptPath = Join-Path $repoRoot "scripts\verification-temp.ps1"
+$artifactScriptPath = Join-Path $repoRoot "scripts\verification-artifacts.ps1"
 $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
+$watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
 $coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
+$coverageEvidenceScriptPath = Join-Path $repoRoot "scripts\verification-coverage-evidence.ps1"
 $verifyWorkflowPath = Join-Path $repoRoot ".github\workflows\verify.yml"
 $stressWorkflowPath = Join-Path $repoRoot ".github\workflows\verification-stress.yml"
 $pullRequestSettingsPath = Join-Path $repoRoot "tests\verification-pull-request.runsettings"
 $stressSettingsPath = Join-Path $repoRoot "tests\verification-stress.runsettings"
+$gitIgnorePath = Join-Path $repoRoot ".gitignore"
 $maximumTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopRunArtifactMaximumShapeTests.cs"
 $retentionTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopTraceRetentionStoreTests.cs"
+$coverageChildProcessPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\CoverageChildProcessAssembly.cs"
+$admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTests.cs"
+$persistenceEnvironmentCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\ProcessEnvironmentCollection.cs"
+$persistenceCapabilityCatalogTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Capabilities\FileCapabilityCatalogTrustProviderTests.cs"
+$startupRuntimeCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\LoopRuntimeIntegrationCollection.cs"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $assertionCount = 0
 
 function Assert-True {
-    param(
-        [bool]$Condition,
-        [string]$Message
-    )
-
-    if (-not $Condition) {
-        throw $Message
-    }
-
+    param([bool]$Condition, [string]$Message)
+    if (-not $Condition) { throw $Message }
     $script:assertionCount++
 }
 
 function Assert-Contains {
-    param(
-        [string]$Actual,
-        [string]$Expected,
-        [string]$Message
-    )
-
+    param([string]$Actual, [string]$Expected, [string]$Message)
     Assert-True -Condition ($Actual.IndexOf($Expected, [StringComparison]::Ordinal) -ge 0) -Message "$Message Expected '$Expected'. Actual: $Actual"
 }
 
 function Invoke-ExpectedFailure {
-    param(
-        [scriptblock]$Action,
-        [string]$ExpectedMessage
-    )
-
+    param([scriptblock]$Action, [string]$ExpectedMessage)
+    $failureMessage = $null
     try {
         & $Action | Out-Null
-        throw "Expected the action to fail with '$ExpectedMessage'."
     }
     catch {
-        Assert-Contains -Actual $_.Exception.Message -Expected $ExpectedMessage -Message "Failure diagnostic mismatch."
-        return $_.Exception.Message
+        $failureMessage = $_.Exception.Message
     }
+    if ($null -eq $failureMessage) { throw "Expected the action to fail, but it completed successfully." }
+    Assert-Contains -Actual $failureMessage -Expected $ExpectedMessage -Message "Failure diagnostic mismatch."
+    return $failureMessage
 }
 
+$noOpWasRejected = $false
+try { $null = Invoke-ExpectedFailure -ExpectedMessage "never emitted" -Action { } } catch { $noOpWasRejected = $_.Exception.Message -ceq "Expected the action to fail, but it completed successfully." }
+Assert-True -Condition $noOpWasRejected -Message "The negative-test helper must reject a successful action instead of catching its own sentinel."
+
 . $phaseScriptPath
+. $tempScriptPath
+. $artifactScriptPath
 Reset-VerificationPhaseState
 
 $contextLine = Write-VerificationContext -RepositoryRoot $repoRoot -Configuration Debug -VerificationTier PullRequest
@@ -61,30 +65,54 @@ Assert-Contains -Actual $contextLine -Expected "VERIFY_CONTEXT_JSON=" -Message "
 $context = $contextLine.Substring("VERIFY_CONTEXT_JSON=".Length) | ConvertFrom-Json
 Assert-True -Condition ($context.schemaVersion -eq 1) -Message "Verifier context schema must remain version 1."
 Assert-True -Condition ($context.verificationTier -eq "PullRequest") -Message "Verifier context must identify its tier."
-Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($context.repositoryHead)) -Message "Verifier context must identify the repository head or its explicit unavailable marker."
+Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($context.repositoryHead)) -Message "Verifier context must identify the exact head or an explicit marker."
 Assert-True -Condition ($context.processorCount -ge 1) -Message "Verifier context must identify processor count."
+
+$systemTempProbe = Join-Path $repoRoot ("embodysense-system-temp-probe-" + [Guid]::NewGuid().ToString("N"))
+$runnerTempProbe = Join-Path $repoRoot ("embodysense-runner-temp-probe-" + [Guid]::NewGuid().ToString("N"))
+Assert-True -Condition ((Resolve-VerificationPhysicalTempRoot -RunnerTemp $runnerTempProbe -SystemTempPath $systemTempProbe) -ceq ([IO.Path]::GetFullPath($runnerTempProbe))) -Message "Hosted verification must prefer the runner-owned ephemeral temporary root."
+Assert-True -Condition ((Resolve-VerificationPhysicalTempRoot -RunnerTemp "" -SystemTempPath $systemTempProbe) -ceq ([IO.Path]::GetFullPath($systemTempProbe))) -Message "Local verification must retain a fully-qualified system-temp fallback."
+if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)) {
+    Assert-True -Condition ((Resolve-VerificationPhysicalTempRoot -RunnerTemp "/tmp/embodysense-verification" -SystemTempPath $systemTempProbe) -ceq "/private/tmp/embodysense-verification") -Message "macOS verification must resolve the /tmp symlink before capability path guards inspect lane fixtures."
+}
+$null = Invoke-ExpectedFailure -ExpectedMessage "fully qualified path" -Action {
+    Resolve-VerificationPhysicalTempRoot -RunnerTemp "relative-temp" -SystemTempPath $systemTempProbe
+}
+$laneFixturePath = Get-VerificationLaneFixturePath -PhysicalTempRoot ([IO.Path]::GetTempPath()) -RunIdentity "run-a" -LaneIdentity "project-lane-a"
+$sameLaneFixturePath = Get-VerificationLaneFixturePath -PhysicalTempRoot ([IO.Path]::GetTempPath()) -RunIdentity "run-a" -LaneIdentity "project-lane-a"
+$differentLaneFixturePath = Get-VerificationLaneFixturePath -PhysicalTempRoot ([IO.Path]::GetTempPath()) -RunIdentity "run-a" -LaneIdentity "project-lane-b"
+Assert-True -Condition ($laneFixturePath -ceq $sameLaneFixturePath) -Message "A run/lane identity must derive one stable temporary path."
+Assert-True -Condition ($laneFixturePath -cne $differentLaneFixturePath) -Message "Distinct lanes must derive disjoint temporary paths."
+Assert-True -Condition ((Split-Path -Parent $laneFixturePath) -ceq ([IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar))) -Message "Lane fixtures must remain on the selected physical temporary volume."
+if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    Assert-True -Condition ([Text.Encoding]::UTF8.GetByteCount($laneFixturePath) -le 72) -Message "Unix lane fixtures must reserve the CoreFxPipe endpoint suffix below macOS's 104-byte limit."
+}
+$null = Invoke-ExpectedFailure -ExpectedMessage "fully qualified root" -Action {
+    Get-VerificationLaneFixturePath -PhysicalTempRoot "relative-temp" -RunIdentity "run-a" -LaneIdentity "project-lane-a"
+}
 
 $scenarioRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-bounded-verifier-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scenarioRoot | Out-Null
 try {
+    $manifestProbeRoot = Join-Path $scenarioRoot "immutable-pristine"
+    New-Item -ItemType Directory -Path $manifestProbeRoot | Out-Null
+    $manifestProbePath = Join-Path $manifestProbeRoot "assembly.dll"
+    [IO.File]::WriteAllBytes($manifestProbePath, [byte[]](1, 2, 3, 4))
+    $manifestProbe = @(Get-VerificationDirectoryManifest -Directory $manifestProbeRoot)
+    Assert-VerificationDirectoryManifest -Expected $manifestProbe -Directory $manifestProbeRoot -Description "Unchanged pristine probe"
+    [IO.File]::WriteAllBytes($manifestProbePath, [byte[]](4, 3, 2, 1))
+    $null = Invoke-ExpectedFailure -ExpectedMessage "failed immutable artifact verification" -Action {
+        Assert-VerificationDirectoryManifest -Expected $manifestProbe -Directory $manifestProbeRoot -Description "Mutated pristine probe"
+    }
+
     $argumentProbePath = Join-Path $scenarioRoot "argument probe.ps1"
     @'
-param(
-    [string]$First,
-    [string]$Second,
-    [string]$Third
-)
-
-if ($First -cne "value with spaces" -or $Second -cne 'quote"value' -or $Third -cne 'trailing\') {
-    exit 19
-}
+param([string]$First, [string]$Second, [string]$Third)
+if ($First -cne "value with spaces" -or $Second -cne 'quote"value' -or $Third -cne 'trailing\') { exit 19 }
 '@ | Set-Content -LiteralPath $argumentProbePath -Encoding UTF8
 
     $successArguments = @("-NoProfile")
-    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
-        $successArguments += @("-ExecutionPolicy", "Bypass")
-    }
-
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) { $successArguments += @("-ExecutionPolicy", "Bypass") }
     $successArguments += @("-File", $argumentProbePath, "value with spaces", 'quote"value', 'trailing\')
     $successOutput = @(Invoke-VerificationPhase -Name "argument-integrity" -FileName $powerShellExecutable -Arguments $successArguments -TimeoutSeconds 10 -WorkingDirectory $repoRoot) -join [Environment]::NewLine
     Assert-Contains -Actual $successOutput -Expected "VERIFY_PHASE_START name=argument-integrity" -Message "Successful phases must announce their start."
@@ -104,105 +132,168 @@ if ($First -cne "value with spaces" -or $Second -cne 'quote"value' -or $Third -c
     Assert-Contains -Actual $timeoutMessage -Expected "Last completed phase: 'argument-integrity'" -Message "Timeout diagnostics must preserve the last completed phase."
 }
 finally {
-    if (Test-Path $scenarioRoot) {
-        Remove-Item -LiteralPath $scenarioRoot -Recurse -Force
-    }
+    if (Test-Path -LiteralPath $scenarioRoot) { Remove-Item -LiteralPath $scenarioRoot -Recurse -Force }
 }
 
-$verifyScript = Get-Content -Raw $verifyScriptPath
-$phaseScript = Get-Content -Raw $phaseScriptPath
-$coverageScript = Get-Content -Raw $coverageScriptPath
-$verifyWorkflow = Get-Content -Raw $verifyWorkflowPath
-$stressWorkflow = Get-Content -Raw $stressWorkflowPath
-$pullRequestSettings = Get-Content -Raw $pullRequestSettingsPath
-$stressSettings = Get-Content -Raw $stressSettingsPath
-$maximumTest = Get-Content -Raw $maximumTestPath
-$retentionTest = Get-Content -Raw $retentionTestPath
+$verifyScript = Get-Content -LiteralPath $verifyScriptPath -Raw
+$watchdogScript = Get-Content -LiteralPath $watchdogScriptPath -Raw
+$phaseScript = Get-Content -LiteralPath $phaseScriptPath -Raw
+$parallelScript = Get-Content -LiteralPath $parallelScriptPath -Raw
+$scheduleScript = Get-Content -LiteralPath $scheduleScriptPath -Raw
+$laneScript = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\verification-test-lanes.ps1") -Raw
+$coverageScript = Get-Content -LiteralPath $coverageScriptPath -Raw
+$coverageEvidenceScript = Get-Content -LiteralPath $coverageEvidenceScriptPath -Raw
+$verifyWorkflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
+$stressWorkflow = Get-Content -LiteralPath $stressWorkflowPath -Raw
+$pullRequestSettings = Get-Content -LiteralPath $pullRequestSettingsPath -Raw
+$stressSettings = Get-Content -LiteralPath $stressSettingsPath -Raw
+$gitIgnore = Get-Content -LiteralPath $gitIgnorePath -Raw
+$maximumTest = Get-Content -LiteralPath $maximumTestPath -Raw
+$retentionTest = Get-Content -LiteralPath $retentionTestPath -Raw
+$coverageChildProcess = Get-Content -LiteralPath $coverageChildProcessPath -Raw
+$admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
+$persistenceEnvironmentCollection = Get-Content -LiteralPath $persistenceEnvironmentCollectionPath -Raw
+$persistenceCapabilityCatalogTest = Get-Content -LiteralPath $persistenceCapabilityCatalogTestPath -Raw
+$startupRuntimeCollection = Get-Content -LiteralPath $startupRuntimeCollectionPath -Raw
 
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "Stress")]' -Message "The verifier must expose only the two owned tiers."
-Assert-Contains -Actual $phaseScript -Expected 'if ($null -ne $commandScriptPath) {' -Message "Windows batch phases must select cmd.exe command-line quoting before generic ArgumentList handling."
-Assert-Contains -Actual $phaseScript -Expected 'elseif ($null -ne $startInfo.PSObject.Properties["ArgumentList"]) {' -Message "Non-batch phases should still use ArgumentList when the runtime provides it."
 Assert-Contains -Actual $verifyScript -Expected '[string]$Configuration = "Release"' -Message "The canonical verifier must default to Release."
-Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("Debug", "Release")]' -Message "The verifier must retain Debug as an explicit supported configuration."
-Assert-Contains -Actual $verifyScript -Expected 'VerificationTier!=Stress' -Message "Required verification must explicitly exclude only the owned stress trait."
-Assert-Contains -Actual $verifyScript -Expected "Adversarial_maximum_transition_reservations_and_canonical_order_checks_remain_bounded" -Message "The verifier must own the exact maximum-artifact stress test."
-Assert-Contains -Actual $verifyScript -Expected "Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible" -Message "The verifier must own the exact deletion-capacity stress test."
-Assert-Contains -Actual $verifyScript -Expected 'exact_test_count=2' -Message "Stress diagnostics must expose the expected exact-test inventory."
-Assert-Contains -Actual $pullRequestSettings -Expected '<TreatNoTestsAsError>true</TreatNoTestsAsError>' -Message "Required verification cannot silently accept an empty selection."
-Assert-Contains -Actual $pullRequestSettings -Expected '<TestSessionTimeout>1500000</TestSessionTimeout>' -Message "Pull-request test sessions must retain enough bounded time for the Persistence coverage suite."
-Assert-Contains -Actual $verifyScript -Expected '$persistenceCoveragePhaseTimeoutSeconds = 1560' -Message "Persistence coverage shards must retain the existing extended phase timeout."
-Assert-Contains -Actual $verifyScript -Expected '-TimeoutSeconds $persistenceCoveragePhaseTimeoutSeconds' -Message "Every Persistence coverage shard must use the existing bounded timeout."
-Assert-Contains -Actual $verifyScript -Expected 'Invoke-CheckedNativePhase -Name "coverage-$($_.BaseName)" -FileName "dotnet" -Arguments $testArguments -TimeoutSeconds 900' -Message "All other coverage projects must retain the existing bounded timeout."
-Assert-Contains -Actual $verifyScript -Expected 'foreach ($shard in $persistenceCoverageShards)' -Message "Persistence coverage must execute each declared shard in a fresh test process."
-Assert-Contains -Actual $verifyScript -Expected '"--collect:XPlat Code Coverage", "--filter", $shard.Filter, "--logger", "console;verbosity=detailed", "--results-directory", $shardResultsPath' -Message "Each Persistence shard must retain coverage collection, its exact filter, detailed logging, and an isolated result root."
-Assert-Contains -Actual $verifyScript -Expected 'Assert-CoverageReportProduced -TestProject $_ -MinimumWriteTimeUtc $shardStartedUtc -SearchRoot $shardResultsPath' -Message "Each Persistence shard must prove that its own invocation produced fresh coverage."
-Assert-Contains -Actual $verifyScript -Expected '$coverageArguments += @("-File", (Join-Path $PSScriptRoot "verify-coverage.ps1"), "-MinimumWriteTimeUtc", $coverageStartedUtc.ToString("O"))' -Message "All shard reports must continue through the canonical coverage merger."
-Assert-Contains -Actual $coverageScript -Expected 'if (-not $fileLines.ContainsKey($lineNumber) -or $hits -gt $fileLines[$lineNumber]) {' -Message "Split reports must continue to merge duplicate source lines by maximum hit count."
-
-$expectedPersistenceCoverageShards = @(
-    [pscustomobject]@{
-        Name = "graph-authoring"
-        Filter = "(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring)&(VerificationTier!=Stress)"
-    }
-    [pscustomobject]@{
-        Name = "governance"
-        Filter = "((FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Audit)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Authority)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Capabilities)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.ContextualRoles)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Credentials)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.HumanInput)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.ToolResults))&(VerificationTier!=Stress)"
-    }
-    [pscustomobject]@{
-        Name = "loops-triggers"
-        Filter = "((FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Loops)|(FullyQualifiedName~EmbodySense.Core.Persistence.Tests.Triggers))&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring)&(VerificationTier!=Stress)"
-    }
-    [pscustomobject]@{
-        Name = "remainder"
-        Filter = "(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Loops)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Triggers)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Audit)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Authority)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Capabilities)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.ContextualRoles)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.Credentials)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.HumanInput)&(FullyQualifiedName!~EmbodySense.Core.Persistence.Tests.ToolResults)&(VerificationTier!=Stress)"
-    }
-)
-$shardDeclaration = [regex]::Match($verifyScript, '(?ms)^\$persistenceCoverageShards = @\(\r?\n(?<body>.*?)^\)')
-Assert-True -Condition $shardDeclaration.Success -Message "The Persistence coverage shard inventory must remain statically inspectable."
-$declaredShards = @([regex]::Matches($shardDeclaration.Groups["body"].Value, '(?ms)^\s+\[pscustomobject\]@\{\r?\n\s+Name = "(?<name>[^"]+)"\r?\n\s+Filter = "(?<filter>[^"]+)"\r?\n\s+\}'))
-Assert-True -Condition ($declaredShards.Count -eq $expectedPersistenceCoverageShards.Count) -Message "Persistence coverage must retain exactly four shards."
-for ($index = 0; $index -lt $expectedPersistenceCoverageShards.Count; $index++) {
-    Assert-True -Condition ($declaredShards[$index].Groups["name"].Value -ceq $expectedPersistenceCoverageShards[$index].Name) -Message "Persistence coverage shard order and names must remain deterministic."
-    Assert-True -Condition ($declaredShards[$index].Groups["filter"].Value -ceq $expectedPersistenceCoverageShards[$index].Filter) -Message "Persistence coverage shard filters must remain mutually exclusive, exhaustive, and stress-free."
+Assert-Contains -Actual $verifyScript -Expected '[int]$MaximumTestWorkers = [Math]::Min(8, [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount * 1.5)))' -Message "The required gate must request bounded logical concurrency above the physical processor count."
+Assert-Contains -Actual $watchdogScript -Expected '[int]$MaximumTestWorkers = [Math]::Min(8, [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount * 1.5)))' -Message "The external watchdog must preserve the bounded logical worker request."
+Assert-Contains -Actual $phaseScript -Expected 'if ($null -ne $commandScriptPath) {' -Message "Windows batch phases must preserve cmd.exe quoting."
+Assert-Contains -Actual $phaseScript -Expected 'elseif ($null -ne $startInfo.PSObject.Properties["ArgumentList"]) {' -Message "Non-batch phases must use ArgumentList when available."
+Assert-Contains -Actual $phaseScript -Expected 'VERIFY_CHILD_TIMEOUT name=$Name' -Message "Sequential timeouts must emit structured watchdog evidence."
+Assert-Contains -Actual $parallelScript -Expected 'Sort-Object -Property @{ Expression = "SchedulingPrioritySeconds"; Descending = $true }, @{ Expression = "EstimatedDurationSeconds"; Descending = $true }, @{ Expression = "Name"; Descending = $false }' -Message "Parallel phases must prioritize singleton-class backlog before deterministic longest-processing-time and exact-name ties."
+Assert-Contains -Actual $verifyScript -Expected '$hardwareProcessorCount = [Math]::Max(1, [Environment]::ProcessorCount)' -Message "The verifier must normalize the host processor count before deriving bounded concurrency."
+Assert-Contains -Actual $verifyScript -Expected '$hardwareBoundedResourceCapacity = [Math]::Min($MaximumTestWorkers, $hardwareProcessorCount)' -Message "Non-required parallel phases must retain hardware-bounded resource capacity."
+Assert-Contains -Actual $verifyScript -Expected 'Invoke-VerificationParallelPhases -MaximumWorkers $hardwareBoundedResourceCapacity -MaximumResourceCapacity $hardwareBoundedResourceCapacity | Out-Null' -Message "Preflight and discovery must remain bounded to physical hosted-runner capacity even when required gates request logical concurrency."
+Assert-Contains -Actual $parallelScript -Expected 'cannot schedule phases beyond logical resource capacity' -Message "Declared phase weight must fail closed instead of adapting down to available capacity."
+Assert-Contains -Actual $parallelScript -Expected 'resource classes are underweighted' -Message "CPU-bound and process-heavy phases must fail closed when their declared weight is too small."
+Assert-Contains -Actual $parallelScript -Expected '$phase.EffectiveWeight = $phase.Weight' -Message "Scheduler evidence must preserve declared weights exactly."
+Assert-Contains -Actual $parallelScript -Expected 'scheduling_priority_seconds=$($phase.SchedulingPrioritySeconds)' -Message "Scheduler start evidence must expose the static priority used for deterministic ordering."
+Assert-Contains -Actual $parallelScript -Expected 'Select-VerificationParallelPhase -Pending $pending -AvailableCapacity $availableCapacity' -Message "The scheduler must select a fitting phase instead of blocking behind the queue head."
+Assert-Contains -Actual $parallelScript -Expected '-AvailableResourceClassSlots $availableResourceClassSlots' -Message "The scheduler must apply explicit resource-class concurrency limits while selecting fitting phases."
+Assert-Contains -Actual $parallelScript -Expected 'resource-class limits cannot exceed the maximum worker count' -Message "Invalid resource-class concurrency limits must fail closed."
+Assert-Contains -Actual $parallelScript -Expected '$Pending[$index].SchedulingDeferrals -ge 1' -Message "Backfill must reserve a later fitting opportunity for bypassed phases."
+Assert-Contains -Actual $parallelScript -Expected 'VERIFY_CHILD_TIMEOUT name=$($result.Name)' -Message "Parallel timeouts must emit structured watchdog evidence."
+Assert-Contains -Actual $verifyScript -Expected '$testLaneTimeoutSeconds = 480' -Message "Every required lane must fit inside the outer budget."
+Assert-Contains -Actual $verifyScript -Expected 'Get-ProjectCoverageIsolation' -Message "Every test project must execute from isolated exact-build copies."
+Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework' -Message "Every lane must preserve its bin/<Configuration>/<TargetFramework> AppContext suffix."
+Assert-Contains -Actual $verifyScript -Expected 'Copy-VerifiedDirectoryFromManifest -SourceDirectory $pristineDirectory -SourceManifest $pristineManifest -DestinationDirectory $laneDirectory' -Message "Every lane copy must use and verify the already authenticated pristine manifest."
+Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory' -Message "Persistence child-process coverage must receive a process-scoped immutable source."
+Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationDirectoryManifest -Expected $isolation.PristineManifest -Directory $isolation.PristineDirectory' -Message "Every verifier run must re-hash the immutable pristine source after all child processes exit."
+Assert-Contains -Actual $coverageChildProcess -Expected 'AddExpectedTerminationVstestArguments' -Message "Intentional process-loss cases must retain an exact VSTest testhost path instead of a custom executable helper."
+Assert-Contains -Actual $coverageChildProcess -Expected 'startInfo.ArgumentList.Add(isolatedPath);' -Message "Expected-termination VSTest must read the immutable pristine test assembly directly."
+Assert-Contains -Actual $admissionStoreTest -Expected '"crash-proof" or "crash-primary" or "crash-trust" => true' -Message "Only the three admitted abrupt-loss modes may omit an impossible child coverage report."
+Assert-Contains -Actual $admissionStoreTest -Expected '"writer" => false' -Message "Successful cross-process writers must retain the report-producing coverage path."
+Assert-Contains -Actual $admissionStoreTest -Expected 'AddExpectedTerminationVstestArguments(startInfo, typeof(GovernedLoopAdmissionStoreTests).Assembly.Location, CrossProcessHostTestName)' -Message "The crash-only route must execute the existing exact xUnit worker identity."
+Assert-Contains -Actual $admissionStoreTest -Expected 'public async Task Cross_process_admission_store_host()' -Message "The existing child worker test ID must remain in canonical inventory."
+Assert-Contains -Actual $verifyScript -Expected 'Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())' -Message "Hosted verification must select the runner-owned ephemeral volume with a local fallback."
+Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot' -Message "Lane fixture isolation must remain short, disjoint, and outside retained repository artifacts."
+Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."
+foreach ($tempVariable in @("TEMP", "TMP", "TMPDIR")) {
+    Assert-Contains -Actual $verifyScript -Expected "$tempVariable = `$laneFixtureRoot" -Message "Every lane and descendant must use the fast isolated '$tempVariable' fixture root."
 }
-
-$governancePrefixes = @("Audit", "Authority", "Capabilities", "ContextualRoles", "Credentials", "HumanInput", "ToolResults") | ForEach-Object { "EmbodySense.Core.Persistence.Tests.$_" }
-$coveragePartitionProbes = @(
-    "EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring.GraphContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.Loops.Admission.AdmissionContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.Triggers.TriggerContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.Audit.AuditContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.Authority.AuthorityContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.Capabilities.CapabilityContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.ContextualRoles.RoleContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.Credentials.CredentialContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.ToolResults.ToolResultContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.Memory.MemoryContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.Verification.VerificationContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.Workspace.WorkspaceContractTests.Probe",
-    "EmbodySense.Core.Persistence.Tests.FutureNamespace.FutureContractTests.Probe"
-)
-foreach ($fullyQualifiedName in $coveragePartitionProbes) {
-    $isGraphAuthoring = $fullyQualifiedName.StartsWith("EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring", [StringComparison]::Ordinal)
-    $isGovernance = @($governancePrefixes | Where-Object { $fullyQualifiedName.StartsWith($_, [StringComparison]::Ordinal) }).Count -gt 0
-    $isLoopsOrTriggers = (-not $isGraphAuthoring) -and ($fullyQualifiedName.StartsWith("EmbodySense.Core.Persistence.Tests.Loops", [StringComparison]::Ordinal) -or $fullyQualifiedName.StartsWith("EmbodySense.Core.Persistence.Tests.Triggers", [StringComparison]::Ordinal))
-    $isRemainder = -not ($isGraphAuthoring -or $isGovernance -or $isLoopsOrTriggers)
-    $partitionCount = @(@($isGraphAuthoring, $isGovernance, $isLoopsOrTriggers, $isRemainder) | Where-Object { $_ }).Count
-    Assert-True -Condition ($partitionCount -eq 1) -Message "Persistence coverage partition must select '$fullyQualifiedName' exactly once."
+Assert-Contains -Actual $verifyScript -Expected 'Remove-Item -LiteralPath $laneFixtureRoot -Recurse -Force' -Message "Lane fixture roots must be cleaned after ordinary verifier completion."
+Assert-Contains -Actual $verifyScript -Expected '"vstest", $Lane.AssemblyPath' -Message "Test lanes must execute isolated assemblies."
+Assert-Contains -Actual $laneScript -Expected 'return @((New-VerificationTestLane -Name "all"))' -Message "Each test assembly must execute through one exact stable-ID lane."
+Assert-True -Condition ($laneScript.IndexOf('$TestProject.', [StringComparison]::Ordinal) -lt 0) -Message "Assembly-wide execution must not inspect project identity or retain project-specific sharding branches."
+Assert-True -Condition ([regex]::Matches($laneScript, 'New-VerificationTestLane -Name "all"').Count -eq 1) -Message "The one-lane policy must have exactly one scheduler declaration."
+foreach ($parallelAssemblyInfoPath in @(
+    "tests\EmbodySense.Core.Persistence.Tests\AssemblyInfo.cs",
+    "tests\EmbodySense.Core.Startup.Tests\AssemblyInfo.cs",
+    "tests\EmbodySense.IntegrationTests\AssemblyInfo.cs",
+    "tests\EmbodySense.Web.Tests\AssemblyInfo.cs"
+)) {
+    $parallelAssemblyInfo = Get-Content -LiteralPath (Join-Path $repoRoot $parallelAssemblyInfoPath) -Raw
+    Assert-Contains -Actual $parallelAssemblyInfo -Expected '[assembly: CollectionBehavior(MaxParallelThreads = 2)]' -Message "Assembly-wide lane '$parallelAssemblyInfoPath' must retain the explicit two-thread xUnit ceiling."
 }
-Assert-Contains -Actual $stressSettings -Expected '<TreatNoTestsAsError>true</TreatNoTestsAsError>' -Message "Stress verification cannot silently accept an empty selection."
-Assert-Contains -Actual $stressSettings -Expected '<TestSessionTimeout>1500000</TestSessionTimeout>' -Message "Stress test sessions must remain bounded."
+Assert-Contains -Actual $startupRuntimeCollection -Expected '[CollectionDefinition(Name)]' -Message "Startup runtime wrappers must retain one shared serial xUnit collection."
+foreach ($startupRuntimeWrapper in @(
+    "CustomLoopRuntimeTestsAdmissionAndContext.cs",
+    "CustomLoopRuntimeTestsDurabilityAndRecovery.cs",
+    "CustomLoopRuntimeTestsPublicationAndConcurrency.cs",
+    "GovernedLoopRuntimeTestsAdmissionAndBinding.cs",
+    "GovernedLoopRuntimeTestsCompletionConstraints.cs",
+    "GovernedLoopRuntimeTestsResumeAndAuthority.cs"
+)) {
+    $startupRuntimeWrapperSource = Get-Content -LiteralPath (Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\$startupRuntimeWrapper") -Raw
+    Assert-Contains -Actual $startupRuntimeWrapperSource -Expected '[Collection(LoopRuntimeIntegrationCollection.Name)]' -Message "Startup runtime wrapper '$startupRuntimeWrapper' must serialize shared file-backed runtime state."
+}
+Assert-Contains -Actual $persistenceEnvironmentCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Persistence process-environment mutation must remain exclusive of all assembly tests."
+Assert-Contains -Actual $persistenceCapabilityCatalogTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Capability-catalog trust-root mutation must retain process-environment serialization."
+Assert-Contains -Actual $admissionStoreTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Coverage child-directory mutation must retain process-environment serialization."
+foreach ($webSharedRuntimeTest in @(
+    "CapabilityApiControllerTests.cs",
+    "LoopApiControllerTests.cs",
+    "LoopRunApiControllerTests.cs",
+    "WebAgentRuntimeHostTests.cs",
+    "WebApiControllerTests.cs",
+    "WebSessionHubTests.cs"
+)) {
+    $webSharedRuntimeTestSource = Get-Content -LiteralPath (Join-Path $repoRoot "tests\EmbodySense.Web.Tests\$webSharedRuntimeTest") -Raw
+    Assert-Contains -Actual $webSharedRuntimeTestSource -Expected '[Collection(EphemeralPortApiCollection.Name)]' -Message "Web runtime/API test '$webSharedRuntimeTest' must serialize shared default trust and host state inside the assembly-wide lane."
+}
+foreach ($assemblyProfile in @(
+    'Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 300; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Core.Startup.Tests-all"; EstimatedDurationSeconds = 240; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy"'
+)) {
+    Assert-Contains -Actual $scheduleScript -Expected $assemblyProfile -Message "Internally parallel assembly gates must retain exact conservative process-heavy scheduling profiles."
+}
+foreach ($assemblyName in @("EmbodySense.Cli.Command.Tests", "EmbodySense.Core.Application.Tests", "EmbodySense.Core.Clients.Tests", "EmbodySense.Core.Common.Tests", "EmbodySense.Core.Persistence.Tests", "EmbodySense.Core.Startup.Tests", "EmbodySense.E2ETests", "EmbodySense.IntegrationTests", "EmbodySense.Web.Tests")) {
+    Assert-Contains -Actual $scheduleScript -Expected "Name = `"tests-$assemblyName-all`";" -Message "Every production test assembly must have exactly one checked-in required-gate profile."
+}
+foreach ($retiredLane in @("loop-execution-custom-runtime", "loop-execution-governed-runtime", "contextual-roles", "codex-app-server", "runtime-host", "remainder-triggers")) {
+    Assert-True -Condition ($laneScript.IndexOf("New-VerificationTestLane -Name `"$retiredLane`"", [StringComparison]::Ordinal) -lt 0) -Message "Assembly-wide execution must not retain report-amplifying lane '$retiredLane'."
+}
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateResourceCapacity = 12' -Message "Required gates must retain twelve logical resource units independently of the four-process host ceiling."
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 3' -Message "Required gates must enforce an explicit three-process-heavy concurrency ceiling."
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumCpuBoundWorkers = 1' -Message "Required gates must enforce an explicit one-CPU-bound concurrency ceiling."
+Assert-Contains -Actual $scheduleScript -Expected 'Weight = 3; ResourceClass = "ProcessHeavy"' -Message "Process-heavy required gates must retain their evidence-backed logical weight."
+Assert-Contains -Actual $scheduleScript -Expected '"ProcessHeavy" { 3; break }' -Message "Required-gate profile validation must reject underweighted process-heavy gates."
+Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-whitespace"; EstimatedDurationSeconds = 35; Weight = 2; ResourceClass = "CpuBound"' -Message "Whitespace formatting must retain one checked-in CPU-bound required-gate profile."
+Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-naming-style"; EstimatedDurationSeconds = 65; Weight = 2; ResourceClass = "CpuBound"' -Message "Naming/style formatting must retain one checked-in CPU-bound required-gate profile."
+Assert-Contains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-whitespace"' -Message "Whitespace formatting must overlap only immutable required-gate test execution."
+Assert-Contains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-naming-style"' -Message "Naming/style formatting must overlap only immutable required-gate test execution."
+Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationRequiredGateScheduleProfile -Name $Name' -Message "Every required gate must obtain checked-in duration and resource metadata by exact name."
+Assert-Contains -Actual $verifyScript -Expected '-EstimatedDurationSeconds $profile.EstimatedDurationSeconds -Weight $profile.Weight -ResourceClass $profile.ResourceClass' -Message "Every required gate must pass its exact checked-in scheduler profile."
+Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases)' -Message "The complete required gate plan must fail closed before execution when a profile is missing or mismatched."
+Assert-Contains -Actual $scheduleScript -Expected '$actualProcessCeiling = [Math]::Min(4, [Math]::Min($script:VerificationRequiredGateResourceCapacity, $HardwareProcessorCount))' -Message "Required gates must separate twelve logical resource units from the hard four-process execution ceiling."
+Assert-Contains -Actual $scheduleScript -Expected 'return [Math]::Min($MaximumTestWorkers, $actualProcessCeiling)' -Message "Required gates must preserve lower explicit worker requests without bypassing the four-process ceiling."
+Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers $MaximumTestWorkers -HardwareProcessorCount $hardwareProcessorCount' -Message "Required gate execution must use the behavior-tested worker derivation."
+Assert-Contains -Actual $verifyScript -Expected '$effectiveRequiredGateMaximumProcessHeavyWorkers = [Math]::Min($requiredGateMaximumProcessHeavyWorkers, $requiredGateMaximumWorkers)' -Message "Low-core execution must cap the process-heavy limit at the effective worker ceiling."
+Assert-Contains -Actual $verifyScript -Expected '$effectiveRequiredGateMaximumCpuBoundWorkers = [Math]::Min($requiredGateMaximumCpuBoundWorkers, $requiredGateMaximumWorkers)' -Message "Low-core execution must cap the CPU-bound limit at the effective worker ceiling."
+Assert-Contains -Actual $verifyScript -Expected 'maximum_process_heavy=$effectiveRequiredGateMaximumProcessHeavyWorkers maximum_cpu_bound=$effectiveRequiredGateMaximumCpuBoundWorkers scheduling=singleton-class-backlog-priority-lpt' -Message "The required-gate plan must report effective limits and singleton-class backlog-priority scheduling."
+Assert-Contains -Actual $verifyScript -Expected '-MaximumProcessHeavyWorkers $effectiveRequiredGateMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers $effectiveRequiredGateMaximumCpuBoundWorkers' -Message "Required gate execution must apply both effective fail-closed resource-class limits."
+Assert-Contains -Actual $parallelScript -Expected '$running.Count -lt $MaximumWorkers' -Message "Logical resource capacity cannot bypass the explicit child-process ceiling."
+Assert-Contains -Actual $verifyScript -Expected 'identity=TestCase.Id partition_identity=XunitTestCaseUniqueID' -Message "Stable inventory identities must remain explicit."
+Assert-Contains -Actual $verifyScript -Expected 'verify-test-partition.ps1' -Message "Canonical discovery and declarative lane selection must be reconciled."
+Assert-Contains -Actual $verifyScript -Expected 'Write-CoverageManifest' -Message "Coverage must be bound to an exact fresh report manifest."
+Assert-Contains -Actual $verifyScript -Expected 'kind=reconciliation' -Message "Inventory and coverage aggregation must overlap safely."
+Assert-Contains -Actual $verifyScript -Expected '-Name "git-diff-check"' -Message "The canonical verifier must retain git diff validation."
+Assert-Contains -Actual $verifyScript -Expected '-Name "frontend-preflight"' -Message "The canonical verifier must retain frontend validation exactly once behind its npm install dependency."
+Assert-Contains -Actual $verifyScript -Expected 'VERIFY_COMPLETE schema_version=1 status=passed' -Message "A successful standard run must emit exact terminal evidence."
+Assert-Contains -Actual $gitIgnore -Expected 'tests/VerificationResults/' -Message "Generated verifier diagnostics must remain uploadable without dirtying a local worktree."
+Assert-Contains -Actual $coverageEvidenceScript -Expected 'if (!fileLines.TryGetValue(line.Key, out existingHits) || line.Value > existingHits)' -Message "Split coverage must merge duplicate source lines by maximum hits in the authenticated reduction owner."
+Assert-Contains -Actual $coverageScript -Expected 'Coverage report manifest contains duplicate report paths.' -Message "Duplicate report evidence must fail closed."
+Assert-Contains -Actual $coverageScript -Expected 'missing, stale, or unexpected reports' -Message "Coverage manifest reconciliation must reject extra or missing files."
+Assert-Contains -Actual $pullRequestSettings -Expected '<TreatNoTestsAsError>true</TreatNoTestsAsError>' -Message "Required verification cannot accept an empty test selection."
+Assert-Contains -Actual $stressSettings -Expected '<TreatNoTestsAsError>true</TreatNoTestsAsError>' -Message "Stress verification cannot accept an empty test selection."
+Assert-Contains -Actual $stressSettings -Expected '<TestSessionTimeout>1500000</TestSessionTimeout>' -Message "Stress sessions must remain bounded."
 Assert-Contains -Actual $maximumTest -Expected '[Trait(VerificationTier.TraitName, VerificationTier.Stress)]' -Message "The adversarial maximum test must remain in the stress tier."
 Assert-Contains -Actual $maximumTest -Expected "Public_artifact_contract_round_trips_the_maximum_bounded_shape_below_fifteen_mebibytes" -Message "A required maximum-contract proof must remain visible."
 Assert-Contains -Actual $retentionTest -Expected '[Trait(VerificationTier.TraitName, VerificationTier.Stress)]' -Message "The 10,000-operation case must remain in the stress tier."
-Assert-Contains -Actual $stressWorkflow -Expected "schedule:" -Message "The stress tier must have a schedule owner."
-Assert-Contains -Actual $stressWorkflow -Expected "-VerificationTier Stress" -Message "The scheduled workflow must invoke the stress tier explicitly."
-Assert-Contains -Actual $stressWorkflow -Expected "-Configuration Release" -Message "The scheduled workflow must explicitly use the canonical Release configuration."
-Assert-Contains -Actual $stressWorkflow -Expected "if: always()" -Message "Stress diagnostics must be retained on both success and failure."
-Assert-Contains -Actual $verifyWorkflow -Expected "-Configuration Release" -Message "Pull-request verification must explicitly use the canonical Release configuration."
-Assert-Contains -Actual $verifyWorkflow -Expected "./tests/scripts/verify-bounded-phases.tests.ps1" -Message "Pull-request verification must execute this contract harness."
-Assert-Contains -Actual $verifyWorkflow -Expected "./tests/scripts/verify-coverage.tests.ps1" -Message "Pull-request verification must exercise coverage aggregation contracts."
-Assert-Contains -Actual $stressWorkflow -Expected "./tests/scripts/verify-coverage.tests.ps1" -Message "Scheduled stress verification must exercise coverage aggregation contracts."
+Assert-Contains -Actual $stressWorkflow -Expected "schedule:" -Message "The stress tier must retain its scheduled owner."
+Assert-Contains -Actual $stressWorkflow -Expected "-VerificationTier Stress" -Message "The scheduled workflow must invoke the stress tier."
+Assert-Contains -Actual $stressWorkflow -Expected "if: always()" -Message "Stress diagnostics must be retained on failure."
+Assert-Contains -Actual $verifyWorkflow -Expected "./scripts/verify-with-watchdog.ps1 -Configuration Release" -Message "Standard CI must enter through the external watchdog."
+Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./scripts/verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "Standard CI cannot bypass the watchdog."
+Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./tests/scripts/", [StringComparison]::Ordinal) -lt 0) -Message "Repository script tests must execute inside the measured verifier child."
+foreach ($contractScript in @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1")) {
+    Assert-Contains -Actual $verifyScript -Expected $contractScript -Message "The measured verifier must own '$contractScript'."
+}
+Assert-Contains -Actual $stressWorkflow -Expected "./tests/scripts/verify-coverage.tests.ps1" -Message "Scheduled stress verification must retain coverage merger contracts."
 
 Write-Output "Bounded verifier contract tests passed ($assertionCount assertions)."

@@ -74,7 +74,9 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
     {
         using var workspace = await CreateWorkspaceAsync();
         var executor = new CountingWorkspaceToolExecutor(blockUntilCancelled: true, throwFromCancellationCallback: true);
-        var boundary = new AdversarialBoundary(BoundaryBehavior.ReturnBeforeCompletion);
+        var boundary = new AdversarialBoundary(
+            BoundaryBehavior.ReturnBeforeCompletion,
+            callbackStarted: () => executor.Started.Task.WaitAsync(TimeSpan.FromSeconds(5)));
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), executor, new RecordingRetentionStore(), boundary);
 
         await Assert.ThrowsAsync<ToolActuationAuthorityProtocolException>(() => broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/note.txt")));
@@ -183,7 +185,10 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
         Ambiguous
     }
 
-    private sealed class AdversarialBoundary(BoundaryBehavior behavior, Func<bool>? precondition = null) : IToolActuationAuthorityBoundary
+    private sealed class AdversarialBoundary(
+        BoundaryBehavior behavior,
+        Func<bool>? precondition = null,
+        Func<Task>? callbackStarted = null) : IToolActuationAuthorityBoundary
     {
         private Func<CancellationToken, Task>? _lateCallback;
 
@@ -236,6 +241,10 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
                     break;
                 case BoundaryBehavior.ReturnBeforeCompletion:
                     IncompleteCallback = executeActuatorAsync(execution, cancellationToken);
+                    if (callbackStarted is not null)
+                    {
+                        await callbackStarted();
+                    }
                     break;
                 case BoundaryBehavior.CaptureLateCallback:
                     _lateCallback = async token => _ = await executeActuatorAsync(execution, token);
@@ -267,6 +276,8 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
     {
         public int CallCount { get; private set; }
 
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public Task<LocalWorkspaceResult> ListAsync(string resolvedPath, CancellationToken cancellationToken = default) => ExecuteAsync(cancellationToken);
 
         public Task<LocalWorkspaceResult> ReadAsync(string resolvedPath, CancellationToken cancellationToken = default) => ExecuteAsync(cancellationToken);
@@ -292,6 +303,7 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
                 using var registration = throwFromCancellationCallback
                     ? cancellationToken.Register(() => throw new InvalidOperationException("hostile cancellation callback"))
                     : default;
+                Started.TrySetResult();
                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             }
 

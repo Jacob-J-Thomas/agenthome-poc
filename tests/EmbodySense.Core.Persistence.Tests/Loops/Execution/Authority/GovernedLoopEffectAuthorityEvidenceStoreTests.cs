@@ -16,19 +16,13 @@ using EmbodySense.Core.Persistence.Capabilities.Models;
 using EmbodySense.Core.Persistence.Loops.Execution.Authority;
 using EmbodySense.Core.Persistence.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Persistence.Tests.Capabilities;
+using EmbodySense.Core.Persistence.Tests.Verification;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops.Execution.Authority;
 
 public sealed class GovernedLoopEffectAuthorityEvidenceStoreTests
 {
-    private const string CrossProcessMode = "EMBODYSENSE_EFFECT_AUTHORITY_STORE_MODE";
-    private const string CrossProcessWorkspace = "EMBODYSENSE_EFFECT_AUTHORITY_STORE_WORKSPACE";
-    private const string CrossProcessTrustRoot = "EMBODYSENSE_EFFECT_AUTHORITY_STORE_TRUST_ROOT";
-    private const string CrossProcessGate = "EMBODYSENSE_EFFECT_AUTHORITY_STORE_GATE";
-    private const string CrossProcessReady = "EMBODYSENSE_EFFECT_AUTHORITY_STORE_READY";
-    private const string CrossProcessOperation = "EMBODYSENSE_EFFECT_AUTHORITY_STORE_OPERATION";
-
     [Fact]
     public async Task Append_restart_and_exact_replay_preserve_one_authenticated_immutable_decision()
     {
@@ -1181,50 +1175,6 @@ public sealed class GovernedLoopEffectAuthorityEvidenceStoreTests
     }
 
     [Fact]
-    public async Task Cross_process_effect_authority_store_host()
-    {
-        var mode = Environment.GetEnvironmentVariable(CrossProcessMode);
-        if (string.IsNullOrEmpty(mode))
-        {
-            return;
-        }
-
-        var workspace = Environment.GetEnvironmentVariable(CrossProcessWorkspace)!;
-        var trustRoot = Environment.GetEnvironmentVariable(CrossProcessTrustRoot)!;
-        var gate = Environment.GetEnvironmentVariable(CrossProcessGate)!;
-        var ready = Environment.GetEnvironmentVariable(CrossProcessReady)!;
-        var operation = Environment.GetEnvironmentVariable(CrossProcessOperation)!;
-        await File.WriteAllTextAsync(ready, "ready");
-        await WaitForPathAsync(gate);
-        var options = new GovernedLoopEffectAuthorityEvidenceStoreOptions
-        {
-            DurableBoundaryObserver = (boundary, _) =>
-            {
-                var target = mode switch
-                {
-                    "crash-proof" => GovernedLoopEffectAuthorityPersistenceBoundary.ProofPublished,
-                    "crash-primary" => GovernedLoopEffectAuthorityPersistenceBoundary.PrimaryPublished,
-                    "crash-trust" => GovernedLoopEffectAuthorityPersistenceBoundary.TrustAdvanced,
-                    _ => throw new ArgumentOutOfRangeException(nameof(mode))
-                };
-                if (boundary == target)
-                {
-                    Process.GetCurrentProcess().Kill();
-                    Thread.Sleep(Timeout.Infinite);
-                }
-
-                return ValueTask.CompletedTask;
-            }
-        };
-        var paths = new WorkspacePaths(workspace);
-        var store = new GovernedLoopEffectAuthorityEvidenceStore(
-            paths,
-            new FileCapabilityCatalogTrustProvider(trustRoot),
-            options);
-        _ = await store.AppendAsync(Decision(operation));
-    }
-
-    [Fact]
     public void Constructor_rejects_invalid_bounds_and_overlapping_trust()
     {
         using var workspace = new TestWorkspace();
@@ -1367,28 +1317,14 @@ public sealed class GovernedLoopEffectAuthorityEvidenceStoreTests
         string gate,
         string ready,
         string operation)
-    {
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            WorkingDirectory = Path.GetTempPath(),
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(GovernedLoopEffectAuthorityEvidenceStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.Loops.Execution.Authority.GovernedLoopEffectAuthorityEvidenceStoreTests.Cross_process_effect_authority_store_host");
-        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        startInfo.Environment[CrossProcessMode] = mode;
-        startInfo.Environment[CrossProcessWorkspace] = workspace;
-        startInfo.Environment[CrossProcessTrustRoot] = trustRoot;
-        startInfo.Environment[CrossProcessGate] = gate;
-        startInfo.Environment[CrossProcessReady] = ready;
-        startInfo.Environment[CrossProcessOperation] = operation;
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process effect-authority evidence-store host did not start.");
-    }
+        => CancellationHostProcess.Start(
+            "effect-authority-crash",
+            mode,
+            workspace,
+            trustRoot,
+            gate,
+            ready,
+            operation);
 
     private static async Task WaitForPathAsync(string path)
     {

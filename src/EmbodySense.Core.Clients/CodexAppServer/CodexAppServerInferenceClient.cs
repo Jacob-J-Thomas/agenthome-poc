@@ -25,8 +25,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private const string ClientVersion = "0.1.0";
     private const int MaxProtocolLineCharacters = 1_000_000;
     private static readonly TimeSpan _protocolReadTimeout = TimeSpan.FromMinutes(2);
-    private static readonly TimeSpan _postCheckpointWriteDeadline = TimeSpan.FromSeconds(15);
-    private static readonly TimeSpan _lateTransportAuditDeadline = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan _defaultPostCheckpointWriteDeadline = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan _defaultLateTransportAuditDeadline = TimeSpan.FromSeconds(5);
     private readonly LlmInferenceClientOptions _options;
     private ICodexAppServerTransport? _transport;
     private readonly CodexAppServerToolBridge? _toolBridge;
@@ -36,6 +36,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private readonly string _runtimeDirectory;
     private readonly IAuditLog? _auditLog;
     private readonly bool _transportWasInjected;
+    private readonly TimeSpan _postCheckpointWriteDeadline;
+    private readonly TimeSpan _lateTransportAuditDeadline;
     private int _nextRequestId;
     private bool _initialized;
     private string? _threadId;
@@ -49,14 +51,26 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     /// <param name="transport">An injected protocol transport, or <see langword="null"/> to launch <c>codex app-server --stdio</c>.</param>
     /// <param name="auditLog">The audit sink for declined native app-server requests, or <see langword="null"/> when unavailable.</param>
     /// <param name="providerRequestStarted">An optional legacy dispatch notification. It is invoked at the pre-write boundary only when no durable callback is supplied.</param>
+    /// <param name="postCheckpointWriteDeadline">An optional tighter server-owned write deadline; it cannot exceed the production default.</param>
+    /// <param name="lateTransportAuditDeadline">An optional tighter detached-audit deadline; it cannot exceed the production default.</param>
     public CodexAppServerInferenceClient(
         LlmInferenceClientOptions options,
         IToolBroker? toolBroker = null,
         ICodexAppServerTransport? transport = null,
         IAuditLog? auditLog = null,
-        Action? providerRequestStarted = null)
+        Action? providerRequestStarted = null,
+        TimeSpan? postCheckpointWriteDeadline = null,
+        TimeSpan? lateTransportAuditDeadline = null)
     {
         ArgumentNullException.ThrowIfNull(options);
+        _postCheckpointWriteDeadline = ValidateTighterDeadline(
+            postCheckpointWriteDeadline,
+            _defaultPostCheckpointWriteDeadline,
+            nameof(postCheckpointWriteDeadline));
+        _lateTransportAuditDeadline = ValidateTighterDeadline(
+            lateTransportAuditDeadline,
+            _defaultLateTransportAuditDeadline,
+            nameof(lateTransportAuditDeadline));
 
         _options = options;
         _transport = transport;
@@ -67,6 +81,17 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         _auditLog = auditLog;
         _requestHandler = new CodexAppServerRequestHandler(_toolBridge, auditLog);
         _providerRequestStarted = providerRequestStarted;
+    }
+
+    private static TimeSpan ValidateTighterDeadline(TimeSpan? candidate, TimeSpan productionDefault, string parameterName)
+    {
+        var deadline = candidate ?? productionDefault;
+        if (deadline <= TimeSpan.Zero || deadline > productionDefault)
+        {
+            throw new ArgumentOutOfRangeException(parameterName, $"The deadline must be positive and no longer than the production default of {productionDefault.TotalSeconds:N0} seconds.");
+        }
+
+        return deadline;
     }
 
     /// <summary>

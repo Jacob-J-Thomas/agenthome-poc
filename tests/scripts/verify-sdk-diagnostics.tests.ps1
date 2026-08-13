@@ -102,9 +102,7 @@ function Invoke-VerifierScenario {
     $testResultsPath = Join-Path $scenarioRoot "tests\Fake.Tests\TestResults"
     $fakeBinPath = Join-Path $scenarioRoot "fake-bin"
     [void](New-Item -ItemType Directory -Path $scriptsPath, $testResultsPath, $fakeBinPath -Force)
-    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verify.ps1") -Destination $scriptsPath
-    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verify-sdk.ps1") -Destination $scriptsPath
-    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-phase.ps1") -Destination $scriptsPath
+    Copy-Item -Path (Join-Path $repoRoot "scripts\*") -Destination $scriptsPath -Recurse
     Copy-Item -LiteralPath (Join-Path $repoRoot "global.json") -Destination $scenarioRoot
 
     $sentinelPath = Join-Path $testResultsPath "sentinel.txt"
@@ -154,7 +152,7 @@ set "EMBODYSENSE_VERIFY_FAKE_VERSION_EXIT=$VersionExitCode"
 set "EMBODYSENSE_VERIFY_FAKE_LIST_STDOUT=$listOutputPath"
 set "EMBODYSENSE_VERIFY_FAKE_LIST_STDERR=$listErrorPath"
 set "EMBODYSENSE_VERIFY_FAKE_LIST_EXIT=$ListExitCode"
-"$powershellPath" -NoProfile -ExecutionPolicy Bypass -File "$verifierPath" -SkipCoverage $verifierArgumentText
+"$powershellPath" -NoProfile -ExecutionPolicy Bypass -File "$verifierPath" -SkipCoverage -VerificationTier Stress $verifierArgumentText
 exit /b %ERRORLEVEL%
 "@
     Set-ScenarioFile -Path $launcherPath -Content $launcher

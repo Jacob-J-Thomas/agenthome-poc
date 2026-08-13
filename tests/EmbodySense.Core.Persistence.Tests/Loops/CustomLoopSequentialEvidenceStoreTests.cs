@@ -27,6 +27,7 @@ using EmbodySense.Core.Common.Tests.Authority.Grants;
 using EmbodySense.Core.Common.Tests.Loops.Admission;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Tests.Verification;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
@@ -35,9 +36,6 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
-    private const string CrossProcessWorkspaceVariable = "EMBODYSENSE_SEQUENTIAL_EVIDENCE_WORKSPACE";
-    private const string CrossProcessEvidenceHashVariable = "EMBODYSENSE_SEQUENTIAL_EVIDENCE_HASH";
-    private const string CrossProcessResultVariable = "EMBODYSENSE_SEQUENTIAL_EVIDENCE_RESULT";
     private static readonly DateTimeOffset _timestamp = new(2026, 8, 10, 11, 0, 0, TimeSpan.Zero);
 
     [Fact]
@@ -109,26 +107,6 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
 
         Assert.True(process.ExitCode == 0, $"Child exit {process.ExitCode}.{Environment.NewLine}{output}{Environment.NewLine}{error}");
         Assert.Equal("resolved", await File.ReadAllTextAsync(resultPath, timeout.Token));
-    }
-
-    [Fact]
-    public async Task Cross_process_restart_resolves_canonical_evidence_child()
-    {
-        var workspaceRoot = Environment.GetEnvironmentVariable(CrossProcessWorkspaceVariable);
-        var evidenceHash = Environment.GetEnvironmentVariable(CrossProcessEvidenceHashVariable);
-        var resultPath = Environment.GetEnvironmentVariable(CrossProcessResultVariable);
-        if (workspaceRoot is null || evidenceHash is null || resultPath is null)
-        {
-            return;
-        }
-
-        using var store = new CustomLoopRunStore(new WorkspacePaths(workspaceRoot));
-        var receipt = Assert.IsType<GovernedLoopSequentialNodeEvidenceReceipt>(await store.ResolveAsync(evidenceHash));
-        var runEvidence = Assert.IsType<GovernedLoopSequentialRunEvidence>(
-            await ((IGovernedLoopSequentialRunEvidenceSource)store).ResolveAsync(receipt.RunId));
-        Assert.Equal(receipt.RunId, runEvidence.AdapterBinding.ExecutionBinding.RunId);
-        Assert.Equal(runEvidence.InvocationSnapshot.ContentHash, runEvidence.AdapterBinding.InvocationPayloadHash);
-        await File.WriteAllTextAsync(resultPath, "resolved");
     }
 
     [Fact]
@@ -824,26 +802,11 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             runEvent.EventId);
 
     private static Process StartCrossProcessResolver(string workspaceRoot, string evidenceHash, string resultPath)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "dotnet",
-            WorkingDirectory = Path.GetTempPath(),
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(CustomLoopSequentialEvidenceStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopSequentialEvidenceStoreTests.Cross_process_restart_resolves_canonical_evidence_child");
-        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        startInfo.Environment[CrossProcessWorkspaceVariable] = workspaceRoot;
-        startInfo.Environment[CrossProcessEvidenceHashVariable] = evidenceHash;
-        startInfo.Environment[CrossProcessResultVariable] = resultPath;
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("The cross-process sequential-evidence resolver did not start.");
-    }
+        => CancellationHostProcess.Start(
+            "sequential-evidence-resolve",
+            workspaceRoot,
+            evidenceHash,
+            resultPath);
 
     private static JsonObject ReverseProperties(JsonObject value)
     {

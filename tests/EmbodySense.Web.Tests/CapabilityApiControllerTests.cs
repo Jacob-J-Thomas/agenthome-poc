@@ -15,6 +15,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace EmbodySense.Web.Tests;
 
+[Collection(EphemeralPortApiCollection.Name)]
 public sealed class CapabilityApiControllerTests
 {
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();

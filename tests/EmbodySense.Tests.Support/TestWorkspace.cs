@@ -7,7 +7,10 @@ public sealed class TestWorkspace : IDisposable
         var identifier = Guid.NewGuid().ToString("N");
         var tempPath = PhysicalTempPath();
         RootPath = System.IO.Path.Combine(tempPath, "embodysense-tests", identifier);
-        ServerStatePath = System.IO.Path.Combine(tempPath, "embodysense-test-server-state", identifier);
+        var serverStateParentPath = System.IO.Path.Combine(tempPath, "embodysense-test-server-state");
+        // Parallel fixtures may safely create unique guarded roots only after their shared test-owned parent exists.
+        Directory.CreateDirectory(serverStateParentPath);
+        ServerStatePath = System.IO.Path.Combine(serverStateParentPath, identifier);
         Directory.CreateDirectory(RootPath);
     }
 

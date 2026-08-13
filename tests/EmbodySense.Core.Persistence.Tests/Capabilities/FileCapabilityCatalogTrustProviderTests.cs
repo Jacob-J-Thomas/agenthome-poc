@@ -7,8 +7,32 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Capabilities;
 
+[Collection(Verification.ProcessEnvironmentCollection.Name)]
 public sealed class FileCapabilityCatalogTrustProviderTests
 {
+    [Fact]
+    public void Default_provider_uses_only_an_exact_absolute_process_configured_root()
+    {
+        using var configuredRoot = new TestWorkspace();
+        var previous = Environment.GetEnvironmentVariable(FileCapabilityCatalogTrustProvider.DefaultRootEnvironmentVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(FileCapabilityCatalogTrustProvider.DefaultRootEnvironmentVariable, configuredRoot.RootPath);
+            var provider = FileCapabilityCatalogTrustProvider.CreateDefault();
+
+            Assert.Equal(configuredRoot.RootPath, provider.RootPath);
+            Assert.False(File.Exists(provider.AuthenticationKeyPath));
+
+            Environment.SetEnvironmentVariable(FileCapabilityCatalogTrustProvider.DefaultRootEnvironmentVariable, "relative/server-state");
+            var failure = Assert.Throws<InvalidOperationException>(FileCapabilityCatalogTrustProvider.CreateDefault);
+            Assert.Contains(FileCapabilityCatalogTrustProvider.DefaultRootEnvironmentVariable, failure.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(FileCapabilityCatalogTrustProvider.DefaultRootEnvironmentVariable, previous);
+        }
+    }
+
     [Fact]
     public async Task Provider_read_of_an_existing_empty_root_is_absent_without_initializing_trust()
     {
@@ -649,11 +673,14 @@ public sealed class FileCapabilityCatalogTrustProviderTests
         var firstAnchor = provider.GetAnchorPath(firstIdentity);
         await provider.InitializeAsync(firstIdentity, 0, Digest("quota-first"));
         var filler = new byte[CapabilityCatalogLimits.MaximumTrustAnchorUtf8Bytes];
-        for (var index = 0; index < 256; index++)
-        {
-            var name = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes($"quota-{index}"))).ToLowerInvariant() + ".json";
-            await File.WriteAllBytesAsync(Path.Combine(provider.AnchorsPath, name), filler);
-        }
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, 256),
+            new ParallelOptions { MaxDegreeOfParallelism = 32 },
+            async (index, cancellationToken) =>
+            {
+                var name = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes($"quota-{index}"))).ToLowerInvariant() + ".json";
+                await File.WriteAllBytesAsync(Path.Combine(provider.AnchorsPath, name), filler, cancellationToken);
+            });
 
         await Assert.ThrowsAsync<IOException>(() => provider.InitializeAsync(Identity("quota-second"), 0, Digest("quota-second")));
         Assert.True(File.Exists(firstAnchor));
@@ -666,11 +693,14 @@ public sealed class FileCapabilityCatalogTrustProviderTests
         var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
         var identity = Identity("count-quota");
         await provider.InitializeAsync(identity, 0, Digest("count-quota"));
-        for (var index = 0; index < CapabilityCatalogLimits.MaximumTrustAnchors; index++)
-        {
-            var name = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes($"count-{index}"))).ToLowerInvariant() + ".json";
-            await File.WriteAllBytesAsync(Path.Combine(provider.AnchorsPath, name), [0]);
-        }
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, CapabilityCatalogLimits.MaximumTrustAnchors),
+            new ParallelOptions { MaxDegreeOfParallelism = 32 },
+            async (index, cancellationToken) =>
+            {
+                var name = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes($"count-{index}"))).ToLowerInvariant() + ".json";
+                await File.WriteAllBytesAsync(Path.Combine(provider.AnchorsPath, name), [0], cancellationToken);
+            });
 
         await Assert.ThrowsAsync<IOException>(() => provider.ReadAsync(identity));
     }

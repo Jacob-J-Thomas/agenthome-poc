@@ -3,6 +3,7 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Workspace;
 
+[Collection(SharedDefaultCapabilityTrustCollection.Name)]
 public sealed class WorkspaceStatusReaderTests
 {
     [Fact]

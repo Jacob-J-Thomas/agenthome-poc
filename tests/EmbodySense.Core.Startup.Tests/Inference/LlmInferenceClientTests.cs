@@ -11,7 +11,6 @@ using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Clients.CodexAppServer;
 using EmbodySense.Core.Persistence.Audit;
-using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Inference;
 using EmbodySense.Tests.Support;
@@ -25,7 +24,7 @@ public sealed class LlmInferenceClientTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await PrepareAuditWorkspaceAsync(paths);
         var auditBefore = await File.ReadAllTextAsync(paths.EventsLogPath);
         var transport = new RecordingCodexAppServerTransport();
         await using var client = CreateCodexClient(workspace, transport);
@@ -68,7 +67,7 @@ public sealed class LlmInferenceClientTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await PrepareAuditWorkspaceAsync(paths);
         var transport = new RecordingCodexAppServerTransport();
         await using var client = CreateCodexClient(workspace, transport);
         FileStream? auditLock = null;
@@ -109,7 +108,7 @@ public sealed class LlmInferenceClientTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await PrepareAuditWorkspaceAsync(paths);
         var client = new LlmInferenceClient(new LlmInferenceClientOptions
         {
             Surface = LlmInferenceSurface.AzureAiFoundry,
@@ -138,7 +137,7 @@ public sealed class LlmInferenceClientTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await PrepareAuditWorkspaceAsync(paths);
         var governance = EmbodySenseDeveloperInstructions.Capture();
         var trustedInstructions = new[]
         {
@@ -174,5 +173,11 @@ public sealed class LlmInferenceClientTests
             WorkingDirectory = workspace.RootPath,
             CodexSandbox = "read-only"
         }, codexAppServerTransport: transport);
+    }
+
+    private static async Task PrepareAuditWorkspaceAsync(WorkspacePaths paths)
+    {
+        Directory.CreateDirectory(paths.AuditPath);
+        await File.WriteAllTextAsync(paths.EventsLogPath, string.Empty);
     }
 }

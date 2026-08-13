@@ -57,10 +57,10 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
         trustProvider.RequireDisjointWorkspace(paths.RootPath);
 
         _paths = paths;
-        _pathGuard = new CapabilityCatalogPathGuard(paths.RootPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
-        _trustProvider = trustProvider;
         _timeProvider = timeProvider ?? TimeProvider.System;
-        _authorityTransaction = authorityTransaction ?? new CapabilityAuthorityTransaction(paths);
+        _pathGuard = new CapabilityCatalogPathGuard(paths.RootPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance, timeProvider: _timeProvider);
+        _trustProvider = trustProvider;
+        _authorityTransaction = authorityTransaction ?? new CapabilityAuthorityTransaction(paths, timeProvider: _timeProvider);
     }
 
     /// <inheritdoc />

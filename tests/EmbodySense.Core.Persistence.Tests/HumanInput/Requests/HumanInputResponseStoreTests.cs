@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -32,20 +33,9 @@ public sealed class HumanInputResponseStoreTests
 {
     private static readonly JsonSerializerOptions _responseJsonOptions = new(JsonSerializerDefaults.Web)
     {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) }
     };
-
-    private const string CrossProcessMode = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_MODE";
-    private const string CrossProcessWorkspace = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_WORKSPACE";
-    private const string CrossProcessTrustRoot = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_TRUST_ROOT";
-    private const string CrossProcessGate = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_GATE";
-    private const string CrossProcessReady = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_READY";
-    private const string CrossProcessOutput = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_OUTPUT";
-    private const string CrossProcessOperation = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_OPERATION";
-    private const string CrossProcessResponse = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_ID";
-    private const string CrossProcessActor = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_ACTOR";
-    private const string CrossProcessRole = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_ROLE";
-    private const string CrossProcessBoundary = "EMBODYSENSE_HUMAN_INPUT_RESPONSE_BOUNDARY";
 
     [Fact]
     public async Task Submit_selection_head_and_lifecycle_projection_commit_atomically_and_restart_exactly_once()
@@ -390,44 +380,50 @@ public sealed class HumanInputResponseStoreTests
                 ImmutableArray.Create("role-00"))
         });
         var create = Create(request);
-        var store = Store(paths, trust);
-        await store.CommitAsync(create);
+        var authenticated = false;
+        HumanInputRequestPersistenceBoundary? boundary = null;
+        var store = Store(paths, trust, new HumanInputRequestStoreOptions
+        {
+            AuthenticatedArtifactObserver = _ =>
+            {
+                authenticated = true;
+                return ValueTask.CompletedTask;
+            },
+            DurableBoundaryObserver = (observed, _) =>
+            {
+                boundary = observed;
+                return ValueTask.CompletedTask;
+            }
+        });
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(create)).Status);
+        var seeded = await SeedMaximumResponseArtifactsAsync(paths, trust, request, create);
+        var seededDocument = JsonNode.Parse(await File.ReadAllTextAsync(PrimaryPath(paths)))!.AsObject();
+        var trustState = await trust.ReadAsync(seededDocument["workspaceIdentity"]!.GetValue<string>());
+        Assert.Equal(seeded.Generation, trustState!.CurrentGeneration);
+        Assert.Equal(seededDocument["contentDigest"]!.GetValue<string>(), trustState.CurrentContentDigest);
+        authenticated = false;
+        boundary = null;
         IHumanInputResponseLifecycleStore responses = store;
-        var firstVersion = await AppendMaximumResponseArtifactsAsync(
-            responses,
-            request,
-            create.PrimaryHeadToWrite!,
-            1,
-            "v1");
-        var amend = TransitionMutation(
-            HumanInputRequestLifecycleOperationKind.Amend,
-            request,
-            create.PrimaryHeadToWrite!,
-            firstVersion.Generation,
-            "amend-version",
-            HashC);
-        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(amend)).Status);
-        var amendedRequest = amend.RequestToAppend!;
-        var secondVersion = await AppendMaximumResponseArtifactsAsync(
-            responses,
-            amendedRequest,
-            amend.PrimaryHeadToWrite!,
-            firstVersion.Generation + 1,
-            "v2");
+        var seededRead = await responses.ReadAsync(Reference(seeded.AmendedRequest));
+        Assert.True(authenticated);
+        Assert.Equal(HumanInputResponseLifecycleStoreReadStatus.Ready, seededRead.Status);
         var releaseActor = respondents[0];
         var release = Withdraw(
-            amendedRequest,
-            amend.PrimaryHeadToWrite!,
-            secondVersion.Generation,
+            seeded.AmendedRequest,
+            seeded.AmendedHead,
+            seeded.Generation,
             "v2-release-one",
-            secondVersion.ActiveResponse,
+            seeded.ActiveResponse,
             releaseActor.RespondentId,
             releaseActor.RespondentRoleId);
-        Assert.Equal(HumanInputResponseLifecycleStoreCommitStatus.Committed, (await responses.CommitAsync(release)).Status);
+        var released = await responses.CommitAsync(release);
+        Assert.True(authenticated);
+        Assert.Equal(HumanInputRequestPersistenceBoundary.TrustAdvanced, boundary);
+        Assert.Equal(HumanInputResponseLifecycleStoreCommitStatus.Committed, released.Status);
         var sixtyFifth = Submit(
-            amendedRequest,
-            amend.PrimaryHeadToWrite!,
-            secondVersion.Generation + 1,
+            seeded.AmendedRequest,
+            seeded.AmendedHead,
+            seeded.Generation + 1,
             "v2-submit-65",
             "v2-response-65",
             answer: false,
@@ -436,10 +432,10 @@ public sealed class HumanInputResponseStoreTests
 
         var limited = await responses.CommitAsync(sixtyFifth);
         var firstRead = await responses.ReadAsync(Reference(request));
-        var secondRead = await responses.ReadAsync(Reference(amendedRequest));
+        var secondRead = await responses.ReadAsync(Reference(seeded.AmendedRequest));
 
         Assert.Equal(HumanInputResponseLifecycleStoreCommitStatus.LimitExceeded, limited.Status);
-        Assert.Equal(secondVersion.Generation + 1, limited.StoreGeneration);
+        Assert.Equal(seeded.Generation + 1, limited.StoreGeneration);
         Assert.Equal(HumanInputResponseContractLimits.MaxResponsesPerRequest, firstRead.Snapshot!.Responses.Count);
         Assert.Equal(HumanInputResponseContractLimits.MaxResponsesPerRequest, secondRead.Snapshot!.Responses.Count);
         Assert.DoesNotContain(secondRead.Snapshot.Responses, response => string.Equals(response.ResponseId, "v2-response-65", StringComparison.Ordinal));
@@ -2213,7 +2209,7 @@ public sealed class HumanInputResponseStoreTests
             "user-two",
             "role-two");
 
-        await Task.WhenAll(WaitForPathAsync(firstReady), WaitForPathAsync(secondReady));
+        await Task.WhenAll(WaitForPathAsync(firstReady, first), WaitForPathAsync(secondReady, second));
         await File.WriteAllTextAsync(gate, "go");
         await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));
         await AssertProcessSucceededAsync(first);
@@ -2256,7 +2252,7 @@ public sealed class HumanInputResponseStoreTests
             "user-one",
             "role-one",
             boundary);
-        await WaitForPathAsync(ready);
+        await WaitForPathAsync(ready, process);
         await File.WriteAllTextAsync(gate, "go");
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
         Assert.NotEqual(0, process.ExitCode);
@@ -2284,61 +2280,50 @@ public sealed class HumanInputResponseStoreTests
         Assert.NotNull(read.Snapshot.Selection);
     }
 
-    [Fact]
-    public async Task Cross_process_human_input_response_store_host()
+    private static async Task<(long Generation, HumanInputRequest AmendedRequest, HumanInputRequestLifecycleHead AmendedHead, HumanInputResponseReference ActiveResponse)> SeedMaximumResponseArtifactsAsync(
+        WorkspacePaths paths,
+        TestCapabilityLifecycleTrustProvider trust,
+        HumanInputRequest request,
+        HumanInputRequestLifecycleStoreMutation create)
     {
-        var mode = Environment.GetEnvironmentVariable(CrossProcessMode);
-        if (string.IsNullOrEmpty(mode))
-        {
-            return;
-        }
-
-        var workspace = Environment.GetEnvironmentVariable(CrossProcessWorkspace)!;
-        var trustRoot = Environment.GetEnvironmentVariable(CrossProcessTrustRoot)!;
-        var gate = Environment.GetEnvironmentVariable(CrossProcessGate)!;
-        var ready = Environment.GetEnvironmentVariable(CrossProcessReady)!;
-        var output = Environment.GetEnvironmentVariable(CrossProcessOutput)!;
-        var operationId = Environment.GetEnvironmentVariable(CrossProcessOperation)!;
-        var responseId = Environment.GetEnvironmentVariable(CrossProcessResponse)!;
-        var actorId = Environment.GetEnvironmentVariable(CrossProcessActor)!;
-        var roleId = Environment.GetEnvironmentVariable(CrossProcessRole)!;
-        await File.WriteAllTextAsync(ready, "ready");
-        await WaitForPathAsync(gate);
-        HumanInputRequestStoreOptions? options = null;
-        if (mode == "crash")
-        {
-            var boundary = Enum.Parse<HumanInputRequestPersistenceBoundary>(Environment.GetEnvironmentVariable(CrossProcessBoundary)!);
-            options = new HumanInputRequestStoreOptions
-            {
-                DurableBoundaryObserver = (observed, _) =>
-                {
-                    if (observed == boundary)
-                    {
-                        TerminateCrossProcessHost();
-                    }
-                    return ValueTask.CompletedTask;
-                }
-            };
-        }
-
-        var request = mode == "writer" ? ManualRequest(includeSecondRespondent: true) : CreateMutation().RequestToAppend!;
-        var head = Head(request, 1, HumanInputRequestLifecycleStatus.Pending, 0, null, null, "create-one", Time);
-        var mutation = Submit(request, head, 1, operationId, responseId, answer: mode == "crash", actorId, roleId);
-        IHumanInputResponseLifecycleStore store = new HumanInputRequestStore(
-            new WorkspacePaths(workspace),
-            new FileCapabilityCatalogTrustProvider(trustRoot),
-            options);
-        var result = await store.CommitAsync(mutation);
-        await File.WriteAllTextAsync(output, result.Status.ToString());
+        var root = JsonNode.Parse(await File.ReadAllTextAsync(PrimaryPath(paths)))!.AsObject();
+        var firstVersion = AppendMaximumResponseArtifacts(
+            root,
+            request,
+            create.PrimaryHeadToWrite!,
+            1,
+            "v1");
+        var amend = TransitionMutation(
+            HumanInputRequestLifecycleOperationKind.Amend,
+            request,
+            create.PrimaryHeadToWrite!,
+            firstVersion.Generation,
+            "amend-version",
+            HashC);
+        root["operations"]!.AsArray().Add(RequestOperationEnvelope(amend.Operation));
+        root["requestVersions"]!.AsArray().Add(ToJsonNode(amend.RequestToAppend!));
+        root["heads"]!.AsArray()[0] = ToJsonNode(amend.PrimaryHeadToWrite!);
+        var amendedRequest = amend.RequestToAppend!;
+        var secondVersion = AppendMaximumResponseArtifacts(
+            root,
+            amendedRequest,
+            amend.PrimaryHeadToWrite!,
+            firstVersion.Generation + 1,
+            "v2");
+        root["generation"] = secondVersion.Generation;
+        await ReplaceAuthenticatedAsync(paths, trust, root);
+        return (secondVersion.Generation, amendedRequest, amend.PrimaryHeadToWrite!, secondVersion.ActiveResponse);
     }
 
-    private static async Task<(long Generation, HumanInputResponseReference ActiveResponse)> AppendMaximumResponseArtifactsAsync(
-        IHumanInputResponseLifecycleStore store,
+    private static (long Generation, HumanInputResponseReference ActiveResponse) AppendMaximumResponseArtifacts(
+        JsonObject root,
         HumanInputRequest request,
         HumanInputRequestLifecycleHead head,
         long generation,
         string operationPrefix)
     {
+        var operations = root["operations"]!.AsArray();
+        var responseArtifacts = root["responseArtifacts"]!.AsArray();
         HumanInputResponseReference? activeResponse = null;
         var respondents = request.EligibleRespondents;
         var batchCount = HumanInputResponseContractLimits.MaxResponsesPerRequest / respondents.Length;
@@ -2358,7 +2343,8 @@ public sealed class HumanInputResponseStoreTests
                     answer: false,
                     respondent.RespondentId,
                     respondent.RespondentRoleId);
-                Assert.Equal(HumanInputResponseLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(submit)).Status);
+                responseArtifacts.Add(ResponseArtifactNode(submit.ResponseToAppend!));
+                operations.Add(ResponseOperationEnvelope(submit.Operation));
                 generation++;
                 batchResponses.Add((submit.Operation.SubmittedResponse!, respondent));
             }
@@ -2380,12 +2366,57 @@ public sealed class HumanInputResponseStoreTests
                     item.Response,
                     item.Respondent.RespondentId,
                     item.Respondent.RespondentRoleId);
-                Assert.Equal(HumanInputResponseLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(withdraw)).Status);
+                operations.Add(ResponseOperationEnvelope(withdraw.Operation));
                 generation++;
             }
         }
 
         return (generation, activeResponse!);
+    }
+
+    private static JsonObject RequestOperationEnvelope(HumanInputRequestLifecycleOperationEvidence operation)
+    {
+        var evidence = ToJsonNode(operation).AsObject();
+        evidence["actorId"] = operation.ActorId.Value;
+        evidence["reason"] = operation.Reason.Value;
+        if (operation.GrantReference is { } grant)
+        {
+            evidence["grantReference"] = new JsonObject
+            {
+                ["grantId"] = grant.GrantId.Value,
+                ["revision"] = grant.Revision.ToString(),
+                ["contentHash"] = grant.ContentHash
+            };
+        }
+        return new()
+        {
+            ["schemaVersion"] = 1,
+            ["operationId"] = operation.OperationId,
+            ["family"] = "request-lifecycle",
+            ["requestLifecycle"] = evidence,
+            ["responseLifecycle"] = null
+        };
+    }
+
+    private static JsonObject ResponseOperationEnvelope(HumanInputResponseOperationEvidence operation)
+    {
+        var evidence = ToJsonNode(operation).AsObject();
+        evidence["actorId"] = operation.ActorId.Value;
+        return new()
+        {
+            ["schemaVersion"] = 1,
+            ["operationId"] = operation.OperationId,
+            ["family"] = "response-lifecycle",
+            ["requestLifecycle"] = null,
+            ["responseLifecycle"] = evidence
+        };
+    }
+
+    private static JsonObject ResponseArtifactNode(HumanInputResponseArtifact artifact)
+    {
+        var node = ToJsonNode(artifact).AsObject();
+        node["actorId"] = artifact.ActorId.Value;
+        return node;
     }
 
     private static HumanInputResponseLifecycleStoreMutation Submit(
@@ -2786,6 +2817,23 @@ public sealed class HumanInputResponseStoreTests
             AuthenticationTag);
     }
 
+    private static async Task ReplaceAuthenticatedAsync(
+        WorkspacePaths paths,
+        TestCapabilityLifecycleTrustProvider trust,
+        JsonObject root)
+    {
+        root["contentDigest"] = string.Empty;
+        root["authenticationTag"] = string.Empty;
+        var canonical = JsonSerializer.Serialize(root, _responseJsonOptions);
+        var contentDigest = CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes(canonical)).Value;
+        var workspaceIdentity = root["workspaceIdentity"]!.GetValue<string>();
+        var generation = root["generation"]!.GetValue<long>();
+        root["contentDigest"] = contentDigest;
+        root["authenticationTag"] = await trust.AuthenticateArtifactAsync(workspaceIdentity, generation, contentDigest);
+        await File.WriteAllTextAsync(PrimaryPath(paths), JsonSerializer.Serialize(root, _responseJsonOptions) + Environment.NewLine);
+        trust.SetCurrent(workspaceIdentity, generation, contentDigest);
+    }
+
     private static JsonNode ToJsonNode<T>(T value)
         => JsonSerializer.SerializeToNode(value, _responseJsonOptions)
             ?? throw new InvalidOperationException("The test value did not serialize.");
@@ -2803,6 +2851,11 @@ public sealed class HumanInputResponseStoreTests
         string roleId,
         HumanInputRequestPersistenceBoundary? boundary = null)
     {
+        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+        var targetFramework = outputDirectory.Name;
+        var configuration = outputDirectory.Parent?.Name ?? throw new DirectoryNotFoundException("The active test build configuration could not be resolved.");
+        var hostAssembly = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", configuration, targetFramework, "EmbodySense.CancellationHost.dll");
+        Assert.True(File.Exists(hostAssembly), $"The cross-process child host assembly was not built at `{hostAssembly}`.");
         var startInfo = new ProcessStartInfo("dotnet")
         {
             WorkingDirectory = Path.GetTempPath(),
@@ -2811,34 +2864,46 @@ public sealed class HumanInputResponseStoreTests
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(HumanInputResponseStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputResponseStoreTests.Cross_process_human_input_response_store_host");
+        startInfo.ArgumentList.Add("exec");
+        startInfo.ArgumentList.Add(hostAssembly);
+        startInfo.ArgumentList.Add("human-input-response");
+        startInfo.ArgumentList.Add(mode);
+        startInfo.ArgumentList.Add(workspace);
+        startInfo.ArgumentList.Add(trustRoot);
+        startInfo.ArgumentList.Add(gate);
+        startInfo.ArgumentList.Add(ready);
+        startInfo.ArgumentList.Add(output);
+        startInfo.ArgumentList.Add(operationId);
+        startInfo.ArgumentList.Add(responseId);
+        startInfo.ArgumentList.Add(actorId);
+        startInfo.ArgumentList.Add(roleId);
+        startInfo.ArgumentList.Add(boundary?.ToString() ?? "none");
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        startInfo.Environment[CrossProcessMode] = mode;
-        startInfo.Environment[CrossProcessWorkspace] = workspace;
-        startInfo.Environment[CrossProcessTrustRoot] = trustRoot;
-        startInfo.Environment[CrossProcessGate] = gate;
-        startInfo.Environment[CrossProcessReady] = ready;
-        startInfo.Environment[CrossProcessOutput] = output;
-        startInfo.Environment[CrossProcessOperation] = operationId;
-        startInfo.Environment[CrossProcessResponse] = responseId;
-        startInfo.Environment[CrossProcessActor] = actorId;
-        startInfo.Environment[CrossProcessRole] = roleId;
-        if (boundary is not null)
-        {
-            startInfo.Environment[CrossProcessBoundary] = boundary.Value.ToString();
-        }
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process Human Input response store host did not start.");
     }
 
-    private static async Task WaitForPathAsync(string path)
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "EmbodySense.sln")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName ?? throw new DirectoryNotFoundException("The repository root could not be located from the test output directory.");
+    }
+
+    private static async Task WaitForPathAsync(string path, Process? process = null)
     {
         var wait = Stopwatch.StartNew();
         while (!File.Exists(path))
         {
-            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(15), $"Cross-process Human Input response store host did not publish `{path}`.");
+            if (process is { HasExited: true })
+            {
+                Assert.Fail($"Cross-process Human Input response store host exited with code {process.ExitCode} before publishing `{path}`.");
+            }
+
+            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(30), $"Cross-process Human Input response store host did not publish `{path}`.");
             await Task.Delay(10);
         }
     }
@@ -2848,12 +2913,6 @@ public sealed class HumanInputResponseStoreTests
         var error = await process.StandardError.ReadToEndAsync();
         var output = await process.StandardOutput.ReadToEndAsync();
         Assert.True(process.ExitCode == 0, error + Environment.NewLine + output);
-    }
-
-    private static void TerminateCrossProcessHost()
-    {
-        Process.GetCurrentProcess().Kill();
-        Thread.Sleep(Timeout.Infinite);
     }
 
     private sealed class CountingRejectingArtifactTrustProvider(ICapabilityCatalogTrustProvider inner)

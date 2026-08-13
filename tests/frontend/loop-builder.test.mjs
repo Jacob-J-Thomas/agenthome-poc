@@ -9,6 +9,9 @@ const builderSource = fs.readFileSync(
   new URL("../../src/EmbodySense.Web/wwwroot/loop-builder.js", import.meta.url),
   "utf8",
 );
+const builderScript = new vm.Script(builderSource, {
+  filename: "loop-builder.js",
+});
 const loopsHtml = fs.readFileSync(
   new URL("../../src/EmbodySense.Web/wwwroot/index.html", import.meta.url),
   "utf8",
@@ -5973,6 +5976,7 @@ test("a runtime model change allocates a new operation without discarding the ol
 test("a request conflict reconciles an older admitted receipt before releasing its operation", async () => {
   const server = new FakeFetchServer(createCatalog());
   const app = await loadLoopBuilder({ server });
+  app.context.waitForInvocationReconciliationRetry = async () => {};
   await selectCustomLoop(app);
   let operationId = null;
   let receiptAvailable = false;
@@ -7076,9 +7080,10 @@ test("different unresolved invocation requests retain independent operation iden
   );
 });
 
-test("missing invocation evidence stops at the bounded reconciliation deadline as unknown", async () => {
+test("missing invocation evidence stops at the bounded reconciliation attempt limit as unknown", async () => {
   const server = new FakeFetchServer(createCatalog());
   const app = await loadLoopBuilder({ server });
+  app.context.waitForInvocationReconciliationRetry = async () => {};
 
   const result = await app.context.reconcileInvocationOperation(
     "invoke-never-visible",
@@ -8758,7 +8763,7 @@ async function loadLoopBuilder(options = {}) {
     window,
   };
   context.globalThis = context;
-  vm.runInNewContext(builderSource, context, { filename: "loop-builder.js" });
+  builderScript.runInNewContext(context);
   await flushAsyncWork();
   document.elementsObject.approvalPanel =
     document.elementsObject.loopApprovalPanel;

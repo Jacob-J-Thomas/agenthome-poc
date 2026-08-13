@@ -10,7 +10,6 @@ namespace EmbodySense.Core.Startup.Capabilities;
 /// <summary>Seeds and verifies shipped implementations without assigning them to a loop or granting authority.</summary>
 public sealed class BuiltInCapabilityCatalogSeeder
 {
-    private const int MaximumConvergenceAttempts = 8;
     private readonly ICapabilityCatalogTrustProvider _trustProvider;
     private readonly IBuiltInCapabilityCatalogSeedObserver? _observer;
 
@@ -62,7 +61,10 @@ public sealed class BuiltInCapabilityCatalogSeeder
 
     private async Task SeedDescriptorAsync(CapabilityCatalogService service, CapabilityCatalogStore store, CapabilityDescriptor descriptor, CancellationToken cancellationToken)
     {
-        for (var attempt = 0; attempt < MaximumConvergenceAttempts; attempt++)
+        // Every nonterminal pass applies or observes one finite catalog-wide bootstrap operation; one final pass observes convergence.
+        var maximumConvergenceAttempts = checked(
+            (BuiltInCapabilityCatalog.Descriptors.Count * BootstrapOperationIds(descriptor.Id).Length) + 1);
+        for (var attempt = 0; attempt < maximumConvergenceAttempts; attempt++)
         {
             var (existing, catalogRevision) = await FindAsync(service, descriptor.Id, cancellationToken);
             if (existing is null)
@@ -77,15 +79,7 @@ public sealed class BuiltInCapabilityCatalogSeeder
                 await ObserveAppliedAsync(declared, cancellationToken);
                 continue;
             }
-            else if (!CapabilityDescriptorHash.TryCompute(existing.Descriptor, out var existingHash, out _) || !CapabilityDescriptorHash.TryCompute(descriptor, out var expectedHash, out _) || !existingHash!.Equals(expectedHash))
-            {
-                throw new InvalidOperationException($"Built-in capability `{descriptor.Id.Value}` conflicts with the retained descriptor.");
-            }
-
-            if (existing!.Lifecycle.Retirement == CapabilityRetirementState.Removed)
-            {
-                throw new InvalidOperationException($"Built-in capability `{descriptor.Id.Value}` is retained as removed and cannot be resurrected automatically.");
-            }
+            RequireMatchingRetainedDescriptor(existing, descriptor);
 
             var provedGeneration = await ProveInterruptedBootstrapAsync(store, descriptor, existing, cancellationToken);
             if (provedGeneration is null)
@@ -149,6 +143,21 @@ public sealed class BuiltInCapabilityCatalogSeeder
         }
 
         throw new InvalidOperationException($"Built-in capability `{descriptor.Id.Value}` did not converge after bounded optimistic retries.");
+    }
+
+    private static void RequireMatchingRetainedDescriptor(CapabilityCatalogEntry existing, CapabilityDescriptor descriptor)
+    {
+        if (!CapabilityDescriptorHash.TryCompute(existing.Descriptor, out var existingHash, out _)
+            || !CapabilityDescriptorHash.TryCompute(descriptor, out var expectedHash, out _)
+            || !existingHash!.Equals(expectedHash))
+        {
+            throw new InvalidOperationException($"Built-in capability `{descriptor.Id.Value}` conflicts with the retained descriptor.");
+        }
+
+        if (existing.Lifecycle.Retirement == CapabilityRetirementState.Removed)
+        {
+            throw new InvalidOperationException($"Built-in capability `{descriptor.Id.Value}` is retained as removed and cannot be resurrected automatically.");
+        }
     }
 
     private Task ObserveAppliedAsync(CapabilityCatalogMutationResult result, CancellationToken cancellationToken)

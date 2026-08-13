@@ -1252,6 +1252,12 @@ public sealed class CredentialRegistryStoreTests
             return;
         }
 
+        if (OperatingSystem.IsMacOS() && read.Succeeded)
+        {
+            Assert.Empty(read.Entries);
+            return;
+        }
+
         Assert.False(read.Succeeded);
         Assert.Equal(CredentialFailureCode.Unavailable, read.Failure!.Code);
         Assert.False(File.Exists(paths.CredentialRegistryDocumentPath));

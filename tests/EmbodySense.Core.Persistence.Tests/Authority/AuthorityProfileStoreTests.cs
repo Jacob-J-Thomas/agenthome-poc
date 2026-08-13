@@ -354,20 +354,17 @@ public sealed class AuthorityProfileStoreTests : IDisposable
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = Store(paths);
-        for (var index = 0; index < AuthorityProfileStoreLimits.MaximumProfiles; index++)
-        {
-            var profile = Profile($"profile-{index:00}");
-            Assert.Equal(AuthorityProfileMutationStatus.Applied, (await store.MutateAsync(Create(profile, $"create-profile-{index:00}"))).Status);
-        }
+        var trust = new MutableAuthenticatedTrustProvider();
+        var store = new AuthorityProfileStore(paths, trust);
+        await SeedMaximumProfilesAsync(paths, trust, store);
 
         var rejected = await store.MutateAsync(Create(Profile("profile-overflow"), "create-profile-overflow"));
-        var retained = await Store(paths).ReadAsync("profile-31");
-        var overflow = await Store(paths).ReadAsync("profile-overflow");
+        var retained = await new AuthorityProfileStore(paths, trust).ReadAsync("profile-031");
+        var overflow = await new AuthorityProfileStore(paths, trust).ReadAsync("profile-overflow");
 
         Assert.Equal(AuthorityProfileMutationStatus.Unavailable, rejected.Status);
         Assert.Equal(AuthorityProfileReadStatus.Available, retained.Status);
-        Assert.Equal("profile-31", retained.Record!.ProfileId.Value);
+        Assert.Equal("profile-031", retained.Record!.ProfileId.Value);
         Assert.Equal(AuthorityProfileReadStatus.NotFound, overflow.Status);
     }
 
@@ -643,6 +640,107 @@ public sealed class AuthorityProfileStoreTests : IDisposable
     }
 
     private AuthorityProfileStore Store(WorkspacePaths paths) => new(paths, _trustProvider);
+
+    private static async Task SeedMaximumProfilesAsync(
+        WorkspacePaths paths,
+        MutableAuthenticatedTrustProvider trust,
+        AuthorityProfileStore store)
+    {
+        var firstProfile = Profile("profile-000");
+        Assert.Equal(
+            AuthorityProfileMutationStatus.Applied,
+            (await store.MutateAsync(Create(firstProfile, "create-profile-000"))).Status);
+
+        var initial = JsonNode.Parse(await File.ReadAllTextAsync(paths.AuthorityProfilesDocumentPath))!.AsObject();
+        var workspaceIdentity = initial["workspaceIdentity"]!.GetValue<string>();
+        var recordedAtUtc = initial["operations"]![0]!["recordedAtUtc"]!.GetValue<DateTimeOffset>();
+        var profiles = new List<AuthorityProfileSeedDocument>(AuthorityProfileStoreLimits.MaximumProfiles);
+        var operations = new List<AuthorityProfileOperationSeedDocument>(AuthorityProfileStoreLimits.MaximumProfiles);
+        for (var index = 0; index < AuthorityProfileStoreLimits.MaximumProfiles; index++)
+        {
+            var profile = Profile($"profile-{index:D3}");
+            var operation = Create(profile, $"create-profile-{index:D3}");
+            Assert.True(AuthorityProfileJson.TrySerialize(profile, out var profileJson, out _));
+            Assert.True(AuthorityProfileHash.TryCompute(profile, out var profileHash, out _));
+            profiles.Add(new AuthorityProfileSeedDocument(
+                profile.ProfileId.Value,
+                [new AuthorityProfileRevisionSeedDocument(1, profileJson!, profileHash!.Value, operation.OperationId, recordedAtUtc)],
+                null));
+            operations.Add(new AuthorityProfileOperationSeedDocument(
+                operation.OperationId,
+                ComputeProfileRequestHash(operation),
+                operation.Kind,
+                AuthorityProfileMutationStatus.Applied,
+                profile.ProfileId.Value,
+                1,
+                operation.ActorId.Value,
+                operation.Reason.Value,
+                recordedAtUtc));
+        }
+
+        var document = new AuthorityProfileStoreSeedDocument(
+            1,
+            workspaceIdentity,
+            AuthorityProfileStoreLimits.MaximumProfiles,
+            profiles,
+            operations,
+            [],
+            [],
+            string.Empty,
+            string.Empty);
+        var digest = CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(document, _jsonOptions))).Value;
+        var authenticated = document with
+        {
+            ContentDigest = digest,
+            AuthenticationTag = MutableAuthenticatedTrustProvider.AuthenticationTag
+        };
+        var json = JsonSerializer.Serialize(authenticated, _jsonOptions) + Environment.NewLine;
+        await File.WriteAllTextAsync(paths.AuthorityProfilesDocumentPath, json);
+        await File.WriteAllTextAsync(paths.AuthorityProfilesProofPath, json);
+        trust.SetCurrent(workspaceIdentity, document.Generation, digest);
+    }
+
+    private static string ComputeProfileRequestHash(AuthorityProfileMutation mutation)
+    {
+        Assert.NotNull(mutation.Profile);
+        Assert.True(AuthorityProfileJson.TrySerialize(mutation.Profile, out var profileJson, out _));
+        var content = $"{(int)mutation.Kind}\n{mutation.OperationId}\n{mutation.ExpectedRevision}\n{mutation.Profile.ProfileId.Value}\n{(int?)mutation.Status}\n{profileJson}\n{mutation.ActorId.Value}\n{mutation.Reason.Value}";
+        return CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes(content)).Value;
+    }
+
+    private sealed record AuthorityProfileStoreSeedDocument(
+        int SchemaVersion,
+        string WorkspaceIdentity,
+        long Generation,
+        IReadOnlyList<AuthorityProfileSeedDocument> Profiles,
+        IReadOnlyList<AuthorityProfileOperationSeedDocument> Operations,
+        IReadOnlyList<object> Grants,
+        IReadOnlyList<object> GrantOperations,
+        string ContentDigest,
+        string AuthenticationTag);
+
+    private sealed record AuthorityProfileSeedDocument(
+        string ProfileId,
+        IReadOnlyList<AuthorityProfileRevisionSeedDocument> Revisions,
+        object? Tombstone);
+
+    private sealed record AuthorityProfileRevisionSeedDocument(
+        int Revision,
+        string ProfileJson,
+        string ProfileHash,
+        string OperationId,
+        DateTimeOffset RecordedAtUtc);
+
+    private sealed record AuthorityProfileOperationSeedDocument(
+        string OperationId,
+        string RequestHash,
+        AuthorityProfileMutationKind Kind,
+        AuthorityProfileMutationStatus Outcome,
+        string ProfileId,
+        int? ResultingRevision,
+        string ActorId,
+        string Reason,
+        DateTimeOffset RecordedAtUtc);
 
     private async Task<JsonObject> CreateAuthenticatedNullOperationDocumentAsync(WorkspacePaths paths)
     {

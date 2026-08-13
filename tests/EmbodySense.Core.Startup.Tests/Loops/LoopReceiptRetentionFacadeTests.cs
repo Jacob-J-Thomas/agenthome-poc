@@ -12,6 +12,7 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Loops;
 
+[Collection(SharedDefaultCapabilityTrustCollection.Name)]
 public sealed class LoopReceiptRetentionFacadeTests
 {
     public static TheoryData<string, LoopReceiptRetentionHealth> BlockReasonCases => new()

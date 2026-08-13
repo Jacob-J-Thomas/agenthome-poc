@@ -19,16 +19,6 @@ namespace EmbodySense.Core.Persistence.Tests.Loops.Revisions;
 
 public sealed class GovernedLoopRevisionLifecycleStoreTests
 {
-    private const string CrossProcessMode = "EMBODYSENSE_REVISION_STORE_MODE";
-    private const string CrossProcessWorkspace = "EMBODYSENSE_REVISION_STORE_WORKSPACE";
-    private const string CrossProcessTrustRoot = "EMBODYSENSE_REVISION_STORE_TRUST_ROOT";
-    private const string CrossProcessGate = "EMBODYSENSE_REVISION_STORE_GATE";
-    private const string CrossProcessReady = "EMBODYSENSE_REVISION_STORE_READY";
-    private const string CrossProcessOutput = "EMBODYSENSE_REVISION_STORE_OUTPUT";
-    private const string CrossProcessGraph = "EMBODYSENSE_REVISION_STORE_GRAPH";
-    private const string CrossProcessRevision = "EMBODYSENSE_REVISION_STORE_REVISION";
-    private const string CrossProcessOperation = "EMBODYSENSE_REVISION_STORE_OPERATION";
-    private const string CrossProcessRequestHash = "EMBODYSENSE_REVISION_STORE_REQUEST_HASH";
     private const string HashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string HashB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private const string HashC = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -931,64 +921,6 @@ public sealed class GovernedLoopRevisionLifecycleStoreTests
         Assert.Equal(operation, (await restarted.ReadGraphAsync("graph-one")).Snapshot!.Operations[^1]);
     }
 
-    [Fact]
-    public async Task Cross_process_revision_store_host()
-    {
-        var mode = Environment.GetEnvironmentVariable(CrossProcessMode);
-        if (string.IsNullOrEmpty(mode))
-        {
-            return;
-        }
-
-        var workspace = Environment.GetEnvironmentVariable(CrossProcessWorkspace)!;
-        var trustRoot = Environment.GetEnvironmentVariable(CrossProcessTrustRoot)!;
-        var gate = Environment.GetEnvironmentVariable(CrossProcessGate)!;
-        var ready = Environment.GetEnvironmentVariable(CrossProcessReady)!;
-        var output = Environment.GetEnvironmentVariable(CrossProcessOutput)!;
-        var graph = Environment.GetEnvironmentVariable(CrossProcessGraph)!;
-        var revision = Environment.GetEnvironmentVariable(CrossProcessRevision)!;
-        var operation = Environment.GetEnvironmentVariable(CrossProcessOperation)!;
-        var requestHash = Environment.GetEnvironmentVariable(CrossProcessRequestHash)!;
-        await File.WriteAllTextAsync(ready, "ready");
-        await WaitForPathAsync(gate);
-        GovernedLoopRevisionStoreOptions? options = mode == "crash-primary"
-            ? new GovernedLoopRevisionStoreOptions
-            {
-                DurableBoundaryObserver = (boundary, _) =>
-                {
-                    if (boundary == GovernedLoopRevisionPersistenceBoundary.PrimaryPublished)
-                    {
-                        TerminateCrossProcessHost();
-                    }
-
-                    return ValueTask.CompletedTask;
-                }
-            }
-            : null;
-        var store = new GovernedLoopRevisionLifecycleStore(
-            new WorkspacePaths(workspace),
-            new FileCapabilityCatalogTrustProvider(trustRoot),
-            options);
-        var mutation = CreateDraftMutation(graph, revision, operation, requestHash, 0);
-        var retryWindow = Stopwatch.StartNew();
-        GovernedLoopRevisionStoreCommitResult result;
-        do
-        {
-            result = await store.CommitAsync(mutation);
-            if (mode != "writer"
-                || result.Status != GovernedLoopRevisionStoreCommitStatus.Unavailable
-                || retryWindow.Elapsed >= TimeSpan.FromSeconds(15))
-            {
-                break;
-            }
-
-            await Task.Delay(50);
-        }
-        while (true);
-
-        await File.WriteAllTextAsync(output, result.Status.ToString());
-    }
-
     private static GovernedLoopRevisionLifecycleStore Store(
         WorkspacePaths paths,
         ICapabilityCatalogTrustProvider trust,
@@ -1039,36 +971,7 @@ public sealed class GovernedLoopRevisionLifecycleStoreTests
         string operationId,
         string requestHash,
         long generation)
-    {
-        var revision = Revision(graphId, revisionId, HashA);
-        var head = GovernedLoopRevisionLifecycleHeadFactory.Create(
-            1,
-            graphId,
-            1,
-            GovernedLoopRevisionLifecycleStatus.Draft,
-            revision,
-            null,
-            operationId,
-            _time);
-        var artifact = GovernedLoopRevisionArtifactFactory.Create(1, revision, null, null, operationId, "actor-one", _time);
-        var operation = GovernedLoopRevisionOperationEvidenceFactory.Create(
-            1,
-            operationId,
-            "actor-one",
-            requestHash,
-            GovernedLoopRevisionOperationKind.CreateDraft,
-            GovernedLoopRevisionOperationOutcome.Committed,
-            GovernedLoopRevisionOperationFailureCode.None,
-            null,
-            head,
-            revision,
-            null,
-            null,
-            HashB,
-            null,
-            _time);
-        return new GovernedLoopRevisionStoreMutation(graphId, generation, operation, artifact, head);
-    }
+        => GovernedLoopRevisionLifecycleStoreTestData.CreateDraftMutation(graphId, revisionId, operationId, requestHash, generation);
 
     private static GovernedLoopRevisionStoreMutation ReplaceDraftMutation(
         GovernedLoopRevisionStoreMutation previous,
@@ -1207,30 +1110,18 @@ public sealed class GovernedLoopRevisionLifecycleStoreTests
         string operation,
         string requestHash)
     {
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            WorkingDirectory = Path.GetTempPath(),
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(GovernedLoopRevisionLifecycleStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.Loops.Revisions.GovernedLoopRevisionLifecycleStoreTests.Cross_process_revision_store_host");
-        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        startInfo.Environment[CrossProcessMode] = mode;
-        startInfo.Environment[CrossProcessWorkspace] = workspace;
-        startInfo.Environment[CrossProcessTrustRoot] = trustRoot;
-        startInfo.Environment[CrossProcessGate] = gate;
-        startInfo.Environment[CrossProcessReady] = ready;
-        startInfo.Environment[CrossProcessOutput] = output;
-        startInfo.Environment[CrossProcessGraph] = graph;
-        startInfo.Environment[CrossProcessRevision] = revision;
-        startInfo.Environment[CrossProcessOperation] = operation;
-        startInfo.Environment[CrossProcessRequestHash] = requestHash;
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process revision-store test host did not start.");
+        return Verification.CancellationHostProcess.Start(
+            "governed-loop-revision-store",
+            mode,
+            workspace,
+            trustRoot,
+            gate,
+            ready,
+            output,
+            graph,
+            revision,
+            operation,
+            requestHash);
     }
 
     private static async Task WaitForPathAsync(string path)
@@ -1248,12 +1139,6 @@ public sealed class GovernedLoopRevisionLifecycleStoreTests
         var error = await process.StandardError.ReadToEndAsync();
         var output = await process.StandardOutput.ReadToEndAsync();
         Assert.True(process.ExitCode == 0, error + Environment.NewLine + output);
-    }
-
-    private static void TerminateCrossProcessHost()
-    {
-        Process.GetCurrentProcess().Kill();
-        Thread.Sleep(Timeout.Infinite);
     }
 
     private sealed class FailAfterPrimaryRenameBarrier : ICapabilityCatalogDurabilityBarrier

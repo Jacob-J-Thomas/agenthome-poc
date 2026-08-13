@@ -26,18 +26,21 @@ using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
-public sealed class CustomLoopRuntimeTests
+// Scenario methods stay centralized so the scheduling wrappers preserve the exact existing behavior.
+// Every scenario owns its workspace and provider process; this type must not gain mutable shared state.
+internal static class CustomLoopRuntimeTests
 {
-    private static readonly TimeSpan _providerAttemptStartTimeout = TimeSpan.FromSeconds(30);
+    private const int ProviderSynchronizationTimeoutMilliseconds = 30_000;
+    private static readonly TimeSpan _providerAttemptStartTimeout = TimeSpan.FromMilliseconds(ProviderSynchronizationTimeoutMilliseconds);
 
-    [Fact]
-    public async Task Context_capture_truncates_role_and_conversation_sources_only_at_valid_utf16_boundaries()
+    internal static async Task Context_capture_truncates_role_and_conversation_sources_only_at_valid_utf16_boundaries()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -59,7 +62,7 @@ public sealed class CustomLoopRuntimeTests
             + new string('p', TailBoundaryOffset - 2)
             + "😀"
             + new string('p', conversationTailCharacters - 1);
-        _ = await runtime.RunTurnAsync(oversizedPrompt);
+        await AppendFakeConversationTurnAsync(workspace, oversizedPrompt);
 
         var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-unicode-context", "capture Unicode safely"));
 
@@ -72,8 +75,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.True(HasValidSurrogatePairs(conversationSource.Content));
     }
 
-    [Fact]
-    public async Task Public_runtime_rejects_malformed_invocations_and_durably_replays_a_missing_loop_outcome()
+    internal static async Task Public_runtime_rejects_malformed_invocations_and_durably_replays_a_missing_loop_outcome()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -117,8 +119,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
-    public async Task Public_runtime_preserves_unsupported_discovery_index_cleanup_guidance_during_admission()
+    internal static async Task Public_runtime_preserves_unsupported_discovery_index_cleanup_guidance_during_admission()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -142,8 +143,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal("Admitted", retry.AdmissionStatus);
     }
 
-    [Fact]
-    public async Task Public_runtime_translates_unsupported_discovery_index_schema_for_run_list_reads()
+    internal static async Task Public_runtime_translates_unsupported_discovery_index_schema_for_run_list_reads()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -162,8 +162,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal(UnsupportedIndex, await File.ReadAllTextAsync(indexPath));
     }
 
-    [Fact]
-    public async Task Invocation_quota_pressure_prunes_expired_completed_receipts_before_accepting_a_new_operation()
+    internal static async Task Invocation_quota_pressure_prunes_expired_completed_receipts_before_accepting_a_new_operation()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -183,8 +182,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.True(File.Exists(Path.Combine(paths.CustomLoopInvocationReceiptRetentionPath, "active.json")));
     }
 
-    [Fact]
-    public async Task Completed_invocation_receipt_cannot_replay_after_the_logical_conversation_is_replaced()
+    internal static async Task Completed_invocation_receipt_cannot_replay_after_the_logical_conversation_is_replaced()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -204,8 +202,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.DoesNotContain("private prompt", await File.ReadAllTextAsync(Path.Combine(new WorkspacePaths(workspace.RootPath).CustomLoopInvocationOperationsPath, input.OperationId + ".json")), StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task Bound_invocation_replay_returns_a_structured_failure_when_conversation_identity_cannot_be_read()
+    internal static async Task Bound_invocation_replay_returns_a_structured_failure_when_conversation_identity_cannot_be_read()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -222,8 +219,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.False(replay.WasDispatched);
     }
 
-    [Fact]
-    public async Task New_terminal_binding_returns_a_structured_failure_when_conversation_identity_cannot_be_read()
+    internal static async Task New_terminal_binding_returns_a_structured_failure_when_conversation_identity_cannot_be_read()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -242,8 +238,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal(CustomLoopInvocationBindingState.Unbound, receipt.BindingState);
     }
 
-    [Fact]
-    public async Task Rejected_invocation_replay_preserves_structured_validation_errors()
+    internal static async Task Rejected_invocation_replay_preserves_structured_validation_errors()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -260,8 +255,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
-    public async Task Audit_unavailable_receipt_replays_a_valid_nonterminal_run_relationship()
+    internal static async Task Audit_unavailable_receipt_replays_a_valid_nonterminal_run_relationship()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -282,8 +276,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
-    public async Task Audit_unavailable_receipt_replays_a_valid_operation_conflict_run_relationship()
+    internal static async Task Audit_unavailable_receipt_replays_a_valid_operation_conflict_run_relationship()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -306,8 +299,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
-    public async Task Rejected_receipt_replays_against_its_intentionally_deleted_run_tombstone()
+    internal static async Task Rejected_receipt_replays_against_its_intentionally_deleted_run_tombstone()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -336,8 +328,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
-    public async Task Definition_read_failure_is_bound_and_replayed_without_repeating_the_failed_read()
+    internal static async Task Definition_read_failure_is_bound_and_replayed_without_repeating_the_failed_read()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -359,8 +350,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.DoesNotContain("private prompt", await File.ReadAllTextAsync(Path.Combine(paths.CustomLoopInvocationOperationsPath, input.OperationId + ".json")), StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task Captured_receipt_retains_its_context_binding_when_a_retried_definition_read_fails()
+    internal static async Task Captured_receipt_retains_its_context_binding_when_a_retried_definition_read_fails()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -391,8 +381,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal(captured.ContextIdentityHash, completed.ContextIdentityHash);
     }
 
-    [Fact]
-    public async Task Pending_workspace_busy_binding_completes_its_selected_outcome_after_the_workspace_becomes_free()
+    internal static async Task Pending_workspace_busy_binding_completes_its_selected_outcome_after_the_workspace_becomes_free()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -424,16 +413,18 @@ public sealed class CustomLoopRuntimeTests
         Assert.DoesNotContain(await runtime.ListCustomLoopRunsAsync(), run => run.LoopId == definition.Id);
     }
 
-    [Fact]
-    public async Task Context_capture_bounds_selected_conversation_entries_and_aggregates_all_omissions_once()
+    internal static async Task Context_capture_bounds_selected_conversation_entries_and_aggregates_all_omissions_once()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-entry-cap", "update-runtime-entry-cap");
         await using var runtime = await CreateRuntimeAsync(workspace);
-        for (var index = 0; index < (CustomLoopLimits.MaxInvokingConversationEntries / 2) + 1; index++)
+        var conversationStore = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        for (var index = 0; index < CustomLoopLimits.MaxInvokingConversationEntries + 2; index++)
         {
-            _ = await runtime.RunTurnAsync("x");
+            await conversationStore.AppendMessageAsync(index % 2 == 0
+                ? LlmMessage.User("x")
+                : LlmMessage.Assistant("fake response: x"));
         }
 
         var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-entry-cap", "entry cap test"));
@@ -442,12 +433,14 @@ public sealed class CustomLoopRuntimeTests
         Assert.InRange(conversation.Count(source => source.OmissionReason is null), 1, CustomLoopLimits.MaxInvokingConversationEntries);
         var omission = Assert.Single(conversation, source => source.OmissionReason is not null);
         Assert.Equal("invoking-conversation-omitted", omission.SourceId);
-        Assert.Contains("message(s) were omitted", omission.OmissionReason, StringComparison.Ordinal);
+        var omissionReason = Assert.IsType<string>(omission.OmissionReason);
+        Assert.Contains("older logical conversation message(s) were omitted", omissionReason, StringComparison.Ordinal);
+        Assert.True(int.TryParse(omissionReason.Split(' ', 2)[0], out var omittedCount));
+        Assert.True(omittedCount > 1, $"Expected one aggregate marker for multiple omissions, but found: {omissionReason}");
         Assert.Equal(Enumerable.Range(1, response.Run.Context.SourceManifest.Count), response.Run.Context.SourceManifest.Select(source => source.Order));
     }
 
-    [Fact]
-    public async Task Public_runtime_admits_executes_publishes_and_exposes_inspectable_artifacts_without_changing_default_turns()
+    internal static async Task Public_runtime_admits_executes_publishes_and_exposes_inspectable_artifacts_without_changing_default_turns()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -513,8 +506,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal("default-conversation", ordinaryTurnAfterCustomRun.RunIdentity!.LoopId);
     }
 
-    [Fact]
-    public async Task Production_factory_keeps_saved_custom_loop_invocation_on_the_legacy_runtime_without_canonical_proof()
+    internal static async Task Production_factory_keeps_saved_custom_loop_invocation_on_the_legacy_runtime_without_canonical_proof()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -549,8 +541,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Null(durable.SequentialInvocationSnapshot);
     }
 
-    [Fact]
-    public async Task Public_runtime_refreshes_durable_conversation_before_custom_loop_context_capture()
+    internal static async Task Public_runtime_refreshes_durable_conversation_before_custom_loop_context_capture()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -570,8 +561,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal(response.Run.FinalOutput, persistedConversation[^1].Content);
     }
 
-    [Fact]
-    public async Task Context_capture_rejects_local_and_durable_conversation_divergence_without_overwriting_local_state()
+    internal static async Task Context_capture_rejects_local_and_durable_conversation_divergence_without_overwriting_local_state()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -581,6 +571,7 @@ public sealed class CustomLoopRuntimeTests
         var defaultTurn = runtime.RunTurnAsync("delayed default turn");
         await WaitForAttemptStartAsync(workspace);
         await conversationMemory.StartFreshConversationAsync();
+        ReleaseAttempt(workspace);
         var divergentDefaultTurn = await defaultTurn;
         Assert.Equal("MessageNeedsReview", divergentDefaultTurn.Status.ToString());
         Assert.Contains("Existing user-owned content was preserved", divergentDefaultTurn.FailureDetail, StringComparison.Ordinal);
@@ -593,8 +584,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Contains("Active local context was preserved", followingTurn.FailureDetail, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task Conversation_publication_rejects_a_replaced_durable_conversation_with_the_same_transcript()
+    internal static async Task Conversation_publication_rejects_a_replaced_durable_conversation_with_the_same_transcript()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -606,6 +596,7 @@ public sealed class CustomLoopRuntimeTests
         await WaitForAttemptStartAsync(workspace);
         await conversationMemory.StartFreshConversationAsync();
         var replacementIdentity = (await conversationMemory.LoadCurrentConversationSnapshotAsync()).Version;
+        ReleaseAttempt(workspace);
 
         var response = await invocation;
         var persistedConversation = await conversationMemory.LoadCurrentConversationAsync();
@@ -617,8 +608,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Empty(persistedConversation);
     }
 
-    [Fact]
-    public async Task Runtime_publishes_multiple_node_and_Exit_outputs_against_the_admission_prefix_plus_the_exact_durable_run_suffix()
+    internal static async Task Runtime_publishes_multiple_node_and_Exit_outputs_against_the_admission_prefix_plus_the_exact_durable_run_suffix()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -660,8 +650,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal(publications.Select(item => item.CanonicalOutput), persistedConversation.Select(item => item.Content));
     }
 
-    [Fact]
-    public async Task Runtime_notifies_each_verified_conversation_publication_in_durable_order()
+    internal static async Task Runtime_notifies_each_verified_conversation_publication_in_durable_order()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -692,8 +681,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal(Assert.Single(response.Run.Events, item => item.Kind == "ConversationPublished").ConversationPublicationId, publication.OperationId);
     }
 
-    [Fact]
-    public async Task Admission_captures_bounded_labeled_role_sources_and_a_versioned_newest_conversation_snapshot()
+    internal static async Task Admission_captures_bounded_labeled_role_sources_and_a_versioned_newest_conversation_snapshot()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -702,7 +690,7 @@ public sealed class CustomLoopRuntimeTests
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-context", "update-runtime-context");
         await using var runtime = await CreateRuntimeAsync(workspace);
         var oversizedPrompt = "prompt-head-" + new string('x', CustomLoopLimits.MaxInvokingConversationCharacters + 500) + "-prompt-tail";
-        _ = await runtime.RunTurnAsync(oversizedPrompt);
+        await AppendFakeConversationTurnAsync(workspace, oversizedPrompt);
 
         var first = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-context-1", "first custom task"));
         var second = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-context-2", "second custom task"));
@@ -755,8 +743,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.True(second.Run.Context.CapturedAtUtc >= first.Run.Context.CapturedAtUtc);
     }
 
-    [Fact]
-    public async Task Replay_of_a_valid_historical_run_without_an_invoking_conversation_reaches_admission_without_throwing_or_dispatching()
+    internal static async Task Replay_of_a_valid_historical_run_without_an_invoking_conversation_reaches_admission_without_throwing_or_dispatching()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -851,8 +838,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, receipt.BindingState);
     }
 
-    [Fact]
-    public async Task Conversation_publication_rejects_matching_content_without_the_exact_publication_identity()
+    internal static async Task Conversation_publication_rejects_matching_content_without_the_exact_publication_identity()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -866,6 +852,7 @@ public sealed class CustomLoopRuntimeTests
 
         var history = await runtime.RunTurnAsync("/history");
         var loaded = await runtime.RunTurnAsync("1");
+        ReleaseAttempt(workspace);
         var response = await invocation;
         var persistedConversation = await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).LoadCurrentConversationAsync();
 
@@ -881,8 +868,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Collection(persistedConversation, message => Assert.Equal(expectedOutput, message.Content));
     }
 
-    [Fact]
-    public async Task Conversation_publication_definitely_fails_when_the_logical_conversation_changes_after_admission()
+    internal static async Task Conversation_publication_definitely_fails_when_the_logical_conversation_changes_after_admission()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -892,6 +878,7 @@ public sealed class CustomLoopRuntimeTests
         await WaitForAttemptStartAsync(workspace);
 
         var interleavingTurn = await runtime.RunTurnAsync("interleaving ordinary turn");
+        ReleaseAttempt(workspace);
         var response = await invocation;
 
         Assert.Equal("MessageCompleted", interleavingTurn.Status.ToString());
@@ -904,8 +891,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.True(disposition.IsDefinite);
     }
 
-    [Fact]
-    public async Task Conversation_append_exception_is_reconciled_as_definitely_failed_when_no_append_occurred()
+    internal static async Task Conversation_append_exception_is_reconciled_as_definitely_failed_when_no_append_occurred()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -915,6 +901,7 @@ public sealed class CustomLoopRuntimeTests
         var invocation = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-append-failure", "delayed append failure"));
         await WaitForAttemptStartAsync(workspace);
         File.SetAttributes(paths.CurrentConversationPath, FileAttributes.ReadOnly);
+        ReleaseAttempt(workspace);
 
         LoopRunInvocationResponse response;
         try
@@ -932,8 +919,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Empty(await new ConversationMemoryStore(paths).LoadCurrentConversationAsync());
     }
 
-    [Fact]
-    public async Task Concurrent_different_loop_is_durably_rejected_as_workspace_busy_without_context_capture_or_hidden_queueing()
+    internal static async Task Concurrent_different_loop_is_durably_rejected_as_workspace_busy_without_context_capture_or_hidden_queueing()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -947,6 +933,7 @@ public sealed class CustomLoopRuntimeTests
         var second = runtime.InvokeCustomLoopAsync(secondInput);
         var firstCompletion = await Task.WhenAny(first, second);
         var rejected = await second;
+        ReleaseAttempt(workspace);
         var completed = await first;
         var busyReplay = await runtime.InvokeCustomLoopAsync(secondInput);
         var changedContent = await runtime.InvokeCustomLoopAsync(secondInput with { InvocationPrompt = "changed invocation" });
@@ -968,8 +955,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Contains("workspaceExecutionBusy", await File.ReadAllTextAsync(receiptPath), StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task Concurrent_same_operation_has_one_owner_and_replays_its_admitted_run_without_redispatch()
+    internal static async Task Concurrent_same_operation_has_one_owner_and_replays_its_admitted_run_without_redispatch()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -980,6 +966,7 @@ public sealed class CustomLoopRuntimeTests
         var first = runtime.InvokeCustomLoopAsync(input);
         await WaitForAttemptStartAsync(workspace);
         var concurrent = await runtime.InvokeCustomLoopAsync(input);
+        ReleaseAttempt(workspace);
         var completed = await first;
         var replay = await runtime.InvokeCustomLoopAsync(input);
 
@@ -994,8 +981,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal(completed.Run.Events.Count, replay.Run.Events.Count);
     }
 
-    [Fact]
-    public async Task Paused_run_releases_workspace_ownership_and_resume_busy_is_replayed_without_mutation_or_dispatch()
+    internal static async Task Paused_run_releases_workspace_ownership_and_resume_busy_is_replayed_without_mutation_or_dispatch()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -1055,8 +1041,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal(resumed.Run.Events.Count, completedReplay.Run.Events.Count);
     }
 
-    [Fact]
-    public async Task Restart_preserves_the_current_conversation_bound_to_a_paused_run_before_explicit_resume()
+    internal static async Task Restart_preserves_the_current_conversation_bound_to_a_paused_run_before_explicit_resume()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -1244,6 +1229,8 @@ public sealed class CustomLoopRuntimeTests
         };
         var completedAtUtc = DateTimeOffset.UtcNow.ToUniversalTime() - CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration - TimeSpan.FromDays(1);
         long retainedBytes = 0;
+        long writtenBytes = 0;
+        var writes = new List<(string Path, string Json)>(16);
         for (var index = 0; retainedBytes <= CustomLoopLimits.MaxInvocationOperationWorkspaceUtf8Bytes; index++)
         {
             var operationId = $"invoke-expired-{index:D5}";
@@ -1257,12 +1244,34 @@ public sealed class CustomLoopRuntimeTests
                 State = CustomLoopInvocationOperationState.Complete,
                 Outcome = CustomLoopInvocationOutcome.Rejected,
                 AdmissionStatus = CustomLoopAdmissionStatusNames.NotFound,
-                Detail = new string('d', CustomLoopLimits.MaxRunDetailCharacters)
+                // U+0800 is one valid BMP scalar and is represented by three UTF-8 bytes (or a
+                // six-byte JSON escape). It fills the real character limit with fewer receipts
+                // while preserving the exact 128 MiB workspace-byte boundary exercised below.
+                Detail = new string('\u0800', CustomLoopLimits.MaxRunDetailCharacters)
             };
             var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, operationId + ".json");
-            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(completed, jsonOptions));
-            retainedBytes += new FileInfo(path).Length;
+            var json = JsonSerializer.Serialize(completed, jsonOptions);
+            writes.Add((path, json));
+            retainedBytes += Encoding.UTF8.GetByteCount(json);
+            if (writes.Count == writes.Capacity)
+            {
+                writtenBytes += await WriteInvocationReceiptBatchAsync(writes);
+                writes.Clear();
+            }
         }
+
+        Assert.True(retainedBytes > CustomLoopLimits.MaxInvocationOperationWorkspaceUtf8Bytes);
+        writtenBytes += await WriteInvocationReceiptBatchAsync(writes);
+        Assert.Equal(retainedBytes, writtenBytes);
+    }
+
+    private static async Task<long> WriteInvocationReceiptBatchAsync(IReadOnlyCollection<(string Path, string Json)> writes)
+    {
+        await Parallel.ForEachAsync(
+            writes,
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Min(8, Environment.ProcessorCount) },
+            async (write, cancellationToken) => await File.WriteAllTextAsync(write.Path, write.Json, cancellationToken));
+        return writes.Sum(write => new FileInfo(write.Path).Length);
     }
 
     private static async Task PersistRejectedReceiptAsync(WorkspacePaths paths, LoopRunInvocationInput input, string roleId, string runId, CustomLoopAdmissionStatus admissionStatus)
@@ -1368,19 +1377,51 @@ public sealed class CustomLoopRuntimeTests
 
     private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, IAgentRuntimeConversationPublicationObserver? observer = null)
     {
-        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath, conversationPublicationObserver: observer);
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace);
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+            new RejectingApprovalPrompt(),
+            workspace.ServerStatePath,
+            CreateCompatibleRuntimeStatus(executablePath),
+            observer);
         return await factory.CreateAsync(
             "test-model",
             workspace.RootPath,
-            await CreateFakeCodexExecutableAsync(workspace),
+            executablePath,
             "read-only",
             AgentRuntimeSurface.Cli);
     }
 
     private static async Task<AgentRuntime> CreateRuntimeWithoutProviderAsync(TestWorkspace workspace)
     {
-        var executable = OperatingSystem.IsWindows() ? await CreateFakeCodexExecutableAsync(workspace) : "/usr/bin/false";
-        return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath).CreateAsync("test-model", workspace.RootPath, executable, "read-only", AgentRuntimeSurface.Cli);
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace);
+        return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+            new RejectingApprovalPrompt(),
+            workspace.ServerStatePath,
+            CreateCompatibleRuntimeStatus(executablePath)).CreateAsync(
+            "test-model",
+            workspace.RootPath,
+            executablePath,
+            "read-only",
+            AgentRuntimeSurface.Cli);
+    }
+
+    private static CodexRuntimeStatus CreateCompatibleRuntimeStatus(string executablePath)
+    {
+        return new CodexRuntimeStatus(
+            CodexRuntimeCompatibility.Compatible,
+            executablePath,
+            executablePath,
+            "codex-cli 999.0.0-test",
+            "test-model",
+            "controlled test",
+            "The isolated fake provider is pre-admitted for this runtime integration scenario.");
+    }
+
+    private static async Task AppendFakeConversationTurnAsync(TestWorkspace workspace, string prompt)
+    {
+        var conversationStore = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        await conversationStore.AppendMessageAsync(LlmMessage.User(prompt));
+        await conversationStore.AppendMessageAsync(LlmMessage.Assistant("fake response: " + prompt));
     }
 
     private sealed class RecordingConversationPublicationObserver : IAgentRuntimeConversationPublicationObserver
@@ -1406,106 +1447,155 @@ public sealed class CustomLoopRuntimeTests
         Assert.True(File.Exists(markerPath), $"The custom-loop provider attempt did not start within {_providerAttemptStartTimeout.TotalSeconds:0} seconds.");
     }
 
+    private static void ReleaseAttempt(TestWorkspace workspace)
+    {
+        File.WriteAllText(workspace.File("custom-attempt-release.marker"), "released");
+    }
+
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("The fake Codex app-server executable is currently implemented as a Windows command script.");
-        }
+        var scriptPath = workspace.File("fake-custom-loop-codex.js");
+        var commandPath = workspace.File(OperatingSystem.IsWindows()
+            ? "fake-custom-loop-codex.cmd"
+            : "fake-custom-loop-codex");
+        await File.WriteAllTextAsync(scriptPath, $$"""
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const readline = require("node:readline");
 
-        var scriptPath = workspace.File("fake-custom-loop-codex.ps1");
-        var commandPath = workspace.File("fake-custom-loop-codex.cmd");
-        await File.WriteAllTextAsync(scriptPath, """
-            if ($args -contains "--version") {
-                Write-Output "codex-cli 999.0.0-test"
-                exit 0
+            if (process.argv.slice(2).includes("--version")) {
+              process.stdout.write("codex-cli 999.0.0-test\n");
+              process.exit(0);
             }
 
-            $threadId = "thread-test"
+            const threadId = "thread-test";
+            const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 
-            function Write-ProtocolJson($value) {
-                $value | ConvertTo-Json -Compress -Depth 20
-                [Console]::Out.Flush()
+            function write(value) {
+              process.stdout.write(`${JSON.stringify(value)}\n`);
             }
 
-            while (($line = [Console]::In.ReadLine()) -ne $null) {
-                $message = $line | ConvertFrom-Json
+            function delay(milliseconds) {
+              return new Promise(resolve => setTimeout(resolve, milliseconds));
+            }
 
-                switch ($message.method) {
-                    "initialize" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{} }
-                    }
-
-                    "initialized" {
-                    }
-
-                    "model/list" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } }
-                    }
-
-                    "thread/start" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{ thread = @{ id = $threadId } } }
-                    }
-
-                    "turn/start" {
-                        $turnId = "turn-test"
-                        $userText = [string]$message.params.input[0].text
-                        $heldOnceMarker = Join-Path $PSScriptRoot "custom-attempt-held-once.marker"
-                        $shouldHold = $userText.Contains("held") -and (-not $userText.Contains("held-once") -or -not (Test-Path $heldOnceMarker))
-                        if ($shouldHold) {
-                            if ($userText.Contains("held-once")) {
-                                [IO.File]::WriteAllText($heldOnceMarker, "held")
-                            }
-                            [IO.File]::WriteAllText((Join-Path $PSScriptRoot "custom-attempt-started.marker"), "started")
-                            $releaseMarker = Join-Path $PSScriptRoot "custom-attempt-release.marker"
-                            $releaseDeadline = [DateTime]::UtcNow.AddSeconds(10)
-                            while (-not (Test-Path $releaseMarker)) {
-                                if ([DateTime]::UtcNow -ge $releaseDeadline) {
-                                    throw "Timed out waiting for the test to release the held custom-loop attempt."
-                                }
-                                Start-Sleep -Milliseconds 25
-                            }
-                            while ($true) {
-                                try {
-                                    Remove-Item -LiteralPath $releaseMarker -ErrorAction Stop
-                                    break
-                                }
-                                catch [IO.IOException] {
-                                    if ([DateTime]::UtcNow -ge $releaseDeadline) {
-                                        throw "Timed out consuming the test release marker for the held custom-loop attempt."
-                                    }
-                                    Start-Sleep -Milliseconds 25
-                                }
-                            }
-                        }
-                        elseif ($userText.Contains("delayed")) {
-                            [IO.File]::WriteAllText((Join-Path $PSScriptRoot "custom-attempt-started.marker"), "started")
-                            Start-Sleep -Milliseconds 1500
-                        }
-                        $triggerMatch = [regex]::Match($userText, '(?s)(\[EmbodySense untrusted trigger prompt data\]\r?\n.*?)\r?\n\[/restored user message\]')
-                        if ($triggerMatch.Success) {
-                            $userText = $triggerMatch.Groups[1].Value
-                        }
-                        else {
-                            $currentUserMarker = "Current user message:"
-                            $currentUserIndex = $userText.IndexOf($currentUserMarker)
-                            if ($currentUserIndex -ge 0) {
-                                $userText = $userText.Substring($currentUserIndex + $currentUserMarker.Length).Trim()
-                            }
-                        }
-                        $text = "fake response: $userText"
-
-                        Write-ProtocolJson @{ id = $message.id; result = @{ turn = @{ id = $turnId } } }
-                        Write-ProtocolJson @{ method = "item/agentMessage/delta"; params = @{ threadId = $threadId; turnId = $turnId; delta = $text } }
-                        Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = $turnId; turn = @{ id = $turnId; status = "completed"; items = @(@{ type = "agentMessage"; phase = "final_answer"; text = $text }) } } }
-                    }
+            async function waitForReleaseMarker(releaseMarker) {
+              const deadline = Date.now() + {{ProviderSynchronizationTimeoutMilliseconds}};
+              while (!fs.existsSync(releaseMarker)) {
+                if (Date.now() >= deadline) {
+                  throw new Error("Timed out waiting for the test to release the held custom-loop attempt.");
                 }
+                await delay(25);
+              }
+
+              while (true) {
+                try {
+                  fs.rmSync(releaseMarker);
+                  return;
+                } catch (error) {
+                  if (Date.now() >= deadline) {
+                    throw new Error("Timed out consuming the test release marker for the held custom-loop attempt.", { cause: error });
+                  }
+                  await delay(25);
+                }
+              }
             }
+
+            async function handle(message) {
+              switch (message.method) {
+                case "initialize":
+                  write({ id: message.id, result: {} });
+                  break;
+                case "model/list":
+                  write({
+                    id: message.id,
+                    result: {
+                      data: [
+                        { id: "test-model", model: "test-model" },
+                        { id: "gpt-test", model: "gpt-test" }
+                      ],
+                      nextCursor: null
+                    }
+                  });
+                  break;
+                case "thread/start":
+                  write({ id: message.id, result: { thread: { id: threadId } } });
+                  break;
+                case "turn/start": {
+                  const turnId = "turn-test";
+                  let userText = String(message.params.input[0].text);
+                  const heldOnceMarker = path.join(__dirname, "custom-attempt-held-once.marker");
+                  const shouldHold = userText.includes("held")
+                    && (!userText.includes("held-once") || !fs.existsSync(heldOnceMarker));
+                  const shouldDelay = userText.includes("delayed");
+                  if (shouldHold || shouldDelay) {
+                    if (userText.includes("held-once")) {
+                      fs.writeFileSync(heldOnceMarker, "held");
+                    }
+                    fs.writeFileSync(path.join(__dirname, "custom-attempt-started.marker"), "started");
+                    await waitForReleaseMarker(path.join(__dirname, "custom-attempt-release.marker"));
+                  }
+
+                  const triggerMatch = userText.match(/(\[EmbodySense untrusted trigger prompt data\]\r?\n[\s\S]*?)\r?\n\[\/restored user message\]/);
+                  if (triggerMatch) {
+                    userText = triggerMatch[1];
+                  } else {
+                    const currentUserMarker = "Current user message:";
+                    const currentUserIndex = userText.indexOf(currentUserMarker);
+                    if (currentUserIndex >= 0) {
+                      userText = userText.slice(currentUserIndex + currentUserMarker.length).trim();
+                    }
+                  }
+                  const text = `fake response: ${userText}`;
+                  write({ id: message.id, result: { turn: { id: turnId } } });
+                  write({ method: "item/agentMessage/delta", params: { threadId, turnId, delta: text } });
+                  write({
+                    method: "turn/completed",
+                    params: {
+                      threadId,
+                      turnId,
+                      turn: {
+                        id: turnId,
+                        status: "completed",
+                        items: [{ type: "agentMessage", phase: "final_answer", text }]
+                      }
+                    }
+                  });
+                  break;
+                }
+                default:
+                  break;
+              }
+            }
+
+            let queue = Promise.resolve();
+            input.on("line", line => {
+              queue = queue.then(() => handle(JSON.parse(line))).catch(error => {
+                process.stderr.write(`${error.stack ?? error}\n`);
+                process.exitCode = 1;
+                input.close();
+              });
+            });
             """);
-        await File.WriteAllTextAsync(commandPath, """
-            @echo off
-            powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-custom-loop-codex.ps1" %*
-            """);
+        if (OperatingSystem.IsWindows())
+        {
+            await File.WriteAllTextAsync(commandPath, """
+                @echo off
+                node "%~dp0fake-custom-loop-codex.js" %*
+                """);
+        }
+        else
+        {
+            var escaped = scriptPath
+                .Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("\"", "\\\"", StringComparison.Ordinal)
+                .Replace("$", "\\$", StringComparison.Ordinal)
+                .Replace("`", "\\`", StringComparison.Ordinal);
+            await File.WriteAllTextAsync(commandPath, $"#!/bin/sh\nexec node \"{escaped}\" \"$@\"\n");
+            File.SetUnixFileMode(
+                commandPath,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
 
         return commandPath;
     }
