@@ -242,7 +242,7 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
             ScheduleRunAdmissionStoreResult scheduled;
             try
             {
-                scheduled = await CreateScheduledAsync(request, run, cancellationToken).ConfigureAwait(false);
+                scheduled = await CreateScheduledAsync(request, CreateRun(request, definition), cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
