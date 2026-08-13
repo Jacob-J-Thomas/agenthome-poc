@@ -197,8 +197,40 @@ function Invoke-CoverageVerification {
         [string]$ResultsRoot,
         [string]$ManifestPath,
         [string]$ReportPath,
-        [int]$MaximumCoverageWorkers = 1
+        [int]$MaximumCoverageWorkers = 1,
+        [switch]$ExternalProcess
     )
+
+    $coverageParameters = @{
+        MinimumWriteTimeUtc = $MinimumWriteTimeUtc
+        MaximumCoverageWorkers = $MaximumCoverageWorkers
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
+        $coverageParameters.ResultsRoot = $ResultsRoot
+        $coverageParameters.ManifestPath = $ManifestPath
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+        $coverageParameters.ReportPath = $ReportPath
+    }
+
+    if (-not $ExternalProcess) {
+        $outputLines = [Collections.Generic.List[string]]::new()
+        $exitCode = 0
+        try {
+            & (Join-Path $RepositoryRoot "scripts\verify-coverage.ps1") @coverageParameters 2>&1 | ForEach-Object {
+                $outputLines.Add($_.ToString())
+            }
+        }
+        catch {
+            $exitCode = 1
+            $outputLines.Add($_.Exception.Message)
+        }
+
+        return [pscustomobject]@{
+            ExitCode = $exitCode
+            Output = $outputLines -join [Environment]::NewLine
+        }
+    }
 
     $arguments = @("-NoLogo", "-NoProfile")
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
@@ -369,6 +401,9 @@ try {
     $validAliasResult = Invoke-CoverageVerification -RepositoryRoot $validAliasRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $validAliasFixture.ResultsRoot -ManifestPath $validAliasFixture.ManifestPath -ReportPath $validAliasSummaryPath
     Assert-True -Condition ($validAliasResult.ExitCode -eq 0) -Message "A validated VSTest staging alias must preserve coverage verification. Actual: $($validAliasResult.Output)"
     Assert-Contains -Actual $validAliasResult.Output -Expected "VERIFY_COVERAGE_REPORT reports=1 packages=2" -Message "Coverage aggregation must merge only the canonical report."
+    $validAliasExternalResult = Invoke-CoverageVerification -RepositoryRoot $validAliasRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $validAliasFixture.ResultsRoot -ManifestPath $validAliasFixture.ManifestPath -ReportPath $validAliasSummaryPath -ExternalProcess
+    Assert-True -Condition ($validAliasExternalResult.ExitCode -eq 0) -Message "The external coverage-verifier entry point must preserve the passing in-process contract. Actual: $($validAliasExternalResult.Output)"
+    Assert-Contains -Actual $validAliasExternalResult.Output -Expected "VERIFY_COVERAGE_REPORT reports=1 packages=2" -Message "The external coverage-verifier entry point must merge the same canonical report inventory."
 
     $reclassifiedAliasRoot = Join-Path $validAliasFixture.ResultsRoot "CoverageIsolation\Fixture.Tests\canonical\bin\Release\Results"
     New-Item -ItemType Directory -Path $reclassifiedAliasRoot -Force | Out-Null
@@ -658,6 +693,10 @@ try {
     $expectedGap = "COVERAGE_GAP package=Fixture.One uncovered=2 total=10 file=SRC${separator}FIXTURE.ONE${separator}FILE.CS lines=9,10"
     Assert-Contains -Actual $failingResult.Output -Expected $expectedGap -Message "Coverage gaps must remain stable and actionable."
     Assert-Contains -Actual $failingResult.Output -Expected "Fixture.One line coverage 80% is below 90%" -Message "Below-threshold diagnostics must preserve the enforced threshold."
+    $failingExternalResult = Invoke-CoverageVerification -RepositoryRoot $failingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ExternalProcess
+    Assert-True -Condition ($failingExternalResult.ExitCode -ne 0) -Message "The external coverage-verifier entry point must preserve the failing in-process contract."
+    Assert-Contains -Actual $failingExternalResult.Output -Expected $expectedGap -Message "The external coverage-verifier entry point must preserve actionable gap evidence."
+    Assert-Contains -Actual $failingExternalResult.Output -Expected "Fixture.One line coverage 80% is below 90%" -Message "The external coverage-verifier entry point must preserve the immutable threshold failure."
 
     $missingRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "missing-package"
     $onePassingClass = New-CoverageClass -Name "Fixture.One.Passing" -FileName "src/Fixture.One/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0))
