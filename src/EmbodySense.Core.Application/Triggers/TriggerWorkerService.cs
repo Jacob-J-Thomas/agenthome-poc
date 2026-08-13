@@ -209,6 +209,91 @@ public sealed class TriggerWorkerService
         return new TriggerWorkerRunResult(selected.Status, completed.Status, completed.Entry);
     }
 
+    /// <summary>Retries one exact retained deferred or serialized schedule admission under its original durable dispatch intent.</summary>
+    /// <remarks>
+    /// The caller must first prove that the retained queue entry is the exact terminal overlap rejection associated with the
+    /// canonical envelope. This method records no replacement intent and never changes operation identity. It rechecks schedule
+    /// readiness and requires current authority evidence to match the original intent before the existing governed dispatcher is
+    /// entered. Once that durable intent is accepted for retry, caller cancellation is not used as proof of non-dispatch.
+    /// </remarks>
+    /// <param name="envelope">The exact canonical schedule envelope retained by atomic run-admission evidence.</param>
+    /// <param name="priorIntent">The original terminal overlap-rejection evidence and operation identity.</param>
+    /// <param name="evaluatedAtUtc">The exact UTC current-evidence observation instant.</param>
+    /// <param name="cancellationToken">A token honored before the retained durable intent is re-entered.</param>
+    /// <returns>The proved governed dispatch posture, or needs-review when exact safe retry cannot be established.</returns>
+    public async Task<TriggerWorkerDispatchResult> RetryScheduleOverlapAsync(
+        TriggerDeliveryEnvelope envelope,
+        TriggerDispatchEvidence priorIntent,
+        DateTimeOffset evaluatedAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(envelope);
+        ArgumentNullException.ThrowIfNull(priorIntent);
+        if (evaluatedAtUtc.Offset != TimeSpan.Zero
+            || envelope.Kind != TriggerKind.Time
+            || envelope.ScheduleExecutionDirective is null
+            || !TriggerDeliveryValidator.Validate(envelope).IsValid
+            || priorIntent.Outcome != TriggerDispatchOutcome.Rejected
+            || priorIntent.OutcomeRecordedAtUtc is null
+            || priorIntent.GovernedInvocation is not null
+            || !TriggerDispatchOperationId.IsValid(priorIntent.OperationId)
+            || !IsHash(priorIntent.RequestHash)
+            || !IsHash(priorIntent.AuthorityEvidenceHash))
+        {
+            return new TriggerWorkerDispatchResult(TriggerDispatchOutcome.NeedsReview, "The retained schedule-overlap dispatch evidence is malformed or is not one exact terminal rejection.");
+        }
+
+        TriggerWorkerDispatchReadinessResult? readiness;
+        try
+        {
+            readiness = await _readiness.CheckAsync(envelope, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            readiness = null;
+        }
+
+        if (readiness?.Status != TriggerWorkerDispatchReadinessStatus.Ready)
+        {
+            return new TriggerWorkerDispatchResult(TriggerDispatchOutcome.NeedsReview, "The exact schedule delivery is not ready for retained overlap reselection.");
+        }
+
+        TriggerDispatchAuthorization? authorization;
+        try
+        {
+            authorization = await _authorizer.AuthorizeAsync(envelope, evaluatedAtUtc, cancellationToken).ConfigureAwait(false);
+            ValidateAuthorization(authorization);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            authorization = null;
+        }
+
+        if (authorization?.Status != TriggerDispatchAuthorizationStatus.Authorized
+            || !string.Equals(authorization.EvidenceHash, priorIntent.AuthorityEvidenceHash, StringComparison.Ordinal))
+        {
+            return new TriggerWorkerDispatchResult(TriggerDispatchOutcome.NeedsReview, "Current trigger authority does not exactly match the original retained dispatch intent.");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            return await DispatchAsync(envelope, priorIntent, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            return new TriggerWorkerDispatchResult(TriggerDispatchOutcome.NeedsReview, Bound($"The retained schedule-overlap dispatch outcome is ambiguous: {exception.GetType().Name}."));
+        }
+    }
+
     private async Task<TriggerWorkerMutationResult> CompleteDispatchFailClosedAsync(TriggerQueueEntry knownEntry, TriggerWorkerLease originalLease, TriggerDispatchEvidence intent, TriggerDispatchEvidence outcome)
     {
         TriggerWorkerMutationResult? first = null;

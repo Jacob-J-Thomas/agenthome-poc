@@ -11,6 +11,7 @@ using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -484,6 +485,39 @@ public sealed class CustomLoopRunStore :
             "Schedule run-admission evidence",
             cancellationToken);
         return ScheduleRunAdmissionEvidenceCodec.Deserialize(content);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<ScheduleRunAdmissionEvidence>> ListPendingScheduleAdmissionsAsync(
+        TriggerDeliveryId? afterDeliveryId,
+        int maximumCount,
+        CancellationToken cancellationToken = default)
+    {
+        if (afterDeliveryId is not null
+            && (!TriggerDeliveryId.TryParse(afterDeliveryId.Value, out var parsedAfter)
+                || !Equals(afterDeliveryId, parsedAfter)))
+        {
+            throw new ArgumentException("The schedule-admission cursor is malformed.", nameof(afterDeliveryId));
+        }
+
+        if (maximumCount is < 1 or > GovernedLoopBackgroundWorkContractLimits.MaxCandidatesPerFamily)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumCount));
+        }
+
+        await using var mutation = await AcquireMutationLockAsync(cancellationToken);
+        var admissions = await ReadAllScheduleAdmissionsAsync(cancellationToken);
+        var candidates = admissions
+            .Select(evidence => (Evidence: evidence, DeliveryId: TriggerDelivery(evidence.CanonicalEnvelope)))
+            .Where(candidate => candidate.Evidence.Attempts[^1].Disposition is
+                ScheduleRunAdmissionDisposition.OverlapDeferred or ScheduleRunAdmissionDisposition.OverlapSerialized)
+            .Where(candidate => afterDeliveryId is null
+                || string.Compare(candidate.DeliveryId.Value, afterDeliveryId.Value, StringComparison.Ordinal) > 0)
+            .OrderBy(candidate => candidate.DeliveryId.Value, StringComparer.Ordinal)
+            .Take(maximumCount)
+            .Select(candidate => candidate.Evidence)
+            .ToArray();
+        return Array.AsReadOnly(candidates);
     }
 
     private async Task<ScheduleRunAdmissionEvidence> AppendScheduleAdmissionAsync(
