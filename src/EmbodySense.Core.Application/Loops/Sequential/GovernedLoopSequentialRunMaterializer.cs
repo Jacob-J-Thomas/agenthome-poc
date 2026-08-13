@@ -182,7 +182,7 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
             case ScheduleRunAdmissionStoreStatus.Created when result.Run is not null:
                 return null;
             case ScheduleRunAdmissionStoreStatus.Replayed when result.Run is not null:
-                return await ReconcileExistingAsync(request, definition, anchor, result.Run, CancellationToken.None).ConfigureAwait(false);
+                return await ReconcileMaterializedRunAsync(request, definition, anchor, result.Run, CancellationToken.None).ConfigureAwait(false);
             case ScheduleRunAdmissionStoreStatus.OverlapSkipped:
                 return Result(GovernedLoopSequentialMaterializationStatus.OverlapSkipped, result.Run, anchor, "Atomic run admission durably skipped the exact occurrence behind the current nonterminal run.");
             case ScheduleRunAdmissionStoreStatus.OverlapDeferred:
@@ -231,6 +231,45 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
     }
 
     private async Task<GovernedLoopSequentialMaterializationResult> ReconcileExistingAsync(
+        GovernedLoopSequentialMaterializationRequest request,
+        CustomLoopDefinition definition,
+        GovernedLoopSequentialRunAnchor anchor,
+        CustomLoopRunRecord run,
+        CancellationToken cancellationToken)
+    {
+        if (request.InvocationSnapshot.TriggerOrigin is not null)
+        {
+            ScheduleRunAdmissionStoreResult scheduled;
+            try
+            {
+                scheduled = await CreateScheduledAsync(request, run, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                return Result(
+                    GovernedLoopSequentialMaterializationStatus.Unavailable,
+                    run,
+                    anchor,
+                    $"Atomic schedule run-admission evidence could not be reconciled before audit: {exception.GetType().Name}.");
+            }
+
+            var scheduledResult = await ResolveScheduledResultAsync(request, definition, anchor, scheduled).ConfigureAwait(false);
+            if (scheduledResult is not null)
+            {
+                return scheduledResult;
+            }
+
+            run = scheduled.Run!;
+        }
+
+        return await ReconcileMaterializedRunAsync(request, definition, anchor, run, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<GovernedLoopSequentialMaterializationResult> ReconcileMaterializedRunAsync(
         GovernedLoopSequentialMaterializationRequest request,
         CustomLoopDefinition definition,
         GovernedLoopSequentialRunAnchor anchor,
