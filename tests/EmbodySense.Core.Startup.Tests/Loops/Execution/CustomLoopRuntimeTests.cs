@@ -37,7 +37,8 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 // Every scenario owns its workspace and provider process; this type must not gain mutable shared state.
 internal static class CustomLoopRuntimeTests
 {
-    private static readonly TimeSpan _providerAttemptStartTimeout = TimeSpan.FromSeconds(30);
+    private const int ProviderSynchronizationTimeoutMilliseconds = 30_000;
+    private static readonly TimeSpan _providerAttemptStartTimeout = TimeSpan.FromMilliseconds(ProviderSynchronizationTimeoutMilliseconds);
 
     internal static async Task Context_capture_truncates_role_and_conversation_sources_only_at_valid_utf16_boundaries()
     {
@@ -1457,7 +1458,7 @@ internal static class CustomLoopRuntimeTests
         var commandPath = workspace.File(OperatingSystem.IsWindows()
             ? "fake-custom-loop-codex.cmd"
             : "fake-custom-loop-codex");
-        await File.WriteAllTextAsync(scriptPath, """
+        await File.WriteAllTextAsync(scriptPath, $$"""
             const fs = require("node:fs");
             const path = require("node:path");
             const readline = require("node:readline");
@@ -1479,7 +1480,7 @@ internal static class CustomLoopRuntimeTests
             }
 
             async function waitForReleaseMarker(releaseMarker) {
-              const deadline = Date.now() + 10000;
+              const deadline = Date.now() + {{ProviderSynchronizationTimeoutMilliseconds}};
               while (!fs.existsSync(releaseMarker)) {
                 if (Date.now() >= deadline) {
                   throw new Error("Timed out waiting for the test to release the held custom-loop attempt.");
