@@ -22,6 +22,7 @@ using EmbodySense.Web.Services;
 
 namespace EmbodySense.Web.Tests;
 
+[Collection(EphemeralPortApiCollection.Name)]
 public sealed class WebAgentRuntimeHostTests
 {
     [Fact]

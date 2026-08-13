@@ -223,6 +223,17 @@ foreach ($startupRuntimeWrapper in @(
 Assert-Contains -Actual $persistenceEnvironmentCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Persistence process-environment mutation must remain exclusive of all assembly tests."
 Assert-Contains -Actual $persistenceCapabilityCatalogTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Capability-catalog trust-root mutation must retain process-environment serialization."
 Assert-Contains -Actual $admissionStoreTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Coverage child-directory mutation must retain process-environment serialization."
+foreach ($webSharedRuntimeTest in @(
+    "CapabilityApiControllerTests.cs",
+    "LoopApiControllerTests.cs",
+    "LoopRunApiControllerTests.cs",
+    "WebAgentRuntimeHostTests.cs",
+    "WebApiControllerTests.cs",
+    "WebSessionHubTests.cs"
+)) {
+    $webSharedRuntimeTestSource = Get-Content -LiteralPath (Join-Path $repoRoot "tests\EmbodySense.Web.Tests\$webSharedRuntimeTest") -Raw
+    Assert-Contains -Actual $webSharedRuntimeTestSource -Expected '[Collection(EphemeralPortApiCollection.Name)]' -Message "Web runtime/API test '$webSharedRuntimeTest' must serialize shared default trust and host state inside the assembly-wide lane."
+}
 foreach ($assemblyProfile in @(
     'Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 300; Weight = 3; ResourceClass = "ProcessHeavy"'
     'Name = "tests-EmbodySense.Core.Startup.Tests-all"; EstimatedDurationSeconds = 240; Weight = 3; ResourceClass = "ProcessHeavy"'
