@@ -6,6 +6,7 @@ $phaseScriptPath = Join-Path $repoRoot "scripts\verification-phase.ps1"
 $parallelScriptPath = Join-Path $repoRoot "scripts\verification-parallel.ps1"
 $scheduleScriptPath = Join-Path $repoRoot "scripts\verification-schedule.ps1"
 $tempScriptPath = Join-Path $repoRoot "scripts\verification-temp.ps1"
+$artifactScriptPath = Join-Path $repoRoot "scripts\verification-artifacts.ps1"
 $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
 $watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
 $coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
@@ -17,6 +18,8 @@ $stressSettingsPath = Join-Path $repoRoot "tests\verification-stress.runsettings
 $gitIgnorePath = Join-Path $repoRoot ".gitignore"
 $maximumTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopRunArtifactMaximumShapeTests.cs"
 $retentionTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopTraceRetentionStoreTests.cs"
+$coverageChildProcessPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\CoverageChildProcessAssembly.cs"
+$admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTests.cs"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $assertionCount = 0
 
@@ -51,6 +54,7 @@ Assert-True -Condition $noOpWasRejected -Message "The negative-test helper must 
 
 . $phaseScriptPath
 . $tempScriptPath
+. $artifactScriptPath
 Reset-VerificationPhaseState
 
 $contextLine = Write-VerificationContext -RepositoryRoot $repoRoot -Configuration Debug -VerificationTier PullRequest
@@ -84,6 +88,17 @@ $null = Invoke-ExpectedFailure -ExpectedMessage "fully qualified root" -Action {
 $scenarioRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-bounded-verifier-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scenarioRoot | Out-Null
 try {
+    $manifestProbeRoot = Join-Path $scenarioRoot "immutable-pristine"
+    New-Item -ItemType Directory -Path $manifestProbeRoot | Out-Null
+    $manifestProbePath = Join-Path $manifestProbeRoot "assembly.dll"
+    [IO.File]::WriteAllBytes($manifestProbePath, [byte[]](1, 2, 3, 4))
+    $manifestProbe = @(Get-VerificationDirectoryManifest -Directory $manifestProbeRoot)
+    Assert-VerificationDirectoryManifest -Expected $manifestProbe -Directory $manifestProbeRoot -Description "Unchanged pristine probe"
+    [IO.File]::WriteAllBytes($manifestProbePath, [byte[]](4, 3, 2, 1))
+    $null = Invoke-ExpectedFailure -ExpectedMessage "failed immutable artifact verification" -Action {
+        Assert-VerificationDirectoryManifest -Expected $manifestProbe -Directory $manifestProbeRoot -Description "Mutated pristine probe"
+    }
+
     $argumentProbePath = Join-Path $scenarioRoot "argument probe.ps1"
     @'
 param([string]$First, [string]$Second, [string]$Third)
@@ -129,6 +144,8 @@ $stressSettings = Get-Content -LiteralPath $stressSettingsPath -Raw
 $gitIgnore = Get-Content -LiteralPath $gitIgnorePath -Raw
 $maximumTest = Get-Content -LiteralPath $maximumTestPath -Raw
 $retentionTest = Get-Content -LiteralPath $retentionTestPath -Raw
+$coverageChildProcess = Get-Content -LiteralPath $coverageChildProcessPath -Raw
+$admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
 
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "Stress")]' -Message "The verifier must expose only the two owned tiers."
 Assert-Contains -Actual $verifyScript -Expected '[string]$Configuration = "Release"' -Message "The canonical verifier must default to Release."
@@ -155,6 +172,13 @@ Assert-Contains -Actual $verifyScript -Expected 'Get-ProjectCoverageIsolation' -
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework' -Message "Every lane must preserve its bin/<Configuration>/<TargetFramework> AppContext suffix."
 Assert-Contains -Actual $verifyScript -Expected 'Copy-VerifiedDirectory -SourceDirectory $pristineDirectory -DestinationDirectory $laneDirectory' -Message "Every lane copy must be verified before use."
 Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory' -Message "Persistence child-process coverage must receive a process-scoped immutable source."
+Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationDirectoryManifest -Expected $isolation.PristineManifest -Directory $isolation.PristineDirectory' -Message "Every verifier run must re-hash the immutable pristine source after all child processes exit."
+Assert-Contains -Actual $coverageChildProcess -Expected 'AddExpectedTerminationVstestArguments' -Message "Intentional process-loss cases must retain an exact VSTest testhost path instead of a custom executable helper."
+Assert-Contains -Actual $coverageChildProcess -Expected 'startInfo.ArgumentList.Add(isolatedPath);' -Message "Expected-termination VSTest must read the immutable pristine test assembly directly."
+Assert-Contains -Actual $admissionStoreTest -Expected '"crash-proof" or "crash-primary" or "crash-trust" => true' -Message "Only the three admitted abrupt-loss modes may omit an impossible child coverage report."
+Assert-Contains -Actual $admissionStoreTest -Expected '"writer" => false' -Message "Successful cross-process writers must retain the report-producing coverage path."
+Assert-Contains -Actual $admissionStoreTest -Expected 'AddExpectedTerminationVstestArguments(startInfo, typeof(GovernedLoopAdmissionStoreTests).Assembly.Location, CrossProcessHostTestName)' -Message "The crash-only route must execute the existing exact xUnit worker identity."
+Assert-Contains -Actual $admissionStoreTest -Expected 'public async Task Cross_process_admission_store_host()' -Message "The existing child worker test ID must remain in canonical inventory."
 Assert-Contains -Actual $verifyScript -Expected 'Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())' -Message "Hosted verification must select the runner-owned ephemeral volume with a local fallback."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot' -Message "Lane fixture isolation must remain short, disjoint, and outside retained repository artifacts."
 Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."

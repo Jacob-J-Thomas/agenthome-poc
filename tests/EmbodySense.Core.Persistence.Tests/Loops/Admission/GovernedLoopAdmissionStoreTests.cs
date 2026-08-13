@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Capabilities;
@@ -28,6 +29,7 @@ public sealed class GovernedLoopAdmissionStoreTests
     private const string CrossProcessReady = "EMBODYSENSE_ADMISSION_STORE_READY";
     private const string CrossProcessOutput = "EMBODYSENSE_ADMISSION_STORE_OUTPUT";
     private const string CrossProcessOperation = "EMBODYSENSE_ADMISSION_STORE_OPERATION";
+    private const string CrossProcessHostTestName = "EmbodySense.Core.Persistence.Tests.Loops.Admission.GovernedLoopAdmissionStoreTests.Cross_process_admission_store_host";
     private const char RequestA = '1';
     private const char RequestB = '4';
 
@@ -651,9 +653,16 @@ public sealed class GovernedLoopAdmissionStoreTests
         var mode = Environment.GetEnvironmentVariable(CrossProcessMode);
         if (string.IsNullOrEmpty(mode))
         {
+            Assert.False(UsesExpectedTerminationVstestHost("writer"));
+            Assert.True(UsesExpectedTerminationVstestHost("crash-proof"));
+            Assert.True(UsesExpectedTerminationVstestHost("crash-primary"));
+            Assert.True(UsesExpectedTerminationVstestHost("crash-trust"));
+            Assert.Throws<ArgumentOutOfRangeException>(() => UsesExpectedTerminationVstestHost("success"));
+            AssertExpectedTerminationVstestContract();
             return;
         }
 
+        var usesExpectedTerminationHost = UsesExpectedTerminationVstestHost(mode);
         var workspace = Environment.GetEnvironmentVariable(CrossProcessWorkspace)!;
         var trustRoot = Environment.GetEnvironmentVariable(CrossProcessTrustRoot)!;
         var gate = Environment.GetEnvironmentVariable(CrossProcessGate)!;
@@ -662,7 +671,7 @@ public sealed class GovernedLoopAdmissionStoreTests
         var operation = Environment.GetEnvironmentVariable(CrossProcessOperation)!;
         await File.WriteAllTextAsync(ready, "ready");
         await WaitForPathAsync(gate);
-        GovernedLoopAdmissionStoreOptions? options = mode.StartsWith("crash-", StringComparison.Ordinal)
+        GovernedLoopAdmissionStoreOptions? options = usesExpectedTerminationHost
             ? new GovernedLoopAdmissionStoreOptions
             {
                 DurableBoundaryObserver = (boundary, _) =>
@@ -844,10 +853,14 @@ public sealed class GovernedLoopAdmissionStoreTests
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(GovernedLoopAdmissionStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.Loops.Admission.GovernedLoopAdmissionStoreTests.Cross_process_admission_store_host");
+        if (UsesExpectedTerminationVstestHost(mode))
+        {
+            Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(startInfo, typeof(GovernedLoopAdmissionStoreTests).Assembly.Location, CrossProcessHostTestName);
+        }
+        else
+        {
+            Verification.CoverageChildProcessAssembly.AddVstestArguments(startInfo, typeof(GovernedLoopAdmissionStoreTests).Assembly.Location, CrossProcessHostTestName);
+        }
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         startInfo.Environment[CrossProcessMode] = mode;
         startInfo.Environment[CrossProcessWorkspace] = workspace;
@@ -858,6 +871,61 @@ public sealed class GovernedLoopAdmissionStoreTests
         startInfo.Environment[CrossProcessOperation] = operation;
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process admission-store host did not start.");
     }
+
+    private static bool UsesExpectedTerminationVstestHost(string mode)
+        => mode switch
+        {
+            "writer" => false,
+            "crash-proof" or "crash-primary" or "crash-trust" => true,
+            _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "The admission-store child-process mode is not admitted.")
+        };
+
+    private static void AssertExpectedTerminationVstestContract()
+    {
+        using var workspace = new TestWorkspace();
+        var pristineDirectory = workspace.File("pristine");
+        var collectorDirectory = workspace.File("Collector");
+        Directory.CreateDirectory(pristineDirectory);
+        Directory.CreateDirectory(collectorDirectory);
+        File.WriteAllText(workspace.File("verification-pull-request.runsettings"), "<RunSettings />");
+        var currentAssemblyPath = typeof(GovernedLoopAdmissionStoreTests).Assembly.Location;
+        var pristineAssemblyPath = Path.Combine(pristineDirectory, Path.GetFileName(currentAssemblyPath));
+        File.WriteAllBytes(pristineAssemblyPath, [0x01, 0x02, 0x03, 0x04]);
+        File.WriteAllBytes(Path.Combine(pristineDirectory, "dependency.dll"), [0x05, 0x06, 0x07, 0x08]);
+        var expectedHashes = GetDirectoryHashes(pristineDirectory);
+        var originalDirectory = Environment.GetEnvironmentVariable(Verification.CoverageChildProcessAssembly.IsolatedAssemblyDirectoryVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(Verification.CoverageChildProcessAssembly.IsolatedAssemblyDirectoryVariable, pristineDirectory);
+            var expectedTermination = new ProcessStartInfo("dotnet");
+            Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(expectedTermination, currentAssemblyPath, CrossProcessHostTestName);
+
+            Assert.Equal(
+                ["vstest", pristineAssemblyPath, $"--TestCaseFilter:FullyQualifiedName={CrossProcessHostTestName}"],
+                expectedTermination.ArgumentList);
+            Assert.False(Directory.Exists(workspace.File("Invocations")));
+            Assert.False(Directory.Exists(workspace.File("Results")));
+            Assert.Equal(expectedHashes, GetDirectoryHashes(pristineDirectory));
+
+            var successful = new ProcessStartInfo("dotnet");
+            Verification.CoverageChildProcessAssembly.AddVstestArguments(successful, currentAssemblyPath, CrossProcessHostTestName);
+            Assert.Contains("--Collect:XPlat Code Coverage", successful.ArgumentList);
+            Assert.Contains($"--ResultsDirectory:{workspace.File("Results")}", successful.ArgumentList);
+            Assert.Single(Directory.EnumerateDirectories(workspace.File("Invocations")));
+            Assert.True(Directory.Exists(workspace.File("Results")));
+            Assert.Equal(expectedHashes, GetDirectoryHashes(pristineDirectory));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(Verification.CoverageChildProcessAssembly.IsolatedAssemblyDirectoryVariable, originalDirectory);
+        }
+    }
+
+    private static IReadOnlyList<string> GetDirectoryHashes(string directory)
+        => Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+            .Order(StringComparer.Ordinal)
+            .Select(path => $"{Path.GetRelativePath(directory, path)}|{Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)))}")
+            .ToArray();
 
     private static async Task WaitForPathAsync(string path)
     {
