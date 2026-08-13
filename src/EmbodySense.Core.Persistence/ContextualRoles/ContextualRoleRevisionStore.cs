@@ -55,7 +55,7 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
         _paths = new ContextualRoleStorePaths(workspacePaths);
         _guard = new ContextualRoleArtifactPathGuard(_paths, _options.PhysicalBoundaryObserver);
         _timeProvider = timeProvider ?? TimeProvider.System;
-        _authorityTransaction = authorityTransaction ?? new CapabilityAuthorityTransaction(workspacePaths);
+        _authorityTransaction = authorityTransaction ?? new CapabilityAuthorityTransaction(workspacePaths, timeProvider: _timeProvider);
     }
 
     /// <summary>Releases the retained physical-directory handles owned by this store.</summary>

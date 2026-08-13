@@ -18,13 +18,14 @@ public sealed class CapabilityAuthorityTransaction : ICapabilityAuthorityTransac
     /// <param name="paths">The initialized workspace paths.</param>
     /// <param name="durabilityBarrier">The optional trusted filesystem durability adapter.</param>
     /// <param name="lockSessionProvider">The optional trusted authority-lock adapter.</param>
-    public CapabilityAuthorityTransaction(WorkspacePaths paths, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityAuthorityLockSessionProvider? lockSessionProvider = null)
+    /// <param name="timeProvider">The optional trusted clock used by bounded lock-retry delays.</param>
+    public CapabilityAuthorityTransaction(WorkspacePaths paths, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityAuthorityLockSessionProvider? lockSessionProvider = null, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         var lockPath = Path.GetFullPath(paths.CapabilityAuthorityLockPath);
         _identity = OperatingSystem.IsWindows() ? lockPath.ToUpperInvariant() : lockPath;
         _processGate = _processGates.GetOrAdd(_identity, _ => new SemaphoreSlim(1, 1));
-        _lockSessionProvider = lockSessionProvider ?? new CapabilityAuthorityLockSessionProvider(paths.RootPath, lockPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
+        _lockSessionProvider = lockSessionProvider ?? new CapabilityAuthorityLockSessionProvider(paths.RootPath, lockPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance, timeProvider);
     }
 
     /// <inheritdoc />

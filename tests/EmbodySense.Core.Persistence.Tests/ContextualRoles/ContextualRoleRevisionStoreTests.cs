@@ -1128,17 +1128,19 @@ public sealed class ContextualRoleRevisionStoreTests
         {
             Assert.Equal("ready", await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15)));
             var other = CreateRequest("create-writer", Revision("writer", 1, workspaceId: workspaceId));
-            var blocked = await new ContextualRoleRevisionStore(paths, workspaceId).MutateAsync(other);
-            var blockedRead = await new ContextualRoleRevisionStore(paths, workspaceId).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
-            var blockedRevisionRead = await new ContextualRoleRevisionStore(paths, workspaceId).ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1)));
+            var retryTime = new ImmediateTimerTimeProvider(_requestedAt);
+            var blocked = await new ContextualRoleRevisionStore(paths, workspaceId, timeProvider: retryTime).MutateAsync(other);
+            var blockedRead = await new ContextualRoleRevisionStore(paths, workspaceId, timeProvider: retryTime).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+            var blockedRevisionRead = await new ContextualRoleRevisionStore(paths, workspaceId, timeProvider: retryTime).ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1)));
             Assert.Equal(ContextualRoleRevisionMutationStatus.Unavailable, blocked.Status);
             Assert.Equal(ContextualRoleLifecycleReadStatus.Unavailable, blockedRead.Status);
             Assert.Equal(ContextualRoleRevisionReadStatus.Unavailable, blockedRevisionRead.Status);
+            Assert.Equal(747, retryTime.TimerCount);
 
             await process.StandardInput.WriteLineAsync("release");
             await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
             Assert.Equal(0, process.ExitCode);
-            var accepted = await new ContextualRoleRevisionStore(paths, workspaceId).MutateAsync(other);
+            var accepted = await new ContextualRoleRevisionStore(paths, workspaceId, timeProvider: retryTime).MutateAsync(other);
             Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, accepted.Status);
         }
         finally
