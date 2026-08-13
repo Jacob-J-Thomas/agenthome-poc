@@ -254,14 +254,14 @@ internal static class GovernedLoopRuntimeTests
     internal static async Task Concurrent_cross_schedule_defer_one_observations_retain_one_atomic_deferral_across_restart()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true, pauseProvider: true);
-        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var dispatchNow = DateTimeOffset.UtcNow.ToUniversalTime();
+        var scheduledAtUtc = dispatchNow.AddMinutes(-2);
         var workerNow = scheduledAtUtc.AddMinutes(2);
         var blocker = ScheduleScenario.Create(fixture, scheduledAtUtc, "hold the observed-active blocker", "observed-defer-a");
         var second = ScheduleScenario.Create(fixture, scheduledAtUtc, "retain one observed-active occurrence", "observed-defer-b");
         var third = ScheduleScenario.Create(fixture, scheduledAtUtc, "suppress the additional observed-active occurrence", "observed-defer-c");
 
         await QueueScheduleAsync(fixture.Paths, blocker, workerNow);
-        var dispatchNow = workerNow.AddSeconds(1);
         var workerClock = new MonotonicTriggerTimeProvider(dispatchNow);
         var queue = new TriggerQueueStore(fixture.Paths, timeProvider: workerClock);
         await using (var runtime = await fixture.CreateRuntimeAsync())
@@ -307,11 +307,17 @@ internal static class GovernedLoopRuntimeTests
 
             var blockerResult = await blockerTask;
             Assert.True(blockerResult.Entry is not null, $"Blocker selection={blockerResult.SelectionStatus}; mutation={blockerResult.MutationStatus}");
-            Assert.Equal("Dispatched", blockerResult.Entry.State);
+            Assert.True(
+                string.Equals("Dispatched", blockerResult.Entry.State, StringComparison.Ordinal),
+                $"State={blockerResult.Entry.State}; Outcome={blockerResult.Entry.DispatchOutcome}; Detail={blockerResult.Entry.DispatchDetail}; Mutation={blockerResult.MutationStatus}");
             Assert.True(blockedSecond.Entry is not null, $"Second selection={blockedSecond.SelectionStatus}; mutation={blockedSecond.MutationStatus}");
-            Assert.Equal("DispatchRejected", blockedSecond.Entry.State);
+            Assert.True(
+                string.Equals("DispatchRejected", blockedSecond.Entry.State, StringComparison.Ordinal),
+                $"State={blockedSecond.Entry.State}; Outcome={blockedSecond.Entry.DispatchOutcome}; Detail={blockedSecond.Entry.DispatchDetail}; Mutation={blockedSecond.MutationStatus}");
             Assert.True(blockedThird.Entry is not null, $"Third selection={blockedThird.SelectionStatus}; mutation={blockedThird.MutationStatus}");
-            Assert.Equal("DispatchRejected", blockedThird.Entry.State);
+            Assert.True(
+                string.Equals("DispatchRejected", blockedThird.Entry.State, StringComparison.Ordinal),
+                $"State={blockedThird.Entry.State}; Outcome={blockedThird.Entry.DispatchOutcome}; Detail={blockedThird.Entry.DispatchDetail}; Mutation={blockedThird.MutationStatus}");
             Assert.Equal(1, fixture.ProviderAttempts);
         }
 
