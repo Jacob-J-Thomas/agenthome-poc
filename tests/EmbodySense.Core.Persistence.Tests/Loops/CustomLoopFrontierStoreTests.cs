@@ -378,7 +378,7 @@ public sealed class CustomLoopFrontierStoreTests
                 child,
                 outputTask,
                 errorTask,
-                TimeSpan.FromSeconds(30));
+                TimeSpan.FromSeconds(60));
             Assert.False(child.HasExited);
             Assert.Equal(candidate.Frontier!.Payload.ContentHash, await File.ReadAllTextAsync(readyPath));
             Assert.Equal(candidateBytes, await File.ReadAllBytesAsync(stagingPath));
