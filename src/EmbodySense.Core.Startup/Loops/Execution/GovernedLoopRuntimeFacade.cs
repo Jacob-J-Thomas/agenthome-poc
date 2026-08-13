@@ -363,10 +363,25 @@ internal sealed class GovernedLoopRuntimeFacade : IDisposable, ITriggerGovernedL
             return Map(await _coordinator.InvokeAsync(request, cancellationToken).ConfigureAwait(false));
         }
 
+        GovernedLoopSequentialInvocationResult? preparedSchedule = null;
+        if (triggerOrigin is not null)
+        {
+            preparedSchedule = await _coordinator.PrepareAsync(request, cancellationToken).ConfigureAwait(false);
+            if (preparedSchedule.Status != GovernedLoopSequentialInvocationStatus.Prepared)
+            {
+                return Map(preparedSchedule);
+            }
+        }
+
         var availability = await _legacyRuntime.EnsureCustomExecutionAvailableAsync(invocationActor.Value, cancellationToken).ConfigureAwait(false);
         if (!availability.Available)
         {
-            return Failure(availability.Status, availability.Detail);
+            return preparedSchedule is null
+                ? Failure(availability.Status, availability.Detail)
+                : Map(preparedSchedule with
+                {
+                    Detail = $"{preparedSchedule.Detail} Provider execution remains pending because runtime availability returned `{availability.Status}`: {availability.Detail}",
+                });
         }
 
         var ownership = _executionGate.TryAcquire(input!.OperationId, pending.RequestHash);
@@ -379,7 +394,12 @@ internal sealed class GovernedLoopRuntimeFacade : IDisposable, ITriggerGovernedL
                 return Map(await _coordinator.InvokeAsync(request, CancellationToken.None).ConfigureAwait(false));
             }
 
-            return Failure(ownership.Status.ToString(), ownership.Detail);
+            return preparedSchedule is null
+                ? Failure(ownership.Status.ToString(), ownership.Detail)
+                : Map(preparedSchedule with
+                {
+                    Detail = $"{preparedSchedule.Detail} Provider execution remains pending because the workspace lease returned `{ownership.Status}`: {ownership.Detail}",
+                });
         }
 
         using (ownership.Lease)

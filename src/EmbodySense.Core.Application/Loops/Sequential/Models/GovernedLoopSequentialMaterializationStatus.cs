@@ -32,4 +32,16 @@ public enum GovernedLoopSequentialMaterializationStatus
 
     /// <summary>The stable admission-audit operation is durably bound to different evidence.</summary>
     AuditConflict = 9,
+
+    /// <summary>The authenticated Skip policy durably terminalized the occurrence before provider dispatch.</summary>
+    OverlapSkipped = 10,
+
+    /// <summary>The authenticated DeferOne policy durably retained the occurrence for later reselection.</summary>
+    OverlapDeferred = 11,
+
+    /// <summary>The authenticated Allow policy durably retained the occurrence while preserving serial execution.</summary>
+    OverlapSerialized = 12,
+
+    /// <summary>Another exact DeferOne occurrence already owns the single deferred slot.</summary>
+    DeferredOneSuppressed = 13,
 }

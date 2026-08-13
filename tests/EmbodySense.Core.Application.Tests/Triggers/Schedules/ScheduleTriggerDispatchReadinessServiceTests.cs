@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
 using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 
 namespace EmbodySense.Core.Application.Tests.Triggers.Schedules;
 
@@ -105,11 +106,20 @@ public sealed class ScheduleTriggerDispatchReadinessServiceTests
             out _));
         var authority = TriggerAdmissionTestData.Authority(evaluatedAtUtc: ScheduleEvaluatorTestData.Now);
         Assert.Equal(definition.AuthorityProfile, authority.Profile);
-        Assert.True(TriggerDeliveryFactory.TryCreateEnvelope(
+        var directive = new ScheduleExecutionDirective(
+            ScheduleExecutionDirective.CurrentSchemaVersion,
+            definition.ScheduleId,
+            definition.Revision,
+            definitionHash!,
+            occurrence,
+            identity,
+            definition.Target,
+            definition.Overlap,
+            new string('8', 64));
+        Assert.True(TriggerDeliveryFactory.TryCreateScheduledEnvelope(
             TriggerDeliveryEnvelope.CurrentSchemaVersion,
             identity.DeliveryId,
             identity.DeduplicationId,
-            TriggerKind.Time,
             definition.TimeAdapter,
             definition.Target,
             actor,
@@ -117,6 +127,7 @@ public sealed class ScheduleTriggerDispatchReadinessServiceTests
             temporal,
             payload,
             redelivery,
+            directive,
             false,
             null,
             TriggerAdmissionStatus.Unknown,

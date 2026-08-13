@@ -2323,6 +2323,11 @@ public sealed class ScheduleDueOccurrenceEvaluator
             && QueueStatusReasonMatches(result.Status, result.Reason)
             && AdmissionEvidenceMatches(result.AdmissionStatus, result.AdmissionReason)
             && QueueAdmissionCoheres(result)
+            // An exact identity replay is usable only while the original delivery can still
+            // reach dispatch. A terminal worker result in the Prepared crash window must be
+            // reconciled as ambiguous instead of being reclassified as successful delivery.
+            && (result.Status != TriggerQueueAdmissionStatus.Replayed
+                || result.Entry?.State is TriggerQueueEntryState.Queued or TriggerQueueEntryState.WorkerOwned or TriggerQueueEntryState.Dispatching or TriggerQueueEntryState.Dispatched)
             && Equals(result.DeliveryId, pending.Identity.DeliveryId)
             && Equals(result.DeduplicationId, pending.Identity.DeduplicationId)
             && string.Equals(result.CanonicalEnvelopeHash, prepared.CanonicalEnvelopeHash, StringComparison.Ordinal)

@@ -16,6 +16,11 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Sequential;
+using EmbodySense.Core.Common.Triggers;
+using EmbodySense.Core.Common.Triggers.Models;
+using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops.Models;
 
@@ -60,6 +65,7 @@ public sealed class CustomLoopRunStore :
     private readonly string _workspaceRoot;
     private readonly string _runsRoot;
     private readonly string _traceDeletionOperationsRoot;
+    private readonly string _scheduleAdmissionsRoot;
     private readonly string _mutationLockPath;
     private readonly string _discoveryIndexPath;
     private readonly string _discoveryIndexPendingPath;
@@ -106,8 +112,10 @@ public sealed class CustomLoopRunStore :
         _workspaceRoot = Path.GetFullPath(paths.RootPath);
         _runsRoot = Path.GetFullPath(paths.CustomLoopRunsPath);
         _traceDeletionOperationsRoot = Path.GetFullPath(paths.CustomLoopTraceDeletionOperationsPath);
+        _scheduleAdmissionsRoot = Path.GetFullPath(paths.CustomLoopScheduleAdmissionsPath);
         EnsureContained(_workspaceRoot, _runsRoot);
         EnsureContained(_workspaceRoot, _traceDeletionOperationsRoot);
+        EnsureContained(_workspaceRoot, _scheduleAdmissionsRoot);
         _mutationLockPath = Path.Combine(_runsRoot, MutationLockFileName);
         _discoveryIndexPath = Path.Combine(_runsRoot, DiscoveryIndexFileName);
         _discoveryIndexPendingPath = Path.Combine(_runsRoot, DiscoveryIndexPendingFileName);
@@ -226,6 +234,413 @@ public sealed class CustomLoopRunStore :
         await WriteArtifactAsync(path, serialized, ToSummary(run), overwrite: false, cancellationToken);
         return CustomLoopRunStoreResult.Created(run);
     }
+
+    /// <inheritdoc />
+    public async Task<ScheduleRunAdmissionStoreResult> CreateScheduledAsync(
+        CustomLoopRunRecord run,
+        TriggerDeliveryEnvelope envelope,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateCanonicalRun(run);
+        if (run.LifecycleVersion != 1 || run.Status != CustomLoopRunStatus.Admitted)
+        {
+            throw new ArgumentException("New scheduled custom-loop runs must begin at admitted lifecycle version 1.", nameof(run));
+        }
+
+        if (!TryValidateScheduledRun(run, envelope, out var canonicalEnvelope, out var canonicalEnvelopeHash))
+        {
+            throw new ArgumentException("The scheduled run does not retain the exact authenticated schedule delivery and directive.", nameof(envelope));
+        }
+
+        var directive = envelope.ScheduleExecutionDirective!;
+        var serialized = SerializeBounded(run);
+        await using var mutation = await AcquireMutationLockAsync(cancellationToken);
+        var admissions = await ReadAllScheduleAdmissionsAsync(cancellationToken);
+        var existingEvidence = admissions.SingleOrDefault(item => string.Equals(item.CanonicalEnvelopeHash, canonicalEnvelopeHash, StringComparison.Ordinal));
+        var deliveryEvidence = admissions.SingleOrDefault(item =>
+            string.Equals(
+                TriggerDelivery(item.CanonicalEnvelope).Value,
+                envelope.DeliveryId.Value,
+                StringComparison.Ordinal));
+
+        if (deliveryEvidence is not null
+            && !string.Equals(deliveryEvidence.CanonicalEnvelopeHash, canonicalEnvelopeHash, StringComparison.Ordinal))
+        {
+            return ScheduleResult(ScheduleRunAdmissionStoreStatus.Conflict, null, deliveryEvidence);
+        }
+
+        CustomLoopRunRecord? operationMatch = null;
+        CustomLoopRunRecord? runIdMatch = null;
+        CustomLoopRunRecord? activeLoopRun = null;
+        CustomLoopRunRecord? exactScheduleRun = null;
+        var multipleActiveLoopRuns = false;
+        var multipleExactScheduleRuns = false;
+        var deletedOperation = false;
+        var deletedRunId = false;
+        var scan = await ScanArtifactsAsync(artifact =>
+        {
+            if (artifact.Tombstone is { } tombstone)
+            {
+                deletedOperation |= string.Equals(tombstone.AdmissionOperationId, run.AdmissionOperationId, StringComparison.Ordinal);
+                deletedRunId |= string.Equals(tombstone.RunId, run.Id, StringComparison.Ordinal);
+                return;
+            }
+
+            var persisted = artifact.Run!;
+            if (string.Equals(persisted.AdmissionOperationId, run.AdmissionOperationId, StringComparison.Ordinal))
+            {
+                operationMatch = persisted;
+            }
+
+            if (string.Equals(persisted.Id, run.Id, StringComparison.Ordinal))
+            {
+                runIdMatch = persisted;
+            }
+
+            if (string.Equals(persisted.LoopId, run.LoopId, StringComparison.Ordinal) && !persisted.IsTerminal)
+            {
+                multipleActiveLoopRuns |= activeLoopRun is not null;
+                activeLoopRun ??= persisted;
+            }
+
+            if (MatchesScheduledEnvelope(persisted, canonicalEnvelope!, canonicalEnvelopeHash!))
+            {
+                multipleExactScheduleRuns |= exactScheduleRun is not null;
+                exactScheduleRun ??= persisted;
+            }
+        }, cancellationToken);
+
+        if (multipleActiveLoopRuns || multipleExactScheduleRuns)
+        {
+            throw new FormatException($"Custom loop `{run.LoopId}` has ambiguous nonterminal or schedule-delivery ownership. The persisted state requires review.");
+        }
+
+        if (existingEvidence is not null && !MatchesEvidenceEnvelope(existingEvidence, run.LoopId, canonicalEnvelope!, canonicalEnvelopeHash!))
+        {
+            return ScheduleResult(ScheduleRunAdmissionStoreStatus.Conflict, null, existingEvidence);
+        }
+
+        var currentDisposition = existingEvidence?.Attempts[^1].Disposition;
+        if (currentDisposition == ScheduleRunAdmissionDisposition.RunCreated)
+        {
+            return exactScheduleRun is not null
+                ? ScheduleResult(ScheduleRunAdmissionStoreStatus.Replayed, exactScheduleRun, existingEvidence)
+                : throw new FormatException("Schedule run-admission evidence claims a materialized run that is not present in canonical run storage.");
+        }
+
+        if (currentDisposition is ScheduleRunAdmissionDisposition.OverlapSkipped or ScheduleRunAdmissionDisposition.DeferredOneSuppressed)
+        {
+            return ScheduleResult(
+                currentDisposition == ScheduleRunAdmissionDisposition.OverlapSkipped
+                    ? ScheduleRunAdmissionStoreStatus.OverlapSkipped
+                    : ScheduleRunAdmissionStoreStatus.DeferredOneSuppressed,
+                FindBlockingRun(existingEvidence!, activeLoopRun),
+                existingEvidence);
+        }
+
+        if (existingEvidence?.Attempts.Count >= ScheduleRunAdmissionEvidenceLimits.MaxAttempts)
+        {
+            return ScheduleResult(ScheduleRunAdmissionStoreStatus.LimitExceeded, activeLoopRun, existingEvidence);
+        }
+
+        if (exactScheduleRun is not null)
+        {
+            var recovered = await AppendScheduleAdmissionAsync(
+                existingEvidence,
+                canonicalEnvelope!,
+                canonicalEnvelopeHash!,
+                run.LoopId,
+                exactScheduleRun.AdmissionOperationId,
+                exactScheduleRun.Id,
+                ScheduleRunAdmissionDisposition.RunCreated,
+                null,
+                cancellationToken);
+            return ScheduleResult(ScheduleRunAdmissionStoreStatus.Replayed, exactScheduleRun, recovered);
+        }
+
+        if (deletedOperation || deletedRunId)
+        {
+            return ScheduleResult(ScheduleRunAdmissionStoreStatus.Conflict, null, existingEvidence);
+        }
+
+        if (operationMatch is not null && !SameAdmissionRequest(operationMatch, run)
+            || runIdMatch is not null)
+        {
+            return ScheduleResult(ScheduleRunAdmissionStoreStatus.Conflict, operationMatch ?? runIdMatch, existingEvidence);
+        }
+
+        if (activeLoopRun is not null)
+        {
+            var disposition = directive.Overlap switch
+            {
+                ScheduleOverlapPolicy.Skip => ScheduleRunAdmissionDisposition.OverlapSkipped,
+                ScheduleOverlapPolicy.DeferOne when HasOtherDeferredOccurrence(admissions, canonicalEnvelopeHash!, run.LoopId) => ScheduleRunAdmissionDisposition.DeferredOneSuppressed,
+                ScheduleOverlapPolicy.DeferOne => ScheduleRunAdmissionDisposition.OverlapDeferred,
+                ScheduleOverlapPolicy.Allow => ScheduleRunAdmissionDisposition.OverlapSerialized,
+                _ => ScheduleRunAdmissionDisposition.Unknown,
+            };
+            if (disposition == ScheduleRunAdmissionDisposition.Unknown)
+            {
+                return ScheduleResult(ScheduleRunAdmissionStoreStatus.Conflict, activeLoopRun, existingEvidence);
+            }
+
+            if (existingEvidence is not null
+                && currentDisposition == disposition
+                && string.Equals(existingEvidence.Attempts[^1].BlockingRunId, activeLoopRun.Id, StringComparison.Ordinal))
+            {
+                return ScheduleResult(MapScheduleDisposition(disposition), activeLoopRun, existingEvidence);
+            }
+
+            var retained = await AppendScheduleAdmissionAsync(
+                existingEvidence,
+                canonicalEnvelope!,
+                canonicalEnvelopeHash!,
+                run.LoopId,
+                run.AdmissionOperationId,
+                run.Id,
+                disposition,
+                activeLoopRun.Id,
+                cancellationToken);
+            return ScheduleResult(MapScheduleDisposition(disposition), activeLoopRun, retained);
+        }
+
+        if (CalculateRequiredTraceCapacity(run, serialized.LongLength) > CustomLoopLimits.MaxRunTraceUtf8Bytes
+            || scan.Quota.RetainedTraceCount >= scan.Quota.MaximumTraceCount
+            || scan.Quota.AccountedTraceUtf8Bytes > scan.Quota.MaximumWorkspaceUtf8Bytes - scan.Quota.MaximumPerTraceUtf8Bytes)
+        {
+            return ScheduleResult(ScheduleRunAdmissionStoreStatus.LimitExceeded, null, existingEvidence);
+        }
+
+        var path = GetRunPath(run.LoopId, run.Id);
+        EnsureSafeDirectory(Path.GetDirectoryName(path)!, create: true);
+        EnsureSafeArtifactPath(path, mustExist: false);
+        await WriteArtifactAsync(path, serialized, ToSummary(run), overwrite: false, cancellationToken);
+        var evidence = await AppendScheduleAdmissionAsync(
+            existingEvidence,
+            canonicalEnvelope!,
+            canonicalEnvelopeHash!,
+            run.LoopId,
+            run.AdmissionOperationId,
+            run.Id,
+            ScheduleRunAdmissionDisposition.RunCreated,
+            null,
+            cancellationToken);
+        return ScheduleResult(ScheduleRunAdmissionStoreStatus.Created, run, evidence);
+    }
+
+    /// <inheritdoc />
+    public async Task<ScheduleRunAdmissionEvidence?> GetScheduleAdmissionAsync(
+        TriggerDeliveryId deliveryId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(deliveryId);
+        var path = GetScheduleAdmissionPath(deliveryId);
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        var content = await ReadBoundedJsonArtifactAsync(
+            _scheduleAdmissionsRoot,
+            path,
+            ScheduleRunAdmissionEvidenceLimits.MaxArtifactUtf8Bytes,
+            "Schedule run-admission evidence",
+            cancellationToken);
+        return ScheduleRunAdmissionEvidenceCodec.Deserialize(content);
+    }
+
+    private async Task<ScheduleRunAdmissionEvidence> AppendScheduleAdmissionAsync(
+        ScheduleRunAdmissionEvidence? existing,
+        string canonicalEnvelope,
+        string canonicalEnvelopeHash,
+        string loopId,
+        string admissionOperationId,
+        string candidateRunId,
+        ScheduleRunAdmissionDisposition disposition,
+        string? blockingRunId,
+        CancellationToken cancellationToken)
+    {
+        var priorAttempts = existing?.Attempts ?? [];
+        if (priorAttempts.Count >= ScheduleRunAdmissionEvidenceLimits.MaxAttempts)
+        {
+            throw new InvalidOperationException("The bounded schedule run-admission attempt limit has been reached.");
+        }
+
+        var now = _timeProvider.GetUtcNow().ToUniversalTime();
+        if (priorAttempts.LastOrDefault()?.RecordedAtUtc is { } prior && now < prior)
+        {
+            now = prior;
+        }
+
+        var attempt = new ScheduleRunAdmissionAttempt(
+            ScheduleRunAdmissionAttempt.CurrentSchemaVersion,
+            priorAttempts.Count + 1,
+            disposition,
+            admissionOperationId,
+            candidateRunId,
+            blockingRunId,
+            now);
+        var evidence = ScheduleRunAdmissionEvidenceHash.Apply(new ScheduleRunAdmissionEvidence(
+            ScheduleRunAdmissionEvidence.CurrentSchemaVersion,
+            canonicalEnvelope,
+            canonicalEnvelopeHash,
+            loopId,
+            [.. priorAttempts, attempt],
+            string.Empty));
+        var path = GetScheduleAdmissionPath(TriggerDelivery(envelope: canonicalEnvelope));
+        await WriteBoundedJsonArtifactAsync(
+            _scheduleAdmissionsRoot,
+            path,
+            ScheduleRunAdmissionEvidenceCodec.Serialize(evidence),
+            overwrite: existing is not null,
+            cancellationToken);
+        return evidence;
+    }
+
+    private async Task<IReadOnlyList<ScheduleRunAdmissionEvidence>> ReadAllScheduleAdmissionsAsync(CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(_scheduleAdmissionsRoot))
+        {
+            return [];
+        }
+
+        EnsureSafeDirectory(_scheduleAdmissionsRoot, create: false);
+        if (Directory.EnumerateDirectories(_scheduleAdmissionsRoot, "*", SearchOption.TopDirectoryOnly).Any())
+        {
+            throw new FormatException("Schedule run-admission evidence storage cannot contain subdirectories.");
+        }
+
+        var maximumArtifacts = CustomLoopLimits.MaxRunTracesPerWorkspace + CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace;
+        var paths = Directory
+            .EnumerateFiles(_scheduleAdmissionsRoot, "*", SearchOption.TopDirectoryOnly)
+            .OrderBy(path => path, PathComparer)
+            .Take(maximumArtifacts + 1)
+            .ToArray();
+        if (paths.Length > maximumArtifacts)
+        {
+            throw new FormatException("Schedule run-admission storage exceeds its explicit bounded artifact count.");
+        }
+
+        var evidence = new List<ScheduleRunAdmissionEvidence>(paths.Length);
+        foreach (var path in paths)
+        {
+            if (IsTemporaryArtifactPath(path, TriggerDeliveryLimits.MaxDeliveryIdCharacters))
+            {
+                continue;
+            }
+
+            EnsureSafeArtifactPath(_scheduleAdmissionsRoot, path, mustExist: true);
+            var deliveryText = Path.GetFileNameWithoutExtension(path);
+            if (!string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase)
+                || !TriggerDeliveryId.TryParse(deliveryText, out var deliveryId))
+            {
+                throw new FormatException($"Schedule run-admission artifact `{path}` has an unsafe delivery identity.");
+            }
+
+            var content = await ReadBoundedJsonArtifactAsync(
+                _scheduleAdmissionsRoot,
+                path,
+                ScheduleRunAdmissionEvidenceLimits.MaxArtifactUtf8Bytes,
+                "Schedule run-admission evidence",
+                cancellationToken);
+            var item = ScheduleRunAdmissionEvidenceCodec.Deserialize(content);
+            if (!Equals(TriggerDelivery(envelope: item.CanonicalEnvelope), deliveryId))
+            {
+                throw new FormatException("Schedule run-admission evidence is stored beneath a substituted delivery identity.");
+            }
+
+            evidence.Add(item);
+        }
+
+        return evidence;
+    }
+
+    private string GetScheduleAdmissionPath(TriggerDeliveryId deliveryId)
+    {
+        ArgumentNullException.ThrowIfNull(deliveryId);
+        var path = Path.Combine(_scheduleAdmissionsRoot, deliveryId.Value + ".json");
+        EnsureContained(_scheduleAdmissionsRoot, path);
+        return path;
+    }
+
+    private static TriggerDeliveryId TriggerDelivery(string envelope)
+    {
+        if (!TriggerDeliveryJson.TryDeserialize(envelope, out var parsed, out _) || parsed is null)
+        {
+            throw new FormatException("Schedule run-admission evidence does not retain a canonical trigger envelope.");
+        }
+
+        return parsed.DeliveryId;
+    }
+
+    private static bool TryValidateScheduledRun(
+        CustomLoopRunRecord run,
+        TriggerDeliveryEnvelope? envelope,
+        out string? canonicalEnvelope,
+        out string? canonicalEnvelopeHash)
+    {
+        canonicalEnvelope = null;
+        canonicalEnvelopeHash = null;
+        var origin = run.SequentialInvocationSnapshot?.TriggerOrigin;
+        return envelope is not null
+            && envelope.Kind == TriggerKind.Time
+            && envelope.ScheduleExecutionDirective is not null
+            && TriggerDeliveryValidator.Validate(envelope).IsValid
+            && string.Equals(run.LoopId, envelope.Loop.LoopId, StringComparison.Ordinal)
+            && origin is not null
+            && GovernedLoopSequentialTriggerOriginFactory.MatchesPersistedOrigin(envelope, origin)
+            && TriggerDeliveryJson.TrySerialize(envelope, out canonicalEnvelope, out _)
+            && TriggerDeliveryHash.TryCompute(envelope, out canonicalEnvelopeHash, out _)
+            && string.Equals(origin.CanonicalEnvelope, canonicalEnvelope, StringComparison.Ordinal)
+            && string.Equals(origin.CanonicalEnvelopeHash, canonicalEnvelopeHash, StringComparison.Ordinal);
+    }
+
+    private static bool MatchesScheduledEnvelope(CustomLoopRunRecord run, string canonicalEnvelope, string canonicalEnvelopeHash)
+        => run.SequentialInvocationSnapshot?.TriggerOrigin is { } origin
+            && string.Equals(origin.CanonicalEnvelope, canonicalEnvelope, StringComparison.Ordinal)
+            && string.Equals(origin.CanonicalEnvelopeHash, canonicalEnvelopeHash, StringComparison.Ordinal);
+
+    private static bool MatchesEvidenceEnvelope(
+        ScheduleRunAdmissionEvidence evidence,
+        string loopId,
+        string canonicalEnvelope,
+        string canonicalEnvelopeHash)
+        => ScheduleRunAdmissionEvidenceValidator.IsValid(evidence)
+            && string.Equals(evidence.LoopId, loopId, StringComparison.Ordinal)
+            && string.Equals(evidence.CanonicalEnvelope, canonicalEnvelope, StringComparison.Ordinal)
+            && string.Equals(evidence.CanonicalEnvelopeHash, canonicalEnvelopeHash, StringComparison.Ordinal);
+
+    private static bool HasOtherDeferredOccurrence(
+        IReadOnlyList<ScheduleRunAdmissionEvidence> evidence,
+        string currentEnvelopeHash,
+        string loopId)
+        => evidence.Any(item => !string.Equals(item.CanonicalEnvelopeHash, currentEnvelopeHash, StringComparison.Ordinal)
+            && string.Equals(item.LoopId, loopId, StringComparison.Ordinal)
+            && item.Attempts[^1].Disposition == ScheduleRunAdmissionDisposition.OverlapDeferred);
+
+    private static CustomLoopRunRecord? FindBlockingRun(
+        ScheduleRunAdmissionEvidence evidence,
+        CustomLoopRunRecord? activeLoopRun)
+        => activeLoopRun is not null
+            && string.Equals(evidence.Attempts[^1].BlockingRunId, activeLoopRun.Id, StringComparison.Ordinal)
+                ? activeLoopRun
+                : null;
+
+    private static ScheduleRunAdmissionStoreStatus MapScheduleDisposition(ScheduleRunAdmissionDisposition disposition)
+        => disposition switch
+        {
+            ScheduleRunAdmissionDisposition.OverlapSkipped => ScheduleRunAdmissionStoreStatus.OverlapSkipped,
+            ScheduleRunAdmissionDisposition.OverlapDeferred => ScheduleRunAdmissionStoreStatus.OverlapDeferred,
+            ScheduleRunAdmissionDisposition.OverlapSerialized => ScheduleRunAdmissionStoreStatus.OverlapSerialized,
+            ScheduleRunAdmissionDisposition.DeferredOneSuppressed => ScheduleRunAdmissionStoreStatus.DeferredOneSuppressed,
+            _ => ScheduleRunAdmissionStoreStatus.Conflict,
+        };
+
+    private static ScheduleRunAdmissionStoreResult ScheduleResult(
+        ScheduleRunAdmissionStoreStatus status,
+        CustomLoopRunRecord? run,
+        ScheduleRunAdmissionEvidence? evidence)
+        => new(status, run, evidence);
 
     /// <summary>
     /// Loads the unique canonical run artifact for a run identifier.
@@ -2567,6 +2982,7 @@ public sealed class CustomLoopRunStore :
     {
         RecoverRunTemporaryArtifacts();
         RecoverTraceDeletionOperationTemporaryArtifacts();
+        RecoverScheduleAdmissionTemporaryArtifacts();
     }
 
     private void RecoverRunTemporaryArtifacts()
@@ -2627,6 +3043,32 @@ public sealed class CustomLoopRunStore :
             else if (LooksLikeTemporaryArtifactPath(path))
             {
                 throw new FormatException($"Custom loop trace-deletion operation storage contains an unrecognized temporary-looking artifact `{path}`.");
+            }
+        }
+    }
+
+    private void RecoverScheduleAdmissionTemporaryArtifacts()
+    {
+        if (!Directory.Exists(_scheduleAdmissionsRoot))
+        {
+            return;
+        }
+
+        EnsureSafeDirectory(_scheduleAdmissionsRoot, create: false);
+        if (Directory.EnumerateDirectories(_scheduleAdmissionsRoot, "*", SearchOption.TopDirectoryOnly).Any())
+        {
+            throw new FormatException("Schedule run-admission evidence storage cannot contain subdirectories.");
+        }
+
+        foreach (var path in Directory.EnumerateFiles(_scheduleAdmissionsRoot, "*", SearchOption.TopDirectoryOnly))
+        {
+            if (IsTemporaryArtifactPath(path, TriggerDeliveryLimits.MaxDeliveryIdCharacters))
+            {
+                DeleteOrphanedTemporaryArtifact(_scheduleAdmissionsRoot, path);
+            }
+            else if (LooksLikeTemporaryArtifactPath(path))
+            {
+                throw new FormatException($"Schedule run-admission evidence storage contains an unrecognized temporary-looking artifact `{path}`.");
             }
         }
     }

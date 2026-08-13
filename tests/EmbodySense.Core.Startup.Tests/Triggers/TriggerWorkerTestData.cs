@@ -90,11 +90,20 @@ internal static class TriggerWorkerTestData
             out var temporal,
             out _));
         payload ??= InlinePayload("dispatch"u8.ToArray());
-        Assert.True(TriggerDeliveryFactory.TryCreateEnvelope(
+        var directive = new ScheduleExecutionDirective(
+            ScheduleExecutionDirective.CurrentSchemaVersion,
+            scheduleId!,
+            1,
+            new string('b', 64),
+            occurrence,
+            identity,
+            loop,
+            ScheduleOverlapPolicy.DeferOne,
+            new string('e', 64));
+        Assert.True(TriggerDeliveryFactory.TryCreateScheduledEnvelope(
             1,
             identity.DeliveryId,
             identity.DeduplicationId,
-            TriggerKind.Time,
             adapter,
             loop,
             actorContext,
@@ -102,6 +111,7 @@ internal static class TriggerWorkerTestData
             temporal,
             payload,
             redelivery,
+            directive,
             false,
             null,
             TriggerAdmissionStatus.Unknown,

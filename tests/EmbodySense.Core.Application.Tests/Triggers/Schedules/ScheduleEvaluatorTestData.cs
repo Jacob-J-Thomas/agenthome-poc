@@ -438,16 +438,49 @@ internal sealed class TestScheduleQueue : ITriggerQueueAdmissionPort
             Assert.True(TriggerDeduplicationId.TryParse("trigger-dedup-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", out deduplicationId));
         }
 
+        var entry = Status == TriggerQueueAdmissionStatus.Replayed
+            ? QueuedEntry(
+                envelope,
+                hash!,
+                request.Priority,
+                request.DeliveryRequest.EvaluatedAtUtc,
+                admissionStatus,
+                admissionReason)
+            : null;
         return Task.FromResult(new TriggerQueueAdmissionResult(
             Status,
             reason,
             deliveryId!,
             deduplicationId!,
             hash,
-            null,
+            entry,
             admissionStatus,
             admissionReason));
     }
+
+    private static TriggerQueueEntry QueuedEntry(
+        TriggerDeliveryEnvelope envelope,
+        string canonicalEnvelopeHash,
+        TriggerQueuePriority priority,
+        DateTimeOffset recordedAtUtc,
+        TriggerAdmissionStatus admissionStatus,
+        TriggerAdmissionReason admissionReason)
+        => new(
+            envelope.DeliveryId,
+            envelope.DeduplicationId,
+            envelope.Loop.LoopId,
+            canonicalEnvelopeHash,
+            1,
+            1,
+            1,
+            TriggerQueueEntryState.Queued,
+            TriggerQueueTerminalReason.None,
+            new TriggerQueueOrderKey(recordedAtUtc, priority, recordedAtUtc, envelope.DeliveryId.Value),
+            1,
+            recordedAtUtc,
+            null,
+            admissionStatus,
+            admissionReason);
 }
 
 internal sealed class TestScheduleAdmissionHistory(
@@ -491,13 +524,35 @@ internal sealed class TestScheduleQueueMutation : ITriggerQueueMutationPort
             TriggerQueueAdmissionStatus.Replayed => TriggerQueueAdmissionReason.ExactReplay,
             _ => TriggerQueueAdmissionReason.AdmissionRejected,
         };
+        var entry = status == TriggerQueueAdmissionStatus.Replayed
+            ? new TriggerQueueEntry(
+                request.Envelope.DeliveryId,
+                request.Envelope.DeduplicationId,
+                request.Envelope.Loop.LoopId,
+                request.CanonicalEnvelopeHash,
+                1,
+                1,
+                1,
+                TriggerQueueEntryState.Queued,
+                TriggerQueueTerminalReason.None,
+                new TriggerQueueOrderKey(
+                    request.RecordedAtUtc,
+                    request.Priority,
+                    request.RecordedAtUtc,
+                    request.Envelope.DeliveryId.Value),
+                1,
+                request.RecordedAtUtc,
+                null,
+                request.AdmissionStatus,
+                request.AdmissionReason)
+            : null;
         return Task.FromResult(new TriggerQueueAdmissionResult(
             status,
             reason,
             request.Envelope.DeliveryId,
             request.Envelope.DeduplicationId,
             request.CanonicalEnvelopeHash,
-            null,
+            entry,
             request.AdmissionStatus,
             request.AdmissionReason));
     }

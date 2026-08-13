@@ -163,6 +163,94 @@ internal static class GovernedLoopRuntimeTests
         }
     }
 
+    internal static async Task Atomic_schedule_run_admission_closes_the_post_observation_race_for_every_overlap_policy(
+        ScheduleOverlapPolicy overlap,
+        ScheduleRunAdmissionDisposition secondDisposition,
+        ScheduleRunAdmissionDisposition thirdDisposition)
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true, pauseProvider: true);
+        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var workerNow = scheduledAtUtc.AddMinutes(2);
+        var token = overlap.ToString().ToLowerInvariant();
+        var first = ScheduleScenario.Create(fixture, scheduledAtUtc, $"hold the {token} blocker", $"governed-overlap-{token}-a", overlap);
+        var second = ScheduleScenario.Create(fixture, scheduledAtUtc, $"never dispatch the {token} contender", $"governed-overlap-{token}-b", overlap);
+        var third = ScheduleScenario.Create(fixture, scheduledAtUtc, $"retain bounded {token} evidence", $"governed-overlap-{token}-c", overlap);
+
+        await QueueScheduleAsync(fixture.Paths, first, workerNow);
+        await QueueScheduleAsync(fixture.Paths, second, workerNow.AddTicks(1));
+        await QueueScheduleAsync(fixture.Paths, third, workerNow.AddTicks(2));
+
+        var dispatchNow = workerNow.AddSeconds(1);
+        var queue = new TriggerQueueStore(fixture.Paths, timeProvider: new FixedTriggerTimeProvider(dispatchNow));
+        Assert.Equal(3, (await queue.GetSnapshotAsync(dispatchNow)).QueuedEntries);
+        await using var runtime = await fixture.CreateRuntimeAsync();
+        var generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
+        var blockerTask = runtime
+            .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(dispatchNow))
+            .RunOnceAsync(new TriggerWorkerSelectionInput("overlap-worker-a", generation, dispatchNow, TimeSpan.FromSeconds(30), [], 3));
+        await fixture.WaitForProviderAsync();
+        TriggerWorkerRunResponse blockedSecond;
+        TriggerWorkerRunResponse blockedThird;
+        try
+        {
+            generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
+            blockedSecond = await runtime
+                .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(dispatchNow))
+                .RunOnceAsync(new TriggerWorkerSelectionInput("overlap-worker-b", generation, dispatchNow, TimeSpan.FromSeconds(30), [], 3));
+            generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
+            blockedThird = await runtime
+                .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(dispatchNow))
+                .RunOnceAsync(new TriggerWorkerSelectionInput("overlap-worker-c", generation, dispatchNow, TimeSpan.FromSeconds(30), [], 3));
+            Assert.Equal(1, fixture.ProviderAttempts);
+        }
+        finally
+        {
+            fixture.ReleaseProvider();
+        }
+
+        var blocker = await blockerTask;
+        Assert.Equal("Dispatched", blocker.Entry!.State);
+        Assert.Equal("Terminal", blocker.Entry.DispatchOutcome);
+
+        Assert.True(
+            string.Equals("DispatchRejected", blockedSecond.Entry!.State, StringComparison.Ordinal),
+            $"State={blockedSecond.Entry.State}; Outcome={blockedSecond.Entry.DispatchOutcome}; Detail={blockedSecond.Entry.DispatchDetail}");
+        Assert.Equal("Rejected", blockedSecond.Entry.DispatchOutcome);
+        Assert.Null(blockedSecond.Entry.GovernedRunId);
+        Assert.Contains(secondDisposition.ToString(), blockedSecond.Entry.DispatchDetail, StringComparison.Ordinal);
+        Assert.Equal("DispatchRejected", blockedThird.Entry!.State);
+        Assert.Equal("Rejected", blockedThird.Entry.DispatchOutcome);
+        Assert.Null(blockedThird.Entry.GovernedRunId);
+        Assert.Contains(thirdDisposition.ToString(), blockedThird.Entry.DispatchDetail, StringComparison.Ordinal);
+        Assert.Equal(1, fixture.ProviderAttempts);
+
+        using var runs = new CustomLoopRunStore(fixture.Paths);
+        var secondEvidence = Assert.IsType<ScheduleRunAdmissionEvidence>(
+            await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId));
+        var thirdEvidence = Assert.IsType<ScheduleRunAdmissionEvidence>(
+            await runs.GetScheduleAdmissionAsync(third.CreateEnvelope().DeliveryId));
+        Assert.True(ScheduleRunAdmissionEvidenceValidator.IsValid(secondEvidence));
+        Assert.True(ScheduleRunAdmissionEvidenceValidator.IsValid(thirdEvidence));
+        Assert.Equal(secondDisposition, secondEvidence.Attempts[^1].Disposition);
+        Assert.Equal(thirdDisposition, thirdEvidence.Attempts[^1].Disposition);
+        Assert.Equal(blocker.Entry.GovernedRunId, secondEvidence.Attempts[^1].BlockingRunId);
+        Assert.Equal(blocker.Entry.GovernedRunId, thirdEvidence.Attempts[^1].BlockingRunId);
+        Assert.Single(await runs.ListRecentAsync(10));
+
+        if (overlap == ScheduleOverlapPolicy.Skip)
+        {
+            var evidencePath = Path.Combine(
+                fixture.Paths.CustomLoopScheduleAdmissionsPath,
+                second.CreateEnvelope().DeliveryId.Value + ".json");
+            var canonical = await File.ReadAllTextAsync(evidencePath);
+            var corrupted = canonical.Replace(secondEvidence.ContentHash, Hash64('0'), StringComparison.Ordinal);
+            Assert.NotEqual(canonical, corrupted);
+            await File.WriteAllTextAsync(evidencePath, corrupted);
+            await Assert.ThrowsAsync<FormatException>(() =>
+                new CustomLoopRunStore(fixture.Paths).GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId));
+        }
+    }
+
     internal static async Task Worker_defers_pending_schedule_finalization_then_restart_dispatches_and_replays_exactly_once()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true);
@@ -266,6 +354,79 @@ internal static class GovernedLoopRuntimeTests
             Assert.Equal("Empty", empty.SelectionStatus);
             Assert.Equal(1, fixture.ProviderAttempts);
         }
+    }
+
+    internal static async Task Queue_commit_before_result_persistence_cannot_be_lost_by_terminal_worker_replay_after_restart()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true);
+        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var workerNow = scheduledAtUtc.AddMinutes(2);
+        var scenario = ScheduleScenario.Create(fixture, scheduledAtUtc, "preserve the prepared queue-commit crash window");
+        var durableStore = new ScheduleStore(fixture.Paths);
+        var conflictOnce = new ResultObservationConflictOnceScheduleStore(durableStore);
+        using (var schedule = ScheduleRuntimeFactory.Create(
+                   fixture.Paths,
+                   conflictOnce,
+                   scenario,
+                   scenario,
+                   scenario,
+                   new FixedTriggerTimeProvider(workerNow)))
+        {
+            Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await schedule.CreateAsync(scenario.Definition)).Status);
+            var interrupted = await schedule.EvaluateOnceAsync(scenario.Definition.ScheduleId);
+            Assert.Equal(ScheduleEvaluationStatus.Conflict, interrupted.Status);
+            Assert.Equal(SchedulePendingDeliveryPhase.Prepared, interrupted.State!.PendingDelivery!.Phase);
+        }
+
+        var queue = new TriggerQueueStore(fixture.Paths, timeProvider: new FixedTriggerTimeProvider(workerNow.AddSeconds(1)));
+        var queued = Assert.Single((await queue.GetSnapshotAsync(workerNow.AddSeconds(1))).Entries);
+        Assert.Equal(TriggerQueueEntryState.Queued, queued.State);
+        await using (var runtime = await fixture.CreateRuntimeAsync())
+        {
+            var generation = (await queue.GetSnapshotAsync(workerNow.AddSeconds(1))).Generation;
+            var terminal = await runtime
+                .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(workerNow.AddSeconds(1)))
+                .RunOnceAsync(new TriggerWorkerSelectionInput(
+                    "prepared-crash-worker",
+                    generation,
+                    workerNow.AddSeconds(1),
+                    TimeSpan.FromSeconds(30),
+                    [],
+                    2));
+
+            Assert.Equal("NeedsReview", terminal.Entry!.State);
+            Assert.Equal("NeedsReview", terminal.Entry.DispatchOutcome);
+            Assert.Null(terminal.Entry.GovernedRunId);
+            Assert.Equal(0, fixture.ProviderAttempts);
+        }
+
+        using (var recovery = ScheduleRuntimeFactory.Create(
+                   fixture.Paths,
+                   scenario,
+                   scenario,
+                   scenario,
+                   new FixedTriggerTimeProvider(workerNow.AddSeconds(2))))
+        {
+            var reconciled = await recovery.EvaluateOnceAsync(scenario.Definition.ScheduleId);
+            Assert.True(
+                reconciled.Status == ScheduleEvaluationStatus.NeedsReview,
+                $"Status={reconciled.Status}; Reason={reconciled.ReasonCode}");
+            Assert.Equal("queue-evidence-conflict", reconciled.ReasonCode);
+            Assert.Equal(SchedulePendingDeliveryPhase.ResultObserved, reconciled.State!.PendingDelivery!.Phase);
+            Assert.Equal(ScheduleDeliveryResultKind.Ambiguous, reconciled.State.PendingDelivery.Result!.Kind);
+            Assert.Empty(reconciled.State.TerminalDeliveryEvidence);
+
+            var replay = await recovery.EvaluateOnceAsync(scenario.Definition.ScheduleId);
+            Assert.Equal(ScheduleEvaluationStatus.NeedsReview, replay.Status);
+            Assert.Equal("queue-outcome-ambiguous", replay.ReasonCode);
+            Assert.Empty(replay.State!.TerminalDeliveryEvidence);
+        }
+
+        var restartedEntry = Assert.Single((await new TriggerQueueStore(fixture.Paths).GetSnapshotAsync(workerNow.AddSeconds(3))).Entries);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, restartedEntry.State);
+        Assert.Null(await new CustomLoopRunStore(fixture.Paths).GetScheduleAdmissionAsync(scenario.CreateEnvelope().DeliveryId));
+        Assert.Empty(await new CustomLoopRunStore(fixture.Paths).ListRecentAsync(10));
+        Assert.Equal(0, fixture.ProviderAttempts);
     }
 
     internal static async Task Substituted_trigger_context_fails_before_canonical_provider_dispatch(string mismatch)
@@ -1024,6 +1185,22 @@ internal static class GovernedLoopRuntimeTests
         Assert.Equal(ScheduleStoreMutationStatus.Applied, created.Status);
     }
 
+    private static async Task QueueScheduleAsync(
+        WorkspacePaths paths,
+        ScheduleScenario scenario,
+        DateTimeOffset workerNow)
+    {
+        using var schedule = ScheduleRuntimeFactory.Create(
+            paths,
+            scenario,
+            scenario,
+            scenario,
+            new FixedTriggerTimeProvider(workerNow));
+        Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await schedule.CreateAsync(scenario.Definition)).Status);
+        var result = await schedule.EvaluateOnceAsync(scenario.Definition.ScheduleId);
+        Assert.True(result.Status == ScheduleEvaluationStatus.Queued, $"Status={result.Status}; Reason={result.ReasonCode}");
+    }
+
     private static TriggerDeliveryEnvelope SubstitutedScheduleEnvelope(
         GovernedRuntimeFixture fixture,
         ScheduleScenario scenario,
@@ -1035,17 +1212,10 @@ internal static class GovernedLoopRuntimeTests
         TriggerTemporalEvidence temporal = canonical.Temporal;
         TriggerPayloadEvidence payload = canonical.Payload;
         TriggerLoopReference target = canonical.Loop;
-        if (mismatch == "forged-identity")
+        var definition = scenario.Definition;
+        var occurrence = scenario.Occurrence;
+        if (mismatch is "schedule" or "occurrence")
         {
-            Assert.True(TriggerDeliveryId.TryParse("schedule-delivery-" + Hash64('a'), out var forgedDeliveryId));
-            Assert.True(TriggerDeduplicationId.TryParse("schedule-deduplication-" + Hash64('b'), out var forgedDeduplicationId));
-            deliveryId = forgedDeliveryId!;
-            deduplicationId = forgedDeduplicationId!;
-        }
-        else if (mismatch is "schedule" or "occurrence")
-        {
-            var definition = scenario.Definition;
-            var occurrence = scenario.Occurrence;
             if (mismatch == "schedule")
             {
                 Assert.True(ScheduleId.TryParse("swapped-schedule", out var swappedScheduleId));
@@ -1102,11 +1272,37 @@ internal static class GovernedLoopRuntimeTests
         }
 
         Assert.True(TriggerDeliveryFactory.TryCreateRedeliveryEvidence(1, 1, deliveryId, out var redelivery, out _));
-        Assert.True(TriggerDeliveryFactory.TryCreateEnvelope(
+        var canonicalDirective = Assert.IsType<ScheduleExecutionDirective>(canonical.ScheduleExecutionDirective);
+        string directiveDefinitionHash = canonicalDirective.DefinitionHash;
+        if (mismatch is "schedule" or "occurrence")
+        {
+            Assert.True(ScheduleContractHash.TryComputeDefinition(definition, out var substitutedDefinitionHash, out _));
+            directiveDefinitionHash = substitutedDefinitionHash!;
+        }
+
+        Assert.True(ScheduleIdentityDerivation.TryDerive(
+            definition.ScheduleId,
+            definition.Revision,
+            directiveDefinitionHash,
+            occurrence,
+            out var directiveIdentity,
+            out _));
+        Assert.Equal(deliveryId, directiveIdentity!.DeliveryId);
+        Assert.Equal(deduplicationId, directiveIdentity.DeduplicationId);
+        var directive = new ScheduleExecutionDirective(
+            ScheduleExecutionDirective.CurrentSchemaVersion,
+            definition.ScheduleId,
+            definition.Revision,
+            directiveDefinitionHash,
+            occurrence,
+            directiveIdentity,
+            target,
+            canonicalDirective.Overlap,
+            canonicalDirective.PreQueueOverlapEvidenceHash);
+        Assert.True(TriggerDeliveryFactory.TryCreateScheduledEnvelope(
             TriggerDeliveryEnvelope.CurrentSchemaVersion,
             deliveryId,
             deduplicationId,
-            TriggerKind.Time,
             canonical.Adapter,
             target,
             canonical.ActorContext,
@@ -1114,6 +1310,7 @@ internal static class GovernedLoopRuntimeTests
             temporal,
             payload,
             redelivery,
+            directive,
             false,
             null,
             TriggerAdmissionStatus.Unknown,
@@ -1172,6 +1369,33 @@ internal static class GovernedLoopRuntimeTests
         }
     }
 
+    private sealed class ResultObservationConflictOnceScheduleStore(IScheduleStorePort inner) : IScheduleStorePort
+    {
+        private int _conflicted;
+
+        public Task<ScheduleStoreReadResult> ReadAsync(ScheduleId scheduleId, CancellationToken cancellationToken = default)
+            => inner.ReadAsync(scheduleId, cancellationToken);
+
+        public Task<ScheduleStoreMutationResult> CreateAsync(ScheduleStoreCreateRequest request, CancellationToken cancellationToken = default)
+            => inner.CreateAsync(request, cancellationToken);
+
+        public Task<ScheduleStoreMutationResult> CompareExchangeAsync(
+            ScheduleStateCompareExchange request,
+            CancellationToken cancellationToken = default)
+        {
+            if (request.Expected.PendingDelivery?.Phase == SchedulePendingDeliveryPhase.Prepared
+                && request.Replacement.PendingDelivery?.Phase == SchedulePendingDeliveryPhase.ResultObserved
+                && Interlocked.CompareExchange(ref _conflicted, 1, 0) == 0)
+            {
+                return Task.FromResult(new ScheduleStoreMutationResult(
+                    ScheduleStoreMutationStatus.Conflict,
+                    ScheduleContractCopy.Copy(request.Expected)));
+            }
+
+            return inner.CompareExchangeAsync(request, cancellationToken);
+        }
+    }
+
     private sealed class FixedTriggerTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
@@ -1204,9 +1428,14 @@ internal static class GovernedLoopRuntimeTests
 
         private DateTime ScheduledLocal { get; }
 
-        internal static ScheduleScenario Create(GovernedRuntimeFixture fixture, DateTimeOffset scheduledAtUtc, string prompt)
+        internal static ScheduleScenario Create(
+            GovernedRuntimeFixture fixture,
+            DateTimeOffset scheduledAtUtc,
+            string prompt,
+            string scheduleIdValue = "governed-runtime-once",
+            ScheduleOverlapPolicy overlap = ScheduleOverlapPolicy.DeferOne)
         {
-            Assert.True(ScheduleId.TryParse("governed-runtime-once", out var scheduleId));
+            Assert.True(ScheduleId.TryParse(scheduleIdValue, out var scheduleId));
             Assert.True(AuthorityActorId.TryParse("scheduled-owner", out var actor, out _));
             Assert.True(AuthorityProfileId.TryParse("governed-loop-profile", out var profileId, out _));
             Assert.True(AuthorityProfileRevision.TryParse("1", out var profileRevision, out _));
@@ -1239,13 +1468,13 @@ internal static class GovernedLoopRuntimeTests
                 TriggerWorkspaceId(fixture.Paths),
                 "governed-helper",
                 new AuthorityProfileReference(profileId!, profileRevision!),
-                new SchedulePayloadReference("payload/governed-runtime-once", payloadHash),
+                new SchedulePayloadReference($"payload/{scheduleIdValue}", payloadHash),
                 SchedulePriority.Normal,
                 new ScheduleRecurrenceRule(ScheduleRecurrenceKind.Once, scheduledLocal, null),
                 timeZone,
                 new ScheduleDaylightSavingPolicy(ScheduleInvalidLocalTimePolicy.ShiftForward, ScheduleAmbiguousLocalTimePolicy.EarlierUtc),
                 new ScheduleMisfirePolicy(ScheduleMisfirePolicyKind.FireLatestOnce, 0),
-                ScheduleOverlapPolicy.DeferOne,
+                overlap,
                 true);
             var evidence = new ScheduleCurrentEvidence(
                 Hash64('9'),
@@ -1281,11 +1510,20 @@ internal static class GovernedLoopRuntimeTests
                 out _));
             Assert.True(TriggerDeliveryFactory.TryCreateInlinePayload(Evidence.GetResolvedPayload(), out var payload, out _));
             Assert.True(TriggerDeliveryFactory.TryCreateRedeliveryEvidence(1, 1, identity!.DeliveryId, out var redelivery, out _));
-            Assert.True(TriggerDeliveryFactory.TryCreateEnvelope(
+            var directive = new ScheduleExecutionDirective(
+                ScheduleExecutionDirective.CurrentSchemaVersion,
+                Definition.ScheduleId,
+                Definition.Revision,
+                definitionHash!,
+                Occurrence,
+                identity,
+                Definition.Target,
+                Definition.Overlap,
+                Hash64('8'));
+            Assert.True(TriggerDeliveryFactory.TryCreateScheduledEnvelope(
                 TriggerDeliveryEnvelope.CurrentSchemaVersion,
                 identity.DeliveryId,
                 identity.DeduplicationId,
-                TriggerKind.Time,
                 Evidence.Adapter,
                 Evidence.Target,
                 Evidence.ActorContext,
@@ -1293,6 +1531,7 @@ internal static class GovernedLoopRuntimeTests
                 temporal,
                 payload,
                 redelivery,
+                directive,
                 false,
                 null,
                 TriggerAdmissionStatus.Unknown,
@@ -1309,7 +1548,18 @@ internal static class GovernedLoopRuntimeTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(new ScheduleCurrentEvidenceResult(ScheduleCurrentEvidenceStatus.Available, Evidence));
+            var current = Evidence.ObservedAtUtc >= observedAtUtc
+                ? Evidence
+                : new ScheduleCurrentEvidence(
+                    Evidence.EvidenceHash,
+                    observedAtUtc,
+                    Evidence.Target,
+                    Evidence.Adapter,
+                    Evidence.ActorContext,
+                    Evidence.Authority,
+                    Evidence.RecurrencePermitted,
+                    Evidence.GetResolvedPayload());
+            return Task.FromResult(new ScheduleCurrentEvidenceResult(ScheduleCurrentEvidenceStatus.Available, current));
         }
 
         public Task<ScheduleOverlapResult> GetStatusAsync(

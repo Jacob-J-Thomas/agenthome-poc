@@ -85,6 +85,33 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
     }
 
     [Fact]
+    public async Task Prepare_commits_exact_admission_and_run_without_provider_then_invoke_executes_the_same_run()
+    {
+        var context = await ContextAsync();
+        var operations = new RecordingOperationStore(context.Operation);
+        var admission = new RecordingAdmissionService(context.AdmissionResult);
+        var materializer = new RecordingMaterializer { Result = await MaterializedAsync(context) };
+        var runtime = new RecordingOrderedRuntime();
+        var coordinator = Coordinator(operations, admission, materializer, runtime);
+
+        var prepared = await coordinator.PrepareAsync(context.Request);
+
+        Assert.Equal(GovernedLoopSequentialInvocationStatus.Prepared, prepared.Status);
+        Assert.False(prepared.ProviderWasInvoked());
+        Assert.NotNull(prepared.Run);
+        Assert.Equal(CustomLoopRunStatus.Admitted, prepared.Run!.Status);
+        Assert.Equal(CustomLoopInvocationOperationState.Complete, operations.Operation!.State);
+        Assert.Equal(0, runtime.RunCallCount);
+
+        var executed = await coordinator.InvokeAsync(context.Request);
+
+        Assert.Equal(GovernedLoopSequentialInvocationStatus.Executed, executed.Status);
+        Assert.True(executed.ProviderWasInvoked());
+        Assert.Equal(prepared.Run.Id, executed.Run?.Id);
+        Assert.Equal(1, runtime.RunCallCount);
+    }
+
+    [Fact]
     public async Task Missing_or_substituted_pre_admission_operation_prevents_admission_and_runtime_work()
     {
         var context = await ContextAsync();

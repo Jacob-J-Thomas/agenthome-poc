@@ -1809,6 +1809,49 @@ public sealed class TriggerQueueStoreTests
     }
 
     [Fact]
+    public async Task Exact_admission_retry_replays_the_terminal_entry_without_refabricating_a_queued_delivery()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new TriggerQueueStore(paths, timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(7)));
+        var envelope = TriggerQueueTestData.Envelope();
+        var request = TriggerQueueTestData.QueueRequest(envelope);
+        var admitted = await TriggerQueueTestData.Service(store).AdmitAsync(request);
+        var snapshot = await store.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4));
+        var selected = await store.SelectAsync(new TriggerWorkerSelectionRequest(
+            "worker-1",
+            snapshot.Generation,
+            TriggerQueueTestData.CreatedAtUtc.AddSeconds(4),
+            TimeSpan.FromSeconds(10),
+            [],
+            2));
+        var intent = Intent(selected.Entry!, TriggerQueueTestData.CreatedAtUtc.AddSeconds(5));
+        var begun = await store.BeginDispatchAsync(selected.Entry!.DeliveryId, "worker-1", 1, selected.Entry.Revision, intent);
+        var ambiguous = intent with
+        {
+            Outcome = TriggerDispatchOutcome.NeedsReview,
+            OutcomeRecordedAtUtc = TriggerQueueTestData.CreatedAtUtc.AddSeconds(6),
+            Detail = "prepared schedule provenance was not yet final",
+        };
+        var terminal = await store.CompleteDispatchAsync(
+            selected.Entry.DeliveryId,
+            "worker-1",
+            1,
+            begun.Entry!.Revision,
+            ambiguous);
+
+        var replay = await TriggerQueueTestData.Service(new TriggerQueueStore(paths)).AdmitAsync(request);
+
+        Assert.Equal(TriggerQueueAdmissionStatus.Queued, admitted.Status);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, terminal.Entry!.State);
+        Assert.Equal(TriggerQueueAdmissionStatus.Replayed, replay.Status);
+        Assert.Equal(TriggerQueueAdmissionReason.ExactReplay, replay.Reason);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, replay.Entry!.State);
+        Assert.Equal(terminal.Entry.Revision, replay.Entry.Revision);
+        Assert.Equal(TriggerDispatchOutcome.NeedsReview, replay.Entry.Dispatch!.Outcome);
+    }
+
+    [Fact]
     public async Task Exact_governed_receipt_binding_completes_and_survives_restart()
     {
         using var workspace = new TestWorkspace();
