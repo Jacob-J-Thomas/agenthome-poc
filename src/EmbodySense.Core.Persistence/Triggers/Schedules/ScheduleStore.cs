@@ -38,7 +38,11 @@ public sealed class ScheduleStore : IScheduleStorePort, IScheduleDeliveryProvena
         _maximumCatalogBytes = options.MaxCatalogUtf8Bytes;
         _observer = new ScheduleStoreDurabilityObserver(options.DurableBoundaryObserver);
         var scheduleRoot = paths.AgentFile(Path.Combine("triggers", "schedules"));
-        _guard = new TriggerQueueArtifactGuard(paths.RootPath, scheduleRoot, options.MaxDurabilityArtifacts);
+        _guard = new TriggerQueueArtifactGuard(
+            paths.RootPath,
+            scheduleRoot,
+            options.MaxDurabilityArtifacts,
+            recycleAuthenticatedTombstones: true);
     }
 
     /// <inheritdoc />
@@ -226,7 +230,7 @@ public sealed class ScheduleStore : IScheduleStorePort, IScheduleDeliveryProvena
             await _guard.WriteAsync(
                 content,
                 identity.Artifacts,
-                identity.TombstoneCount,
+                identity.Tombstones,
                 identity.Precursors,
                 candidate.Generation,
                 _observer,
@@ -297,7 +301,7 @@ public sealed class ScheduleStore : IScheduleStorePort, IScheduleDeliveryProvena
             await _guard.WriteAsync(
                 content,
                 identity.Artifacts,
-                identity.TombstoneCount,
+                identity.Tombstones,
                 identity.Precursors,
                 candidate.Generation,
                 _observer,

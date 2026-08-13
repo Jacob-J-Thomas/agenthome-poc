@@ -328,6 +328,83 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
     }
 
     [Fact]
+    public async Task Full_day_shift_forward_collision_is_durably_skipped_until_utc_advances()
+    {
+        var firstLocal = new DateTime(2011, 12, 30, 0, 0, 0, DateTimeKind.Unspecified);
+        var collisionLocal = firstLocal.AddDays(1);
+        var futureLocal = collisionLocal.AddDays(1);
+        var collisionUtc = new DateTimeOffset(2011, 12, 30, 10, 0, 0, TimeSpan.Zero);
+        var futureUtc = collisionUtc.AddDays(1);
+        var definition = ScheduleEvaluatorTestData.Definition(firstLocal: firstLocal);
+        var occurrence = ScheduleEvaluatorTestData.Occurrence(
+            local: firstLocal,
+            utc: collisionUtc,
+            timeZone: definition.TimeZone);
+        var fixture = Fixture(
+            definition,
+            ScheduleEvaluatorTestData.State(definition, occurrence),
+            collisionUtc.AddHours(1));
+        fixture.TimeZone.LocalResolver = (timeZone, local) => local switch
+        {
+            var value when value == firstLocal => new ScheduleTimeZoneResolution(
+                ScheduleTimeZoneResolutionStatus.InvalidLocalTime,
+                timeZone.RulesFingerprint,
+                collisionLocal,
+                collisionUtc,
+                null),
+            var value when value == collisionLocal => new ScheduleTimeZoneResolution(
+                ScheduleTimeZoneResolutionStatus.Unique,
+                timeZone.RulesFingerprint,
+                collisionLocal,
+                collisionUtc,
+                null),
+            var value when value == futureLocal => new ScheduleTimeZoneResolution(
+                ScheduleTimeZoneResolutionStatus.Unique,
+                timeZone.RulesFingerprint,
+                futureLocal,
+                futureUtc,
+                null),
+            _ => new ScheduleTimeZoneResolution(
+                ScheduleTimeZoneResolutionStatus.Corrupt,
+                timeZone.RulesFingerprint,
+                default,
+                null,
+                null),
+        };
+
+        var result = await fixture.Evaluator.EvaluateAsync(definition.ScheduleId);
+
+        Assert.Equal(ScheduleEvaluationStatus.Queued, result.Status);
+        Assert.Equal(3, result.State!.NextOccurrence!.Ordinal);
+        Assert.Equal(futureLocal, result.State.NextOccurrence.ScheduledLocal);
+        Assert.Equal(futureUtc, result.State.NextOccurrence.ScheduledAtUtc);
+        Assert.True(result.State.NextOccurrence.ScheduledAtUtc > occurrence.ScheduledAtUtc);
+        Assert.True(ScheduleContractHash.TryComputeDefinition(definition, out var definitionHash, out _));
+        Assert.True(ScheduleIdentityDerivation.TryDerive(
+            definition.ScheduleId,
+            definition.Revision,
+            definitionHash,
+            occurrence,
+            out var deliveredIdentity,
+            out _));
+        Assert.True(ScheduleIdentityDerivation.TryDerive(
+            definition.ScheduleId,
+            definition.Revision,
+            definitionHash,
+            result.State.NextOccurrence,
+            out var successorIdentity,
+            out _));
+        Assert.NotEqual(deliveredIdentity, successorIdentity);
+        var skipped = Assert.Single(result.State.DispositionEvidence);
+        Assert.Equal((2L, 2L, collisionLocal, collisionUtc),
+            (skipped.FirstOrdinal, skipped.LastOrdinal, skipped.FirstScheduledLocal, skipped.FirstScheduledAtUtc));
+        Assert.Equal(ScheduleOccurrenceDisposition.MisfireSkipped, skipped.Disposition);
+        Assert.Equal("recurrence-instant-collision-skipped", skipped.ReasonCode);
+        Assert.Equal(1, fixture.Queue.Calls);
+        AssertLegalTransitions(definition, fixture.Store.Mutations);
+    }
+
+    [Fact]
     public async Task Fixed_interval_uses_utc_to_local_port_and_preserves_folded_local_time()
     {
         var firstLocal = new DateTime(2026, 11, 1, 1, 30, 0, DateTimeKind.Unspecified);

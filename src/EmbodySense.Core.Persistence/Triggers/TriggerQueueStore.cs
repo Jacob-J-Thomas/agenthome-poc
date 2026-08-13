@@ -770,7 +770,7 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        await _guard.WriteAsync(content, artifacts, identity.TombstoneCount, identity.Precursors, next.Generation, _observer, mutationLease).ConfigureAwait(false);
+        await _guard.WriteAsync(content, artifacts, identity.Tombstones, identity.Precursors, next.Generation, _observer, mutationLease).ConfigureAwait(false);
     }
 
     private async Task PersistSweepIfNeededAsync(TriggerQueueLedger ledger, TriggerQueueReadResult identity, bool changed, TriggerQueueMutationLease mutationLease, CancellationToken cancellationToken)

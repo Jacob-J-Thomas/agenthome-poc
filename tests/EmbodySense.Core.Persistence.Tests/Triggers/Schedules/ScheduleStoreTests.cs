@@ -26,6 +26,7 @@ public sealed class ScheduleStoreTests
     private const string CrossProcessCrashBoundary = "EMBODYSENSE_SCHEDULE_STORE_CRASH_BOUNDARY";
     private const string CrossProcessOperation = "EMBODYSENSE_SCHEDULE_STORE_OPERATION";
     private const string CrossProcessVariant = "EMBODYSENSE_SCHEDULE_STORE_VARIANT";
+    private const string CrossProcessMaxDurabilityArtifacts = "EMBODYSENSE_SCHEDULE_STORE_MAX_DURABILITY_ARTIFACTS";
 
     [Fact]
     public async Task Accepted_terminal_schedule_provenance_is_exact_restart_safe_and_conflict_closed()
@@ -384,6 +385,162 @@ public sealed class ScheduleStoreTests
     }
 
     [Fact]
+    public async Task Unix_compare_exchange_recycles_authenticated_tombstones_beyond_the_durability_bound()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var options = new ScheduleStoreOptions { MaxDurabilityArtifacts = 1 };
+        var request = ScheduleStoreTestData.CreateRequest();
+        var current = request.InitialState;
+        Assert.Equal(
+            ScheduleStoreMutationStatus.Applied,
+            (await new ScheduleStore(paths, options).CreateAsync(request)).Status);
+        var interruptedCleanupContent = await File.ReadAllBytesAsync(LatestLedger(paths));
+
+        var mutationCount = ScheduleStoreOptions.DefaultMaximumDurabilityArtifacts + 4;
+        for (var mutation = 0; mutation < mutationCount; mutation++)
+        {
+            var replacement = ScheduleStoreTestData.Replacement(current);
+            var result = await new ScheduleStore(paths, options)
+                .CompareExchangeAsync(new ScheduleStateCompareExchange(current, replacement));
+
+            Assert.Equal(ScheduleStoreMutationStatus.Applied, result.Status);
+            Assert.Equal(replacement, result.CurrentState);
+            current = replacement;
+            if (mutation == 0)
+            {
+                // Model loss after the authenticated rename but before the old generation was zeroed.
+                var interruptedTombstone = Assert.Single(
+                    Directory.EnumerateFiles(StoreRoot(paths), ".tombstone-*.tmp"));
+                await File.WriteAllBytesAsync(interruptedTombstone, interruptedCleanupContent);
+            }
+        }
+
+        var read = await new ScheduleStore(paths, options).ReadAsync(request.Definition.ScheduleId);
+        Assert.Equal(ScheduleStoreReadStatus.Found, read.Status);
+        AssertSameState(current, read.State!);
+        Assert.Single(Directory.EnumerateFiles(StoreRoot(paths), "ledger-*.json"));
+        var tombstone = Assert.Single(Directory.EnumerateFiles(StoreRoot(paths), ".tombstone-*.tmp"));
+        Assert.Equal(0, new FileInfo(tombstone).Length);
+        Assert.DoesNotContain(Directory.EnumerateFiles(StoreRoot(paths)), path =>
+            Path.GetFileName(path).StartsWith(".staged-", StringComparison.Ordinal)
+            || Path.GetFileName(path).StartsWith(".discard-", StringComparison.Ordinal)
+            || Path.GetFileName(path).StartsWith(".cleanup-", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Unix_recycled_tombstone_staging_interruption_preserves_exact_retry()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var options = new ScheduleStoreOptions { MaxDurabilityArtifacts = 1 };
+        var request = ScheduleStoreTestData.CreateRequest();
+        Assert.Equal(
+            ScheduleStoreMutationStatus.Applied,
+            (await new ScheduleStore(paths, options).CreateAsync(request)).Status);
+        var current = ScheduleStoreTestData.Replacement(request.InitialState);
+        Assert.Equal(
+            ScheduleStoreMutationStatus.Applied,
+            (await new ScheduleStore(paths, options).CompareExchangeAsync(new(request.InitialState, current))).Status);
+        Assert.Single(Directory.EnumerateFiles(StoreRoot(paths), ".tombstone-*.tmp"));
+
+        var replacement = ScheduleStoreTestData.Replacement(current);
+        var interrupted = await new ScheduleStore(paths, new ScheduleStoreOptions
+        {
+            MaxDurabilityArtifacts = 1,
+            DurableBoundaryObserver = boundary =>
+            {
+                if (boundary == ScheduleStorePersistenceBoundary.Staged)
+                {
+                    throw new IOException("simulated recycled staging interruption");
+                }
+            },
+        }).CompareExchangeAsync(new(current, replacement));
+        var retry = await new ScheduleStore(paths, options).CompareExchangeAsync(new(current, replacement));
+        var read = await new ScheduleStore(paths, options).ReadAsync(request.Definition.ScheduleId);
+
+        Assert.Equal(ScheduleStoreMutationStatus.Unavailable, interrupted.Status);
+        Assert.Equal(ScheduleStoreMutationStatus.Applied, retry.Status);
+        AssertSameState(replacement, read.State!);
+        Assert.Single(Directory.EnumerateFiles(StoreRoot(paths), ".tombstone-*.tmp"));
+    }
+
+    [Fact]
+    public async Task Unix_external_process_loss_after_recycled_tombstone_staging_preserves_exact_retry()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var options = new ScheduleStoreOptions { MaxDurabilityArtifacts = 1 };
+        var request = ScheduleStoreTestData.CreateRequest("schedule-recycled-crash");
+        var current = ScheduleStoreTestData.Replacement(request.InitialState);
+        Assert.Equal(
+            ScheduleStoreMutationStatus.Applied,
+            (await new ScheduleStore(paths, options).CreateAsync(request)).Status);
+        Assert.Equal(
+            ScheduleStoreMutationStatus.Applied,
+            (await new ScheduleStore(paths, options).CompareExchangeAsync(new(request.InitialState, current))).Status);
+        Assert.Single(Directory.EnumerateFiles(StoreRoot(paths), ".tombstone-*.tmp"));
+
+        var gate = workspace.File("release-recycled-schedule-host");
+        var ready = workspace.File("recycled-schedule-host-ready");
+        var output = workspace.File("recycled-schedule-host-output");
+        using var process = StartCrossProcessHost(
+            workspace.RootPath,
+            gate,
+            ready,
+            output,
+            request.Definition.ScheduleId.Value,
+            ScheduleStorePersistenceBoundary.Staged,
+            "compare-exchange-current",
+            variant: 2,
+            maxDurabilityArtifacts: 1);
+        await WaitForPathAsync(ready);
+        await File.WriteAllTextAsync(gate, "go");
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.NotEqual(0, process.ExitCode);
+        Assert.Single(Directory.EnumerateFiles(StoreRoot(paths), "ledger-*.json"));
+        Assert.Single(Directory.EnumerateFiles(StoreRoot(paths), ".staged-*.tmp"));
+        Assert.Empty(Directory.EnumerateFiles(StoreRoot(paths), ".tombstone-*.tmp"));
+
+        var restarted = new ScheduleStore(paths, options);
+        var recovered = await restarted.ReadAsync(request.Definition.ScheduleId);
+        var replacement = ScheduleStoreTestData.Replacement(current, 2);
+        var retry = await restarted.CompareExchangeAsync(new(current, replacement));
+        var read = await new ScheduleStore(paths, options).ReadAsync(request.Definition.ScheduleId);
+
+        Assert.Equal(ScheduleStoreReadStatus.Found, recovered.Status);
+        AssertSameState(current, recovered.State!);
+        Assert.Equal(ScheduleStoreMutationStatus.Applied, retry.Status);
+        AssertSameState(replacement, retry.CurrentState!);
+        Assert.Equal(ScheduleStoreReadStatus.Found, read.Status);
+        AssertSameState(replacement, read.State!);
+        Assert.Single(Directory.EnumerateFiles(StoreRoot(paths), "ledger-*.json"));
+        var tombstone = Assert.Single(Directory.EnumerateFiles(StoreRoot(paths), ".tombstone-*.tmp"));
+        Assert.Equal(0, new FileInfo(tombstone).Length);
+        Assert.DoesNotContain(Directory.EnumerateFiles(StoreRoot(paths)), path =>
+            Path.GetFileName(path).StartsWith(".ledger-", StringComparison.Ordinal)
+            || Path.GetFileName(path).StartsWith(".staged-", StringComparison.Ordinal)
+            || Path.GetFileName(path).StartsWith(".discard-", StringComparison.Ordinal)
+            || Path.GetFileName(path).StartsWith(".cleanup-", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Create_and_compare_exchange_enforce_contiguous_state_history()
     {
         using var workspace = new TestWorkspace();
@@ -566,15 +723,36 @@ public sealed class ScheduleStoreTests
         var options = new ScheduleStoreOptions
         {
             MaxSchedules = 1,
+            MaxDurabilityArtifacts = int.TryParse(
+                Environment.GetEnvironmentVariable(CrossProcessMaxDurabilityArtifacts),
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var maxDurabilityArtifacts)
+                    ? maxDurabilityArtifacts
+                    : ScheduleStoreOptions.DefaultMaximumDurabilityArtifacts,
             DurableBoundaryObserver = observer,
         };
         var store = new ScheduleStore(new WorkspacePaths(workspace), options);
         var request = ScheduleStoreTestData.CreateRequest(scheduleId);
         ScheduleStoreMutationResult result;
         if (string.Equals(
-            Environment.GetEnvironmentVariable(CrossProcessOperation),
-            "compare-exchange",
-            StringComparison.Ordinal))
+                Environment.GetEnvironmentVariable(CrossProcessOperation),
+                "compare-exchange-current",
+                StringComparison.Ordinal))
+        {
+            var read = await store.ReadAsync(request.Definition.ScheduleId);
+            Assert.Equal(ScheduleStoreReadStatus.Found, read.Status);
+            var variant = int.Parse(
+                Environment.GetEnvironmentVariable(CrossProcessVariant)!,
+                System.Globalization.CultureInfo.InvariantCulture);
+            result = await store.CompareExchangeAsync(new(
+                read.State!,
+                ScheduleStoreTestData.Replacement(read.State!, variant)));
+        }
+        else if (string.Equals(
+                Environment.GetEnvironmentVariable(CrossProcessOperation),
+                "compare-exchange",
+                StringComparison.Ordinal))
         {
             var variant = int.Parse(
                 Environment.GetEnvironmentVariable(CrossProcessVariant)!,
@@ -1024,7 +1202,8 @@ public sealed class ScheduleStoreTests
         string scheduleId,
         ScheduleStorePersistenceBoundary? crashBoundary = null,
         string operation = "create",
-        int variant = 1)
+        int variant = 1,
+        int? maxDurabilityArtifacts = null)
     {
         var startInfo = new ProcessStartInfo("dotnet")
         {
@@ -1046,6 +1225,12 @@ public sealed class ScheduleStoreTests
         startInfo.Environment[CrossProcessScheduleId] = scheduleId;
         startInfo.Environment[CrossProcessOperation] = operation;
         startInfo.Environment[CrossProcessVariant] = variant.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (maxDurabilityArtifacts is not null)
+        {
+            startInfo.Environment[CrossProcessMaxDurabilityArtifacts] = maxDurabilityArtifacts.Value.ToString(
+                System.Globalization.CultureInfo.InvariantCulture);
+        }
+
         if (crashBoundary is not null)
         {
             startInfo.Environment[CrossProcessCrashBoundary] = crashBoundary.Value.ToString();

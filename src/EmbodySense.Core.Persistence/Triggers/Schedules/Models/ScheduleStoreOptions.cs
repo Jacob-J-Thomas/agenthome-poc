@@ -9,7 +9,7 @@ public sealed class ScheduleStoreOptions
     /// <summary>Gets the default maximum canonical UTF-8 bytes retained by one catalog generation.</summary>
     public const int DefaultMaximumCatalogUtf8Bytes = 4 * 1024 * 1024;
 
-    /// <summary>Gets the default maximum authenticated cleanup artifacts retained after interrupted Unix cleanup.</summary>
+    /// <summary>Gets the default maximum authenticated Unix cleanup artifacts retained at one time.</summary>
     public const int DefaultMaximumDurabilityArtifacts = 16;
 
     /// <summary>Gets the configured retained schedule count ceiling.</summary>
@@ -18,7 +18,7 @@ public sealed class ScheduleStoreOptions
     /// <summary>Gets the configured canonical catalog byte ceiling.</summary>
     public int MaxCatalogUtf8Bytes { get; init; } = DefaultMaximumCatalogUtf8Bytes;
 
-    /// <summary>Gets the configured interrupted-cleanup artifact ceiling.</summary>
+    /// <summary>Gets the configured simultaneous Unix cleanup-artifact ceiling.</summary>
     public int MaxDurabilityArtifacts { get; init; } = DefaultMaximumDurabilityArtifacts;
 
     /// <summary>Gets an optional synchronous observer invoked at exact durable publication boundaries.</summary>

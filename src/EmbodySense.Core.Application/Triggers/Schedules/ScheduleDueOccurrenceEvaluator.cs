@@ -1674,6 +1674,27 @@ public sealed class ScheduleDueOccurrenceEvaluator
                 return new RecurrenceStep(RecurrenceStatus.Corrupt, null, skips, "time-zone-evidence-invalid", proofHashes);
             }
 
+            if (selectedUtc <= current.ScheduledAtUtc)
+            {
+                skips.Add(new ResolvedSkip(
+                    new ScheduleOccurrenceDispositionEvidence(
+                        ScheduleOccurrenceDispositionEvidence.CurrentSchemaVersion,
+                        ordinal,
+                        ordinal,
+                        1,
+                        nominal,
+                        nominal,
+                        selectedUtc,
+                        selectedUtc,
+                        definition.TimeZone,
+                        ScheduleOccurrenceDisposition.MisfireSkipped,
+                        null,
+                        "recurrence-instant-collision-skipped",
+                        recordedAtUtc),
+                    selectedUtc.Value));
+                continue;
+            }
+
             var occurrence = new ScheduleOccurrence(
                 ScheduleOccurrence.CurrentSchemaVersion,
                 ordinal,

@@ -20,14 +20,20 @@ internal sealed class TriggerQueueArtifactGuard
     private readonly string _queueRoot;
     private readonly StringComparison _comparison;
     private readonly int _maxTombstoneArtifacts;
+    private readonly bool _recycleAuthenticatedTombstones;
 
     /// <summary>Initializes the guard for one workspace and queue root.</summary>
-    public TriggerQueueArtifactGuard(string workspaceRoot, string queueRoot, int maxTombstoneArtifacts)
+    public TriggerQueueArtifactGuard(
+        string workspaceRoot,
+        string queueRoot,
+        int maxTombstoneArtifacts,
+        bool recycleAuthenticatedTombstones = false)
     {
         _workspaceRoot = Path.GetFullPath(workspaceRoot);
         _queueRoot = Path.GetFullPath(queueRoot);
         _comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         _maxTombstoneArtifacts = maxTombstoneArtifacts;
+        _recycleAuthenticatedTombstones = recycleAuthenticatedTombstones;
         EnsureContained(_workspaceRoot, _queueRoot);
     }
 
@@ -118,7 +124,7 @@ internal sealed class TriggerQueueArtifactGuard
         var cleanupArtifacts = new List<TriggerQueueArtifactSnapshot>();
         var abandonedArtifacts = new List<TriggerQueueArtifactSnapshot>();
         var precursorArtifacts = new List<TriggerQueueArtifactSnapshot>();
-        var tombstoneCount = 0;
+        var tombstones = new List<TriggerQueueArtifactSnapshot>();
         var entries = Directory.EnumerateFileSystemEntries(_queueRoot, "*", SearchOption.TopDirectoryOnly).Take(MaxDirectoryEntries + 1).ToArray();
         if (entries.Length > MaxDirectoryEntries)
         {
@@ -165,9 +171,9 @@ internal sealed class TriggerQueueArtifactGuard
                 continue;
             }
 
-            if (TryParseTombstoneName(name, out _, out expectedIdentity))
+            if (TryParseTombstoneName(name, out generation, out expectedIdentity))
             {
-                if (tombstoneCount == _maxTombstoneArtifacts)
+                if (tombstones.Count == _maxTombstoneArtifacts)
                 {
                     throw new InvalidOperationException($"Trigger queue persistence refuses more than {_maxTombstoneArtifacts} authenticated tombstones.");
                 }
@@ -178,8 +184,9 @@ internal sealed class TriggerQueueArtifactGuard
                     throw new InvalidOperationException("Trigger queue persistence found a substituted authenticated tombstone.");
                 }
 
-                aggregateBytes = checked(aggregateBytes + new FileInfo(path).Length);
-                tombstoneCount++;
+                var length = new FileInfo(path).Length;
+                aggregateBytes = checked(aggregateBytes + length);
+                tombstones.Add(new TriggerQueueArtifactSnapshot(path, generation, identity, length, string.Empty));
                 continue;
             }
 
@@ -229,25 +236,30 @@ internal sealed class TriggerQueueArtifactGuard
         artifacts = artifacts.Select(artifact => BindArtifactContent(artifact, mutationLease.DirectoryAuthority)).ToList();
         cleanupArtifacts = cleanupArtifacts.Select(artifact => BindArtifactContent(artifact, mutationLease.DirectoryAuthority)).ToList();
         abandonedArtifacts = abandonedArtifacts.Select(artifact => BindArtifactContent(artifact, mutationLease.DirectoryAuthority)).ToList();
+        tombstones = tombstones.Select(artifact => BindArtifactContent(artifact, mutationLease.DirectoryAuthority)).ToList();
         precursorArtifacts = precursorArtifacts.Select(artifact => BindArtifactContent(artifact, mutationLease.DirectoryAuthority)).ToList();
 
-        if (precursorArtifacts.Count + tombstoneCount + abandonedArtifacts.Count > _maxTombstoneArtifacts)
+        if (precursorArtifacts.Count + tombstones.Count + abandonedArtifacts.Count > _maxTombstoneArtifacts)
         {
             throw new TriggerQueuePersistenceBackpressureException();
         }
 
+        tombstones = tombstones
+            .Select(artifact => CompleteInterruptedTombstone(artifact, mutationLease))
+            .ToList();
+
         foreach (var abandoned in abandonedArtifacts)
         {
-            ClaimAndReclaimExact(abandoned, recoverAsLedger: false, NullTriggerQueueDurabilityObserver.Instance, mutationLease);
+            var tombstone = ClaimAndReclaimExact(abandoned, recoverAsLedger: false, NullTriggerQueueDurabilityObserver.Instance, mutationLease);
+            if (tombstone is not null)
+            {
+                tombstones.Add(tombstone);
+            }
         }
 
         if (abandonedArtifacts.Count > 0)
         {
             mutationLease.DirectoryAuthority.Flush();
-            if (!OperatingSystem.IsWindows())
-            {
-                tombstoneCount = checked(tombstoneCount + abandonedArtifacts.Count);
-            }
         }
 
         foreach (var cleanup in cleanupArtifacts)
@@ -292,28 +304,47 @@ internal sealed class TriggerQueueArtifactGuard
             : await ReadExactAsync(ordered[^1], maximumBytes, mutationLease.DirectoryAuthority, cancellationToken).ConfigureAwait(false);
 
         ValidateMutationLease(mutationLease);
-        return new TriggerQueueReadResult(ordered, latestContent, tombstoneCount, precursorArtifacts);
+        return new TriggerQueueReadResult(ordered, latestContent, tombstones, precursorArtifacts);
     }
 
     /// <summary>Publishes a flushed immutable generation without replacing any path, then identity-cleans older generations.</summary>
-    public async Task WriteAsync(byte[] content, IReadOnlyList<TriggerQueueArtifactSnapshot> previousArtifacts, int tombstoneCount, IReadOnlyList<TriggerQueueArtifactSnapshot> precursors, long generation, ITriggerQueueDurabilityObserver observer, TriggerQueueMutationLease mutationLease)
+    public async Task WriteAsync(
+        byte[] content,
+        IReadOnlyList<TriggerQueueArtifactSnapshot> previousArtifacts,
+        IReadOnlyList<TriggerQueueArtifactSnapshot> tombstones,
+        IReadOnlyList<TriggerQueueArtifactSnapshot> precursors,
+        long generation,
+        ITriggerQueueDurabilityObserver observer,
+        TriggerQueueMutationLease mutationLease)
     {
         ArgumentNullException.ThrowIfNull(content);
         ArgumentNullException.ThrowIfNull(previousArtifacts);
+        ArgumentNullException.ThrowIfNull(tombstones);
         ArgumentNullException.ThrowIfNull(precursors);
         ArgumentNullException.ThrowIfNull(observer);
         ArgumentNullException.ThrowIfNull(mutationLease);
         ValidateMutationLease(mutationLease);
+        ValidatePreservedTombstones(tombstones, mutationLease.DirectoryAuthority);
         ValidatePreservedPrecursors(precursors, mutationLease.DirectoryAuthority);
-        var reservedArtifacts = precursors.Count + (OperatingSystem.IsWindows() ? 0 : tombstoneCount + Math.Max(1, previousArtifacts.Count));
+        var retiredArtifactSlots = tombstones.Count + Math.Max(0, previousArtifacts.Count - 1);
+        var reservedArtifacts = precursors.Count + (OperatingSystem.IsWindows()
+            ? 0
+            : _recycleAuthenticatedTombstones
+                ? Math.Max(1, retiredArtifactSlots)
+                : tombstones.Count + Math.Max(1, previousArtifacts.Count));
         if (reservedArtifacts > _maxTombstoneArtifacts)
         {
             throw new TriggerQueuePersistenceBackpressureException();
         }
 
+        var reusableTombstones = tombstones.ToList();
         foreach (var artifact in previousArtifacts.Take(Math.Max(0, previousArtifacts.Count - 1)))
         {
-            ClaimAndReclaimExact(artifact, recoverAsLedger: true, observer, mutationLease);
+            var reclaimed = ClaimAndReclaimExact(artifact, recoverAsLedger: true, observer, mutationLease);
+            if (reclaimed is not null)
+            {
+                reusableTombstones.Add(reclaimed);
+            }
         }
 
         if (previousArtifacts.Count > 1)
@@ -321,8 +352,20 @@ internal sealed class TriggerQueueArtifactGuard
             mutationLease.DirectoryAuthority.Flush();
         }
 
+        // Unix cannot unlink a path by the already-proven file handle. Reusing one authenticated,
+        // zero-length cleanup inode as staging preserves exact identity without growing tombstones.
+        var recycledTombstone = !OperatingSystem.IsWindows()
+            && _recycleAuthenticatedTombstones
+            && reusableTombstones.Count > 0
+                ? reusableTombstones[0]
+                : null;
+        var retainedTombstones = recycledTombstone is null
+            ? reusableTombstones.ToArray()
+            : reusableTombstones.Skip(1).ToArray();
+        ValidatePreservedTombstones(reusableTombstones, mutationLease.DirectoryAuthority);
         var destinationPath = GetPath($"ledger-{generation:D19}.json");
-        var tempPath = GetPath($".ledger-{generation:D19}.{Guid.NewGuid():N}.tmp");
+        var tempPath = recycledTombstone?.Path
+            ?? GetPath($".ledger-{generation:D19}.{Guid.NewGuid():N}.tmp");
         TriggerQueueFileIdentity? stagedIdentity = null;
         TriggerQueueArtifactSnapshot? publishedArtifact = null;
         try
@@ -330,18 +373,54 @@ internal sealed class TriggerQueueArtifactGuard
             observer.OnStagingDirectoryBound(generation, tempPath, destinationPath);
             ValidateMutationLease(mutationLease);
             ValidatePreservedPrecursors(precursors, mutationLease.DirectoryAuthority);
-            // Windows needs delete sharing for the immediate handle-retaining rename. Every later boundary
-            // re-proves that the owned path still resolves to this exact single-link regular-file identity.
-            await using (var stream = mutationLease.DirectoryAuthority.CreateNew(Path.GetFileName(tempPath), FileAccess.Write, FileShare.Read | FileShare.Delete, 4096, FileOptions.Asynchronous | FileOptions.WriteThrough))
+            ValidatePreservedTombstones(reusableTombstones, mutationLease.DirectoryAuthority);
+            FileStream stream;
+            if (recycledTombstone is null)
             {
+                // Windows needs delete sharing for the immediate handle-retaining rename. Every later boundary
+                // re-proves that the owned path still resolves to this exact single-link regular-file identity.
+                stream = mutationLease.DirectoryAuthority.CreateNew(
+                    Path.GetFileName(tempPath),
+                    FileAccess.Write,
+                    FileShare.Read | FileShare.Delete,
+                    4096,
+                    FileOptions.Asynchronous | FileOptions.WriteThrough);
                 stagedIdentity = TriggerQueueNativeFileInspector.InspectHandle(stream.SafeFileHandle, tempPath);
                 if (stagedIdentity != TriggerQueueNativeFileInspector.InspectPath(tempPath))
                 {
+                    stream.Dispose();
                     throw new InvalidOperationException("Trigger queue staging path was substituted while opening it.");
                 }
+            }
+            else
+            {
+                stream = mutationLease.DirectoryAuthority.OpenExisting(
+                    Path.GetFileName(tempPath),
+                    FileAccess.ReadWrite,
+                    FileShare.Read | FileShare.Delete,
+                    4096);
+                try
+                {
+                    ValidateArtifactHandleContent(stream, recycledTombstone);
+                    stagedIdentity = TriggerQueueNativeFileInspector.InspectHandle(stream.SafeFileHandle, tempPath);
+                    if (stagedIdentity != recycledTombstone.Identity
+                        || stagedIdentity != TriggerQueueNativeFileInspector.InspectPath(tempPath))
+                    {
+                        throw new InvalidOperationException("Trigger queue recycled tombstone changed while opening it for staging.");
+                    }
+                }
+                catch
+                {
+                    stream.Dispose();
+                    throw;
+                }
+            }
 
+            await using (stream)
+            {
                 observer.OnStagingPrecursorCreated(generation, tempPath, destinationPath);
                 ValidateMutationLease(mutationLease);
+                ValidatePreservedTombstones(reusableTombstones, mutationLease.DirectoryAuthority);
                 if (stream.Length != 0 || TriggerQueueNativeFileInspector.InspectPath(tempPath) != stagedIdentity)
                 {
                     throw new InvalidOperationException("Trigger queue empty staging precursor changed before identity-bound naming.");
@@ -349,12 +428,19 @@ internal sealed class TriggerQueueArtifactGuard
 
                 var ownedTempPath = GetPath($".staged-{generation:D19}-{stagedIdentity.Device:X16}-{stagedIdentity.File:X16}.{Guid.NewGuid():N}.tmp");
                 MoveNoReplaceDurably(tempPath, ownedTempPath, mutationLease);
-                tempPath = ownedTempPath;
-                ValidateMutationLease(mutationLease);
-                if (TriggerQueueNativeFileInspector.InspectPath(tempPath) != stagedIdentity)
+                if (TriggerQueueNativeFileInspector.InspectPath(ownedTempPath) != stagedIdentity)
                 {
+                    if (!File.Exists(tempPath))
+                    {
+                        MoveNoReplaceDurably(ownedTempPath, tempPath, mutationLease);
+                    }
+
                     throw new InvalidOperationException("Trigger queue staging identity changed during identity-bound naming.");
                 }
+
+                tempPath = ownedTempPath;
+                ValidateMutationLease(mutationLease);
+                ValidatePreservedTombstones(retainedTombstones, mutationLease.DirectoryAuthority);
 
                 await stream.WriteAsync(content, CancellationToken.None).ConfigureAwait(false);
                 await stream.FlushAsync(CancellationToken.None).ConfigureAwait(false);
@@ -369,6 +455,7 @@ internal sealed class TriggerQueueArtifactGuard
             ValidateMutationLease(mutationLease);
             observer.OnStaged(generation, tempPath, destinationPath);
             ValidateMutationLease(mutationLease);
+            ValidatePreservedTombstones(retainedTombstones, mutationLease.DirectoryAuthority);
             if (TriggerQueueNativeFileInspector.InspectPath(tempPath) != stagedIdentity)
             {
                 throw new InvalidOperationException("Trigger queue staging path was substituted before publication.");
@@ -377,6 +464,7 @@ internal sealed class TriggerQueueArtifactGuard
             observer.OnPublishing(generation, tempPath, destinationPath);
             ValidateMutationLease(mutationLease);
             ValidatePreservedPrecursors(precursors, mutationLease.DirectoryAuthority);
+            ValidatePreservedTombstones(retainedTombstones, mutationLease.DirectoryAuthority);
             if (TriggerQueueNativeFileInspector.InspectPath(tempPath) != stagedIdentity)
             {
                 throw new InvalidOperationException("Trigger queue staging path was substituted at the publication boundary.");
@@ -395,6 +483,7 @@ internal sealed class TriggerQueueArtifactGuard
             observer.OnPublished(generation, destinationPath);
             ValidateMutationLease(mutationLease);
             ValidatePreservedPrecursors(precursors, mutationLease.DirectoryAuthority);
+            ValidatePreservedTombstones(retainedTombstones, mutationLease.DirectoryAuthority);
             ValidateArtifactContent(publishedArtifact, mutationLease.DirectoryAuthority);
             if (TriggerQueueNativeFileInspector.InspectPath(destinationPath) != stagedIdentity)
             {
@@ -408,6 +497,7 @@ internal sealed class TriggerQueueArtifactGuard
 
             mutationLease.DirectoryAuthority.Flush();
             ValidatePreservedPrecursors(precursors, mutationLease.DirectoryAuthority);
+            ValidatePreservedTombstones(retainedTombstones, mutationLease.DirectoryAuthority);
             ValidateArtifactContent(publishedArtifact, mutationLease.DirectoryAuthority);
             if (TriggerQueueNativeFileInspector.InspectPath(destinationPath) != stagedIdentity)
             {
@@ -482,12 +572,16 @@ internal sealed class TriggerQueueArtifactGuard
         return result;
     }
 
-    private void ClaimAndReclaimExact(TriggerQueueArtifactSnapshot artifact, bool recoverAsLedger, ITriggerQueueDurabilityObserver observer, TriggerQueueMutationLease mutationLease)
+    private TriggerQueueArtifactSnapshot? ClaimAndReclaimExact(
+        TriggerQueueArtifactSnapshot artifact,
+        bool recoverAsLedger,
+        ITriggerQueueDurabilityObserver observer,
+        TriggerQueueMutationLease mutationLease)
     {
         ValidateMutationLease(mutationLease);
         if (!File.Exists(artifact.Path))
         {
-            return;
+            return null;
         }
 
         if (TriggerQueueNativeFileInspector.InspectPath(artifact.Path) != artifact.Identity)
@@ -537,14 +631,15 @@ internal sealed class TriggerQueueArtifactGuard
         if (OperatingSystem.IsWindows())
         {
             DeleteExactOnWindows(claimed);
+            return null;
         }
-        else
-        {
-            TombstoneExactOnUnix(claimed, mutationLease);
-        }
+
+        return TombstoneExactOnUnix(claimed, mutationLease);
     }
 
-    private void TombstoneExactOnUnix(TriggerQueueArtifactSnapshot artifact, TriggerQueueMutationLease mutationLease)
+    private TriggerQueueArtifactSnapshot TombstoneExactOnUnix(
+        TriggerQueueArtifactSnapshot artifact,
+        TriggerQueueMutationLease mutationLease)
     {
         using var stream = mutationLease.DirectoryAuthority.OpenExisting(Path.GetFileName(artifact.Path), FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete, 4096);
         ValidateArtifactHandleContent(stream, artifact);
@@ -568,6 +663,13 @@ internal sealed class TriggerQueueArtifactGuard
         {
             throw new InvalidOperationException("Trigger queue cleanup handle changed while creating its zero-length tombstone.");
         }
+
+        return new TriggerQueueArtifactSnapshot(
+            tombstonePath,
+            artifact.Generation,
+            artifact.Identity,
+            0,
+            Hash(ReadOnlySpan<byte>.Empty));
     }
 
     private static void DeleteExactOnWindows(TriggerQueueArtifactSnapshot artifact)
@@ -651,6 +753,65 @@ internal sealed class TriggerQueueArtifactGuard
                 throw new InvalidOperationException("Trigger queue preserved precursor path changed after handle-bound validation.");
             }
         }
+    }
+
+    private static void ValidatePreservedTombstones(
+        IReadOnlyList<TriggerQueueArtifactSnapshot> tombstones,
+        TriggerQueueDirectoryAuthority directoryAuthority)
+    {
+        foreach (var tombstone in tombstones)
+        {
+            if (!TryParseTombstoneName(Path.GetFileName(tombstone.Path), out var generation, out var identity)
+                || generation != tombstone.Generation
+                || identity != tombstone.Identity
+                || tombstone.Length != 0)
+            {
+                throw new InvalidOperationException("Trigger queue preserved tombstone evidence is malformed.");
+            }
+
+            using var stream = directoryAuthority.OpenExisting(
+                Path.GetFileName(tombstone.Path),
+                FileAccess.Read,
+                FileShare.Read,
+                4096);
+            ValidateArtifactHandleContent(stream, tombstone);
+            if (TriggerQueueNativeFileInspector.InspectPath(tombstone.Path) != tombstone.Identity)
+            {
+                throw new InvalidOperationException("Trigger queue preserved tombstone path changed after handle-bound validation.");
+            }
+        }
+    }
+
+    private static TriggerQueueArtifactSnapshot CompleteInterruptedTombstone(
+        TriggerQueueArtifactSnapshot tombstone,
+        TriggerQueueMutationLease mutationLease)
+    {
+        if (tombstone.Length == 0)
+        {
+            return tombstone;
+        }
+
+        using var stream = mutationLease.DirectoryAuthority.OpenExisting(
+            Path.GetFileName(tombstone.Path),
+            FileAccess.ReadWrite,
+            FileShare.Read | FileShare.Delete,
+            4096);
+        ValidateArtifactHandleContent(stream, tombstone);
+        if (TriggerQueueNativeFileInspector.InspectPath(tombstone.Path) != tombstone.Identity)
+        {
+            throw new InvalidOperationException("Trigger queue interrupted tombstone changed before handle-bound completion.");
+        }
+
+        stream.SetLength(0);
+        stream.Flush(flushToDisk: true);
+        if (TriggerQueueNativeFileInspector.InspectHandle(stream.SafeFileHandle, tombstone.Path) != tombstone.Identity
+            || TriggerQueueNativeFileInspector.InspectPath(tombstone.Path) != tombstone.Identity
+            || stream.Length != 0)
+        {
+            throw new InvalidOperationException("Trigger queue interrupted tombstone changed during handle-bound completion.");
+        }
+
+        return tombstone with { Length = 0, ContentHash = Hash(ReadOnlySpan<byte>.Empty) };
     }
 
     private static FileStream OpenArtifact(TriggerQueueArtifactSnapshot artifact, TriggerQueueDirectoryAuthority directoryAuthority)
