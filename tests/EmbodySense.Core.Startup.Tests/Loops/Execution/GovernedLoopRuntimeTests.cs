@@ -251,6 +251,97 @@ internal static class GovernedLoopRuntimeTests
         }
     }
 
+    internal static async Task Concurrent_cross_schedule_defer_one_observations_retain_one_atomic_deferral_across_restart()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true, pauseProvider: true);
+        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var workerNow = scheduledAtUtc.AddMinutes(2);
+        var blocker = ScheduleScenario.Create(fixture, scheduledAtUtc, "hold the observed-active blocker", "observed-defer-a");
+        var second = ScheduleScenario.Create(fixture, scheduledAtUtc, "retain one observed-active occurrence", "observed-defer-b");
+        var third = ScheduleScenario.Create(fixture, scheduledAtUtc, "suppress the additional observed-active occurrence", "observed-defer-c");
+
+        await QueueScheduleAsync(fixture.Paths, blocker, workerNow);
+        var dispatchNow = workerNow.AddSeconds(1);
+        var workerClock = new MonotonicTriggerTimeProvider(dispatchNow);
+        var queue = new TriggerQueueStore(fixture.Paths, timeProvider: workerClock);
+        await using (var runtime = await fixture.CreateRuntimeAsync())
+        {
+            var generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
+            var blockerTask = runtime
+                .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), workerClock)
+                .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-a", generation, dispatchNow, TimeSpan.FromSeconds(30), [], 3));
+            await fixture.WaitForProviderAsync();
+            TriggerWorkerRunResponse blockedSecond;
+            TriggerWorkerRunResponse blockedThird;
+            try
+            {
+                using var activeRuns = new CustomLoopRunStore(fixture.Paths);
+                var active = Assert.IsType<CustomLoopRunRecord>(
+                    await activeRuns.GetNonterminalByLoopAsync(blocker.Definition.Target.LoopId));
+                workerClock.AdvanceTo(active.UpdatedAtUtc.AddTicks(1));
+                var contenderObservedNow = workerClock.GetUtcNow();
+                var evaluations = await Task.WhenAll(
+                    QueueScheduleThroughDurableOverlapAsync(fixture.Paths, second, workerClock),
+                    QueueScheduleThroughDurableOverlapAsync(fixture.Paths, third, workerClock));
+                Assert.All(evaluations, result =>
+                {
+                    Assert.Equal(ScheduleEvaluationStatus.Queued, result.Status);
+                    Assert.Null(result.State!.DeferredOccurrence);
+                    Assert.Empty(result.State.DispositionEvidence);
+                });
+
+                generation = (await queue.GetSnapshotAsync(contenderObservedNow)).Generation;
+                blockedSecond = await runtime
+                    .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), workerClock)
+                    .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-b", generation, contenderObservedNow, TimeSpan.FromSeconds(30), [], 3));
+                generation = (await queue.GetSnapshotAsync(contenderObservedNow)).Generation;
+                blockedThird = await runtime
+                    .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), workerClock)
+                    .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-c", generation, contenderObservedNow, TimeSpan.FromSeconds(30), [], 3));
+                Assert.Equal(1, fixture.ProviderAttempts);
+            }
+            finally
+            {
+                fixture.ReleaseProvider();
+            }
+
+            var blockerResult = await blockerTask;
+            Assert.True(blockerResult.Entry is not null, $"Blocker selection={blockerResult.SelectionStatus}; mutation={blockerResult.MutationStatus}");
+            Assert.Equal("Dispatched", blockerResult.Entry.State);
+            Assert.True(blockedSecond.Entry is not null, $"Second selection={blockedSecond.SelectionStatus}; mutation={blockedSecond.MutationStatus}");
+            Assert.Equal("DispatchRejected", blockedSecond.Entry.State);
+            Assert.True(blockedThird.Entry is not null, $"Third selection={blockedThird.SelectionStatus}; mutation={blockedThird.MutationStatus}");
+            Assert.Equal("DispatchRejected", blockedThird.Entry.State);
+            Assert.Equal(1, fixture.ProviderAttempts);
+        }
+
+        using (var restartedRuns = new CustomLoopRunStore(fixture.Paths))
+        {
+            var dispositions = new[]
+            {
+                Assert.IsType<ScheduleRunAdmissionEvidence>(
+                    await restartedRuns.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId)),
+                Assert.IsType<ScheduleRunAdmissionEvidence>(
+                    await restartedRuns.GetScheduleAdmissionAsync(third.CreateEnvelope().DeliveryId)),
+            }.Select(evidence => evidence.Attempts[^1].Disposition).ToArray();
+            Assert.Single(dispositions, disposition => disposition == ScheduleRunAdmissionDisposition.OverlapDeferred);
+            Assert.Single(dispositions, disposition => disposition == ScheduleRunAdmissionDisposition.DeferredOneSuppressed);
+            Assert.Single(await restartedRuns.ListRecentAsync(10));
+        }
+
+        await using (var restartedRuntime = await fixture.CreateRuntimeAsync())
+        {
+            workerClock.AdvanceTo(workerClock.GetUtcNow().AddMinutes(1));
+            var restartNow = workerClock.GetUtcNow();
+            var generation = (await queue.GetSnapshotAsync(restartNow)).Generation;
+            var empty = await restartedRuntime
+                .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), workerClock)
+                .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-restart", generation, restartNow, TimeSpan.FromSeconds(30), [], 3));
+            Assert.Equal("Empty", empty.SelectionStatus);
+            Assert.Equal(1, fixture.ProviderAttempts);
+        }
+    }
+
     internal static async Task Worker_defers_pending_schedule_finalization_then_restart_dispatches_and_replays_exactly_once()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true);
@@ -1201,6 +1292,22 @@ internal static class GovernedLoopRuntimeTests
         Assert.True(result.Status == ScheduleEvaluationStatus.Queued, $"Status={result.Status}; Reason={result.ReasonCode}");
     }
 
+    private static async Task<ScheduleEvaluationResult> QueueScheduleThroughDurableOverlapAsync(
+        WorkspacePaths paths,
+        ScheduleScenario scenario,
+        TimeProvider clock)
+    {
+        using var runStore = new CustomLoopRunStore(paths);
+        using var schedule = ScheduleRuntimeFactory.Create(
+            paths,
+            scenario,
+            new ScheduleRunOverlapAdapter(runStore),
+            scenario,
+            clock);
+        Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await schedule.CreateAsync(scenario.Definition)).Status);
+        return await schedule.EvaluateOnceAsync(scenario.Definition.ScheduleId);
+    }
+
     private static TriggerDeliveryEnvelope SubstitutedScheduleEnvelope(
         GovernedRuntimeFixture fixture,
         ScheduleScenario scenario,
@@ -1399,6 +1506,26 @@ internal static class GovernedLoopRuntimeTests
     private sealed class FixedTriggerTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private sealed class MonotonicTriggerTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        private long _utcTicks = now.UtcDateTime.Ticks;
+
+        public override DateTimeOffset GetUtcNow() => new(Interlocked.Read(ref _utcTicks), TimeSpan.Zero);
+
+        internal void AdvanceTo(DateTimeOffset candidate)
+        {
+            var candidateTicks = candidate.UtcDateTime.Ticks;
+            while (true)
+            {
+                var current = Interlocked.Read(ref _utcTicks);
+                if (candidateTicks <= current || Interlocked.CompareExchange(ref _utcTicks, candidateTicks, current) == current)
+                {
+                    return;
+                }
+            }
+        }
     }
 
     private sealed class ScheduleScenario : IScheduleCurrentEvidencePort, IScheduleOverlapPort, IScheduleTimeZonePort

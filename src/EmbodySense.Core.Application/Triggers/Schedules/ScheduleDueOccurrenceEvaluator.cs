@@ -447,15 +447,9 @@ public sealed class ScheduleDueOccurrenceEvaluator
                     decisionEvidenceHash: overlap.EvidenceHash).ConfigureAwait(false);
             }
 
-            if (definition.Overlap == ScheduleOverlapPolicy.DeferOne)
-            {
-                return await DeferClaimAsync(
-                    definition,
-                    state,
-                    now,
-                    overlap.EvidenceHash!,
-                    cancellationToken).ConfigureAwait(false);
-            }
+            // DeferOne must reach the atomic run-admission fence. Retaining it here would
+            // create one independent deferral per schedule, allowing multiple schedules
+            // targeting the same loop to each believe they own the single deferred slot.
         }
         else if (overlap.Status != ScheduleOverlapStatus.Clear)
         {
