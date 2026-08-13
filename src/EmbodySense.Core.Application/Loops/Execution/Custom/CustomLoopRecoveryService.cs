@@ -308,8 +308,8 @@ public sealed class CustomLoopRecoveryService
             .Take(2)
             .ToArray();
         return exactStarts.Length != 1
-            || !HasAuthenticatedTerminalSequentialOutcome(run, exactStarts[0])
-                && !IsRestartSafePureAttemptStart(run, exactStarts[0]);
+            || (!HasAuthenticatedTerminalSequentialOutcome(run, exactStarts[0])
+                && !IsRestartSafePureAttemptStart(run, exactStarts[0]));
     }
 
     private static bool HasAuthenticatedTerminalSequentialOutcome(CustomLoopRunRecord run, CustomLoopRunEvent started)

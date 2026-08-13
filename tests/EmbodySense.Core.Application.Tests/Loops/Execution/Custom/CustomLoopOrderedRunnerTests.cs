@@ -355,9 +355,15 @@ public sealed class CustomLoopOrderedRunnerTests
         _ = await firstAdapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
 
         var recoveredStore = new FakeRunStore(Assert.IsType<CustomLoopRunRecord>(retainedStart));
-        var recovery = Assert.Single(await new CustomLoopRecoveryService(recoveredStore, new RecordingAuditLog(), new FixedTimeProvider(_now.AddMinutes(1))).RecoverAsync(AuditSchema.Actors.Web));
+        var recoveryAudit = new RecordingAuditLog();
+        var recovery = Assert.Single(await new CustomLoopRecoveryService(recoveredStore, recoveryAudit, new FixedTimeProvider(_now.AddMinutes(1))).RecoverAsync(AuditSchema.Actors.Web));
         Assert.Equal(CustomLoopRecoveryStatus.Paused, recovery.Status);
         Assert.Equal(GovernedLoopNodeExecutionStatus.Running, recovery.Run.Frontier!.Payload.Nodes[^1].Status);
+        Assert.All(recoveryAudit.Events, item =>
+        {
+            Assert.Equal(false, item.Metadata["openAttemptAfterCheckpoint"]);
+            Assert.Equal(true, item.Metadata["restartSafePureAttemptAfterCheckpoint"]);
+        });
 
         var resumedExecutor = new QueueExecutor(Result("resumed provider outcome"));
         var resumedAudit = new RecordingAuditLog();
@@ -2670,7 +2676,11 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(interrupted.Frontier!.Payload.Nodes[^1].Attempt, blocked.Attempt);
         Assert.Equal(interrupted.Frontier.Payload.Nodes[^1].AttemptOperationId, blocked.AttemptOperationId);
         Assert.Equal("recovery_open_attempt", recoveryStore.Current.FailureCode);
-        Assert.All(recoveryAudit.Events, item => Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]));
+        Assert.All(recoveryAudit.Events, item =>
+        {
+            Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]);
+            Assert.Equal(false, item.Metadata["restartSafePureAttemptAfterCheckpoint"]);
+        });
         Assert.Empty(executor.Requests);
     }
 
@@ -2758,8 +2768,13 @@ public sealed class CustomLoopOrderedRunnerTests
             AfterUpdate = candidate =>
             {
                 if (retainedClaim is null
-                    && candidate.Frontier?.Payload.Nodes[^1].Status == GovernedLoopNodeExecutionStatus.Running
-                    && !candidate.Events.Any(item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted }))
+                    && candidate.Frontier?.Payload.Nodes[^1] is
+                    {
+                        Status: GovernedLoopNodeExecutionStatus.Running,
+                        AttemptOperationId: { } attemptOperationId,
+                    }
+                    && !candidate.Events.Any(item => string.Equals(item.EventId, attemptOperationId, StringComparison.Ordinal)
+                        && item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted }))
                 {
                     retainedClaim = candidate;
                     throw new IOException("Simulated process loss after the durable Running claim.");
@@ -2782,6 +2797,7 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Empty(firstExecutor.Requests);
         var retained = Assert.IsType<CustomLoopRunRecord>(retainedClaim);
         var retainedAttempt = retained.Frontier!.Payload.Nodes[^1];
+        Assert.Equal(GovernedLoopNodeKind.Inference, retainedAttempt.Descriptor.Kind);
         var recoveryStore = new FakeRunStore(retained);
         var recoveryAudit = new RecordingAuditLog();
         var recovery = new CustomLoopRecoveryService(recoveryStore, recoveryAudit, new FixedTimeProvider(retained.UpdatedAtUtc.AddSeconds(1)));
@@ -2799,7 +2815,11 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Null(blocked.OutcomeEvidenceId);
         Assert.Null(blocked.OutcomeEvidenceHash);
         Assert.DoesNotContain(result.Run.Events, item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted });
-        Assert.All(recoveryAudit.Events, item => Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]));
+        Assert.All(recoveryAudit.Events, item =>
+        {
+            Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]);
+            Assert.Equal(false, item.Metadata["restartSafePureAttemptAfterCheckpoint"]);
+        });
         Assert.Empty(firstExecutor.Requests);
         Assert.Equal(["trigger"], firstEvidence.Requests.Select(item => item.Dispatch.Node.NodeId));
         Assert.Empty(recoveryStore.ValidationFailures);
