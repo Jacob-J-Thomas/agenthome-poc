@@ -25,6 +25,7 @@ public static class ConversationPublicationCommitProtocol
         Exception? boundaryFailure = null;
         var callbackInvocationCount = 0;
         var callbackCompleted = 0;
+        var callbackIncompleteWhenBoundaryClosed = false;
         var boundaryActive = 1;
         using var boundaryLifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         try
@@ -68,6 +69,8 @@ public static class ConversationPublicationCommitProtocol
         }
         finally
         {
+            callbackIncompleteWhenBoundaryClosed = Volatile.Read(ref callbackInvocationCount) > 0
+                && Volatile.Read(ref callbackCompleted) == 0;
             Volatile.Write(ref boundaryActive, 0);
             await boundaryLifetime.CancelAsync();
         }
@@ -87,7 +90,7 @@ public static class ConversationPublicationCommitProtocol
             return new ConversationPublicationCommitProtocolResult<T>(ConversationPublicationCommitProtocolStatus.CallbackInvokedMultipleTimes, value, boundaryFailure, observedInvocationCount);
         }
 
-        if (Volatile.Read(ref callbackCompleted) == 0)
+        if (callbackIncompleteWhenBoundaryClosed || Volatile.Read(ref callbackCompleted) == 0)
         {
             return new ConversationPublicationCommitProtocolResult<T>(ConversationPublicationCommitProtocolStatus.CallbackIncomplete, value, boundaryFailure, observedInvocationCount);
         }

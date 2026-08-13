@@ -85,6 +85,7 @@ public sealed class ConversationPublicationCommitProtocolTests
     public async Task Returning_before_callback_completion_cancels_the_append_lifetime_and_fails_closed()
     {
         var callbackEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackCancellation = new TaskCompletionSource<string>();
         var appendCount = 0;
 
         var result = await ConversationPublicationCommitProtocol.ExecuteAsync(
@@ -95,8 +96,9 @@ public sealed class ConversationPublicationCommitProtocolTests
             },
             async cancellationToken =>
             {
+                using var registration = cancellationToken.Register(() => callbackCancellation.TrySetException(new OperationCanceledException(cancellationToken)));
                 callbackEntered.TrySetResult();
-                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                await callbackCancellation.Task;
                 appendCount++;
                 return "unexpected";
             });
