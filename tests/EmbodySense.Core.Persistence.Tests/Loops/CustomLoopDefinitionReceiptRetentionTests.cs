@@ -15,6 +15,7 @@ using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.Json.Nodes;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
@@ -24,6 +25,13 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     private static readonly DateTimeOffset _createdAtUtc = new(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset _observedAtUtc = _createdAtUtc.AddDays(40);
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions _canonicalJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
+    };
 
     [Fact]
     public async Task Active_cleanup_journal_inspection_distinguishes_empty_and_nonterminal_authoring_state_without_mutating_it()
@@ -585,6 +593,7 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
         var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
         var definition = CreateDefinition("loop-batches");
         await CreateCommittedAsync(store, definition);
+        var seededReceipts = new Dictionary<string, (CustomLoopDefinitionMutationRequest Mutation, byte[] Utf8Json)>(StringComparer.Ordinal);
         for (var index = 1; index <= CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount + 1; index++)
         {
             var updated = CustomLoopDefinitionContentHash.Apply(definition with
@@ -595,19 +604,99 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
                 UpdatedAtUtc = _createdAtUtc.AddMinutes(index)
             });
             var mutation = Mutation(CustomLoopDefinitionMutationKind.Update, updated.LastMutationOperationId, updated, definition, definition.DefinitionVersion, updated.UpdatedAtUtc);
-            Assert.Equal(CustomLoopDefinitionStoreStatus.Updated, (await store.UpdateAsync(updated, definition.DefinitionVersion, mutation)).Status);
-            Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, await store.MarkOperationOutcomeAuditedAsync(mutation.OperationId));
+            var receiptUtf8Json = SerializeAuthenticatedUpdateReceipt(mutation);
+            if (index == 1)
+            {
+                Assert.Equal(CustomLoopDefinitionStoreStatus.Updated, (await store.UpdateAsync(updated, definition.DefinitionVersion, mutation)).Status);
+                Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, await store.MarkOperationOutcomeAuditedAsync(mutation.OperationId));
+                var persistedReceipt = await File.ReadAllBytesAsync(Path.Combine(paths.CustomLoopDefinitionOperationsPath, mutation.OperationId + ".json"));
+                Assert.Equal(receiptUtf8Json, persistedReceipt);
+                Assert.Equal(SerializeDefinition(updated), await File.ReadAllBytesAsync(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json")));
+            }
+            else
+            {
+                await SeedAuthenticatedUpdateReceiptAsync(paths, mutation.OperationId, receiptUtf8Json);
+            }
+
+            seededReceipts.Add(mutation.OperationId, (mutation, receiptUtf8Json));
             definition = updated;
         }
+
+        await File.WriteAllBytesAsync(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json"), SerializeDefinition(definition));
+        var persisted = await store.GetAsync(definition.Id);
+        Assert.NotNull(persisted);
+        Assert.Equal(definition.ContentHash, persisted.ContentHash);
+        var latestLookup = await store.GetMutationOperationAsync(definition.LastMutationOperationId);
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.OutcomeCommitted, latestLookup.Status);
+        Assert.True(latestLookup.Operation!.OutcomeAuditRecorded);
+        Assert.True(latestLookup.Operation.HasAppliedMutationArtifact);
 
         var first = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-batch-1"));
         var second = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-batch-2"));
 
         Assert.Equal(CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount, first.CompactedArtifactCount);
         Assert.Equal(1, second.CompactedArtifactCount);
+        Assert.Equal(CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount, first.Journal!.Candidates.Length);
+        Assert.Single(second.Journal!.Candidates);
+        var compactedCandidates = first.Journal.Candidates.Concat(second.Journal.Candidates).ToArray();
+        Assert.Equal(seededReceipts.Count, compactedCandidates.Length);
+        Assert.All(compactedCandidates, candidate =>
+        {
+            var expected = seededReceipts[candidate.ArtifactId];
+            var expectedHash = Convert.ToHexString(SHA256.HashData(expected.Utf8Json)).ToLowerInvariant();
+            Assert.Equal(CustomLoopReceiptArtifactCategory.Compactable, candidate.Category);
+            Assert.True(candidate.OutcomeAuditRecorded);
+            Assert.True(candidate.OwnershipResolved);
+            Assert.Equal(expectedHash, candidate.ArtifactHash);
+            Assert.Equal(expected.Utf8Json.LongLength, candidate.ArtifactUtf8Bytes);
+            var proof = Assert.IsType<CustomLoopExpiredOperationProof>(candidate.ExpiredOperationProof);
+            Assert.Equal(expectedHash, proof.OutcomeHash);
+            Assert.Equal(expected.Mutation.RequestHash, proof.RequestHash);
+            Assert.Equal(expected.Mutation.RequestedAtUtc, proof.CompletedAtUtc);
+        });
+        Assert.Equal(first.CompactedArtifactUtf8Bytes, first.Journal.RemovedArtifactUtf8Bytes);
+        Assert.Equal(second.CompactedArtifactUtf8Bytes, second.Journal.RemovedArtifactUtf8Bytes);
+        Assert.Equal(first.CompactedArtifactCount, first.Journal.RemovedArtifactCount);
+        Assert.Equal(second.CompactedArtifactCount, second.Journal.RemovedArtifactCount);
+        Assert.Equal(seededReceipts.Values.Sum(item => item.Utf8Json.LongLength), first.CompactedArtifactUtf8Bytes + second.CompactedArtifactUtf8Bytes);
         Assert.Single(Directory.EnumerateFiles(paths.CustomLoopDefinitionOperationsPath, "*.json", SearchOption.TopDirectoryOnly));
         Assert.Equal(definition.ContentHash, (await store.GetAsync(definition.Id))!.ContentHash);
     }
+
+    private static async Task SeedAuthenticatedUpdateReceiptAsync(WorkspacePaths paths, string operationId, byte[] receiptUtf8Json)
+    {
+        Directory.CreateDirectory(paths.CustomLoopDefinitionOperationsPath);
+        await File.WriteAllBytesAsync(Path.Combine(paths.CustomLoopDefinitionOperationsPath, operationId + ".json"), receiptUtf8Json);
+    }
+
+    private static byte[] SerializeAuthenticatedUpdateReceipt(CustomLoopDefinitionMutationRequest mutation)
+    {
+        var receipt = new
+        {
+            schemaVersion = CustomLoopDefinitionMutationOperation.CurrentSchemaVersion,
+            kind = CustomLoopDefinitionMutationKind.Update,
+            mutation.OperationId,
+            mutation.RequestHash,
+            mutation.LoopId,
+            mutation.RoleId,
+            mutation.ExpectedDefinitionVersion,
+            mutation.PlannedDefinition,
+            mutation.PriorDefinition,
+            mutation.RequestedAtUtc,
+            updatedAtUtc = mutation.RequestedAtUtc,
+            state = CustomLoopDefinitionMutationState.OutcomeCommitted,
+            outcome = CustomLoopDefinitionStoreStatus.Updated,
+            resultDefinition = mutation.PlannedDefinition,
+            resultConflict = (CustomLoopDefinitionConflict?)null,
+            resultTombstone = (CustomLoopDefinitionTombstone?)null,
+            outcomeAuditRecorded = true,
+            originalDefinition = (CustomLoopDefinition?)null,
+            recordedAtUtc = mutation.RequestedAtUtc
+        };
+        return Encoding.UTF8.GetBytes(JsonSerializer.Serialize(receipt, _canonicalJsonOptions) + Environment.NewLine);
+    }
+
+    private static byte[] SerializeDefinition(CustomLoopDefinition definition) => Encoding.UTF8.GetBytes(JsonSerializer.Serialize(definition, _canonicalJsonOptions) + Environment.NewLine);
 
     [Fact]
     public async Task Stale_intent_audited_owner_recovers_when_the_ledger_write_committed_before_the_crash()
