@@ -22,6 +22,17 @@ namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 public sealed class GovernedLoopSequentialBindingResolverTests
 {
     [Fact]
+    public void Resolve_rejects_a_missing_public_context_without_throwing()
+    {
+        var result = GovernedLoopSequentialBindingResolver.Resolve(null, null, null, null);
+
+        Assert.False(result.IsResolved);
+        Assert.Empty(result.Inputs);
+        Assert.Equal("pure-node.context-invalid", result.FailureCode);
+        Assert.Equal("$", result.FailurePath);
+    }
+
+    [Fact]
     public async Task Resolve_materializes_typed_transform_and_validate_inputs_and_preserves_false_boolean_outputs()
     {
         var context = await ContextAsync();

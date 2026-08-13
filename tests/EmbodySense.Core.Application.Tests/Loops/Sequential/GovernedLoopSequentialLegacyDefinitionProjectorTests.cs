@@ -212,6 +212,9 @@ public sealed class GovernedLoopSequentialLegacyDefinitionProjectorTests
         Assert.Equal(
             GovernedLoopSequentialLegacyDefinitionProjectionStatus.InvalidPlan,
             GovernedLoopSequentialLegacyDefinitionProjector.ProjectPrepared(binding.AdmissionOperationId, invocation, null, artifact).Status);
+        Assert.Equal(
+            GovernedLoopSequentialLegacyDefinitionProjectionStatus.InvalidArtifact,
+            GovernedLoopSequentialLegacyDefinitionProjector.ProjectPrepared(binding.AdmissionOperationId, invocation, plan, null).Status);
     }
 
     private static GovernedLoopSequentialInvocationSnapshot Invocation(bool includeConversation)

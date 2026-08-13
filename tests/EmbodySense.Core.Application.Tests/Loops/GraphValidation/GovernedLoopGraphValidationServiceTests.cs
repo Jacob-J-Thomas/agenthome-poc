@@ -195,6 +195,41 @@ public sealed class GovernedLoopGraphValidationServiceTests
         }
     }
 
+    [Fact]
+    public async Task ValidateAdmitsCanonicalNumberRangeAndStructuredSelectionSchemaSemantics()
+    {
+        Assert.True(GovernedLoopTypedValue.TryCreate(1, GovernedLoopValueKind.Number, "1.5", out var canonicalNumber, out var numberValidation));
+        Assert.True(numberValidation.IsValid);
+        Assert.Equal("15e-1", canonicalNumber!.CanonicalValueJson);
+
+        foreach (var candidate in new[]
+                 {
+                     NumberRangeCandidate("15e-1", "2"),
+                     StructuredSelectionCandidate(),
+                 })
+        {
+            var result = await Service(ExactPureCatalog(candidate)).ValidateAsync(candidate);
+
+            Assert.DoesNotContain(result.Errors, error => error.Code == "node.pure-schema-contract.incompatible");
+        }
+    }
+
+    [Theory]
+    [InlineData("2", "1")]
+    [InlineData("01", "2")]
+    [InlineData("NaN", "2")]
+    public async Task ValidateRejectsNonCanonicalOrReversedNumberRangeSemantics(string minimum, string maximum)
+    {
+        var candidate = NumberRangeCandidate(minimum, maximum);
+
+        var result = await Service(ExactPureCatalog(candidate)).ValidateAsync(candidate);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(
+            result.Errors,
+            error => error.Code == "node.pure-schema-contract.incompatible" && error.Element.Id == "validate-number");
+    }
+
     [Theory]
     [InlineData(CustomLoopLimits.MaxGraphTypedValueDepth - 1, false)]
     [InlineData(CustomLoopLimits.MaxGraphTypedValueDepth, true)]
@@ -1330,6 +1365,107 @@ public sealed class GovernedLoopGraphValidationServiceTests
                 new GovernedLoopValueSchemaDefinition("items", GovernedLoopValueKind.Array, false, ElementSchemaId: "boolean"),
                 new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
             ]);
+        return CandidateFromGraph(artifact.Graph);
+    }
+
+    private static GovernedLoopGraphCandidate NumberRangeCandidate(string minimum, string maximum)
+    {
+        var trigger = GovernedLoopSequentialApplicationTestFixture.Trigger("trigger") with
+        {
+            Ports =
+            [
+                GovernedLoopSequentialApplicationTestFixture.Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "number"),
+                GovernedLoopSequentialApplicationTestFixture.Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context),
+            ],
+        };
+        var validate = new GovernedLoopNodeDefinition(
+            "validate-number",
+            GovernedLoopSequentialNodeDescriptors.InclusiveNumberRange,
+            [
+                GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "number"),
+                GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.ResultPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "boolean"),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>
+            {
+                [GovernedLoopPureNodeVocabulary.MinimumParameter] = minimum,
+                [GovernedLoopPureNodeVocabulary.MaximumParameter] = maximum,
+            });
+        var exit = GovernedLoopSequentialApplicationTestFixture.Exit("exit") with
+        {
+            AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([]),
+            Ports =
+            [
+                GovernedLoopSequentialApplicationTestFixture.Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "boolean"),
+                GovernedLoopSequentialApplicationTestFixture.Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "boolean"),
+            ],
+        };
+        var artifact = GovernedLoopSequentialApplicationTestFixture.Artifact(
+            [trigger, validate, exit],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-validation", "trigger", validate.Id, GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("validation-to-exit", validate.Id, exit.Id, GovernedLoopControlCondition.Success),
+            ],
+            [exit.Id],
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("request-to-validation", GovernedLoopBindingKind.Data, trigger.Id, "request", validate.Id, GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, validate.Id, GovernedLoopPureNodeVocabulary.ResultPort, exit.Id, "result"),
+            ],
+            valueSchemas:
+            [
+                new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, false),
+                new GovernedLoopValueSchemaDefinition("number", GovernedLoopValueKind.Number, false),
+                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
+            ],
+            outputContract: new GovernedLoopOutputContract(
+                "Return the exact range result.",
+                [new GovernedLoopOutputDefinition("result", "boolean", exit.Id, "published-result", true)]),
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([]));
+        return CandidateFromGraph(artifact.Graph);
+    }
+
+    private static GovernedLoopGraphCandidate StructuredSelectionCandidate()
+    {
+        var trigger = GovernedLoopSequentialApplicationTestFixture.Trigger("trigger") with
+        {
+            Ports =
+            [
+                GovernedLoopSequentialApplicationTestFixture.Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "object"),
+                GovernedLoopSequentialApplicationTestFixture.Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context),
+            ],
+        };
+        var select = new GovernedLoopNodeDefinition(
+            "select",
+            GovernedLoopSequentialNodeDescriptors.StructuredSelect,
+            [
+                GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "object"),
+                GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text"),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string> { [GovernedLoopPureNodeVocabulary.PointerParameter] = "/value" });
+        var exit = GovernedLoopSequentialApplicationTestFixture.Exit("exit") with
+        {
+            AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([]),
+        };
+        var artifact = GovernedLoopSequentialApplicationTestFixture.Artifact(
+            [trigger, select, exit],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-selection", trigger.Id, select.Id, GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("selection-to-exit", select.Id, exit.Id, GovernedLoopControlCondition.Success),
+            ],
+            [exit.Id],
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("request-to-selection", GovernedLoopBindingKind.Data, trigger.Id, "request", select.Id, GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("selection-to-exit", GovernedLoopBindingKind.Data, select.Id, GovernedLoopPureNodeVocabulary.OutputPort, exit.Id, "result"),
+            ],
+            valueSchemas:
+            [
+                new GovernedLoopValueSchemaDefinition("object", GovernedLoopValueKind.Object, false),
+                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
+            ],
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([]));
         return CandidateFromGraph(artifact.Graph);
     }
 
