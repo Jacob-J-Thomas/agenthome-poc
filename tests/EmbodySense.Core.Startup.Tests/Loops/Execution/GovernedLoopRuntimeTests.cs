@@ -425,8 +425,7 @@ internal static class GovernedLoopRuntimeTests
         await AssertNoToolExecutionAsync(fixture.Paths);
     }
 
-    [Fact]
-    public void Public_frontier_node_contract_preserves_legacy_json_and_round_trips_topology_evidence()
+    internal static void Public_frontier_node_contract_preserves_legacy_json_and_round_trips_topology_evidence()
     {
         var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         const string LegacyJson = """

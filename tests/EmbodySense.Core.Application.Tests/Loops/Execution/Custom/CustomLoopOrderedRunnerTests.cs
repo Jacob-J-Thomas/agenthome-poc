@@ -362,7 +362,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.All(recoveryAudit.Events, item =>
         {
             Assert.Equal(false, item.Metadata["openAttemptAfterCheckpoint"]);
-            Assert.Equal(true, item.Metadata["restartSafePureAttemptAfterCheckpoint"]);
+            Assert.Equal(true, item.Metadata["restartSafeDeterministicAttemptAfterCheckpoint"]);
         });
 
         var resumedExecutor = new QueueExecutor(Result("resumed provider outcome"));
@@ -2686,7 +2686,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.All(recoveryAudit.Events, item =>
         {
             Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]);
-            Assert.Equal(false, item.Metadata["restartSafePureAttemptAfterCheckpoint"]);
+            Assert.Equal(false, item.Metadata["restartSafeDeterministicAttemptAfterCheckpoint"]);
         });
         Assert.Empty(executor.Requests);
     }
@@ -2849,10 +2849,10 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.All(recoveryAudit.Events, item =>
         {
             Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]);
-            Assert.Equal(false, item.Metadata["restartSafePureAttemptAfterCheckpoint"]);
+            Assert.Equal(false, item.Metadata["restartSafeDeterministicAttemptAfterCheckpoint"]);
         });
         Assert.Empty(firstExecutor.Requests);
-        Assert.Equal(["trigger"], firstEvidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.Empty(firstEvidence.Requests);
         Assert.Empty(recoveryStore.ValidationFailures);
         Assert.Empty(await recovery.RecoverAsync(AuditSchema.Actors.Web));
     }
