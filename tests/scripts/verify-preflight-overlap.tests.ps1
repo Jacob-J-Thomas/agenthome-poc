@@ -284,14 +284,14 @@ exit 97
     Assert-True -Condition ($installFailure.ExitCode -ne 0) -Message "A failed npm install must fail the composed phase."
     Assert-True -Condition ((@(Get-Content -LiteralPath $installFailure.OrderPath) -join ",") -ceq "ci") -Message "Frontend tests must not run after a failed npm install."
     $normalizedInstallFailure = Normalize-ConsoleDiagnostic $installFailure.Output
-    Assert-Contains -Actual $normalizedInstallFailure -Expected "'npm-ci' exited with code 11" -Message "Install failure identity and exit code must remain explicit. Actual: $normalizedInstallFailure"
+    Assert-Contains -Actual $normalizedInstallFailure -Expected "VERIFY_PARALLEL_PHASE_COMPLETE name=npm-ci status=failed exit_code=11" -Message "Install failure identity, terminal status, and exit code must remain explicit. Actual: $normalizedInstallFailure"
     Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $installFailure.LogsPath "frontend-tests.log"))) -Message "A skipped frontend test must not leave stale success evidence."
 
     $testFailure = Invoke-FrontendFixture -Name "test-failure" -FixtureRoot $frontendFixtureRoot -FakeBinPath $fakeBinPath -TestExitCode 13
     Assert-True -Condition ($testFailure.ExitCode -ne 0) -Message "A failed frontend test must fail the composed phase."
     Assert-True -Condition ((@(Get-Content -LiteralPath $testFailure.OrderPath) -join ",") -ceq "ci,test") -Message "A frontend failure must retain its exact dependency order."
     $normalizedTestFailure = Normalize-ConsoleDiagnostic $testFailure.Output
-    Assert-Contains -Actual $normalizedTestFailure -Expected "'frontend-tests' exited with code 13" -Message "Frontend failure identity and exit code must remain explicit. Actual: $normalizedTestFailure"
+    Assert-Contains -Actual $normalizedTestFailure -Expected "VERIFY_PARALLEL_PHASE_COMPLETE name=frontend-tests status=failed exit_code=13" -Message "Frontend failure identity, terminal status, and exit code must remain explicit. Actual: $normalizedTestFailure"
 
     $installTimeout = Invoke-FrontendFixture -Name "install-timeout" -FixtureRoot $frontendFixtureRoot -FakeBinPath $fakeBinPath -InstallDelayMilliseconds 2500 -InstallTimeoutSeconds 1
     Assert-True -Condition ($installTimeout.ExitCode -ne 0 -and $installTimeout.ElapsedSeconds -lt 5) -Message "A stalled npm install must fail inside its bounded timeout."
