@@ -8,6 +8,9 @@ using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Tests.Capabilities;
 using EmbodySense.Tests.Support;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.Json.Nodes;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
@@ -15,6 +18,13 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 public sealed class CustomLoopDefinitionStoreTests
 {
     private static readonly DateTimeOffset _initialTimestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
+    private static readonly JsonSerializerOptions _canonicalJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
+    };
 
     [Fact]
     public async Task Governed_definition_writer_cannot_commit_inside_capability_snapshot_finalization_fence()
@@ -524,18 +534,37 @@ public sealed class CustomLoopDefinitionStoreTests
     public async Task CreateAsync_enforces_the_workspace_definition_limit()
     {
         using var workspace = new TestWorkspace();
-        var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
-        for (var index = 0; index < CustomLoopLimits.MaxDefinitionsPerWorkspace; index++)
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var first = CreateDefinition("loop-00");
+        var firstResult = await CreateCommittedAsync(store, first);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Created, firstResult.Status);
+        Assert.Equal(SerializeDefinition(first), await File.ReadAllBytesAsync(Path.Combine(paths.CustomLoopDefinitionsPath, first.Id + ".json")));
+        Assert.Equal(SerializeCommittedCreateReceipt(first), await File.ReadAllBytesAsync(Path.Combine(paths.CustomLoopDefinitionOperationsPath, first.LastMutationOperationId + ".json")));
+
+        var seeded = new List<CustomLoopDefinition>(CustomLoopLimits.MaxDefinitionsPerWorkspace - 2);
+        for (var index = 1; index < CustomLoopLimits.MaxDefinitionsPerWorkspace - 1; index++)
         {
             var definition = CreateDefinition($"loop-{index:D2}");
-            var created = await CreateCommittedAsync(store, definition);
-            Assert.Equal(CustomLoopDefinitionStoreStatus.Created, created.Status);
+            await SeedCommittedCreateAsync(paths, definition);
+            seeded.Add(definition);
         }
 
+        Assert.All(seeded, definition =>
+        {
+            Assert.Equal(SerializeDefinition(definition), File.ReadAllBytes(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json")));
+            Assert.Equal(SerializeCommittedCreateReceipt(definition), File.ReadAllBytes(Path.Combine(paths.CustomLoopDefinitionOperationsPath, definition.LastMutationOperationId + ".json")));
+        });
+
+        var maximum = CreateDefinition($"loop-{CustomLoopLimits.MaxDefinitionsPerWorkspace - 1:D2}");
+        var acceptedAtMaximum = await CreateCommittedAsync(store, maximum);
         var result = await store.CreateAsync(CreateDefinition("loop-over-limit"));
 
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Created, acceptedAtMaximum.Status);
+        Assert.NotNull(await new CustomLoopDefinitionStore(paths).GetAsync(maximum.Id));
         Assert.Equal(CustomLoopDefinitionStoreStatus.LimitExceeded, result.Status);
         Assert.Null(await store.GetAsync("loop-over-limit"));
+        Assert.Equal(CustomLoopLimits.MaxDefinitionsPerWorkspace, Directory.EnumerateFiles(paths.CustomLoopDefinitionsPath, "*.json", SearchOption.TopDirectoryOnly).Count());
     }
 
     [Fact]
@@ -1365,6 +1394,45 @@ public sealed class CustomLoopDefinitionStoreTests
     {
         var canonicalRequest = "custom-loop-create\0" + roleId.Normalize();
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(canonicalRequest))).ToLowerInvariant();
+    }
+
+    private static async Task SeedCommittedCreateAsync(WorkspacePaths paths, CustomLoopDefinition definition)
+    {
+        Directory.CreateDirectory(paths.CustomLoopDefinitionsPath);
+        Directory.CreateDirectory(paths.CustomLoopDefinitionOperationsPath);
+        await Task.WhenAll(
+            File.WriteAllBytesAsync(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json"), SerializeDefinition(definition)),
+            File.WriteAllBytesAsync(Path.Combine(paths.CustomLoopDefinitionOperationsPath, definition.LastMutationOperationId + ".json"), SerializeCommittedCreateReceipt(definition)));
+    }
+
+    private static byte[] SerializeDefinition(CustomLoopDefinition definition)
+        => Encoding.UTF8.GetBytes(JsonSerializer.Serialize(definition, _canonicalJsonOptions) + Environment.NewLine);
+
+    private static byte[] SerializeCommittedCreateReceipt(CustomLoopDefinition definition)
+    {
+        var receipt = new
+        {
+            schemaVersion = CustomLoopDefinitionMutationOperation.CurrentSchemaVersion,
+            kind = CustomLoopDefinitionMutationKind.Create,
+            operationId = definition.LastMutationOperationId,
+            requestHash = ComputeCreateRequestHash(definition.RoleId),
+            loopId = definition.Id,
+            roleId = definition.RoleId,
+            expectedDefinitionVersion = (int?)null,
+            plannedDefinition = definition,
+            priorDefinition = (CustomLoopDefinition?)null,
+            requestedAtUtc = definition.CreatedAtUtc,
+            updatedAtUtc = definition.CreatedAtUtc,
+            state = CustomLoopDefinitionMutationState.OutcomeCommitted,
+            outcome = CustomLoopDefinitionStoreStatus.Created,
+            resultDefinition = definition,
+            resultConflict = (CustomLoopDefinitionConflict?)null,
+            resultTombstone = (CustomLoopDefinitionTombstone?)null,
+            outcomeAuditRecorded = true,
+            originalDefinition = definition,
+            recordedAtUtc = definition.CreatedAtUtc
+        };
+        return Encoding.UTF8.GetBytes(JsonSerializer.Serialize(receipt, _canonicalJsonOptions) + Environment.NewLine);
     }
 
     private static async Task RewriteOperationAsPendingAsync(WorkspacePaths paths, string operationId)

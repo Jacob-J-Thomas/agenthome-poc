@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models;
@@ -14,6 +15,9 @@ namespace EmbodySense.Core.Persistence.Tests.ToolResults;
 
 public sealed class ToolResultRetentionStoreTests
 {
+    private const string FixtureRetentionPolicy = "oldest-first within 256 artifacts and 64 MiB; full response chunks are sensitive local workspace evidence";
+    private static readonly JsonSerializerOptions _canonicalManifestJsonOptions = CreateCanonicalManifestJsonOptions();
+
     [Fact]
     public async Task RetainAsync_preserves_the_exact_full_response_in_agent_readable_chunks()
     {
@@ -71,12 +75,12 @@ public sealed class ToolResultRetentionStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var future = new DateTimeOffset(2035, 1, 1, 0, 0, 0, TimeSpan.Zero);
         var store = new ToolResultRetentionStore(paths, new FixedTimeProvider(future));
-        for (var index = 0; index < ToolResultRetentionLimits.MaxArtifactsPerWorkspace; index++)
-        {
-            var retained = await store.RetainAsync(Result(index.ToString("x32"), $"result-{index}"), LoopDefinition.CreateDefaultConversation());
-            Assert.Equal(ToolResultRetentionStatus.Retained, retained.Status);
-            Assert.Equal(0, retained.EvictedArtifactCount);
-        }
+        var first = Result(new string('0', 32), "result-0");
+        var retainedFirst = await store.RetainAsync(first, LoopDefinition.CreateDefaultConversation());
+        Assert.Equal(ToolResultRetentionStatus.Retained, retainedFirst.Status);
+        Assert.Equal(0, retainedFirst.EvictedArtifactCount);
+        await AssertPublicArtifactMatchesCanonicalFixtureAsync(paths, first, future);
+        await SeedCanonicalArtifactsAsync(paths, 1, ToolResultRetentionLimits.MaxArtifactsPerWorkspace, future, index => $"result-{index}");
 
         var latest = await new ToolResultRetentionStore(paths, new FixedTimeProvider(future.AddYears(-10)))
             .RetainAsync(Result(new string('f', 32), "newest"), LoopDefinition.CreateDefaultConversation());
@@ -94,12 +98,12 @@ public sealed class ToolResultRetentionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new ToolResultRetentionStore(paths);
-        for (var index = 0; index < ToolResultRetentionLimits.MaxArtifactsPerWorkspace; index++)
-        {
-            var retained = await store.RetainAsync(Result(index.ToString("x32"), $"result-{index}"), LoopDefinition.CreateDefaultConversation());
-            Assert.Equal(ToolResultRetentionStatus.Retained, retained.Status);
-        }
+        var retainedAtUtc = new DateTimeOffset(2035, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var store = new ToolResultRetentionStore(paths, new FixedTimeProvider(retainedAtUtc));
+        var first = Result(new string('0', 32), "result-0");
+        Assert.Equal(ToolResultRetentionStatus.Retained, (await store.RetainAsync(first, LoopDefinition.CreateDefaultConversation())).Status);
+        await AssertPublicArtifactMatchesCanonicalFixtureAsync(paths, first, retainedAtUtc);
+        await SeedCanonicalArtifactsAsync(paths, 1, ToolResultRetentionLimits.MaxArtifactsPerWorkspace, retainedAtUtc, index => $"result-{index}");
 
         var sourceRequestId = new string('0', 32);
         var inspectionRequestId = new string('f', 32);
@@ -232,12 +236,15 @@ public sealed class ToolResultRetentionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new ToolResultRetentionStore(paths);
-        for (var index = 0; index < ToolResultRetentionLimits.MaxArtifactsPerWorkspace; index++)
-        {
-            var retained = await store.RetainAsync(Result(index.ToString("x32"), $"result-{index:D3}"), LoopDefinition.CreateDefaultConversation());
-            Assert.Equal(ToolResultRetentionStatus.Retained, retained.Status);
-        }
+        var retainedAtUtc = new DateTimeOffset(2035, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var store = new ToolResultRetentionStore(paths, new FixedTimeProvider(retainedAtUtc));
+        var first = Result(new string('0', 32), "result-000");
+        Assert.Equal(ToolResultRetentionStatus.Retained, (await store.RetainAsync(first, LoopDefinition.CreateDefaultConversation())).Status);
+        await AssertPublicArtifactMatchesCanonicalFixtureAsync(paths, first, retainedAtUtc);
+        await SeedCanonicalArtifactsAsync(paths, 1, ToolResultRetentionLimits.MaxArtifactsPerWorkspace, retainedAtUtc, index => $"result-{index:D3}");
+        var cacheWarm = await store.RetainAsync(first, LoopDefinition.CreateDefaultConversation());
+        Assert.Equal(ToolResultRetentionStatus.Retained, cacheWarm.Status);
+        Assert.Equal(0, cacheWarm.EvictedArtifactCount);
 
         var oldestDirectory = Path.Combine(paths.ToolResponsesPath, new string('0', 32));
         var chunkPath = Path.Combine(oldestDirectory, "0001.txt");
@@ -462,8 +469,109 @@ public sealed class ToolResultRetentionStoreTests
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
     }
 
+    private static async Task AssertPublicArtifactMatchesCanonicalFixtureAsync(WorkspacePaths paths, ToolResult result, DateTimeOffset retainedAtUtc)
+    {
+        var fixture = CreateCanonicalArtifactFixture(result, retainedAtUtc);
+        var directory = Path.Combine(paths.ToolResponsesPath, result.RequestId);
+        Assert.Equal(fixture.ManifestUtf8Json, await File.ReadAllBytesAsync(Path.Combine(directory, "manifest.json")));
+        Assert.Equal(fixture.ChunkUtf8, await File.ReadAllBytesAsync(Path.Combine(directory, "0001.txt")));
+    }
+
+    private static async Task SeedCanonicalArtifactsAsync(
+        WorkspacePaths paths,
+        int startIndex,
+        int exclusiveEndIndex,
+        DateTimeOffset firstRetainedAtUtc,
+        Func<int, string> outputFactory)
+    {
+        await Parallel.ForEachAsync(
+            Enumerable.Range(startIndex, exclusiveEndIndex - startIndex),
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Min(8, Environment.ProcessorCount) },
+            async (index, cancellationToken) =>
+            {
+                var result = Result(index.ToString("x32"), outputFactory(index));
+                var fixture = CreateCanonicalArtifactFixture(result, firstRetainedAtUtc.AddTicks(index));
+                var directory = Path.Combine(paths.ToolResponsesPath, result.RequestId);
+                Directory.CreateDirectory(directory);
+                await Task.WhenAll(
+                    File.WriteAllBytesAsync(Path.Combine(directory, "0001.txt"), fixture.ChunkUtf8, cancellationToken),
+                    File.WriteAllBytesAsync(Path.Combine(directory, "manifest.json"), fixture.ManifestUtf8Json, cancellationToken));
+            });
+    }
+
+    private static CanonicalArtifactFixture CreateCanonicalArtifactFixture(ToolResult result, DateTimeOffset retainedAtUtc)
+    {
+        var contentUtf8 = Encoding.UTF8.GetBytes(result.OutputText);
+        var correlation = result.Request.AuditCorrelation;
+        var chunk = new ToolResultArtifactChunkFixture(1, "0001.txt", Sha256(result.OutputText), result.OutputText.Length, contentUtf8.LongLength);
+        var manifest = new ToolResultArtifactManifestFixture(
+            1,
+            result.RequestId,
+            result.Request.CorrelationId,
+            correlation?.LoopId ?? LoopDefinition.CreateDefaultConversation().Id,
+            correlation?.RoleId ?? LoopDefinition.CreateDefaultConversation().RoleId,
+            correlation?.RunId,
+            correlation?.DefinitionVersion,
+            correlation?.DefinitionHash,
+            correlation?.Iteration,
+            correlation?.StepId,
+            correlation?.Attempt,
+            correlation?.AttemptCorrelationId,
+            result.Request.Command,
+            result.Request.TargetPath,
+            result.ResolvedPath,
+            result.Outcome,
+            Sha256(result.OutputText),
+            result.OutputText.Length,
+            contentUtf8.LongLength,
+            retainedAtUtc,
+            FixtureRetentionPolicy,
+            [chunk]);
+        return new CanonicalArtifactFixture(JsonSerializer.SerializeToUtf8Bytes(manifest, _canonicalManifestJsonOptions), contentUtf8);
+    }
+
+    private static JsonSerializerOptions CreateCanonicalManifestJsonOptions()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true };
+        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+        return options;
+    }
+
     private sealed class FixedTimeProvider(DateTimeOffset timestamp) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => timestamp;
     }
+
+    private sealed record CanonicalArtifactFixture(byte[] ManifestUtf8Json, byte[] ChunkUtf8);
+
+    private sealed record ToolResultArtifactManifestFixture(
+        int SchemaVersion,
+        string RequestId,
+        string? ToolRequestCorrelationId,
+        string LoopId,
+        string RoleId,
+        string? RunId,
+        int? DefinitionVersion,
+        string? DefinitionHash,
+        int? Iteration,
+        string? StepId,
+        int? Attempt,
+        string? AttemptCorrelationId,
+        ToolCommand Command,
+        string TargetPath,
+        string ResolvedPath,
+        ToolExecutionOutcome Outcome,
+        string ContentSha256,
+        int CharacterCount,
+        long Utf8ByteCount,
+        DateTimeOffset RetainedAtUtc,
+        string RetentionPolicy,
+        ToolResultArtifactChunkFixture[] Chunks);
+
+    private sealed record ToolResultArtifactChunkFixture(
+        int Sequence,
+        string Path,
+        string ContentSha256,
+        int CharacterCount,
+        long Utf8ByteCount);
 }

@@ -8,6 +8,7 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.Capabilities.Models;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Capabilities;
@@ -16,6 +17,13 @@ public sealed class CapabilityArtifactStoreTests
 {
     private static readonly byte[] _versionOne = "version-one"u8.ToArray();
     private static readonly byte[] _versionTwo = "version-two"u8.ToArray();
+    private static readonly DateTimeOffset _activationTimestamp = new(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+    private static readonly JsonSerializerOptions _canonicalActivationJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = false,
+        WriteIndented = true,
+        UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow
+    };
 
     [Theory]
     [InlineData(CapabilityLifecycleOperationKind.Disable)]
@@ -198,17 +206,34 @@ public sealed class CapabilityArtifactStoreTests
     public async Task Full_idempotency_ledger_refuses_new_operations_without_evicting_old_bindings()
     {
         using var workspace = new TestWorkspace();
-        var store = Store(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new MutableAuthenticatedArtifactStateTrustProvider();
+        var store = new CapabilityArtifactStore(paths, trust, new AlwaysTrustedArtifactVerifier(), new FixedTimeProvider(_activationTimestamp));
         var first = CapabilityArtifactStoreTestData.Stage(_versionOne);
         var second = CapabilityArtifactStoreTestData.Stage(_versionTwo, "2.0.0");
-        await store.StageAsync(first);
-        await store.StageAsync(second);
-        for (var revision = 0; revision < 256; revision++)
-        {
-            var stage = revision % 2 == 0 ? first : second;
-            Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await store.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, revision, $"operation-{revision}"))).Status);
-        }
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await store.StageAsync(first)).Status);
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await store.StageAsync(second)).Status);
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await store.ActivateAsync(new CapabilityArtifactActivationRequest(first.Manifest, 0, "operation-0"))).Status);
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await store.ActivateAsync(new CapabilityArtifactActivationRequest(second.Manifest, 1, "operation-1"))).Status);
 
+        var publicFixture = CreateActivationFixture(trust, first.Manifest, second.Manifest, 2);
+        Assert.Equal(publicFixture.Utf8Json, await File.ReadAllBytesAsync(paths.CapabilityArtifactActivationPath));
+        Assert.Equal(publicFixture.Utf8Json, await File.ReadAllBytesAsync(paths.CapabilityArtifactActivationProofPath));
+
+        var seededFixture = CreateActivationFixture(trust, first.Manifest, second.Manifest, 255);
+        await Task.WhenAll(
+            File.WriteAllBytesAsync(paths.CapabilityArtifactActivationPath, seededFixture.Utf8Json),
+            File.WriteAllBytesAsync(paths.CapabilityArtifactActivationProofPath, seededFixture.Utf8Json));
+        trust.SetCurrent(255, seededFixture.ContentDigest);
+
+        var provedSeed = await new CapabilityArtifactStore(paths, trust, new AlwaysTrustedArtifactVerifier(), new FixedTimeProvider(_activationTimestamp)).ReadAsync(first.Manifest.Descriptor.Id);
+        var acceptedAtMaximum = await store.ActivateAsync(new CapabilityArtifactActivationRequest(second.Manifest, 255, "operation-255"));
+
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, provedSeed.Status);
+        Assert.Equal(255, provedSeed.Activation!.Revision);
+        Assert.Equal(first.Manifest.Checksum, provedSeed.Activation.ArtifactDigest);
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, acceptedAtMaximum.Status);
+        Assert.Equal(256, acceptedAtMaximum.Activation!.Revision);
         Assert.Equal(CapabilityArtifactStoreStatus.Unavailable, (await store.ActivateAsync(new CapabilityArtifactActivationRequest(first.Manifest, 256, "operation-new"))).Status);
         Assert.Equal(CapabilityArtifactStoreStatus.Replayed, (await store.ActivateAsync(new CapabilityArtifactActivationRequest(first.Manifest, 0, "operation-0"))).Status);
     }
@@ -778,6 +803,49 @@ public sealed class CapabilityArtifactStoreTests
 
     private static CapabilityArtifactStore Store(TestWorkspace workspace, WorkspacePaths? paths = null, ICapabilityArtifactTrustVerifier? verifier = null) => new(paths ?? new WorkspacePaths(workspace.RootPath), new FileCapabilityArtifactStateTrustProvider(workspace.ServerStatePath), verifier ?? new AlwaysTrustedArtifactVerifier());
 
+    private static AuthenticatedActivationFixture CreateActivationFixture(
+        MutableAuthenticatedArtifactStateTrustProvider trust,
+        CapabilityArtifactManifest first,
+        CapabilityArtifactManifest second,
+        int operationCount)
+    {
+        var operations = Enumerable.Range(0, operationCount)
+            .Select(revision =>
+            {
+                var manifest = revision % 2 == 0 ? first : second;
+                return new CapabilityArtifactOperationFixture(
+                    $"operation-{revision}",
+                    "activate",
+                    manifest.Descriptor.Id.Value,
+                    CapabilityArtifactManifestCanonicalizer.ComputePolicyPin(manifest).Value,
+                    manifest.Checksum.Value,
+                    revision,
+                    revision + 1);
+            })
+            .ToArray();
+        var current = operationCount == 0 ? null : (operationCount - 1) % 2 == 0 ? first : second;
+        var prior = operationCount < 2 ? null : (operationCount - 2) % 2 == 0 ? first : second;
+        CapabilityArtifactActivationEntryFixture[] entries = current is null
+            ? []
+            : [new(
+                current.Descriptor.Id.Value,
+                current.Checksum.Value,
+                prior?.Checksum.Value,
+                operationCount,
+                _activationTimestamp)];
+        var document = new CapabilityArtifactActivationFixtureDocument(1, operationCount, entries, operations, string.Empty, string.Empty);
+        var canonicalContent = JsonSerializer.Serialize(document, _canonicalActivationJsonOptions);
+        var digest = CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes(canonicalContent)).Value;
+        var authenticated = document with
+        {
+            ContentDigest = digest,
+            AuthenticationTag = trust.CreateActivationTag(operationCount, digest)
+        };
+        return new AuthenticatedActivationFixture(
+            digest,
+            Encoding.UTF8.GetBytes(JsonSerializer.Serialize(authenticated, _canonicalActivationJsonOptions) + Environment.NewLine));
+    }
+
     private static CapabilityArtifactStageRequest WithPackageDependencies(CapabilityArtifactStageRequest stage)
     {
         Assert.True(CapabilityId.TryParse("org.example/dependency", out var dependencyId, out _));
@@ -797,4 +865,115 @@ public sealed class CapabilityArtifactStoreTests
     {
         public Task<CapabilityArtifactTrustDecision> VerifyAsync(CapabilityArtifactManifest manifest, EmbodySense.Core.Common.Capabilities.CapabilityIntegrityDigest actualDigest, CancellationToken cancellationToken = default) => Task.FromResult(new CapabilityArtifactTrustDecision(CapabilityArtifactTrustStatus.Rejected, "test-server-policy", "Rejected."));
     }
+
+    private sealed class FixedTimeProvider(DateTimeOffset timestamp) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => timestamp;
+    }
+
+    private sealed class MutableAuthenticatedArtifactStateTrustProvider : ICapabilityArtifactStateTrustProvider
+    {
+        private string? _workspaceIdentity;
+        private CapabilityArtifactTrustState? _current;
+
+        public Task<string> AuthenticateStagedEvidenceAsync(string workspaceIdentity, string artifactDigest, string evidenceDigest, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(Tag(workspaceIdentity, 0, artifactDigest + "\n" + evidenceDigest));
+        }
+
+        public Task<bool> VerifyStagedEvidenceAsync(string workspaceIdentity, string artifactDigest, string evidenceDigest, string authenticationTag, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(string.Equals(authenticationTag, Tag(workspaceIdentity, 0, artifactDigest + "\n" + evidenceDigest), StringComparison.Ordinal));
+        }
+
+        public Task<CapabilityArtifactTrustState?> ReadActivationAsync(string workspaceIdentity, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _workspaceIdentity ??= workspaceIdentity;
+            Assert.Equal(_workspaceIdentity, workspaceIdentity);
+            return Task.FromResult(_current);
+        }
+
+        public Task<CapabilityArtifactTrustState> InitializeActivationAsync(string workspaceIdentity, string contentDigest, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _workspaceIdentity ??= workspaceIdentity;
+            Assert.Equal(_workspaceIdentity, workspaceIdentity);
+            _current ??= new CapabilityArtifactTrustState(0, contentDigest, null, null);
+            return Task.FromResult(_current);
+        }
+
+        public Task<string> AuthenticateActivationAsync(string workspaceIdentity, long revision, string contentDigest, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _workspaceIdentity ??= workspaceIdentity;
+            Assert.Equal(_workspaceIdentity, workspaceIdentity);
+            return Task.FromResult(CreateActivationTag(revision, contentDigest));
+        }
+
+        public Task<bool> VerifyActivationAsync(string workspaceIdentity, long revision, string contentDigest, string authenticationTag, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _workspaceIdentity ??= workspaceIdentity;
+            Assert.Equal(_workspaceIdentity, workspaceIdentity);
+            return Task.FromResult(string.Equals(authenticationTag, CreateActivationTag(revision, contentDigest), StringComparison.Ordinal));
+        }
+
+        public Task<CapabilityArtifactTrustState> AdvanceActivationAsync(string workspaceIdentity, long expectedRevision, string expectedContentDigest, long newRevision, string newContentDigest, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _workspaceIdentity ??= workspaceIdentity;
+            Assert.Equal(_workspaceIdentity, workspaceIdentity);
+            if (_current is null || _current.CurrentRevision != expectedRevision || !string.Equals(_current.CurrentContentDigest, expectedContentDigest, StringComparison.Ordinal) || newRevision != expectedRevision + 1)
+            {
+                throw new IOException("Test activation trust compare-exchange conflict.");
+            }
+
+            _current = new CapabilityArtifactTrustState(newRevision, newContentDigest, expectedRevision, expectedContentDigest);
+            return Task.FromResult(_current);
+        }
+
+        internal string CreateActivationTag(long revision, string contentDigest)
+        {
+            Assert.NotNull(_workspaceIdentity);
+            return Tag(_workspaceIdentity!, revision, contentDigest);
+        }
+
+        internal void SetCurrent(long revision, string contentDigest)
+        {
+            Assert.NotNull(_workspaceIdentity);
+            _current = new CapabilityArtifactTrustState(revision, contentDigest, null, null);
+        }
+
+        private static string Tag(string workspaceIdentity, long revision, string contentDigest)
+            => "test:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{workspaceIdentity}\n{revision}\n{contentDigest}"))).ToLowerInvariant();
+    }
+
+    private sealed record CapabilityArtifactActivationFixtureDocument(
+        int SchemaVersion,
+        long Revision,
+        IReadOnlyList<CapabilityArtifactActivationEntryFixture> Entries,
+        IReadOnlyList<CapabilityArtifactOperationFixture> Operations,
+        string ContentDigest,
+        string AuthenticationTag);
+
+    private sealed record CapabilityArtifactActivationEntryFixture(
+        string CapabilityId,
+        string ArtifactDigest,
+        string? PriorArtifactDigest,
+        long Revision,
+        DateTimeOffset ActivatedAtUtc);
+
+    private sealed record CapabilityArtifactOperationFixture(
+        string OperationId,
+        string Kind,
+        string CapabilityId,
+        string RequestDigest,
+        string ArtifactDigest,
+        long ExpectedRevision,
+        long ResultRevision);
+
+    private sealed record AuthenticatedActivationFixture(string ContentDigest, byte[] Utf8Json);
 }
