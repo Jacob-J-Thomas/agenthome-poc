@@ -66,9 +66,8 @@ Assert-Contains -Actual $scheduleScript -Expected 'function Get-VerificationPref
 Assert-Contains -Actual $scheduleScript -Expected 'return $ResourceCapacity' -Message "Nested-process script contracts must reserve the entire preflight resource capacity."
 Assert-Contains -Actual $scheduleScript -Expected 'function Assert-VerificationPreflightContractClassification {' -Message "Preflight script contract classification must have one shared fail-closed validator."
 Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationPreflightContractClassification -ContractScripts $contractScripts -CoverageContractScript "verify-coverage.tests.ps1" -NestedProcessContractScripts $preflightNestedProcessContractScripts -OrdinaryContractScripts $preflightBuildOverlapContractScripts' -Message "The complete platform-applicable contract manifest must be classified before scheduling begins."
-Assert-Contains -Actual $verifyScript -Expected 'if ($contractScript -ceq "verify-coverage.tests.ps1") {' -Message "Only the intrinsically process-heavy coverage contract may receive the expanded preflight profile."
-Assert-Contains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 75 -Weight $preflightCoverageContractWeight -ResourceClass "ProcessHeavy"' -Message "The coverage contract must retain its measured process-heavy profile and bounded headroom."
-Assert-Contains -Actual $verifyScript -Expected 'elseif ($preflightNestedProcessContractScripts -ccontains $contractScript) {' -Message "Known descendant-heavy script contracts must be classified explicitly before the Ordinary fallback."
+Assert-Contains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "contract-verify-coverage.tests" -FileName $powerShellExecutable -Arguments $coverageContractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "verify-coverage.tests.ps1.log") -EstimatedDurationSeconds 75 -Weight $preflightCoverageContractWeight -ResourceClass "ProcessHeavy"' -Message "The coverage contract must retain its measured process-heavy profile and bounded headroom inside build overlap."
+Assert-Contains -Actual $verifyScript -Expected 'if ($preflightNestedProcessContractScripts -ccontains $contractScript) {' -Message "Known descendant-heavy script contracts must be classified explicitly before fail-closed rejection."
 Assert-Contains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 60 -Weight $preflightNestedProcessContractWeight -ResourceClass "ProcessHeavy"' -Message "Descendant-heavy script contracts must receive full-capacity process-heavy admission."
 Assert-Contains -Actual $verifyScript -Expected 'foreach ($contractScript in $preflightBuildOverlapContractScripts) {' -Message "Only explicitly classified descendant-free contracts may join the build-overlap schedule."
 Assert-Contains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"' -Message "Every other independent script contract must retain the original bounded Ordinary profile."
@@ -90,7 +89,8 @@ Assert-OccurrenceCount -Actual $verifyScript -Expected 'Add-ProfiledRequiredGate
 Assert-OccurrenceCount -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-naming-style"' -ExpectedCount 1 -Message "Naming/style format validation must have exactly one scheduler owner."
 Assert-NotContains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "format-whitespace"' -Message "Whitespace formatting must not be duplicated in preflight."
 Assert-NotContains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "format-naming-style"' -Message "Naming/style formatting must not be duplicated in preflight."
-Assert-Contains -Actual $verifyScript -Expected 'kind=pull-request-post-build-contracts phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers coverage_contract_weight=$preflightCoverageContractWeight nested_process_contract_weight=$preflightNestedProcessContractWeight nested_process_contracts=$($preflightNestedProcessContractScripts.Count) nested_process_isolation=full-resource-capacity configuration=$Configuration' -Message "Post-build contract work must publish its four-process, descendant-isolation, and evidence-weight bounds."
+Assert-Contains -Actual $verifyScript -Expected 'coverage_after_build_by_singleton_lpt=true' -Message "Build overlap must publish its dependency-safe coverage backfill contract."
+Assert-Contains -Actual $verifyScript -Expected 'kind=pull-request-post-build-contracts phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers nested_process_contract_weight=$preflightNestedProcessContractWeight nested_process_contracts=$($preflightNestedProcessContractScripts.Count) nested_process_isolation=full-resource-capacity configuration=$Configuration' -Message "Post-build contract work must publish its four-process and descendant-isolation bounds."
 Assert-Contains -Actual $verifyScript -Expected 'kind=discovery phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$hardwareBoundedResourceCapacity maximum_resource_capacity=$hardwareBoundedResourceCapacity' -Message "Canonical discovery must publish the same hardware-bounded worker and resource limits."
 Assert-Contains -Actual $verifyScript -Expected 'Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers | Out-Null' -Message "Post-build contract work must apply fail-closed process and process-heavy bounds."
 Assert-Contains -Actual $verifyScript -Expected '$script:LastCompletedVerificationPhase = "pull-request-preflight"' -Message "Later failures must identify the successful preflight dependency boundary."
@@ -189,22 +189,22 @@ try {
 param([string]$Role, [string]$SynchronizationRoot)
 Write-Output "start=$([DateTime]::UtcNow.Ticks)"
 if ($Role -ceq "build") {
-    Start-Sleep -Milliseconds 2000
+    Start-Sleep -Milliseconds 1000
 }
 elseif ($Role -ceq "frontend") {
-    Start-Sleep -Milliseconds 300
+    Start-Sleep -Milliseconds 150
 }
 elseif ($Role -ceq "coverage") {
-    Start-Sleep -Milliseconds 800
+    Start-Sleep -Milliseconds 400
 }
 elseif ($Role.StartsWith("format-", [StringComparison]::Ordinal)) {
     Start-Sleep -Milliseconds 1000
 }
 elseif ($Role -ceq "ordinary") {
-    Start-Sleep -Milliseconds 100
+    Start-Sleep -Milliseconds 1200
 }
 elseif ($Role.StartsWith("nested-", [StringComparison]::Ordinal)) {
-    Start-Sleep -Milliseconds 400
+    Start-Sleep -Milliseconds 200
 }
 Write-Output "end=$([DateTime]::UtcNow.Ticks)"
 '@, [Text.UTF8Encoding]::new($false))
@@ -219,17 +219,17 @@ Write-Output "end=$([DateTime]::UtcNow.Ticks)"
     Add-VerificationParallelPhase -Name "build" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "build" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $buildOutputPath -EstimatedDurationSeconds 90 -Weight 2 -ResourceClass "ProcessHeavy"
     Add-VerificationParallelPhase -Name "frontend" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "frontend" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $frontendOutputPath -EstimatedDurationSeconds 70 -Weight 2 -ResourceClass "CpuBound"
     Add-VerificationParallelPhase -Name "ordinary" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "ordinary" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $ordinaryOutputPath -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
+    Add-VerificationParallelPhase -Name "coverage" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "coverage" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $coverageOutputPath -EstimatedDurationSeconds 75 -Weight 3 -ResourceClass "ProcessHeavy"
     $overlapResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 4 -MaximumProcessHeavyWorkers 1 -MaximumCpuBoundWorkers 1)
-    Assert-True -Condition ($overlapResults.Count -eq 3 -and @($overlapResults | Where-Object { $_.ExitCode -ne 0 }).Count -eq 0) -Message "The bounded build-overlap schedule must complete its exact phase set successfully."
-    Assert-True -Condition (@($overlapResults | Select-Object -ExpandProperty Name | Sort-Object) -join "," -ceq "build,frontend,ordinary") -Message "Build overlap must contain only build, frontend, and explicitly safe contracts."
+    Assert-True -Condition ($overlapResults.Count -eq 4 -and @($overlapResults | Where-Object { $_.ExitCode -ne 0 }).Count -eq 0) -Message "The bounded build-overlap schedule must complete its exact phase set successfully."
+    Assert-True -Condition (@($overlapResults | Select-Object -ExpandProperty Name | Sort-Object) -join "," -ceq "build,coverage,frontend,ordinary") -Message "Build overlap must contain only build, dependency-ordered coverage, frontend, and explicitly safe contracts."
 
     Reset-VerificationParallelPhaseState
     Add-VerificationParallelPhase -Name "nested-first" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-first" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $nestedFirstOutputPath -EstimatedDurationSeconds 60 -Weight 4 -ResourceClass "ProcessHeavy"
     Add-VerificationParallelPhase -Name "nested-second" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-second" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $nestedSecondOutputPath -EstimatedDurationSeconds 60 -Weight 4 -ResourceClass "ProcessHeavy"
-    Add-VerificationParallelPhase -Name "coverage" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "coverage" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $coverageOutputPath -EstimatedDurationSeconds 75 -Weight 3 -ResourceClass "ProcessHeavy"
     $postBuildResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 4 -MaximumProcessHeavyWorkers 1)
-    Assert-True -Condition ($postBuildResults.Count -eq 3 -and @($postBuildResults | Where-Object { $_.ExitCode -ne 0 }).Count -eq 0) -Message "The bounded post-build contract schedule must complete every declared phase exactly once and successfully."
-    Assert-True -Condition (@($postBuildResults | Select-Object -ExpandProperty Name | Sort-Object) -join "," -ceq "coverage,nested-first,nested-second") -Message "Post-build contract execution must contain the exact declared phase set without omissions or duplicates."
+    Assert-True -Condition ($postBuildResults.Count -eq 2 -and @($postBuildResults | Where-Object { $_.ExitCode -ne 0 }).Count -eq 0) -Message "The bounded post-build contract schedule must complete every declared phase exactly once and successfully."
+    Assert-True -Condition (@($postBuildResults | Select-Object -ExpandProperty Name | Sort-Object) -join "," -ceq "nested-first,nested-second") -Message "Post-build contract execution must contain only the exact descendant-heavy phase set."
 
     $buildTiming = Read-PreflightTiming -Path $buildOutputPath
     $coverageTiming = Read-PreflightTiming -Path $coverageOutputPath
@@ -240,7 +240,8 @@ Write-Output "end=$([DateTime]::UtcNow.Ticks)"
     Assert-True -Condition ($frontendTiming.Start -lt $buildTiming.End -and $buildTiming.Start -lt $frontendTiming.End) -Message "The independent frontend chain must overlap the canonical build."
     Assert-True -Condition ($ordinaryTiming.Start -lt $buildTiming.End) -Message "A build-safe contract must backfill capacity after the faster frontend chain completes."
     Assert-True -Condition ($coverageTiming.Start -ge $buildTiming.End) -Message "The coverage contract must start only after the canonical build completes."
-    $nonNestedTimings = @($coverageTiming)
+    Assert-True -Condition ($coverageTiming.Start -lt $ordinaryTiming.End -and $ordinaryTiming.Start -lt $coverageTiming.End) -Message "Coverage must backfill beside remaining build-safe work instead of extending the serialized post-build tail."
+    $nonNestedTimings = @($buildTiming, $coverageTiming, $frontendTiming, $ordinaryTiming)
     Assert-True -Condition ($nestedFirstTiming.End -le $nestedSecondTiming.Start -or $nestedSecondTiming.End -le $nestedFirstTiming.Start) -Message "Full-capacity nested-process contracts must execute serially rather than multiplying their descendants."
     foreach ($nestedTiming in @($nestedFirstTiming, $nestedSecondTiming)) {
         foreach ($otherTiming in $nonNestedTimings) {
@@ -395,15 +396,16 @@ $browserIndex = $verifyScript.IndexOf('if ($RunBrowserE2E) {', [StringComparison
 $isolationIndex = $verifyScript.IndexOf('Write-Output "VERIFY_REQUIRED_TEST_CONTRACT', [StringComparison]::Ordinal)
 $buildIndex = $verifyScript.IndexOf('Add-VerificationParallelPhase -Name "build-pullrequest"', [StringComparison]::Ordinal)
 $frontendIndex = $verifyScript.IndexOf('Add-VerificationParallelPhase -Name "frontend-preflight"', [StringComparison]::Ordinal)
-$coverageIndex = $verifyScript.IndexOf('if ($contractScript -ceq "verify-coverage.tests.ps1") {', [StringComparison]::Ordinal)
+$coverageIndex = $verifyScript.IndexOf('Add-VerificationParallelPhase -Name "contract-verify-coverage.tests"', [StringComparison]::Ordinal)
+$nestedAdmissionIndex = $verifyScript.IndexOf('foreach ($contractScript in $contractScripts) {', [StringComparison]::Ordinal)
 $partitionIndex = $verifyScript.IndexOf('Invoke-CheckedNativePhase -Name "test-partition-reconciliation"', [StringComparison]::Ordinal)
 $formatWhitespaceIndex = $verifyScript.IndexOf('Add-ProfiledRequiredGatePhase -Name "format-whitespace"', [StringComparison]::Ordinal)
 $formatNamingStyleIndex = $verifyScript.IndexOf('Add-ProfiledRequiredGatePhase -Name "format-naming-style"', [StringComparison]::Ordinal)
 $requiredGateInvocationIndex = $verifyScript.IndexOf('Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases)', [StringComparison]::Ordinal)
 Assert-True -Condition ($contractManifestIndex -ge 0 -and $contractManifestIndex -lt $buildIndex) -Message "Every script contract must be classified before any overlap phase is admitted."
-Assert-True -Condition ($buildIndex -lt $buildInvocationIndex -and $frontendIndex -lt $buildInvocationIndex) -Message "Build and frontend must enter the same bounded overlap schedule."
+Assert-True -Condition ($buildIndex -lt $buildInvocationIndex -and $frontendIndex -lt $buildInvocationIndex -and $coverageIndex -lt $buildInvocationIndex) -Message "Build, frontend, and dependency-ordered coverage must enter the same bounded overlap schedule."
 Assert-True -Condition ($buildInvocationIndex -lt $buildCompletionIndex) -Message "The build-overlap schedule must complete before its dependency boundary is recorded."
-Assert-True -Condition ($buildCompletionIndex -lt $coverageIndex) -Message "Coverage and nested-process contracts may be admitted only after build overlap succeeds."
+Assert-True -Condition ($buildCompletionIndex -lt $nestedAdmissionIndex) -Message "Descendant-heavy contracts may be admitted only after build overlap succeeds."
 Assert-True -Condition ($preflightCompletionIndex -ge 0 -and $preflightCompletionIndex -lt $browserIndex) -Message "Browser execution must wait for the complete split preflight."
 Assert-True -Condition ($preflightCompletionIndex -lt $isolationIndex) -Message "Isolation and discovery must wait for the complete split preflight."
 Assert-True -Condition ($frontendIndex -ge 0 -and $frontendIndex -lt $buildCompletionIndex) -Message "Frontend install and tests must complete inside build overlap."

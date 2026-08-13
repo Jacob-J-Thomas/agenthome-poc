@@ -1228,7 +1228,12 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         var orphanOwnerAllowance = allowedOrphanOwnerOperationId is null ? 0 : 1;
         var maximumOwnerLockCount = checked(budget.MaximumArtifactCount + orphanOwnerAllowance);
         var maximumFileCount = checked(budget.MaximumArtifactCount + maximumOwnerLockCount + MaximumInterruptedAtomicWriteCount);
-        var paths = ReadBoundedTopLevelFiles(_root, maximumFileCount, "Lifecycle-control receipt storage");
+        var paths = ReadBoundedTopLevelFiles(
+            _root,
+            maximumFileCount,
+            "Lifecycle-control receipt storage",
+            boundedFileNamePredicate: IsCanonicalOperationArtifactFileName,
+            maximumMatchingFileCount: budget.MaximumArtifactCount);
         var receiptCount = paths.Count(path => IsCanonicalOperationArtifactFileName(Path.GetFileName(path)));
         var ownerLockCount = paths.Count(path => TryGetOwnerLockOperationId(Path.GetFileName(path), out _));
         var atomicWriteTempCount = paths.Count(path => IsAtomicWriteTemp(Path.GetFileName(path), IsCanonicalOperationArtifactFileName));
@@ -1240,12 +1245,26 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         return paths.OrderBy(path => path, StringComparer.Ordinal).ToArray();
     }
 
-    private string[] ReadBoundedTopLevelFiles(string root, int maximumFileCount, string artifactName, string? allowedDirectoryPath = null)
+    private string[] ReadBoundedTopLevelFiles(
+        string root,
+        int maximumFileCount,
+        string artifactName,
+        string? allowedDirectoryPath = null,
+        Func<string, bool>? boundedFileNamePredicate = null,
+        int maximumMatchingFileCount = int.MaxValue)
     {
         var maximumEntryCount = checked(maximumFileCount + (allowedDirectoryPath is null ? 0 : 1));
         var boundedEntries = Directory.EnumerateFileSystemEntries(root, "*", SearchOption.TopDirectoryOnly).Take(maximumEntryCount + 1).ToArray();
         if (boundedEntries.Length > maximumEntryCount)
         {
+            throw new FormatException($"{artifactName} exceeds its bounded inventory ceiling.");
+        }
+        if (boundedFileNamePredicate is not null
+            && boundedEntries.Count(entry => boundedFileNamePredicate(Path.GetFileName(entry))) > maximumMatchingFileCount)
+        {
+            // A reject-only raw-name count is safe before path authentication: an attacker-controlled directory,
+            // link, or file can only make an already excessive inventory fail earlier. Admitted inventories still
+            // traverse the path guard below before any artifact is classified or read.
             throw new FormatException($"{artifactName} exceeds its bounded inventory ceiling.");
         }
 
