@@ -288,6 +288,8 @@ try {
             $contractScripts = @("verify-sdk-diagnostics.tests.ps1") + $contractScripts
         }
         $preflightCoverageContractWeight = Get-VerificationPreflightCoverageContractWeight -ResourceCapacity $hardwareBoundedResourceCapacity
+        $preflightFrontendWeight = Get-VerificationPreflightFrontendWeight -ResourceCapacity $hardwareBoundedResourceCapacity
+        $preflightMaximumProcessHeavyWorkers = 1
         foreach ($contractScript in $contractScripts) {
             $contractArguments = @("-NoProfile")
             if ($runningOnWindows) {
@@ -303,14 +305,14 @@ try {
         }
         $preflightProcessHeavyWeight = [Math]::Max(1, [int][Math]::Ceiling($hardwareBoundedResourceCapacity / 2.0))
         Add-VerificationParallelPhase -Name "build-pullrequest" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "build-pullrequest.log") -EstimatedDurationSeconds 90 -Weight $preflightProcessHeavyWeight -ResourceClass "ProcessHeavy"
+        $frontendArguments = @("-NoProfile")
         if ($runningOnWindows) {
-            Add-VerificationParallelPhase -Name "npm-ci" -FileName $env:ComSpec -Arguments @("/d", "/s", "/c", "npm.cmd ci --include=dev") -TimeoutSeconds 300 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "npm-ci.log") -EstimatedDurationSeconds 30 -Weight 1 -ResourceClass "Ordinary"
+            $frontendArguments += @("-ExecutionPolicy", "Bypass")
         }
-        else {
-            Add-VerificationParallelPhase -Name "npm-ci" -FileName "npm" -Arguments @("ci", "--include=dev") -TimeoutSeconds 300 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "npm-ci.log") -EstimatedDurationSeconds 30 -Weight 1 -ResourceClass "Ordinary"
-        }
-        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-preflight phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$hardwareBoundedResourceCapacity maximum_resource_capacity=$hardwareBoundedResourceCapacity build_weight=$preflightProcessHeavyWeight npm_weight=1 coverage_contract_weight=$preflightCoverageContractWeight ordinary_contract_weight=1 configuration=$Configuration"
-        Invoke-VerificationParallelPhases -MaximumWorkers $hardwareBoundedResourceCapacity -MaximumResourceCapacity $hardwareBoundedResourceCapacity | Out-Null
+        $frontendArguments += @("-File", (Join-Path $PSScriptRoot "verify-frontend.ps1"), "-RepositoryRoot", $repoRoot, "-LogsPath", $verificationLogsPath)
+        Add-VerificationParallelPhase -Name "frontend-preflight" -FileName $powerShellExecutable -Arguments $frontendArguments -TimeoutSeconds 590 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "frontend-preflight.log") -EstimatedDurationSeconds 70 -Weight $preflightFrontendWeight -ResourceClass "CpuBound"
+        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-preflight phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$hardwareBoundedResourceCapacity maximum_resource_capacity=$hardwareBoundedResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers build_weight=$preflightProcessHeavyWeight frontend_weight=$preflightFrontendWeight coverage_contract_weight=$preflightCoverageContractWeight ordinary_contract_weight=1 configuration=$Configuration"
+        Invoke-VerificationParallelPhases -MaximumWorkers $hardwareBoundedResourceCapacity -MaximumResourceCapacity $hardwareBoundedResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers | Out-Null
         Reset-VerificationParallelPhaseState
         $script:LastCompletedVerificationPhase = "pull-request-preflight"
     }
@@ -382,12 +384,6 @@ try {
     Add-ProfiledRequiredGatePhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-whitespace.log")
     Add-ProfiledRequiredGatePhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-naming-style.log")
     Add-ProfiledRequiredGatePhase -Name "git-diff-check" -FileName "git" -Arguments @("diff", "--check") -TimeoutSeconds 60 -OutputPath (Join-Path $verificationLogsPath "git-diff-check.log")
-    if ($runningOnWindows) {
-        Add-ProfiledRequiredGatePhase -Name "frontend-tests" -FileName $env:ComSpec -Arguments @("/d", "/s", "/c", "npm.cmd test") -TimeoutSeconds 300 -OutputPath (Join-Path $verificationLogsPath "frontend-tests.log")
-    }
-    else {
-        Add-ProfiledRequiredGatePhase -Name "frontend-tests" -FileName "npm" -Arguments @("test") -TimeoutSeconds 300 -OutputPath (Join-Path $verificationLogsPath "frontend-tests.log")
-    }
     foreach ($isolation in $isolations) {
         foreach ($lane in $isolation.Lanes) {
             Add-TestExecutionPhase -Isolation $isolation -Lane $lane

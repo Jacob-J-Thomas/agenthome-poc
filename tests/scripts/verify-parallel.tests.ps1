@@ -112,11 +112,11 @@ Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTest
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 4) -eq 6) -Message "A hosted four-core runner must admit six bounded logical required-gate workers when the default request provides them."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 10) -eq 4) -Message "A lower explicit worker request must remain authoritative below the required-gate ceiling."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 4) -eq 4) -Message "A hosted four-core request must not be expanded beyond its explicit four-worker bound."
-Assert-True -Condition ($requiredGateProfiles.Count -eq 33) -Message "The exact 29-lane test plan and four non-test gates must have checked-in duration/resource profiles."
+Assert-True -Condition ($requiredGateProfiles.Count -eq 32) -Message "The exact 29-lane test plan and three post-preflight non-test gates must have checked-in duration/resource profiles."
 Assert-True -Condition (@($requiredGateProfiles | Group-Object Name -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Required gate scheduling profiles must have exact unique names."
 Assert-VerificationRequiredGateSchedule -Phases $requiredGateProfiles
 $declaredRequiredGateNames = [Collections.Generic.List[string]]::new()
-foreach ($nonTestGateName in @("format-whitespace", "format-naming-style", "git-diff-check", "frontend-tests")) {
+foreach ($nonTestGateName in @("format-whitespace", "format-naming-style", "git-diff-check")) {
     $declaredRequiredGateNames.Add($nonTestGateName)
 }
 $testProjects = @(Get-ChildItem -Path (Join-Path $repoRoot "tests") -Recurse -Filter "*.csproj" | Where-Object { $_.Name -ne "EmbodySense.CancellationHost.csproj" -and $_.Name -ne "EmbodySense.Tests.Support.csproj" } | Sort-Object FullName)
@@ -138,10 +138,9 @@ foreach ($processHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-cu
 }
 
 $requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 6 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
-Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -eq 428) -Message "The checked-in required-gate estimates must retain the bounded 428-second virtual makespan."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-naming-style"] -eq 0) -Message "The first singleton CPU-bound gate must begin at virtual second zero."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-whitespace"] -eq 45) -Message "The second singleton CPU-bound gate must begin immediately after the first estimate."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["frontend-tests"] -eq 90) -Message "The final singleton CPU-bound gate must begin immediately after both formatting estimates."
+Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -eq 417) -Message "The checked-in required-gate estimates must retain the bounded 417-second virtual makespan after frontend verification moves behind npm install in preflight."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-naming-style"] -eq 140) -Message "The first remaining singleton CPU-bound gate must start as soon as the initial full-capacity process-heavy wave completes."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-whitespace"] -eq 185) -Message "The second singleton CPU-bound gate must begin immediately after the first estimate."
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"] -eq 0) -Message "The maximum-shape custom-run trace lane must begin at virtual second zero under its process-heavy profile."
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime"] -eq 0) -Message "The tied custom runtime lane must retain the other process-heavy slot at virtual second zero."
 $initialResourceCapacity = ($requiredGateProfiles | Where-Object { $requiredGateVirtualSchedule.Starts[$_.Name] -eq 0 } | Measure-Object -Property Weight -Sum).Sum

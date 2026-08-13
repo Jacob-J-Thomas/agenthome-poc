@@ -30,7 +30,6 @@ $script:VerificationRequiredGateScheduleProfiles = @(
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-remainder"; EstimatedDurationSeconds = 45; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "format-naming-style"; EstimatedDurationSeconds = 45; Weight = 2; ResourceClass = "CpuBound" }
     [pscustomobject]@{ Name = "format-whitespace"; EstimatedDurationSeconds = 45; Weight = 2; ResourceClass = "CpuBound" }
-    [pscustomobject]@{ Name = "frontend-tests"; EstimatedDurationSeconds = 40; Weight = 2; ResourceClass = "CpuBound" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loop-execution-remainder"; EstimatedDurationSeconds = 40; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-all"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Clients.Tests-all"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
@@ -59,6 +58,16 @@ function Get-VerificationPreflightCoverageContractWeight {
     )
 
     return [Math]::Min(3, $ResourceCapacity)
+}
+
+function Get-VerificationPreflightFrontendWeight {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 8)]
+        [int]$ResourceCapacity
+    )
+
+    return [Math]::Min(2, $ResourceCapacity)
 }
 
 function Get-VerificationRequiredGateMaximumWorkers {
