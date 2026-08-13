@@ -29,6 +29,13 @@ function Assert-NotContains {
     Assert-True -Condition ($Actual.IndexOf($Expected, [StringComparison]::Ordinal) -lt 0) -Message "$Message Unexpected '$Expected'."
 }
 
+function Normalize-ConsoleDiagnostic {
+    param([AllowEmptyString()] [string]$Value)
+
+    $withoutAnsi = [regex]::Replace($Value, "`e\[[0-?]*[ -/]*[@-~]", "")
+    return [regex]::Replace($withoutAnsi, "\s+", " ").Trim()
+}
+
 . $phaseScriptPath
 . $parallelScriptPath
 . $scheduleScriptPath
@@ -278,13 +285,15 @@ exit 97
     $installFailure = Invoke-FrontendFixture -Name "install-failure" -FixtureRoot $frontendFixtureRoot -FakeBinPath $fakeBinPath -InstallExitCode 11 -SeedStaleFrontendLog
     Assert-True -Condition ($installFailure.ExitCode -ne 0) -Message "A failed npm install must fail the composed phase."
     Assert-True -Condition ((@(Get-Content -LiteralPath $installFailure.OrderPath) -join ",") -ceq "ci") -Message "Frontend tests must not run after a failed npm install."
-    Assert-Contains -Actual $installFailure.Output -Expected "'npm-ci' exited with code 11" -Message "Install failure identity and exit code must remain explicit."
+    $normalizedInstallFailure = Normalize-ConsoleDiagnostic $installFailure.Output
+    Assert-Contains -Actual $normalizedInstallFailure -Expected "'npm-ci' exited with code 11" -Message "Install failure identity and exit code must remain explicit. Actual: $normalizedInstallFailure"
     Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $installFailure.LogsPath "frontend-tests.log"))) -Message "A skipped frontend test must not leave stale success evidence."
 
     $testFailure = Invoke-FrontendFixture -Name "test-failure" -FixtureRoot $frontendFixtureRoot -FakeBinPath $fakeBinPath -TestExitCode 13
     Assert-True -Condition ($testFailure.ExitCode -ne 0) -Message "A failed frontend test must fail the composed phase."
     Assert-True -Condition ((@(Get-Content -LiteralPath $testFailure.OrderPath) -join ",") -ceq "ci,test") -Message "A frontend failure must retain its exact dependency order."
-    Assert-Contains -Actual $testFailure.Output -Expected "'frontend-tests' exited with code 13" -Message "Frontend failure identity and exit code must remain explicit."
+    $normalizedTestFailure = Normalize-ConsoleDiagnostic $testFailure.Output
+    Assert-Contains -Actual $normalizedTestFailure -Expected "'frontend-tests' exited with code 13" -Message "Frontend failure identity and exit code must remain explicit. Actual: $normalizedTestFailure"
 
     $installTimeout = Invoke-FrontendFixture -Name "install-timeout" -FixtureRoot $frontendFixtureRoot -FakeBinPath $fakeBinPath -InstallDelayMilliseconds 2500 -InstallTimeoutSeconds 1
     Assert-True -Condition ($installTimeout.ExitCode -ne 0 -and $installTimeout.ElapsedSeconds -lt 5) -Message "A stalled npm install must fail inside its bounded timeout."
