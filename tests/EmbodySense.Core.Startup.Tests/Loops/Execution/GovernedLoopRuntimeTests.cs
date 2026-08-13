@@ -78,8 +78,7 @@ internal static class GovernedLoopRuntimeTests
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
     private const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
 
-    [Fact]
-    public async Task Public_schedule_queues_and_executes_the_exact_canonical_graph_once_across_restart()
+    internal static async Task Public_schedule_queues_and_executes_the_exact_canonical_graph_once_across_restart()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true);
         var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
@@ -164,8 +163,7 @@ internal static class GovernedLoopRuntimeTests
         }
     }
 
-    [Fact]
-    public async Task Worker_defers_pending_schedule_finalization_then_restart_dispatches_and_replays_exactly_once()
+    internal static async Task Worker_defers_pending_schedule_finalization_then_restart_dispatches_and_replays_exactly_once()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true);
         var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
@@ -270,10 +268,7 @@ internal static class GovernedLoopRuntimeTests
         }
     }
 
-    [Theory]
-    [InlineData("workspace")]
-    [InlineData("role")]
-    public async Task Substituted_trigger_context_fails_before_canonical_provider_dispatch(string mismatch)
+    internal static async Task Substituted_trigger_context_fails_before_canonical_provider_dispatch(string mismatch)
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true);
         await using var runtime = await fixture.CreateRuntimeAsync();
@@ -299,13 +294,7 @@ internal static class GovernedLoopRuntimeTests
         Assert.Equal(0, fixture.ProviderAttempts);
     }
 
-    [Theory]
-    [InlineData("forged-identity")]
-    [InlineData("schedule")]
-    [InlineData("occurrence")]
-    [InlineData("payload")]
-    [InlineData("target")]
-    public async Task Forged_or_swapped_schedule_provenance_fails_before_admission_across_replay_and_restart(string mismatch)
+    internal static async Task Forged_or_swapped_schedule_provenance_fails_before_admission_across_replay_and_restart(string mismatch)
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(includeRestrictedGrant: true, scheduleTrigger: true);
         var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
@@ -351,8 +340,7 @@ internal static class GovernedLoopRuntimeTests
         Assert.Equal(0, fixture.ProviderAttempts);
     }
 
-    [Fact]
-    public async Task Manual_governed_invocation_rejects_the_reserved_trigger_namespace_before_admission()
+    internal static async Task Manual_governed_invocation_rejects_the_reserved_trigger_namespace_before_admission()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync();
         await using var runtime = await fixture.CreateRuntimeAsync();
@@ -369,8 +357,7 @@ internal static class GovernedLoopRuntimeTests
         Assert.Equal(0, fixture.ProviderAttempts);
     }
 
-    [Fact]
-    public async Task Manual_invocation_of_a_schedule_trigger_graph_fails_before_admission()
+    internal static async Task Manual_invocation_of_a_schedule_trigger_graph_fails_before_admission()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true);
         await using var runtime = await fixture.CreateRuntimeAsync();
@@ -385,8 +372,7 @@ internal static class GovernedLoopRuntimeTests
         Assert.Equal(0, fixture.ProviderAttempts);
     }
 
-    [Fact]
-    public async Task Schedule_delivery_to_a_manual_trigger_graph_fails_before_admission()
+    internal static async Task Schedule_delivery_to_a_manual_trigger_graph_fails_before_admission()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync();
         var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
