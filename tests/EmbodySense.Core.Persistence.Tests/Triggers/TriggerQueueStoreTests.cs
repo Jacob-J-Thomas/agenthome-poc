@@ -729,10 +729,11 @@ public sealed class TriggerQueueStoreTests
         var countPaths = new WorkspacePaths(countWorkspace.RootPath);
         var countRoot = QueueRoot(countPaths);
         Directory.CreateDirectory(countRoot);
-        for (var index = 0; index < 129; index++)
-        {
-            await File.WriteAllTextAsync(Path.Combine(countRoot, $"unknown-{index:D3}"), "x");
-        }
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, 129),
+            new ParallelOptions { MaxDegreeOfParallelism = 32 },
+            async (index, cancellationToken) =>
+                await File.WriteAllTextAsync(Path.Combine(countRoot, $"unknown-{index:D3}"), "x", cancellationToken));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => new TriggerQueueStore(countPaths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3)));
 

@@ -165,8 +165,12 @@ $overlap = @($laneXunitGroups | Where-Object { $_.Count -ne 1 })
 $duplicateExecutionIds = @($laneIdGroups | Where-Object { $_.Count -ne 1 })
 $canonicalIds = @($canonicalGroups.Name | Sort-Object -CaseSensitive)
 $laneXunitIds = @($laneXunitGroups.Name | Sort-Object -CaseSensitive)
-$missing = @($canonicalIds | Where-Object { $_ -cnotin $laneXunitIds })
-$unexpected = @($laneXunitIds | Where-Object { $_ -cnotin $canonicalIds })
+$canonicalIdSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$laneXunitIdSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($id in $canonicalIds) { [void]$canonicalIdSet.Add($id) }
+foreach ($id in $laneXunitIds) { [void]$laneXunitIdSet.Add($id) }
+$missing = @($canonicalIds | Where-Object { -not $laneXunitIdSet.Contains($_) })
+$unexpected = @($laneXunitIds | Where-Object { -not $canonicalIdSet.Contains($_) })
 
 $report = [ordered]@{
     schemaVersion = 1

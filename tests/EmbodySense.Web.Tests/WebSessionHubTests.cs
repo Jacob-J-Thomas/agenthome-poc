@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.SignalR;
 
 namespace EmbodySense.Web.Tests;
 
+[Collection(EphemeralPortApiCollection.Name)]
 public sealed class WebSessionHubTests
 {
     [Fact]

@@ -105,20 +105,46 @@ function Get-VirtualVerificationSchedule {
 }
 
 $requiredGateProfiles = @(Get-VerificationRequiredGateScheduleProfiles)
-Assert-True -Condition ((Get-VerificationRequiredGateResourceCapacity) -eq 8) -Message "Required gates must use the explicit eight-unit logical resource capacity."
+Assert-True -Condition ((Get-VerificationRequiredGateResourceCapacity) -eq 8) -Message "Required gates must retain the explicit eight-unit logical resource capacity."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumProcessHeavyWorkers) -eq 2) -Message "Required gates must admit at most two helper-process-heavy phases."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumCpuBoundWorkers) -eq 1) -Message "Required gates must admit at most one CPU-bound non-test gate."
-Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 8 -HardwareProcessorCount 10) -eq 6) -Message "The default eight-worker request on a ten-core host must retain the six-worker required-gate ceiling."
-Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 4) -eq 6) -Message "A hosted four-core runner must admit six bounded logical required-gate workers when the default request provides them."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 8 -HardwareProcessorCount 10) -eq 4) -Message "A larger host must retain the checked-in four-process required-gate ceiling."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 4) -eq 4) -Message "A hosted four-core runner must admit exactly four physical required-gate workers."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 10) -eq 4) -Message "A lower explicit worker request must remain authoritative below the required-gate ceiling."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 4) -eq 4) -Message "A hosted four-core request must not be expanded beyond its explicit four-worker bound."
-Assert-True -Condition ($requiredGateProfiles.Count -eq 32) -Message "The exact 29-lane test plan and three post-preflight non-test gates must have checked-in duration/resource profiles."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 2) -eq 2) -Message "A smaller host must reduce required-gate workers to its physical processor count."
+Assert-True -Condition ($requiredGateProfiles.Count -eq 24) -Message "The exact 23-lane test plan and required git-diff gate must have checked-in duration/resource profiles."
 Assert-True -Condition (@($requiredGateProfiles | Group-Object Name -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Required gate scheduling profiles must have exact unique names."
 Assert-VerificationRequiredGateSchedule -Phases $requiredGateProfiles
+$expectedRequiredGateNames = @(
+    "git-diff-check"
+    "tests-EmbodySense.Cli.Command.Tests-all"
+    "tests-EmbodySense.Core.Application.Tests-all"
+    "tests-EmbodySense.Core.Clients.Tests-all"
+    "tests-EmbodySense.Core.Common.Tests-all"
+    "tests-EmbodySense.Core.Persistence.Tests-authority"
+    "tests-EmbodySense.Core.Persistence.Tests-capabilities"
+    "tests-EmbodySense.Core.Persistence.Tests-contextual-roles"
+    "tests-EmbodySense.Core.Persistence.Tests-credentials"
+    "tests-EmbodySense.Core.Persistence.Tests-custom-definition-control"
+    "tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"
+    "tests-EmbodySense.Core.Persistence.Tests-default-conversation"
+    "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle"
+    "tests-EmbodySense.Core.Persistence.Tests-human-input"
+    "tests-EmbodySense.Core.Persistence.Tests-remainder-triggers"
+    "tests-EmbodySense.Core.Persistence.Tests-tool-results-audit"
+    "tests-EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime"
+    "tests-EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime"
+    "tests-EmbodySense.Core.Startup.Tests-remainder"
+    "tests-EmbodySense.E2ETests-all"
+    "tests-EmbodySense.IntegrationTests-codex-app-server"
+    "tests-EmbodySense.IntegrationTests-remainder"
+    "tests-EmbodySense.Web.Tests-remainder"
+    "tests-EmbodySense.Web.Tests-runtime-host"
+)
+Assert-True -Condition ((@($requiredGateProfiles.Name | Sort-Object) -join "`n") -ceq (@($expectedRequiredGateNames | Sort-Object) -join "`n")) -Message "Required-gate profiles must equal the canonical 23-lane catalog plus git-diff exactly."
 $declaredRequiredGateNames = [Collections.Generic.List[string]]::new()
-foreach ($nonTestGateName in @("format-whitespace", "format-naming-style", "git-diff-check")) {
-    $declaredRequiredGateNames.Add($nonTestGateName)
-}
+$declaredRequiredGateNames.Add("git-diff-check")
 $testProjects = @(Get-ChildItem -Path (Join-Path $repoRoot "tests") -Recurse -Filter "*.csproj" | Where-Object { $_.Name -ne "EmbodySense.CancellationHost.csproj" -and $_.Name -ne "EmbodySense.Tests.Support.csproj" } | Sort-Object FullName)
 foreach ($testProject in $testProjects) {
     foreach ($lane in @(Get-VerificationTestProjectLanes -TestProject $testProject)) {
@@ -129,22 +155,22 @@ $declaredRequiredGateProfiles = @($declaredRequiredGateNames | ForEach-Object { 
 Assert-VerificationRequiredGateSchedule -Phases $declaredRequiredGateProfiles
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $declaredRequiredGateNames.Count) -Message "Every dynamically declared required gate must resolve to one checked-in profile."
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $requiredGateProfiles.Count) -Message "The checked-in scheduling catalog cannot retain stale profiles for gates outside the current plan."
-foreach ($splitGateName in @("tests-EmbodySense.Core.Persistence.Tests-contextual-roles", "tests-EmbodySense.Core.Persistence.Tests-authority", "tests-EmbodySense.Core.Persistence.Tests-credentials", "tests-EmbodySense.Core.Persistence.Tests-human-input", "tests-EmbodySense.Core.Persistence.Tests-default-conversation", "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle", "tests-EmbodySense.IntegrationTests-governance", "tests-EmbodySense.IntegrationTests-cli", "tests-EmbodySense.IntegrationTests-codex-app-server", "tests-EmbodySense.IntegrationTests-remainder", "tests-EmbodySense.Web.Tests-runtime-host", "tests-EmbodySense.Web.Tests-loop-api-run", "tests-EmbodySense.Web.Tests-remainder")) {
+foreach ($splitGateName in @("tests-EmbodySense.Core.Persistence.Tests-contextual-roles", "tests-EmbodySense.Core.Persistence.Tests-authority", "tests-EmbodySense.Core.Persistence.Tests-credentials", "tests-EmbodySense.Core.Persistence.Tests-human-input", "tests-EmbodySense.Core.Persistence.Tests-default-conversation", "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle", "tests-EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime", "tests-EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime", "tests-EmbodySense.Core.Startup.Tests-remainder", "tests-EmbodySense.IntegrationTests-codex-app-server", "tests-EmbodySense.IntegrationTests-remainder", "tests-EmbodySense.Web.Tests-runtime-host", "tests-EmbodySense.Web.Tests-remainder")) {
     Assert-True -Condition ((Get-VerificationRequiredGateScheduleProfile -Name $splitGateName).EstimatedDurationSeconds -gt 0) -Message "Downstream split gate '$splitGateName' must be ready for singleton-class backlog-priority scheduling."
 }
-foreach ($processHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-custom-run-trace", "tests-EmbodySense.Core.Persistence.Tests-default-conversation", "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle")) {
+foreach ($processHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-custom-run-trace", "tests-EmbodySense.Core.Persistence.Tests-default-conversation", "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle", "tests-EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime", "tests-EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime", "tests-EmbodySense.Core.Startup.Tests-remainder", "tests-EmbodySense.IntegrationTests-remainder", "tests-EmbodySense.Web.Tests-remainder")) {
     $processHeavyProfile = Get-VerificationRequiredGateScheduleProfile -Name $processHeavyGateName
-    Assert-True -Condition ($processHeavyProfile.Weight -eq 3 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "Nested-process persistence gate '$processHeavyGateName' must retain process-heavy weight and concurrency protection."
+    Assert-True -Condition ($processHeavyProfile.Weight -eq 3 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "Nested-process or internally parallel gate '$processHeavyGateName' must retain its evidence-backed logical weight with explicit concurrency protection."
 }
+Assert-True -Condition ((Get-VerificationRequiredGateScheduleProfile -Name "tests-EmbodySense.Web.Tests-runtime-host").ResourceClass -ceq "Ordinary") -Message "The serial Web runtime-host lane must remain Ordinary; its tests do not enable internal parallel workers."
 
-$requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 6 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
-Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -eq 417) -Message "The checked-in required-gate estimates must retain the bounded 417-second virtual makespan after frontend verification moves behind npm install in preflight."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-naming-style"] -eq 140) -Message "The first remaining singleton CPU-bound gate must start as soon as the initial full-capacity process-heavy wave completes."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-whitespace"] -eq 185) -Message "The second singleton CPU-bound gate must begin immediately after the first estimate."
+$requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
+Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -eq 480) -Message "The hybrid four-process/eight-unit 23-lane required-gate schedule must retain its deterministic 480-second estimate baseline. Actual: $($requiredGateVirtualSchedule.MakespanSeconds)."
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"] -eq 0) -Message "The maximum-shape custom-run trace lane must begin at virtual second zero under its process-heavy profile."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime"] -eq 0) -Message "The tied custom runtime lane must retain the other process-heavy slot at virtual second zero."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Startup.Tests-remainder"] -eq 0) -Message "The longest internally parallel remainder must retain the other process-heavy slot at virtual second zero."
 $initialResourceCapacity = ($requiredGateProfiles | Where-Object { $requiredGateVirtualSchedule.Starts[$_.Name] -eq 0 } | Measure-Object -Property Weight -Sum).Sum
-Assert-True -Condition ($initialResourceCapacity -eq 8) -Message "The exact-name tie must pack both initial process-heavy lanes and the first CPU gate into all eight logical resource units."
+Assert-True -Condition ($initialResourceCapacity -eq 8) -Message "Two process-heavy and two Ordinary phases must pack the initial eight logical units without exceeding four actual workers."
+Assert-True -Condition (@($requiredGateProfiles | Where-Object { $_.Name -in @("format-naming-style", "format-whitespace") }).Count -eq 0) -Message "Post-build format checks must not retain stale required-gate scheduling profiles."
 
 $counterexamplePhases = @(
     [pscustomobject]@{ Name = "long-ordinary"; EstimatedDurationSeconds = 100; SchedulingPrioritySeconds = 100; ResourceClass = "Ordinary" }
@@ -261,6 +287,23 @@ finally {
     $weightedResults = @(Invoke-VerificationParallelPhases -MaximumWorkers $sixUnitCapacity -MaximumResourceCapacity $sixUnitCapacity)
     Assert-True -Condition ($weightedResults.Count -eq 4) -Message "Every weighted phase must be scheduled and aggregated."
     Assert-True -Condition (@($weightedResults | Where-Object { $_.Weight -eq $heavyWeight -and $_.EffectiveWeight -eq $heavyWeight -and $_.ResourceClass -ceq "ProcessHeavy" }).Count -eq 4) -Message "Weighted result evidence must preserve the declared process-heavy posture without adapting its weight downward."
+
+    $physicalHeavyRoot = Join-Path $scenarioRoot "physical-heavy-active"
+    New-Item -ItemType Directory -Path $physicalHeavyRoot | Out-Null
+    Reset-VerificationParallelPhaseState
+    foreach ($name in @("physical-heavy-first", "physical-heavy-second")) {
+        Add-VerificationParallelPhase -Name $name -FileName $powerShellExecutable -Arguments ($weightedArguments + @($name, $physicalHeavyRoot, "2", "2")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log") -Weight 3 -ResourceClass ProcessHeavy
+    }
+    $physicalHeavyResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
+    Assert-True -Condition ($physicalHeavyResults.Count -eq 2) -Message "Two evidence-weighted process-heavy phases must overlap within eight logical units and the four-process ceiling."
+
+    $exclusiveRoot = Join-Path $scenarioRoot "full-capacity-active"
+    New-Item -ItemType Directory -Path $exclusiveRoot | Out-Null
+    Reset-VerificationParallelPhaseState
+    Add-VerificationParallelPhase -Name "full-capacity-format" -FileName $powerShellExecutable -Arguments ($weightedArguments + @("full-capacity-format", $exclusiveRoot, "1", "1")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "full-capacity-format.log") -EstimatedDurationSeconds 2 -Weight 4 -ResourceClass CpuBound
+    Add-VerificationParallelPhase -Name "excluded-ordinary" -FileName $powerShellExecutable -Arguments ($weightedArguments + @("excluded-ordinary", $exclusiveRoot, "1", "1")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "excluded-ordinary.log")
+    $exclusiveResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 4 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
+    Assert-True -Condition ($exclusiveResults.Count -eq 2) -Message "A full-capacity CPU phase must exclude ordinary work and then allow the plan to drain."
 
     foreach ($resourceClassScenario in @(
         [pscustomobject]@{ Name = "process-heavy"; ResourceClass = "ProcessHeavy"; Weight = 3; Maximum = 2; Count = 4 },
@@ -424,6 +467,30 @@ finally {
     }
     catch {
         Assert-Contains -Actual $_.Exception.Message -Expected "could substitute stale artifacts" -Message "Pre-existing lane output cannot be reused as a stale substitute."
+    }
+
+    $manifestCopy = Join-Path $scenarioRoot "manifest-copy"
+    $manifestCopyResult = @(Copy-VerifiedDirectoryFromManifest -SourceDirectory $artifactSource -SourceManifest $artifactManifest -DestinationDirectory $manifestCopy -Description "authenticated manifest copy")
+    Assert-VerificationDirectoryManifest -Expected $artifactManifest -Directory $manifestCopy -Description "authenticated manifest copy"
+    Assert-True -Condition ($manifestCopyResult.Count -eq $artifactManifest.Count) -Message "A manifest-backed copy must retain every authenticated source entry exactly once."
+
+    $staleManifestDestination = Join-Path $scenarioRoot "stale-manifest-destination"
+    New-Item -ItemType Directory -Path $staleManifestDestination | Out-Null
+    try {
+        Copy-VerifiedDirectoryFromManifest -SourceDirectory $artifactSource -SourceManifest $artifactManifest -DestinationDirectory $staleManifestDestination -Description "stale manifest destination" | Out-Null
+        throw "Expected stale manifest-backed destination rejection."
+    }
+    catch {
+        Assert-Contains -Actual $_.Exception.Message -Expected "could substitute stale artifacts" -Message "A manifest-backed copy cannot reuse a pre-existing destination."
+    }
+
+    Set-Content -LiteralPath (Join-Path $artifactSource "nested\assembly.dll") -Value "source-mutated-after-manifest" -Encoding UTF8
+    try {
+        Copy-VerifiedDirectoryFromManifest -SourceDirectory $artifactSource -SourceManifest $artifactManifest -DestinationDirectory (Join-Path $scenarioRoot "mutated-source-copy") -Description "mutated manifest source" | Out-Null
+        throw "Expected stale source manifest rejection."
+    }
+    catch {
+        Assert-Contains -Actual $_.Exception.Message -Expected "failed immutable artifact verification" -Message "A source mutation after manifest capture must fail the manifest-backed copy closed."
     }
 
     $isolatedOutput = Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $scenarioRoot "project\lane") -Configuration "Release" -TargetFramework "net10.0"

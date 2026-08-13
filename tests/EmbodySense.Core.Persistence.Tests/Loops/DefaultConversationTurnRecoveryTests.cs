@@ -26,7 +26,6 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 
 public sealed class DefaultConversationTurnRecoveryTests
 {
-    private const int ProcessLossExitCode = 173;
     private const string ProcessLossWorkspaceVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PROCESS_LOSS_WORKSPACE";
     private const string ProcessLossBoundaryVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PROCESS_LOSS_BOUNDARY";
 
@@ -298,13 +297,10 @@ public sealed class DefaultConversationTurnRecoveryTests
     public async Task Separate_process_recovers_a_raw_assistant_append_after_abrupt_process_loss()
     {
         using var workspace = new TestWorkspace();
-        using var process = StartSelfTest(
-            nameof(Process_loss_worker_exits_at_the_requested_durable_boundary),
-            new Dictionary<string, string>
-            {
-                [ProcessLossWorkspaceVariable] = workspace.RootPath,
-                [ProcessLossBoundaryVariable] = DefaultConversationTurnBoundary.AssistantTranscriptAppended.ToString()
-            });
+        using var process = Verification.CancellationHostProcess.Start(
+            "default-turn-process-loss",
+            workspace.RootPath,
+            DefaultConversationTurnBoundary.AssistantTranscriptAppended.ToString());
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
         try
@@ -339,25 +335,11 @@ public sealed class DefaultConversationTurnRecoveryTests
     }
 
     [Fact]
-    public async Task Process_loss_worker_exits_at_the_requested_durable_boundary()
+    public Task Process_loss_worker_exits_at_the_requested_durable_boundary()
     {
-        var workspaceRoot = Environment.GetEnvironmentVariable(ProcessLossWorkspaceVariable);
-        if (string.IsNullOrWhiteSpace(workspaceRoot))
-        {
-            return;
-        }
-
-        var boundaryText = Environment.GetEnvironmentVariable(ProcessLossBoundaryVariable) ?? throw new InvalidOperationException("The process-loss boundary is required.");
-        var boundary = Enum.Parse<DefaultConversationTurnBoundary>(boundaryText);
-        var paths = new WorkspacePaths(workspaceRoot);
-        var memory = new ConversationMemoryStore(paths);
-        var turns = new DefaultConversationTurnStore(paths);
-        var runs = new LoopRunStore(paths);
-        var state = new ConversationRuntimeState(workspaceLease: new FileConversationWorkspaceLease(paths));
-        var runner = new DefaultConversationLoopRunner(new RecordingInferenceClient("answer"), state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns, new ExitingFailpoint(boundary), new TestCapabilityAdmissionService());
-
-        _ = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: "process-loss-request"));
-        throw new InvalidOperationException("The process-loss failpoint did not terminate the worker.");
+        Assert.Null(Environment.GetEnvironmentVariable(ProcessLossWorkspaceVariable));
+        Assert.Null(Environment.GetEnvironmentVariable(ProcessLossBoundaryVariable));
+        return Task.CompletedTask;
     }
 
     [Theory]
@@ -3540,29 +3522,6 @@ public sealed class DefaultConversationTurnRecoveryTests
         RecordingInferenceClient Client,
         InterruptingFailpoint? Failpoint);
 
-    private static Process StartSelfTest(string testName, IReadOnlyDictionary<string, string> environment)
-    {
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            WorkingDirectory = Path.GetTempPath(),
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(DefaultConversationTurnRecoveryTests).Assembly.Location,
-            $"{typeof(DefaultConversationTurnRecoveryTests).FullName}.{testName}");
-        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        foreach (var item in environment)
-        {
-            startInfo.Environment[item.Key] = item.Value;
-        }
-
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("The default-conversation test worker did not start.");
-    }
-
     private static IReadOnlyList<string> GetHistoryStageRetirementEvidencePaths(WorkspacePaths paths, string turnId, string suffix)
     {
         return Directory.EnumerateFileSystemEntries(paths.DefaultConversationTurnHistoryPath, $".{turnId}.json.archive-history.*{suffix}", SearchOption.TopDirectoryOnly)
@@ -3721,19 +3680,6 @@ public sealed class DefaultConversationTurnRecoveryTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             QuarantineCount++;
-            return Task.CompletedTask;
-        }
-    }
-
-    private sealed class ExitingFailpoint(DefaultConversationTurnBoundary boundary) : IDefaultConversationTurnFailpoint
-    {
-        public Task AfterBoundaryAsync(DefaultConversationTurnBoundary currentBoundary, DefaultConversationTurnRecord record, CancellationToken cancellationToken = default)
-        {
-            if (currentBoundary == boundary)
-            {
-                Environment.Exit(ProcessLossExitCode);
-            }
-
             return Task.CompletedTask;
         }
     }

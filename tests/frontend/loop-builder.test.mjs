@@ -9,6 +9,9 @@ const builderSource = fs.readFileSync(
   new URL("../../src/EmbodySense.Web/wwwroot/loop-builder.js", import.meta.url),
   "utf8",
 );
+const builderScript = new vm.Script(builderSource, {
+  filename: "loop-builder.js",
+});
 const loopsHtml = fs.readFileSync(
   new URL("../../src/EmbodySense.Web/wwwroot/index.html", import.meta.url),
   "utf8",
@@ -8760,7 +8763,7 @@ async function loadLoopBuilder(options = {}) {
     window,
   };
   context.globalThis = context;
-  vm.runInNewContext(builderSource, context, { filename: "loop-builder.js" });
+  builderScript.runInNewContext(context);
   await flushAsyncWork();
   document.elementsObject.approvalPanel =
     document.elementsObject.loopApprovalPanel;

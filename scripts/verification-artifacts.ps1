@@ -110,3 +110,41 @@ function Copy-VerifiedDirectory {
     Assert-VerificationDirectoryManifest -Expected $sourceManifest -Directory $destination -Description $Description
     return $sourceManifest
 }
+
+function Copy-VerifiedDirectoryFromManifest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SourceDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [object[]]$SourceManifest,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DestinationDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Description
+    )
+
+    $source = [IO.Path]::GetFullPath($SourceDirectory)
+    $destination = [IO.Path]::GetFullPath($DestinationDirectory)
+    if (Test-Path -LiteralPath $destination) {
+        throw "$Description destination already exists and could substitute stale artifacts: $destination"
+    }
+    if ($SourceManifest.Count -eq 0) {
+        throw "$Description source manifest is empty."
+    }
+
+    New-Item -ItemType Directory -Path $destination -Force | Out-Null
+    foreach ($entry in $SourceManifest) {
+        $sourcePath = Join-Path $source $entry.RelativePath
+        $destinationPath = Join-Path $destination $entry.RelativePath
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destinationPath) -Force | Out-Null
+        Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
+    }
+    Assert-VerificationDirectoryManifest -Expected $SourceManifest -Directory $destination -Description $Description
+    return @($SourceManifest)
+}

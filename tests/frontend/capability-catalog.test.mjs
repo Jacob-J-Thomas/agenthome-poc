@@ -11,6 +11,9 @@ const catalogSource = fs.readFileSync(
   ),
   "utf8",
 );
+const catalogScript = new vm.Script(catalogSource, {
+  filename: "capability-catalog.js",
+});
 const catalogHtml = fs.readFileSync(
   new URL(
     "../../src/EmbodySense.Web/wwwroot/capabilities.html",
@@ -929,9 +932,7 @@ async function loadCapabilityCatalog(options = {}) {
     window,
   };
   context.globalThis = context;
-  vm.runInNewContext(catalogSource, context, {
-    filename: "capability-catalog.js",
-  });
+  catalogScript.runInNewContext(context);
   await flushAsyncWork();
   const storageKey = `embodysense.pending-capability-lifecycle.v1.${workspaceScope}`;
   return {

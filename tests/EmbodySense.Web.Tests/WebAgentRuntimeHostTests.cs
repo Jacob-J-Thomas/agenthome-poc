@@ -475,12 +475,17 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
-    public async Task SendMessageAsync_emits_cancelled_event_after_active_turn_is_cancelled()
+    public async Task SendMessageAsync_parks_active_provider_cancellation_for_review_before_starting_a_new_session()
     {
         using var workspace = new TestWorkspace();
-        var codexPath = await CreateFakeCodexExecutableAsync(workspace, holdTurnUntilCancelled: true);
+        var codexPath = await CreateTrackedFakeCodexExecutableAsync(workspace);
         await using var host = CreateHost(workspace.RootPath, codexPath);
         await host.InitializeWorkspaceAsync();
+        await host.SendMessageAsync("warm provider session", (_, _) => Task.CompletedTask);
+        var instancePath = workspace.File("web-app-server-instances.txt");
+        var providerTurnsPath = workspace.File("web-provider-turns.txt");
+        var initialInstance = Assert.Single(await File.ReadAllLinesAsync(instancePath));
+        Assert.Equal([$"{initialInstance}:warm provider session"], await File.ReadAllLinesAsync(providerTurnsPath));
         var events = new List<WebStreamEvent>();
 
         var sendTask = host.SendMessageAsync("hello from web", (streamEvent, _) =>
@@ -488,29 +493,49 @@ public sealed class WebAgentRuntimeHostTests
             events.Add(streamEvent);
             return Task.CompletedTask;
         });
-        var releasePath = workspace.File("web-turn-cancellation.release");
-        try
-        {
-            await WaitForMarkerAsync(workspace.File("web-turn-cancellation.marker"));
-            Assert.True(host.CancelCurrentTurn());
-            await sendTask.WaitAsync(TimeSpan.FromSeconds(10));
-        }
-        finally
-        {
-            await File.WriteAllTextAsync(releasePath, "released");
-        }
+        var markerPath = workspace.File("web-turn-cancellation.marker");
+        await WaitForMarkerAsync(markerPath);
+        Assert.Equal(initialInstance, await File.ReadAllTextAsync(markerPath));
+        Assert.True(host.CancelCurrentTurn());
+        var cancelled = await sendTask.WaitAsync(TimeSpan.FromSeconds(10));
 
         var streamEvent = Assert.Single(events);
-        Assert.Equal("cancelled", streamEvent.Type);
-        Assert.Equal("Message cancelled.", streamEvent.Text);
+        Assert.Equal(AgentRuntimeTurnStatus.MessageNeedsReview, cancelled.Status);
+        Assert.Equal("needs_review", streamEvent.Type);
+        Assert.Contains("irreversible turn/start transport-write boundary", streamEvent.Text, StringComparison.Ordinal);
+        var turns = new DefaultConversationTurnStore(new WorkspacePaths(workspace.RootPath));
+        var review = Assert.Single(await turns.ListNeedsReviewAsync());
+        Assert.Equal(DefaultConversationTurnReviewCause.OutcomeUnknown, review.ReviewCause);
+        Assert.Equal(DefaultConversationProviderOutcome.OutcomeUnknown, review.ProviderOutcome);
+        Assert.Equal(
+            [$"{initialInstance}:warm provider session", $"{initialInstance}:hello from web"],
+            await File.ReadAllLinesAsync(providerTurnsPath));
 
         events.Clear();
-        await host.SendMessageAsync("after cancel", (streamEvent, _) =>
+        var resolution = await host.SendMessageAsync($"/review resolve {review.TurnId}", (streamEvent, _) =>
         {
             events.Add(streamEvent);
             return Task.CompletedTask;
         });
 
+        Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, resolution.Status);
+        var resolutionEvent = Assert.Single(events);
+        Assert.Equal("assistant_final", resolutionEvent.Type);
+        Assert.Contains("explicitly abandoning its outcome-unknown provider attempt", resolutionEvent.Text, StringComparison.Ordinal);
+        Assert.Empty(await turns.ListNeedsReviewAsync());
+        Assert.Single(await File.ReadAllLinesAsync(instancePath));
+        Assert.Equal(
+            [$"{initialInstance}:warm provider session", $"{initialInstance}:hello from web"],
+            await File.ReadAllLinesAsync(providerTurnsPath));
+
+        events.Clear();
+        var afterReview = await host.SendMessageAsync("after cancel", (streamEvent, _) =>
+        {
+            events.Add(streamEvent);
+            return Task.CompletedTask;
+        });
+
+        Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, afterReview.Status);
         Assert.Collection(
             events,
             deltaEvent =>
@@ -523,6 +548,18 @@ public sealed class WebAgentRuntimeHostTests
                 Assert.Equal("assistant_final", finalEvent.Type);
                 Assert.Equal("web response: after cancel", finalEvent.Text);
             });
+
+        var instances = await File.ReadAllLinesAsync(instancePath);
+        Assert.Equal(2, instances.Length);
+        Assert.Equal(initialInstance, instances[0]);
+        Assert.NotEqual(initialInstance, instances[1]);
+        Assert.Equal(
+            [
+                $"{initialInstance}:warm provider session",
+                $"{initialInstance}:hello from web",
+                $"{instances[1]}:after cancel"
+            ],
+            await File.ReadAllLinesAsync(providerTurnsPath));
     }
 
     [Fact]
@@ -907,8 +944,7 @@ public sealed class WebAgentRuntimeHostTests
         TestWorkspace workspace,
         string? turnFailureMessage = null,
         int turnDelayMilliseconds = 0,
-        bool advertiseConfiguredModels = true,
-        bool holdTurnUntilCancelled = false)
+        bool advertiseConfiguredModels = true)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -926,7 +962,6 @@ public sealed class WebAgentRuntimeHostTests
             $threadId = "thread-test"
             $turnFailureMessage = {{FormatPowerShellStringLiteral(turnFailureMessage)}}
             $turnDelayMilliseconds = {{turnDelayMilliseconds}}
-            $holdTurnUntilCancelled = {{(holdTurnUntilCancelled ? "$true" : "$false")}}
             $advertisedModels = if ({{(advertiseConfiguredModels ? "$true" : "$false")}}) { @("test-model", "gpt-test") } else { @("older-model") }
             $turnNumber = 0
 
@@ -987,14 +1022,6 @@ public sealed class WebAgentRuntimeHostTests
                                 Start-Sleep -Milliseconds 25
                             }
                         }
-                        elseif ($holdTurnUntilCancelled -and $userText.Contains("hello from web")) {
-                            [IO.File]::WriteAllText((Join-Path $PSScriptRoot "web-turn-cancellation.marker"), "started")
-                            $releasePath = Join-Path $PSScriptRoot "web-turn-cancellation.release"
-                            while (-not [IO.File]::Exists($releasePath)) {
-                                Start-Sleep -Milliseconds 25
-                            }
-                        }
-
                         if ($turnFailureMessage) {
                             Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = $turnId; turn = @{ id = $turnId; status = "failed"; error = @{ message = $turnFailureMessage }; items = @() } } }
                             break
@@ -1010,6 +1037,86 @@ public sealed class WebAgentRuntimeHostTests
             @echo off
             powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-codex.ps1" %*
             """);
+
+        return commandPath;
+    }
+
+    private static async Task<string> CreateTrackedFakeCodexExecutableAsync(TestWorkspace workspace)
+    {
+        var scriptPath = workspace.File("tracked-fake-codex.js");
+        var commandPath = workspace.File(OperatingSystem.IsWindows() ? "tracked-fake-codex.cmd" : "tracked-fake-codex");
+        await File.WriteAllTextAsync(scriptPath, """
+            if (process.argv.slice(2).includes("--version")) {
+              process.stdout.write("codex-cli 999.0.0-test\n");
+              process.exit(0);
+            }
+
+            const crypto = require("node:crypto");
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const readline = require("node:readline");
+            const instanceId = crypto.randomUUID().replaceAll("-", "");
+            const threadId = `thread-${instanceId}`;
+            const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+            fs.appendFileSync(path.join(__dirname, "web-app-server-instances.txt"), `${instanceId}\n`);
+
+            function write(value) {
+              process.stdout.write(`${JSON.stringify(value)}\n`);
+            }
+
+            function userText(message) {
+              const inputText = String(message.params?.input?.[0]?.text ?? "");
+              const marker = "Current user message:";
+              const markerIndex = inputText.indexOf(marker);
+              return markerIndex < 0 ? inputText : inputText.slice(markerIndex + marker.length).trim();
+            }
+
+            input.on("line", (line) => {
+              const message = JSON.parse(line);
+              switch (message.method) {
+                case "initialize":
+                  write({ id: message.id, result: {} });
+                  break;
+                case "model/list":
+                  write({ id: message.id, result: { data: ["test-model", "gpt-test"].map((model) => ({ id: model, model })) } });
+                  break;
+                case "thread/start":
+                  write({ id: message.id, result: { thread: { id: threadId } } });
+                  break;
+                case "turn/start": {
+                  const turnId = `turn-${instanceId}`;
+                  const text = `web response: ${userText(message)}`;
+                  fs.appendFileSync(path.join(__dirname, "web-provider-turns.txt"), `${instanceId}:${userText(message)}\n`);
+                  write({ id: message.id, result: { turn: { id: turnId } } });
+                  if (userText(message).includes("hello from web")) {
+                    fs.writeFileSync(path.join(__dirname, "web-turn-cancellation.marker"), instanceId);
+                    break;
+                  }
+                  write({ method: "item/agentMessage/delta", params: { threadId, turnId, delta: text } });
+                  write({ method: "turn/completed", params: { threadId, turnId, turn: { id: turnId, status: "completed", items: [{ type: "agentMessage", phase: "final_answer", text }] } } });
+                  break;
+                }
+                default:
+                  break;
+              }
+            });
+            """);
+
+        if (OperatingSystem.IsWindows())
+        {
+            await File.WriteAllTextAsync(commandPath, """
+                @echo off
+                node "%~dp0tracked-fake-codex.js" %*
+                """);
+        }
+        else
+        {
+            await File.WriteAllTextAsync(commandPath, """
+                #!/bin/sh
+                exec node "$(dirname "$0")/tracked-fake-codex.js" "$@"
+                """);
+            File.SetUnixFileMode(commandPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
 
         return commandPath;
     }

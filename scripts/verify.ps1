@@ -149,7 +149,7 @@ function Get-ProjectCoverageIsolation {
     $laneCopies = [Collections.Generic.List[object]]::new()
     foreach ($lane in $Lanes) {
         $laneDirectory = Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework
-        $laneManifest = @(Copy-VerifiedDirectory -SourceDirectory $pristineDirectory -DestinationDirectory $laneDirectory -Description "$($TestProject.BaseName)/$($lane.Name) lane copy")
+        $laneManifest = @(Copy-VerifiedDirectoryFromManifest -SourceDirectory $pristineDirectory -SourceManifest $pristineManifest -DestinationDirectory $laneDirectory -Description "$($TestProject.BaseName)/$($lane.Name) lane copy")
         $laneIdentity = "$($TestProject.BaseName)-$($lane.Name)"
         $laneFixtureRoot = Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot -RunIdentity $verificationFixtureRunIdentity -LaneIdentity $laneIdentity
         if (Test-Path -LiteralPath $laneFixtureRoot) {
@@ -287,10 +287,54 @@ try {
         if ($runningOnWindows) {
             $contractScripts = @("verify-sdk-diagnostics.tests.ps1") + $contractScripts
         }
-        $preflightCoverageContractWeight = Get-VerificationPreflightCoverageContractWeight -ResourceCapacity $hardwareBoundedResourceCapacity
-        $preflightFrontendWeight = Get-VerificationPreflightFrontendWeight -ResourceCapacity $hardwareBoundedResourceCapacity
+        $preflightNestedProcessContractScripts = @(
+            "verify-preflight-overlap.tests.ps1",
+            "verify-parallel.tests.ps1"
+        )
+        if ($runningOnWindows) {
+            $preflightNestedProcessContractScripts = @("verify-sdk-diagnostics.tests.ps1") + $preflightNestedProcessContractScripts
+        }
+        $preflightBuildOverlapContractScripts = @(
+            "verify-bounded-phases.tests.ps1",
+            "verify-test-inventory.tests.ps1",
+            "verify-watchdog.tests.ps1"
+        )
+        Assert-VerificationPreflightContractClassification -ContractScripts $contractScripts -CoverageContractScript "verify-coverage.tests.ps1" -NestedProcessContractScripts $preflightNestedProcessContractScripts -OrdinaryContractScripts $preflightBuildOverlapContractScripts
+        $preflightMaximumWorkers = [Math]::Min(4, $hardwareBoundedResourceCapacity)
+        $preflightResourceCapacity = $preflightMaximumWorkers
+        $preflightProcessHeavyWeight = [Math]::Max(1, [int][Math]::Ceiling($preflightResourceCapacity / 2.0))
         $preflightMaximumProcessHeavyWorkers = 1
+        $preflightCoverageContractWeight = Get-VerificationPreflightCoverageContractWeight -ResourceCapacity $preflightResourceCapacity
+        $preflightFrontendWeight = Get-VerificationPreflightFrontendWeight -ResourceCapacity $preflightResourceCapacity
+        $preflightNestedProcessContractWeight = Get-VerificationPreflightNestedProcessContractWeight -ResourceCapacity $preflightResourceCapacity
+        $preflightFormatWeight = [Math]::Min(2, $preflightResourceCapacity)
+        $preflightMaximumCpuBoundWorkers = [Math]::Min(2, $preflightMaximumWorkers)
+
+        Add-VerificationParallelPhase -Name "build-pullrequest" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "build-pullrequest.log") -EstimatedDurationSeconds 90 -Weight $preflightProcessHeavyWeight -ResourceClass "ProcessHeavy"
+        $frontendArguments = @("-NoProfile")
+        if ($runningOnWindows) {
+            $frontendArguments += @("-ExecutionPolicy", "Bypass")
+        }
+        $frontendArguments += @("-File", (Join-Path $PSScriptRoot "verify-frontend.ps1"), "-RepositoryRoot", $repoRoot, "-LogsPath", $verificationLogsPath)
+        Add-VerificationParallelPhase -Name "frontend-preflight" -FileName $powerShellExecutable -Arguments $frontendArguments -TimeoutSeconds 590 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "frontend-preflight.log") -EstimatedDurationSeconds 70 -Weight $preflightFrontendWeight -ResourceClass "CpuBound"
+        foreach ($contractScript in $preflightBuildOverlapContractScripts) {
+            $contractArguments = @("-NoProfile")
+            if ($runningOnWindows) {
+                $contractArguments += @("-ExecutionPolicy", "Bypass")
+            }
+            $contractArguments += @("-File", (Join-Path $testsPath "scripts\$contractScript"))
+            Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
+        }
+        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-build-overlap phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers maximum_cpu_bound=1 build_weight=$preflightProcessHeavyWeight frontend_weight=$preflightFrontendWeight ordinary_contract_weight=1 ordinary_contracts=$($preflightBuildOverlapContractScripts.Count) configuration=$Configuration"
+        Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers 1 | Out-Null
+        Reset-VerificationParallelPhaseState
+        $script:LastCompletedVerificationPhase = "pull-request-build-overlap"
+
         foreach ($contractScript in $contractScripts) {
+            if ($preflightBuildOverlapContractScripts -ccontains $contractScript) {
+                continue
+            }
+
             $contractArguments = @("-NoProfile")
             if ($runningOnWindows) {
                 $contractArguments += @("-ExecutionPolicy", "Bypass")
@@ -299,20 +343,17 @@ try {
             if ($contractScript -ceq "verify-coverage.tests.ps1") {
                 Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 75 -Weight $preflightCoverageContractWeight -ResourceClass "ProcessHeavy"
             }
+            elseif ($preflightNestedProcessContractScripts -ccontains $contractScript) {
+                Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 60 -Weight $preflightNestedProcessContractWeight -ResourceClass "ProcessHeavy"
+            }
             else {
-                Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
+                throw "Preflight script contract '$contractScript' reached execution without a resource classification."
             }
         }
-        $preflightProcessHeavyWeight = [Math]::Max(1, [int][Math]::Ceiling($hardwareBoundedResourceCapacity / 2.0))
-        Add-VerificationParallelPhase -Name "build-pullrequest" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "build-pullrequest.log") -EstimatedDurationSeconds 90 -Weight $preflightProcessHeavyWeight -ResourceClass "ProcessHeavy"
-        $frontendArguments = @("-NoProfile")
-        if ($runningOnWindows) {
-            $frontendArguments += @("-ExecutionPolicy", "Bypass")
-        }
-        $frontendArguments += @("-File", (Join-Path $PSScriptRoot "verify-frontend.ps1"), "-RepositoryRoot", $repoRoot, "-LogsPath", $verificationLogsPath)
-        Add-VerificationParallelPhase -Name "frontend-preflight" -FileName $powerShellExecutable -Arguments $frontendArguments -TimeoutSeconds 590 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "frontend-preflight.log") -EstimatedDurationSeconds 70 -Weight $preflightFrontendWeight -ResourceClass "CpuBound"
-        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-preflight phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$hardwareBoundedResourceCapacity maximum_resource_capacity=$hardwareBoundedResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers build_weight=$preflightProcessHeavyWeight frontend_weight=$preflightFrontendWeight coverage_contract_weight=$preflightCoverageContractWeight ordinary_contract_weight=1 configuration=$Configuration"
-        Invoke-VerificationParallelPhases -MaximumWorkers $hardwareBoundedResourceCapacity -MaximumResourceCapacity $hardwareBoundedResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers | Out-Null
+        Add-VerificationParallelPhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -TimeoutSeconds 240 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "format-whitespace.log") -EstimatedDurationSeconds 45 -Weight $preflightFormatWeight -ResourceClass "CpuBound"
+        Add-VerificationParallelPhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -TimeoutSeconds 240 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "format-naming-style.log") -EstimatedDurationSeconds 45 -Weight $preflightFormatWeight -ResourceClass "CpuBound"
+        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-post-build-preflight phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers maximum_cpu_bound=$preflightMaximumCpuBoundWorkers format_weight=$preflightFormatWeight coverage_contract_weight=$preflightCoverageContractWeight nested_process_contract_weight=$preflightNestedProcessContractWeight nested_process_contracts=$($preflightNestedProcessContractScripts.Count) nested_process_isolation=full-resource-capacity configuration=$Configuration"
+        Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers $preflightMaximumCpuBoundWorkers | Out-Null
         Reset-VerificationParallelPhaseState
         $script:LastCompletedVerificationPhase = "pull-request-preflight"
     }
@@ -381,8 +422,6 @@ try {
     Invoke-CheckedNativePhase -Name "test-partition-reconciliation" -FileName $powerShellExecutable -Arguments $partitionArguments -TimeoutSeconds 120
 
     $coverageStartedUtc = [DateTime]::UtcNow
-    Add-ProfiledRequiredGatePhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-whitespace.log")
-    Add-ProfiledRequiredGatePhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-naming-style.log")
     Add-ProfiledRequiredGatePhase -Name "git-diff-check" -FileName "git" -Arguments @("diff", "--check") -TimeoutSeconds 60 -OutputPath (Join-Path $verificationLogsPath "git-diff-check.log")
     foreach ($isolation in $isolations) {
         foreach ($lane in $isolation.Lanes) {

@@ -1000,7 +1000,7 @@ public sealed class AgentRuntimeFactoryTests
         }
 
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var record = await PersistTranscriptConflictReviewAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
         var turns = new DefaultConversationTurnStore(paths);

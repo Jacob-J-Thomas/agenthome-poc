@@ -120,8 +120,12 @@ $crossReportOverlap = @($executedGroups | Where-Object { @($_.Group.Report | Sor
 $executionIdDuplicates = @($executed | Group-Object -Property ExecutionId -CaseSensitive | Where-Object { $_.Count -ne 1 } | Sort-Object Name)
 $executedIds = @($executedGroups.Name | Sort-Object -CaseSensitive)
 $expectedIds = @($expected.Id | Sort-Object -CaseSensitive)
-$missing = @($expectedIds | Where-Object { $_ -cnotin $executedIds })
-$unexpected = @($executedIds | Where-Object { $_ -cnotin $expectedIds })
+$expectedIdSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$executedIdSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($id in $expectedIds) { [void]$expectedIdSet.Add($id) }
+foreach ($id in $executedIds) { [void]$executedIdSet.Add($id) }
+$missing = @($expectedIds | Where-Object { -not $executedIdSet.Contains($_) })
+$unexpected = @($executedIds | Where-Object { -not $expectedIdSet.Contains($_) })
 $nonPassing = @($executed | Where-Object { $_.Outcome -cne "Passed" } | Sort-Object Id)
 $slowest = @($executed | Sort-Object -Property @{ Expression = "DurationMilliseconds"; Descending = $true }, @{ Expression = "Id"; Descending = $false } | Select-Object -First $SlowestTestCount)
 $expectedById = @{}

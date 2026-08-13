@@ -4,19 +4,22 @@ $script:VerificationRequiredGateResourceCapacity = 8
 $script:VerificationRequiredGateMaximumProcessHeavyWorkers = 2
 $script:VerificationRequiredGateMaximumCpuBoundWorkers = 1
 $script:VerificationRequiredGateScheduleProfiles = @(
+    # The prior Startup remainder profiles totaled 312 seconds; two xUnit workers imply
+    # a 156-second floor, with 24 seconds retained for collection imbalance and setup.
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loop-execution-custom-runtime"; EstimatedDurationSeconds = 140; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"; EstimatedDurationSeconds = 140; Weight = 3; ResourceClass = "ProcessHeavy" }
+    # Hosted Loop API plus Web remainder observations totaled about 220 seconds;
+    # 130 seconds allows for their serialized API collection under two xUnit workers.
+    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-remainder"; EstimatedDurationSeconds = 130; Weight = 3; ResourceClass = "ProcessHeavy" }
+    # The prior non-Codex Integration profiles totaled 190 seconds; two xUnit workers
+    # imply a 95-second floor, with 25 seconds retained for imbalance and setup.
+    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-remainder"; EstimatedDurationSeconds = 120; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-runtime-host"; EstimatedDurationSeconds = 120; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loop-execution-governed-runtime"; EstimatedDurationSeconds = 115; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loops-other"; EstimatedDurationSeconds = 105; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-governance"; EstimatedDurationSeconds = 95; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-codex-app-server"; EstimatedDurationSeconds = 92; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-runtime-triggers"; EstimatedDurationSeconds = 85; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-remainder-capabilities"; EstimatedDurationSeconds = 82; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-remainder-triggers"; EstimatedDurationSeconds = 78; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-contextual-roles"; EstimatedDurationSeconds = 75; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-run-trace"; EstimatedDurationSeconds = 140; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-loop-api-run"; EstimatedDurationSeconds = 72; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-remainder"; EstimatedDurationSeconds = 72; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-capabilities"; EstimatedDurationSeconds = 68; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-custom-definition-control"; EstimatedDurationSeconds = 65; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-default-conversation"; EstimatedDurationSeconds = 65; Weight = 3; ResourceClass = "ProcessHeavy" }
@@ -25,12 +28,7 @@ $script:VerificationRequiredGateScheduleProfiles = @(
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-human-input"; EstimatedDurationSeconds = 60; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-graph-lifecycle"; EstimatedDurationSeconds = 55; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-tool-results-audit"; EstimatedDurationSeconds = 50; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-cli"; EstimatedDurationSeconds = 50; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-all"; EstimatedDurationSeconds = 45; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-remainder"; EstimatedDurationSeconds = 45; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "format-naming-style"; EstimatedDurationSeconds = 45; Weight = 2; ResourceClass = "CpuBound" }
-    [pscustomobject]@{ Name = "format-whitespace"; EstimatedDurationSeconds = 45; Weight = 2; ResourceClass = "CpuBound" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-loop-execution-remainder"; EstimatedDurationSeconds = 40; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-all"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Clients.Tests-all"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.E2ETests-all"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
@@ -70,6 +68,42 @@ function Get-VerificationPreflightFrontendWeight {
     return [Math]::Min(2, $ResourceCapacity)
 }
 
+function Get-VerificationPreflightNestedProcessContractWeight {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 8)]
+        [int]$ResourceCapacity
+    )
+
+    return $ResourceCapacity
+}
+
+function Assert-VerificationPreflightContractClassification {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$ContractScripts,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$CoverageContractScript,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$NestedProcessContractScripts,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$OrdinaryContractScripts
+    )
+
+    $classifiedScripts = @($CoverageContractScript) + @($NestedProcessContractScripts) + @($OrdinaryContractScripts)
+    $duplicateContracts = @($ContractScripts | Group-Object -CaseSensitive | Where-Object Count -gt 1 | ForEach-Object Name | Sort-Object)
+    $duplicateClassifications = @($classifiedScripts | Group-Object -CaseSensitive | Where-Object Count -gt 1 | ForEach-Object Name | Sort-Object)
+    $missingClassifications = @($ContractScripts | Where-Object { $candidate = $_; @($classifiedScripts | Where-Object { $_ -ceq $candidate }).Count -eq 0 } | Sort-Object)
+    $unexpectedClassifications = @($classifiedScripts | Where-Object { $candidate = $_; @($ContractScripts | Where-Object { $_ -ceq $candidate }).Count -eq 0 } | Sort-Object)
+    if ($duplicateContracts.Count -gt 0 -or $duplicateClassifications.Count -gt 0 -or $missingClassifications.Count -gt 0 -or $unexpectedClassifications.Count -gt 0) {
+        throw "Preflight script contracts must have exactly one resource classification. duplicate_contracts=[$($duplicateContracts -join ',')] duplicate_classifications=[$($duplicateClassifications -join ',')] missing_classifications=[$($missingClassifications -join ',')] unexpected_classifications=[$($unexpectedClassifications -join ',')]"
+    }
+}
+
 function Get-VerificationRequiredGateMaximumWorkers {
     param(
         [Parameter(Mandatory = $true)]
@@ -81,8 +115,8 @@ function Get-VerificationRequiredGateMaximumWorkers {
         [int]$HardwareProcessorCount
     )
 
-    $logicalLaneWorkerCeiling = [Math]::Min(6, [Math]::Min($script:VerificationRequiredGateResourceCapacity, [Math]::Max(1, [int][Math]::Floor($HardwareProcessorCount * 1.5))))
-    return [Math]::Min($MaximumTestWorkers, $logicalLaneWorkerCeiling)
+    $actualProcessCeiling = [Math]::Min(4, [Math]::Min($script:VerificationRequiredGateResourceCapacity, $HardwareProcessorCount))
+    return [Math]::Min($MaximumTestWorkers, $actualProcessCeiling)
 }
 
 function Get-VerificationRequiredGateScheduleProfiles {

@@ -50,6 +50,11 @@ if (args is ["default-turn-archive-process-loss", var archiveWorkspaceRoot, var 
     return await DefaultConversationStoreCrossProcessHost.RunArchiveProcessLossAsync(archiveWorkspaceRoot, archivePhase);
 }
 
+if (args is ["default-turn-process-loss", var turnWorkspaceRoot, var turnBoundary])
+{
+    return await DefaultConversationTurnProcessLossHost.RunAsync(turnWorkspaceRoot, turnBoundary);
+}
+
 if (args is ["default-turn-publication", var publicationWorkspaceRoot, var publicationReadyPath, var publicationReleasePath, var publicationResultPath])
 {
     return await DefaultConversationStoreCrossProcessHost.RunPublicationAsync(publicationWorkspaceRoot, publicationReadyPath, publicationReleasePath, publicationResultPath);

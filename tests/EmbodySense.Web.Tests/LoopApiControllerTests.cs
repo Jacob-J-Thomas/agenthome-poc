@@ -18,9 +18,16 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace EmbodySense.Web.Tests;
 
-public sealed class LoopApiControllerTests
+[Collection(EphemeralPortApiCollection.Name)]
+public sealed class LoopApiControllerTests : IClassFixture<LoopApiControllerTests.ReceiptRetentionFixture>
 {
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
+    private readonly ReceiptRetentionFixture _receiptRetentionFixture;
+
+    public LoopApiControllerTests(ReceiptRetentionFixture receiptRetentionFixture)
+    {
+        _receiptRetentionFixture = receiptRetentionFixture;
+    }
 
     [Fact]
     public async Task Loop_api_enforces_authentication_initialization_and_system_loop_lock()
@@ -233,28 +240,13 @@ public sealed class LoopApiControllerTests
     [InlineData(LoopReceiptRetentionHealth.RecoveryPending)]
     public async Task Receipt_retention_api_preserves_every_safe_health_state(LoopReceiptRetentionHealth health)
     {
-        using var workspace = new TestWorkspace();
-        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
-        var retention = new StubReceiptRetentionFacade(CreateRetentionPosture(health));
-        await using var app = CreateApp(workspace.RootPath, out var options, retention);
-        await app.StartAsync();
+        using var response = await _receiptRetentionFixture.ReadPostureAsync(health);
+        var posture = await response.Content.ReadFromJsonAsync<LoopReceiptRetentionPostureSnapshot>(_jsonOptions);
 
-        try
-        {
-            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
-            var response = await SendAsync(client, HttpMethod.Get, "/api/loops/receipt-retention", token);
-            var posture = await response.Content.ReadFromJsonAsync<LoopReceiptRetentionPostureSnapshot>(_jsonOptions);
-
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            Assert.True(response.Headers.CacheControl?.NoStore == true);
-            Assert.Equal(health, posture!.Health);
-            Assert.Equal(health, Assert.Single(posture.Classes).Health);
-        }
-        finally
-        {
-            await app.StopAsync();
-        }
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore == true);
+        Assert.Equal(health, posture!.Health);
+        Assert.Equal(health, Assert.Single(posture.Classes).Health);
     }
 
     [Fact]
@@ -491,11 +483,59 @@ public sealed class LoopApiControllerTests
 
     private sealed class StubReceiptRetentionFacade(LoopReceiptRetentionPostureSnapshot posture) : ILoopReceiptRetentionFacade
     {
-        public Task<LoopReceiptRetentionPostureSnapshot> GetPostureAsync(CancellationToken cancellationToken = default) => Task.FromResult(posture);
+        public LoopReceiptRetentionPostureSnapshot Posture { get; set; } = posture;
+
+        public Task<LoopReceiptRetentionPostureSnapshot> GetPostureAsync(CancellationToken cancellationToken = default) => Task.FromResult(Posture);
 
         public Task<LoopReceiptCleanupResponse> CleanupAsync(LoopReceiptCleanupInput input, CancellationToken cancellationToken = default)
         {
             return Task.FromResult(new LoopReceiptCleanupResponse("NothingEligible", LoopReceiptRetentionHealth.Healthy, false, "None", "None", 0, 0, "No eligible evidence."));
+        }
+    }
+
+    public sealed class ReceiptRetentionFixture : IAsyncLifetime
+    {
+        private readonly SemaphoreSlim _gate = new(1, 1);
+        private readonly StubReceiptRetentionFacade _retention = new(CreateRetentionPosture(LoopReceiptRetentionHealth.Healthy));
+        private readonly TestWorkspace _workspace = new();
+        private WebApplication? _app;
+        private WebRunOptions? _options;
+
+        public async Task InitializeAsync()
+        {
+            await WorkspaceInitializer.ForWeb().InitializeAsync(_workspace.RootPath);
+            _app = CreateApp(_workspace.RootPath, out var options, _retention);
+            _options = options;
+            await _app.StartAsync();
+        }
+
+        public async Task<HttpResponseMessage> ReadPostureAsync(LoopReceiptRetentionHealth health)
+        {
+            await _gate.WaitAsync();
+            try
+            {
+                _retention.Posture = CreateRetentionPosture(health);
+                using var client = new HttpClient { BaseAddress = new Uri(_options!.Url) };
+                var token = _app!.Services.GetRequiredService<WebSessionSecurity>().Token;
+                return await SendAsync(client, HttpMethod.Get, "/api/loops/receipt-retention", token);
+            }
+            finally
+            {
+                _retention.Posture = CreateRetentionPosture(LoopReceiptRetentionHealth.Healthy);
+                _gate.Release();
+            }
+        }
+
+        public async Task DisposeAsync()
+        {
+            if (_app is not null)
+            {
+                await _app.StopAsync();
+                await _app.DisposeAsync();
+            }
+
+            _workspace.Dispose();
+            _gate.Dispose();
         }
     }
 

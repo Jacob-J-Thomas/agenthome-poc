@@ -20,6 +20,14 @@ function Assert-Contains {
     Assert-True -Condition ($Actual.IndexOf($Expected, [StringComparison]::Ordinal) -ge 0) -Message "$Message Expected '$Expected'. Actual: $Actual"
 }
 
+$ordinalSetConstruction = '[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)'
+$partitionScript = Get-Content -LiteralPath $partitionScriptPath -Raw
+$inventoryScript = Get-Content -LiteralPath $inventoryScriptPath -Raw
+Assert-True -Condition (([regex]::Matches($partitionScript, [regex]::Escape($ordinalSetConstruction))).Count -eq 2) -Message "Partition reconciliation must use two ordinal identity sets."
+Assert-True -Condition (([regex]::Matches($inventoryScript, [regex]::Escape($ordinalSetConstruction))).Count -eq 2) -Message "Execution reconciliation must use two ordinal identity sets."
+Assert-True -Condition ($partitionScript.IndexOf("-cnotin", [StringComparison]::Ordinal) -lt 0) -Message "Partition reconciliation must not regress to quadratic array membership."
+Assert-True -Condition ($inventoryScript.IndexOf("-cnotin", [StringComparison]::Ordinal) -lt 0) -Message "Execution reconciliation must not regress to quadratic array membership."
+
 . $phaseScriptPath
 
 function Invoke-Script {
@@ -103,7 +111,7 @@ try {
     $idA = "11111111-1111-1111-1111-111111111111"
     $idB = "22222222-2222-2222-2222-222222222222"
     $testA = New-DiscoveryTest -Id $idA -XunitId "xunit-a" -Name "A"
-    $testB = New-DiscoveryTest -Id $idB -XunitId "xunit-b" -Name "B"
+    $testB = New-DiscoveryTest -Id $idB -XunitId "XUNIT-A" -Name "B"
     $canonicalRoot = Join-Path $scenarioRoot "canonical"
     New-Item -ItemType Directory -Path $canonicalRoot | Out-Null
     Write-DiscoveryInventory -Path (Join-Path $canonicalRoot "project.json") -Tests @($testA, $testB)
@@ -120,6 +128,8 @@ try {
     Assert-Contains -Actual $partition.Output -Expected "VERIFY_TEST_PARTITION_COMPLETE canonical=2 execution=2 lanes=2" -Message "Partition counts must be explicit."
     $partitionInventory = Get-Content -LiteralPath $expectedPath -Raw | ConvertFrom-Json
     Assert-True -Condition (@($partitionInventory.tests | Where-Object { $_.lane -ceq "lane-a" -and $_.fullyQualifiedName -ceq "Suite.A" }).Count -eq 1) -Message "The declarative include predicate must bind Suite.A to lane-a."
+    Assert-True -Condition (@($partitionInventory.tests | Where-Object { $_.xunitTestCaseUniqueId -ceq "xunit-a" }).Count -eq 1) -Message "Lower-case xUnit identities must remain distinct."
+    Assert-True -Condition (@($partitionInventory.tests | Where-Object { $_.xunitTestCaseUniqueId -ceq "XUNIT-A" }).Count -eq 1) -Message "Upper-case xUnit identities must remain distinct under ordinal reconciliation."
 
     Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
         (New-LaneDefinition -Name "lane-a" -Filter "((FullyQualifiedName~suite.a))&(VerificationTier!=Stress)"),
@@ -176,6 +186,19 @@ try {
     Assert-True -Condition ($passing.ExitCode -eq 0) -Message "One report per canonical ID with dynamic data rows must pass. Actual: $($passing.Output)"
     Assert-Contains -Actual $passing.Output -Expected "expected=2 executed_rows=3 unique_tests=2" -Message "Dynamic row multiplicity must remain visible."
     Assert-Contains -Actual $passing.Output -Expected "duration_milliseconds=250" -Message "Slowest-row diagnostics must be emitted."
+
+    $duplicateExpectedPath = Join-Path $scenarioRoot "duplicate-expected.json"
+    Write-ExecutionInventory -Path $duplicateExpectedPath -Tests @($executionTests[0], $executionTests[0])
+    $duplicateExpected = Invoke-Script -ScriptPath $inventoryScriptPath -Arguments @("-ExpectedInventoryPath", $duplicateExpectedPath, "-ResultsRoot", $passingRoot, "-ReportPath", (Join-Path $scenarioRoot "duplicate-expected-report.json"))
+    Assert-True -Condition ($duplicateExpected.ExitCode -ne 0) -Message "Duplicate expected TestCase identities must fail closed."
+    Assert-Contains -Actual $duplicateExpected.Output -Expected "contains duplicate TestCase IDs:" -Message "Duplicate expected-identity diagnostics must remain exact."
+
+    $malformedExpectedPath = Join-Path $scenarioRoot "malformed-expected.json"
+    $malformedExpected = [ordered]@{ schemaVersion = 1; totalTests = 2; tests = @($executionTests[0]) }
+    [IO.File]::WriteAllText($malformedExpectedPath, ($malformedExpected | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    $malformed = Invoke-Script -ScriptPath $inventoryScriptPath -Arguments @("-ExpectedInventoryPath", $malformedExpectedPath, "-ResultsRoot", $passingRoot, "-ReportPath", (Join-Path $scenarioRoot "malformed-expected-report.json"))
+    Assert-True -Condition ($malformed.ExitCode -ne 0) -Message "A malformed expected inventory shape must fail closed."
+    Assert-Contains -Actual $malformed.Output -Expected "Expected required-test inventory is empty or malformed" -Message "Malformed expected-inventory diagnostics must remain exact."
 
     $overlapResults = Join-Path $scenarioRoot "cross-report"
     New-Item -ItemType Directory -Path $overlapResults | Out-Null

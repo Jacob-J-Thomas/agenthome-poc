@@ -14,7 +14,7 @@ function Resolve-VerificationPhysicalTempRoot {
     }
 
     $physicalPath = [IO.Path]::GetFullPath($candidate)
-    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX) -and ($physicalPath -eq "/var" -or $physicalPath.StartsWith("/var/", [StringComparison]::Ordinal))) {
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX) -and ($physicalPath -eq "/var" -or $physicalPath.StartsWith("/var/", [StringComparison]::Ordinal) -or $physicalPath -eq "/tmp" -or $physicalPath.StartsWith("/tmp/", [StringComparison]::Ordinal))) {
         $physicalPath = "/private" + $physicalPath
     }
 
