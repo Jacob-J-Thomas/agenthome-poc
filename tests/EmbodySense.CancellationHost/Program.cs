@@ -20,6 +20,7 @@ using EmbodySense.Core.Persistence.ContextualRoles.Models;
 using EmbodySense.Core.Persistence.Credentials;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.CancellationHost.Credentials;
+using EmbodySense.CancellationHost.CodexAppServer;
 using EmbodySense.CancellationHost.Persistence;
 using System.Collections.Immutable;
 using System.Text;
@@ -28,6 +29,16 @@ using System.Text.Json;
 if (args is ["custom-loop-run-stage", var runLockPath, var runStagingPath, var runReadyMarker, var runReleaseMarker])
 {
     return await CustomLoopRunStagingWriterHost.RunAsync(runLockPath, runStagingPath, runReadyMarker, runReleaseMarker);
+}
+
+if (args is ["codex-runtime-probe", var probeConfigurationPath, .. var probeArguments])
+{
+    return await CodexRuntimeProbeHost.RunAsync(probeConfigurationPath, probeArguments);
+}
+
+if (args is ["codex-conversation-probe", var conversationConfigurationPath, .. var conversationArguments])
+{
+    return await CodexConversationProbeHost.RunAsync(conversationConfigurationPath, conversationArguments);
 }
 
 if (args is ["credential-mutex-contention", var contentionId])

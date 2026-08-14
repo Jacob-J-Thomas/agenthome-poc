@@ -19,6 +19,7 @@ using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
+using System.Text.Json;
 
 namespace EmbodySense.Web.Tests;
 
@@ -947,99 +948,24 @@ public sealed class WebAgentRuntimeHostTests
         int turnDelayMilliseconds = 0,
         bool advertiseConfiguredModels = true)
     {
-        if (!OperatingSystem.IsWindows())
+        const string RelativeDirectory = "fake-codex-conversation";
+        var directory = workspace.File(RelativeDirectory);
+        Directory.CreateDirectory(directory);
+        var configurationPath = Path.Combine(directory, "conversation-config.json");
+        var configuration = new
         {
-            throw new PlatformNotSupportedException("The fake Codex app-server executable is currently implemented as a Windows command script.");
-        }
-
-        var scriptPath = workspace.File("fake-codex.ps1");
-        var commandPath = workspace.File("fake-codex.cmd");
-        await File.WriteAllTextAsync(scriptPath, $$"""
-            if ($args -contains "--version") {
-                Write-Output "codex-cli 999.0.0-test"
-                exit 0
-            }
-
-            $threadId = "thread-test"
-            $turnFailureMessage = {{FormatPowerShellStringLiteral(turnFailureMessage)}}
-            $turnDelayMilliseconds = {{turnDelayMilliseconds}}
-            $advertisedModels = if ({{(advertiseConfiguredModels ? "$true" : "$false")}}) { @("test-model", "gpt-test") } else { @("older-model") }
-            $turnNumber = 0
-
-            function Write-ProtocolJson($value) {
-                $value | ConvertTo-Json -Compress -Depth 20
-                [Console]::Out.Flush()
-            }
-
-            while (($line = [Console]::In.ReadLine()) -ne $null) {
-                $message = $line | ConvertFrom-Json
-
-                if ($message.id -eq 99) {
-                    $toolResponse = $message | ConvertTo-Json -Compress -Depth 20
-                    [IO.File]::WriteAllText((Join-Path $PSScriptRoot "owner-disconnected-tool-response.json"), $toolResponse)
-                    $text = "continued after governed tool denial"
-                    Write-ProtocolJson @{ method = "item/agentMessage/delta"; params = @{ threadId = $threadId; turnId = "turn-test"; delta = $text } }
-                    Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = "turn-test"; turn = @{ id = "turn-test"; status = "completed"; items = @(@{ type = "agentMessage"; phase = "final_answer"; text = $text }) } } }
-                    continue
-                }
-
-                switch ($message.method) {
-                    "initialize" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{} }
-                    }
-
-                    "initialized" {
-                    }
-
-                    "model/list" {
-                        $models = @($advertisedModels | ForEach-Object { @{ id = $_; model = $_ } })
-                        Write-ProtocolJson @{ id = $message.id; result = @{ data = $models } }
-                    }
-
-                    "thread/start" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{ thread = @{ id = $threadId } } }
-                    }
-
-                    "turn/start" {
-                        $turnNumber++
-                        $turnId = "turn-test"
-                        $userText = [string]$message.params.input[0].text
-                        $currentUserMarker = "Current user message:"
-                        $currentUserIndex = $userText.IndexOf($currentUserMarker)
-                        if ($currentUserIndex -ge 0) {
-                            $userText = $userText.Substring($currentUserIndex + $currentUserMarker.Length).Trim()
-                        }
-
-                        $text = "web response: $userText"
-                        Write-ProtocolJson @{ id = $message.id; result = @{ turn = @{ id = $turnId } } }
-                        if ($turnDelayMilliseconds -eq -1) {
-                            Write-ProtocolJson @{ id = 99; method = "item/tool/call"; params = @{ threadId = $threadId; turnId = $turnId; callId = "call-owner-disconnect"; namespace = "embodysense"; tool = "command"; arguments = @{ command = "read"; path = "approval-only-note.txt" } } }
-                            break
-                        }
-                        if ($turnDelayMilliseconds -ge 30000) {
-                            [IO.File]::WriteAllText((Join-Path $PSScriptRoot "host-dispose-custom-loop.marker"), "started")
-                            $releasePath = Join-Path $PSScriptRoot "host-dispose-custom-loop.release"
-                            while (-not [IO.File]::Exists($releasePath)) {
-                                Start-Sleep -Milliseconds 25
-                            }
-                        }
-                        if ($turnFailureMessage) {
-                            Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = $turnId; turn = @{ id = $turnId; status = "failed"; error = @{ message = $turnFailureMessage }; items = @() } } }
-                            break
-                        }
-
-                        Write-ProtocolJson @{ method = "item/agentMessage/delta"; params = @{ threadId = $threadId; turnId = $turnId; delta = $text } }
-                        Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = $turnId; turn = @{ id = $turnId; status = "completed"; items = @(@{ type = "agentMessage"; phase = "final_answer"; text = $text }) } } }
-                    }
-                }
-            }
-            """);
-        await File.WriteAllTextAsync(commandPath, """
-            @echo off
-            powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-codex.ps1" %*
-            """);
-
-        return commandPath;
+            version = "codex-cli 999.0.0-test",
+            advertisedModels = advertiseConfiguredModels ? new[] { "test-model", "gpt-test" } : new[] { "older-model" },
+            responsePrefix = "web response: ",
+            turnFailureMessage,
+            waitForTurnRelease = turnDelayMilliseconds >= 30_000,
+            requestGovernedTool = turnDelayMilliseconds == -1,
+            turnReadyMarkerPath = workspace.File("host-dispose-custom-loop.marker"),
+            turnReleaseMarkerPath = workspace.File("host-dispose-custom-loop.release"),
+            toolResponsePath = workspace.File("owner-disconnected-tool-response.json")
+        };
+        await File.WriteAllTextAsync(configurationPath, JsonSerializer.Serialize(configuration, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        return await CancellationHostExecutable.CreateAsync(workspace, RelativeDirectory, "codex-conversation-probe", "conversation-config.json");
     }
 
     private static async Task<string> CreateTrackedFakeCodexExecutableAsync(TestWorkspace workspace)
@@ -1122,8 +1048,4 @@ public sealed class WebAgentRuntimeHostTests
         return commandPath;
     }
 
-    private static string FormatPowerShellStringLiteral(string? value)
-    {
-        return value is null ? "$null" : "'" + value.Replace("'", "''") + "'";
-    }
 }
