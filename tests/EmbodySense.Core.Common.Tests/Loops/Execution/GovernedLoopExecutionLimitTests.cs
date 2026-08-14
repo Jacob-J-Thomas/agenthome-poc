@@ -14,7 +14,7 @@ public sealed class GovernedLoopExecutionLimitTests
         var binding = GovernedLoopExecutionBinding.Create(1, maximumId, revision, GovernedLoopExecutionLimits.MaxExecutionGeneration);
         var lifecycle = GovernedLoopRunLifecyclePayload.Create(1, GovernedLoopExecutionLimits.MaxVersion, GovernedLoopRunStatus.Running, GovernedLoopExecutionTestFixture.CreatedAtUtc, GovernedLoopExecutionTestFixture.UpdatedAtUtc, null);
         var maximumReference = new string('a', GovernedLoopExecutionLimits.MaxEvidenceReferenceCharacters);
-        var node = GovernedLoopNodeExecutionEvidence.Create(maximumId, [], GovernedLoopExecutionLimits.MaxNodeAttempt, GovernedLoopNodeExecutionStatus.Completed, maximumReference);
+        var node = GovernedLoopNodeExecutionEvidence.Create(0, maximumId, Descriptor(), [], [], GovernedLoopNodeExecutionStatus.Completed, GovernedLoopExecutionLimits.MaxNodeAttempt, "operation", maximumReference, new string('f', 64));
 
         Assert.Equal(maximumId, binding.RunId);
         Assert.Equal(1, binding.SchemaVersion);
@@ -25,25 +25,29 @@ public sealed class GovernedLoopExecutionLimitTests
         Assert.Throws<ArgumentException>(() => GovernedLoopExecutionBinding.Create(1, maximumId + "a", revision, 1));
         Assert.Throws<ArgumentOutOfRangeException>(() => GovernedLoopExecutionBinding.Create(1, "run", revision, GovernedLoopExecutionLimits.MaxExecutionGeneration + 1));
         Assert.Throws<ArgumentOutOfRangeException>(() => GovernedLoopRunLifecyclePayload.Create(1, GovernedLoopExecutionLimits.MaxVersion + 1, GovernedLoopRunStatus.Running, GovernedLoopExecutionTestFixture.CreatedAtUtc, GovernedLoopExecutionTestFixture.UpdatedAtUtc, null));
-        Assert.Throws<ArgumentOutOfRangeException>(() => GovernedLoopNodeExecutionEvidence.Create("node", [], GovernedLoopExecutionLimits.MaxNodeAttempt + 1, GovernedLoopNodeExecutionStatus.Completed, "outcome"));
-        Assert.Throws<ArgumentException>(() => GovernedLoopNodeExecutionEvidence.Create("node", [], 1, GovernedLoopNodeExecutionStatus.Completed, maximumReference + "a"));
+        Assert.Throws<ArgumentOutOfRangeException>(() => GovernedLoopNodeExecutionEvidence.Create(0, "node", Descriptor(), [], [], GovernedLoopNodeExecutionStatus.Completed, GovernedLoopExecutionLimits.MaxNodeAttempt + 1, "operation", "outcome", new string('f', 64)));
+        Assert.Throws<ArgumentException>(() => GovernedLoopNodeExecutionEvidence.Create(0, "node", Descriptor(), [], [], GovernedLoopNodeExecutionStatus.Completed, 1, "operation", maximumReference + "a", new string('f', 64)));
     }
 
     [Fact]
     public void Incoming_edge_and_frontier_node_bounds_reject_limit_plus_one()
     {
         var maximumEdges = Enumerable.Range(0, GovernedLoopExecutionLimits.MaxIncomingEdges).Select(index => $"edge-{index:D3}").ToArray();
-        var node = GovernedLoopNodeExecutionEvidence.Create("join", maximumEdges, 1, GovernedLoopNodeExecutionStatus.Running, null);
+        var node = GovernedLoopNodeExecutionEvidence.Create(0, "join", Descriptor(), maximumEdges, [], GovernedLoopNodeExecutionStatus.Running, 1, "operation");
         var maximumNodes = Enumerable.Range(0, GovernedLoopExecutionLimits.MaxFrontierNodes)
-            .Select(index => GovernedLoopNodeExecutionEvidence.Create($"node-{index:D3}", [], null, GovernedLoopNodeExecutionStatus.Ready, null))
+            .Select(index => GovernedLoopExecutionTestFixture.Node(
+                index == GovernedLoopExecutionLimits.MaxFrontierNodes - 1 ? GovernedLoopNodeExecutionStatus.Ready : GovernedLoopNodeExecutionStatus.Completed,
+                $"node-{index:D3}",
+                incomingEdgeIds: [],
+                planOrdinal: index))
             .ToArray();
-        var frontier = GovernedLoopFrontierPayload.Create(1, 1, GovernedLoopFrontierStatus.Active, maximumNodes, GovernedLoopExecutionTestFixture.UpdatedAtUtc);
+        var frontier = GovernedLoopFrontierPayload.Create(1, 1, 1, GovernedLoopFrontierStatus.Active, maximumNodes, GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty);
 
-        Assert.Equal(GovernedLoopExecutionLimits.MaxIncomingEdges, node.IncomingEdgeIds.Count);
+        Assert.Equal(GovernedLoopExecutionLimits.MaxIncomingEdges, node.IncomingControlEdgeIds.Count);
         Assert.Equal(GovernedLoopExecutionLimits.MaxFrontierNodes, frontier.Nodes.Count);
-        Assert.Throws<ArgumentOutOfRangeException>(() => GovernedLoopNodeExecutionEvidence.Create("join", [.. maximumEdges, "edge-512"], 1, GovernedLoopNodeExecutionStatus.Running, null));
-        Assert.Throws<ArgumentOutOfRangeException>(() => GovernedLoopFrontierPayload.Create(1, 1, GovernedLoopFrontierStatus.Active, [.. maximumNodes, GovernedLoopNodeExecutionEvidence.Create("node-128", [], null, GovernedLoopNodeExecutionStatus.Ready, null)], GovernedLoopExecutionTestFixture.UpdatedAtUtc));
-        Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Active, [.. maximumNodes, GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "node-128")]));
+        Assert.Throws<ArgumentOutOfRangeException>(() => GovernedLoopNodeExecutionEvidence.Create(0, "join", Descriptor(), [.. maximumEdges, "edge-512"], [], GovernedLoopNodeExecutionStatus.Running, 1, "operation"));
+        Assert.Throws<ArgumentOutOfRangeException>(() => GovernedLoopFrontierPayload.Create(1, 1, 1, GovernedLoopFrontierStatus.Active, [.. maximumNodes, GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Completed, "node-128", incomingEdgeIds: [], planOrdinal: 128)], GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Active, [.. maximumNodes, GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Completed, "node-128", incomingEdgeIds: [])]));
         Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Cancelled, new GovernedLoopNodeExecutionEvidence[] { null! }));
     }
 
@@ -79,4 +83,7 @@ public sealed class GovernedLoopExecutionLimitTests
         Assert.Throws<ArgumentException>(() => GovernedLoopEffectPayload.Create(1, "effect", "operation", 1, GovernedLoopEffectOrigin.Provider, "node", new string('A', 64), GovernedLoopEffectPhase.IntentPrepared, GovernedLoopEffectOutcome.None, GovernedLoopEffectEvidenceStatus.Pending, null, null, GovernedLoopExecutionTestFixture.UpdatedAtUtc));
         Assert.Throws<ArgumentException>(() => GovernedLoopProjectionPayload.Create(1, "projection", "operation", GovernedLoopProjectionClass.LocalRuntime, GovernedLoopProjectionStatus.Pending, "source", null, null, null, null, default));
     }
+
+    private static GovernedLoopNodeDescriptor Descriptor()
+        => new(GovernedLoopNodeKind.Inference, "provider-inference", 1);
 }

@@ -22,6 +22,9 @@
   <ItemGroup>
     <Compile Include="..\Shared\TestCapabilityAdmissionFactory.cs" Link="Support\TestCapabilityAdmissionFactory.cs" />
     <Compile Include="..\Shared\TestCapabilityAdmissionService.cs" Link="Support\TestCapabilityAdmissionService.cs" />
+    <Compile Include="..\EmbodySense.Core.Common.Tests\Authority\Grants\AuthorityGrantTestFixture.cs" Link="Support\AuthorityGrantTestFixture.cs" />
+    <Compile Include="..\EmbodySense.Core.Common.Tests\Loops\Admission\GovernedLoopAdmissionTestFixture.cs" Link="Support\GovernedLoopAdmissionTestFixture.cs" />
+    <Compile Include="..\EmbodySense.Core.Common.Tests\Loops\Execution\Authority\GovernedLoopEffectAuthorityTestFixture.cs" Link="Support\GovernedLoopEffectAuthorityTestFixture.cs" />
   </ItemGroup>
 
   <PropertyGroup>

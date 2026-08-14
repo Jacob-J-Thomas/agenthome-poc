@@ -1,9 +1,14 @@
 using System.Globalization;
 using System.Text;
+using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
 
 namespace EmbodySense.Core.Application.Loops.GraphValidation;
 
@@ -58,7 +63,7 @@ public sealed class GovernedLoopGraphValidationService
 
         try
         {
-            authority = await _authorityProvider.GetSnapshotAsync(normalized.Graph!.OwningRoleId, cancellationToken);
+            authority = await _authorityProvider.GetSnapshotAsync(normalized.Graph!.OwningRole, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -168,7 +173,14 @@ public sealed class GovernedLoopGraphValidationService
             var portIds = new HashSet<string>(StringComparer.Ordinal);
             foreach (var port in descriptor.Ports.Take(CustomLoopLimits.MaxGraphPortsPerNode))
             {
-                if (port is null || !CustomLoopArtifactIdentifier.IsValid(port.Id) || !portIds.Add(port.Id) || !Enum.IsDefined(port.Direction) || port.Direction == GovernedLoopPortDirection.Unknown || !Enum.IsDefined(port.BindingKind) || port.BindingKind == GovernedLoopBindingKind.Unknown || !Enum.IsDefined(port.ValueKind) || port.ValueKind == GovernedLoopValueKind.Unknown)
+                if (port is null
+                    || !CustomLoopArtifactIdentifier.IsValid(port.Id)
+                    || !portIds.Add(port.Id)
+                    || !Enum.IsDefined(port.Direction)
+                    || port.Direction == GovernedLoopPortDirection.Unknown
+                    || !Enum.IsDefined(port.BindingKind)
+                    || port.BindingKind == GovernedLoopBindingKind.Unknown
+                    || !IsValidKindSet(port.AllowedValueKinds))
                 {
                     Add(errors, "catalog.port-contract.invalid", GovernedLoopGraphElementKind.Catalog, id, $"{path}.ports", "Catalog port contracts must be canonical, unique, and fully defined.");
                 }
@@ -181,7 +193,7 @@ public sealed class GovernedLoopGraphValidationService
         {
             Add(errors, "catalog.capabilities.count", GovernedLoopGraphElementKind.Catalog, id, $"{path}.requiredCapabilityIds", $"A descriptor may require at most {CustomLoopLimits.MaxGraphAuthorityCapabilities} capabilities.");
         }
-        else if (descriptor.RequiredCapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Any(capability => !CustomLoopArtifactIdentifier.IsValid(capability)) || descriptor.RequiredCapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Distinct(StringComparer.Ordinal).Count() != descriptor.RequiredCapabilityIds.Count)
+        else if (descriptor.RequiredCapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Any(capability => !CapabilityId.TryParse(capability, out _, out _)) || descriptor.RequiredCapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Distinct(StringComparer.Ordinal).Count() != descriptor.RequiredCapabilityIds.Count)
         {
             Add(errors, "catalog.capabilities.invalid", GovernedLoopGraphElementKind.Catalog, id, $"{path}.requiredCapabilityIds", "Catalog capabilities must be canonical and unique.");
         }
@@ -232,27 +244,42 @@ public sealed class GovernedLoopGraphValidationService
 
     private static void ValidateAuthoritySnapshot(GovernedLoopAuthoritySnapshot snapshot, List<GovernedLoopGraphValidationError> errors)
     {
-        if (!CustomLoopArtifactIdentifier.IsValid(snapshot.SourceEvidenceId) || !CustomLoopArtifactIdentifier.IsValid(snapshot.RoleId) || snapshot.CapabilityIds is null)
+        var role = snapshot.RoleRevision;
+        var lifecycle = snapshot.RoleLifecycle;
+        if (!IsSha256(snapshot.SourceEvidenceId)
+            || snapshot.OwningRole?.Identity is null
+            || role is null
+            || lifecycle is null
+            || !ContextualRoleWorkspaceId.IsValid(snapshot.WorkspaceId)
+            || snapshot.SourceStatus != ContextualRoleInstructionSourceProbeStatus.Ready
+            || !ContextualRoleRevisionValidator.Validate(role).IsValid
+            || !Equals(role.Identity, snapshot.OwningRole.Identity)
+            || !string.Equals(role.ContentHash, snapshot.OwningRole.ContentHash, StringComparison.Ordinal)
+            || !role.WorkspaceApplicability.AppliesTo(snapshot.WorkspaceId)
+            || !IsExactActiveLifecycle(lifecycle, snapshot.OwningRole.Identity)
+            || snapshot.CapabilityIds is null)
         {
-            Add(errors, "authority.snapshot.invalid", GovernedLoopGraphElementKind.Authority, snapshot.RoleId, "authority", "The authority snapshot identity, role, or capabilities are invalid.");
+            Add(errors, "authority.snapshot.invalid", GovernedLoopGraphElementKind.Authority, snapshot.OwningRole?.Identity.RoleId, "authority", "The authority snapshot identity, role, workspace, source, lifecycle, or capabilities are invalid.");
         }
         else if (snapshot.CapabilityIds.Count > CustomLoopLimits.MaxGraphAuthorityCapabilities)
         {
-            Add(errors, "authority.capabilities.count", GovernedLoopGraphElementKind.Authority, snapshot.RoleId, "authority.capabilityIds", $"Current role authority may contain at most {CustomLoopLimits.MaxGraphAuthorityCapabilities} capabilities.");
+            Add(errors, "authority.capabilities.count", GovernedLoopGraphElementKind.Authority, snapshot.OwningRole.Identity.RoleId, "authority.capabilityIds", $"Current role authority may contain at most {CustomLoopLimits.MaxGraphAuthorityCapabilities} capabilities.");
         }
-        else if (snapshot.CapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Any(capability => !CustomLoopArtifactIdentifier.IsValid(capability)) || snapshot.CapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Distinct(StringComparer.Ordinal).Count() != snapshot.CapabilityIds.Count)
+        else if (snapshot.CapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Any(capability => !CapabilityId.TryParse(capability, out _, out _))
+            || snapshot.CapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Distinct(StringComparer.Ordinal).Count() != snapshot.CapabilityIds.Count
+            || !SameCapabilitySet(snapshot.CapabilityIds, role.PolicyMaxima.CapabilityIds))
         {
-            Add(errors, "authority.snapshot.invalid", GovernedLoopGraphElementKind.Authority, snapshot.RoleId, "authority", "The authority snapshot identity, role, or capabilities are invalid.");
+            Add(errors, "authority.snapshot.invalid", GovernedLoopGraphElementKind.Authority, snapshot.OwningRole.Identity.RoleId, "authority", "The authority snapshot capability maximum must exactly match the pinned contextual-role revision.");
         }
 
-        ValidateResourceBudget(new GovernedLoopNodeResourceBudget(snapshot.MaxAttempts, snapshot.MaxPayloadCharacters, snapshot.MaxEvidenceItems, snapshot.MaxResourceUnits), CustomLoopLimits.MaxGraphNodeAttempts, CustomLoopLimits.MaxGraphNodePayloadCharacters, CustomLoopLimits.MaxGraphNodeEvidenceItems, CustomLoopLimits.MaxGraphNodeResourceUnits, "authority.resource-limits.invalid", GovernedLoopGraphElementKind.Authority, snapshot.RoleId, "authority.resourceLimits", errors);
+        ValidateResourceBudget(new GovernedLoopNodeResourceBudget(snapshot.MaxAttempts, snapshot.MaxPayloadCharacters, snapshot.MaxEvidenceItems, snapshot.MaxResourceUnits), CustomLoopLimits.MaxGraphAggregateAttempts, CustomLoopLimits.MaxGraphAggregatePayloadCharacters, CustomLoopLimits.MaxGraphAggregateEvidenceItems, CustomLoopLimits.MaxGraphAggregateResourceUnits, "authority.resource-limits.invalid", GovernedLoopGraphElementKind.Authority, snapshot.OwningRole?.Identity.RoleId, "authority.resourceLimits", errors);
     }
 
     private static void ValidateAuthority(GovernedLoopGraphDefinition graph, GovernedLoopAuthoritySnapshot authority, List<GovernedLoopGraphValidationError> errors)
     {
-        if (!string.Equals(graph.OwningRoleId, authority.RoleId, StringComparison.Ordinal))
+        if (!Equals(graph.OwningRole, authority.OwningRole))
         {
-            Add(errors, "authority.role.mismatch", GovernedLoopGraphElementKind.Authority, authority.RoleId, "authority.roleId", "Authority evidence must belong to the graph's owning role.");
+            Add(errors, "authority.role.mismatch", GovernedLoopGraphElementKind.Authority, authority.OwningRole?.Identity.RoleId, "authority.owningRole", "Authority evidence must belong to the graph's exact owning-role revision.");
         }
 
         var current = authority.CapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).ToHashSet(StringComparer.Ordinal);
@@ -261,6 +288,23 @@ public sealed class GovernedLoopGraphValidationService
             Add(errors, "authority.loop.widens-current-role", GovernedLoopGraphElementKind.Authority, capability, "graph.authorityCeiling", "The loop ceiling cannot widen current role authority.");
         }
     }
+
+    private static bool SameCapabilitySet(IReadOnlyList<string> left, IReadOnlyList<string> right)
+        => left.Count == right.Count && left.ToHashSet(StringComparer.Ordinal).SetEquals(right);
+
+    private static bool IsExactActiveLifecycle(ContextualRoleLifecycleSnapshot lifecycle, ContextualRoleRevisionIdentity identity)
+        => lifecycle.SchemaVersion == 1
+            && string.Equals(lifecycle.RoleId, identity.RoleId, StringComparison.Ordinal)
+            && Equals(lifecycle.CurrentIdentity, identity)
+            && lifecycle.State == ContextualRoleLifecycleState.Active
+            && ContextualRoleId.IsValid(lifecycle.LastOperationId)
+            && Enum.IsDefined(lifecycle.LastMutationKind)
+            && lifecycle.LastMutationKind != ContextualRoleRevisionMutationKind.Unknown
+            && lifecycle.UpdatedAtUtc != default
+            && lifecycle.UpdatedAtUtc.Offset == TimeSpan.Zero;
+
+    private static bool IsSha256(string? value)
+        => value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static void ValidateDescriptors(GovernedLoopGraphDefinition graph, IReadOnlyDictionary<(GovernedLoopNodeKind Kind, string TypeId, int Version), GovernedLoopNodeCatalogDescriptor> catalog, GovernedLoopAuthoritySnapshot authority, List<GovernedLoopGraphValidationError> errors)
     {
@@ -297,6 +341,7 @@ public sealed class GovernedLoopGraphValidationService
 
             ValidateNodePorts(graph, node, descriptor, errors);
             ValidateNodeParameters(node, descriptor, errors);
+            ValidatePureNodeSchemaSemantics(graph, node, errors);
             ValidateNodeAuthority(node, descriptor, errors);
         }
 
@@ -304,6 +349,29 @@ public sealed class GovernedLoopGraphValidationService
         ValidateJoins(graph, semantics, errors);
         ValidateCycles(graph, semantics, errors);
         ValidateResources(graph, semantics, authority, errors);
+    }
+
+    private static void ValidatePureNodeSchemaSemantics(
+        GovernedLoopGraphDefinition graph,
+        GovernedLoopNodeDefinition node,
+        List<GovernedLoopGraphValidationError> errors)
+    {
+        if (!GovernedLoopPureNodeCatalogContract.TryResolve(node.Descriptor, out _))
+        {
+            return;
+        }
+
+        var schemas = graph.ValueSchemas.ToDictionary(schema => schema.Id, StringComparer.Ordinal);
+        if (!GovernedLoopPureNodeCatalogContract.HasExactSchemaSemantics(node, schemas))
+        {
+            Add(
+                errors,
+                "node.pure-schema-contract.incompatible",
+                GovernedLoopGraphElementKind.Node,
+                node.Id,
+                $"graph.nodes[{node.Id}]",
+                "The pure-node schema relationships, bounded topology, nullability, element schema, or ordered bounds conflict with the exact executable descriptor semantics.");
+        }
     }
 
     private static void ValidateNodePorts(GovernedLoopGraphDefinition graph, GovernedLoopNodeDefinition node, GovernedLoopNodeCatalogDescriptor descriptor, List<GovernedLoopGraphValidationError> errors)
@@ -320,7 +388,12 @@ public sealed class GovernedLoopGraphValidationService
                 continue;
             }
 
-            if (!schemas.TryGetValue(port.ValueSchemaId, out var schema) || port.Direction != contract.Direction || port.BindingKind != contract.BindingKind || port.Required != contract.Required || schema.Kind != contract.ValueKind)
+            if (!schemas.TryGetValue(port.ValueSchemaId, out var schema)
+                || port.Direction != contract.Direction
+                || port.BindingKind != contract.BindingKind
+                || port.Required != contract.Required
+                || contract.AllowedValueKinds is null
+                || !contract.AllowedValueKinds.Contains(schema.Kind))
             {
                 Add(errors, "node.port-contract.incompatible", GovernedLoopGraphElementKind.Port, $"{node.Id}.{portId}", path, "The port direction, channel, requiredness, or portable value kind conflicts with the descriptor contract.");
             }
@@ -370,10 +443,68 @@ public sealed class GovernedLoopGraphValidationService
             GovernedLoopParameterValueKind.Text => true,
             GovernedLoopParameterValueKind.Boolean => value is "true" or "false",
             GovernedLoopParameterValueKind.Integer => contract.MinimumInteger.HasValue && contract.MaximumInteger.HasValue && long.TryParse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var integer) && string.Equals(integer.ToString(CultureInfo.InvariantCulture), value, StringComparison.Ordinal) && integer >= contract.MinimumInteger.Value && integer <= contract.MaximumInteger.Value,
+            GovernedLoopParameterValueKind.Number => IsCanonicalFiniteNumber(value),
             GovernedLoopParameterValueKind.Identifier => CustomLoopArtifactIdentifier.IsValid(value),
+            GovernedLoopParameterValueKind.JsonPointer => IsCanonicalJsonPointer(value),
             GovernedLoopParameterValueKind.Enumeration => contract.AllowedValues.Contains(value, StringComparer.Ordinal),
             _ => false
         };
+    }
+
+    private static bool IsValidKindSet(GovernedLoopValueKindSet? kinds)
+    {
+        if (kinds?.Kinds is not { Count: > 0 } values)
+        {
+            return false;
+        }
+
+        var maximum = Enum.GetValues<GovernedLoopValueKind>().Count(value => value != GovernedLoopValueKind.Unknown);
+        return values.Count <= maximum
+            && values.All(value => Enum.IsDefined(value) && value != GovernedLoopValueKind.Unknown)
+            && values.Distinct().Count() == values.Count
+            && values.SequenceEqual(values.Order());
+    }
+
+    private static bool IsCanonicalFiniteNumber(string value)
+    {
+        return GovernedLoopTypedValue.TryCreate(
+                GovernedLoopTypedValue.CurrentSchemaVersion,
+                GovernedLoopValueKind.Number,
+                value,
+                out var canonical,
+                out _)
+            && !canonical!.IsNull
+            && string.Equals(canonical.CanonicalValueJson, value, StringComparison.Ordinal)
+            && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+            && double.IsFinite(number);
+    }
+
+    private static bool IsCanonicalJsonPointer(string value)
+    {
+        if (value.Length == 0)
+        {
+            return true;
+        }
+
+        if (value[0] != '/')
+        {
+            return false;
+        }
+
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (value[index] != '~')
+            {
+                continue;
+            }
+
+            if (++index >= value.Length || value[index] is not ('0' or '1'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool IsCanonicalParameterText(string? value, int minimumCharacters, int maximumCharacters)

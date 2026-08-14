@@ -1,3 +1,6 @@
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Common.Capabilities;
@@ -11,6 +14,28 @@ namespace EmbodySense.Core.Startup.Tests.Capabilities;
 
 public sealed class BuiltInCapabilityCatalogSeederTests
 {
+    private static readonly JsonSerializerOptions _catalogArtifactJsonOptions = CreateCatalogJsonOptions(writeIndented: true);
+    private static readonly JsonSerializerOptions _catalogHashJsonOptions = CreateCatalogJsonOptions(writeIndented: false);
+
+    [Fact]
+    public void Catalog_declares_one_exact_non_effecting_local_model_inference_graph_node()
+    {
+        var descriptor = Assert.Single(
+            BuiltInCapabilityCatalog.Descriptors,
+            item => item.Id.Value == "org.embodysense/model-inference");
+
+        Assert.Equal(CapabilityDescriptor.CurrentSchemaVersion, descriptor.SchemaVersion);
+        Assert.Equal("1.0.0", descriptor.Version.Value);
+        Assert.Equal(CapabilityKind.GraphNode, descriptor.Kind);
+        Assert.Equal("org.embodysense", descriptor.Implementation.ProviderId.Value);
+        Assert.Equal("model-inference", descriptor.Implementation.ImplementationId);
+        Assert.Equal(CapabilitySideEffectClass.None, descriptor.SideEffectClass);
+        Assert.Equal(CapabilityEgressMode.None, descriptor.Requirements.EgressMode);
+        Assert.Empty(descriptor.Requirements.DataClasses);
+        Assert.Empty(descriptor.Requirements.EgressDestinations);
+        Assert.Empty(descriptor.Requirements.Secrets);
+    }
+
     [Fact]
     public void Host_runtime_exposes_one_exact_compatible_bounded_context()
     {
@@ -72,20 +97,25 @@ public sealed class BuiltInCapabilityCatalogSeederTests
         var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
         var service = new CapabilityCatalogService(new CapabilityCatalogStore(paths, provider));
         var template = BuiltInCapabilityCatalog.Descriptors[0];
-        var revision = 0L;
-        for (var index = 0; index <= CapabilityCatalogLimits.MaximumPageSize; index++)
-        {
-            _ = CapabilityId.TryParse($"aaa.example/capability-{index:D3}", out var id, out _);
-            var result = await service.DeclareAsync(template with { Id = id! }, revision, $"declare-prefill-{index:D3}");
-            Assert.Equal(CapabilityCatalogMutationStatus.Applied, result.Status);
-            revision = result.CatalogRevision!.Value;
-        }
+        await SeedAuthenticatedCatalogPagesAsync(paths, provider, template);
 
+        var firstPage = await service.ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
+        Assert.Equal(CapabilityCatalogReadStatus.Available, firstPage.Status);
+        Assert.Equal(CapabilityCatalogLimits.MaximumPageSize, firstPage.Page!.Entries.Count);
+        Assert.NotNull(firstPage.Page.NextCursor);
+        var secondPage = await service.ReadAsync(firstPage.Page.NextCursor, CapabilityCatalogLimits.MaximumPageSize);
+        Assert.Equal(CapabilityCatalogReadStatus.Available, secondPage.Status);
+        Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, secondPage.Page!.Entries.Count);
+        Assert.Equal(
+            BuiltInCapabilityCatalog.Descriptors.Select(descriptor => descriptor.Id).OrderBy(id => id.Value, StringComparer.Ordinal),
+            secondPage.Page.Entries.Select(entry => entry.Descriptor.Id).OrderBy(id => id.Value, StringComparer.Ordinal));
+
+        var originalArtifact = await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath);
         await new BuiltInCapabilityCatalogSeeder(provider).SeedAsync(paths);
-        var firstArtifact = await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath);
+        Assert.Equal(originalArtifact, await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath));
         await new BuiltInCapabilityCatalogSeeder(provider).SeedAsync(paths);
 
-        Assert.Equal(firstArtifact, await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath));
+        Assert.Equal(originalArtifact, await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath));
         var builtIns = await ReadBuiltInsAsync(new CapabilityCatalogStore(paths, provider));
         Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, builtIns.Count);
         Assert.All(builtIns, entry =>
@@ -95,6 +125,47 @@ public sealed class BuiltInCapabilityCatalogSeederTests
             Assert.Equal(CapabilityHealthState.Healthy, entry.Lifecycle.Health);
             Assert.Equal(CapabilityTrustState.Verified, entry.Lifecycle.Trust);
         });
+    }
+
+    private static async Task SeedAuthenticatedCatalogPagesAsync(WorkspacePaths paths, FileCapabilityCatalogTrustProvider provider, CapabilityDescriptor template)
+    {
+        // Pagination is the behavior under test. Bootstrap the real built-in while the catalog is small, then place
+        // it after one full page in one authenticated successor generation. This avoids repeatedly rewriting a
+        // maximum-size catalog during fixture setup while retaining the same durable, authenticated page boundary.
+        await new BuiltInCapabilityCatalogSeeder(provider).SeedAsync(paths);
+
+        var primaryJson = await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath);
+        var current = JsonSerializer.Deserialize<CapabilityCatalogFixtureDocument>(primaryJson, _catalogArtifactJsonOptions)!;
+        Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, current.Entries.Count);
+        var sourceEntry = current.Entries[0];
+        var entries = new List<CapabilityCatalogFixtureEntry>(CapabilityCatalogLimits.MaximumPageSize + current.Entries.Count);
+        for (var index = 0; index < CapabilityCatalogLimits.MaximumPageSize; index++)
+        {
+            Assert.True(CapabilityId.TryParse($"aaa.example/capability-{index:D3}", out var id, out _));
+            Assert.True(CapabilityDescriptorJson.TrySerialize(template with { Id = id! }, out var descriptorJson, out _));
+            entries.Add(sourceEntry with { DescriptorJson = descriptorJson!, LastOperationId = $"declare-prefill-{index:D3}" });
+        }
+        entries.AddRange(current.Entries);
+
+        var candidateGeneration = checked(current.Generation + 1);
+        var candidate = current with { Generation = candidateGeneration, CatalogRevision = entries.Count, Entries = entries, ContentDigest = string.Empty, AuthenticationTag = string.Empty };
+        var contentDigest = CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(candidate, _catalogHashJsonOptions))).Value;
+        var authenticationTag = await provider.AuthenticateArtifactAsync(current.WorkspaceIdentity, candidateGeneration, contentDigest);
+        candidate = candidate with { ContentDigest = contentDigest, AuthenticationTag = authenticationTag };
+
+        File.Copy(paths.CapabilityCatalogDocumentPath, paths.CapabilityCatalogProofPath, overwrite: true);
+        await File.WriteAllTextAsync(paths.CapabilityCatalogDocumentPath, JsonSerializer.Serialize(candidate, _catalogArtifactJsonOptions) + Environment.NewLine);
+        _ = await provider.AdvanceAsync(current.WorkspaceIdentity, current.Generation, current.ContentDigest, candidateGeneration, contentDigest);
+    }
+
+    private static JsonSerializerOptions CreateCatalogJsonOptions(bool writeIndented)
+    {
+        return new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            WriteIndented = writeIndented,
+            UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+            Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) }
+        };
     }
 
     [Theory]
@@ -300,4 +371,42 @@ public sealed class BuiltInCapabilityCatalogSeederTests
 
         return entries;
     }
+
+    private sealed record CapabilityCatalogFixtureDocument(
+        int SchemaVersion,
+        string WorkspaceIdentity,
+        long Generation,
+        long CatalogRevision,
+        IReadOnlyList<CapabilityCatalogFixtureEntry> Entries,
+        IReadOnlyList<CapabilityCatalogFixtureOperation> Operations,
+        string ContentDigest,
+        string AuthenticationTag);
+
+    private sealed record CapabilityCatalogFixtureEntry(
+        string DescriptorJson,
+        long Revision,
+        CapabilityDeclarationState Declaration,
+        CapabilityInstallationState Installation,
+        CapabilityEnablementState Enablement,
+        CapabilityHealthState Health,
+        CapabilityRetirementState Retirement,
+        CapabilityTrustState Trust,
+        DateTimeOffset UpdatedAtUtc,
+        string LastOperationId);
+
+    private sealed record CapabilityCatalogFixtureOperation(
+        string OperationId,
+        string RequestHash,
+        CapabilityCatalogMutationStatus Outcome,
+        long CatalogRevision,
+        string CapabilityId,
+        long EntryRevision,
+        CapabilityDeclarationState Declaration,
+        CapabilityInstallationState Installation,
+        CapabilityEnablementState Enablement,
+        CapabilityHealthState Health,
+        CapabilityRetirementState Retirement,
+        CapabilityTrustState Trust,
+        DateTimeOffset UpdatedAtUtc,
+        string LastOperationId);
 }

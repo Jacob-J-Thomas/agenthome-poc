@@ -13,10 +13,11 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
     private readonly List<SafeFileHandle> _ownedDirectories;
     private readonly ICapabilityCatalogDurabilityBarrier _durabilityBarrier;
     private readonly ICapabilityCatalogPathObserver? _pathObserver;
+    private readonly TimeProvider _timeProvider;
     private FileStream? _lock;
     private string? _lockPath;
 
-    private CapabilityCatalogPathSession(string root, StringComparison comparison, Dictionary<string, SafeFileHandle> directories, List<SafeFileHandle> ownedDirectories, ICapabilityCatalogDurabilityBarrier durabilityBarrier, ICapabilityCatalogPathObserver? pathObserver)
+    private CapabilityCatalogPathSession(string root, StringComparison comparison, Dictionary<string, SafeFileHandle> directories, List<SafeFileHandle> ownedDirectories, ICapabilityCatalogDurabilityBarrier durabilityBarrier, ICapabilityCatalogPathObserver? pathObserver, TimeProvider timeProvider)
     {
         _root = root;
         _comparison = comparison;
@@ -24,6 +25,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         _ownedDirectories = ownedDirectories;
         _durabilityBarrier = durabilityBarrier;
         _pathObserver = pathObserver;
+        _timeProvider = timeProvider;
         PhysicalIdentityMaterial = CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(directories[string.Empty]);
     }
 
@@ -31,9 +33,10 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
 
     public string Root => _root;
 
-    public static CapabilityCatalogPathSession? Open(string root, StringComparison comparison, bool createRoot, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityCatalogPathObserver? pathObserver = null)
+    public static CapabilityCatalogPathSession? Open(string root, StringComparison comparison, bool createRoot, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityCatalogPathObserver? pathObserver = null, TimeProvider? timeProvider = null)
     {
         durabilityBarrier ??= NativeCapabilityCatalogDurabilityBarrier.Instance;
+        timeProvider ??= TimeProvider.System;
         var directories = new Dictionary<string, SafeFileHandle>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         var owned = new List<SafeFileHandle>();
         try
@@ -69,7 +72,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             }
 
             directories[string.Empty] = current;
-            return new CapabilityCatalogPathSession(root, comparison, directories, owned, durabilityBarrier, pathObserver);
+            return new CapabilityCatalogPathSession(root, comparison, directories, owned, durabilityBarrier, pathObserver, timeProvider);
         }
         catch
         {
@@ -103,7 +106,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
 
             if (attempt < 249)
             {
-                await Task.Delay(20, cancellationToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(20), _timeProvider, cancellationToken);
             }
         }
 

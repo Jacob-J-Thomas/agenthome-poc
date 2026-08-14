@@ -1,10 +1,10 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Loops.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.Models;
-using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
@@ -13,6 +13,7 @@ using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Triggers;
@@ -27,13 +28,14 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     private readonly ICustomLoopDefinitionStore _definitionStore;
     private readonly ICustomLoopRunStore _runStore;
     private readonly ICustomLoopInvocationOperationStore _invocationOperationStore;
-    private readonly CustomLoopInvocationReceiptRetentionService _invocationReceiptRetention;
+    private readonly CustomLoopInvocationReceiptWriter _invocationReceiptWriter;
     private readonly ICustomLoopControlOperationStore _controlOperationStore;
     private readonly ICustomLoopWorkspaceExecutionGate _executionGate;
     private readonly CustomLoopAdmissionService _admissionService;
     private readonly CustomLoopRecoveryService _recoveryService;
     private readonly CustomLoopLifecycleService _lifecycleService;
-    private readonly CustomLoopOrderedRunner _runner;
+    private readonly CustomLoopOrderedRunner _humanInvocationRunner;
+    private readonly CustomLoopOrderedRunner _triggerInvocationRunner;
     private readonly CustomLoopRuntimeContext _runtimeContext;
     private readonly SemaphoreSlim _executionAvailabilityGate = new(1, 1);
     private readonly string _surface;
@@ -52,13 +54,14 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     /// <param name="definitionStore">The definition store.</param>
     /// <param name="runStore">The run store.</param>
     /// <param name="invocationOperationStore">The invocation operation store.</param>
-    /// <param name="invocationReceiptRetention">The invocation receipt retention.</param>
+    /// <param name="invocationReceiptWriter">The shared governed invocation receipt writer.</param>
     /// <param name="controlOperationStore">The control operation store.</param>
     /// <param name="executionGate">The execution gate.</param>
     /// <param name="admissionService">The admission service.</param>
     /// <param name="recoveryService">The recovery service.</param>
     /// <param name="lifecycleService">The lifecycle service.</param>
-    /// <param name="runner">The runner.</param>
+    /// <param name="humanInvocationRunner">The retained compatibility runner used only for intentional human invocation.</param>
+    /// <param name="triggerInvocationRunner">The governed runner used for explicit trigger-adapter invocation.</param>
     /// <param name="runtimeContext">The runtime context.</param>
     /// <param name="customExecutionAvailable">The custom execution available.</param>
     /// <param name="customExecutionReacquisitionAllowed">The custom execution reacquisition allowed.</param>
@@ -72,13 +75,14 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         ICustomLoopDefinitionStore definitionStore,
         ICustomLoopRunStore runStore,
         ICustomLoopInvocationOperationStore invocationOperationStore,
-        CustomLoopInvocationReceiptRetentionService invocationReceiptRetention,
+        CustomLoopInvocationReceiptWriter invocationReceiptWriter,
         ICustomLoopControlOperationStore controlOperationStore,
         ICustomLoopWorkspaceExecutionGate executionGate,
         CustomLoopAdmissionService admissionService,
         CustomLoopRecoveryService recoveryService,
         CustomLoopLifecycleService lifecycleService,
-        CustomLoopOrderedRunner runner,
+        CustomLoopOrderedRunner humanInvocationRunner,
+        CustomLoopOrderedRunner triggerInvocationRunner,
         CustomLoopRuntimeContext runtimeContext,
         bool customExecutionAvailable,
         bool customExecutionReacquisitionAllowed,
@@ -92,13 +96,14 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         _definitionStore = definitionStore ?? throw new ArgumentNullException(nameof(definitionStore));
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _invocationOperationStore = invocationOperationStore ?? throw new ArgumentNullException(nameof(invocationOperationStore));
-        _invocationReceiptRetention = invocationReceiptRetention ?? throw new ArgumentNullException(nameof(invocationReceiptRetention));
+        _invocationReceiptWriter = invocationReceiptWriter ?? throw new ArgumentNullException(nameof(invocationReceiptWriter));
         _controlOperationStore = controlOperationStore ?? throw new ArgumentNullException(nameof(controlOperationStore));
         _executionGate = executionGate ?? throw new ArgumentNullException(nameof(executionGate));
         _admissionService = admissionService ?? throw new ArgumentNullException(nameof(admissionService));
         _recoveryService = recoveryService ?? throw new ArgumentNullException(nameof(recoveryService));
         _lifecycleService = lifecycleService ?? throw new ArgumentNullException(nameof(lifecycleService));
-        _runner = runner ?? throw new ArgumentNullException(nameof(runner));
+        _humanInvocationRunner = humanInvocationRunner ?? throw new ArgumentNullException(nameof(humanInvocationRunner));
+        _triggerInvocationRunner = triggerInvocationRunner ?? throw new ArgumentNullException(nameof(triggerInvocationRunner));
         _runtimeContext = runtimeContext ?? throw new ArgumentNullException(nameof(runtimeContext));
         _customExecutionAvailable = customExecutionAvailable;
         _customExecutionReacquisitionAllowed = customExecutionReacquisitionAllowed;
@@ -129,15 +134,39 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     /// proved. Unsupported run-discovery schemas fail closed with explicit cleanup guidance.
     /// </remarks>
     public Task<LoopRunInvocationResponse> InvokeAsync(LoopRunInvocationInput input, CancellationToken cancellationToken)
-        => InvokeAuthorizedAsync(input, _actor, _surface, _currentRoleId, cancellationToken);
+    {
+        if (input is not null && TriggerDispatchOperationId.IsValid(input.OperationId))
+        {
+            return Task.FromResult(Invalid("The trigger-worker operation identity namespace is reserved for authenticated trigger dispatch."));
+        }
+
+        return InvokeAuthorizedAsync(input!, _actor, _surface, _currentRoleId, _humanInvocationRunner, cancellationToken);
+    }
 
     async Task<LoopRunInvocationResponse> ITriggerCustomLoopInvoker.InvokeAsync(LoopRunInvocationInput input, TriggerActorContext actorContext, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(actorContext);
-        return await InvokeAuthorizedAsync(input, actorContext.ActorId.Value, actorContext.SurfaceId, actorContext.RoleId, cancellationToken);
+        if (input is not null && !TriggerDispatchOperationId.IsValid(input.OperationId))
+        {
+            return Invalid("Authenticated trigger dispatch requires the exact trigger-worker operation identity shape.");
+        }
+
+        return await InvokeAuthorizedAsync(
+            input!,
+            actorContext.ActorId.Value,
+            actorContext.SurfaceId,
+            actorContext.RoleId,
+            _triggerInvocationRunner,
+            cancellationToken);
     }
 
-    private async Task<LoopRunInvocationResponse> InvokeAuthorizedAsync(LoopRunInvocationInput input, string actor, string surface, string currentRoleId, CancellationToken cancellationToken)
+    private async Task<LoopRunInvocationResponse> InvokeAuthorizedAsync(
+        LoopRunInvocationInput input,
+        string actor,
+        string surface,
+        string currentRoleId,
+        CustomLoopOrderedRunner runner,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
         CustomLoopInvocationOperation pending;
@@ -261,7 +290,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             CustomLoopInvocationOperation operation;
             try
             {
-                var begun = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BeginAsync(pending, token), pending.Actor, pending.Surface, cancellationToken);
+                var begun = await _invocationReceiptWriter.BeginAsync(pending, cancellationToken);
                 if (begun.Status == CustomLoopInvocationOperationStoreStatus.Conflict)
                 {
                     return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
@@ -447,7 +476,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
                 return new LoopRunInvocationResponse(CustomLoopAdmissionStatus.Admitted.ToString(), admission.Run?.Status.ToString(), false, admission.Run is null ? null : Map(admission.Run), admission.ValidationErrors.Select(Map).ToArray(), "The durable admitted invocation outcome was recovered without another provider dispatch.");
             }
 
-            var execution = await ExecuteOrderedRunAsync(_runner.RunAsync(new CustomLoopOrderedRunRequest(admission.Run!.Id, actor), cancellationToken));
+            var execution = await ExecuteOrderedRunAsync(runner.RunAsync(new CustomLoopOrderedRunRequest(admission.Run!.Id, actor), cancellationToken));
             CustomLoopRunRecord? executedRun = execution.Run;
             var executionDetail = execution.Detail;
             if (executedRun is null)
@@ -617,7 +646,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         _executionAvailabilityGate.Dispose();
     }
 
-    private async Task<CustomExecutionAvailability> EnsureCustomExecutionAvailableAsync(string actor, CancellationToken cancellationToken)
+    internal async Task<CustomExecutionAvailability> EnsureCustomExecutionAvailableAsync(string actor, CancellationToken cancellationToken)
     {
         if (Volatile.Read(ref _customExecutionAvailable))
         {
@@ -840,7 +869,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             var durable = operation;
             if (operation.BindingState == CustomLoopInvocationBindingState.Unbound)
             {
-                var begun = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BeginAsync(operation, token), operation.Actor, operation.Surface, cancellationToken);
+                var begun = await _invocationReceiptWriter.BeginAsync(operation, cancellationToken);
                 if (begun.Status == CustomLoopInvocationOperationStoreStatus.Conflict)
                 {
                     return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
@@ -925,7 +954,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         CustomLoopInvocationOperationStoreResult stored;
         try
         {
-            stored = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BindAsync(bound, token), bound.Actor, bound.Surface, cancellationToken);
+            stored = await _invocationReceiptWriter.BindAsync(bound, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -1212,43 +1241,13 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         using var integrity = new CancellationTokenSource(_integrityWriteTimeout);
         try
         {
-            var result = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.CompleteAsync(completed, token), completed.Actor, completed.Surface, integrity.Token);
+            var result = await _invocationReceiptWriter.CompleteAsync(completed, integrity.Token);
             return result.Status is CustomLoopInvocationOperationStoreStatus.Completed or CustomLoopInvocationOperationStoreStatus.Replayed;
         }
         catch
         {
             return false;
         }
-    }
-
-    private async Task<CustomLoopInvocationOperationStoreResult> WriteReceiptWithRetentionAsync(
-        Func<CancellationToken, Task<CustomLoopInvocationOperationStoreResult>> write,
-        string actor,
-        string surface,
-        CancellationToken cancellationToken)
-    {
-        var result = await write(cancellationToken);
-        if (result.Status is not (CustomLoopInvocationOperationStoreStatus.LimitExceeded or CustomLoopInvocationOperationStoreStatus.RetentionRequired))
-        {
-            return result;
-        }
-
-        // Capacity is reclaimed only through governed retention. The original write is retried once
-        // after retention succeeds so no caller can bypass replay and audit guarantees.
-        var retention = await _invocationReceiptRetention.PruneForCapacityAsync(actor, surface, cancellationToken);
-        if (!retention.AllowsReceiptWrite)
-        {
-            var status = retention.Status switch
-            {
-                CustomLoopInvocationReceiptRetentionStatus.OperationInProgress => CustomLoopInvocationOperationStoreStatus.RetentionRequired,
-                CustomLoopInvocationReceiptRetentionStatus.AuditUnavailable => CustomLoopInvocationOperationStoreStatus.RetentionAuditUnavailable,
-                CustomLoopInvocationReceiptRetentionStatus.Invalid => CustomLoopInvocationOperationStoreStatus.RetentionInvalid,
-                _ => CustomLoopInvocationOperationStoreStatus.LimitExceeded
-            };
-            return new CustomLoopInvocationOperationStoreResult(status, result.Operation);
-        }
-
-        return await write(cancellationToken);
     }
 
     internal static LoopRunInvocationResponse ReceiptWriteFailure(CustomLoopInvocationOperationStoreStatus status)
@@ -1471,8 +1470,46 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             run.FailureCode,
             run.FailureDetail)
         {
+            Frontier = run.Frontier is null ? null : Map(run.Frontier),
             ConversationPublicationDispositions = LoopRunConversationPublicationDispositionProjector.Project(run)
         };
+    }
+
+    private static LoopRunFrontierSnapshot Map(GovernedLoopFrontierPosture frontier)
+    {
+        var revision = frontier.Binding.Revision;
+        return new LoopRunFrontierSnapshot(
+            frontier.SchemaVersion,
+            frontier.WorkspaceId,
+            new LoopRunFrontierBindingSnapshot(
+                frontier.Binding.SchemaVersion,
+                frontier.Binding.RunId,
+                revision.GraphId,
+                revision.RevisionId,
+                revision.ExecutableHash,
+                frontier.Binding.ExecutionGeneration),
+            frontier.GraphArtifactHash,
+            frontier.GraphLayoutHash,
+            frontier.AdmissionReceiptHash,
+            frontier.Payload.FrontierVersion,
+            frontier.Payload.ConcurrencyCeiling,
+            frontier.Payload.Status.ToString(),
+            frontier.Payload.UpdatedAtUtc,
+            frontier.Payload.ContentHash,
+            frontier.Payload.Nodes.Select(node => new LoopRunFrontierNodeSnapshot(
+                node.SchemaVersion,
+                node.PlanOrdinal,
+                node.NodeId,
+                node.Descriptor.Kind.ToString(),
+                node.Descriptor.TypeId,
+                node.Descriptor.Version,
+                node.IncomingControlEdgeIds.ToArray(),
+                node.OutgoingControlEdgeIds.ToArray(),
+                node.Status.ToString(),
+                node.Attempt,
+                node.AttemptOperationId,
+                node.OutcomeEvidenceId,
+                node.OutcomeEvidenceHash)).ToArray());
     }
 
     private static LoopRunMessageSnapshot Map(CustomLoopMessageSnapshot message)

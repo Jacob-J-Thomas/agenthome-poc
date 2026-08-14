@@ -1,10 +1,13 @@
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Application.Governance.Authority;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.Governance.Authority.Models;
+using EmbodySense.Core.Application.Tests.Capabilities;
 using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 
 namespace EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
@@ -34,6 +37,27 @@ public sealed class AuthorityGrantDependencySourceTests
         Assert.Equal(64, active.EvidenceHash.Length);
         Assert.Equal(AuthorityGrantDependencyStatus.Disabled, disabled.Status);
         Assert.Equal(AuthorityGrantDependencyStatus.Expired, expired.Status);
+    }
+
+    [Fact]
+    public async Task Profile_source_accepts_store_canonical_request_digest_and_rejects_unprefixed_alias()
+    {
+        var record = AuthorityGrantApplicationTestFixture.ProfileRecord();
+        var pin = new AuthorityGrantProfilePin(
+            new(record.ProfileId, record.CurrentProfile.Revision),
+            record.CurrentHash);
+        var store = new ProfileStore { Result = Available(record) };
+        var source = new AuthorityGrantProfileSource(store);
+
+        var canonical = await source.ResolveAsync(pin, AuthorityGrantApplicationTestFixture.Now);
+        store.Result = Available(Copy(
+            record,
+            operations: [record.Operations[0] with { RequestHash = record.Operations[0].RequestHash[7..] }]));
+        var unprefixed = await source.ResolveAsync(pin, AuthorityGrantApplicationTestFixture.Now);
+
+        Assert.StartsWith("sha256:", record.Operations[0].RequestHash, StringComparison.Ordinal);
+        Assert.Equal(AuthorityGrantDependencyStatus.Active, canonical.Status);
+        Assert.Equal(AuthorityGrantDependencyStatus.Ambiguous, unprefixed.Status);
     }
 
     [Fact]
@@ -243,16 +267,23 @@ public sealed class AuthorityGrantDependencySourceTests
     public async Task Role_source_resolves_exact_active_stale_and_disabled_postures()
     {
         var role = AuthorityGrantApplicationTestFixture.Role();
-        var pin = new AuthorityGrantRolePin(role.Identity, role.ContentHash);
+        var pin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
         var ports = new RolePorts
         {
             RevisionResult = new(ContextualRoleRevisionReadStatus.Found, role, ContextualRoleRevisionDisposition.Active, []),
             LifecycleResult = new(ContextualRoleLifecycleReadStatus.Found, AuthorityGrantApplicationTestFixture.RoleLifecycle(role)),
         };
-        var source = new AuthorityGrantRoleSource(ports, ports);
+        var source = RoleSource(ports);
 
         var active = await source.ResolveAsync(pin);
         ports.RevisionResult = ports.RevisionResult with { Disposition = ContextualRoleRevisionDisposition.Replaced };
+        var replacementLifecycle = AuthorityGrantApplicationTestFixture.RoleLifecycle(role) with
+        {
+            CurrentIdentity = new(role.Identity.RoleId, role.Identity.Revision + 1),
+            LastOperationId = "replace-role",
+            LastMutationKind = ContextualRoleRevisionMutationKind.Replace,
+        };
+        ports.LifecycleResult = new(ContextualRoleLifecycleReadStatus.Found, replacementLifecycle);
         var stale = await source.ResolveAsync(pin);
         ports.RevisionResult = ports.RevisionResult with { Disposition = ContextualRoleRevisionDisposition.Active };
         ports.LifecycleResult = new(ContextualRoleLifecycleReadStatus.Found, AuthorityGrantApplicationTestFixture.RoleLifecycle(role, ContextualRoleLifecycleState.Disabled));
@@ -260,22 +291,81 @@ public sealed class AuthorityGrantDependencySourceTests
 
         Assert.Equal(AuthorityGrantDependencyStatus.Active, active.Status);
         Assert.Equal(64, active.EvidenceHash.Length);
+        Assert.Equal(AuthorityGrantApplicationTestFixture.WorkspaceId, active.WorkspaceId);
+        Assert.Equal(ContextualRoleInstructionSourceProbeStatus.Ready, active.SourceStatus);
+        Assert.Equal(4, ports.LifecycleReads);
         Assert.Equal(AuthorityGrantDependencyStatus.Stale, stale.Status);
+        Assert.Equal(replacementLifecycle, stale.Lifecycle);
+        Assert.Equal(ContextualRoleInstructionSourceProbeStatus.Unknown, stale.SourceStatus);
         Assert.Equal(AuthorityGrantDependencyStatus.Disabled, disabled.Status);
+    }
+
+    [Fact]
+    public async Task Role_source_rejects_replaced_disposition_without_exact_replacement_lifecycle_proof()
+    {
+        var role = AuthorityGrantApplicationTestFixture.Role();
+        var pin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
+        var ports = new RolePorts
+        {
+            RevisionResult = new(ContextualRoleRevisionReadStatus.Found, role, ContextualRoleRevisionDisposition.Replaced, []),
+            LifecycleResult = new(ContextualRoleLifecycleReadStatus.Found, AuthorityGrantApplicationTestFixture.RoleLifecycle(role)),
+        };
+        var source = RoleSource(ports);
+
+        var unresolved = await source.ResolveAsync(pin);
+
+        Assert.Equal(AuthorityGrantDependencyStatus.Ambiguous, unresolved.Status);
+        Assert.Null(unresolved.Lifecycle);
+        Assert.Equal(1, ports.LifecycleReads);
+        Assert.Equal(0, ports.SourceReads);
+    }
+
+    [Fact]
+    public async Task Role_source_rejects_missing_or_regressed_lifecycle_after_a_found_replaced_revision()
+    {
+        var role = ContextualRoleRevisionContentHash.Apply(AuthorityGrantApplicationTestFixture.Role() with
+        {
+            Identity = new ContextualRoleRevisionIdentity("reviewer", 2),
+        });
+        var pin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
+        var ports = new RolePorts
+        {
+            RevisionResult = new(ContextualRoleRevisionReadStatus.Found, role, ContextualRoleRevisionDisposition.Replaced, []),
+            LifecycleResult = new(ContextualRoleLifecycleReadStatus.NotFound, null),
+        };
+        var source = RoleSource(ports);
+
+        var missing = await source.ResolveAsync(pin);
+        ports.LifecycleResult = new(ContextualRoleLifecycleReadStatus.Found, AuthorityGrantApplicationTestFixture.RoleLifecycle(role) with
+        {
+            CurrentIdentity = new(role.Identity.RoleId, role.Identity.Revision - 1),
+            LastOperationId = "replace-role",
+            LastMutationKind = ContextualRoleRevisionMutationKind.Replace,
+        });
+        var regressed = await source.ResolveAsync(pin);
+
+        Assert.Equal(AuthorityGrantDependencyStatus.Ambiguous, missing.Status);
+        Assert.Equal(AuthorityGrantDependencyStatus.Ambiguous, regressed.Status);
+        Assert.Null(missing.Revision);
+        Assert.Null(missing.Lifecycle);
+        Assert.Null(regressed.Revision);
+        Assert.Null(regressed.Lifecycle);
+        Assert.Equal(2, ports.LifecycleReads);
+        Assert.Equal(0, ports.SourceReads);
     }
 
     [Fact]
     public async Task Role_source_requires_canonical_bounded_operation_evidence_and_exact_shapes()
     {
         var role = AuthorityGrantApplicationTestFixture.Role();
-        var pin = new AuthorityGrantRolePin(role.Identity, role.ContentHash);
+        var pin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
         var lifecycle = AuthorityGrantApplicationTestFixture.RoleLifecycle(role);
         var ports = new RolePorts
         {
             RevisionResult = new(ContextualRoleRevisionReadStatus.Found, role, ContextualRoleRevisionDisposition.Active, []),
             LifecycleResult = new(ContextualRoleLifecycleReadStatus.Found, lifecycle with { LastOperationId = new string('x', 121) }),
         };
-        var source = new AuthorityGrantRoleSource(ports, ports);
+        var source = RoleSource(ports);
 
         var oversized = await source.ResolveAsync(pin);
         ports.LifecycleResult = new(ContextualRoleLifecycleReadStatus.Found, lifecycle with { LastOperationId = "unsafe.operation" });
@@ -292,9 +382,9 @@ public sealed class AuthorityGrantDependencySourceTests
     public async Task Role_source_maps_closed_read_failures_without_following_substitutions()
     {
         var role = AuthorityGrantApplicationTestFixture.Role();
-        var pin = new AuthorityGrantRolePin(role.Identity, role.ContentHash);
+        var pin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
         var ports = new RolePorts { RevisionResult = new(ContextualRoleRevisionReadStatus.NotFound, null, ContextualRoleRevisionDisposition.Unknown, []) };
-        var source = new AuthorityGrantRoleSource(ports, ports);
+        var source = RoleSource(ports);
 
         Assert.Equal(AuthorityGrantDependencyStatus.Invalid, (await source.ResolveAsync(null)).Status);
         Assert.Equal(AuthorityGrantDependencyStatus.NotFound, (await source.ResolveAsync(pin)).Status);
@@ -303,6 +393,105 @@ public sealed class AuthorityGrantDependencySourceTests
         ports.RevisionException = new IOException("offline");
         Assert.Equal(AuthorityGrantDependencyStatus.Unavailable, (await source.ResolveAsync(pin)).Status);
     }
+
+    [Fact]
+    public async Task Role_source_fails_closed_for_workspace_source_and_post_probe_lifecycle_drift()
+    {
+        var role = AuthorityGrantApplicationTestFixture.Role();
+        var pin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
+        var lifecycle = AuthorityGrantApplicationTestFixture.RoleLifecycle(role);
+        var ports = new RolePorts
+        {
+            RevisionResult = new(ContextualRoleRevisionReadStatus.Found, role, ContextualRoleRevisionDisposition.Active, []),
+            LifecycleResult = new(ContextualRoleLifecycleReadStatus.Found, lifecycle),
+        };
+
+        var wrongWorkspaceRole = ContextualRoleRevisionContentHash.Apply(role with
+        {
+            WorkspaceApplicability = new(["workspace-sha256:" + new string('b', ContextualRoleLimits.Sha256HexCharacters)]),
+        });
+        ports.RevisionResult = ports.RevisionResult with { Revision = wrongWorkspaceRole };
+        var wrongWorkspace = await RoleSource(ports).ResolveAsync(new ContextualRoleRevisionPin(wrongWorkspaceRole.Identity, wrongWorkspaceRole.ContentHash));
+        Assert.Equal(0, ports.SourceReads);
+
+        ports.RevisionResult = ports.RevisionResult with { Revision = role };
+        ports.ProbeResult = new(ContextualRoleInstructionSourceProbeStatus.Substituted);
+        var substituted = await RoleSource(ports).ResolveAsync(pin);
+
+        ports.ProbeResult = new(ContextualRoleInstructionSourceProbeStatus.Ready);
+        ports.LifecycleResults.Enqueue(new(ContextualRoleLifecycleReadStatus.Found, lifecycle));
+        ports.LifecycleResults.Enqueue(new(ContextualRoleLifecycleReadStatus.Found, lifecycle with { State = ContextualRoleLifecycleState.Disabled, UpdatedAtUtc = lifecycle.UpdatedAtUtc.AddMinutes(1) }));
+        var drifted = await RoleSource(ports).ResolveAsync(pin);
+
+        Assert.Equal(AuthorityGrantDependencyStatus.Disabled, wrongWorkspace.Status);
+        Assert.Equal(ContextualRoleInstructionSourceProbeStatus.WorkspaceMismatch, wrongWorkspace.SourceStatus);
+        Assert.Equal(AuthorityGrantDependencyStatus.Ambiguous, substituted.Status);
+        Assert.Equal(ContextualRoleInstructionSourceProbeStatus.Substituted, substituted.SourceStatus);
+        Assert.Equal(AuthorityGrantDependencyStatus.Stale, drifted.Status);
+        Assert.Equal(ContextualRoleLifecycleState.Disabled, drifted.Lifecycle!.State);
+    }
+
+    [Fact]
+    public async Task Role_source_evidence_is_deterministic_and_cancellation_propagates()
+    {
+        var role = AuthorityGrantApplicationTestFixture.Role();
+        var pin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
+        var ports = new RolePorts
+        {
+            RevisionResult = new(ContextualRoleRevisionReadStatus.Found, role, ContextualRoleRevisionDisposition.Active, []),
+            LifecycleResult = new(ContextualRoleLifecycleReadStatus.Found, AuthorityGrantApplicationTestFixture.RoleLifecycle(role)),
+        };
+        var source = RoleSource(ports);
+
+        var first = await source.ResolveAsync(pin);
+        var second = await source.ResolveAsync(pin);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.Equal(first.EvidenceHash, second.EvidenceHash);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => source.ResolveAsync(pin, cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Role_source_rejects_revision_and_hash_substitution_before_lifecycle_or_source_reads()
+    {
+        var role = AuthorityGrantApplicationTestFixture.Role();
+        var ports = new RolePorts
+        {
+            RevisionResult = new(ContextualRoleRevisionReadStatus.Found, role, ContextualRoleRevisionDisposition.Active, []),
+            LifecycleResult = new(ContextualRoleLifecycleReadStatus.Found, AuthorityGrantApplicationTestFixture.RoleLifecycle(role)),
+        };
+        var source = RoleSource(ports);
+
+        var revisionSubstitution = await source.ResolveAsync(new ContextualRoleRevisionPin(new(role.Identity.RoleId, role.Identity.Revision + 1), role.ContentHash));
+        var hashSubstitution = await source.ResolveAsync(new ContextualRoleRevisionPin(role.Identity, AuthorityGrantApplicationTestFixture.Hash64('f')));
+
+        Assert.Equal(AuthorityGrantDependencyStatus.Ambiguous, revisionSubstitution.Status);
+        Assert.Equal(AuthorityGrantDependencyStatus.Ambiguous, hashSubstitution.Status);
+        Assert.Equal(0, ports.LifecycleReads);
+        Assert.Equal(0, ports.SourceReads);
+    }
+
+    [Fact]
+    public async Task Role_source_is_reentrant_under_the_caller_owned_shared_fence()
+    {
+        var role = AuthorityGrantApplicationTestFixture.Role();
+        var pin = new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
+        var ports = new RolePorts
+        {
+            RevisionResult = new(ContextualRoleRevisionReadStatus.Found, role, ContextualRoleRevisionDisposition.Active, []),
+            LifecycleResult = new(ContextualRoleLifecycleReadStatus.Found, AuthorityGrantApplicationTestFixture.RoleLifecycle(role)),
+        };
+        var transaction = new SerializingCapabilityAuthorityTransaction();
+        var source = RoleSource(ports, transaction);
+
+        var result = await transaction.ExecuteAsync(token => source.ResolveAsync(pin, token));
+
+        Assert.Equal(AuthorityGrantDependencyStatus.Active, result.Status);
+    }
+
+    private static AuthorityGrantRoleSource RoleSource(RolePorts ports, ICapabilityAuthorityTransaction? transaction = null)
+        => new(AuthorityGrantApplicationTestFixture.WorkspaceId, ports, ports, ports, transaction ?? new StubCapabilityAuthorityTransaction());
 
     private static AuthorityProfileReadResult Available(AuthorityProfileRecord record)
         => new(AuthorityProfileReadStatus.Available, record, "ready");
@@ -320,7 +509,7 @@ public sealed class AuthorityGrantDependencySourceTests
         AuthorityProfileMutationKind kind,
         int revision,
         DateTimeOffset time)
-        => new(operationId, hash.Value[7..], kind, AuthorityProfileMutationStatus.Applied, profile.ProfileId, revision, AuthorityGrantApplicationTestFixture.Actor(), AuthorityGrantApplicationTestFixture.Purpose(), time);
+        => new(operationId, hash.Value, kind, AuthorityProfileMutationStatus.Applied, profile.ProfileId, revision, AuthorityGrantApplicationTestFixture.Actor(), AuthorityGrantApplicationTestFixture.Purpose(), time);
 
     private sealed class ProfileStore : IAuthorityProfileStore
     {
@@ -334,16 +523,31 @@ public sealed class AuthorityGrantDependencySourceTests
             => throw new NotSupportedException();
     }
 
-    private sealed class RolePorts : IContextualRoleRevisionReader, IContextualRoleLifecycleReader
+    private sealed class RolePorts : IContextualRoleRevisionReader, IContextualRoleLifecycleReader, IContextualRoleInstructionSourceProbe
     {
         public ContextualRoleRevisionReadResult RevisionResult { get; set; } = null!;
         public ContextualRoleLifecycleReadResult LifecycleResult { get; set; } = null!;
+        public ContextualRoleInstructionSourceProbeResult ProbeResult { get; set; } = new(ContextualRoleInstructionSourceProbeStatus.Ready);
+        public Queue<ContextualRoleLifecycleReadResult> LifecycleResults { get; } = new();
         public Exception? RevisionException { get; set; }
+        public int LifecycleReads { get; private set; }
+        public int SourceReads { get; private set; }
 
         public Task<ContextualRoleRevisionReadResult> ReadAsync(ContextualRoleRevisionReadRequest request, CancellationToken cancellationToken = default)
             => RevisionException is null ? Task.FromResult(RevisionResult) : Task.FromException<ContextualRoleRevisionReadResult>(RevisionException);
 
         public Task<ContextualRoleLifecycleReadResult> ReadLifecycleAsync(ContextualRoleLifecycleReadRequest request, CancellationToken cancellationToken = default)
-            => Task.FromResult(LifecycleResult);
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LifecycleReads++;
+            return Task.FromResult(LifecycleResults.Count > 0 ? LifecycleResults.Dequeue() : LifecycleResult);
+        }
+
+        public Task<ContextualRoleInstructionSourceProbeResult> ProbeAsync(ContextualRoleInstructionSourceReference source, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            SourceReads++;
+            return Task.FromResult(ProbeResult);
+        }
     }
 }

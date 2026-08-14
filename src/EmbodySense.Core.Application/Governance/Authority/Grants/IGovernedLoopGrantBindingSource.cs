@@ -9,6 +9,6 @@ public interface IGovernedLoopGrantBindingSource
     /// <summary>Resolves one exact publication pin without selecting a newer loop revision.</summary>
     /// <param name="pin">The exact publication pin.</param>
     /// <param name="cancellationToken">A token that cancels the source read.</param>
-    /// <returns>The exact owner, capability identifiers, and evidence posture.</returns>
+    /// <returns>The exact publication artifact, owner pin, capability identifiers, and evidence posture.</returns>
     Task<GovernedLoopGrantBindingResolution> ResolveAsync(GovernedLoopRevisionPublicationPin? pin, CancellationToken cancellationToken = default);
 }

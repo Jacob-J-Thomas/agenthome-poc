@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
@@ -6,6 +7,7 @@ using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Application.Tests.Capabilities;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 
 namespace EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
@@ -21,6 +23,7 @@ public sealed class AuthorityGrantResolverTests
 
         Assert.Equal(AuthorityGrantResolutionStatus.Active, result.Status);
         Assert.Equal(harness.Snapshot.CurrentGrant, result.Grant);
+        Assert.Equal(harness.Snapshot.CurrentGrant, result.CurrentGrant);
         Assert.Equal(harness.Snapshot.CurrentGrant.RequestedCeiling, result.EffectiveCeiling);
         Assert.Equal(64, result.DependencyEvidenceHash.Length);
         Assert.Equal(AuthorityGrantApplicationTestFixture.Now, result.EvaluatedAtUtc);
@@ -89,7 +92,8 @@ public sealed class AuthorityGrantResolverTests
 
         Assert.Equal(AuthorityGrantResolutionStatus.Stale, result.Status);
         Assert.Equal(first, result.Grant);
-        Assert.Equal(second, harness.Snapshot.CurrentGrant);
+        Assert.Equal(second, result.CurrentGrant);
+        Assert.NotEqual(result.Grant, result.CurrentGrant);
         Assert.Equal(0, harness.Profile.Calls);
     }
 
@@ -98,6 +102,7 @@ public sealed class AuthorityGrantResolverTests
     [InlineData("role", AuthorityGrantResolutionStatus.RoleUnavailable)]
     [InlineData("publication", AuthorityGrantResolutionStatus.LoopUnavailable)]
     [InlineData("owner", AuthorityGrantResolutionStatus.LoopUnavailable)]
+    [InlineData("owner-hash", AuthorityGrantResolutionStatus.LoopUnavailable)]
     [InlineData("operation", AuthorityGrantResolutionStatus.LoopUnavailable)]
     [InlineData("ceiling", AuthorityGrantResolutionStatus.CeilingExceeded)]
     public async Task Dependency_substitution_status_and_ceiling_fail_closed(string failure, AuthorityGrantResolutionStatus expected)
@@ -117,11 +122,23 @@ public sealed class AuthorityGrantResolverTests
             case "owner":
                 harness.Binding.SubstituteOwner = true;
                 break;
+            case "owner-hash":
+                harness.Binding.SubstituteOwnerHash = true;
+                break;
             case "operation":
                 harness.Publication.ObservedOperationId = new string('x', 121);
                 break;
             case "ceiling":
-                harness.Binding.CapabilityIds = [];
+                var emptyArtifact = AuthorityGrantApplicationTestFixture.GraphArtifact(capabilityIds: []);
+                var emptyBinding = AuthorityGrantApplicationTestFixture.Binding() with
+                {
+                    Loop = AuthorityGrantApplicationTestFixture.LoopPin(capabilityIds: []),
+                };
+                var emptyGrant = AuthorityGrantApplicationTestFixture.Grant(
+                    binding: emptyBinding,
+                    recordedAtUtc: AuthorityGrantApplicationTestFixture.Now.AddMinutes(-1));
+                harness = new Harness(SingleSnapshot(emptyGrant));
+                harness.Binding.Artifact = emptyArtifact;
                 break;
         }
 
@@ -165,11 +182,29 @@ public sealed class AuthorityGrantResolverTests
         int capabilityCount,
         AuthorityGrantResolutionStatus expected)
     {
-        var harness = new Harness(ActiveSnapshot());
-        harness.Binding.CapabilityIds = Enumerable.Range(1, capabilityCount - 1)
+        var capabilities = Enumerable.Range(1, capabilityCount - 1)
             .Select(index => $"org.embodysense/workspace/read-{index}")
             .Prepend(AuthorityGrantApplicationTestFixture.Capability().Id.Value)
             .ToArray();
+        Harness harness;
+        if (expected == AuthorityGrantResolutionStatus.Active)
+        {
+            var artifact = AuthorityGrantApplicationTestFixture.GraphArtifact(capabilityIds: capabilities);
+            var binding = AuthorityGrantApplicationTestFixture.Binding() with
+            {
+                Loop = AuthorityGrantApplicationTestFixture.LoopPin(capabilityIds: capabilities),
+            };
+            var grant = AuthorityGrantApplicationTestFixture.Grant(
+                binding: binding,
+                recordedAtUtc: AuthorityGrantApplicationTestFixture.Now.AddMinutes(-1));
+            harness = new Harness(SingleSnapshot(grant));
+            harness.Binding.Artifact = artifact;
+        }
+        else
+        {
+            harness = new Harness(ActiveSnapshot());
+            harness.Binding.CapabilityIds = capabilities;
+        }
 
         var result = await harness.Resolver.ResolveAsync(Reference(harness.Snapshot.CurrentGrant));
 
@@ -407,10 +442,10 @@ public sealed class AuthorityGrantResolverTests
         internal AuthorityGrantDependencyStatus Status { get; set; } = AuthorityGrantDependencyStatus.Active;
         internal EmbodySense.Core.Application.ContextualRoles.Models.ContextualRoleLifecycleSnapshot? Lifecycle { get; set; }
 
-        public Task<AuthorityGrantRoleResolution> ResolveAsync(AuthorityGrantRolePin? pin, CancellationToken cancellationToken = default)
+        public Task<AuthorityGrantRoleResolution> ResolveAsync(ContextualRoleRevisionPin? pin, CancellationToken cancellationToken = default)
         {
             var role = AuthorityGrantApplicationTestFixture.Role();
-            return Task.FromResult(new AuthorityGrantRoleResolution(Status, pin, role, Lifecycle ?? AuthorityGrantApplicationTestFixture.RoleLifecycle(role), AuthorityGrantApplicationTestFixture.Hash64('6')));
+            return Task.FromResult(new AuthorityGrantRoleResolution(Status, pin, role, Lifecycle ?? AuthorityGrantApplicationTestFixture.RoleLifecycle(role), AuthorityGrantApplicationTestFixture.WorkspaceId, ContextualRoleInstructionSourceProbeStatus.Ready, AuthorityGrantApplicationTestFixture.Hash64('6')));
         }
     }
 
@@ -426,18 +461,24 @@ public sealed class AuthorityGrantResolverTests
     private sealed class BindingSource : IGovernedLoopGrantBindingSource
     {
         internal bool SubstituteOwner { get; set; }
+        internal bool SubstituteOwnerHash { get; set; }
+        internal Common.Loops.Revisions.Models.GovernedLoopGraphRevisionArtifact? Artifact { get; set; }
         internal IReadOnlyList<string>? CapabilityIds { get; set; }
 
         public Task<GovernedLoopGrantBindingResolution> ResolveAsync(GovernedLoopRevisionPublicationPin? pin, CancellationToken cancellationToken = default)
         {
+            var artifact = Artifact ?? AuthorityGrantApplicationTestFixture.GraphArtifact();
             var owner = SubstituteOwner
-                ? new Common.ContextualRoles.Models.ContextualRoleRevisionIdentity("other-role", 1)
-                : AuthorityGrantApplicationTestFixture.Role().Identity;
+                ? new Common.ContextualRoles.Models.ContextualRoleRevisionPin(new Common.ContextualRoles.Models.ContextualRoleRevisionIdentity("other-role", 1), artifact.Graph.OwningRole.ContentHash)
+                : SubstituteOwnerHash
+                    ? artifact.Graph.OwningRole with { ContentHash = AuthorityGrantApplicationTestFixture.Hash64('f') }
+                    : artifact.Graph.OwningRole;
             return Task.FromResult(new GovernedLoopGrantBindingResolution(
                 AuthorityGrantDependencyStatus.Active,
                 pin,
+                artifact,
                 owner,
-                CapabilityIds ?? [AuthorityGrantApplicationTestFixture.Capability().Id.Value],
+                CapabilityIds ?? artifact.Graph.AuthorityCeiling.CapabilityIds,
                 AuthorityGrantApplicationTestFixture.Hash64('7')));
         }
     }

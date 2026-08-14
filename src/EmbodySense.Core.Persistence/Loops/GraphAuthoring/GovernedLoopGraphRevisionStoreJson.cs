@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -110,7 +111,7 @@ internal static class GovernedLoopGraphRevisionStoreJson
             Required(graphJson.GraphId, "graph id"),
             Required(graphJson.RevisionId, "revision id"),
             Required(graphJson.Purpose, "purpose"),
-            Required(graphJson.OwningRoleId, "owning role"),
+            OwningRole(graphJson.OwningRole),
             Required(graphJson.EntryNodeId, "entry node"),
             Required(graphJson.TerminalNodeIds, "terminal nodes"),
             GovernedLoopAuthorityCeiling.Create(Required(graphJson.AuthorityCeiling, "graph authority ceiling")),
@@ -206,7 +207,10 @@ internal static class GovernedLoopGraphRevisionStoreJson
             graph.GraphId,
             graph.RevisionId,
             graph.Purpose,
-            graph.OwningRoleId,
+            new ContextualRoleRevisionPinJson(
+                graph.OwningRole.ContentHash,
+                graph.OwningRole.Identity.Revision,
+                graph.OwningRole.Identity.RoleId),
             graph.EntryNodeId,
             graph.TerminalNodeIds.ToArray(),
             graph.AuthorityCeiling.CapabilityIds.ToArray(),
@@ -224,6 +228,20 @@ internal static class GovernedLoopGraphRevisionStoreJson
             new OutputContractJson(
                 graph.OutputContract.Summary,
                 graph.OutputContract.Outputs.Select(output => new OutputJson(output.Id, output.ValueSchemaId, output.SourceNodeId, output.SourcePortId, output.Required)).ToArray()));
+
+    private static ContextualRoleRevisionPin OwningRole(ContextualRoleRevisionPinJson? owningRole)
+    {
+        if (owningRole is null)
+        {
+            throw new FormatException("The governed-loop owning-role pin is missing.");
+        }
+
+        return new ContextualRoleRevisionPin(
+            new ContextualRoleRevisionIdentity(
+                Required(owningRole.RoleId, "owning role id"),
+                owningRole.Revision),
+            Required(owningRole.ContentHash, "owning role content hash"));
+    }
 
     private static GraphLayoutJson Layout(GovernedLoopDisplayMetadata layout)
         => new(

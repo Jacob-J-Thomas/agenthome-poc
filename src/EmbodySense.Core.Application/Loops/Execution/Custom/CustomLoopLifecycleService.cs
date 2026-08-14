@@ -6,7 +6,11 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
+using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
@@ -340,6 +344,14 @@ public sealed class CustomLoopLifecycleService
 
         if (run.Status == CustomLoopRunStatus.Paused)
         {
+            if (CustomLoopRecoveryService.HasRestartSafePureAttemptSinceCheckpoint(run))
+            {
+                const string Detail = "Cancellation found a recovery-parked deterministic pure-node attempt whose start/outcome audits and terminal disposition require reconciliation; the run was attention-blocked without dispatch.";
+                var parked = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, Detail);
+                var parkedOutcome = parked.Run is null ? parked.Status : CustomLoopControlStatus.NeedsReview;
+                return await CompleteAsync(operation, parkedOutcome, parked.Run ?? parked.CurrentRun, parked.AuditRecorded, parked.Detail);
+            }
+
             var cancelled = await PersistTransitionAsync(run, CustomLoopRunStatus.Cancelled, operation.Actor, operation.OperationId, "The safely paused run was cancelled atomically without provider dispatch.");
             var outcome = cancelled.Run is null ? cancelled.Status : cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning;
             return await CompleteAsync(operation, outcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
@@ -355,9 +367,27 @@ public sealed class CustomLoopLifecycleService
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, $"Explicit Resume is allowed only from Paused, not {run.Status}.");
         }
 
+        if (run.SequentialAdapterBinding is not null && run.Frontier?.Payload.Status == GovernedLoopFrontierStatus.ReviewBlocked)
+        {
+            const string Detail = "Explicit Resume found a canonical ReviewBlocked frontier. The run requires operator review and no provider request was dispatched.";
+            var quarantined = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, Detail);
+            var quarantinedRun = quarantined.Run ?? quarantined.CurrentRun ?? run;
+            var status = quarantined.Run is null ? quarantined.Status : CustomLoopControlStatus.NeedsReview;
+            return await CompleteAsync(operation, status, quarantinedRun, quarantined.AuditRecorded, quarantined.Detail);
+        }
+
         if (!CustomLoopRunValidator.HasCompleteAdmissionAudit(run))
         {
             const string Detail = "Explicit Resume rejected an integrity-incomplete admission; the run requires review and no provider request was dispatched.";
+            if (IsUndispatchedCanonicalReadyCheckpoint(run))
+            {
+                return await CompleteAuditedOutcomeAsync(
+                    operation,
+                    CustomLoopControlStatus.NeedsReview,
+                    run,
+                    $"{Detail} The exact canonical Ready checkpoint remains Paused; no attempt was fabricated solely to change its frontier posture.");
+            }
+
             var quarantined = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, Detail);
             var quarantinedRun = quarantined.Run ?? quarantined.CurrentRun ?? run;
             var status = quarantined.Run is null ? quarantined.Status : CustomLoopControlStatus.NeedsReview;
@@ -438,6 +468,22 @@ public sealed class CustomLoopLifecycleService
                 return await HandleResumeExecutorFailureAsync(operation, resumed.Run, exception);
             }
 
+            if (execution.Status is CustomLoopOrderedRunStatus.Failed
+                or CustomLoopOrderedRunStatus.InvalidState
+                or CustomLoopOrderedRunStatus.NotFound
+                or CustomLoopOrderedRunStatus.Conflict
+                or CustomLoopOrderedRunStatus.NeedsReview)
+            {
+                var current = await TryLoadAsync(resumed.Run.Id, IntegrityToken());
+                if (current is null || current.Status == CustomLoopRunStatus.Running)
+                {
+                    return await HandleResumeExecutorFailureAsync(
+                        operation,
+                        current ?? resumed.Run,
+                        new InvalidOperationException($"The ordered resume executor returned non-dispatchable status {execution.Status} while the durable run remained Running."));
+                }
+            }
+
             return execution.Status switch
             {
                 CustomLoopOrderedRunStatus.Completed => Result(CustomLoopControlStatus.Completed, execution.Run, operation.OperationId, execution.Detail),
@@ -510,6 +556,15 @@ public sealed class CustomLoopLifecycleService
             return Result(CustomLoopControlStatus.Paused, current, operation.OperationId, detail);
         }
 
+        if (current.Status == CustomLoopRunStatus.Running && IsUndispatchedCanonicalReadyCheckpoint(current))
+        {
+            var parkedDetail = $"{detail} The hash-valid canonical frontier remained Active at its exact Ready checkpoint, proving that no node attempt was dispatched; the lifecycle was restored to Paused.";
+            var parked = await PersistTransitionAsync(current, CustomLoopRunStatus.Paused, operation.Actor, NewEventId("resume-failure-park"), parkedDetail);
+            var parkedRun = parked.Run ?? parked.CurrentRun ?? current;
+            var parkedStatus = parked.Run is null ? parked.Status : CustomLoopControlStatus.NeedsReview;
+            return Result(parkedStatus, parkedRun, operation.OperationId, parked.Run is null ? $"{parkedDetail} {parked.Detail}" : parked.Detail);
+        }
+
         if (current.IsTerminal)
         {
             return Result(StatusFor(current.Status, CustomLoopControlKind.Resume), current, operation.OperationId, detail);
@@ -517,7 +572,8 @@ public sealed class CustomLoopLifecycleService
 
         var quarantined = await PersistTransitionAsync(current, CustomLoopRunStatus.NeedsReview, operation.Actor, NewEventId("resume-failure"), detail);
         var quarantinedRun = quarantined.Run ?? quarantined.CurrentRun ?? current;
-        return Result(CustomLoopControlStatus.NeedsReview, quarantinedRun, operation.OperationId, quarantined.Run is null ? $"{detail} {quarantined.Detail}" : quarantined.Detail);
+        var status = quarantined.Run is null ? quarantined.Status : CustomLoopControlStatus.NeedsReview;
+        return Result(status, quarantinedRun, operation.OperationId, quarantined.Run is null ? $"{detail} {quarantined.Detail}" : quarantined.Detail);
     }
 
     private async Task<CancellationSignalAttempt> TryCancelActiveAttemptAsync(string runId, string operationId)
@@ -544,10 +600,11 @@ public sealed class CustomLoopLifecycleService
     private async Task<TransitionResult> PersistTransitionAsync(CustomLoopRunRecord current, CustomLoopRunStatus status, string actor, string eventId, string detail)
     {
         var now = Now(current);
-        var candidate = CreateTransition(current, status, eventId, detail, now);
+        CustomLoopRunRecord candidate;
         CustomLoopRunStoreResult stored;
         try
         {
+            candidate = CreateTransition(current, status, eventId, detail, now);
             stored = await _runStore.UpdateAsync(candidate, current.LifecycleVersion, IntegrityToken());
         }
         catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
@@ -765,6 +822,7 @@ public sealed class CustomLoopLifecycleService
             _ => run.ExecutionClock
         };
         var lifecycle = new CustomLoopRunEvent(run.Events.Length + 1, eventId, now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, detail, [], null, null, null, null, null, null, null, null, null, null, ControlExpectedLifecycleVersion: run.LifecycleVersion);
+        var frontier = ProjectCanonicalFrontier(run, status, now);
         return run with
         {
             LifecycleVersion = run.LifecycleVersion + 1,
@@ -775,9 +833,50 @@ public sealed class CustomLoopLifecycleService
             Events = [.. run.Events, lifecycle],
             FinalOutput = null,
             FailureCode = status is CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview ? "lifecycle_control_failed" : null,
-            FailureDetail = status is CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview ? detail : null
+            FailureDetail = status is CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview ? detail : null,
+            Frontier = frontier,
         };
     }
+
+    private static GovernedLoopFrontierPosture? ProjectCanonicalFrontier(CustomLoopRunRecord run, CustomLoopRunStatus status, DateTimeOffset now)
+    {
+        if (run.SequentialAdapterBinding is not { } binding || run.Frontier is not { } frontier)
+        {
+            return run.Frontier;
+        }
+
+        if (status == CustomLoopRunStatus.Cancelled)
+        {
+            if (frontier.Payload.Status == GovernedLoopFrontierStatus.Cancelled)
+            {
+                return frontier;
+            }
+
+            var cancelled = GovernedLoopSequentialFrontierMachine.CancelCurrent(frontier, binding, now);
+            return cancelled.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied && cancelled.Frontier is not null
+                ? cancelled.Frontier
+                : throw new InvalidOperationException("The exact canonical frontier could not enter Cancelled with its lifecycle transition.");
+        }
+
+        if (status != CustomLoopRunStatus.NeedsReview)
+        {
+            return frontier;
+        }
+
+        if (frontier.Payload.Status == GovernedLoopFrontierStatus.ReviewBlocked)
+        {
+            return frontier;
+        }
+
+        var blocked = GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(frontier, binding, null, null, now);
+        return blocked.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied && blocked.Frontier is not null
+            ? blocked.Frontier
+            : throw new InvalidOperationException("The exact canonical frontier could not enter ReviewBlocked without fabricating node-attempt evidence.");
+    }
+
+    private static bool IsUndispatchedCanonicalReadyCheckpoint(CustomLoopRunRecord run)
+        => run.SequentialAdapterBinding is { } binding
+            && GovernedLoopSequentialFrontierMachine.IsUndispatchedReadyCheckpoint(run.Frontier, binding);
 
     private static CustomLoopExecutionClock StopClock(CustomLoopExecutionClock clock, DateTimeOffset now)
     {

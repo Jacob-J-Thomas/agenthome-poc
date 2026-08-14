@@ -7,6 +7,8 @@ namespace EmbodySense.Core.Application.Tests.ContextualRoles;
 
 public sealed class ContextualRoleInspectionServiceTests
 {
+    private const string WorkspaceId = "workspace-sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    private const string OtherWorkspaceId = "workspace-sha256:1111111111111111111111111111111111111111111111111111111111111111";
     private static readonly DateTimeOffset _now = new(2026, 8, 9, 18, 0, 0, TimeSpan.Zero);
 
     [Fact]
@@ -15,7 +17,7 @@ public sealed class ContextualRoleInspectionServiceTests
         var ports = new Ports();
         ports.CatalogResult = new ContextualRoleCatalogReadResult(ContextualRoleCatalogReadStatus.Available,
         [
-            Entry("analyst", ContextualRoleLifecycleState.Active, workspaceId: "workspace-other"),
+            Entry("analyst", ContextualRoleLifecycleState.Active, workspaceId: OtherWorkspaceId),
             Entry("missing", ContextualRoleLifecycleState.Active, sourceId: "missing"),
             Entry("reviewer", ContextualRoleLifecycleState.Active, sourceId: "nearest-agents", sourceKind: ContextualRoleInstructionSourceKind.AgentsMarkdown),
             Entry("writer", ContextualRoleLifecycleState.Disabled)
@@ -294,10 +296,10 @@ public sealed class ContextualRoleInspectionServiceTests
     }
 
     [Theory]
-    [InlineData(ContextualRoleLifecycleState.Disabled, ContextualRoleStatus.Published, "workspace-one", ContextualRoleInspectionStatus.Ineligible)]
-    [InlineData(ContextualRoleLifecycleState.Tombstoned, ContextualRoleStatus.Published, "workspace-one", ContextualRoleInspectionStatus.Ineligible)]
-    [InlineData(ContextualRoleLifecycleState.Active, ContextualRoleStatus.Draft, "workspace-one", ContextualRoleInspectionStatus.Ineligible)]
-    [InlineData(ContextualRoleLifecycleState.Active, ContextualRoleStatus.Published, "workspace-other", ContextualRoleInspectionStatus.WorkspaceMismatch)]
+    [InlineData(ContextualRoleLifecycleState.Disabled, ContextualRoleStatus.Published, WorkspaceId, ContextualRoleInspectionStatus.Ineligible)]
+    [InlineData(ContextualRoleLifecycleState.Tombstoned, ContextualRoleStatus.Published, WorkspaceId, ContextualRoleInspectionStatus.Ineligible)]
+    [InlineData(ContextualRoleLifecycleState.Active, ContextualRoleStatus.Draft, WorkspaceId, ContextualRoleInspectionStatus.Ineligible)]
+    [InlineData(ContextualRoleLifecycleState.Active, ContextualRoleStatus.Published, OtherWorkspaceId, ContextualRoleInspectionStatus.WorkspaceMismatch)]
     public async Task Ineligible_or_cross_workspace_roles_never_probe_sources(ContextualRoleLifecycleState lifecycle, ContextualRoleStatus revisionStatus, string workspaceId, ContextualRoleInspectionStatus expected)
     {
         var revision = Revision("reviewer", status: revisionStatus, workspaceId: workspaceId);
@@ -320,15 +322,16 @@ public sealed class ContextualRoleInspectionServiceTests
     }
 
     [Fact]
-    public void Constructor_requires_a_bounded_workspace_and_every_port()
+    public void Constructor_requires_a_canonical_workspace_and_every_port()
     {
         var ports = new Ports();
 
         Assert.Throws<ArgumentException>(() => new ContextualRoleInspectionService("../unsafe", ports, ports, ports, ports));
-        Assert.Throws<ArgumentNullException>(() => new ContextualRoleInspectionService("workspace-one", null!, ports, ports, ports));
-        Assert.Throws<ArgumentNullException>(() => new ContextualRoleInspectionService("workspace-one", ports, null!, ports, ports));
-        Assert.Throws<ArgumentNullException>(() => new ContextualRoleInspectionService("workspace-one", ports, ports, null!, ports));
-        Assert.Throws<ArgumentNullException>(() => new ContextualRoleInspectionService("workspace-one", ports, ports, ports, null!));
+        Assert.Throws<ArgumentException>(() => new ContextualRoleInspectionService("workspace-one", ports, ports, ports, ports));
+        Assert.Throws<ArgumentNullException>(() => new ContextualRoleInspectionService(WorkspaceId, null!, ports, ports, ports));
+        Assert.Throws<ArgumentNullException>(() => new ContextualRoleInspectionService(WorkspaceId, ports, null!, ports, ports));
+        Assert.Throws<ArgumentNullException>(() => new ContextualRoleInspectionService(WorkspaceId, ports, ports, null!, ports));
+        Assert.Throws<ArgumentNullException>(() => new ContextualRoleInspectionService(WorkspaceId, ports, ports, ports, null!));
     }
 
     [Fact]
@@ -356,7 +359,7 @@ public sealed class ContextualRoleInspectionServiceTests
         Assert.Empty(nullDependents.Dependents);
     }
 
-    private static ContextualRoleInspectionService Service(Ports ports) => new("workspace-one", ports, ports, ports, ports);
+    private static ContextualRoleInspectionService Service(Ports ports) => new(WorkspaceId, ports, ports, ports, ports);
 
     private static ContextualRoleInspectionRequest Request(string? contentHash = null)
     {
@@ -367,7 +370,7 @@ public sealed class ContextualRoleInspectionServiceTests
     private static ContextualRoleCatalogEntry Entry(
         string roleId,
         ContextualRoleLifecycleState lifecycle = ContextualRoleLifecycleState.Active,
-        string workspaceId = "workspace-one",
+        string workspaceId = WorkspaceId,
         string sourceId = "role",
         ContextualRoleInstructionSourceKind sourceKind = ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown)
     {
@@ -379,7 +382,7 @@ public sealed class ContextualRoleInspectionServiceTests
         string roleId,
         int revision = 1,
         ContextualRoleStatus status = ContextualRoleStatus.Published,
-        string workspaceId = "workspace-one",
+        string workspaceId = WorkspaceId,
         string sourceId = "role",
         ContextualRoleInstructionSourceKind sourceKind = ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown)
     {

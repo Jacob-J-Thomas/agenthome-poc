@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Capabilities;
@@ -18,19 +17,6 @@ namespace EmbodySense.Core.Persistence.Tests.HumanInput.Requests;
 
 public sealed class HumanInputRequestStoreTests
 {
-    private const string CrossProcessMode = "EMBODYSENSE_HUMAN_INPUT_STORE_MODE";
-    private const string CrossProcessWorkspace = "EMBODYSENSE_HUMAN_INPUT_STORE_WORKSPACE";
-    private const string CrossProcessTrustRoot = "EMBODYSENSE_HUMAN_INPUT_STORE_TRUST_ROOT";
-    private const string CrossProcessGate = "EMBODYSENSE_HUMAN_INPUT_STORE_GATE";
-    private const string CrossProcessReady = "EMBODYSENSE_HUMAN_INPUT_STORE_READY";
-    private const string CrossProcessOutput = "EMBODYSENSE_HUMAN_INPUT_STORE_OUTPUT";
-    private const string CrossProcessRequest = "EMBODYSENSE_HUMAN_INPUT_STORE_REQUEST";
-    private const string CrossProcessOperation = "EMBODYSENSE_HUMAN_INPUT_STORE_OPERATION";
-    private const string CrossProcessHash = "EMBODYSENSE_HUMAN_INPUT_STORE_HASH";
-    private const string CrossProcessBoundary = "EMBODYSENSE_HUMAN_INPUT_STORE_BOUNDARY";
-    private const string CrossProcessGeneration = "EMBODYSENSE_HUMAN_INPUT_STORE_GENERATION";
-    private const string CrossProcessRelated = "EMBODYSENSE_HUMAN_INPUT_STORE_RELATED";
-
     [Fact]
     public async Task Commit_restart_read_and_exact_replay_preserve_one_private_immutable_request()
     {
@@ -944,86 +930,6 @@ public sealed class HumanInputRequestStoreTests
         Assert.Single((await store.ReadAsync("request-one")).PrimarySnapshot!.Operations);
     }
 
-    [Fact]
-    public async Task Cross_process_human_input_store_host()
-    {
-        var mode = Environment.GetEnvironmentVariable(CrossProcessMode);
-        if (string.IsNullOrEmpty(mode))
-        {
-            return;
-        }
-
-        var workspace = Environment.GetEnvironmentVariable(CrossProcessWorkspace)!;
-        var trustRoot = Environment.GetEnvironmentVariable(CrossProcessTrustRoot)!;
-        var gate = Environment.GetEnvironmentVariable(CrossProcessGate)!;
-        var ready = Environment.GetEnvironmentVariable(CrossProcessReady)!;
-        var output = Environment.GetEnvironmentVariable(CrossProcessOutput)!;
-        var request = Environment.GetEnvironmentVariable(CrossProcessRequest)!;
-        var operation = Environment.GetEnvironmentVariable(CrossProcessOperation)!;
-        var requestHash = Environment.GetEnvironmentVariable(CrossProcessHash)!;
-        var relatedRequestId = Environment.GetEnvironmentVariable(CrossProcessRelated);
-        var generation = long.Parse(
-            Environment.GetEnvironmentVariable(CrossProcessGeneration) ?? "0",
-            NumberStyles.None,
-            CultureInfo.InvariantCulture);
-        await File.WriteAllTextAsync(ready, "ready");
-        await WaitForPathAsync(gate);
-        HumanInputRequestStoreOptions? options = null;
-        if (mode == "crash")
-        {
-            var boundary = Enum.Parse<HumanInputRequestPersistenceBoundary>(Environment.GetEnvironmentVariable(CrossProcessBoundary)!);
-            options = new HumanInputRequestStoreOptions
-            {
-                DurableBoundaryObserver = (observed, _) =>
-                {
-                    if (observed == boundary)
-                    {
-                        TerminateCrossProcessHost();
-                    }
-
-                    return ValueTask.CompletedTask;
-                }
-            };
-        }
-
-        var store = new HumanInputRequestStore(
-            new WorkspacePaths(workspace),
-            new FileCapabilityCatalogTrustProvider(trustRoot),
-            options);
-        if (mode == "related-reader")
-        {
-            var read = await store.ReadForMutationAsync(request, operation, requestHash, relatedRequestId);
-            await File.WriteAllTextAsync(
-                output,
-                $"{read.Status}|{read.StoreGeneration.ToString(CultureInfo.InvariantCulture)}|{(read.RelatedSnapshot is not null).ToString(CultureInfo.InvariantCulture)}");
-            return;
-        }
-
-        var mutation = CreateMutation(
-            request,
-            request == "request-one" ? "version-one" : "version-two",
-            operation,
-            requestHash,
-            generation);
-        var retryWindow = Stopwatch.StartNew();
-        HumanInputRequestLifecycleStoreCommitResult result;
-        do
-        {
-            result = await store.CommitAsync(mutation);
-            if (mode != "writer"
-                || result.Status != HumanInputRequestLifecycleStoreCommitStatus.Unavailable
-                || retryWindow.Elapsed >= TimeSpan.FromSeconds(15))
-            {
-                break;
-            }
-
-            await Task.Delay(50);
-        }
-        while (true);
-
-        await File.WriteAllTextAsync(output, result.Status.ToString());
-    }
-
     private static HumanInputRequestStore Store(
         WorkspacePaths paths,
         ICapabilityCatalogTrustProvider trust,
@@ -1094,39 +1000,20 @@ public sealed class HumanInputRequestStoreTests
         long generation = 0,
         string? relatedRequestId = null)
     {
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            WorkingDirectory = Path.GetTempPath(),
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(HumanInputRequestStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputRequestStoreTests.Cross_process_human_input_store_host");
-        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        startInfo.Environment[CrossProcessMode] = mode;
-        startInfo.Environment[CrossProcessWorkspace] = workspace;
-        startInfo.Environment[CrossProcessTrustRoot] = trustRoot;
-        startInfo.Environment[CrossProcessGate] = gate;
-        startInfo.Environment[CrossProcessReady] = ready;
-        startInfo.Environment[CrossProcessOutput] = output;
-        startInfo.Environment[CrossProcessRequest] = request;
-        startInfo.Environment[CrossProcessOperation] = operation;
-        startInfo.Environment[CrossProcessHash] = requestHash;
-        startInfo.Environment[CrossProcessGeneration] = generation.ToString(CultureInfo.InvariantCulture);
-        if (relatedRequestId is not null)
-        {
-            startInfo.Environment[CrossProcessRelated] = relatedRequestId;
-        }
-        if (boundary is not null)
-        {
-            startInfo.Environment[CrossProcessBoundary] = boundary.Value.ToString();
-        }
-
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process Human Input store host did not start.");
+        return Verification.CancellationHostProcess.Start(
+            "human-input-request-store",
+            mode,
+            workspace,
+            trustRoot,
+            gate,
+            ready,
+            output,
+            request,
+            operation,
+            requestHash,
+            boundary?.ToString() ?? string.Empty,
+            generation.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            relatedRequestId ?? string.Empty);
     }
 
     private static async Task WaitForPathAsync(string path)
@@ -1146,9 +1033,4 @@ public sealed class HumanInputRequestStoreTests
         Assert.True(process.ExitCode == 0, error + Environment.NewLine + output);
     }
 
-    private static void TerminateCrossProcessHost()
-    {
-        Process.GetCurrentProcess().Kill();
-        Thread.Sleep(Timeout.Infinite);
-    }
 }

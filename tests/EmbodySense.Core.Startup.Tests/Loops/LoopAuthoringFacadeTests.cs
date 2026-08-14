@@ -6,7 +6,14 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.ContextualRoles;
+using EmbodySense.Core.Application.ContextualRoles.Models;
+using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Tests.Support;
+using System.Collections.Immutable;
 
 namespace EmbodySense.Core.Startup.Tests.Loops;
 
@@ -16,6 +23,7 @@ public sealed class LoopAuthoringFacadeTests
     public async Task Catalog_and_mutations_project_server_owned_authoring_state()
     {
         using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var facade = new LoopAuthoringFacade(workspace.RootPath);
 
         var initialCatalog = await facade.GetCatalogAsync();
@@ -37,6 +45,8 @@ public sealed class LoopAuthoringFacadeTests
 
         Assert.Equal("default-assistant", initialCatalog.RoleId);
         Assert.Equal("default-conversation", initialCatalog.SystemDefault.Id);
+        Assert.Equal(new ContextualRoleRevisionIdentity("default-assistant", 1), initialCatalog.SystemDefault.OwningRole.Identity);
+        Assert.Equal(64, initialCatalog.SystemDefault.OwningRole.ContentHash.Length);
         Assert.Empty(initialCatalog.CustomDefinitions);
         Assert.Equal(initialCatalog.RoleId, initialCatalog.DraftTemplate.RoleId);
         Assert.Equal("Untitled loop", initialCatalog.DraftTemplate.Definition.DisplayName);
@@ -93,6 +103,7 @@ public sealed class LoopAuthoringFacadeTests
     public async Task System_default_projection_matches_the_canonical_graph_and_dedicated_runner_contract()
     {
         using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var projection = (await new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync()).SystemDefault;
         var canonical = LoopDefinition.CreateDefaultConversation();
 
@@ -100,7 +111,9 @@ public sealed class LoopAuthoringFacadeTests
         Assert.Equal(canonical.Id, projection.Id);
         Assert.Equal(canonical.DisplayName, projection.DisplayName);
         Assert.Equal(canonical.Description, projection.Description);
-        Assert.Equal(canonical.RoleId, projection.RoleId);
+        Assert.Equal(canonical.RoleId, projection.OwningRole.Identity.RoleId);
+        Assert.Equal(new ContextualRoleRevisionIdentity(canonical.RoleId, 1), projection.OwningRole.Identity);
+        Assert.Equal(64, projection.OwningRole.ContentHash.Length);
         Assert.Equal(canonical.Trigger, projection.Trigger);
         Assert.Equal(canonical.MemoryScope, projection.MemoryScope);
         Assert.Equal(canonical.CapabilityIds, projection.CapabilityIds);
@@ -174,6 +187,7 @@ public sealed class LoopAuthoringFacadeTests
     public async Task Missing_definition_and_invalid_create_operation_are_projected_without_writes()
     {
         using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var facade = new LoopAuthoringFacade(workspace.RootPath, "startup-test");
 
         var invalidCreate = await facade.CreateAsync("INVALID OPERATION");
@@ -221,9 +235,128 @@ public sealed class LoopAuthoringFacadeTests
     }
 
     [Fact]
+    public async Task Missing_default_role_is_not_inferred_from_role_markdown_or_backfilled_by_projection()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.Delete(Path.Combine(paths.AgentPath, "contextual-roles"), recursive: true);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync());
+
+        Assert.Contains("exact active default contextual-role lifecycle", exception.Message, StringComparison.Ordinal);
+        Assert.True(File.Exists(paths.RolePath));
+        Assert.False(Directory.Exists(Path.Combine(paths.AgentPath, "contextual-roles")));
+    }
+
+    [Fact]
+    public async Task Inactive_default_role_fails_closed_before_authoring_or_projection()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var identity = new ContextualRoleRevisionIdentity(DefaultContextualRoleSeeder.RoleId, DefaultContextualRoleSeeder.Revision);
+        var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(
+            "disable-default-assistant",
+            string.Empty,
+            ContextualRoleRevisionMutationKind.Disable,
+            identity.RoleId,
+            "startup-test",
+            null,
+            identity,
+            new DateTimeOffset(2026, 8, 10, 12, 0, 0, TimeSpan.Zero)));
+        using (var store = new ContextualRoleRevisionStore(paths, workspaceId))
+        {
+            Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await store.MutateAsync(request)).Status);
+        }
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new LoopAuthoringFacade(workspace.RootPath).CreateAsync("blocked-create"));
+
+        Assert.Contains("exact active default contextual-role lifecycle", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Missing_or_ambiguous_default_role_source_fails_closed_without_changing_the_persisted_pin()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var identity = new ContextualRoleRevisionIdentity(DefaultContextualRoleSeeder.RoleId, DefaultContextualRoleSeeder.Revision);
+        ContextualRoleRevision before;
+        using (var store = new ContextualRoleRevisionStore(paths, workspaceId))
+        {
+            before = Assert.IsType<ContextualRoleRevision>((await store.ReadAsync(new ContextualRoleRevisionReadRequest(identity))).Revision);
+        }
+
+        await File.WriteAllTextAsync(paths.RolePath, "   \n");
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync());
+
+        Assert.Contains("instruction source is unavailable or substituted", exception.Message, StringComparison.Ordinal);
+        using var confirmedStore = new ContextualRoleRevisionStore(paths, workspaceId);
+        var after = await confirmedStore.ReadAsync(new ContextualRoleRevisionReadRequest(identity));
+        Assert.Equal(ContextualRoleRevisionReadStatus.Found, after.Status);
+        Assert.Equal(before.ContentHash, after.Revision!.ContentHash);
+    }
+
+    [Fact]
+    public async Task Corrupt_default_role_hash_evidence_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var revisionPath = Path.Combine(paths.AgentPath, "contextual-roles", "revisions", "default-assistant.1.json");
+        var root = JsonNode.Parse(await File.ReadAllTextAsync(revisionPath))!.AsObject();
+        root["integrityHash"] = new string('0', 64);
+        await File.WriteAllTextAsync(revisionPath, root.ToJsonString());
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync());
+
+        Assert.Contains("failed closed", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Default_role_bound_to_another_workspace_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await PersistSystemDefinitionAndRoleAsync(
+            paths,
+            "workspace-sha256:" + new string('1', 64),
+            new ContextualRoleInstructionSourceReference(
+                ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown,
+                "role",
+                ContextualRoleInstructionClassification.RoleInstruction));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync());
+
+        Assert.Contains("exact published default contextual-role revision", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Default_role_with_a_substituted_source_contract_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await PersistSystemDefinitionAndRoleAsync(
+            paths,
+            CapabilityWorkspaceScopeId.Create(paths.RootPath),
+            new ContextualRoleInstructionSourceReference(
+                ContextualRoleInstructionSourceKind.RoleArtifact,
+                "substituted-role",
+                ContextualRoleInstructionClassification.RoleInstruction));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync());
+
+        Assert.Contains("exact published default contextual-role revision", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Null_nested_input_is_returned_as_validation_feedback_instead_of_throwing()
     {
         using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var facade = new LoopAuthoringFacade(workspace.RootPath);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-null-shapes")).Definition);
         var valid = CreateInput(created, "Valid text");
@@ -255,6 +388,7 @@ public sealed class LoopAuthoringFacadeTests
     public async Task Update_operation_replays_its_original_snapshot_and_conflicts_on_cross_request_reuse_after_restart()
     {
         using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var facade = new LoopAuthoringFacade(workspace.RootPath);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-first-loop")).Definition);
         var versionTwoInput = CreateInput(created, "Version two");
@@ -290,5 +424,43 @@ public sealed class LoopAuthoringFacadeTests
             [new LoopInferenceStep(definition?.InferenceSteps.Single().Id, "Inspect", text, new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, context))],
             [LoopToolAssignment.List, LoopToolAssignment.Read, LoopToolAssignment.Search],
             new LoopExitPolicy(2, text, new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, context)));
+    }
+
+    private static async Task PersistSystemDefinitionAndRoleAsync(
+        WorkspacePaths paths,
+        string applicableWorkspaceId,
+        ContextualRoleInstructionSourceReference source)
+    {
+        Directory.CreateDirectory(paths.AgentPath);
+        await File.WriteAllTextAsync(paths.RolePath, "# Workspace role\n");
+        await new LoopDefinitionStore(paths).SaveAsync(LoopDefinition.CreateDefaultConversation());
+        var actualWorkspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var timestamp = DateTimeOffset.UnixEpoch;
+        var revision = ContextualRoleRevisionContentHash.Apply(new ContextualRoleRevision(
+            1,
+            new ContextualRoleRevisionIdentity(DefaultContextualRoleSeeder.RoleId, DefaultContextualRoleSeeder.Revision),
+            string.Empty,
+            "Default assistant",
+            "Provide the workspace's bounded default conversation assistance.",
+            ContextualRoleStatus.Published,
+            new ContextualRoleProvenance("embodysense-initializer", timestamp, timestamp),
+            new ContextualRoleWorkspaceApplicability(ImmutableArray.Create(applicableWorkspaceId)),
+            source,
+            new ContextualRolePolicyMaxima(
+                LoopCapabilityRequirements.GetAssignedCapabilityIds(LoopCapabilityRequirements.CreateDefaultConversationManifest())
+                    .Select(capabilityId => capabilityId.Value)
+                    .Order(StringComparer.Ordinal)
+                    .ToImmutableArray())));
+        var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(
+            "seed-default-assistant-v1",
+            string.Empty,
+            ContextualRoleRevisionMutationKind.Create,
+            DefaultContextualRoleSeeder.RoleId,
+            "embodysense-initializer",
+            revision,
+            null,
+            timestamp));
+        using var store = new ContextualRoleRevisionStore(paths, actualWorkspaceId);
+        Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await store.MutateAsync(request)).Status);
     }
 }

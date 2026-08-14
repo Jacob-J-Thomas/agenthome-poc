@@ -265,7 +265,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                     inferenceRequest,
                     request.ResponseChunkHandler,
                     request.CancellationToken,
-                    async token =>
+                    async (commitTransportWrite, token) =>
                     {
                         turn = await AdvanceAsync(
                             turn,
@@ -275,6 +275,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                             token,
                             providerOutcome: DefaultConversationProviderOutcome.OutcomeUnknown);
                         dispatchStarted = true;
+                        await commitTransportWrite(token);
                     });
             }
             catch (LlmInferenceObservedResponseException exception)

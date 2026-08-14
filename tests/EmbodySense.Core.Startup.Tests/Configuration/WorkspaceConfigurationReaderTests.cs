@@ -14,6 +14,7 @@ using System.Text.Json;
 
 namespace EmbodySense.Core.Startup.Tests.Configuration;
 
+[Collection(SharedDefaultCapabilityTrustCollection.Name)]
 public sealed class WorkspaceConfigurationReaderTests
 {
     [Fact]

@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Common.ContextualRoles;
@@ -19,16 +20,19 @@ public sealed class ContextualRoleCatalogFacade : IContextualRoleCatalogFacade
     private readonly WorkspacePaths _paths;
     private readonly string _workspaceId;
 
-    /// <summary>Creates a facade bound to one exact workspace root and stable workspace identity.</summary>
-    public ContextualRoleCatalogFacade(string workingDirectory, string workspaceId)
+    /// <summary>Creates a facade bound to one exact workspace root and its server-derived workspace identity.</summary>
+    /// <param name="workingDirectory">The workspace root whose normalized path determines the exact workspace identity.</param>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="workingDirectory"/> is empty or whitespace.</exception>
+    public ContextualRoleCatalogFacade(string workingDirectory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
-        if (!ContextualRoleId.IsValid(workspaceId))
+        _paths = new WorkspacePaths(workingDirectory);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(_paths.RootPath);
+        if (!ContextualRoleWorkspaceId.IsValid(workspaceId))
         {
-            throw new ArgumentException("Workspace id must be a bounded lowercase ASCII identifier.", nameof(workspaceId));
+            throw new InvalidOperationException("The server-derived workspace identity is outside the contextual-role contract.");
         }
 
-        _paths = new WorkspacePaths(workingDirectory);
         _workspaceId = workspaceId;
     }
 

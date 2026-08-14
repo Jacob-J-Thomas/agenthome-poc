@@ -37,6 +37,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly RuntimeCommandService _commandService;
     private readonly ConversationRuntimeState _conversationState;
     private readonly CustomLoopRuntimeFacade _customLoops;
+    private readonly GovernedLoopRuntimeFacade _governedLoops;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
 
     internal AgentRuntime(
@@ -48,6 +49,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         IAsyncDisposable inferenceClient,
         IDefaultConversationLoopRunner loopRunner,
         CustomLoopRuntimeFacade customLoops,
+        GovernedLoopRuntimeFacade governedLoops,
         DefaultConversationTurnReviewService defaultConversationReviews,
         CodexRuntimeStatus codexRuntimeStatus)
     {
@@ -59,6 +61,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(inferenceClient);
         ArgumentNullException.ThrowIfNull(loopRunner);
         ArgumentNullException.ThrowIfNull(customLoops);
+        ArgumentNullException.ThrowIfNull(governedLoops);
         ArgumentNullException.ThrowIfNull(defaultConversationReviews);
         ArgumentNullException.ThrowIfNull(codexRuntimeStatus);
 
@@ -70,6 +73,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _inferenceClient = inferenceClient;
         _loopRunner = loopRunner;
         _customLoops = customLoops;
+        _governedLoops = governedLoops;
         _defaultConversationReviews = defaultConversationReviews;
         _commandService = new RuntimeCommandService(conversationMemory, startupContext);
         CodexRuntimeStatus = codexRuntimeStatus;
@@ -231,12 +235,27 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// <summary>
     /// Admits and synchronously invokes one published custom-loop definition.
     /// </summary>
-    /// <param name="input">The immutable definition and operation identity used for admission.</param>
+    /// <param name="input">The immutable definition and operation identity used for admission. The canonical trigger-worker operation namespace is reserved for authenticated trigger dispatch.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A task whose result contains the durable admission receipt and projected run evidence.</returns>
     public Task<LoopRunInvocationResponse> InvokeCustomLoopAsync(LoopRunInvocationInput input, CancellationToken cancellationToken = default)
     {
         return _customLoops.InvokeAsync(input, cancellationToken);
+    }
+
+    /// <summary>Invokes one exact published governed-loop revision through canonical admission and the shared durable runtime.</summary>
+    /// <param name="input">The operation, immutable publication and grant pins, and manual-trigger prompt.</param>
+    /// <param name="cancellationToken">The token used until an irreversible or durable integrity boundary is reached.</param>
+    /// <returns>The canonical admission, materialization, execution, replay, or recovery-required projection.</returns>
+    /// <remarks>
+    /// Workspace, actor, surface, role, graph payload, model, context, run identity, and execution generation are captured or
+    /// derived by the runtime. The existing custom-loop API remains a separate compatibility entry point during convergence.
+    /// </remarks>
+    public Task<GovernedLoopRunInvocationResponse> InvokeGovernedLoopAsync(
+        GovernedLoopRunInvocationInput input,
+        CancellationToken cancellationToken = default)
+    {
+        return _governedLoops.InvokeAsync(input, cancellationToken);
     }
 
     /// <summary>Creates an explicit one-shot trigger worker bound to this runtime's governed custom-loop execution gate.</summary>
@@ -344,6 +363,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// <returns>A task that represents the asynchronous operation.</returns>
     public async ValueTask DisposeAsync()
     {
+        _governedLoops.Dispose();
         await _customLoops.DisposeAsync();
         await _inferenceClient.DisposeAsync();
     }

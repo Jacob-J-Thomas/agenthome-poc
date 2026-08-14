@@ -13,6 +13,22 @@ public sealed class CapabilityAdmissionServiceTests
     private static readonly DateTimeOffset _now = DateTimeOffset.Parse("2026-08-01T12:00:00+00:00");
 
     [Fact]
+    public async Task Admission_records_an_empty_proof_without_consulting_the_catalog_when_no_capabilities_are_required()
+    {
+        var store = new MutableCatalogStore([]) { Status = CapabilityCatalogReadStatus.Unavailable };
+        var requirements = EmptyManifest();
+
+        var result = await Service(store).AdmitAsync(requirements, []);
+
+        Assert.True(result.IsAdmitted, result.Detail);
+        var snapshot = Assert.IsType<CapabilityAdmissionSnapshot>(result.Snapshot);
+        Assert.Empty(snapshot.Pins);
+        Assert.Empty(snapshot.Evidence);
+        Assert.Equal(0, store.ReadCount);
+        Assert.Null(CapabilityAdmissionSnapshotValidator.Validate(snapshot));
+    }
+
+    [Fact]
     public async Task Admission_persists_exact_descriptor_implementation_provenance_and_resolution_evidence()
     {
         var entry = Entry();
@@ -86,6 +102,8 @@ public sealed class CapabilityAdmissionServiceTests
 
         Assert.False(versionDrift.IsValid);
         Assert.False(platformDrift.IsValid);
+        Assert.Equal(CapabilityRevalidationStatus.PinInactive, versionDrift.Status);
+        Assert.Equal(CapabilityRevalidationStatus.PinInactive, platformDrift.Status);
     }
 
     [Theory]
@@ -178,30 +196,51 @@ public sealed class CapabilityAdmissionServiceTests
         var persistedBefore = JsonSerializer.Serialize(snapshot);
 
         store.Entries = [Entry(purpose: "Drifted description")];
-        Assert.False((await service.RevalidateAsync(snapshot, [original.Descriptor.Id])).IsValid);
+        Assert.Equal(CapabilityRevalidationStatus.PinDrifted, (await service.RevalidateAsync(snapshot, [original.Descriptor.Id])).Status);
 
         store.Entries = [Entry(retirement: CapabilityRetirementState.Removed)];
-        Assert.False((await service.RevalidateAsync(snapshot, [original.Descriptor.Id])).IsValid);
+        Assert.Equal(CapabilityRevalidationStatus.PinInactive, (await service.RevalidateAsync(snapshot, [original.Descriptor.Id])).Status);
 
         store.Entries = [Entry(trust: CapabilityTrustState.Rejected)];
-        Assert.False((await service.RevalidateAsync(snapshot, [original.Descriptor.Id])).IsValid);
+        Assert.Equal(CapabilityRevalidationStatus.PinInactive, (await service.RevalidateAsync(snapshot, [original.Descriptor.Id])).Status);
 
         store.Entries = [Entry(health: CapabilityHealthState.Degraded)];
-        Assert.False((await service.RevalidateAsync(snapshot, [original.Descriptor.Id])).IsValid);
+        Assert.Equal(CapabilityRevalidationStatus.PinInactive, (await service.RevalidateAsync(snapshot, [original.Descriptor.Id])).Status);
 
         store.Entries = [original with { Descriptor = original.Descriptor with { Compatibility = null! } }];
-        Assert.False((await service.RevalidateAsync(snapshot, [original.Descriptor.Id])).IsValid);
+        Assert.Equal(CapabilityRevalidationStatus.PinDrifted, (await service.RevalidateAsync(snapshot, [original.Descriptor.Id])).Status);
 
         store.Entries = [original];
-        Assert.False((await service.RevalidateAsync(snapshot, [])).IsValid);
-        Assert.False((await new CapabilityAdmissionService(store, "workspace-other", Version("1.5.0"), Platform("linux/x64"), new StubCapabilityAuthorityTransaction()).RevalidateAsync(snapshot, [original.Descriptor.Id])).IsValid);
+        Assert.Equal(CapabilityRevalidationStatus.AuthorityNarrowed, (await service.RevalidateAsync(snapshot, [])).Status);
+        Assert.Equal(CapabilityRevalidationStatus.WorkspaceMismatch, (await new CapabilityAdmissionService(store, "workspace-other", Version("1.5.0"), Platform("linux/x64"), new StubCapabilityAuthorityTransaction()).RevalidateAsync(snapshot, [original.Descriptor.Id])).Status);
 
         var malformedEvidence = snapshot with { Evidence = [null!] };
-        Assert.False((await service.RevalidateAsync(malformedEvidence, [original.Descriptor.Id])).IsValid);
+        Assert.Equal(CapabilityRevalidationStatus.InvalidSnapshot, (await service.RevalidateAsync(malformedEvidence, [original.Descriptor.Id])).Status);
 
         var forged = snapshot with { RequirementsHash = new string('0', 64) };
-        Assert.False((await service.RevalidateAsync(forged, [original.Descriptor.Id])).IsValid);
+        Assert.Equal(CapabilityRevalidationStatus.InvalidSnapshot, (await service.RevalidateAsync(forged, [original.Descriptor.Id])).Status);
         Assert.Equal(persistedBefore, JsonSerializer.Serialize(snapshot));
+    }
+
+    [Fact]
+    public async Task Revalidation_distinguishes_unavailable_and_ambiguous_catalog_posture()
+    {
+        var entry = Entry();
+        var store = new MutableCatalogStore([entry]);
+        var service = Service(store);
+        var admitted = await service.AdmitAsync(Manifest(), [entry.Descriptor.Id]);
+        var snapshot = Assert.IsType<CapabilityAdmissionSnapshot>(admitted.Snapshot);
+
+        store.Status = CapabilityCatalogReadStatus.Unavailable;
+        var unavailable = await service.RevalidateAsync(snapshot, [entry.Descriptor.Id]);
+        store.Status = CapabilityCatalogReadStatus.Available;
+        store.Entries = [entry, entry];
+        var ambiguous = await service.RevalidateAsync(snapshot, [entry.Descriptor.Id]);
+
+        Assert.Equal(CapabilityRevalidationStatus.CatalogUnavailable, unavailable.Status);
+        Assert.Equal(CapabilityRevalidationStatus.CatalogAmbiguous, ambiguous.Status);
+        Assert.False(unavailable.IsValid);
+        Assert.False(ambiguous.IsValid);
     }
 
     [Fact]
@@ -300,6 +339,18 @@ public sealed class CapabilityAdmissionServiceTests
             new CapabilityDependencyArtifactMetadata(null, null));
     }
 
+    private static CapabilityDependencyManifest EmptyManifest()
+    {
+        Assert.True(CapabilityId.TryParse("org.example/authority-free-loop", out var subject, out _));
+        return new CapabilityDependencyManifest(
+            CapabilityDependencyManifest.CurrentSchemaVersion,
+            CapabilityDependencyManifestKind.LoopPackage,
+            subject!,
+            [],
+            [],
+            new CapabilityDependencyArtifactMetadata(null, null));
+    }
+
     private static CapabilityVersion Version(string value)
     {
         Assert.True(CapabilityVersion.TryParse(value, out var version, out _));
@@ -361,11 +412,14 @@ public sealed class CapabilityAdmissionServiceTests
     {
         public IReadOnlyList<CapabilityCatalogEntry> Entries { get; set; } = entries;
 
-        public CapabilityCatalogReadStatus Status { get; init; } = CapabilityCatalogReadStatus.Available;
+        public CapabilityCatalogReadStatus Status { get; set; } = CapabilityCatalogReadStatus.Available;
+
+        public int ReadCount { get; private set; }
 
         public Task<CapabilityCatalogReadResult> ReadAsync(string? startAfterId, int maximumCount, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            ReadCount++;
             var page = Status == CapabilityCatalogReadStatus.Available ? new CapabilityCatalogPage(7, Entries, null) : null;
             return Task.FromResult(new CapabilityCatalogReadResult(Status, page, "Test catalog read."));
         }

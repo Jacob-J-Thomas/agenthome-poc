@@ -3,6 +3,7 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Workspace;
 
+[Collection(SharedDefaultCapabilityTrustCollection.Name)]
 public sealed class WorkspaceStatusReaderTests
 {
     [Fact]
@@ -21,6 +22,30 @@ public sealed class WorkspaceStatusReaderTests
         Assert.Equal("requires approval for missing or unmatched directory rules", status.DefaultAccess);
         Assert.NotEmpty(status.ApprovedEntries);
         Assert.NotEmpty(status.DeniedEntries);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("corrupt")]
+    [InlineData("substituted")]
+    [InlineData("inactive")]
+    [InlineData("wrong-workspace")]
+    [InlineData("source-ineligible")]
+    public async Task Read_reports_damaged_default_role_evidence_as_cleanup_required_without_mutation(string damage)
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await DefaultContextualRoleEvidenceTestSupport.DamageAsync(workspace, damage);
+        var workspaceBefore = DefaultContextualRoleEvidenceTestSupport.SnapshotFiles(workspace.RootPath);
+        var serverStateBefore = DefaultContextualRoleEvidenceTestSupport.SnapshotFiles(workspace.ServerStatePath);
+
+        var status = new WorkspaceStatusReader().Read(workspace.RootPath);
+
+        Assert.False(status.IsInitialized);
+        Assert.True(status.HasPartialScaffold);
+        Assert.True(status.RequiresExplicitCleanup);
+        AssertSnapshotsEqual(workspaceBefore, DefaultContextualRoleEvidenceTestSupport.SnapshotFiles(workspace.RootPath));
+        AssertSnapshotsEqual(serverStateBefore, DefaultContextualRoleEvidenceTestSupport.SnapshotFiles(workspace.ServerStatePath));
     }
 
     [Fact]
@@ -51,7 +76,7 @@ public sealed class WorkspaceStatusReaderTests
 
         Assert.False(status.IsInitialized);
         Assert.True(status.HasPartialScaffold);
-        Assert.False(status.RequiresExplicitCleanup);
+        Assert.True(status.RequiresExplicitCleanup);
     }
 
     [Fact]
@@ -106,7 +131,7 @@ public sealed class WorkspaceStatusReaderTests
 
         Assert.False(status.IsInitialized);
         Assert.True(status.HasPartialScaffold);
-        Assert.False(status.RequiresExplicitCleanup);
+        Assert.True(status.RequiresExplicitCleanup);
     }
 
     [Fact]
@@ -121,7 +146,7 @@ public sealed class WorkspaceStatusReaderTests
 
         Assert.False(status.IsInitialized);
         Assert.True(status.HasPartialScaffold);
-        Assert.False(status.RequiresExplicitCleanup);
+        Assert.True(status.RequiresExplicitCleanup);
     }
 
     [Fact]
@@ -164,6 +189,15 @@ public sealed class WorkspaceStatusReaderTests
         finally
         {
             File.SetAttributes(paths.WorkspaceInitializationMarkerPath, FileAttributes.Normal);
+        }
+    }
+
+    private static void AssertSnapshotsEqual(IReadOnlyDictionary<string, string> expected, IReadOnlyDictionary<string, string> actual)
+    {
+        Assert.Equal(expected.Keys, actual.Keys);
+        foreach (var path in expected.Keys)
+        {
+            Assert.Equal(expected[path], actual[path]);
         }
     }
 }

@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Clients.CodexAppServer;
 using EmbodySense.Core.Persistence.Audit;
 
@@ -60,15 +61,26 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
         CancellationToken cancellationToken = default)
     {
-        return GenerateAsync(request, responseChunkHandler, cancellationToken, providerRequestStarting: null);
+        return GenerateCoreAsync(request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary: null);
     }
 
     /// <inheritdoc />
-    public async Task<LlmInferenceResponse> GenerateAsync(
+    public Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler,
         CancellationToken cancellationToken,
-        Func<CancellationToken, Task>? providerRequestStarting)
+        InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(providerTransportCommitBoundary);
+        return GenerateCoreAsync(request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary);
+    }
+
+    private async Task<LlmInferenceResponse> GenerateCoreAsync(
+        LlmInferenceRequest request,
+        Func<string, CancellationToken, Task>? responseChunkHandler,
+        CancellationToken cancellationToken,
+        InferenceProviderTransportCommitBoundary? providerTransportCommitBoundary)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -79,9 +91,9 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
 
         try
         {
-            var response = providerRequestStarting is null
+            var response = providerTransportCommitBoundary is null
                 ? await _innerClient.GenerateAsync(request, responseChunkHandler, cancellationToken)
-                : await _innerClient.GenerateAsync(request, responseChunkHandler, cancellationToken, providerRequestStarting);
+                : await _innerClient.GenerateAsync(request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary);
             stopwatch.Stop();
             try
             {
@@ -95,6 +107,14 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
             return response;
         }
         catch (LlmInferenceObservedResponseException)
+        {
+            throw;
+        }
+        catch (GovernedLoopEffectAuthorityStoppedException)
+        {
+            throw;
+        }
+        catch (ToolActuationReviewRequiredException)
         {
             throw;
         }

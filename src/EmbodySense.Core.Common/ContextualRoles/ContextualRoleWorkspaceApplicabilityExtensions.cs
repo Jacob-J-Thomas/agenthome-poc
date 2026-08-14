@@ -9,9 +9,11 @@ public static class ContextualRoleWorkspaceApplicabilityExtensions
     /// <param name="applicability">The declarative workspace scope.</param>
     /// <param name="workspaceId">The workspace identifier to test.</param>
     /// <returns><see langword="true"/> only when an exact declared identifier matches.</returns>
-    public static bool AppliesTo(this ContextualRoleWorkspaceApplicability applicability, string workspaceId)
+    public static bool AppliesTo(this ContextualRoleWorkspaceApplicability applicability, string? workspaceId)
     {
         ArgumentNullException.ThrowIfNull(applicability);
-        return applicability.WorkspaceIds.Contains(workspaceId, StringComparer.Ordinal);
+        return ContextualRoleWorkspaceId.IsValid(workspaceId)
+            && !applicability.WorkspaceIds.IsDefault
+            && applicability.WorkspaceIds.Contains(workspaceId!, StringComparer.Ordinal);
     }
 }

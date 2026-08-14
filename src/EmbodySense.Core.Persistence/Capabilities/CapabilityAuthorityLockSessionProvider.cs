@@ -5,9 +5,9 @@ internal sealed class CapabilityAuthorityLockSessionProvider : ICapabilityAuthor
     private readonly CapabilityCatalogPathGuard _guard;
     private readonly string _lockPath;
 
-    internal CapabilityAuthorityLockSessionProvider(string rootPath, string lockPath, ICapabilityCatalogDurabilityBarrier durabilityBarrier)
+    internal CapabilityAuthorityLockSessionProvider(string rootPath, string lockPath, ICapabilityCatalogDurabilityBarrier durabilityBarrier, TimeProvider? timeProvider = null)
     {
-        _guard = new CapabilityCatalogPathGuard(rootPath, durabilityBarrier);
+        _guard = new CapabilityCatalogPathGuard(rootPath, durabilityBarrier, timeProvider: timeProvider);
         _lockPath = lockPath;
     }
 

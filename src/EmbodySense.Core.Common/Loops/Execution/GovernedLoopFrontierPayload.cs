@@ -2,18 +2,22 @@ using EmbodySense.Core.Common.Loops.Execution.Models;
 
 namespace EmbodySense.Core.Common.Loops.Execution;
 
-/// <summary>Contains reusable unbound committed frontier evidence for one graph execution generation.</summary>
-/// <remarks>Construction validates the aggregate posture and preserves sorted, unique node evidence.</remarks>
+/// <summary>Contains one immutable, bounded canonical execution-frontier version.</summary>
 public sealed record GovernedLoopFrontierPayload
 {
-    private GovernedLoopFrontierPayload(int schemaVersion, long frontierVersion, GovernedLoopFrontierStatus status, IReadOnlyList<GovernedLoopNodeExecutionEvidence> nodes, DateTimeOffset updatedAtUtc)
+    private GovernedLoopFrontierPayload(long frontierVersion, int concurrencyCeiling, GovernedLoopFrontierStatus status, IReadOnlyList<GovernedLoopNodeExecutionEvidence> nodes, DateTimeOffset updatedAtUtc, string contentHash)
     {
-        SchemaVersion = schemaVersion;
+        SchemaVersion = CurrentSchemaVersion;
         FrontierVersion = frontierVersion;
+        ConcurrencyCeiling = concurrencyCeiling;
         Status = status;
-        Nodes = nodes;
+        Nodes = Array.AsReadOnly(nodes.Select(GovernedLoopFrontierContractCopy.Copy).ToArray());
         UpdatedAtUtc = updatedAtUtc;
+        ContentHash = contentHash;
     }
+
+    /// <summary>Gets the only supported schema version.</summary>
+    public const int CurrentSchemaVersion = GovernedLoopExecutionLimits.CurrentSchemaVersion;
 
     /// <summary>Gets the schema version.</summary>
     public int SchemaVersion { get; }
@@ -21,56 +25,57 @@ public sealed record GovernedLoopFrontierPayload
     /// <summary>Gets the positive optimistic frontier version.</summary>
     public long FrontierVersion { get; }
 
+    /// <summary>Gets the admitted concurrent-node ceiling; schema 1 requires one.</summary>
+    public int ConcurrencyCeiling { get; }
+
     /// <summary>Gets the aggregate frontier posture.</summary>
     public GovernedLoopFrontierStatus Status { get; }
 
-    /// <summary>Gets the sorted unique bounded node evidence.</summary>
+    /// <summary>Gets the immutable contiguous deterministic plan prefix.</summary>
     public IReadOnlyList<GovernedLoopNodeExecutionEvidence> Nodes { get; }
 
-    /// <summary>Gets the UTC timestamp of this committed frontier version.</summary>
+    /// <summary>Gets the UTC commit timestamp.</summary>
     public DateTimeOffset UpdatedAtUtc { get; }
 
-    /// <summary>Creates validated reusable unbound frontier evidence.</summary>
-    /// <param name="schemaVersion">The schema version, which must be 1.</param>
-    /// <param name="frontierVersion">The positive bounded optimistic version.</param>
-    /// <param name="status">The aggregate frontier posture.</param>
-    /// <param name="nodes">The node evidence sorted by node identity.</param>
-    /// <param name="updatedAtUtc">The UTC timestamp of this version.</param>
-    /// <returns>The validated frontier evidence.</returns>
-    /// <exception cref="ArgumentNullException">Thrown when <paramref name="nodes"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">Thrown when the frontier version or node count exceeds its supported bound.</exception>
-    /// <exception cref="ArgumentException">Thrown when the schema, status, timestamp, node collection, or aggregate frontier shape is invalid.</exception>
-    public static GovernedLoopFrontierPayload Create(int schemaVersion, long frontierVersion, GovernedLoopFrontierStatus status, IEnumerable<GovernedLoopNodeExecutionEvidence> nodes, DateTimeOffset updatedAtUtc)
+    /// <summary>Gets the exact hash of the complete bound frontier posture, or empty before binding and hashing.</summary>
+    public string ContentHash { get; }
+
+    /// <summary>Creates an unhashed validated schema-1 frontier payload.</summary>
+    public static GovernedLoopFrontierPayload Create(
+        int schemaVersion,
+        long frontierVersion,
+        int concurrencyCeiling,
+        GovernedLoopFrontierStatus status,
+        IEnumerable<GovernedLoopNodeExecutionEvidence> nodes,
+        DateTimeOffset updatedAtUtc,
+        string contentHash)
     {
         GovernedLoopExecutionContractGuard.RequireSchema(schemaVersion, nameof(schemaVersion));
-        if (!GovernedLoopExecutionStateMatrix.IsSupported(status))
+        var snapshot = GovernedLoopExecutionContractGuard.SnapshotBounded(nodes, nameof(nodes), GovernedLoopExecutionLimits.MaxFrontierNodes);
+        GovernedLoopExecutionContractGuard.RequireContiguousPlanPrefix(snapshot, nameof(nodes));
+        if (concurrencyCeiling != GovernedLoopExecutionLimits.Schema1ConcurrencyCeiling)
         {
-            throw new ArgumentException("A supported governed-loop frontier status is required.", nameof(status));
+            throw new ArgumentOutOfRangeException(nameof(concurrencyCeiling), "Schema-1 governed-loop execution requires a concurrency ceiling of one.");
         }
 
-        var snapshot = GovernedLoopExecutionContractGuard.SnapshotBounded(nodes, nameof(nodes), GovernedLoopExecutionLimits.MaxFrontierNodes);
-        RequireSortedUniqueNodes(snapshot);
         if (!GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(status, snapshot))
         {
             throw new ArgumentException("Node evidence does not match the aggregate frontier status.", nameof(nodes));
         }
 
-        return new GovernedLoopFrontierPayload(
-            schemaVersion,
-            GovernedLoopExecutionContractGuard.RequirePositiveVersion(frontierVersion, nameof(frontierVersion)),
-            status,
-            snapshot,
-            GovernedLoopExecutionContractGuard.RequireUtc(updatedAtUtc, nameof(updatedAtUtc)));
+        if (snapshot.Count(node => node.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running) > concurrencyCeiling)
+        {
+            throw new ArgumentException("Ready and running frontier nodes exceed the admitted concurrency ceiling.", nameof(nodes));
+        }
+
+        if (!string.IsNullOrEmpty(contentHash))
+        {
+            GovernedLoopExecutionContractGuard.RequireSha256(contentHash, nameof(contentHash));
+        }
+
+        return new GovernedLoopFrontierPayload(GovernedLoopExecutionContractGuard.RequirePositiveVersion(frontierVersion, nameof(frontierVersion)), concurrencyCeiling, status, snapshot, GovernedLoopExecutionContractGuard.RequireUtc(updatedAtUtc, nameof(updatedAtUtc)), contentHash);
     }
 
-    private static void RequireSortedUniqueNodes(IReadOnlyList<GovernedLoopNodeExecutionEvidence> nodes)
-    {
-        for (var index = 1; index < nodes.Count; index++)
-        {
-            if (string.CompareOrdinal(nodes[index - 1].NodeId, nodes[index].NodeId) >= 0)
-            {
-                throw new ArgumentException("Governed-loop frontier nodes must be sorted and unique by node identity.", nameof(nodes));
-            }
-        }
-    }
+    internal GovernedLoopFrontierPayload WithContentHash(string contentHash)
+        => new(FrontierVersion, ConcurrencyCeiling, Status, Nodes, UpdatedAtUtc, GovernedLoopExecutionContractGuard.RequireSha256(contentHash, nameof(contentHash)));
 }

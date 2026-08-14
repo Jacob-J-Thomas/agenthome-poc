@@ -17,6 +17,9 @@ namespace EmbodySense.Core.Persistence.Capabilities;
 /// </remarks>
 public sealed class FileCapabilityCatalogTrustProvider : ICapabilityCatalogTrustProvider
 {
+    /// <summary>Names the optional process environment variable that selects the default catalog trust root.</summary>
+    public const string DefaultRootEnvironmentVariable = "EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT";
+
     private const int AuthenticationKeyByteCount = 32;
     private const string AuthenticationTagPrefix = "hmac-sha256:";
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions(writeIndented: true);
@@ -48,9 +51,20 @@ public sealed class FileCapabilityCatalogTrustProvider : ICapabilityCatalogTrust
     /// <inheritdoc />
     public int MaximumAuthenticationTagUtf8Bytes => AuthenticationTagPrefix.Length + SHA256.HashSizeInBytes * 2;
 
-    /// <summary>Creates the default provider beneath the current server account's local application data.</summary>
+    /// <summary>Creates the default provider at the absolute process-configured root, or beneath the current server account's local application data.</summary>
     public static FileCapabilityCatalogTrustProvider CreateDefault()
     {
+        var configuredRoot = Environment.GetEnvironmentVariable(DefaultRootEnvironmentVariable);
+        if (configuredRoot is not null)
+        {
+            if (string.IsNullOrWhiteSpace(configuredRoot) || !Path.IsPathFullyQualified(configuredRoot))
+            {
+                throw new InvalidOperationException($"{DefaultRootEnvironmentVariable} must name a nonblank absolute path when configured.");
+            }
+
+            return new FileCapabilityCatalogTrustProvider(configuredRoot);
+        }
+
         var localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(localData))
         {

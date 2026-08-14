@@ -30,7 +30,7 @@ public static class CapabilityAdmissionSnapshotValidator
             return "Capability admission requirement evidence was forged or corrupted.";
         }
 
-        if (snapshot.Pins.Count == 0 || snapshot.Pins.Count > CapabilityContractLimits.MaxCapabilityAdmissionPins
+        if (snapshot.Pins.Count > CapabilityContractLimits.MaxCapabilityAdmissionPins
             || snapshot.Pins.Any(pin => pin is null || pin.DescriptorIdentity is null || pin.Implementation is null || pin.Provenance is null || pin.Artifact is null
                 || string.IsNullOrWhiteSpace(pin.SafeDescription) || pin.SafeDescription.Length > CapabilityContractLimits.MaxPurposeCharacters)
             || snapshot.Pins.Select(pin => pin.DescriptorIdentity.Id.Value).Distinct(StringComparer.Ordinal).Count() != snapshot.Pins.Count)
@@ -50,6 +50,11 @@ public static class CapabilityAdmissionSnapshotValidator
         if (snapshot.Evidence.GroupBy(item => (item.SubjectId.Value, item.DependencyId.Value, item.IsOptional)).Any(group => group.Skip(1).Any()))
         {
             return "Capability admission resolution evidence contains duplicate observations.";
+        }
+
+        if (!RootRequirementsHaveExactEvidence(snapshot))
+        {
+            return "Capability admission evidence does not cover the exact root requirements.";
         }
 
         var selectedEvidence = snapshot.Evidence.Where(item => string.Equals(item.Outcome, "Selected", StringComparison.Ordinal)).ToArray();
@@ -83,6 +88,41 @@ public static class CapabilityAdmissionSnapshotValidator
         }
 
         return null;
+    }
+
+    private static bool RootRequirementsHaveExactEvidence(CapabilityAdmissionSnapshot snapshot)
+    {
+        var rootEvidence = snapshot.Evidence
+            .Where(item => item.SubjectId.Equals(snapshot.Requirements.SubjectId))
+            .ToArray();
+        if (rootEvidence.Length != snapshot.Requirements.Required.Count + snapshot.Requirements.Optional.Count)
+        {
+            return false;
+        }
+
+        foreach (var dependency in snapshot.Requirements.Required)
+        {
+            var matches = rootEvidence.Where(item => !item.IsOptional && item.DependencyId.Equals(dependency.CapabilityId)).ToArray();
+            if (matches.Length != 1
+                || !matches[0].CompatibleVersionRange.Equals(dependency.CompatibleVersionRange)
+                || !string.Equals(matches[0].Outcome, "Selected", StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        foreach (var dependency in snapshot.Requirements.Optional)
+        {
+            var matches = rootEvidence.Where(item => item.IsOptional && item.DependencyId.Equals(dependency.CapabilityId)).ToArray();
+            if (matches.Length != 1
+                || !matches[0].CompatibleVersionRange.Equals(dependency.CompatibleVersionRange)
+                || matches[0].Outcome is not "Selected" and not "OmittedOptional")
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool IsSafeDetail(string? detail)

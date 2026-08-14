@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging;
 
 namespace EmbodySense.Web.Tests;
 
+[Collection(EphemeralPortApiCollection.Name)]
 public sealed class WebApiControllerTests
 {
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();

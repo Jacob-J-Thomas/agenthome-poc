@@ -2,6 +2,8 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Loops.Execution;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 
@@ -63,6 +65,19 @@ public sealed record CustomLoopRunRecord(
 
     /// <summary>Gets the immutable exact capability resolution admitted for this run.</summary>
     public CapabilityAdmissionSnapshot CapabilityAdmission { get; init; } = null!;
+
+    /// <summary>Gets the exact bounded invocation payload copied from the pre-admission operation, or null for the fenced legacy path.</summary>
+    [JsonRequired]
+    public GovernedLoopSequentialInvocationSnapshot? SequentialInvocationSnapshot { get; init; }
+
+    /// <summary>Gets the exact canonical admission and graph binding, or null for the fenced legacy path.</summary>
+    [JsonRequired]
+    public GovernedLoopSequentialAdapterBinding? SequentialAdapterBinding { get; init; }
+
+    /// <summary>Gets the exact durable canonical execution frontier, or null only for the explicitly isolated legacy path.</summary>
+    /// <remarks>The JSON property is required even when its value is null; schema-1 artifacts that omit it are unsupported.</remarks>
+    [JsonRequired]
+    public GovernedLoopFrontierPosture? Frontier { get; init; }
 
     /// <summary>
     /// Gets a value indicating whether the lifecycle has reached a terminal status.

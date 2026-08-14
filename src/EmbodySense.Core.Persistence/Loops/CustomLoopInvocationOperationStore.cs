@@ -9,6 +9,8 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;
@@ -136,7 +138,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.NotFound, null);
             }
 
-            if (!SameEnvelope(existing, operation))
+            if (!SameEnvelope(existing, operation, allowSequentialSnapshotBinding: true))
             {
                 return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
@@ -965,9 +967,18 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
     }
 
-    private static bool SameEnvelope(CustomLoopInvocationOperation left, CustomLoopInvocationOperation right)
+    private static bool SameEnvelope(CustomLoopInvocationOperation left, CustomLoopInvocationOperation right, bool allowSequentialSnapshotBinding = false)
     {
-        return string.Equals(left.RequestHash, right.RequestHash, StringComparison.Ordinal)
+        var snapshotMatches = string.Equals(left.SequentialInvocationSnapshot?.ContentHash, right.SequentialInvocationSnapshot?.ContentHash, StringComparison.Ordinal)
+            || allowSequentialSnapshotBinding
+                && left.SequentialInvocationSnapshot is null
+                && right.SequentialInvocationSnapshot is not null
+                && left.BindingState == CustomLoopInvocationBindingState.Unbound
+                && right.BindingState == CustomLoopInvocationBindingState.CapturedContext;
+        return snapshotMatches
+            && string.Equals(left.SequentialAdmissionRequestHash, right.SequentialAdmissionRequestHash, StringComparison.Ordinal)
+            && string.Equals(left.SequentialArtifactHash, right.SequentialArtifactHash, StringComparison.Ordinal)
+            && string.Equals(left.RequestHash, right.RequestHash, StringComparison.Ordinal)
             && string.Equals(left.OperationId, right.OperationId, StringComparison.Ordinal)
             && string.Equals(left.LoopId, right.LoopId, StringComparison.Ordinal)
             && left.ExpectedDefinitionVersion == right.ExpectedDefinitionVersion
@@ -1021,6 +1032,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             && IsBoundedText(operation.Provider, CustomLoopLimits.MaxTraceReferenceCharacters)
             && (operation.Model is null || IsBoundedText(operation.Model, CustomLoopLimits.MaxTraceReferenceCharacters))
             && ValidBinding(operation)
+            && ValidSequentialSnapshot(operation)
             && IsHash(operation.RequestHash)
             && CustomLoopInvocationRequestHash.Matches(operation)
             && operation.CreatedAtUtc != default
@@ -1081,6 +1093,12 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         var hasValidOptionalRun = operation.RunId is null || CustomLoopArtifactIdentifier.IsValid(operation.RunId);
         return operation.AdmissionStatus switch
         {
+            nameof(CustomLoopInvocationOutcome.Rejected) => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext
+                && operation.SequentialAdmissionRequestHash is not null
+                && operation.SequentialArtifactHash is not null
+                && operation.SequentialInvocationSnapshot is not null
+                && operation.RunId is null
+                && operation.ValidationErrors.Length == 0,
             CustomLoopAdmissionStatusNames.Invalid => operation.BindingState == CustomLoopInvocationBindingState.ConversationInvalid
                 ? operation.RunId is null
                 : operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && hasValidOptionalRun,
@@ -1101,10 +1119,58 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             CustomLoopInvocationBindingState.ConversationNotFound => IsHash(operation.InvokingConversationId) && operation.ContextIdentityHash is null,
             CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy => IsHash(operation.InvokingConversationId) && operation.ContextIdentityHash is null,
             CustomLoopInvocationBindingState.ConversationInvalid => IsHash(operation.InvokingConversationId) && operation.ContextIdentityHash is null,
-            CustomLoopInvocationBindingState.CapturedContext => IsHash(operation.InvokingConversationId) && IsHash(operation.ContextIdentityHash),
-            CustomLoopInvocationBindingState.CapturedContextNotFound => IsHash(operation.InvokingConversationId) && IsHash(operation.ContextIdentityHash),
+            CustomLoopInvocationBindingState.CapturedContext => ValidCapturedContextBinding(operation),
+            CustomLoopInvocationBindingState.CapturedContextNotFound => ValidCapturedContextBinding(operation),
             _ => false
         };
+    }
+
+    private static bool ValidCapturedContextBinding(CustomLoopInvocationOperation operation)
+    {
+        var validConversation = IsHash(operation.InvokingConversationId)
+            || operation.InvokingConversationId is null
+                && operation.SequentialInvocationSnapshot is { InvokingConversation: null };
+        return validConversation && IsHash(operation.ContextIdentityHash);
+    }
+
+    private static bool ValidSequentialSnapshot(CustomLoopInvocationOperation operation)
+    {
+        var snapshot = operation.SequentialInvocationSnapshot;
+        var hasAdmissionRequestHash = IsHash(operation.SequentialAdmissionRequestHash);
+        var hasArtifactHash = IsHash(operation.SequentialArtifactHash);
+        if (operation.SequentialAdmissionRequestHash is null && operation.SequentialArtifactHash is null)
+        {
+            return snapshot is null;
+        }
+
+        if (!hasAdmissionRequestHash || !hasArtifactHash)
+        {
+            return false;
+        }
+
+        if (snapshot is null)
+        {
+            return operation.State == CustomLoopInvocationOperationState.Pending
+                && operation.BindingState == CustomLoopInvocationBindingState.Unbound;
+        }
+
+        if (operation.BindingState is not (CustomLoopInvocationBindingState.CapturedContext or CustomLoopInvocationBindingState.CapturedContextNotFound)
+            || !GovernedLoopSequentialContractValidator.Validate(snapshot).IsValid
+            || snapshot.ContextCapturedAtUtc > operation.UpdatedAtUtc
+            || !string.Equals(operation.InvocationPromptHash, CustomLoopInvocationRequestHash.ComputePromptHash(snapshot.TriggerPrompt), StringComparison.Ordinal)
+            || !string.Equals(operation.Provider, snapshot.ModelSnapshot.Provider, StringComparison.Ordinal)
+            || !string.Equals(operation.Model, snapshot.ModelSnapshot.Model, StringComparison.Ordinal)
+            || !string.Equals(operation.InvokingConversationId, snapshot.InvokingConversation?.ConversationId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var context = new CustomLoopContextSnapshot(
+            CustomLoopContextSnapshot.CurrentSchemaVersion,
+            snapshot.ContextCapturedAtUtc,
+            snapshot.ContextManifest.ToArray(),
+            string.Empty);
+        return string.Equals(operation.ContextIdentityHash, CustomLoopContextSnapshotHash.ComputeIdentity(context), StringComparison.Ordinal);
     }
 
     private static bool ValidValidationError(CustomLoopValidationError? error)

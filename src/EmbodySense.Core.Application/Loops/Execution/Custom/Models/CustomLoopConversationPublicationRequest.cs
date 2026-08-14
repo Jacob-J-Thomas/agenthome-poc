@@ -1,3 +1,5 @@
+using EmbodySense.Core.Application.Loops.Execution.Custom;
+
 namespace EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 
 /// <summary>
@@ -14,6 +16,7 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 /// <param name="CanonicalOutputHash">The canonical output hash.</param>
 /// <param name="PriorPublications">The prior publications.</param>
 /// <param name="AppendStarted">The append started.</param>
+/// <param name="AppendCommitBoundary">The optional caller-owned boundary that must commit the identity-bearing append at most once.</param>
 public sealed record CustomLoopConversationPublicationRequest(
     string OperationId,
     string RunId,
@@ -25,4 +28,5 @@ public sealed record CustomLoopConversationPublicationRequest(
     string CanonicalOutput,
     string CanonicalOutputHash,
     IReadOnlyList<CustomLoopPriorConversationPublication>? PriorPublications = null,
-    Action? AppendStarted = null);
+    Action? AppendStarted = null,
+    ConversationPublicationCommitBoundary? AppendCommitBoundary = null);

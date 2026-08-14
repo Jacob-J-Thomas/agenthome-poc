@@ -20,6 +20,8 @@ namespace EmbodySense.Core.Persistence.Tests.ContextualRoles;
 
 public sealed class ContextualRoleRevisionStoreTests
 {
+    private const string WorkspaceId = "workspace-sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    private const string OtherWorkspaceId = "workspace-sha256:1111111111111111111111111111111111111111111111111111111111111111";
     private static readonly DateTimeOffset _requestedAt = new(2026, 8, 2, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
@@ -27,7 +29,7 @@ public sealed class ContextualRoleRevisionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        var store = new ContextualRoleRevisionStore(paths, WorkspaceId);
         var missingRevision = await store.ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1)));
         var invalidRevision = await store.ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("../unsafe", 0)));
         var missingLifecycle = await store.ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
@@ -39,7 +41,9 @@ public sealed class ContextualRoleRevisionStoreTests
         Assert.Equal(ContextualRoleLifecycleReadStatus.Invalid, invalidLifecycle.Status);
         Assert.False(Directory.Exists(Path.Combine(workspace.RootPath, ".agent", "contextual-roles")));
         Assert.Throws<ArgumentException>(() => new ContextualRoleRevisionStore(paths, "../unsafe"));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new ContextualRoleRevisionStore(paths, "workspace-one", new ContextualRoleRevisionStoreOptions { MaxRevisionArtifacts = ContextualRoleRevisionStoreOptions.MaximumRevisionArtifacts + 1 }));
+        Assert.Throws<ArgumentException>(() => new ContextualRoleRevisionStore(paths, "workspace-one"));
+        Assert.Throws<ArgumentException>(() => new ContextualRoleRevisionStore(paths, "workspace-sha256:" + new string('A', 64)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ContextualRoleRevisionStore(paths, WorkspaceId, new ContextualRoleRevisionStoreOptions { MaxRevisionArtifacts = ContextualRoleRevisionStoreOptions.MaximumRevisionArtifacts + 1 }));
     }
 
     [Fact]
@@ -47,7 +51,7 @@ public sealed class ContextualRoleRevisionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        var store = new ContextualRoleRevisionStore(paths, WorkspaceId);
         var invalid = await store.MutateAsync(new ContextualRoleRevisionMutationRequest("../unsafe", string.Empty, ContextualRoleRevisionMutationKind.Unknown, "../unsafe", "../unsafe", null, null, default));
         var revision = Revision("reviewer", 1);
         await store.MutateAsync(CreateRequest("create-reviewer", revision));
@@ -69,7 +73,7 @@ public sealed class ContextualRoleRevisionStoreTests
         var retained = await authority.AcquireValidatedLeaseAsync(_ => Task.FromResult(true));
         Assert.NotNull(retained);
         var mutationProbe = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
-        var store = new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: mutationProbe);
+        var store = new ContextualRoleRevisionStore(paths, WorkspaceId, authorityTransaction: mutationProbe);
 
         var mutation = Task.Run(() => store.MutateAsync(CreateRequest("fenced-role-create", Revision("reviewer", 1))));
         await mutationProbe.Attempted.Task;
@@ -79,13 +83,13 @@ public sealed class ContextualRoleRevisionStoreTests
         Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await mutation).Status);
 
         var revisionProbe = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
-        var revision = await new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: revisionProbe)
+        var revision = await new ContextualRoleRevisionStore(paths, WorkspaceId, authorityTransaction: revisionProbe)
             .ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1)));
         var lifecycleProbe = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
-        var lifecycle = await new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: lifecycleProbe)
+        var lifecycle = await new ContextualRoleRevisionStore(paths, WorkspaceId, authorityTransaction: lifecycleProbe)
             .ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
         var catalogProbe = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
-        var catalog = await new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: catalogProbe)
+        var catalog = await new ContextualRoleRevisionStore(paths, WorkspaceId, authorityTransaction: catalogProbe)
             .ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 10));
 
         Assert.True(revisionProbe.Attempted.Task.IsCompleted);
@@ -104,7 +108,7 @@ public sealed class ContextualRoleRevisionStoreTests
         var cancellationTransaction = new FaultingCapabilityAuthorityTransaction(
             new CapabilityAuthorityTransaction(paths),
             CapabilityAuthorityTransactionFault.CancelAfterCallback);
-        using var store = new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: cancellationTransaction);
+        using var store = new ContextualRoleRevisionStore(paths, WorkspaceId, authorityTransaction: cancellationTransaction);
 
         var mutation = await store.MutateAsync(CreateRequest("create-after-callback-cancellation", Revision("reviewer", 1)));
         var revision = await store.ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1)));
@@ -113,7 +117,7 @@ public sealed class ContextualRoleRevisionStoreTests
         var ioTransaction = new FaultingCapabilityAuthorityTransaction(
             new CapabilityAuthorityTransaction(paths),
             CapabilityAuthorityTransactionFault.IoAfterCallback);
-        using var ioStore = new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: ioTransaction);
+        using var ioStore = new ContextualRoleRevisionStore(paths, WorkspaceId, authorityTransaction: ioTransaction);
         var ioCatalog = await ioStore.ReadCatalogAsync(new ContextualRoleCatalogReadRequest(null, 10));
 
         Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, mutation.Status);
@@ -132,7 +136,7 @@ public sealed class ContextualRoleRevisionStoreTests
         var transaction = new FaultingCapabilityAuthorityTransaction(
             new CapabilityAuthorityTransaction(paths),
             CapabilityAuthorityTransactionFault.CancelBeforeCallback);
-        using var store = new ContextualRoleRevisionStore(paths, "workspace-one", authorityTransaction: transaction);
+        using var store = new ContextualRoleRevisionStore(paths, WorkspaceId, authorityTransaction: transaction);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.MutateAsync(CreateRequest("never-started-role", Revision("reviewer", 1))));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1))));
@@ -148,11 +152,11 @@ public sealed class ContextualRoleRevisionStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var request = CreateRequest("create-reviewer", Revision("reviewer", 1));
-        var created = await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(request);
-        var replay = await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(request);
+        var created = await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(request);
+        var replay = await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(request);
         var changed = ContextualRoleRevisionMutationRequestHash.Apply(request with { Revision = ContextualRoleRevisionContentHash.Apply(request.Revision! with { DisplayName = "Changed reviewer" }) });
-        var conflict = await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(changed);
-        var read = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadAsync(new ContextualRoleRevisionReadRequest(request.Revision!.Identity));
+        var conflict = await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(changed);
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadAsync(new ContextualRoleRevisionReadRequest(request.Revision!.Identity));
 
         Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, created.Status);
         Assert.Equal(created.Status, replay.Status);
@@ -171,7 +175,7 @@ public sealed class ContextualRoleRevisionStoreTests
     public async Task First_mutation_initializes_each_durable_artifact_stage()
     {
         using var workspace = new TestWorkspace();
-        var result = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one")
+        var result = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), WorkspaceId)
             .MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
         var root = StoreRoot(workspace.RootPath);
         var revisions = Path.Combine(root, "revisions");
@@ -204,7 +208,7 @@ public sealed class ContextualRoleRevisionStoreTests
                 ? ValueTask.FromException(new IOException("Simulated pre-publication failure."))
                 : ValueTask.CompletedTask
         };
-        var result = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one", options).MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
+        var result = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), WorkspaceId, options).MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
 
         Assert.Equal(ContextualRoleRevisionMutationStatus.Unavailable, result.Status);
         Assert.Equal(new ContextualRoleRevisionMutationDiagnostic(ContextualRolePersistenceDiagnosticStage.PrePublicationObservation, ContextualRoleNativeErrorKind.None, null), result.Diagnostic);
@@ -223,8 +227,8 @@ public sealed class ContextualRoleRevisionStoreTests
             ContentHash = string.Empty,
             InstructionSource = new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.RoleArtifact, "role-source", ContextualRoleInstructionClassification.RoleInstruction)
         });
-        var created = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").MutateAsync(CreateRequest(operationId, revision));
-        var reopened = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
+        var created = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), WorkspaceId).MutateAsync(CreateRequest(operationId, revision));
+        var reopened = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), WorkspaceId).ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
         var root = StoreRoot(workspace.RootPath);
 
         Assert.True(created.Status == ContextualRoleRevisionMutationStatus.Accepted, $"validation={string.Join("; ", created.ValidationErrors.Select(error => $"{error.Field}:{error.Code}"))}; diagnostic={FormatDiagnostic(created.Diagnostic)}");
@@ -243,7 +247,7 @@ public sealed class ContextualRoleRevisionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        var store = new ContextualRoleRevisionStore(paths, WorkspaceId);
         var first = Revision("reviewer", 1);
         var second = Revision("reviewer", 2, "Replacement");
         Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await store.MutateAsync(CreateRequest("create-reviewer", first))).Status);
@@ -251,7 +255,7 @@ public sealed class ContextualRoleRevisionStoreTests
         Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await store.MutateAsync(replacement)).Status);
         var stale = Mutation("stale-disable", ContextualRoleRevisionMutationKind.Disable, "reviewer", null, first.Identity);
         var firstConflict = await store.MutateAsync(stale);
-        var replayedConflict = await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(stale);
+        var replayedConflict = await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(stale);
         var oldRead = await store.ReadAsync(new ContextualRoleRevisionReadRequest(first.Identity));
         var newRead = await store.ReadAsync(new ContextualRoleRevisionReadRequest(second.Identity));
         var lifecycle = await store.ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
@@ -273,7 +277,7 @@ public sealed class ContextualRoleRevisionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        var store = new ContextualRoleRevisionStore(paths, WorkspaceId);
         var revision = Revision("reviewer", 1);
         await store.MutateAsync(CreateRequest("create-reviewer", revision));
         var disabled = await store.MutateAsync(Mutation("disable-reviewer", ContextualRoleRevisionMutationKind.Disable, "reviewer", null, revision.Identity));
@@ -299,7 +303,7 @@ public sealed class ContextualRoleRevisionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        var store = new ContextualRoleRevisionStore(paths, WorkspaceId);
         var first = Revision("reviewer", 1);
         var second = Revision("reviewer", 2, "Replacement");
         await store.MutateAsync(CreateRequest("create-reviewer", first));
@@ -319,7 +323,7 @@ public sealed class ContextualRoleRevisionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        var store = new ContextualRoleRevisionStore(paths, WorkspaceId);
         var revision = Revision("reviewer", 1);
         await store.MutateAsync(CreateRequest("create-reviewer", revision));
         var statePath = Path.Combine(StoreRoot(workspace.RootPath), "states", "reviewer.json");
@@ -327,8 +331,8 @@ public sealed class ContextualRoleRevisionStoreTests
         await store.MutateAsync(Mutation("disable-reviewer", ContextualRoleRevisionMutationKind.Disable, "reviewer", null, revision.Identity));
         await File.WriteAllBytesAsync(statePath, historicalActive);
 
-        var read = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
-        var mutation = await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(Mutation("reenable-reviewer", ContextualRoleRevisionMutationKind.Reenable, "reviewer", null, revision.Identity));
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var mutation = await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(Mutation("reenable-reviewer", ContextualRoleRevisionMutationKind.Reenable, "reviewer", null, revision.Identity));
 
         Assert.Equal(ContextualRoleLifecycleReadStatus.Ambiguous, read.Status);
         Assert.Equal(ContextualRoleRevisionMutationStatus.Ambiguous, mutation.Status);
@@ -344,7 +348,7 @@ public sealed class ContextualRoleRevisionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        var store = new ContextualRoleRevisionStore(paths, WorkspaceId);
         var revision = Revision("reviewer", 1);
         await store.MutateAsync(CreateRequest("create-reviewer", revision));
         await store.MutateAsync(Mutation("disable-reviewer", ContextualRoleRevisionMutationKind.Disable, "reviewer", null, revision.Identity));
@@ -378,7 +382,7 @@ public sealed class ContextualRoleRevisionStoreTests
                 break;
         }
 
-        var read = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
 
         Assert.Equal(ContextualRoleLifecycleReadStatus.Ambiguous, read.Status);
     }
@@ -408,14 +412,14 @@ public sealed class ContextualRoleRevisionStoreTests
             }
         };
         var request = CreateRequest("create-reviewer", Revision("reviewer", 1));
-        var first = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one", options).MutateAsync(request);
-        var retry = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").MutateAsync(request);
+        var first = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), WorkspaceId, options).MutateAsync(request);
+        var retry = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), WorkspaceId).MutateAsync(request);
 
         Assert.True(interrupted);
         Assert.Equal(interruptedStatus, first.Status);
         Assert.Equal(recoveredStatus, retry.Status);
         Assert.NotNull(retry.Evidence);
-        Assert.Equal(ContextualRoleRevisionReadStatus.Found, (await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").ReadAsync(new ContextualRoleRevisionReadRequest(request.Revision!.Identity))).Status);
+        Assert.Equal(ContextualRoleRevisionReadStatus.Found, (await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), WorkspaceId).ReadAsync(new ContextualRoleRevisionReadRequest(request.Revision!.Identity))).Status);
     }
 
     [Theory]
@@ -437,12 +441,12 @@ public sealed class ContextualRoleRevisionStoreTests
         };
         var paths = new WorkspacePaths(workspace.RootPath);
         var request = CreateRequest("create-reviewer", Revision("reviewer", 1));
-        var interrupted = await new ContextualRoleRevisionStore(paths, "workspace-one", options).MutateAsync(request);
-        var recovered = await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(request);
+        var interrupted = await new ContextualRoleRevisionStore(paths, WorkspaceId, options).MutateAsync(request);
+        var recovered = await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(request);
 
         Assert.Equal(ContextualRoleRevisionMutationStatus.Ambiguous, interrupted.Status);
         Assert.Equal(recoveredStatus, recovered.Status);
-        Assert.Equal(ContextualRoleRevisionReadStatus.Found, (await new ContextualRoleRevisionStore(paths, "workspace-one").ReadAsync(new ContextualRoleRevisionReadRequest(request.Revision!.Identity))).Status);
+        Assert.Equal(ContextualRoleRevisionReadStatus.Found, (await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadAsync(new ContextualRoleRevisionReadRequest(request.Revision!.Identity))).Status);
     }
 
     [Fact]
@@ -458,9 +462,9 @@ public sealed class ContextualRoleRevisionStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var request = CreateRequest("create-reviewer", Revision("reviewer", 1));
 
-        var interrupted = await new ContextualRoleRevisionStore(paths, "workspace-one", options).MutateAsync(request);
+        var interrupted = await new ContextualRoleRevisionStore(paths, WorkspaceId, options).MutateAsync(request);
         var temporaryArtifacts = Directory.EnumerateFiles(StoreRoot(workspace.RootPath), "*.tmp", SearchOption.AllDirectories).ToArray();
-        var retried = await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(request);
+        var retried = await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(request);
 
         Assert.Equal(ContextualRoleRevisionMutationStatus.Unavailable, interrupted.Status);
         Assert.Empty(temporaryArtifacts);
@@ -493,8 +497,8 @@ public sealed class ContextualRoleRevisionStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var request = CreateRequest("create-reviewer", Revision("reviewer", 1));
 
-        var result = await new ContextualRoleRevisionStore(paths, "workspace-one", options).MutateAsync(request);
-        var read = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var result = await new ContextualRoleRevisionStore(paths, WorkspaceId, options).MutateAsync(request);
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
 
         Assert.True(substituted);
         Assert.Equal(ContextualRoleRevisionMutationStatus.Ambiguous, result.Status);
@@ -522,9 +526,9 @@ public sealed class ContextualRoleRevisionStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var request = CreateRequest("create-reviewer", Revision("reviewer", 1));
 
-        var interrupted = await new ContextualRoleRevisionStore(paths, "workspace-one", options).MutateAsync(request);
+        var interrupted = await new ContextualRoleRevisionStore(paths, WorkspaceId, options).MutateAsync(request);
         File.Delete(linkPath);
-        var recovered = await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(request);
+        var recovered = await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(request);
 
         Assert.Equal(ContextualRoleRevisionMutationStatus.Ambiguous, interrupted.Status);
         Assert.Equal(ContextualRoleRevisionMutationStatus.Recovered, recovered.Status);
@@ -542,8 +546,8 @@ public sealed class ContextualRoleRevisionStoreTests
         };
         var paths = new WorkspacePaths(workspace.RootPath);
         var request = CreateRequest("create-reviewer", Revision("reviewer", 1));
-        var interrupted = await new ContextualRoleRevisionStore(paths, "workspace-one", options).MutateAsync(request);
-        var recovered = await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(request);
+        var interrupted = await new ContextualRoleRevisionStore(paths, WorkspaceId, options).MutateAsync(request);
+        var recovered = await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(request);
 
         Assert.Equal(ContextualRoleRevisionMutationStatus.Ambiguous, interrupted.Status);
         Assert.Equal(ContextualRoleRevisionMutationStatus.Recovered, recovered.Status);
@@ -556,7 +560,7 @@ public sealed class ContextualRoleRevisionStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var revision = Revision("reviewer", 1);
-        await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(CreateRequest("create-reviewer", revision));
+        await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(CreateRequest("create-reviewer", revision));
         var options = new ContextualRoleRevisionStoreOptions
         {
             DurableBoundaryObserver = (boundary, _) => boundary == ContextualRolePersistenceBoundary.IntentPublished
@@ -564,9 +568,9 @@ public sealed class ContextualRoleRevisionStoreTests
                 : ValueTask.CompletedTask
         };
         var stale = Mutation("stale-disable", ContextualRoleRevisionMutationKind.Disable, "reviewer", null, new ContextualRoleRevisionIdentity("reviewer", 2));
-        var interrupted = await new ContextualRoleRevisionStore(paths, "workspace-one", options).MutateAsync(stale);
-        var recovered = await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(stale);
-        var lifecycle = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var interrupted = await new ContextualRoleRevisionStore(paths, WorkspaceId, options).MutateAsync(stale);
+        var recovered = await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(stale);
+        var lifecycle = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
 
         Assert.Equal(ContextualRoleRevisionMutationStatus.Ambiguous, interrupted.Status);
         Assert.Equal(ContextualRoleRevisionMutationStatus.Conflict, recovered.Status);
@@ -581,14 +585,35 @@ public sealed class ContextualRoleRevisionStoreTests
         using var source = new TestWorkspace();
         using var target = new TestWorkspace();
         var revision = Revision("reviewer", 1);
-        await new ContextualRoleRevisionStore(new WorkspacePaths(source.RootPath), "workspace-one").MutateAsync(CreateRequest("create-reviewer", revision));
+        await new ContextualRoleRevisionStore(new WorkspacePaths(source.RootPath), WorkspaceId).MutateAsync(CreateRequest("create-reviewer", revision));
         CopyDirectory(Path.Combine(source.RootPath, ".agent", "contextual-roles"), Path.Combine(target.RootPath, ".agent", "contextual-roles"));
 
-        var copied = await new ContextualRoleRevisionStore(new WorkspacePaths(target.RootPath), "workspace-one").ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
-        var changedIdentity = await new ContextualRoleRevisionStore(new WorkspacePaths(source.RootPath), "workspace-two").ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
+        var copied = await new ContextualRoleRevisionStore(new WorkspacePaths(target.RootPath), WorkspaceId).ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
+        var changedIdentity = await new ContextualRoleRevisionStore(new WorkspacePaths(source.RootPath), OtherWorkspaceId).ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
 
         Assert.Equal(ContextualRoleRevisionReadStatus.Ambiguous, copied.Status);
         Assert.Equal(ContextualRoleRevisionReadStatus.Ambiguous, changedIdentity.Status);
+    }
+
+    [Fact]
+    public async Task Legacy_workspace_anchor_fails_closed_without_repair_or_new_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var revision = Revision("reviewer", 1);
+        await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(CreateRequest("create-reviewer", revision));
+        var root = StoreRoot(workspace.RootPath);
+        var anchorPath = Path.Combine(root, "workspace-anchor.json");
+        ResealArtifact(anchorPath, artifact => artifact["workspaceId"] = "workspace-one");
+        var before = SnapshotArtifacts(root);
+
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
+        var mutation = await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(Mutation("disable-reviewer", ContextualRoleRevisionMutationKind.Disable, "reviewer", null, revision.Identity));
+
+        Assert.Equal(ContextualRoleRevisionReadStatus.Ambiguous, read.Status);
+        Assert.Equal(ContextualRoleRevisionMutationStatus.Ambiguous, mutation.Status);
+        AssertSnapshotsEqual(before, SnapshotArtifacts(root));
+        Assert.False(File.Exists(Path.Combine(root, "operations", "disable-reviewer.intent.json")));
     }
 
     [Fact]
@@ -596,7 +621,7 @@ public sealed class ContextualRoleRevisionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        var store = new ContextualRoleRevisionStore(paths, WorkspaceId);
         var revision = Revision("reviewer", 1);
         await store.MutateAsync(CreateRequest("create-reviewer", revision));
         var statePath = Path.Combine(workspace.RootPath, ".agent", "contextual-roles", "states", "reviewer.json");
@@ -624,10 +649,10 @@ public sealed class ContextualRoleRevisionStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var revision = Revision("reviewer", 1);
-        await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(CreateRequest("create-reviewer", revision));
+        await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(CreateRequest("create-reviewer", revision));
         CorruptIntegrityHash(ArtifactPath(workspace.RootPath, artifactFamily));
 
-        var read = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
 
         Assert.Equal(ContextualRoleLifecycleReadStatus.Ambiguous, read.Status);
     }
@@ -642,11 +667,11 @@ public sealed class ContextualRoleRevisionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
+        await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
         var root = StoreRoot(workspace.RootPath);
         File.Move(Path.Combine(root, originalRelativePath), Path.Combine(root, changedRelativePath));
 
-        var read = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
 
         Assert.Equal(ContextualRoleLifecycleReadStatus.Ambiguous, read.Status);
     }
@@ -663,7 +688,7 @@ public sealed class ContextualRoleRevisionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
+        await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
         var root = StoreRoot(workspace.RootPath);
         switch (scenario)
         {
@@ -692,7 +717,7 @@ public sealed class ContextualRoleRevisionStoreTests
                 break;
         }
 
-        var read = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
 
         Assert.Equal(ContextualRoleLifecycleReadStatus.Ambiguous, read.Status);
     }
@@ -702,7 +727,7 @@ public sealed class ContextualRoleRevisionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        var store = new ContextualRoleRevisionStore(paths, WorkspaceId);
         Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await store.MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)))).Status);
         File.Delete(Path.Combine(StoreRoot(workspace.RootPath), "workspace-anchor.json"));
 
@@ -719,13 +744,13 @@ public sealed class ContextualRoleRevisionStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var revision = Revision("reviewer", 1);
-        await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(CreateRequest("create-reviewer", revision));
+        await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(CreateRequest("create-reviewer", revision));
         var root = Path.Combine(workspace.RootPath, ".agent", "contextual-roles");
         await File.WriteAllTextAsync(Path.Combine(root, "unknown.json"), "{}");
-        var unknownFile = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
+        var unknownFile = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
         File.Delete(Path.Combine(root, "unknown.json"));
         Directory.CreateDirectory(Path.Combine(root, "revisions", "nested"));
-        var nested = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
+        var nested = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
 
         Assert.Equal(ContextualRoleRevisionReadStatus.Ambiguous, unknownFile.Status);
         Assert.Equal(ContextualRoleRevisionReadStatus.Ambiguous, nested.Status);
@@ -737,7 +762,7 @@ public sealed class ContextualRoleRevisionStoreTests
         using var workspace = new TestWorkspace();
         Directory.CreateDirectory(Path.Combine(workspace.RootPath, ".agent"));
 
-        var read = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var read = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), WorkspaceId).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
 
         Assert.Equal(ContextualRoleLifecycleReadStatus.NotFound, read.Status);
     }
@@ -748,16 +773,16 @@ public sealed class ContextualRoleRevisionStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var revision = Revision("reviewer", 1);
-        await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(CreateRequest("create-reviewer", revision));
+        await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(CreateRequest("create-reviewer", revision));
         var root = StoreRoot(workspace.RootPath);
         var unknownDirectory = Path.Combine(root, "unknown");
         Directory.CreateDirectory(unknownDirectory);
 
-        var rejected = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var rejected = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
         Directory.Delete(unknownDirectory);
         var temporaryPath = Path.Combine(root, "operations", ".orphan.tmp");
         await File.WriteAllTextAsync(temporaryPath, "orphan");
-        var accepted = await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(Mutation("disable-reviewer", ContextualRoleRevisionMutationKind.Disable, "reviewer", null, revision.Identity));
+        var accepted = await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(Mutation("disable-reviewer", ContextualRoleRevisionMutationKind.Disable, "reviewer", null, revision.Identity));
 
         Assert.Equal(ContextualRoleLifecycleReadStatus.Ambiguous, rejected.Status);
         Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, accepted.Status);
@@ -776,14 +801,14 @@ public sealed class ContextualRoleRevisionStoreTests
         using var external = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var revision = Revision("reviewer", 1);
-        await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(CreateRequest("create-reviewer", revision));
+        await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(CreateRequest("create-reviewer", revision));
         var statePath = Path.Combine(workspace.RootPath, ".agent", "contextual-roles", "states", "reviewer.json");
         var externalState = Path.Combine(external.RootPath, "state.json");
         File.Copy(statePath, externalState);
         File.Delete(statePath);
         File.CreateSymbolicLink(statePath, externalState);
 
-        var read = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
 
         Assert.Equal(ContextualRoleLifecycleReadStatus.Ambiguous, read.Status);
         Assert.True(File.Exists(externalState));
@@ -794,7 +819,7 @@ public sealed class ContextualRoleRevisionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
+        await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
         var root = StoreRoot(workspace.RootPath);
         var substituteRoot = root + "-substitute";
         var retainedRoot = root + "-retained";
@@ -839,7 +864,7 @@ public sealed class ContextualRoleRevisionStoreTests
             }
         };
 
-        var read = await new ContextualRoleRevisionStore(paths, "workspace-one", options).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId, options).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
 
         Assert.True(swapAttempted);
         Assert.True(swapBlocked || restored);
@@ -854,7 +879,7 @@ public sealed class ContextualRoleRevisionStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var first = Revision("reviewer", 1);
         var second = Revision("reviewer", 2, "Replacement");
-        await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(CreateRequest("create-reviewer", first));
+        await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(CreateRequest("create-reviewer", first));
         var root = StoreRoot(workspace.RootPath);
         var historicalState = File.ReadAllBytes(Path.Combine(root, "states", "reviewer.json"));
         var substitutedDirectories = new Dictionary<int, string>
@@ -868,7 +893,7 @@ public sealed class ContextualRoleRevisionStoreTests
             CopyDirectory(Path.Combine(root, name), Path.Combine(workspace.RootPath, $"historical-{name}"));
         }
 
-        await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(Mutation("replace-reviewer", ContextualRoleRevisionMutationKind.Replace, "reviewer", second, first.Identity));
+        await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(Mutation("replace-reviewer", ContextualRoleRevisionMutationKind.Replace, "reviewer", second, first.Identity));
         File.WriteAllBytes(Path.Combine(root, "states", "reviewer.json"), historicalState);
         var enumeration = 0;
         var swappedDirectories = 0;
@@ -923,7 +948,7 @@ public sealed class ContextualRoleRevisionStoreTests
             }
         };
 
-        var read = await new ContextualRoleRevisionStore(paths, "workspace-one", options).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId, options).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
 
         Assert.True(swapBlocked || swappedDirectories == substitutedDirectories.Count);
         Assert.Equal(swappedDirectories, restoredDirectories);
@@ -938,7 +963,7 @@ public sealed class ContextualRoleRevisionStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var revision = Revision("reviewer", 1);
-        using (var store = new ContextualRoleRevisionStore(paths, "workspace-one"))
+        using (var store = new ContextualRoleRevisionStore(paths, WorkspaceId))
         {
             await store.MutateAsync(CreateRequest("create-reviewer", revision));
         }
@@ -948,7 +973,7 @@ public sealed class ContextualRoleRevisionStoreTests
         Directory.Move(revisionsPath, externalRevisionsPath);
         CreateDirectoryLink(revisionsPath, externalRevisionsPath);
 
-        var read = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
 
         Assert.Equal(ContextualRoleRevisionReadStatus.Ambiguous, read.Status);
         Assert.True(File.Exists(Path.Combine(externalRevisionsPath, "reviewer.1.json")));
@@ -967,7 +992,7 @@ public sealed class ContextualRoleRevisionStoreTests
         Directory.CreateDirectory(Path.GetDirectoryName(root)!);
         Directory.CreateSymbolicLink(root, Path.Combine(workspace.RootPath, "missing-target"));
 
-        var read = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+        var read = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), WorkspaceId).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
 
         Assert.Equal(ContextualRoleLifecycleReadStatus.Ambiguous, read.Status);
     }
@@ -978,11 +1003,11 @@ public sealed class ContextualRoleRevisionStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var revision = Revision("reviewer", 1);
-        await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(CreateRequest("create-reviewer", revision));
+        await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(CreateRequest("create-reviewer", revision));
         var revisionPath = Path.Combine(StoreRoot(workspace.RootPath), "revisions", "reviewer.1.json");
         CreateHardLink(Path.Combine(workspace.RootPath, "revision-hardlink.json"), revisionPath);
 
-        var read = await new ContextualRoleRevisionStore(paths, "workspace-one").ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
+        var read = await new ContextualRoleRevisionStore(paths, WorkspaceId).ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
 
         Assert.Equal(ContextualRoleRevisionReadStatus.Ambiguous, read.Status);
     }
@@ -1024,7 +1049,7 @@ public sealed class ContextualRoleRevisionStoreTests
         };
         var request = CreateRequest("create-reviewer", Revision("reviewer", 1));
 
-        var result = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one", options).MutateAsync(request);
+        var result = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), WorkspaceId, options).MutateAsync(request);
 
         if (swapBlocked)
         {
@@ -1046,7 +1071,7 @@ public sealed class ContextualRoleRevisionStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var options = new ContextualRoleRevisionStoreOptions { MaxOperationArtifacts = 1 };
-        var store = new ContextualRoleRevisionStore(paths, "workspace-one", options);
+        var store = new ContextualRoleRevisionStore(paths, WorkspaceId, options);
         var revision = Revision("reviewer", 1);
         await store.MutateAsync(CreateRequest("create-reviewer", revision));
         var result = await store.MutateAsync(Mutation("disable-reviewer", ContextualRoleRevisionMutationKind.Disable, "reviewer", null, revision.Identity));
@@ -1054,8 +1079,8 @@ public sealed class ContextualRoleRevisionStoreTests
         Assert.Equal(ContextualRoleRevisionMutationStatus.Unavailable, result.Status);
         Assert.False(File.Exists(Path.Combine(workspace.RootPath, ".agent", "contextual-roles", "operations", "disable-reviewer.intent.json")));
 
-        Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await new ContextualRoleRevisionStore(paths, "workspace-one").MutateAsync(Mutation("disable-reviewer", ContextualRoleRevisionMutationKind.Disable, "reviewer", null, revision.Identity))).Status);
-        var boundedReader = new ContextualRoleRevisionStore(paths, "workspace-one", new ContextualRoleRevisionStoreOptions { MaxOperationArtifacts = 1 });
+        Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await new ContextualRoleRevisionStore(paths, WorkspaceId).MutateAsync(Mutation("disable-reviewer", ContextualRoleRevisionMutationKind.Disable, "reviewer", null, revision.Identity))).Status);
+        var boundedReader = new ContextualRoleRevisionStore(paths, WorkspaceId, new ContextualRoleRevisionStoreOptions { MaxOperationArtifacts = 1 });
         Assert.Equal(ContextualRoleLifecycleReadStatus.Ambiguous, (await boundedReader.ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"))).Status);
     }
 
@@ -1065,9 +1090,9 @@ public sealed class ContextualRoleRevisionStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var timeProvider = new FixedTimeProvider(_requestedAt.AddHours(1));
-        await new ContextualRoleRevisionStore(paths, "workspace-one", timeProvider: timeProvider).MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
+        await new ContextualRoleRevisionStore(paths, WorkspaceId, timeProvider: timeProvider).MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
         var conflict = Mutation("stale-replace", ContextualRoleRevisionMutationKind.Replace, "reviewer", Revision("reviewer", 3, "Replacement"), new ContextualRoleRevisionIdentity("reviewer", 2));
-        var measured = await new ContextualRoleRevisionStore(paths, "workspace-one", timeProvider: timeProvider).MutateAsync(conflict);
+        var measured = await new ContextualRoleRevisionStore(paths, WorkspaceId, timeProvider: timeProvider).MutateAsync(conflict);
         var root = StoreRoot(workspace.RootPath);
         var exactByteCeiling = ArtifactBytes(root);
         File.Delete(Path.Combine(root, "operations", "stale-replace.intent.json"));
@@ -1076,12 +1101,12 @@ public sealed class ContextualRoleRevisionStoreTests
         var belowOptions = new ContextualRoleRevisionStoreOptions { MaxRevisionArtifacts = 1, MaxTotalArtifactBytes = exactByteCeiling - 1 };
         var options = new ContextualRoleRevisionStoreOptions { MaxRevisionArtifacts = 1, MaxTotalArtifactBytes = exactByteCeiling };
 
-        var belowBoundary = await new ContextualRoleRevisionStore(paths, "workspace-one", belowOptions, timeProvider).MutateAsync(conflict);
+        var belowBoundary = await new ContextualRoleRevisionStore(paths, WorkspaceId, belowOptions, timeProvider).MutateAsync(conflict);
         Assert.Equal(ContextualRoleRevisionMutationStatus.Unavailable, belowBoundary.Status);
         Assert.False(File.Exists(Path.Combine(root, "operations", "stale-replace.intent.json")));
         Assert.False(File.Exists(Path.Combine(root, "operations", "stale-replace.result.json")));
         Assert.False(File.Exists(Path.Combine(root, "proofs", "stale-replace.json")));
-        var bounded = await new ContextualRoleRevisionStore(paths, "workspace-one", options, timeProvider).MutateAsync(conflict);
+        var bounded = await new ContextualRoleRevisionStore(paths, WorkspaceId, options, timeProvider).MutateAsync(conflict);
 
         Assert.Equal(ContextualRoleRevisionMutationStatus.Conflict, measured.Status);
         Assert.Equal(ContextualRoleRevisionMutationStatus.Conflict, bounded.Status);
@@ -1096,22 +1121,26 @@ public sealed class ContextualRoleRevisionStoreTests
     public async Task Cross_process_mutation_owner_makes_other_operations_unavailable_until_release()
     {
         using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
         using var process = StartMutationHost(workspace.RootPath);
         try
         {
             Assert.Equal("ready", await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15)));
-            var other = CreateRequest("create-writer", Revision("writer", 1));
-            var blocked = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").MutateAsync(other);
-            var blockedRead = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
-            var blockedRevisionRead = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1)));
+            var other = CreateRequest("create-writer", Revision("writer", 1, workspaceId: workspaceId));
+            var retryTime = new ImmediateTimerTimeProvider(_requestedAt);
+            var blocked = await new ContextualRoleRevisionStore(paths, workspaceId, timeProvider: retryTime).MutateAsync(other);
+            var blockedRead = await new ContextualRoleRevisionStore(paths, workspaceId, timeProvider: retryTime).ReadLifecycleAsync(new ContextualRoleLifecycleReadRequest("reviewer"));
+            var blockedRevisionRead = await new ContextualRoleRevisionStore(paths, workspaceId, timeProvider: retryTime).ReadAsync(new ContextualRoleRevisionReadRequest(new ContextualRoleRevisionIdentity("reviewer", 1)));
             Assert.Equal(ContextualRoleRevisionMutationStatus.Unavailable, blocked.Status);
             Assert.Equal(ContextualRoleLifecycleReadStatus.Unavailable, blockedRead.Status);
             Assert.Equal(ContextualRoleRevisionReadStatus.Unavailable, blockedRevisionRead.Status);
+            Assert.Equal(747, retryTime.TimerCount);
 
             await process.StandardInput.WriteLineAsync("release");
             await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
             Assert.Equal(0, process.ExitCode);
-            var accepted = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").MutateAsync(other);
+            var accepted = await new ContextualRoleRevisionStore(paths, workspaceId, timeProvider: retryTime).MutateAsync(other);
             Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, accepted.Status);
         }
         finally
@@ -1130,7 +1159,7 @@ public sealed class ContextualRoleRevisionStoreTests
     private static ContextualRoleRevisionMutationRequest Mutation(string operationId, ContextualRoleRevisionMutationKind kind, string roleId, ContextualRoleRevision? revision, ContextualRoleRevisionIdentity? expected)
         => ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(operationId, string.Empty, kind, roleId, "user-jake", revision, expected, _requestedAt));
 
-    private static ContextualRoleRevision Revision(string roleId, int revision, string displayName = "Reviewer")
+    private static ContextualRoleRevision Revision(string roleId, int revision, string displayName = "Reviewer", string workspaceId = WorkspaceId)
     {
         var value = new ContextualRoleRevision(
             1,
@@ -1140,7 +1169,7 @@ public sealed class ContextualRoleRevisionStoreTests
             "Provide bounded review assistance.",
             ContextualRoleStatus.Published,
             new ContextualRoleProvenance("user-jake", _requestedAt, _requestedAt),
-            new ContextualRoleWorkspaceApplicability(ImmutableArray.Create("workspace-one")),
+            new ContextualRoleWorkspaceApplicability(ImmutableArray.Create(workspaceId)),
             new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.RoleArtifact, $"{roleId}-source", ContextualRoleInstructionClassification.RoleInstruction),
             new ContextualRolePolicyMaxima(ImmutableArray<string>.Empty));
         return ContextualRoleRevisionContentHash.Apply(value);
@@ -1164,6 +1193,20 @@ public sealed class ContextualRoleRevisionStoreTests
     private static string StoreRoot(string workspaceRoot) => Path.Combine(workspaceRoot, ".agent", "contextual-roles");
 
     private static long ArtifactBytes(string root) => Directory.EnumerateFiles(root, "*.json", SearchOption.AllDirectories).Sum(path => new FileInfo(path).Length);
+
+    private static IReadOnlyDictionary<string, byte[]> SnapshotArtifacts(string root)
+        => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+            .Order(StringComparer.Ordinal)
+            .ToDictionary(path => Path.GetRelativePath(root, path), File.ReadAllBytes, StringComparer.Ordinal);
+
+    private static void AssertSnapshotsEqual(IReadOnlyDictionary<string, byte[]> expected, IReadOnlyDictionary<string, byte[]> actual)
+    {
+        Assert.Equal(expected.Keys, actual.Keys);
+        foreach (var (path, bytes) in expected)
+        {
+            Assert.Equal(bytes, actual[path]);
+        }
+    }
 
     private static string FormatDiagnostic(ContextualRoleRevisionMutationDiagnostic? diagnostic)
         => diagnostic is null ? "none" : $"{diagnostic.Stage}/{diagnostic.NativeErrorKind}/{diagnostic.NativeErrorCode?.ToString() ?? "none"}";

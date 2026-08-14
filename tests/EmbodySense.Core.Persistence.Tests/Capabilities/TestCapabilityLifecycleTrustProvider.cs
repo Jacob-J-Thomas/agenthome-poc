@@ -67,5 +67,8 @@ internal sealed class TestCapabilityLifecycleTrustProvider : ICapabilityCatalogT
         return Task.FromResult(advanced);
     }
 
+    internal void SetCurrent(string workspaceIdentity, long generation, string contentDigest)
+        => _states[workspaceIdentity] = new CapabilityCatalogTrustState(workspaceIdentity, generation, contentDigest, null, null);
+
     private static string Tag(string workspaceIdentity, long generation, string contentDigest) => "test:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{workspaceIdentity}\n{generation}\n{contentDigest}"))).ToLowerInvariant();
 }

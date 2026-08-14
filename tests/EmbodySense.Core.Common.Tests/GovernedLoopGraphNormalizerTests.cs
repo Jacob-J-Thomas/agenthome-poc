@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -18,6 +19,7 @@ public sealed class GovernedLoopGraphNormalizerTests
         Assert.True(expected.IsValid);
         Assert.True(permuted.IsValid);
         Assert.Equal(expected.Graph!.ExecutableHash, permuted.Graph!.ExecutableHash);
+        Assert.Contains(expected.Graph.AuthorityCeiling.CapabilityIds, capability => capability.Contains('/', StringComparison.Ordinal));
         Assert.Empty(expected.Errors);
     }
 
@@ -350,7 +352,7 @@ public sealed class GovernedLoopGraphNormalizerTests
     [Fact]
     public void NormalizeCapsAndOrdinallySortsErrorsIndependentlyOfElementPermutation()
     {
-        var nodes = Enumerable.Range(0, CustomLoopLimits.MaxGraphNodes).Select(index => (GovernedLoopNodeDefinition?)new GovernedLoopNodeDefinition($"malformed-{index:D3}", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Unknown, "INVALID", 0), [new GovernedLoopPortDefinition("INVALID", GovernedLoopPortDirection.Unknown, GovernedLoopBindingKind.Unknown, "missing", true)], GovernedLoopAuthorityCeiling.Create(["outside-loop"]), new Dictionary<string, string> { ["INVALID"] = " bad" })).ToArray();
+        var nodes = Enumerable.Range(0, CustomLoopLimits.MaxGraphNodes).Select(index => (GovernedLoopNodeDefinition?)new GovernedLoopNodeDefinition($"malformed-{index:D3}", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Unknown, "INVALID", 0), [new GovernedLoopPortDefinition("INVALID", GovernedLoopPortDirection.Unknown, GovernedLoopBindingKind.Unknown, "missing", true)], GovernedLoopAuthorityCeiling.Create(["org.embodysense/outside-loop"]), new Dictionary<string, string> { ["INVALID"] = " bad" })).ToArray();
         var forward = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: nodes));
         var reverse = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: nodes.Reverse().ToArray()));
 
@@ -382,7 +384,7 @@ public sealed class GovernedLoopGraphNormalizerTests
             GraphId = null,
             RevisionId = "INVALID",
             Purpose = null,
-            OwningRoleId = "INVALID",
+            OwningRole = new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("INVALID", 0), "short"),
             EntryNodeId = null,
             TerminalNodeIds = null,
             AuthorityCeiling = null,
@@ -398,6 +400,9 @@ public sealed class GovernedLoopGraphNormalizerTests
 
         Assert.False(result.IsValid);
         Assert.Contains(result.Errors, error => error.Code == "graph.schema-version.unsupported");
+        Assert.Contains(result.Errors, error => error.Code == "graph.role-id.invalid" && error.Element.Path == "graph.owningRole.roleId");
+        Assert.Contains(result.Errors, error => error.Code == "graph.role-revision.invalid" && error.Element.Path == "graph.owningRole.revision");
+        Assert.Contains(result.Errors, error => error.Code == "graph.role-content-hash.invalid" && error.Element.Path == "graph.owningRole.contentHash");
         Assert.Contains(result.Errors, error => error.Code == "graph.authority.required");
         Assert.Contains(result.Errors, error => error.Code == "graph.value-schemas.required");
         Assert.Contains(result.Errors, error => error.Code == "graph.nodes.required");
@@ -406,6 +411,20 @@ public sealed class GovernedLoopGraphNormalizerTests
         Assert.Contains(result.Errors, error => error.Code == "graph.terminal-node-ids.required");
         Assert.Contains(result.Errors, error => error.Code == "graph.output-contract.required");
         Assert.Contains(result.Errors, error => error.Code == "graph.display.required");
+    }
+
+    [Fact]
+    public void NormalizeRejectsMissingOrIncompleteOwningRolePinsWithoutThrowing()
+    {
+        var missing = GovernedLoopGraphNormalizer.Normalize(Candidate() with { OwningRole = null });
+        var missingIdentity = GovernedLoopGraphNormalizer.Normalize(Candidate() with
+        {
+            OwningRole = new ContextualRoleRevisionPin(null!, new string('a', 64)),
+        });
+
+        Assert.Contains(missing.Errors, error => error.Code == "graph.role.required" && error.Element.Path == "graph.owningRole");
+        Assert.Contains(missingIdentity.Errors, error => error.Code == "graph.role-id.invalid" && error.Element.Path == "graph.owningRole.roleId");
+        Assert.Contains(missingIdentity.Errors, error => error.Code == "graph.role-revision.invalid" && error.Element.Path == "graph.owningRole.revision");
     }
 
     [Fact]
@@ -550,7 +569,7 @@ public sealed class GovernedLoopGraphNormalizerTests
             bindings.Add(new GovernedLoopBindingDefinition("binding-extra", GovernedLoopBindingKind.Data, "producer-extra", "output", "consumer-extra", "input"));
         }
 
-        return new GovernedLoopGraphCandidate(1, "binding-limit", "revision-1", "Validate binding limits.", "researcher", "trigger", ["exit"], authority, GovernedLoopGraphTestFixture.Schemas(), nodes, edges, bindings, new GovernedLoopOutputContract("Return the result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]), new GovernedLoopDisplayMetadata("Binding limit", "Display only.", []));
+        return new GovernedLoopGraphCandidate(1, "binding-limit", "revision-1", "Validate binding limits.", GovernedLoopGraphTestFixture.Role(), "trigger", ["exit"], authority, GovernedLoopGraphTestFixture.Schemas(), nodes, edges, bindings, new GovernedLoopOutputContract("Return the result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]), new GovernedLoopDisplayMetadata("Binding limit", "Display only.", []));
     }
 
     private static GovernedLoopNodeDefinition?[] NodesForMalformedContracts()
@@ -559,7 +578,7 @@ public sealed class GovernedLoopGraphNormalizerTests
         var malformed = GovernedLoopGraphTestFixture.Nodes()[1] with
         {
             Descriptor = new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Unknown, "INVALID", 0),
-            AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(["outside-loop"]),
+            AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(["org.embodysense/outside-loop"]),
             Ports =
             [
                 new GovernedLoopPortDefinition("bad-port", GovernedLoopPortDirection.Unknown, GovernedLoopBindingKind.Unknown, "missing", true),
@@ -581,10 +600,10 @@ public sealed class GovernedLoopGraphNormalizerTests
             "research-loop",
             "revision-1",
             purpose,
-            "researcher",
+            GovernedLoopGraphTestFixture.Role(),
             "trigger",
             ["exit"],
-            GovernedLoopAuthorityCeiling.Create(["model-inference", "workspace-read"]),
+            GovernedLoopAuthorityCeiling.Create([GovernedLoopGraphTestFixture.ModelInferenceCapability, GovernedLoopGraphTestFixture.WorkspaceReadCapability]),
             GovernedLoopGraphTestFixture.Schemas(),
             nodes ?? GovernedLoopGraphTestFixture.Nodes(),
             edges ?? GovernedLoopGraphTestFixture.Edges(),

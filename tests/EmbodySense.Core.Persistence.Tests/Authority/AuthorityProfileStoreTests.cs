@@ -19,6 +19,12 @@ namespace EmbodySense.Core.Persistence.Tests.Authority;
 public sealed class AuthorityProfileStoreTests : IDisposable
 {
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, false) } };
+    private static readonly JsonSerializerOptions _canonicalDocumentJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, false) }
+    };
     private readonly TestWorkspace _trustRoot = new();
     private readonly FileCapabilityCatalogTrustProvider _trustProvider;
 
@@ -354,20 +360,17 @@ public sealed class AuthorityProfileStoreTests : IDisposable
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = Store(paths);
-        for (var index = 0; index < AuthorityProfileStoreLimits.MaximumProfiles; index++)
-        {
-            var profile = Profile($"profile-{index:00}");
-            Assert.Equal(AuthorityProfileMutationStatus.Applied, (await store.MutateAsync(Create(profile, $"create-profile-{index:00}"))).Status);
-        }
+        var trust = new MutableAuthenticatedTrustProvider();
+        var store = new AuthorityProfileStore(paths, trust);
+        await SeedMaximumProfilesAsync(paths, trust, store);
 
         var rejected = await store.MutateAsync(Create(Profile("profile-overflow"), "create-profile-overflow"));
-        var retained = await Store(paths).ReadAsync("profile-31");
-        var overflow = await Store(paths).ReadAsync("profile-overflow");
+        var retained = await new AuthorityProfileStore(paths, trust).ReadAsync("profile-031");
+        var overflow = await new AuthorityProfileStore(paths, trust).ReadAsync("profile-overflow");
 
         Assert.Equal(AuthorityProfileMutationStatus.Unavailable, rejected.Status);
         Assert.Equal(AuthorityProfileReadStatus.Available, retained.Status);
-        Assert.Equal("profile-31", retained.Record!.ProfileId.Value);
+        Assert.Equal("profile-031", retained.Record!.ProfileId.Value);
         Assert.Equal(AuthorityProfileReadStatus.NotFound, overflow.Status);
     }
 
@@ -513,22 +516,23 @@ public sealed class AuthorityProfileStoreTests : IDisposable
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = Store(paths);
+        var trust = new MutableAuthenticatedTrustProvider();
+        var store = new AuthorityProfileStore(paths, trust);
         var profile = Profile();
-        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await store.MutateAsync(Create(profile, "revision-1"))).Status);
-        for (var revision = 2; revision <= AuthorityProfileStoreLimits.MaximumRevisionsPerProfile; revision++)
-        {
-            var status = revision % 2 == 0 ? AuthorityProfileStatus.Suspended : AuthorityProfileStatus.Active;
-            var result = await store.MutateAsync(Transition(profile.ProfileId, revision - 1, status, $"revision-{revision}"));
-            Assert.Equal(AuthorityProfileMutationStatus.Applied, result.Status);
-        }
+        await SeedProfileRevisionsBelowLimitAsync(paths, trust, store, profile);
+        var accepted = await store.MutateAsync(Transition(
+            profile.ProfileId,
+            AuthorityProfileStoreLimits.MaximumRevisionsPerProfile - 1,
+            AuthorityProfileStatus.Suspended,
+            $"revision-{AuthorityProfileStoreLimits.MaximumRevisionsPerProfile}"));
 
-        var atLimit = await Store(paths).ReadAsync(profile.ProfileId.Value);
+        var atLimit = await new AuthorityProfileStore(paths, trust).ReadAsync(profile.ProfileId.Value);
         var rejected = await store.MutateAsync(Transition(profile.ProfileId, AuthorityProfileStoreLimits.MaximumRevisionsPerProfile, AuthorityProfileStatus.Retired, "revision-129"));
-        var afterRejected = await Store(paths).ReadAsync(profile.ProfileId.Value);
+        var afterRejected = await new AuthorityProfileStore(paths, trust).ReadAsync(profile.ProfileId.Value);
         var tombstoned = await store.MutateAsync(Tombstone(profile.ProfileId, AuthorityProfileStoreLimits.MaximumRevisionsPerProfile, "tombstone-at-revision-limit"));
-        var afterTombstone = await Store(paths).ReadAsync(profile.ProfileId.Value);
+        var afterTombstone = await new AuthorityProfileStore(paths, trust).ReadAsync(profile.ProfileId.Value);
 
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, accepted.Status);
         Assert.Equal(AuthorityProfileStoreLimits.MaximumRevisionsPerProfile, atLimit.Record!.Revisions.Count);
         Assert.Equal(AuthorityProfileMutationStatus.Unavailable, rejected.Status);
         Assert.Equal(AuthorityProfileReadStatus.Available, afterRejected.Status);
@@ -643,6 +647,225 @@ public sealed class AuthorityProfileStoreTests : IDisposable
     }
 
     private AuthorityProfileStore Store(WorkspacePaths paths) => new(paths, _trustProvider);
+
+    private static async Task SeedMaximumProfilesAsync(
+        WorkspacePaths paths,
+        MutableAuthenticatedTrustProvider trust,
+        AuthorityProfileStore store)
+    {
+        var firstProfile = Profile("profile-000");
+        Assert.Equal(
+            AuthorityProfileMutationStatus.Applied,
+            (await store.MutateAsync(Create(firstProfile, "create-profile-000"))).Status);
+
+        var initial = JsonNode.Parse(await File.ReadAllTextAsync(paths.AuthorityProfilesDocumentPath))!.AsObject();
+        var workspaceIdentity = initial["workspaceIdentity"]!.GetValue<string>();
+        var recordedAtUtc = initial["operations"]![0]!["recordedAtUtc"]!.GetValue<DateTimeOffset>();
+        var profiles = new List<AuthorityProfileSeedDocument>(AuthorityProfileStoreLimits.MaximumProfiles);
+        var operations = new List<AuthorityProfileOperationSeedDocument>(AuthorityProfileStoreLimits.MaximumProfiles);
+        for (var index = 0; index < AuthorityProfileStoreLimits.MaximumProfiles; index++)
+        {
+            var profile = Profile($"profile-{index:D3}");
+            var operation = Create(profile, $"create-profile-{index:D3}");
+            Assert.True(AuthorityProfileJson.TrySerialize(profile, out var profileJson, out _));
+            Assert.True(AuthorityProfileHash.TryCompute(profile, out var profileHash, out _));
+            profiles.Add(new AuthorityProfileSeedDocument(
+                profile.ProfileId.Value,
+                [new AuthorityProfileRevisionSeedDocument(1, profileJson!, profileHash!.Value, operation.OperationId, recordedAtUtc)],
+                null));
+            operations.Add(new AuthorityProfileOperationSeedDocument(
+                operation.OperationId,
+                ComputeProfileRequestHash(operation),
+                operation.Kind,
+                AuthorityProfileMutationStatus.Applied,
+                profile.ProfileId.Value,
+                1,
+                operation.ActorId.Value,
+                operation.Reason.Value,
+                recordedAtUtc));
+        }
+
+        var document = new AuthorityProfileStoreSeedDocument(
+            1,
+            workspaceIdentity,
+            AuthorityProfileStoreLimits.MaximumProfiles,
+            profiles,
+            operations,
+            [],
+            [],
+            string.Empty,
+            string.Empty);
+        var digest = CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(document, _jsonOptions))).Value;
+        var authenticated = document with
+        {
+            ContentDigest = digest,
+            AuthenticationTag = MutableAuthenticatedTrustProvider.AuthenticationTag
+        };
+        var json = JsonSerializer.Serialize(authenticated, _jsonOptions) + Environment.NewLine;
+        await File.WriteAllTextAsync(paths.AuthorityProfilesDocumentPath, json);
+        await File.WriteAllTextAsync(paths.AuthorityProfilesProofPath, json);
+        trust.SetCurrent(workspaceIdentity, document.Generation, digest);
+    }
+
+    private static async Task SeedProfileRevisionsBelowLimitAsync(
+        WorkspacePaths paths,
+        MutableAuthenticatedTrustProvider trust,
+        AuthorityProfileStore store,
+        AuthorityProfile initialProfile)
+    {
+        Assert.Equal(
+            AuthorityProfileMutationStatus.Applied,
+            (await store.MutateAsync(Create(initialProfile, "revision-1"))).Status);
+        Assert.Equal(
+            AuthorityProfileMutationStatus.Applied,
+            (await store.MutateAsync(Transition(initialProfile.ProfileId, 1, AuthorityProfileStatus.Suspended, "revision-2"))).Status);
+
+        var publicBytes = await File.ReadAllBytesAsync(paths.AuthorityProfilesDocumentPath);
+        var publicDocument = JsonNode.Parse(publicBytes)!.AsObject();
+        var workspaceIdentity = publicDocument["workspaceIdentity"]!.GetValue<string>();
+        var recordedAtByOperation = publicDocument["operations"]!
+            .AsArray()
+            .ToDictionary(
+                node => node!["operationId"]!.GetValue<string>(),
+                node => node!["recordedAtUtc"]!.GetValue<DateTimeOffset>(),
+                StringComparer.Ordinal);
+        var retainedRecordedAtUtc = recordedAtByOperation["revision-2"];
+        var publicFixture = CreateProfileRevisionSeedDocument(
+            workspaceIdentity,
+            initialProfile,
+            2,
+            operationId => recordedAtByOperation[operationId]);
+        Assert.Equal(publicBytes, SerializeAuthenticatedProfileSeedDocument(publicFixture));
+
+        var maximumFixture = CreateProfileRevisionSeedDocument(
+            workspaceIdentity,
+            initialProfile,
+            AuthorityProfileStoreLimits.MaximumRevisionsPerProfile - 1,
+            _ => retainedRecordedAtUtc);
+        var maximumBytes = SerializeAuthenticatedProfileSeedDocument(maximumFixture);
+        await File.WriteAllBytesAsync(paths.AuthorityProfilesDocumentPath, maximumBytes);
+        await File.WriteAllBytesAsync(paths.AuthorityProfilesProofPath, maximumBytes);
+        trust.SetCurrent(workspaceIdentity, maximumFixture.Generation, maximumFixture.ContentDigest);
+
+        var proved = await new AuthorityProfileStore(paths, trust).ReadAsync(initialProfile.ProfileId.Value);
+        Assert.Equal(AuthorityProfileReadStatus.Available, proved.Status);
+        Assert.Equal(AuthorityProfileStoreLimits.MaximumRevisionsPerProfile - 1, proved.Record!.Revisions.Count);
+        Assert.Equal(AuthorityProfileStoreLimits.MaximumRevisionsPerProfile - 1, proved.Record.Operations.Count);
+    }
+
+    private static AuthorityProfileStoreSeedDocument CreateProfileRevisionSeedDocument(
+        string workspaceIdentity,
+        AuthorityProfile initialProfile,
+        int maximumRevision,
+        Func<string, DateTimeOffset> recordedAt)
+    {
+        var revisions = new List<AuthorityProfileRevisionSeedDocument>(maximumRevision);
+        var operations = new List<AuthorityProfileOperationSeedDocument>(maximumRevision);
+        var current = initialProfile;
+        for (var revision = 1; revision <= maximumRevision; revision++)
+        {
+            var operationId = $"revision-{revision}";
+            AuthorityProfileMutation mutation;
+            if (revision == 1)
+            {
+                mutation = Create(current, operationId);
+            }
+            else
+            {
+                var status = revision % 2 == 0 ? AuthorityProfileStatus.Suspended : AuthorityProfileStatus.Active;
+                mutation = Transition(initialProfile.ProfileId, revision - 1, status, operationId);
+                current = current with { Revision = Revision(revision), Status = status };
+            }
+
+            Assert.True(AuthorityProfileJson.TrySerialize(current, out var profileJson, out _));
+            Assert.True(AuthorityProfileHash.TryCompute(current, out var profileHash, out _));
+            var operationRecordedAtUtc = recordedAt(operationId);
+            revisions.Add(new AuthorityProfileRevisionSeedDocument(revision, profileJson!, profileHash!.Value, operationId, operationRecordedAtUtc));
+            operations.Add(new AuthorityProfileOperationSeedDocument(
+                operationId,
+                ComputeProfileMutationRequestHash(mutation),
+                mutation.Kind,
+                AuthorityProfileMutationStatus.Applied,
+                initialProfile.ProfileId.Value,
+                revision,
+                mutation.ActorId.Value,
+                mutation.Reason.Value,
+                operationRecordedAtUtc));
+        }
+
+        var document = new AuthorityProfileStoreSeedDocument(
+            1,
+            workspaceIdentity,
+            maximumRevision,
+            [new AuthorityProfileSeedDocument(initialProfile.ProfileId.Value, revisions, null)],
+            operations.OrderBy(operation => operation.OperationId, StringComparer.Ordinal).ToArray(),
+            [],
+            [],
+            string.Empty,
+            string.Empty);
+        var digest = CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(document, _jsonOptions))).Value;
+        return document with
+        {
+            ContentDigest = digest,
+            AuthenticationTag = MutableAuthenticatedTrustProvider.AuthenticationTag
+        };
+    }
+
+    private static byte[] SerializeAuthenticatedProfileSeedDocument(AuthorityProfileStoreSeedDocument document)
+        => Encoding.UTF8.GetBytes(JsonSerializer.Serialize(document, _canonicalDocumentJsonOptions) + Environment.NewLine);
+
+    private static string ComputeProfileMutationRequestHash(AuthorityProfileMutation mutation)
+    {
+        var profileJson = mutation.Profile is null
+            ? string.Empty
+            : AuthorityProfileJson.TrySerialize(mutation.Profile, out var json, out _)
+                ? json!
+                : string.Empty;
+        var content = $"{(int)mutation.Kind}\n{mutation.OperationId}\n{mutation.ExpectedRevision}\n{mutation.ProfileId?.Value ?? mutation.Profile?.ProfileId.Value}\n{(int?)mutation.Status}\n{profileJson}\n{mutation.ActorId.Value}\n{mutation.Reason.Value}";
+        return CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes(content)).Value;
+    }
+
+    private static string ComputeProfileRequestHash(AuthorityProfileMutation mutation)
+    {
+        Assert.NotNull(mutation.Profile);
+        Assert.True(AuthorityProfileJson.TrySerialize(mutation.Profile, out var profileJson, out _));
+        var content = $"{(int)mutation.Kind}\n{mutation.OperationId}\n{mutation.ExpectedRevision}\n{mutation.Profile.ProfileId.Value}\n{(int?)mutation.Status}\n{profileJson}\n{mutation.ActorId.Value}\n{mutation.Reason.Value}";
+        return CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes(content)).Value;
+    }
+
+    private sealed record AuthorityProfileStoreSeedDocument(
+        int SchemaVersion,
+        string WorkspaceIdentity,
+        long Generation,
+        IReadOnlyList<AuthorityProfileSeedDocument> Profiles,
+        IReadOnlyList<AuthorityProfileOperationSeedDocument> Operations,
+        IReadOnlyList<object> Grants,
+        IReadOnlyList<object> GrantOperations,
+        string ContentDigest,
+        string AuthenticationTag);
+
+    private sealed record AuthorityProfileSeedDocument(
+        string ProfileId,
+        IReadOnlyList<AuthorityProfileRevisionSeedDocument> Revisions,
+        object? Tombstone);
+
+    private sealed record AuthorityProfileRevisionSeedDocument(
+        int Revision,
+        string ProfileJson,
+        string ProfileHash,
+        string OperationId,
+        DateTimeOffset RecordedAtUtc);
+
+    private sealed record AuthorityProfileOperationSeedDocument(
+        string OperationId,
+        string RequestHash,
+        AuthorityProfileMutationKind Kind,
+        AuthorityProfileMutationStatus Outcome,
+        string ProfileId,
+        int? ResultingRevision,
+        string ActorId,
+        string Reason,
+        DateTimeOffset RecordedAtUtc);
 
     private async Task<JsonObject> CreateAuthenticatedNullOperationDocumentAsync(WorkspacePaths paths)
     {

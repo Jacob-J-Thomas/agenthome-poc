@@ -82,7 +82,7 @@ internal static class AuthorityGrantTestFixture
     {
         var profileReference = new AuthorityProfileReference(ProfileId(profileId), ProfileRevision(profileRevision));
         var profile = new AuthorityGrantProfilePin(profileReference, ProfileHash(profileHash));
-        var role = new AuthorityGrantRolePin(new ContextualRoleRevisionIdentity(roleId, roleRevision), new string(roleHash, 64));
+        var role = new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity(roleId, roleRevision), new string(roleHash, 64));
         var loopReference = GovernedLoopRevisionReference.Create(1, graphId, loopRevisionId, new string(executableHash, 64));
         var loop = GovernedLoopRevisionPublicationPinFactory.Create(1, loopReference, publicationOperationId, new string(validationHash, 64));
         return new AuthorityGrantBinding(profile, role, loop);

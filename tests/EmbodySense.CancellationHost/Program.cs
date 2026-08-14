@@ -20,9 +20,100 @@ using EmbodySense.Core.Persistence.ContextualRoles.Models;
 using EmbodySense.Core.Persistence.Credentials;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.CancellationHost.Credentials;
+using EmbodySense.CancellationHost.Persistence;
 using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
+
+if (args is ["custom-loop-run-stage", var runLockPath, var runStagingPath, var runReadyMarker, var runReleaseMarker])
+{
+    return await CustomLoopRunStagingWriterHost.RunAsync(runLockPath, runStagingPath, runReadyMarker, runReleaseMarker);
+}
+
+if (args is ["credential-mutex-contention", var contentionId])
+{
+    return await WindowsCredentialProviderCrossProcessHost.RunMutexContentionAsync(contentionId);
+}
+
+if (args is ["credential-external-value"])
+{
+    return await WindowsCredentialProviderCrossProcessHost.RunExternalValueAsync();
+}
+
+if (args is ["authority-grant-store", var authorityMode, var authorityWorkspaceRoot, var authorityTrustRoot, var authorityMarkerPath, var authorityResultPath])
+{
+    return await AuthorityGrantStoreCrossProcessHost.RunAsync(authorityMode, authorityWorkspaceRoot, authorityTrustRoot, authorityMarkerPath, authorityResultPath);
+}
+
+if (args is ["default-turn-archive-process-loss", var archiveWorkspaceRoot, var archivePhase])
+{
+    return await DefaultConversationStoreCrossProcessHost.RunArchiveProcessLossAsync(archiveWorkspaceRoot, archivePhase);
+}
+
+if (args is ["default-turn-process-loss", var turnWorkspaceRoot, var turnBoundary])
+{
+    return await DefaultConversationTurnProcessLossHost.RunAsync(turnWorkspaceRoot, turnBoundary);
+}
+
+if (args is ["default-turn-publication", var publicationWorkspaceRoot, var publicationReadyPath, var publicationReleasePath, var publicationResultPath])
+{
+    return await DefaultConversationStoreCrossProcessHost.RunPublicationAsync(publicationWorkspaceRoot, publicationReadyPath, publicationReleasePath, publicationResultPath);
+}
+
+if (args is ["default-turn-active-set-lease", var leaseWorkspaceRoot, var leaseReadyPath, var leaseReleasePath])
+{
+    return await DefaultConversationStoreCrossProcessHost.RunActiveSetLeaseAsync(leaseWorkspaceRoot, leaseReadyPath, leaseReleasePath);
+}
+
+if (args is ["default-turn-history-stage-substitution", var stagePath, var displacedPath, var replacementPayload])
+{
+    return DefaultConversationStoreCrossProcessHost.RunHistoryStageSubstitution(stagePath, displacedPath, replacementPayload);
+}
+
+if (args is ["human-input-request-store", var humanInputMode, var humanInputWorkspaceRoot, var humanInputTrustRoot, var humanInputGatePath, var humanInputReadyPath, var humanInputOutputPath, var humanInputRequestId, var humanInputOperationId, var humanInputRequestHash, var humanInputBoundary, var humanInputGeneration, var humanInputRelatedRequestId])
+{
+    return await HumanInputRequestStoreCrossProcessHost.RunAsync(humanInputMode, humanInputWorkspaceRoot, humanInputTrustRoot, humanInputGatePath, humanInputReadyPath, humanInputOutputPath, humanInputRequestId, humanInputOperationId, humanInputRequestHash, humanInputBoundary, humanInputGeneration, humanInputRelatedRequestId);
+}
+
+if (args is ["governed-loop-revision-store", var revisionMode, var revisionWorkspaceRoot, var revisionTrustRoot, var revisionGatePath, var revisionReadyPath, var revisionOutputPath, var revisionGraphId, var revisionId, var revisionOperationId, var revisionRequestHash])
+{
+    return await GovernedLoopRevisionStoreCrossProcessHost.RunAsync(revisionMode, revisionWorkspaceRoot, revisionTrustRoot, revisionGatePath, revisionReadyPath, revisionOutputPath, revisionGraphId, revisionId, revisionOperationId, revisionRequestHash);
+}
+
+if (args is ["sequential-audit-record-then-exit", var auditWorkspaceRoot])
+{
+    return await SequentialAuditCrossProcessHost.RecordThenExitAsync(auditWorkspaceRoot);
+}
+
+if (args is ["sequential-evidence-resolve", var evidenceWorkspaceRoot, var evidenceHash, var evidenceResultPath])
+{
+    return await CustomLoopSequentialEvidenceCrossProcessHost.ResolveAsync(evidenceWorkspaceRoot, evidenceHash, evidenceResultPath);
+}
+
+if (args is ["effect-authority-crash", var effectMode, var effectWorkspaceRoot, var effectTrustRoot, var effectReleaseMarker, var effectReadyMarker, var effectOperationId])
+{
+    return await GovernedLoopEffectAuthorityCrashHost.RunAsync(effectMode, effectWorkspaceRoot, effectTrustRoot, effectReleaseMarker, effectReadyMarker, effectOperationId);
+}
+
+if (args is ["trigger-queue-admit", var queueWorkspaceRoot, var queueReleaseMarker, var queueReadyMarker, var queueResultMarker, var deliveryId, var deduplicationId, var loopId, var crashBoundary])
+{
+    return await TriggerQueueCrossProcessHost.RunAdmissionAsync(queueWorkspaceRoot, queueReleaseMarker, queueReadyMarker, queueResultMarker, deliveryId, deduplicationId, loopId, crashBoundary);
+}
+
+if (args is ["trigger-worker-select", var workerWorkspaceRoot, var workerReleaseMarker, var workerReadyMarker, var workerResultMarker, var workerId, var expectedGeneration])
+{
+    return await TriggerQueueCrossProcessHost.RunWorkerSelectionAsync(workerWorkspaceRoot, workerReleaseMarker, workerReadyMarker, workerResultMarker, workerId, expectedGeneration);
+}
+
+if (args is ["trigger-queue-hold-lock", var lockWorkspaceRoot, var lockReleaseMarker, var lockReadyMarker, var lockResultMarker])
+{
+    return await TriggerQueueCrossProcessHost.RunLockHolderAsync(lockWorkspaceRoot, lockReleaseMarker, lockReadyMarker, lockResultMarker);
+}
+
+if (args is ["human-input-response", var responseMode, var responseWorkspaceRoot, var responseTrustRoot, var responseReleaseMarker, var responseReadyMarker, var responseResultMarker, var responseOperationId, var responseId, var responseActorId, var responseActorRoleId, var responseBoundary])
+{
+    return await HumanInputResponseCrossProcessHost.RunAsync(responseMode, responseWorkspaceRoot, responseTrustRoot, responseReleaseMarker, responseReadyMarker, responseResultMarker, responseOperationId, responseId, responseActorId, responseActorRoleId, responseBoundary);
+}
 
 if (args is ["capability", var behavior])
 {
@@ -209,6 +300,8 @@ static async Task<int> HostCapabilityAsync(string behavior)
 
 static async Task<int> HoldContextualRoleMutationAsync(string workspaceRoot)
 {
+    var paths = new WorkspacePaths(workspaceRoot);
+    var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
     var now = DateTimeOffset.UtcNow;
     var revision = ContextualRoleRevisionContentHash.Apply(new ContextualRoleRevision(
         1,
@@ -218,7 +311,7 @@ static async Task<int> HoldContextualRoleMutationAsync(string workspaceRoot)
         "Provide bounded review assistance.",
         ContextualRoleStatus.Published,
         new ContextualRoleProvenance("user-jake", now, now),
-        new ContextualRoleWorkspaceApplicability(ImmutableArray.Create("workspace-one")),
+        new ContextualRoleWorkspaceApplicability(ImmutableArray.Create(workspaceId)),
         new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.RoleArtifact, "reviewer-source", ContextualRoleInstructionClassification.RoleInstruction),
         new ContextualRolePolicyMaxima(ImmutableArray<string>.Empty)));
     var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest("create-reviewer", string.Empty, ContextualRoleRevisionMutationKind.Create, "reviewer", "user-jake", revision, null, now));
@@ -234,7 +327,7 @@ static async Task<int> HoldContextualRoleMutationAsync(string workspaceRoot)
             }
         }
     };
-    var result = await new ContextualRoleRevisionStore(new WorkspacePaths(workspaceRoot), "workspace-one", options).MutateAsync(request);
+    var result = await new ContextualRoleRevisionStore(paths, workspaceId, options).MutateAsync(request);
     return result.Status == ContextualRoleRevisionMutationStatus.Accepted ? 0 : 3;
 }
 

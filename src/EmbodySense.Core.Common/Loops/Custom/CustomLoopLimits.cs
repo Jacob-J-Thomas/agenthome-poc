@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Governance.Tools;
+using EmbodySense.Core.Common.Loops.Execution;
 
 namespace EmbodySense.Core.Common.Loops.Custom;
 
@@ -96,6 +97,70 @@ public static class CustomLoopLimits
     /// Maximum abstract resource units declared by one node descriptor.
     /// </summary>
     public const int MaxGraphNodeResourceUnits = 100_000;
+    /// <summary>
+    /// Maximum sequential dispatch and terminal evidence records retained by one graph activation.
+    /// </summary>
+    public const int MaxGraphSequentialEvidenceItemsPerActivation = 2;
+    /// <summary>
+    /// Maximum graph-wide attempt envelope admitted for one run.
+    /// </summary>
+    public const int MaxGraphAggregateAttempts = MaxModelAttemptsPerRun;
+    /// <summary>
+    /// Maximum graph-wide payload-character envelope admitted across all retained activations.
+    /// </summary>
+    public const int MaxGraphAggregatePayloadCharacters = MaxGraphNodePayloadCharacters * GovernedLoopExecutionLimits.MaxFrontierNodes;
+    /// <summary>
+    /// Maximum graph-wide sequential-evidence envelope admitted across all retained activations.
+    /// </summary>
+    public const int MaxGraphAggregateEvidenceItems = MaxGraphSequentialEvidenceItemsPerActivation * GovernedLoopExecutionLimits.MaxFrontierNodes;
+    /// <summary>
+    /// Maximum graph-wide abstract resource-unit envelope admitted for one run.
+    /// </summary>
+    public const int MaxGraphAggregateResourceUnits = MaxGraphNodeResourceUnits;
+    /// <summary>
+    /// Maximum UTF-8 bytes in one canonical typed graph value envelope.
+    /// </summary>
+    public const int MaxGraphTypedValueUtf8Bytes = 256 * 1024;
+    /// <summary>
+    /// Maximum decoded characters in one string or object-property name carried by a typed graph value.
+    /// </summary>
+    public const int MaxGraphTypedValueStringCharacters = 64 * 1024;
+    /// <summary>
+    /// Maximum decoded characters in one object-property name carried by a typed graph value.
+    /// </summary>
+    public const int MaxGraphTypedValuePropertyNameCharacters = 256;
+    /// <summary>
+    /// Maximum nested depth in one typed graph value.
+    /// </summary>
+    public const int MaxGraphTypedValueDepth = 32;
+    /// <summary>
+    /// Maximum JSON values in one typed graph value.
+    /// </summary>
+    public const int MaxGraphTypedValueElements = 4_096;
+    /// <summary>
+    /// Maximum entries in one typed graph array or object.
+    /// </summary>
+    public const int MaxGraphTypedValueCollectionEntries = 1_024;
+    /// <summary>
+    /// Maximum characters in one finite typed-value numeric token.
+    /// </summary>
+    public const int MaxGraphTypedValueNumberCharacters = 128;
+    /// <summary>
+    /// Maximum characters in the signed exponent portion of one finite typed-value number.
+    /// </summary>
+    public const int MaxGraphTypedValueExponentCharacters = 6;
+    /// <summary>
+    /// Maximum path/code observations retained by one deterministic validation node.
+    /// </summary>
+    public const int MaxGraphPureNodeObservations = 64;
+    /// <summary>
+    /// Maximum UTF-8 bytes in one canonical pure-node outcome artifact.
+    /// </summary>
+    public const int MaxGraphPureNodeOutcomeUtf8Bytes = 4 * 1024 * 1024;
+    /// <summary>
+    /// Maximum trace capacity reserved before pure-node execution for the complete outcome plus bounded event and registry metadata.
+    /// </summary>
+    public const int MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes = (((MaxGraphPureNodeOutcomeUtf8Bytes + 2) / 3) * 4) + (256 * 1024);
     /// <summary>
     /// Maximum definitions per workspace.
     /// </summary>

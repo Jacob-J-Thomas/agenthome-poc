@@ -7,8 +7,9 @@ internal sealed class CapabilityCatalogPathGuard
     private readonly StringComparison _comparison;
     private readonly ICapabilityCatalogDurabilityBarrier _durabilityBarrier;
     private readonly ICapabilityCatalogPathObserver? _pathObserver;
+    private readonly TimeProvider _timeProvider;
 
-    public CapabilityCatalogPathGuard(string root, ICapabilityCatalogDurabilityBarrier durabilityBarrier, ICapabilityCatalogPathObserver? pathObserver = null)
+    public CapabilityCatalogPathGuard(string root, ICapabilityCatalogDurabilityBarrier durabilityBarrier, ICapabilityCatalogPathObserver? pathObserver = null, TimeProvider? timeProvider = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         ArgumentNullException.ThrowIfNull(durabilityBarrier);
@@ -16,11 +17,12 @@ internal sealed class CapabilityCatalogPathGuard
         _comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         _durabilityBarrier = durabilityBarrier;
         _pathObserver = pathObserver;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<CapabilityCatalogPathSession?> TryAcquireExclusiveSessionAsync(string lockPath, bool createRoot, CancellationToken cancellationToken, bool createLockParent = true)
     {
-        var session = CapabilityCatalogPathSession.Open(_root, _comparison, createRoot, _durabilityBarrier, _pathObserver);
+        var session = CapabilityCatalogPathSession.Open(_root, _comparison, createRoot, _durabilityBarrier, _pathObserver, _timeProvider);
         if (session is null)
         {
             return null;

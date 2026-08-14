@@ -14,18 +14,6 @@ namespace EmbodySense.Core.Persistence.Tests.Triggers;
 
 public sealed class TriggerQueueStoreTests
 {
-    private const string CrossProcessWorkspace = "EMBODYSENSE_TRIGGER_QUEUE_WORKSPACE";
-    private const string CrossProcessGate = "EMBODYSENSE_TRIGGER_QUEUE_GATE";
-    private const string CrossProcessOutput = "EMBODYSENSE_TRIGGER_QUEUE_OUTPUT";
-    private const string CrossProcessReady = "EMBODYSENSE_TRIGGER_QUEUE_READY";
-    private const string CrossProcessDelivery = "EMBODYSENSE_TRIGGER_QUEUE_DELIVERY";
-    private const string CrossProcessDeduplication = "EMBODYSENSE_TRIGGER_QUEUE_DEDUPLICATION";
-    private const string CrossProcessLoop = "EMBODYSENSE_TRIGGER_QUEUE_LOOP";
-    private const string CrossProcessCrashAfterStaged = "EMBODYSENSE_TRIGGER_QUEUE_CRASH_AFTER_STAGED";
-    private const string CrossProcessCrashAfterPrecursor = "EMBODYSENSE_TRIGGER_QUEUE_CRASH_AFTER_PRECURSOR";
-    private const string CrossProcessWorkerId = "EMBODYSENSE_TRIGGER_QUEUE_WORKER_ID";
-    private const string CrossProcessExpectedGeneration = "EMBODYSENSE_TRIGGER_QUEUE_EXPECTED_GENERATION";
-
     [Fact]
     public async Task Windows_staging_path_identity_check_allows_publication_and_prior_generation_cleanup()
     {
@@ -446,68 +434,33 @@ public sealed class TriggerQueueStoreTests
     }
 
     [Fact]
-    public async Task Cross_process_queue_admission_host()
+    public async Task Cross_process_mutation_lock_contention_honors_cancellation_without_mutation()
     {
-        var workspace = Environment.GetEnvironmentVariable(CrossProcessWorkspace);
-        if (string.IsNullOrEmpty(workspace))
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var release = Path.Combine(workspace.RootPath, "release-trigger-queue-lock-holder");
+        var ready = Path.Combine(workspace.RootPath, "trigger-queue-lock-holder-ready");
+        var output = Path.Combine(workspace.RootPath, "trigger-queue-lock-holder-result");
+        using var process = StartCrossProcessLockHolder(workspace.RootPath, release, ready, output);
+        await WaitForPathAsync(ready, process);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+        try
         {
-            return;
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3), cancellation.Token));
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(release, "go");
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
         }
 
-        var gate = Environment.GetEnvironmentVariable(CrossProcessGate)!;
-        var output = Environment.GetEnvironmentVariable(CrossProcessOutput)!;
-        var ready = Environment.GetEnvironmentVariable(CrossProcessReady)!;
-        var delivery = Environment.GetEnvironmentVariable(CrossProcessDelivery)!;
-        var deduplication = Environment.GetEnvironmentVariable(CrossProcessDeduplication)!;
-        var loop = Environment.GetEnvironmentVariable(CrossProcessLoop)!;
-        await File.WriteAllTextAsync(ready, "ready");
-        var wait = Stopwatch.StartNew();
-        while (!File.Exists(gate))
-        {
-            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(15), "Cross-process trigger queue gate was not released within its bounded wait.");
-            await Task.Delay(10);
-        }
-
-        ITriggerQueueDurabilityObserver? observer = null;
-        if (string.Equals(Environment.GetEnvironmentVariable(CrossProcessCrashAfterStaged), "1", StringComparison.Ordinal))
-        {
-            observer = new CallbackObserver(onStaged: (_, _, _) => TerminateCrossProcessHost());
-        }
-        else if (string.Equals(Environment.GetEnvironmentVariable(CrossProcessCrashAfterPrecursor), "1", StringComparison.Ordinal))
-        {
-            observer = new CallbackObserver(onStagingPrecursorCreated: (_, _, _) => TerminateCrossProcessHost());
-        }
-        var store = new TriggerQueueStore(new WorkspacePaths(workspace), RaceQuota(), observer);
-        var result = await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope(delivery, deduplication, loop)));
-        await File.WriteAllTextAsync(output, result.Status.ToString());
-    }
-
-    [Fact]
-    public async Task Cross_process_worker_selection_host()
-    {
-        var workspace = Environment.GetEnvironmentVariable(CrossProcessWorkspace);
-        if (string.IsNullOrEmpty(workspace))
-        {
-            return;
-        }
-
-        var gate = Environment.GetEnvironmentVariable(CrossProcessGate)!;
-        var output = Environment.GetEnvironmentVariable(CrossProcessOutput)!;
-        var ready = Environment.GetEnvironmentVariable(CrossProcessReady)!;
-        var workerId = Environment.GetEnvironmentVariable(CrossProcessWorkerId)!;
-        var generation = long.Parse(Environment.GetEnvironmentVariable(CrossProcessExpectedGeneration)!, System.Globalization.CultureInfo.InvariantCulture);
-        await File.WriteAllTextAsync(ready, "ready");
-        var wait = Stopwatch.StartNew();
-        while (!File.Exists(gate))
-        {
-            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(15), "Cross-process trigger worker gate was not released within its bounded wait.");
-            await Task.Delay(10);
-        }
-
-        var store = new TriggerQueueStore(new WorkspacePaths(workspace));
-        var request = new TriggerWorkerSelectionRequest(workerId, generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(30), [], 2);
-        var result = await store.SelectAsync(request);
-        await File.WriteAllTextAsync(output, result.Status.ToString());
+        var error = await process.StandardError.ReadToEndAsync();
+        Assert.True(process.ExitCode == 0, error + Environment.NewLine + await process.StandardOutput.ReadToEndAsync());
+        Assert.Equal("released", await File.ReadAllTextAsync(output));
+        var snapshot = await new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4));
+        Assert.Equal(0, snapshot.Generation);
+        Assert.Empty(snapshot.Entries);
+        Assert.Empty(Directory.EnumerateFiles(QueueRoot(paths), "ledger-*.json"));
     }
 
     [Fact]
@@ -776,10 +729,11 @@ public sealed class TriggerQueueStoreTests
         var countPaths = new WorkspacePaths(countWorkspace.RootPath);
         var countRoot = QueueRoot(countPaths);
         Directory.CreateDirectory(countRoot);
-        for (var index = 0; index < 129; index++)
-        {
-            await File.WriteAllTextAsync(Path.Combine(countRoot, $"unknown-{index:D3}"), "x");
-        }
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, 129),
+            new ParallelOptions { MaxDegreeOfParallelism = 32 },
+            async (index, cancellationToken) =>
+                await File.WriteAllTextAsync(Path.Combine(countRoot, $"unknown-{index:D3}"), "x", cancellationToken));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => new TriggerQueueStore(countPaths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3)));
 
@@ -872,7 +826,7 @@ public sealed class TriggerQueueStoreTests
         var ready = Path.Combine(workspace.RootPath, "crashing-trigger-queue-ready");
         var output = Path.Combine(workspace.RootPath, "crashing-trigger-queue-result");
         using var process = StartCrossProcessHost(workspace.RootPath, gate, ready, output, ("delivery-crash", "dedup-crash", "loop-crash"), crashAfterStaged: true);
-        await WaitForPathAsync(ready);
+        await WaitForPathAsync(ready, process);
         await File.WriteAllTextAsync(gate, "go");
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
 
@@ -920,7 +874,7 @@ public sealed class TriggerQueueStoreTests
         var ready = Path.Combine(workspace.RootPath, "precursor-crashing-trigger-queue-ready");
         var output = Path.Combine(workspace.RootPath, "precursor-crashing-trigger-queue-result");
         using var process = StartCrossProcessHost(workspace.RootPath, gate, ready, output, ("delivery-crash", "dedup-crash", "loop-crash"), crashAfterPrecursor: true);
-        await WaitForPathAsync(ready);
+        await WaitForPathAsync(ready, process);
         await File.WriteAllTextAsync(gate, "go");
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
 
@@ -1579,7 +1533,7 @@ public sealed class TriggerQueueStoreTests
         var secondReady = Path.Combine(workspace.RootPath, "second-trigger-worker-ready");
         using var first = StartCrossProcessWorkerHost(workspace.RootPath, gate, firstReady, firstOutput, "worker-1", generation);
         using var second = StartCrossProcessWorkerHost(workspace.RootPath, gate, secondReady, secondOutput, "worker-2", generation);
-        await Task.WhenAll(WaitForPathAsync(firstReady), WaitForPathAsync(secondReady));
+        await Task.WhenAll(WaitForPathAsync(firstReady, first), WaitForPathAsync(secondReady, second));
         await File.WriteAllTextAsync(gate, "go");
         await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));
         var firstError = await first.StandardError.ReadToEndAsync();
@@ -2253,7 +2207,7 @@ public sealed class TriggerQueueStoreTests
         var secondReady = Path.Combine(workspace, "second-trigger-queue-ready");
         using var firstProcess = StartCrossProcessHost(workspace, gate, firstReady, firstOutput, first);
         using var secondProcess = StartCrossProcessHost(workspace, gate, secondReady, secondOutput, second);
-        await Task.WhenAll(WaitForPathAsync(firstReady), WaitForPathAsync(secondReady));
+        await Task.WhenAll(WaitForPathAsync(firstReady, firstProcess), WaitForPathAsync(secondReady, secondProcess));
         await File.WriteAllTextAsync(gate, "go");
         await Task.WhenAll(firstProcess.WaitForExitAsync(), secondProcess.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));
         var firstError = await firstProcess.StandardError.ReadToEndAsync();
@@ -2265,53 +2219,69 @@ public sealed class TriggerQueueStoreTests
         return [await File.ReadAllTextAsync(firstOutput), await File.ReadAllTextAsync(secondOutput)];
     }
 
-    private static async Task WaitForPathAsync(string path)
+    private static async Task WaitForPathAsync(string path, Process? process = null)
     {
         var wait = Stopwatch.StartNew();
         while (!File.Exists(path))
         {
-            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(15), $"Cross-process trigger queue host did not report ready: `{path}`.");
+            if (process is { HasExited: true })
+            {
+                Assert.Fail($"Cross-process trigger queue host exited with code {process.ExitCode} before reporting ready: `{path}`.");
+            }
+
+            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(30), $"Cross-process trigger queue host did not report ready: `{path}`.");
             await Task.Delay(10);
         }
     }
 
     private static Process StartCrossProcessHost(string workspace, string gate, string ready, string output, (string Delivery, string Deduplication, string Loop) delivery, bool crashAfterStaged = false, bool crashAfterPrecursor = false)
     {
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            WorkingDirectory = Path.GetTempPath(),
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(TriggerQueueStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.Triggers.TriggerQueueStoreTests.Cross_process_queue_admission_host");
-        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        startInfo.Environment[CrossProcessWorkspace] = workspace;
-        startInfo.Environment[CrossProcessGate] = gate;
-        startInfo.Environment[CrossProcessReady] = ready;
-        startInfo.Environment[CrossProcessOutput] = output;
-        startInfo.Environment[CrossProcessDelivery] = delivery.Delivery;
-        startInfo.Environment[CrossProcessDeduplication] = delivery.Deduplication;
-        startInfo.Environment[CrossProcessLoop] = delivery.Loop;
-        if (crashAfterStaged)
-        {
-            startInfo.Environment[CrossProcessCrashAfterStaged] = "1";
-        }
-
-        if (crashAfterPrecursor)
-        {
-            startInfo.Environment[CrossProcessCrashAfterPrecursor] = "1";
-        }
+        Assert.False(crashAfterStaged && crashAfterPrecursor);
+        var startInfo = CreateCrossProcessHostStartInfo();
+        startInfo.ArgumentList.Add("trigger-queue-admit");
+        startInfo.ArgumentList.Add(workspace);
+        startInfo.ArgumentList.Add(gate);
+        startInfo.ArgumentList.Add(ready);
+        startInfo.ArgumentList.Add(output);
+        startInfo.ArgumentList.Add(delivery.Delivery);
+        startInfo.ArgumentList.Add(delivery.Deduplication);
+        startInfo.ArgumentList.Add(delivery.Loop);
+        startInfo.ArgumentList.Add(crashAfterStaged ? "staged" : crashAfterPrecursor ? "precursor" : "none");
 
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process trigger queue test host did not start.");
     }
 
     private static Process StartCrossProcessWorkerHost(string workspace, string gate, string ready, string output, string workerId, long generation)
     {
+        var startInfo = CreateCrossProcessHostStartInfo();
+        startInfo.ArgumentList.Add("trigger-worker-select");
+        startInfo.ArgumentList.Add(workspace);
+        startInfo.ArgumentList.Add(gate);
+        startInfo.ArgumentList.Add(ready);
+        startInfo.ArgumentList.Add(output);
+        startInfo.ArgumentList.Add(workerId);
+        startInfo.ArgumentList.Add(generation.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process trigger worker test host did not start.");
+    }
+
+    private static Process StartCrossProcessLockHolder(string workspace, string gate, string ready, string output)
+    {
+        var startInfo = CreateCrossProcessHostStartInfo();
+        startInfo.ArgumentList.Add("trigger-queue-hold-lock");
+        startInfo.ArgumentList.Add(workspace);
+        startInfo.ArgumentList.Add(gate);
+        startInfo.ArgumentList.Add(ready);
+        startInfo.ArgumentList.Add(output);
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process trigger queue lock holder did not start.");
+    }
+
+    private static ProcessStartInfo CreateCrossProcessHostStartInfo()
+    {
+        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+        var targetFramework = outputDirectory.Name;
+        var configuration = outputDirectory.Parent?.Name ?? throw new DirectoryNotFoundException("The active test build configuration could not be resolved.");
+        var hostAssembly = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", configuration, targetFramework, "EmbodySense.CancellationHost.dll");
+        Assert.True(File.Exists(hostAssembly), $"The cross-process child host assembly was not built at `{hostAssembly}`.");
         var startInfo = new ProcessStartInfo("dotnet")
         {
             WorkingDirectory = Path.GetTempPath(),
@@ -2320,24 +2290,21 @@ public sealed class TriggerQueueStoreTests
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(TriggerQueueStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.Triggers.TriggerQueueStoreTests.Cross_process_worker_selection_host");
+        startInfo.ArgumentList.Add("exec");
+        startInfo.ArgumentList.Add(hostAssembly);
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        startInfo.Environment[CrossProcessWorkspace] = workspace;
-        startInfo.Environment[CrossProcessGate] = gate;
-        startInfo.Environment[CrossProcessReady] = ready;
-        startInfo.Environment[CrossProcessOutput] = output;
-        startInfo.Environment[CrossProcessWorkerId] = workerId;
-        startInfo.Environment[CrossProcessExpectedGeneration] = generation.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process trigger worker test host did not start.");
+        return startInfo;
     }
 
-    private static void TerminateCrossProcessHost()
+    private static string FindRepositoryRoot()
     {
-        Process.GetCurrentProcess().Kill();
-        Thread.Sleep(Timeout.Infinite);
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "EmbodySense.sln")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName ?? throw new DirectoryNotFoundException("The repository root could not be located from the test output directory.");
     }
 
     private sealed class AuthorizedAuthorizer : ITriggerDispatchAuthorizer

@@ -7,6 +7,13 @@ using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using static EmbodySense.Core.Common.Loops.Custom.Execution.CustomLoopRunValidationRules;
 using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Loops.Sequential;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Loops.Admission;
+using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using System.Text;
 using System.Text.Json;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
@@ -16,6 +23,25 @@ namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 /// </summary>
 public static class CustomLoopRunValidator
 {
+    private static readonly UTF8Encoding _strictUtf8 = new(false, true);
+    private static readonly string[] _sequentialToolFreeCapabilityRootIds =
+    [
+        "org.embodysense/conversation-turn",
+        "org.embodysense/model-inference",
+    ];
+    private static readonly string[] _sequentialToolEnabledCapabilityRootIds =
+    [
+        "org.embodysense/conversation-turn",
+        "org.embodysense/model-inference",
+        "org.embodysense/workspace-command",
+    ];
+    private static readonly CustomLoopToolAssignment[] _sequentialToolEnabledAssignments =
+    [
+        CustomLoopToolAssignment.List,
+        CustomLoopToolAssignment.Read,
+        CustomLoopToolAssignment.Search,
+    ];
+
     /// <summary>
     /// Validates the complete persisted shape and cross-field invariants of a custom-loop run.
     /// </summary>
@@ -106,9 +132,11 @@ public static class CustomLoopRunValidator
         }
 
         ValidateImmutableAdmission(current, candidate, errors);
+        ValidateExecutionFrontierUpdate(current, candidate, errors);
         ValidateLifecycleTransition(current, candidate, errors);
         ValidateAppendOnlyEvents(current, candidate, errors);
         ValidateAppendedControlOwnership(current, candidate, errors);
+        ValidateSequentialCheckpointAdvance(current, candidate, errors);
         ValidateMonotonicCheckpoint(current, candidate, errors);
         ValidateMonotonicExecutionClock(current, candidate, errors);
         if (candidate.UpdatedAtUtc < current.UpdatedAtUtc)
@@ -117,6 +145,91 @@ public static class CustomLoopRunValidator
         }
 
         return new CustomLoopValidationResult(errors);
+    }
+
+    /// <summary>
+    /// Determines whether two valid run records represent the exact same durable lifecycle version.
+    /// </summary>
+    /// <param name="expected">The previously authenticated durable record.</param>
+    /// <param name="actual">The freshly loaded record.</param>
+    /// <returns><see langword="true"/> only when every persisted field and append-only event is unchanged.</returns>
+    public static bool HasSameDurableVersion(CustomLoopRunRecord? expected, CustomLoopRunRecord? actual)
+    {
+        if (expected is null
+            || actual is null
+            || !Validate(expected).IsValid
+            || !Validate(actual).IsValid
+            || expected.LifecycleVersion != actual.LifecycleVersion
+            || expected.Status != actual.Status
+            || expected.UpdatedAtUtc != actual.UpdatedAtUtc
+            || expected.CompletedAtUtc != actual.CompletedAtUtc
+            || !Equals(expected.ExecutionClock, actual.ExecutionClock)
+            || !CheckpointsEqual(expected.Checkpoint, actual.Checkpoint)
+            || expected.Events.Length != actual.Events.Length
+            || !string.Equals(expected.FinalOutput, actual.FinalOutput, StringComparison.Ordinal)
+            || !string.Equals(expected.FailureCode, actual.FailureCode, StringComparison.Ordinal)
+            || !string.Equals(expected.FailureDetail, actual.FailureDetail, StringComparison.Ordinal)
+            || !FrontiersEqual(expected.Frontier, actual.Frontier))
+        {
+            return false;
+        }
+
+        var immutableErrors = new List<CustomLoopValidationError>();
+        ValidateImmutableAdmission(expected, actual, immutableErrors);
+        if (immutableErrors.Count != 0)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < expected.Events.Length; index++)
+        {
+            if (!EventsEqual(expected.Events[index], actual.Events[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Determines whether a later valid run preserves one exact immutable admission and event prefix.</summary>
+    /// <param name="expectedPrefix">The authenticated earlier durable record.</param>
+    /// <param name="actual">The later durable record that must preserve its complete event prefix.</param>
+    /// <returns><see langword="true"/> only when both records are valid and every earlier event is byte-semantically unchanged.</returns>
+    public static bool HasExactDurableEventPrefix(CustomLoopRunRecord? expectedPrefix, CustomLoopRunRecord? actual)
+    {
+        if (expectedPrefix is null
+            || actual is null
+            || !Validate(expectedPrefix).IsValid
+            || !Validate(actual).IsValid
+            || actual.LifecycleVersion < expectedPrefix.LifecycleVersion
+            || actual.UpdatedAtUtc < expectedPrefix.UpdatedAtUtc
+            || expectedPrefix.Events.Length > actual.Events.Length)
+        {
+            return false;
+        }
+
+        if (actual.LifecycleVersion == expectedPrefix.LifecycleVersion)
+        {
+            return HasSameDurableVersion(expectedPrefix, actual);
+        }
+
+        var immutableErrors = new List<CustomLoopValidationError>();
+        ValidateImmutableAdmission(expectedPrefix, actual, immutableErrors);
+        if (immutableErrors.Count != 0)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < expectedPrefix.Events.Length; index++)
+        {
+            if (!EventsEqual(expectedPrefix.Events[index], actual.Events[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -168,7 +281,8 @@ public static class CustomLoopRunValidator
             || warning.CanonicalOutput is not null || warning.OriginalOutputCharacterCount is not null || warning.CanonicalOutputTruncated is not null
             || warning.RetainedForLoopReasoning is not null || warning.PublishedToInvokingConversation is not null || warning.ConversationPublicationId is not null
             || warning.Provider is not null || warning.Model is not null || warning.ProviderResponseId is not null || warning.ExitDecision is not null
-            || warning.ToolAuthority is not null || warning.ToolEvidence is not null || warning.TraceReservationUtf8Bytes is not null || warning.ControlExpectedLifecycleVersion is not null)
+            || warning.ToolAuthority is not null || warning.ToolEvidence is not null || warning.TraceReservationUtf8Bytes is not null || warning.ControlExpectedLifecycleVersion is not null
+            || warning.SequentialNodeEvidence is not null || warning.PureNodeOutcomeJson is not null)
         {
             Add(errors, "invalid_terminal_integrity_warning", "warning", "The post-terminal integrity warning can carry only its sequence, id, timestamp, kind, detail, and an empty context-block list.");
         }
@@ -277,10 +391,17 @@ public static class CustomLoopRunValidator
         {
             Add(errors, "invalid_capability_admission", "capabilityAdmission", capabilityError);
         }
+        else if (run.SequentialInvocationSnapshot is not null && run.SequentialAdapterBinding is not null)
+        {
+            ValidateSequentialCapabilityAdmission(run, errors);
+        }
         else if (run.AdmittedDefinition is not null && !string.Equals(run.CapabilityAdmission.RequirementsHash, GetRequirementsHash(run.AdmittedDefinition), StringComparison.Ordinal))
         {
             Add(errors, "capability_admission_definition_mismatch", "capabilityAdmission.requirementsHash", "Admitted capability evidence must bind the admitted definition's exact requirements.");
         }
+
+        ValidateSequentialAdmission(run, errors);
+        ValidateExecutionFrontier(run, errors);
 
         if (run.ModelSnapshot is null)
         {
@@ -324,6 +445,399 @@ public static class CustomLoopRunValidator
         if (IsSha256(run.AdmissionRequestHash) && !CustomLoopAdmissionRequestHash.Matches(run))
         {
             Add(errors, "admission_request_hash_mismatch", "admissionRequestHash", "Admission request hash does not match the pinned definition, model, input, and context snapshot.");
+        }
+    }
+
+    private static void ValidateSequentialAdmission(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
+    {
+        var snapshot = run.SequentialInvocationSnapshot;
+        var binding = run.SequentialAdapterBinding;
+        if ((snapshot is null) != (binding is null))
+        {
+            Add(errors, "incomplete_sequential_binding", "sequentialAdapterBinding", "Canonical sequential runs require both the exact invocation snapshot and adapter binding; fenced legacy runs require both fields to be null.");
+            return;
+        }
+
+        if (snapshot is null || binding is null)
+        {
+            return;
+        }
+
+        var snapshotValidation = GovernedLoopSequentialContractValidator.Validate(snapshot);
+        foreach (var error in snapshotValidation.Errors)
+        {
+            Add(errors, "invalid_sequential_invocation_snapshot", $"sequentialInvocationSnapshot{error.Path[1..]}", "The sequential invocation snapshot is invalid.");
+        }
+
+        var bindingValidation = GovernedLoopSequentialContractValidator.Validate(binding);
+        foreach (var error in bindingValidation.Errors)
+        {
+            Add(errors, "invalid_sequential_adapter_binding", $"sequentialAdapterBinding{error.Path[1..]}", "The sequential adapter binding is invalid.");
+        }
+
+        if (!snapshotValidation.IsValid || !bindingValidation.IsValid)
+        {
+            return;
+        }
+
+        if (!string.Equals(binding.InvocationPayloadHash, snapshot.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(binding.ExecutionBinding.RunId, run.Id, StringComparison.Ordinal)
+            || !string.Equals(binding.AdmissionOperationId, run.AdmissionOperationId, StringComparison.Ordinal))
+        {
+            Add(errors, "sequential_binding_identity_mismatch", "sequentialAdapterBinding", "Sequential adapter coordinates must bind the exact run, invocation operation, and immutable invocation payload.");
+        }
+
+        try
+        {
+            if (!string.Equals(
+                GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(binding.AdmissionReceipt.Evidence.CapabilityAdmission),
+                GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(run.CapabilityAdmission),
+                StringComparison.Ordinal))
+            {
+                Add(errors, "sequential_admission_capability_mismatch", "capabilityAdmission", "The durable capability resolution must exactly match the complete retained admission receipt.");
+            }
+        }
+        catch (ArgumentException)
+        {
+            Add(errors, "sequential_admission_capability_mismatch", "capabilityAdmission", "The durable capability resolution must exactly match the complete retained admission receipt.");
+        }
+
+        if (!Equals(snapshot.ModelSnapshot, run.ModelSnapshot)
+            || !Equals(snapshot.InvokingConversation, run.InvokingConversation)
+            || !string.Equals(snapshot.TriggerPrompt, run.TriggerPrompt, StringComparison.Ordinal)
+            || snapshot.ContextCapturedAtUtc != run.ContextSnapshot?.CapturedAtUtc
+            || run.ContextSnapshot?.SourceManifest is null
+            || !snapshot.ContextManifest.SequenceEqual(run.ContextSnapshot.SourceManifest))
+        {
+            Add(errors, "sequential_invocation_projection_mismatch", "sequentialInvocationSnapshot", "The sequential invocation snapshot must exactly match the legacy adapter's admitted prompt, model, conversation, and context projection.");
+        }
+    }
+
+    private static void ValidateExecutionFrontier(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
+    {
+        if (run.Frontier is not { } frontier)
+        {
+            if (run.SequentialInvocationSnapshot is not null || run.SequentialAdapterBinding is not null)
+            {
+                Add(errors, "execution_frontier_required", "frontier", "A canonical sequential run requires its exact durable execution frontier.");
+            }
+
+            return;
+        }
+
+        var frontierValidation = GovernedLoopFrontierContractValidator.Validate(frontier);
+        foreach (var error in frontierValidation.Errors)
+        {
+            Add(errors, "invalid_execution_frontier", "frontier" + error.Path.TrimStart('$'), "The durable execution frontier is malformed or does not match its retained content hash.");
+        }
+
+        if (run.SequentialAdapterBinding is not { } binding)
+        {
+            Add(errors, "execution_frontier_binding_required", "frontier", "A durable execution frontier requires the exact canonical sequential adapter binding.");
+            return;
+        }
+
+        if (!Equals(frontier.Binding, binding.ExecutionBinding)
+            || !string.Equals(frontier.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(frontier.GraphArtifactHash, binding.GraphArtifactHash, StringComparison.Ordinal)
+            || !string.Equals(frontier.GraphLayoutHash, binding.GraphLayoutHash, StringComparison.Ordinal)
+            || !string.Equals(frontier.AdmissionReceiptHash, binding.AdmissionReceiptHash, StringComparison.Ordinal))
+        {
+            Add(errors, "execution_frontier_binding_mismatch", "frontier", "The durable execution frontier must bind the run's exact workspace, execution, graph, layout, and admission receipt coordinates.");
+        }
+
+        ValidateFrontierOutcomeEvidence(run, frontier, errors);
+
+        if (frontier.Payload.UpdatedAtUtc < run.CreatedAtUtc || frontier.Payload.UpdatedAtUtc > run.UpdatedAtUtc)
+        {
+            Add(errors, "execution_frontier_timestamp_mismatch", "frontier.payload.updatedAtUtc", "The durable execution frontier timestamp must be within the retained run interval.");
+        }
+
+        if (!FrontierMatchesRunLifecycle(run, frontier))
+        {
+            Add(errors, "execution_frontier_lifecycle_mismatch", "frontier.payload.status", "The durable execution frontier must honestly match the retained run lifecycle.");
+        }
+    }
+
+    private static void ValidateFrontierOutcomeEvidence(CustomLoopRunRecord run, GovernedLoopFrontierPosture frontier, List<CustomLoopValidationError> errors)
+    {
+        var runEvents = run.Events ?? [];
+        for (var nodeIndex = 0; nodeIndex < frontier.Payload.Nodes.Count; nodeIndex++)
+        {
+            var node = frontier.Payload.Nodes[nodeIndex];
+            if (node.OutcomeEvidenceId is not { } outcomeEvidenceId)
+            {
+                continue;
+            }
+
+            var matchingEvents = runEvents
+                .Where(item => item is not null && string.Equals(item.EventId, outcomeEvidenceId, StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            var evidence = matchingEvents.Length == 1 ? matchingEvents[0].SequentialNodeEvidence : null;
+            var compatible = evidence is not null
+                && CustomLoopSequentialOutcomeArtifactHash.Matches(matchingEvents[0])
+                && string.Equals(evidence.OutcomeArtifactHash, node.OutcomeEvidenceHash, StringComparison.Ordinal)
+                && (node.Status == GovernedLoopNodeExecutionStatus.Skipped
+                    ? IsSkippedFrontierEvidenceCompatible(frontier, node, matchingEvents[0], evidence)
+                    : string.Equals(evidence.NodeId, node.NodeId, StringComparison.Ordinal)
+                        && node.Attempt == evidence.Attempt
+                        && IsFrontierOutcomeDispositionCompatible(node.Status, evidence.Kind, evidence.Disposition));
+            if (!compatible)
+            {
+                Add(errors, "execution_frontier_outcome_evidence_mismatch", $"frontier.payload.nodes[{nodeIndex}].outcomeEvidenceId", "Committed frontier outcome evidence must identify one exact retained run event for the same node, attempt, artifact hash, and disposition.");
+            }
+        }
+    }
+
+    private static bool IsSkippedFrontierEvidenceCompatible(
+        GovernedLoopFrontierPosture frontier,
+        GovernedLoopNodeExecutionEvidence skipped,
+        CustomLoopRunEvent governingEvent,
+        CustomLoopSequentialNodeEvidence governingEvidence)
+    {
+        var governingNode = frontier.Payload.Nodes.FirstOrDefault(candidate =>
+            string.Equals(candidate.NodeId, governingEvidence.NodeId, StringComparison.Ordinal));
+        return governingEvidence.Kind == CustomLoopSequentialNodeEvidenceKind.CompletedOutcome
+            && governingEvidence.Disposition == CustomLoopSequentialNodeDisposition.Completed
+            && governingNode is
+            {
+                Status: GovernedLoopNodeExecutionStatus.Completed,
+                OutcomeEvidenceId: not null,
+                OutcomeEvidenceHash: not null,
+            }
+            && governingNode.Attempt == governingEvidence.Attempt
+            && governingNode.PlanOrdinal < skipped.PlanOrdinal
+            && string.Equals(governingNode.OutcomeEvidenceId, governingEvent.EventId, StringComparison.Ordinal)
+            && string.Equals(governingNode.OutcomeEvidenceHash, governingEvidence.OutcomeArtifactHash, StringComparison.Ordinal)
+            && governingNode.OutgoingControlEdgeIds.Intersect(skipped.IncomingControlEdgeIds, StringComparer.Ordinal).Any();
+    }
+
+    private static bool IsFrontierOutcomeDispositionCompatible(
+        GovernedLoopNodeExecutionStatus status,
+        CustomLoopSequentialNodeEvidenceKind kind,
+        CustomLoopSequentialNodeDisposition disposition)
+    {
+        return status switch
+        {
+            GovernedLoopNodeExecutionStatus.Completed => kind == CustomLoopSequentialNodeEvidenceKind.CompletedOutcome && disposition == CustomLoopSequentialNodeDisposition.Completed,
+            GovernedLoopNodeExecutionStatus.Failed => kind == CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection && disposition == CustomLoopSequentialNodeDisposition.Rejected,
+            GovernedLoopNodeExecutionStatus.ReviewBlocked => IsClosedSequentialOutcome(kind, disposition),
+            _ => false,
+        };
+    }
+
+    private static bool IsClosedSequentialOutcome(CustomLoopSequentialNodeEvidenceKind kind, CustomLoopSequentialNodeDisposition disposition)
+        => (kind, disposition) is
+            (CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed)
+            or (CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected)
+            or (CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention, CustomLoopSequentialNodeDisposition.NeedsReview);
+
+    private static void ValidateExecutionFrontierUpdate(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
+    {
+        if ((current.Frontier is null) != (candidate.Frontier is null))
+        {
+            Add(errors, "execution_frontier_presence_changed", "frontier", "A run update cannot add or remove its durable execution-frontier plane.");
+            return;
+        }
+
+        if (current.Frontier is not { } currentFrontier || candidate.Frontier is not { } candidateFrontier)
+        {
+            return;
+        }
+
+        if (string.Equals(currentFrontier.Payload.ContentHash, candidateFrontier.Payload.ContentHash, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var transition = GovernedLoopExecutionValidator.ValidateTransition(currentFrontier, candidateFrontier);
+        foreach (var error in transition.Errors)
+        {
+            Add(errors, "invalid_execution_frontier_transition", "frontier" + error.Path.TrimStart('$'), "The durable execution frontier is not the exact legal successor of the retained frontier.");
+        }
+    }
+
+    private static bool FrontierMatchesRunLifecycle(CustomLoopRunRecord run, GovernedLoopFrontierPosture frontier)
+    {
+        var status = run.Status;
+        var frontierStatus = frontier.Payload.Status;
+        return status switch
+        {
+            CustomLoopRunStatus.Admitted or CustomLoopRunStatus.Running => frontierStatus == GovernedLoopFrontierStatus.Active,
+            CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.CancelRequested => frontierStatus is GovernedLoopFrontierStatus.Active or GovernedLoopFrontierStatus.Waiting or GovernedLoopFrontierStatus.ReviewBlocked,
+            CustomLoopRunStatus.Paused => frontierStatus is GovernedLoopFrontierStatus.Waiting or GovernedLoopFrontierStatus.ReviewBlocked
+                || frontierStatus == GovernedLoopFrontierStatus.Active
+                    && (frontier.Payload.Nodes.All(node => node.Status != GovernedLoopNodeExecutionStatus.Running)
+                        || AllRunningAttemptsAreRestartSafe(run, frontier)),
+            CustomLoopRunStatus.Completed => frontierStatus == GovernedLoopFrontierStatus.Completed,
+            CustomLoopRunStatus.Failed => frontierStatus == GovernedLoopFrontierStatus.Failed,
+            CustomLoopRunStatus.Cancelled => frontierStatus == GovernedLoopFrontierStatus.Cancelled,
+            CustomLoopRunStatus.NeedsReview => frontierStatus == GovernedLoopFrontierStatus.ReviewBlocked,
+            _ => false,
+        };
+    }
+
+    private static bool AllRunningAttemptsAreRestartSafe(CustomLoopRunRecord run, GovernedLoopFrontierPosture frontier)
+    {
+        var runningNodes = frontier.Payload.Nodes
+            .Where(node => node.Status == GovernedLoopNodeExecutionStatus.Running)
+            .ToArray();
+        return runningNodes.Length > 0
+            && runningNodes.All(node => HasRestartSafePureRunningAttempt(run, node)
+                || HasAuthenticatedTerminalRunningAttempt(run, node));
+    }
+
+    private static bool HasRestartSafePureRunningAttempt(CustomLoopRunRecord run, GovernedLoopNodeExecutionEvidence node)
+    {
+        if (node is not
+            {
+                Status: GovernedLoopNodeExecutionStatus.Running,
+                Attempt: not null,
+                AttemptOperationId: not null,
+                Descriptor.Kind: GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate,
+            })
+        {
+            return false;
+        }
+
+        var starts = ExactRunningAttemptStarts(run, node)
+            .Where(item => item is
+            {
+                TraceReservationUtf8Bytes: CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
+            })
+            .Take(2)
+            .ToArray();
+        return starts.Length == 1;
+    }
+
+    private static bool HasAuthenticatedTerminalRunningAttempt(CustomLoopRunRecord run, GovernedLoopNodeExecutionEvidence node)
+    {
+        var starts = ExactRunningAttemptStarts(run, node).Take(2).ToArray();
+        if (starts.Length != 1 || starts[0].SequentialNodeEvidence is not { } dispatch)
+        {
+            return false;
+        }
+
+        var started = starts[0];
+        var terminals = run.Events.Where(item => item.Sequence > started.Sequence
+            && item.SequentialNodeEvidence is { } outcome
+            && item.Iteration == started.Iteration
+            && string.Equals(item.StepId, started.StepId, StringComparison.Ordinal)
+            && item.Attempt == started.Attempt
+            && SameSequentialBinding(outcome, dispatch)
+            && string.Equals(outcome.NodeId, dispatch.NodeId, StringComparison.Ordinal)
+            && outcome.Attempt == dispatch.Attempt
+            && IsResolvedSequentialOutcome(item.Kind, outcome)
+            && CustomLoopSequentialNodeEvidenceHash.Matches(outcome)
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(item))
+            .Take(2)
+            .ToArray();
+        return terminals.Length == 1;
+    }
+
+    private static IEnumerable<CustomLoopRunEvent> ExactRunningAttemptStarts(
+        CustomLoopRunRecord run,
+        GovernedLoopNodeExecutionEvidence node)
+    {
+        if (node is not
+            {
+                Status: GovernedLoopNodeExecutionStatus.Running,
+                Attempt: { } attempt,
+                AttemptOperationId: { } attemptOperationId,
+            }
+            || run.SequentialAdapterBinding is not { } binding)
+        {
+            return [];
+        }
+
+        return run.Events.Where(item => item.Sequence > run.Checkpoint.LastCommittedSequence
+            && item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted
+            && item.Iteration is > 0
+            && item.Attempt == attempt
+            && string.Equals(item.EventId, attemptOperationId, StringComparison.Ordinal)
+            && StepIdMatchesNode(item.StepId, node)
+            && item.SequentialNodeEvidence is
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+                Disposition: CustomLoopSequentialNodeDisposition.Unknown,
+            } evidence
+            && string.Equals(evidence.NodeId, node.NodeId, StringComparison.Ordinal)
+            && evidence.Attempt == attempt
+            && SequentialBindingMatchesRun(evidence, run, binding)
+            && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(item));
+    }
+
+    private static bool StepIdMatchesNode(string? stepId, GovernedLoopNodeExecutionEvidence node)
+        => string.Equals(
+            stepId,
+            node.Descriptor.Kind == GovernedLoopNodeKind.Exit ? "exit" : node.NodeId,
+            StringComparison.Ordinal);
+
+    private static bool SequentialBindingMatchesRun(
+        CustomLoopSequentialNodeEvidence evidence,
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialAdapterBinding binding)
+        => string.Equals(evidence.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(evidence.RunId, run.Id, StringComparison.Ordinal)
+            && Equals(evidence.Revision, binding.ExecutionBinding.Revision)
+            && evidence.ExecutionGeneration == binding.ExecutionBinding.ExecutionGeneration;
+
+    private static bool SameSequentialBinding(
+        CustomLoopSequentialNodeEvidence candidate,
+        CustomLoopSequentialNodeEvidence expected)
+        => string.Equals(candidate.WorkspaceId, expected.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(candidate.RunId, expected.RunId, StringComparison.Ordinal)
+            && Equals(candidate.Revision, expected.Revision)
+            && candidate.ExecutionGeneration == expected.ExecutionGeneration;
+
+    private static bool IsResolvedSequentialOutcome(
+        CustomLoopRunEventKind eventKind,
+        CustomLoopSequentialNodeEvidence evidence)
+        => (eventKind, evidence.Kind, evidence.Disposition) is
+            (CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.ExitDecisionCompleted,
+                CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                CustomLoopSequentialNodeDisposition.Completed)
+            or (CustomLoopRunEventKind.NodeAttemptFailed,
+                CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+                CustomLoopSequentialNodeDisposition.Rejected);
+
+    private static void ValidateSequentialCapabilityAdmission(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
+    {
+        var binding = run.SequentialAdapterBinding!;
+        var capabilityAdmission = run.CapabilityAdmission;
+        var toolAssignments = run.AdmittedDefinition?.ToolAssignments;
+        string[] expectedRootIdentities;
+        if (toolAssignments is { Length: 0 })
+        {
+            expectedRootIdentities = _sequentialToolFreeCapabilityRootIds;
+        }
+        else if (toolAssignments is not null && toolAssignments.SequenceEqual(_sequentialToolEnabledAssignments))
+        {
+            expectedRootIdentities = _sequentialToolEnabledCapabilityRootIds;
+        }
+        else
+        {
+            Add(errors, "sequential_tool_assignment_mismatch", "admittedDefinition.toolAssignments", "Canonical sequential execution supports either no tools or exactly the ordered List, Read, and Search assignment catalog.");
+            return;
+        }
+
+        var expectedGraphChecksum = "sha256:" + binding.GraphArtifactHash;
+        if (!string.Equals(capabilityAdmission.Requirements.Artifact.Checksum?.Value, expectedGraphChecksum, StringComparison.Ordinal))
+        {
+            Add(errors, "sequential_capability_graph_artifact_mismatch", "capabilityAdmission.requirements.artifact.checksum", "Canonical sequential capability evidence must bind the adapter's exact graph artifact hash.");
+        }
+
+        var selectedRootIdentities = capabilityAdmission.Evidence
+            .Where(item => item.SubjectId.Equals(capabilityAdmission.Requirements.SubjectId)
+                && string.Equals(item.Outcome, "Selected", StringComparison.Ordinal))
+            .Select(item => item.SelectedIdentity?.Id.Value ?? string.Empty)
+            .OrderBy(value => value, StringComparer.Ordinal)
+            .ToArray();
+        if (!selectedRootIdentities.SequenceEqual(expectedRootIdentities, StringComparer.Ordinal))
+        {
+            Add(errors, "sequential_capability_identity_mismatch", "capabilityAdmission.evidence", "Canonical sequential execution requires exactly the sorted roots derived from its closed tool-free or List/Read/Search assignment shape.");
         }
     }
 
@@ -551,6 +1065,13 @@ public static class CustomLoopRunValidator
             return;
         }
 
+        if (run.SequentialInvocationSnapshot is not null
+            && run.SequentialAdapterBinding is not null
+            && run.Events[0]?.SequentialNodeEvidence is null)
+        {
+            Add(errors, "sequential_trigger_evidence_required", "events[0].sequentialNodeEvidence", "Canonical sequential materialization requires the initial admitted event to retain its exact completed Manual Trigger evidence.");
+        }
+
         if (run.Events.Length > CustomLoopLimits.MaxTraceEventsPerRun)
         {
             Add(errors, "too_many_trace_events", "events", $"A run trace cannot retain more than {CustomLoopLimits.MaxTraceEventsPerRun} events.");
@@ -587,6 +1108,9 @@ public static class CustomLoopRunValidator
 
         var eventIds = new HashSet<string>(StringComparer.Ordinal);
         var controlExpectedLifecycleVersions = new HashSet<int>();
+        var sequentialStarts = new HashSet<(string NodeId, int Attempt)>();
+        var sequentialTerminals = new HashSet<(string NodeId, int Attempt)>();
+        var latestSequentialAttempts = new Dictionary<string, int>(StringComparer.Ordinal);
         DateTimeOffset? previousTimestamp = null;
         for (var index = 0; index < run.Events.Length; index++)
         {
@@ -651,7 +1175,9 @@ public static class CustomLoopRunValidator
             ValidateOptionalText(item.ProviderResponseId, $"{field}.providerResponseId", CustomLoopLimits.MaxTraceReferenceCharacters, errors);
             ValidateToolAuthority(item.ToolAuthority, $"{field}.toolAuthority", run, errors);
             ValidateToolEvidence(item.ToolEvidence, $"{field}.toolEvidence", run, errors);
-            ValidateTraceReservation(item, field, errors);
+            ValidatePureNodeOutcome(item, field, run, errors);
+            ValidateSequentialNodeEvidence(item, index, field, run, sequentialStarts, sequentialTerminals, latestSequentialAttempts, errors);
+            ValidateTraceReservation(item, field, run, errors);
             var isToolEvent = item.Kind is CustomLoopRunEventKind.ToolRequestReserved or CustomLoopRunEventKind.ToolGovernanceDecided or CustomLoopRunEventKind.ToolOutcomeObserved or CustomLoopRunEventKind.ToolIntegrityFailed;
             if (isToolEvent && (item.ToolAuthority is null || item.ToolEvidence is null || !ToolAuthoritiesEqual(item.ToolAuthority, item.ToolEvidence.Authority)))
             {
@@ -721,11 +1247,266 @@ public static class CustomLoopRunValidator
             if (marker.Iteration is not null || marker.StepId is not null || marker.Attempt is not null || marker.ContextBlocks is not { Length: 0 }
                 || marker.CanonicalOutput is not null || marker.OriginalOutputCharacterCount is not null || marker.CanonicalOutputTruncated is not null
                 || marker.RetainedForLoopReasoning is not null || marker.PublishedToInvokingConversation is not null || marker.ConversationPublicationId is not null
-                || marker.Provider is not null || marker.Model is not null || marker.ProviderResponseId is not null || marker.ExitDecision is not null || marker.ToolAuthority is not null || marker.ToolEvidence is not null || marker.TraceReservationUtf8Bytes is not null || marker.ControlExpectedLifecycleVersion is not null)
+                || marker.Provider is not null || marker.Model is not null || marker.ProviderResponseId is not null || marker.ExitDecision is not null || marker.ToolAuthority is not null || marker.ToolEvidence is not null || marker.TraceReservationUtf8Bytes is not null || marker.ControlExpectedLifecycleVersion is not null
+                || marker.SequentialNodeEvidence is not null || marker.PureNodeOutcomeJson is not null)
             {
                 Add(errors, "invalid_admission_audit_marker", $"events[{markerIndex}]", "The admission-audit completion marker cannot carry prompt, output, provider, publication, or node-attempt data.");
             }
         }
+    }
+
+    private static void ValidatePureNodeOutcome(CustomLoopRunEvent item, string field, CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
+    {
+        if (item.PureNodeOutcomeJson is not { } outcomeJson)
+        {
+            return;
+        }
+
+        if (outcomeJson.Length == 0)
+        {
+            Add(errors, "invalid_pure_node_outcome_json", $"{field}.pureNodeOutcomeJson", "A retained pure-node outcome must contain bounded canonical JSON.");
+        }
+        else
+        {
+            try
+            {
+                if (outcomeJson.Length > CustomLoopLimits.MaxGraphPureNodeOutcomeUtf8Bytes
+                    || _strictUtf8.GetByteCount(outcomeJson) > CustomLoopLimits.MaxGraphPureNodeOutcomeUtf8Bytes)
+                {
+                    Add(errors, "pure_node_outcome_too_large", $"{field}.pureNodeOutcomeJson", $"A retained pure-node outcome cannot exceed {CustomLoopLimits.MaxGraphPureNodeOutcomeUtf8Bytes} UTF-8 bytes.");
+                }
+            }
+            catch (EncoderFallbackException)
+            {
+                Add(errors, "invalid_pure_node_outcome_json", $"{field}.pureNodeOutcomeJson", "A retained pure-node outcome must be valid UTF-16 text that can be encoded as strict UTF-8.");
+            }
+        }
+
+        if (item.Kind != CustomLoopRunEventKind.NodeAttemptCompleted
+            || item.SequentialNodeEvidence is not
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                Disposition: CustomLoopSequentialNodeDisposition.Completed,
+            }
+            || !IsPureNodeEvent(run, item))
+        {
+            Add(errors, "invalid_pure_node_outcome_coupling", $"{field}.pureNodeOutcomeJson", "Pure-node outcome JSON belongs only to an exact completed Transform or Validate node attempt; canonical graph and outcome verification occurs at the Application boundary.");
+        }
+
+        if (item.ContextBlocks is not { Length: 0 }
+            || item.CanonicalOutput is not null
+            || item.OriginalOutputCharacterCount is not null
+            || item.CanonicalOutputTruncated is not null
+            || item.RetainedForLoopReasoning is not null
+            || item.PublishedToInvokingConversation is not null
+            || item.ConversationPublicationId is not null
+            || item.Provider is not null
+            || item.Model is not null
+            || item.ProviderResponseId is not null
+            || item.ExitDecision is not null
+            || item.ToolAuthority is not null
+            || item.ToolEvidence is not null
+            || item.TraceReservationUtf8Bytes is not null
+            || item.ControlExpectedLifecycleVersion is not null)
+        {
+            Add(errors, "invalid_pure_node_outcome_payload", field, "A pure-node completion cannot carry provider, context, publication, exit, tool, control, or legacy model-output payload.");
+        }
+    }
+
+    private static void ValidateSequentialNodeEvidence(
+        CustomLoopRunEvent item,
+        int eventIndex,
+        string field,
+        CustomLoopRunRecord run,
+        HashSet<(string NodeId, int Attempt)> starts,
+        HashSet<(string NodeId, int Attempt)> terminals,
+        Dictionary<string, int> latestAttempts,
+        List<CustomLoopValidationError> errors)
+    {
+        if (item.SequentialNodeEvidence is not { } evidence)
+        {
+            return;
+        }
+
+        if (run.SequentialAdapterBinding is not { } binding)
+        {
+            Add(errors, "unexpected_sequential_node_evidence", $"{field}.sequentialNodeEvidence", "Sequential node evidence requires an exact run-level sequential adapter binding.");
+            return;
+        }
+
+        var validKind = Enum.IsDefined(evidence.Kind) && evidence.Kind != CustomLoopSequentialNodeEvidenceKind.Unknown;
+        var validDisposition = Enum.IsDefined(evidence.Disposition)
+            && evidence.Disposition == (evidence.Kind switch
+            {
+                CustomLoopSequentialNodeEvidenceKind.DispatchStarted => CustomLoopSequentialNodeDisposition.Unknown,
+                CustomLoopSequentialNodeEvidenceKind.CompletedOutcome => CustomLoopSequentialNodeDisposition.Completed,
+                CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection => CustomLoopSequentialNodeDisposition.Rejected,
+                CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention => CustomLoopSequentialNodeDisposition.NeedsReview,
+                _ => (CustomLoopSequentialNodeDisposition)(-1),
+            });
+        if (evidence.SchemaVersion != CustomLoopSequentialNodeEvidence.CurrentSchemaVersion
+            || !validKind
+            || !validDisposition
+            || !CustomLoopArtifactIdentifier.IsValid(evidence.NodeId)
+            || evidence.Attempt is < 1 or > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxNodeAttempt
+            || !CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
+            || !CustomLoopSequentialOutcomeArtifactHash.Matches(item))
+        {
+            Add(errors, "invalid_sequential_node_evidence", $"{field}.sequentialNodeEvidence", "Sequential node evidence has an unsupported schema, identity, disposition, outcome digest, or canonical evidence hash.");
+            return;
+        }
+
+        var execution = binding.ExecutionBinding;
+        if (!string.Equals(evidence.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(evidence.RunId, run.Id, StringComparison.Ordinal)
+            || !Equals(evidence.Revision, execution.Revision)
+            || evidence.ExecutionGeneration != execution.ExecutionGeneration
+            || item.Attempt is not null && item.Attempt != evidence.Attempt)
+        {
+            Add(errors, "sequential_node_evidence_binding_mismatch", $"{field}.sequentialNodeEvidence", "Sequential node evidence must match the exact run binding and containing event attempt.");
+        }
+
+        ValidateSequentialNodeCoordinates(item, eventIndex, evidence, field, run, errors);
+
+        var key = (evidence.NodeId, evidence.Attempt);
+        if (evidence.Kind == CustomLoopSequentialNodeEvidenceKind.DispatchStarted)
+        {
+            if (item.Kind is not (CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted))
+            {
+                Add(errors, "invalid_sequential_dispatch_marker", $"{field}.kind", "A sequential dispatch-start marker belongs only to a durable provider-attempt start event.");
+            }
+
+            var expectedAttempt = latestAttempts.GetValueOrDefault(evidence.NodeId) + 1;
+            if (!starts.Add(key) || evidence.Attempt != expectedAttempt)
+            {
+                Add(errors, "non_monotonic_sequential_node_attempt", $"{field}.sequentialNodeEvidence.attempt", "Sequential node attempts must be unique and increase contiguously for each canonical node.");
+            }
+            else
+            {
+                latestAttempts[evidence.NodeId] = evidence.Attempt;
+            }
+
+            return;
+        }
+
+        var compatibleTerminalEvent = evidence.Kind switch
+        {
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome => item.Kind is CustomLoopRunEventKind.Admitted or CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.ExitDecisionCompleted,
+            CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection => item.Kind == CustomLoopRunEventKind.NodeAttemptFailed,
+            CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention => item.Kind is CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.ExitDecisionCompleted,
+            _ => false,
+        };
+        if (!compatibleTerminalEvent)
+        {
+            Add(errors, "invalid_sequential_terminal_marker", $"{field}.kind", "The terminal sequential evidence disposition is incompatible with the selected durable admission, completion, observed-outcome, failure, or Exit event.");
+        }
+
+        if (!terminals.Add(key))
+        {
+            Add(errors, "duplicate_sequential_node_outcome", $"{field}.sequentialNodeEvidence", "A canonical node attempt may retain exactly one terminal evidence record.");
+        }
+
+        if (item.Kind == CustomLoopRunEventKind.Admitted)
+        {
+            if (evidence.Kind != CustomLoopSequentialNodeEvidenceKind.CompletedOutcome || evidence.Attempt != 1 || latestAttempts.ContainsKey(evidence.NodeId))
+            {
+                Add(errors, "invalid_sequential_trigger_outcome", $"{field}.sequentialNodeEvidence", "The admission event may retain only the first completed Manual Trigger outcome.");
+            }
+            else
+            {
+                latestAttempts[evidence.NodeId] = evidence.Attempt;
+            }
+        }
+        else if (!starts.Contains(key))
+        {
+            Add(errors, "sequential_dispatch_marker_required", $"{field}.sequentialNodeEvidence", "Terminal provider-node evidence requires an earlier exact dispatch-start marker for the same canonical attempt.");
+        }
+    }
+
+    private static void ValidateSequentialNodeCoordinates(
+        CustomLoopRunEvent item,
+        int eventIndex,
+        CustomLoopSequentialNodeEvidence evidence,
+        string field,
+        CustomLoopRunRecord run,
+        List<CustomLoopValidationError> errors)
+    {
+        var isExitFailure = item.Kind == CustomLoopRunEventKind.NodeAttemptFailed
+            && HasPriorSequentialDispatch(run.Events, eventIndex, evidence, CustomLoopRunEventKind.ExitDecisionStarted);
+        if (isExitFailure)
+        {
+            if (!string.Equals(item.StepId, "exit", StringComparison.Ordinal))
+            {
+                Add(errors, "sequential_exit_step_mismatch", $"{field}.stepId", "Sequential Exit-decision evidence requires the reserved legacy adapter step id 'exit'.");
+            }
+        }
+        else if (item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed)
+        {
+            var isPureNode = IsPureNodeEvent(run, item);
+            var hasValidPureEventShape = item.Kind switch
+            {
+                CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
+                CustomLoopRunEventKind.NodeAttemptCompleted => item.PureNodeOutcomeJson is not null,
+                CustomLoopRunEventKind.NodeAttemptFailed => HasPriorPureDispatch(run.Events, eventIndex, evidence),
+                _ => false,
+            };
+            if (isPureNode)
+            {
+                if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal) || !hasValidPureEventShape)
+                {
+                    Add(errors, "sequential_pure_node_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential Transform or Validate evidence must identify its exact pinned frontier node and use the pure-node start, completion, or failure envelope.");
+                }
+
+                return;
+            }
+
+            var isAdmittedInferenceStep = run.AdmittedDefinition?.InferenceSteps?.Any(step => string.Equals(step.Id, item.StepId, StringComparison.Ordinal)) == true;
+            if (string.Equals(item.StepId, "exit", StringComparison.Ordinal)
+                || !string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal)
+                || !isAdmittedInferenceStep)
+            {
+                Add(errors, "sequential_inference_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential inference evidence must identify the containing event's exact admitted legacy inference-step id.");
+            }
+        }
+        else if (item.Kind is CustomLoopRunEventKind.ExitDecisionStarted or CustomLoopRunEventKind.ExitDecisionCompleted)
+        {
+            if (!string.Equals(item.StepId, "exit", StringComparison.Ordinal))
+            {
+                Add(errors, "sequential_exit_step_mismatch", $"{field}.stepId", "Sequential Exit-decision evidence requires the reserved legacy adapter step id 'exit'.");
+            }
+        }
+        else if (item.Kind == CustomLoopRunEventKind.Admitted && (item.Iteration is not null || item.StepId is not null || item.Attempt is not null))
+        {
+            Add(errors, "sequential_trigger_coordinates_mismatch", field, "The admitted Manual Trigger outcome cannot carry legacy iteration, step, or attempt coordinates.");
+        }
+    }
+
+    private static bool HasPriorSequentialDispatch(
+        IReadOnlyList<CustomLoopRunEvent> events,
+        int terminalIndex,
+        CustomLoopSequentialNodeEvidence evidence,
+        CustomLoopRunEventKind expectedStartKind)
+    {
+        return terminalIndex > 0 && events.Take(terminalIndex).Any(candidate => candidate is { Kind: var kind }
+            && kind == expectedStartKind
+            && candidate.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted } start
+            && string.Equals(start.NodeId, evidence.NodeId, StringComparison.Ordinal)
+            && start.Attempt == evidence.Attempt);
+    }
+
+    private static bool HasPriorPureDispatch(
+        IReadOnlyList<CustomLoopRunEvent> events,
+        int terminalIndex,
+        CustomLoopSequentialNodeEvidence evidence)
+    {
+        return terminalIndex > 0 && events.Take(terminalIndex).Any(candidate => candidate is
+        {
+            Kind: CustomLoopRunEventKind.NodeAttemptStarted,
+            TraceReservationUtf8Bytes: CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
+            SequentialNodeEvidence: { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted } start,
+        }
+            && string.Equals(start.NodeId, evidence.NodeId, StringComparison.Ordinal)
+            && start.Attempt == evidence.Attempt);
     }
 
     private static void ValidateIntegrityReservationScope(IReadOnlyList<CustomLoopRunEvent> events, List<CustomLoopValidationError> errors)
@@ -756,17 +1537,31 @@ public static class CustomLoopRunValidator
         }
     }
 
-    private static void ValidateTraceReservation(CustomLoopRunEvent item, string field, List<CustomLoopValidationError> errors)
+    private static void ValidateTraceReservation(CustomLoopRunEvent item, string field, CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
     {
         var startsAttempt = item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted;
-        if (startsAttempt && item.TraceReservationUtf8Bytes != CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes)
+        var expectedReservation = IsPureNodeEvent(run, item)
+            ? CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes
+            : CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes;
+        if (startsAttempt && item.TraceReservationUtf8Bytes != expectedReservation)
         {
-            Add(errors, "attempt_trace_reservation_required", $"{field}.traceReservationUtf8Bytes", "Every provider-attempt start must atomically reserve the bounded mandatory outcome footprint before dispatch.");
+            Add(errors, "attempt_trace_reservation_required", $"{field}.traceReservationUtf8Bytes", "Every node-attempt start must atomically reserve its exact bounded mandatory outcome footprint before dispatch.");
         }
         else if (!startsAttempt && item.TraceReservationUtf8Bytes is not null)
         {
-            Add(errors, "unexpected_trace_reservation", $"{field}.traceReservationUtf8Bytes", "Only provider-attempt start events may carry an attempt trace reservation.");
+            Add(errors, "unexpected_trace_reservation", $"{field}.traceReservationUtf8Bytes", "Only node-attempt start events may carry an attempt trace reservation.");
         }
+    }
+
+    private static bool IsPureNodeEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        if (item.SequentialNodeEvidence is not { NodeId: var nodeId })
+        {
+            return false;
+        }
+
+        var node = run.Frontier?.Payload.Nodes.FirstOrDefault(candidate => string.Equals(candidate.NodeId, nodeId, StringComparison.Ordinal));
+        return node?.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate;
     }
 
     private static bool ToolPhaseMatchesEventKind(CustomLoopToolEvidencePhase phase, CustomLoopRunEventKind kind)
@@ -1153,9 +1948,11 @@ public static class CustomLoopRunValidator
         }
 
         ValidateArtifactId(output.StepId, $"{field}.stepId", errors);
-        if (run.AdmittedDefinition?.InferenceSteps is { } steps && !steps.Any(step => string.Equals(step.Id, output.StepId, StringComparison.Ordinal)))
+        if (run.AdmittedDefinition?.InferenceSteps is { } steps
+            && !steps.Any(step => string.Equals(step.Id, output.StepId, StringComparison.Ordinal))
+            && !HasCompletedPureNodeOutcome(run, output.StepId))
         {
-            Add(errors, "unknown_retained_step", $"{field}.stepId", "Retained output step id must exist in the admitted definition.");
+            Add(errors, "unknown_retained_step", $"{field}.stepId", "Retained output step id must exist in the admitted legacy definition or identify an exact completed pure node in the pinned sequential frontier.");
         }
 
         if (output.Iteration < 1 || output.Iteration > run.Checkpoint.Iteration)
@@ -1165,6 +1962,31 @@ public static class CustomLoopRunValidator
 
         ValidateText(output.Content, $"{field}.content", CustomLoopLimits.MaxCanonicalModelOutputCharacters, required: false, errors, requireNormalized: false);
         ValidateContentHash(output.Content, output.ContentHash, $"{field}.contentHash", errors);
+    }
+
+    private static bool HasCompletedPureNodeOutcome(CustomLoopRunRecord run, string stepId)
+    {
+        if (run.SequentialAdapterBinding is null
+            || run.Frontier?.Payload.Nodes.FirstOrDefault(node => string.Equals(node.NodeId, stepId, StringComparison.Ordinal))?.Descriptor.Kind
+                is not (GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate))
+        {
+            return false;
+        }
+
+        return run.Events?.Any(item => item is
+        {
+            Kind: CustomLoopRunEventKind.NodeAttemptCompleted,
+            PureNodeOutcomeJson: not null,
+            SequentialNodeEvidence:
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                Disposition: CustomLoopSequentialNodeDisposition.Completed,
+            } evidence,
+        }
+            && string.Equals(item.StepId, stepId, StringComparison.Ordinal)
+            && string.Equals(evidence.NodeId, stepId, StringComparison.Ordinal)
+            && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(item)) == true;
     }
 
     private static void ValidateOutcome(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
@@ -1226,6 +2048,41 @@ public static class CustomLoopRunValidator
         if (!string.Equals(JsonSerializer.Serialize(current.CapabilityAdmission), JsonSerializer.Serialize(candidate.CapabilityAdmission), StringComparison.Ordinal))
         {
             Add(errors, "capability_admission_changed", "capabilityAdmission", "Historical capability pins and resolution evidence are immutable.");
+        }
+
+
+        if (!string.Equals(current.SequentialInvocationSnapshot?.ContentHash, candidate.SequentialInvocationSnapshot?.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(current.SequentialAdapterBinding?.ContentHash, candidate.SequentialAdapterBinding?.ContentHash, StringComparison.Ordinal))
+        {
+            Add(errors, "sequential_admission_changed", "sequentialAdapterBinding", "The immutable sequential invocation snapshot and adapter binding cannot change after run materialization.");
+        }
+    }
+
+    private static void ValidateSequentialCheckpointAdvance(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
+    {
+        if (candidate.SequentialAdapterBinding is null || current.Checkpoint is null || candidate.Checkpoint is null)
+        {
+            return;
+        }
+
+        var advanced = candidate.Checkpoint.Iteration != current.Checkpoint.Iteration
+            || candidate.Checkpoint.NextStepIndex != current.Checkpoint.NextStepIndex
+            || candidate.Checkpoint.AcceptedRepeatCount != current.Checkpoint.AcceptedRepeatCount
+            || candidate.Checkpoint.PendingExitDecision != current.Checkpoint.PendingExitDecision
+            || candidate.Checkpoint.LastCommittedSequence != current.Checkpoint.LastCommittedSequence;
+        if (!advanced)
+        {
+            return;
+        }
+
+        var hasPriorDurableOutcome = candidate.Events is not null
+            && candidate.Events.Any(item => item is not null
+                && item.Sequence > current.Checkpoint.LastCommittedSequence
+                && item.Sequence <= candidate.Checkpoint.LastCommittedSequence
+                && item.SequentialNodeEvidence is { Kind: not CustomLoopSequentialNodeEvidenceKind.DispatchStarted });
+        if (!hasPriorDurableOutcome)
+        {
+            Add(errors, "sequential_outcome_required_before_checkpoint", "checkpoint", "A canonical sequential checkpoint cannot advance until exact terminal node evidence is already present earlier in the durable event stream.");
         }
     }
 
@@ -1403,7 +2260,9 @@ public static class CustomLoopRunValidator
             && ToolAuthoritiesEqual(left.ToolAuthority, right.ToolAuthority)
             && ToolEvidenceEqual(left.ToolEvidence, right.ToolEvidence)
             && left.TraceReservationUtf8Bytes == right.TraceReservationUtf8Bytes
-            && left.ControlExpectedLifecycleVersion == right.ControlExpectedLifecycleVersion;
+            && left.ControlExpectedLifecycleVersion == right.ControlExpectedLifecycleVersion
+            && Equals(left.SequentialNodeEvidence, right.SequentialNodeEvidence)
+            && string.Equals(left.PureNodeOutcomeJson, right.PureNodeOutcomeJson, StringComparison.Ordinal);
     }
 
     private static bool ToolAuthoritiesEqual(CustomLoopToolAuthoritySnapshot? left, CustomLoopToolAuthoritySnapshot? right)
@@ -1434,6 +2293,46 @@ public static class CustomLoopRunValidator
             && left.SourceManifest is not null
             && right.SourceManifest is not null
             && left.SourceManifest.SequenceEqual(right.SourceManifest);
+    }
+
+    private static bool CheckpointsEqual(CustomLoopRunCheckpoint? left, CustomLoopRunCheckpoint? right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        return left is not null
+            && right is not null
+            && left.Iteration == right.Iteration
+            && left.NextStepIndex == right.NextStepIndex
+            && left.AcceptedRepeatCount == right.AcceptedRepeatCount
+            && left.PendingExitDecision == right.PendingExitDecision
+            && left.EarlierRetainedOutputs is not null
+            && right.EarlierRetainedOutputs is not null
+            && left.EarlierRetainedOutputs.SequenceEqual(right.EarlierRetainedOutputs)
+            && Equals(left.PreviousIterationResult, right.PreviousIterationResult)
+            && Equals(left.CurrentIterationResult, right.CurrentIterationResult)
+            && left.ToolRequestsUsed == right.ToolRequestsUsed
+            && left.LastCommittedSequence == right.LastCommittedSequence;
+    }
+
+    private static bool FrontiersEqual(GovernedLoopFrontierPosture? left, GovernedLoopFrontierPosture? right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        return left is not null
+            && right is not null
+            && left.SchemaVersion == right.SchemaVersion
+            && string.Equals(left.WorkspaceId, right.WorkspaceId, StringComparison.Ordinal)
+            && Equals(left.Binding, right.Binding)
+            && string.Equals(left.GraphArtifactHash, right.GraphArtifactHash, StringComparison.Ordinal)
+            && string.Equals(left.GraphLayoutHash, right.GraphLayoutHash, StringComparison.Ordinal)
+            && string.Equals(left.AdmissionReceiptHash, right.AdmissionReceiptHash, StringComparison.Ordinal)
+            && string.Equals(left.Payload.ContentHash, right.Payload.ContentHash, StringComparison.Ordinal);
     }
 
 }

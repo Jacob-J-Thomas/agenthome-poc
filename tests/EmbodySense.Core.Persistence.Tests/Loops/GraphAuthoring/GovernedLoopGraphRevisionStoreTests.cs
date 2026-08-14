@@ -1,9 +1,11 @@
+using System.Collections.Immutable;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Win32.SafeHandles;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation;
@@ -11,10 +13,13 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Workspace;
@@ -29,10 +34,12 @@ namespace EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring;
 
 public sealed class GovernedLoopGraphRevisionStoreTests
 {
+    private const string ModelInferenceCapabilityId = "org.embodysense/model/inference";
     private const string HashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string HashB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private const string HashC = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     private static readonly DateTimeOffset _time = new(2026, 8, 10, 12, 0, 0, TimeSpan.Zero);
+    private static readonly string _workspaceId = "workspace-sha256:" + new string('a', ContextualRoleLimits.Sha256HexCharacters);
 
     [Fact]
     public async Task Commit_restart_read_and_exact_replay_preserve_canonical_graph_and_generic_provenance()
@@ -70,6 +77,35 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         Assert.DoesNotContain("createdAtUtc", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("createdByActorId", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("creationOperationId", payload, StringComparison.Ordinal);
+        using var payloadJson = JsonDocument.Parse(payload);
+        var executableGraph = payloadJson.RootElement.GetProperty("executableGraph");
+        Assert.Equal(
+            ["schemaVersion", "graphId", "revisionId", "purpose", "owningRole", "entryNodeId"],
+            executableGraph.EnumerateObject().Take(6).Select(property => property.Name));
+        var owningRole = executableGraph.GetProperty("owningRole");
+        Assert.Equal(["contentHash", "revision", "roleId"], owningRole.EnumerateObject().Select(property => property.Name));
+        Assert.Equal(graph.OwningRole.ContentHash, owningRole.GetProperty("contentHash").GetString());
+        Assert.Equal(graph.OwningRole.Identity.Revision, owningRole.GetProperty("revision").GetInt32());
+        Assert.Equal(graph.OwningRole.Identity.RoleId, owningRole.GetProperty("roleId").GetString());
+        Assert.DoesNotContain("owningRoleId", payload, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Persisted_payload_digest_binds_every_exact_owning_role_pin_component()
+    {
+        var baseline = Graph();
+        var baselineDigest = await PersistedContentDigestAsync(baseline);
+        var variants = new[]
+        {
+            Graph(owningRole: Role("writer", 1, 'a')),
+            Graph(owningRole: Role("researcher", 2, 'a')),
+            Graph(owningRole: Role("researcher", 1, 'b')),
+        };
+
+        foreach (var variant in variants)
+        {
+            Assert.NotEqual(baselineDigest, await PersistedContentDigestAsync(variant));
+        }
     }
 
     [Fact]
@@ -460,6 +496,9 @@ public sealed class GovernedLoopGraphRevisionStoreTests
     [InlineData("unknown")]
     [InlineData("noncanonical")]
     [InlineData("raw-content-digest")]
+    [InlineData("legacy-owning-role")]
+    [InlineData("mixed-owning-role")]
+    [InlineData("malformed-owning-role")]
     public async Task Malformed_or_noncanonical_payloads_are_never_projected(string corruption)
     {
         using var workspace = new TestWorkspace();
@@ -481,6 +520,9 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             "unknown" => Encoding.UTF8.GetBytes(text.Replace("{" + newline, "{" + newline + "  \"unknown\": true," + newline, StringComparison.Ordinal)),
             "noncanonical" => Encoding.UTF8.GetBytes(newline == "\n" ? text.Replace("\n", "\r\n", StringComparison.Ordinal) : text.Replace("\r\n", "\n", StringComparison.Ordinal)),
             "raw-content-digest" => Encoding.UTF8.GetBytes(text.Replace("\"contentDigest\": \"sha256:", "\"contentDigest\": \"", StringComparison.Ordinal)),
+            "legacy-owning-role" => Encoding.UTF8.GetBytes(ReplaceOwningRole(text, newline, "\"owningRoleId\": \"researcher\"")),
+            "mixed-owning-role" => Encoding.UTF8.GetBytes(text.Replace("\"owningRole\": {", "\"owningRoleId\": \"researcher\"," + newline + "    \"owningRole\": {", StringComparison.Ordinal)),
+            "malformed-owning-role" => Encoding.UTF8.GetBytes(text.Replace("\"revision\": 1", "\"revision\": 0", StringComparison.Ordinal)),
             _ => throw new ArgumentOutOfRangeException(nameof(corruption)),
         };
         Assert.False(originalBytes.SequenceEqual(bytes));
@@ -1433,7 +1475,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                     port.Id,
                     port.Direction,
                     port.BindingKind,
-                    schemas[port.ValueSchemaId],
+                    GovernedLoopValueKindSet.Create([schemas[port.ValueSchemaId]]),
                     port.Required)).ToArray(),
                 node.Parameters.Select(parameter => new GovernedLoopCatalogParameterContract(
                     parameter.Key,
@@ -1447,13 +1489,25 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                 node.AuthorityCeiling.CapabilityIds,
                 new GovernedLoopNodeResourceBudget(0, 0, 0, 0));
         }).ToArray();
+        var role = ValidRoleRevision();
         var validation = new GovernedLoopGraphValidationService(
             new FixedNodeCatalog(new GovernedLoopNodeCatalogSnapshot(true, "catalog-one", descriptors)),
             new FixedAuthorityProvider(new GovernedLoopAuthoritySnapshot(
                 true,
-                "authority-one",
-                graph.OwningRoleId,
-                graph.AuthorityCeiling.CapabilityIds,
+                HashC,
+                graph.OwningRole,
+                role,
+                new ContextualRoleLifecycleSnapshot(
+                    1,
+                    role.Identity.RoleId,
+                    role.Identity,
+                    ContextualRoleLifecycleState.Active,
+                    "publish-role",
+                    ContextualRoleRevisionMutationKind.Create,
+                    _time.AddMinutes(-10)),
+                _workspaceId,
+                ContextualRoleInstructionSourceProbeStatus.Ready,
+                role.PolicyMaxima.CapabilityIds,
                 CustomLoopLimits.MaxGraphNodeAttempts,
                 100_000,
                 CustomLoopLimits.MaxGraphNodeEvidenceItems,
@@ -1472,7 +1526,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             graph.GraphId,
             graph.RevisionId,
             graph.Purpose,
-            graph.OwningRoleId,
+            graph.OwningRole,
             graph.EntryNodeId,
             graph.TerminalNodeIds,
             graph.AuthorityCeiling,
@@ -1509,16 +1563,17 @@ public sealed class GovernedLoopGraphRevisionStoreTests
     private static GovernedLoopGraphDefinition Graph(
         string graphId = "graph-one",
         string revisionId = "revision-one",
-        GovernedLoopDisplayMetadata? display = null)
+        GovernedLoopDisplayMetadata? display = null,
+        ContextualRoleRevisionPin? owningRole = null)
         => GovernedLoopGraphDefinition.Create(
             1,
             graphId,
             revisionId,
             "Answer one bounded request.",
-            "researcher",
+            owningRole ?? ValidRolePin(),
             "trigger",
             ["exit"],
-            GovernedLoopAuthorityCeiling.Create(["model-inference"]),
+            GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
             [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
             [
                 new GovernedLoopNodeDefinition(
@@ -1531,7 +1586,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                     "infer",
                     new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
                     [InputPort("request"), OutputPort("result")],
-                    GovernedLoopAuthorityCeiling.Create(["model-inference"]),
+                    GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
                     new Dictionary<string, string> { ["instruction"] = "Answer from the explicit input." }),
                 new GovernedLoopNodeDefinition(
                     "exit",
@@ -1581,7 +1636,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                 ],
                 _ => [],
             },
-            GovernedLoopAuthorityCeiling.Create(kind == GovernedLoopNodeKind.Inference ? ["model-inference"] : []),
+            GovernedLoopAuthorityCeiling.Create(kind == GovernedLoopNodeKind.Inference ? [ModelInferenceCapabilityId] : []),
             new Dictionary<string, string> { ["ordinal"] = index.ToString(System.Globalization.CultureInfo.InvariantCulture) }))
             .ToArray();
         var display = nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(
@@ -1603,10 +1658,10 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             "all-enums-graph",
             "all-enums-revision",
             "Round-trip every closed schema-one graph discriminator.",
-            "researcher",
+            Role(),
             "trigger",
             ["exit", "fail"],
-            GovernedLoopAuthorityCeiling.Create(["model-inference"]),
+            GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
             [
                 new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
                 new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, true),
@@ -1627,6 +1682,47 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                 "Return the result.",
                 [new GovernedLoopOutputDefinition("result", "text", "exit", "published", true)]),
             new GovernedLoopDisplayMetadata("All enums", "Every closed discriminator.", display));
+    }
+
+    private static ContextualRoleRevisionPin Role(
+        string roleId = "researcher",
+        int revision = 1,
+        char contentHash = 'a')
+        => new(new ContextualRoleRevisionIdentity(roleId, revision), new string(contentHash, 64));
+
+    private static ContextualRoleRevisionPin ValidRolePin()
+    {
+        var role = ValidRoleRevision();
+        return new ContextualRoleRevisionPin(role.Identity, role.ContentHash);
+    }
+
+    private static ContextualRoleRevision ValidRoleRevision()
+    {
+        var role = new ContextualRoleRevision(
+            1,
+            new ContextualRoleRevisionIdentity("researcher", 1),
+            string.Empty,
+            "Researcher",
+            "Answer one bounded request.",
+            ContextualRoleStatus.Published,
+            new ContextualRoleProvenance("actor-one", _time.AddHours(-2), _time.AddHours(-1)),
+            new ContextualRoleWorkspaceApplicability([_workspaceId]),
+            new ContextualRoleInstructionSourceReference(
+                ContextualRoleInstructionSourceKind.RoleArtifact,
+                "researcher-source",
+                ContextualRoleInstructionClassification.RoleInstruction),
+            new ContextualRolePolicyMaxima(ImmutableArray.Create(ModelInferenceCapabilityId)));
+        return ContextualRoleRevisionContentHash.Apply(role);
+    }
+
+    private static string ReplaceOwningRole(string json, string newline, string replacement)
+    {
+        const string StartMarker = "    \"owningRole\": {";
+        var endMarker = "    }," + newline + "    \"entryNodeId\"";
+        var start = json.IndexOf(StartMarker, StringComparison.Ordinal);
+        var end = json.IndexOf(endMarker, start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start);
+        return json[..start] + "    " + replacement + "," + newline + "    \"entryNodeId\"" + json[(end + endMarker.Length)..];
     }
 
     private static GovernedLoopDisplayMetadata Display(string name, int x, int y)
@@ -1650,6 +1746,17 @@ public sealed class GovernedLoopGraphRevisionStoreTests
 
     private static string ArtifactPath(WorkspacePaths paths, GovernedLoopGraphDefinition graph)
         => Path.Combine(GraphRoot(paths), "artifacts", graph.GraphId, graph.RevisionId + ".json");
+
+    private static async Task<string> PersistedContentDigestAsync(GovernedLoopGraphDefinition graph)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var committed = await Store(paths, new TestCapabilityLifecycleTrustProvider())
+            .CommitAsync(CreateDraft(graph, "create-digest", HashA, HashB, 0, _time));
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, committed.Status);
+        using var document = JsonDocument.Parse(await File.ReadAllBytesAsync(ArtifactPath(paths, graph)));
+        return document.RootElement.GetProperty("contentDigest").GetString()!;
+    }
 
     private static string ImmutableReadyPath(string destinationPath, byte[] content)
     {
@@ -1675,9 +1782,9 @@ public sealed class GovernedLoopGraphRevisionStoreTests
 
     private sealed class FixedAuthorityProvider(GovernedLoopAuthoritySnapshot snapshot) : IGovernedLoopAuthoritySnapshotProvider
     {
-        public Task<GovernedLoopAuthoritySnapshot> GetSnapshotAsync(string roleId, CancellationToken cancellationToken = default)
+        public Task<GovernedLoopAuthoritySnapshot> GetSnapshotAsync(ContextualRoleRevisionPin? owningRole, CancellationToken cancellationToken = default)
         {
-            _ = roleId;
+            _ = owningRole;
             return Task.FromResult(snapshot);
         }
     }

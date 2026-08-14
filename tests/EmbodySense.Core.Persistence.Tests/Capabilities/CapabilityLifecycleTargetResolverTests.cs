@@ -128,6 +128,7 @@ public sealed class CapabilityLifecycleTargetResolverTests
         var quotaPaths = new WorkspacePaths(quotaWorkspace.RootPath);
         var quotaStore = Store(quotaWorkspace, quotaPaths);
         CapabilityArtifactStageRequest? first = null;
+        var evidencePadding = new List<(string Path, int CharacterCount)>();
         for (var index = 0; index < 5; index++)
         {
             var stage = CapabilityArtifactStoreTestData.Stage(BitConverter.GetBytes(index), $"1.0.{index}");
@@ -136,8 +137,14 @@ public sealed class CapabilityLifecycleTargetResolverTests
             var evidencePath = EvidencePath(quotaPaths, stage);
             var evidenceLength = new FileInfo(evidencePath).Length;
             Assert.InRange(evidenceLength, 1, 1_048_575);
-            await File.AppendAllTextAsync(evidencePath, new string(' ', checked(1_048_576 - (int)evidenceLength)));
+            evidencePadding.Add((evidencePath, checked(1_048_576 - (int)evidenceLength)));
         }
+
+        await Parallel.ForEachAsync(
+            evidencePadding,
+            new ParallelOptions { MaxDegreeOfParallelism = 5 },
+            async (item, cancellationToken) =>
+                await File.AppendAllTextAsync(item.Path, new string(' ', item.CharacterCount), cancellationToken));
         Assert.Equal(CapabilityLifecycleTargetResolutionStatus.Unavailable, (await quotaStore.ResolveAsync(Request(first!))).Status);
 
         using var canceledWorkspace = new TestWorkspace();

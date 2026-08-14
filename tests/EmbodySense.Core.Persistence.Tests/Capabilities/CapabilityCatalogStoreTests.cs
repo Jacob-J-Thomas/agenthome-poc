@@ -917,7 +917,8 @@ public sealed class CapabilityCatalogStoreTests : IDisposable
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.CapabilityCatalogPath);
         await using var heldLock = new FileStream(paths.CapabilityCatalogLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-        var store = Store(paths);
+        var retryTime = new ImmediateTimerTimeProvider(DateTimeOffset.UtcNow);
+        var store = Store(paths, retryTime);
         var descriptor = CapabilityCatalogTestData.Descriptor();
 
         var readTask = store.ReadAsync(null, 10);
@@ -928,6 +929,7 @@ public sealed class CapabilityCatalogStoreTests : IDisposable
 
         Assert.Equal(CapabilityCatalogReadStatus.Unavailable, read.Status);
         Assert.Equal(CapabilityCatalogMutationStatus.Unavailable, mutation.Status);
+        Assert.Equal(498, retryTime.TimerCount);
         Assert.False(File.Exists(paths.CapabilityCatalogDocumentPath));
     }
 
@@ -971,7 +973,7 @@ public sealed class CapabilityCatalogStoreTests : IDisposable
 
     private CapabilityCatalogService Service(TestWorkspace workspace) => new(Store(new WorkspacePaths(workspace.RootPath)));
 
-    private CapabilityCatalogStore Store(WorkspacePaths paths) => new(paths, _defaultTrustProvider);
+    private CapabilityCatalogStore Store(WorkspacePaths paths, TimeProvider? timeProvider = null) => new(paths, _defaultTrustProvider, timeProvider);
 
     private static CapabilityCatalogService Service(WorkspacePaths paths, ICapabilityCatalogTrustProvider trustProvider) => new(new CapabilityCatalogStore(paths, trustProvider));
 

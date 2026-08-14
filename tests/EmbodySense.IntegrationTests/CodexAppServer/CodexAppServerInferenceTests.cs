@@ -30,6 +30,41 @@ public sealed class CodexAppServerInferenceTests
     private static readonly JsonSerializerOptions _auditJsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
     [Fact]
+    public void Constructor_rejects_non_positive_or_relaxed_safety_deadlines()
+    {
+        var options = new LlmInferenceClientOptions
+        {
+            Surface = LlmInferenceSurface.OpenAiCodex,
+            Model = "gpt-test",
+            WorkingDirectory = Directory.GetCurrentDirectory(),
+            CodexSandbox = "read-only"
+        };
+        var transport = new ScriptedAppServerTransport();
+
+        var zeroWrite = Assert.Throws<ArgumentOutOfRangeException>(() => new CodexAppServerInferenceClient(
+            options,
+            transport: transport,
+            postCheckpointWriteDeadline: TimeSpan.Zero));
+        var relaxedWrite = Assert.Throws<ArgumentOutOfRangeException>(() => new CodexAppServerInferenceClient(
+            options,
+            transport: transport,
+            postCheckpointWriteDeadline: TimeSpan.FromSeconds(16)));
+        var zeroAudit = Assert.Throws<ArgumentOutOfRangeException>(() => new CodexAppServerInferenceClient(
+            options,
+            transport: transport,
+            lateTransportAuditDeadline: TimeSpan.Zero));
+        var relaxedAudit = Assert.Throws<ArgumentOutOfRangeException>(() => new CodexAppServerInferenceClient(
+            options,
+            transport: transport,
+            lateTransportAuditDeadline: TimeSpan.FromSeconds(6)));
+
+        Assert.Equal("postCheckpointWriteDeadline", zeroWrite.ParamName);
+        Assert.Equal("postCheckpointWriteDeadline", relaxedWrite.ParamName);
+        Assert.Equal("lateTransportAuditDeadline", zeroAudit.ParamName);
+        Assert.Equal("lateTransportAuditDeadline", relaxedAudit.ParamName);
+    }
+
+    [Fact]
     public async Task GenerateAsync_streams_agent_message_deltas_and_returns_completed_message()
     {
         var transport = new ScriptedAppServerTransport(
@@ -73,10 +108,10 @@ public sealed class CodexAppServerInferenceTests
             LlmInferenceRequest.FromUserText("fail conclusively"),
             responseChunkHandler: null,
             CancellationToken.None,
-            _ =>
+            async (commitTransportWrite, token) =>
             {
                 dispatchStarted = true;
-                return Task.CompletedTask;
+                await commitTransportWrite(token);
             }));
 
         Assert.True(dispatchStarted);
@@ -98,10 +133,10 @@ public sealed class CodexAppServerInferenceTests
             LlmInferenceRequest.FromUserText("reject conclusively"),
             responseChunkHandler: null,
             CancellationToken.None,
-            _ =>
+            async (commitTransportWrite, token) =>
             {
                 dispatchStarted = true;
-                return Task.CompletedTask;
+                await commitTransportWrite(token);
             }));
 
         Assert.True(dispatchStarted);
@@ -129,10 +164,10 @@ public sealed class CodexAppServerInferenceTests
                 LlmInferenceRequest.FromUserText("observe success"),
                 responseChunkHandler: null,
                 CancellationToken.None,
-                _ =>
+                async (commitTransportWrite, token) =>
                 {
                     auditLock = new FileStream(paths.EventsLogPath, FileMode.Open, FileAccess.Read, FileShare.None);
-                    return Task.CompletedTask;
+                    await commitTransportWrite(token);
                 }));
 
             Assert.Equal("observed answer", exception.Response.OutputText);
@@ -168,10 +203,10 @@ public sealed class CodexAppServerInferenceTests
                 LlmInferenceRequest.FromUserText("observe failure"),
                 responseChunkHandler: null,
                 CancellationToken.None,
-                _ =>
+                async (commitTransportWrite, token) =>
                 {
                     auditLock = new FileStream(paths.EventsLogPath, FileMode.Open, FileAccess.Read, FileShare.None);
-                    return Task.CompletedTask;
+                    await commitTransportWrite(token);
                 }));
 
             Assert.Equal("turn-1", exception.ProviderResponseId);
@@ -213,11 +248,11 @@ public sealed class CodexAppServerInferenceTests
             request,
             (_, _) => Task.CompletedTask,
             CancellationToken.None,
-            _ =>
+            async (commitTransportWrite, token) =>
             {
                 durableBoundaryObserved = true;
                 Assert.DoesNotContain(transport.Writes, IsTurnStart);
-                return Task.CompletedTask;
+                await commitTransportWrite(token);
             });
 
         Assert.Equal("The note says tool-visible note.", response.OutputText);
@@ -552,14 +587,32 @@ public sealed class CodexAppServerInferenceTests
             LlmInferenceRequest.FromUserText("hello"),
             responseChunkHandler: null,
             CancellationToken.None,
-            _ =>
+            async (commitTransportWrite, token) =>
             {
                 durableDispatchStarted = true;
-                return Task.CompletedTask;
+                await commitTransportWrite(token);
             }));
 
         Assert.Equal("turn write failed", exception.Message);
         Assert.True(durableDispatchStarted);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_governed_overload_rejects_a_null_boundary_before_provider_activity()
+    {
+        var providerRequestStarted = false;
+        var transport = new ScriptedAppServerTransport();
+        await using var client = CreateRawClient(transport, providerRequestStarted: () => providerRequestStarted = true);
+
+        var exception = await Assert.ThrowsAsync<ArgumentNullException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            providerTransportCommitBoundary: null!));
+
+        Assert.Equal("providerTransportCommitBoundary", exception.ParamName);
+        Assert.Empty(transport.Writes);
+        Assert.False(providerRequestStarted);
     }
 
     [Fact]
@@ -598,17 +651,19 @@ public sealed class CodexAppServerInferenceTests
                 return Task.CompletedTask;
             }
         };
-        await using var client = CreateRawClient(transport);
+        await using var client = CreateRawClient(
+            transport,
+            postCheckpointWriteDeadline: TimeSpan.FromMilliseconds(250));
         var durableDispatchStarted = false;
 
         var exception = await Assert.ThrowsAsync<TimeoutException>(() => client.GenerateAsync(
             LlmInferenceRequest.FromUserText("hello"),
             responseChunkHandler: null,
             CancellationToken.None,
-            _ =>
+            async (commitTransportWrite, token) =>
             {
                 durableDispatchStarted = true;
-                return Task.CompletedTask;
+                await commitTransportWrite(token);
             }));
 
         await turnWriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -645,10 +700,10 @@ public sealed class CodexAppServerInferenceTests
             LlmInferenceRequest.FromUserText("hello"),
             responseChunkHandler: null,
             cancellation.Token,
-            _ =>
+            async (commitTransportWrite, token) =>
             {
                 durableDispatchStarted = true;
-                return Task.CompletedTask;
+                await commitTransportWrite(token);
             });
 
         await turnWriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -690,7 +745,7 @@ public sealed class CodexAppServerInferenceTests
             LlmInferenceRequest.FromUserText("hello"),
             responseChunkHandler: null,
             cancellation.Token,
-            _ => Task.CompletedTask);
+            (commitTransportWrite, token) => commitTransportWrite(token));
 
         await writeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         cancellation.Cancel();
@@ -731,7 +786,7 @@ public sealed class CodexAppServerInferenceTests
             LlmInferenceRequest.FromUserText("hello"),
             responseChunkHandler: null,
             cancellation.Token,
-            _ => Task.CompletedTask);
+            (commitTransportWrite, token) => commitTransportWrite(token));
 
         await writeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         cancellation.Cancel();
@@ -764,12 +819,15 @@ public sealed class CodexAppServerInferenceTests
             }
         };
         var auditLog = new BlockingAuditLog();
-        await using var client = CreateRawClient(transport, auditLog);
+        await using var client = CreateRawClient(
+            transport,
+            auditLog,
+            lateTransportAuditDeadline: TimeSpan.FromMilliseconds(250));
         var generation = client.GenerateAsync(
             LlmInferenceRequest.FromUserText("hello"),
             responseChunkHandler: null,
             cancellation.Token,
-            _ => Task.CompletedTask);
+            (commitTransportWrite, token) => commitTransportWrite(token));
 
         await writeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         cancellation.Cancel();
@@ -781,7 +839,7 @@ public sealed class CodexAppServerInferenceTests
     }
 
     [Fact]
-    public async Task GenerateAsync_does_not_mark_durable_dispatch_when_cancelled_before_the_turn_transport_write()
+    public async Task GenerateAsync_fences_request_correlated_setup_before_turn_start_and_preserves_request_start_timing()
     {
         using var cancellation = new CancellationTokenSource();
         var transport = new ScriptedAppServerTransport(
@@ -796,21 +854,25 @@ public sealed class CodexAppServerInferenceTests
                 }
             }
         };
-        var client = CreateClient(transport);
+        var providerRequestStarted = false;
+        var client = CreateClient(transport, providerRequestStarted: () => providerRequestStarted = true);
         var durableDispatchStarted = false;
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.GenerateAsync(
             LlmInferenceRequest.FromUserText("hello"),
             responseChunkHandler: null,
             cancellation.Token,
-            _ =>
+            async (commitTransportWrite, token) =>
             {
                 durableDispatchStarted = true;
-                return Task.CompletedTask;
+                await commitTransportWrite(token);
             }));
 
-        Assert.False(durableDispatchStarted);
+        Assert.True(durableDispatchStarted);
+        Assert.False(providerRequestStarted);
         Assert.DoesNotContain(transport.Writes, IsTurnStart);
+        await transport.DisposedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(transport.Disposed);
     }
 
     [Fact]
@@ -825,10 +887,210 @@ public sealed class CodexAppServerInferenceTests
             LlmInferenceRequest.FromUserText("hello"),
             responseChunkHandler: null,
             CancellationToken.None,
-            _ => Task.FromException(new IOException("durable checkpoint unavailable"))));
+            (_, _) => Task.FromException(new IOException("durable checkpoint unavailable"))));
 
         Assert.Equal("durable checkpoint unavailable", exception.Message);
-        Assert.DoesNotContain(transport.Writes, IsTurnStart);
+        Assert.Empty(transport.Writes);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_commits_the_turn_transport_write_inside_the_durable_boundary()
+    {
+        var boundaryActive = false;
+        var writeObservedOutsideBoundary = false;
+        var providerRequestStarted = false;
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""))
+        {
+            AfterWrite = line =>
+            {
+                if (!boundaryActive)
+                {
+                    writeObservedOutsideBoundary = true;
+                }
+            }
+        };
+        var client = CreateClient(transport, providerRequestStarted: () => providerRequestStarted = true);
+
+        var response = await client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            async (commitTransportWrite, token) =>
+            {
+                Assert.Empty(transport.Writes);
+                Assert.False(providerRequestStarted);
+                boundaryActive = true;
+                try
+                {
+                    await commitTransportWrite(token);
+                    Assert.Contains(transport.Writes, IsInitialize);
+                    Assert.Contains(transport.Writes, IsInitialized);
+                    Assert.Contains(transport.Writes, IsThreadStart);
+                    Assert.Contains(transport.Writes, IsTurnStart);
+                    Assert.False(providerRequestStarted);
+                }
+                finally
+                {
+                    boundaryActive = false;
+                }
+            });
+
+        Assert.Equal("done", response.OutputText);
+        Assert.False(writeObservedOutsideBoundary);
+        Assert.False(boundaryActive);
+        Assert.True(providerRequestStarted);
+        Assert.Equal(1, transport.Writes.Count(IsTurnStart));
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_a_durable_boundary_that_returns_without_committing_the_turn_write()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            (_, _) => Task.CompletedTask));
+
+        Assert.Contains("without invoking its write callback", exception.Message, StringComparison.Ordinal);
+        Assert.Empty(transport.Writes);
+        Assert.False(transport.Disposed);
+
+        var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("retry safely"));
+
+        Assert.Equal("done", response.OutputText);
+        Assert.Equal(1, GetRequestId(transport.Writes.Single(IsInitialize)));
+        Assert.Equal(2, GetRequestId(transport.Writes.Single(IsThreadStart)));
+        Assert.Equal(3, GetRequestId(transport.Writes.Single(IsTurnStart)));
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_a_late_dispatch_callback_without_provider_writes_and_quarantines_the_transport()
+    {
+        var transport = new ScriptedAppServerTransport();
+        await using var client = CreateRawClient(transport);
+        Func<CancellationToken, Task>? capturedCommit = null;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            (commitProviderDispatch, _) =>
+            {
+                capturedCommit = commitProviderDispatch;
+                return Task.CompletedTask;
+            }));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => capturedCommit!(CancellationToken.None));
+        await transport.DisposedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("after its boundary returns", exception.Message, StringComparison.Ordinal);
+        Assert.Empty(transport.Writes);
+        Assert.True(transport.Disposed);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_a_second_turn_write_and_quarantines_the_ambiguous_transport()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""));
+        await using var client = CreateRawClient(transport);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            async (commitTransportWrite, token) =>
+            {
+                await commitTransportWrite(token);
+                await commitTransportWrite(token);
+            }));
+
+        await transport.DisposedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("at most once", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, transport.Writes.Count(IsTurnStart));
+        Assert.True(transport.Disposed);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("must not reuse")));
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_a_caught_second_turn_write_and_quarantines_the_ambiguous_transport()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""));
+        await using var client = CreateRawClient(transport);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            async (commitTransportWrite, token) =>
+            {
+                await commitTransportWrite(token);
+                try
+                {
+                    await commitTransportWrite(token);
+                }
+                catch (InvalidOperationException)
+                {
+                }
+            }));
+
+        await transport.DisposedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("at most once", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, transport.Writes.Count(IsTurnStart));
+        Assert.True(transport.Disposed);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_a_boundary_that_returns_before_its_turn_write_completes()
+    {
+        var writeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""))
+        {
+            WriteOverride = (line, _) =>
+            {
+                if (!IsTurnStart(line))
+                {
+                    return Task.CompletedTask;
+                }
+
+                writeStarted.TrySetResult();
+                return releaseWrite.Task;
+            }
+        };
+        await using var client = CreateRawClient(transport);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            (commitTransportWrite, token) =>
+            {
+                _ = commitTransportWrite(token);
+                return Task.CompletedTask;
+            }));
+
+        await writeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseWrite.TrySetResult();
+        await transport.DisposedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("before its write callback completed", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, transport.Writes.Count(IsTurnStart));
+        Assert.True(transport.Disposed);
     }
 
     [Fact]
@@ -932,7 +1194,12 @@ public sealed class CodexAppServerInferenceTests
         }, broker, transport, providerRequestStarted);
     }
 
-    private static CodexAppServerInferenceClient CreateRawClient(ScriptedAppServerTransport transport, IAuditLog? auditLog = null)
+    private static CodexAppServerInferenceClient CreateRawClient(
+        ScriptedAppServerTransport transport,
+        IAuditLog? auditLog = null,
+        Action? providerRequestStarted = null,
+        TimeSpan? postCheckpointWriteDeadline = null,
+        TimeSpan? lateTransportAuditDeadline = null)
     {
         return new CodexAppServerInferenceClient(new LlmInferenceClientOptions
         {
@@ -940,7 +1207,12 @@ public sealed class CodexAppServerInferenceTests
             Model = "gpt-test",
             WorkingDirectory = Directory.GetCurrentDirectory(),
             CodexSandbox = "read-only"
-        }, transport: transport, auditLog: auditLog);
+        },
+        transport: transport,
+        auditLog: auditLog,
+        providerRequestStarted: providerRequestStarted,
+        postCheckpointWriteDeadline: postCheckpointWriteDeadline,
+        lateTransportAuditDeadline: lateTransportAuditDeadline);
     }
 
     private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt prompt, LoopDefinition? loopDefinition = null)
@@ -973,10 +1245,28 @@ public sealed class CodexAppServerInferenceTests
         return document.RootElement.TryGetProperty("method", out var method) && method.GetString() == "thread/start";
     }
 
+    private static bool IsInitialize(string line)
+    {
+        using var document = JsonDocument.Parse(line);
+        return document.RootElement.TryGetProperty("method", out var method) && method.GetString() == "initialize";
+    }
+
+    private static bool IsInitialized(string line)
+    {
+        using var document = JsonDocument.Parse(line);
+        return document.RootElement.TryGetProperty("method", out var method) && method.GetString() == "initialized";
+    }
+
     private static bool IsTurnStart(string line)
     {
         using var document = JsonDocument.Parse(line);
         return document.RootElement.TryGetProperty("method", out var method) && method.GetString() == "turn/start";
+    }
+
+    private static int GetRequestId(string line)
+    {
+        using var document = JsonDocument.Parse(line);
+        return document.RootElement.GetProperty("id").GetInt32();
     }
 
     private static async Task<IReadOnlyList<AuditEvent>> ReadAuditEventsAsync(TestWorkspace workspace)

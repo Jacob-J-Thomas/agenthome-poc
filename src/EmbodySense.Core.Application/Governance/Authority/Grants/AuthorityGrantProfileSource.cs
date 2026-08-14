@@ -4,6 +4,7 @@ using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
+using EmbodySense.Core.Common.Capabilities;
 
 namespace EmbodySense.Core.Application.Governance.Authority.Grants;
 
@@ -271,5 +272,5 @@ public sealed class AuthorityGrantProfileSource : IAuthorityGrantProfileSource
             && value[^1] is >= 'a' and <= 'z' or >= '0' and <= '9'
             && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '_' or '.');
 
-    private static bool IsSha256(string? value) => value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+    private static bool IsSha256(string? value) => CapabilityIntegrityDigest.TryParse(value, out _, out _);
 }
