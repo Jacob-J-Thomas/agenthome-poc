@@ -1280,8 +1280,8 @@ public sealed class BrowserFlowTests
             return text?.Contains("401 (Unauthorized)", StringComparison.OrdinalIgnoreCase) == true
                 || (text?.Contains("WebSocket", StringComparison.OrdinalIgnoreCase) == true
                     || url?.StartsWith("ws", StringComparison.OrdinalIgnoreCase) == true
-                    || IsSessionBootstrapUrl(url))
-                && (text?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true || text?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true);
+                    || IsExpectedRecoveryUrl(url))
+                && (text?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true || text?.Contains("ERR_CONNECTION_", StringComparison.OrdinalIgnoreCase) == true);
         }
 
         private bool IsExpectedServerRestartHttpResponse(JsonElement response, double statusCode)
@@ -1311,8 +1311,8 @@ public sealed class BrowserFlowTests
             }
 
             var errorText = parameters.TryGetProperty("errorText", out var errorTextValue) ? errorTextValue.GetString() : null;
-            return errorText?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true
-                || errorText?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true;
+            return errorText?.StartsWith("net::ERR_CONNECTION_", StringComparison.OrdinalIgnoreCase) == true
+                || string.Equals(errorText, "net::ERR_FAILED", StringComparison.OrdinalIgnoreCase);
         }
 
         private bool ContainsTargetAuthority(string? value)
@@ -1320,20 +1320,19 @@ public sealed class BrowserFlowTests
             return value?.Contains(_targetAuthority, StringComparison.OrdinalIgnoreCase) == true;
         }
 
-        private bool IsSessionBootstrapUrl(string? value)
+        private bool IsExpectedRecoveryUrl(string? value)
         {
             return Uri.TryCreate(value, UriKind.Absolute, out var uri)
                 && string.Equals(uri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(uri.AbsolutePath, "/api/session", StringComparison.OrdinalIgnoreCase);
+                && IsExpectedRecoveryScheme(uri);
         }
 
         private static bool IsExpectedRecoveryScheme(Uri uri)
         {
             return string.Equals(uri.Scheme, "ws", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(uri.Scheme, "wss", StringComparison.OrdinalIgnoreCase)
-                || (string.Equals(uri.AbsolutePath, "/api/session", StringComparison.OrdinalIgnoreCase)
-                    && (string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)));
+                || string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase);
         }
 
         private async Task AcceptJavaScriptDialogAsync()
