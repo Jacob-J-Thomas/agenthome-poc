@@ -2,6 +2,7 @@ name: Verify
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
     branches:
       - main
@@ -11,10 +12,16 @@ permissions:
 
 jobs:
   verify:
+    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'verify-metadata-edit' || 'verify' }}
+    if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && (github.event.action != 'edited' || github.event.changes.base != null))
+    concurrency:
+      group: verify-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     runs-on: windows-latest
     # Tool setup and diagnostic upload are outside the repository verifier budget.
-    # scripts/verify-with-watchdog.ps1 owns the exact inclusive 600-second child deadline.
-    timeout-minutes: 15
+    # Promotion runs once per stable merge candidate, so the exhaustive child receives a
+    # bounded 900-second certification window instead of constraining the draft edit loop.
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -33,7 +40,7 @@ jobs:
 
       - name: Verify solution
         shell: pwsh
-        run: ./scripts/verify-with-watchdog.ps1 -Configuration Release
+        run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900
 
       - name: Upload verification diagnostics
         if: always()

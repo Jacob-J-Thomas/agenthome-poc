@@ -286,8 +286,10 @@ public sealed class ToolResultRetentionStoreTests
             var manifestPath = workspace.File(retained.ManifestPath!.Replace('/', Path.DirectorySeparatorChar));
             if (corruption == "manifest")
             {
-                var manifest = await File.ReadAllTextAsync(manifestPath);
-                await File.WriteAllTextAsync(manifestPath, manifest.Replace("\"schemaVersion\": 1", "\"schemaVersion\": 2", StringComparison.Ordinal));
+                var manifest = JsonNode.Parse(await File.ReadAllTextAsync(manifestPath))!.AsObject();
+                Assert.Equal(1, manifest["schemaVersion"]!.GetValue<int>());
+                manifest["schemaVersion"] = 2;
+                await File.WriteAllTextAsync(manifestPath, manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             }
             else if (corruption == "chunk-content")
             {

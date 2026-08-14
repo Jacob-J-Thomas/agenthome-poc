@@ -111,7 +111,7 @@ public sealed class ToolBrokerTests
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
         var paths = new WorkspacePaths(workspace.RootPath);
         var audit = new BlockingRetentionAuditLog(new AuditLog(paths));
-        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), auditLog: audit, postActuationIntegrityTimeout: TimeSpan.FromMilliseconds(25));
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), retentionStore: new ImmediateToolResultRetentionStore(), auditLog: audit, postActuationIntegrityTimeout: TimeSpan.FromMilliseconds(25));
 
         var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", " second"));
 

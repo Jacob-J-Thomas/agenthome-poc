@@ -2,6 +2,7 @@ name: Dependency review
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
@@ -9,6 +10,8 @@ permissions:
 
 jobs:
   dependency-review:
+    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'dependency-review-metadata-edit' || 'dependency-review' }}
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

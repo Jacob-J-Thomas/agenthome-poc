@@ -1,0 +1,60 @@
+name: Qualification
+
+on:
+  pull_request:
+    types:
+      [
+        opened,
+        synchronize,
+        reopened,
+        ready_for_review,
+        converted_to_draft,
+        edited,
+      ]
+
+permissions:
+  contents: read
+
+jobs:
+  qualification:
+    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'qualification-metadata-edit' || 'qualification' }}
+    if: github.event.action != 'edited' || github.event.changes.base != null
+    concurrency:
+      group: qualification-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: windows-latest
+    # Tool setup and diagnostic upload are outside the repository qualification budget.
+    # The watchdog owns the exact inclusive 300-second child deadline.
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Install pinned .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Qualify solution
+        shell: pwsh
+        run: ./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit "${{ github.event.pull_request.base.sha }}" -HeadCommit "${{ github.event.pull_request.head.sha }}" -Configuration Release -DeadlineSeconds 300
+
+      - name: Upload qualification diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qualification-diagnostics-${{ github.run_attempt }}
+          path: |
+            tests/QualificationResults/**
+          if-no-files-found: error
+          retention-days: 14

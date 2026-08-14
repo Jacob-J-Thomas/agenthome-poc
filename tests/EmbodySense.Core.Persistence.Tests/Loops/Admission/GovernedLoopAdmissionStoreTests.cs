@@ -31,6 +31,10 @@ public sealed class GovernedLoopAdmissionStoreTests
     private const string CrossProcessOutput = "EMBODYSENSE_ADMISSION_STORE_OUTPUT";
     private const string CrossProcessOperation = "EMBODYSENSE_ADMISSION_STORE_OPERATION";
     private const string CrossProcessHostTestName = "EmbodySense.Core.Persistence.Tests.Loops.Admission.GovernedLoopAdmissionStoreTests.Cross_process_admission_store_host";
+    private const int ChildReadinessTimeoutSeconds = 60;
+    private const int GateReleaseMarginSeconds = 15;
+    private const int GateTimeoutSeconds = ChildReadinessTimeoutSeconds + GateReleaseMarginSeconds;
+    private const int MaximumChildEvidenceCharacters = 8_192;
     private const char RequestA = '1';
     private const char RequestB = '4';
 
@@ -598,7 +602,7 @@ public sealed class GovernedLoopAdmissionStoreTests
         var secondOutput = workspace.File("second.output");
         using var first = StartCrossProcessHost("writer", workspace.RootPath, trustRoot.RootPath, gate, firstReady, firstOutput, "admit-one");
         using var second = StartCrossProcessHost("writer", workspace.RootPath, trustRoot.RootPath, gate, secondReady, secondOutput, "admit-two");
-        await Task.WhenAll(WaitForPathAsync(firstReady), WaitForPathAsync(secondReady));
+        await WaitForChildrenReadyAsync(first, firstReady, second, secondReady);
         await File.WriteAllTextAsync(gate, "go");
         await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync());
         await Task.WhenAll(AssertProcessSucceededAsync(first), AssertProcessSucceededAsync(second));
@@ -606,6 +610,23 @@ public sealed class GovernedLoopAdmissionStoreTests
         var results = new[] { await File.ReadAllTextAsync(firstOutput), await File.ReadAllTextAsync(secondOutput) };
         Assert.Single(results, item => item == GovernedLoopAdmissionStoreCommitStatus.Committed.ToString());
         Assert.Single(results, item => item == GovernedLoopAdmissionStoreCommitStatus.GenerationConflict.ToString());
+    }
+
+    [Fact]
+    public async Task Early_child_gate_wait_remains_open_past_the_complete_sibling_readiness_window()
+    {
+        using var workspace = new TestWorkspace();
+        var gate = workspace.File("gate");
+        var simulatedSiblingReadinessWindow = TimeSpan.FromMilliseconds(100);
+        var gateWait = WaitForGateAsync(gate, simulatedSiblingReadinessWindow + TimeSpan.FromSeconds(10));
+
+        await Task.Delay(simulatedSiblingReadinessWindow + TimeSpan.FromMilliseconds(100));
+
+        Assert.False(gateWait.IsCompleted);
+        Assert.Equal(ChildReadinessTimeoutSeconds + GateReleaseMarginSeconds, GateTimeoutSeconds);
+        Assert.True(GateTimeoutSeconds > ChildReadinessTimeoutSeconds);
+        await File.WriteAllTextAsync(gate, "go");
+        await gateWait;
     }
 
     [Theory]
@@ -620,7 +641,7 @@ public sealed class GovernedLoopAdmissionStoreTests
         var ready = workspace.File("ready");
         var output = workspace.File("output");
         using var process = StartCrossProcessHost(mode, workspace.RootPath, trustRoot.RootPath, gate, ready, output, "admit-one");
-        await WaitForPathAsync(ready);
+        await WaitForChildReadyAsync(process, ready);
         await File.WriteAllTextAsync(gate, "go");
         await process.WaitForExitAsync();
         Assert.NotEqual(0, process.ExitCode);
@@ -671,7 +692,7 @@ public sealed class GovernedLoopAdmissionStoreTests
         var output = Environment.GetEnvironmentVariable(CrossProcessOutput)!;
         var operation = Environment.GetEnvironmentVariable(CrossProcessOperation)!;
         await File.WriteAllTextAsync(ready, "ready");
-        await WaitForPathAsync(gate);
+        await WaitForGateAsync(gate);
         GovernedLoopAdmissionStoreOptions? options = usesExpectedTerminationHost
             ? new GovernedLoopAdmissionStoreOptions
             {
@@ -928,12 +949,117 @@ public sealed class GovernedLoopAdmissionStoreTests
             .Select(path => $"{Path.GetRelativePath(directory, path)}|{Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)))}")
             .ToArray();
 
-    private static async Task WaitForPathAsync(string path)
+    private static async Task WaitForChildrenReadyAsync(Process first, string firstReadyPath, Process second, string secondReadyPath)
     {
+        var wait = Stopwatch.StartNew();
+        while (!File.Exists(firstReadyPath) || !File.Exists(secondReadyPath))
+        {
+            if (first.HasExited || second.HasExited)
+            {
+                var exitedLabel = first.HasExited ? "first" : "second";
+                var exitedPath = first.HasExited ? firstReadyPath : secondReadyPath;
+                var evidence = await StopAndReadChildEvidenceAsync(first, second);
+                Assert.Fail($"Cross-process admission writer '{exitedLabel}' exited before publishing `{exitedPath}`.{Environment.NewLine}{evidence}");
+            }
+
+            if (wait.Elapsed >= TimeSpan.FromSeconds(ChildReadinessTimeoutSeconds))
+            {
+                var evidence = await StopAndReadChildEvidenceAsync(first, second);
+                Assert.Fail($"Cross-process admission writers did not both report ready within {ChildReadinessTimeoutSeconds} seconds. first_ready={File.Exists(firstReadyPath)} second_ready={File.Exists(secondReadyPath)}{Environment.NewLine}{evidence}");
+            }
+
+            await Task.Delay(10);
+        }
+    }
+
+    private static async Task WaitForChildReadyAsync(Process process, string readyPath)
+    {
+        var wait = Stopwatch.StartNew();
+        while (!File.Exists(readyPath))
+        {
+            if (process.HasExited)
+            {
+                var evidence = await ReadChildEvidenceAsync("child", process);
+                Assert.Fail($"Cross-process admission host exited before publishing `{readyPath}`.{Environment.NewLine}{evidence}");
+            }
+
+            if (wait.Elapsed >= TimeSpan.FromSeconds(ChildReadinessTimeoutSeconds))
+            {
+                await StopChildProcessAsync(process);
+                var evidence = await ReadChildEvidenceAsync("child", process);
+                Assert.Fail($"Cross-process admission host did not report ready within {ChildReadinessTimeoutSeconds} seconds: `{readyPath}`.{Environment.NewLine}{evidence}");
+            }
+
+            await Task.Delay(10);
+        }
+    }
+
+    private static async Task<string> StopAndReadChildEvidenceAsync(Process first, Process second)
+    {
+        await Task.WhenAll(StopChildProcessAsync(first), StopChildProcessAsync(second));
+        var evidence = await Task.WhenAll(ReadChildEvidenceAsync("first", first), ReadChildEvidenceAsync("second", second));
+        return string.Join(Environment.NewLine, evidence);
+    }
+
+    private static async Task StopChildProcessAsync(Process process)
+    {
+        if (process.HasExited)
+        {
+            return;
+        }
+
+        try
+        {
+            process.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException) when (process.HasExited)
+        {
+        }
+
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (TimeoutException)
+        {
+        }
+    }
+
+    private static async Task<string> ReadChildEvidenceAsync(string label, Process process)
+    {
+        if (!process.HasExited)
+        {
+            return $"{label}: pid={process.Id} exit=<still-running> stdout=<unavailable> stderr=<unavailable>";
+        }
+
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        await Task.WhenAll(outputTask, errorTask);
+        return $"{label}: pid={process.Id} exit={process.ExitCode} stdout={BoundChildEvidence(outputTask.Result)} stderr={BoundChildEvidence(errorTask.Result)}";
+    }
+
+    private static string BoundChildEvidence(string evidence)
+    {
+        if (string.IsNullOrEmpty(evidence))
+        {
+            return "<empty>";
+        }
+
+        return evidence.Length <= MaximumChildEvidenceCharacters
+            ? evidence
+            : "<truncated>" + evidence[^MaximumChildEvidenceCharacters..];
+    }
+
+    private static Task WaitForGateAsync(string path)
+        => WaitForGateAsync(path, TimeSpan.FromSeconds(GateTimeoutSeconds));
+
+    private static async Task WaitForGateAsync(string path, TimeSpan timeout)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
         var wait = Stopwatch.StartNew();
         while (!File.Exists(path))
         {
-            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(15), $"Cross-process admission host did not publish `{path}`.");
+            Assert.True(wait.Elapsed < timeout, $"Cross-process admission host did not observe gate `{path}`.");
             await Task.Delay(10);
         }
     }
