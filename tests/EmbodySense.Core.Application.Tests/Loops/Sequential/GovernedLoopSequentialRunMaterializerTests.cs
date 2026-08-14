@@ -352,12 +352,16 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
     internal static async Task<TestContext> ContextAsync(
         bool includeConversation = true,
         string surface = "web",
-        bool allowWorkspaceTools = false)
+        bool allowWorkspaceTools = false,
+        int inferenceCount = 1,
+        IReadOnlyList<string>? inferenceIds = null)
     {
         var seedHarness = GovernedLoopAdmissionTestHarness.Create();
         var seedOutcome = Assert.IsType<GovernedLoopAdmissionTerminalOutcome>((await seedHarness.CreateService().AdmitAsync(seedHarness.Request)).Outcome);
         var seedReceipt = Assert.IsType<GovernedLoopAdmissionReceipt>(seedOutcome.Receipt);
         var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(
+            inferenceCount,
+            inferenceIds,
             owningRole: seedReceipt.Intent.Role,
             allowWorkspaceTools: allowWorkspaceTools);
         var publication = GovernedLoopRevisionPublicationPinFactory.Create(

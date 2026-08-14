@@ -24,7 +24,9 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// </summary>
 /// <remarks>
 /// Run mutation uses optimistic lifecycle versions plus process-local and cross-process serialization. Artifacts are bounded,
-/// written through sibling temporary files, flushed, and renamed at the single-file commit boundary. The discovery index is
+/// written through sibling temporary files, flushed, and renamed at the single-file commit boundary. Canonical lifecycle,
+/// append-only run evidence, and the hash-bound execution frontier therefore become visible atomically in the same artifact;
+/// a frontier cannot advance before its referenced outcome event is retained. The discovery index is
 /// derived acceleration data and is repaired from canonical artifacts when safely possible; unsupported index versions remain
 /// explicit failures. Duplicate identities, corrupt JSON, unknown fields, unsupported run shapes, broken evidence ordering, or
 /// ambiguous recovery state throw <see cref="FormatException"/>. No legacy run reader or automatic schema migration is provided.

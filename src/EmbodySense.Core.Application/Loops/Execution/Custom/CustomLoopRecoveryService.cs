@@ -1,13 +1,19 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using System.Text;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
@@ -15,9 +21,10 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 /// Parks interrupted nonterminal runs at the last provable checkpoint without automatically dispatching work.
 /// </summary>
 /// <remarks>
-/// Recovery distinguishes a checkpointed interruption from an open provider attempt. Open or incomplete admission evidence moves
-/// the run to review. An exact authenticated canonical completion or definitive rejection closes its matching attempt, but recovery
-/// only parks that evidence at Paused for a later explicit resume; it never advances a checkpoint or resumes execution automatically.
+/// Recovery distinguishes a checkpointed interruption from an unresolved canonical attempt, including a durable Running frontier
+/// claim with no matching dispatch-start event. Open or incomplete admission evidence moves the run to review. An exact authenticated
+/// canonical completion or definitive rejection closes its matching attempt, but recovery only parks that evidence at Paused for a
+/// later explicit resume; it never advances a checkpoint or resumes execution automatically.
 /// </remarks>
 public sealed class CustomLoopRecoveryService
 {
@@ -75,8 +82,9 @@ public sealed class CustomLoopRecoveryService
             return Result(CustomLoopRecoveryStatus.Unchanged, run, "The run is already Paused; restart recovery never starts execution automatically.");
         }
 
-        // Open provider-attempt evidence makes the external outcome uncertain. Such a run requires
-        // review; recovery never guesses whether the provider completed or silently retries it.
+        // Open canonical-attempt evidence makes the outcome uncertain. This includes a durable
+        // Running frontier claim that committed before its matching dispatch-start event. Such a
+        // run requires review; recovery never guesses whether node work started or silently retries it.
         var target = !admissionAuditComplete
             ? CustomLoopRunStatus.NeedsReview
             : run.Status switch
@@ -99,7 +107,7 @@ public sealed class CustomLoopRecoveryService
         {
             (_, CustomLoopRunStatus.NeedsReview) when !admissionAuditComplete => "Restart recovery found no valid durable admission-audit completion marker; execution is permanently stopped for review.",
             (CustomLoopRunStatus.Admitted, CustomLoopRunStatus.Paused) => "Restart recovery parked the admitted run at Paused without dispatch.",
-            (_, CustomLoopRunStatus.NeedsReview) => "Restart recovery found provider-attempt evidence after the last committed checkpoint; execution remains stopped for review.",
+            (_, CustomLoopRunStatus.NeedsReview) => "Restart recovery found an unresolved canonical attempt after the last committed checkpoint; execution remains stopped for review.",
             (CustomLoopRunStatus.CancelRequested, CustomLoopRunStatus.Cancelled) => "Restart recovery proved there was no open attempt after the checkpoint and completed cancellation without dispatch.",
             _ => "Restart recovery parked the interrupted run at its last proved checkpoint without dispatch."
         };
@@ -197,7 +205,12 @@ public sealed class CustomLoopRecoveryService
         };
     }
 
-    private static CustomLoopRunRecord CreateCandidate(CustomLoopRunRecord run, CustomLoopRunStatus status, string? failureCode, string detail, DateTimeOffset now)
+    private static CustomLoopRunRecord CreateCandidate(
+        CustomLoopRunRecord run,
+        CustomLoopRunStatus status,
+        string? failureCode,
+        string detail,
+        DateTimeOffset now)
     {
         var terminal = status is CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview;
         var lifecycle = new CustomLoopRunEvent(run.Events.Length + 1, $"recovery-{Guid.NewGuid():N}", now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, detail, [], null, null, null, null, null, null, null, null, null, null);
@@ -211,15 +224,75 @@ public sealed class CustomLoopRecoveryService
             Events = [.. run.Events, lifecycle],
             FinalOutput = null,
             FailureCode = status == CustomLoopRunStatus.NeedsReview ? failureCode : null,
-            FailureDetail = status == CustomLoopRunStatus.NeedsReview ? detail : null
+            FailureDetail = status == CustomLoopRunStatus.NeedsReview ? detail : null,
+            Frontier = ProjectCanonicalFrontier(run, status, now),
         };
+    }
+
+    private static GovernedLoopFrontierPosture? ProjectCanonicalFrontier(
+        CustomLoopRunRecord run,
+        CustomLoopRunStatus status,
+        DateTimeOffset now)
+    {
+        if (run.SequentialAdapterBinding is not { } binding
+            || run.Frontier is not { } frontier
+            || status == CustomLoopRunStatus.NeedsReview && frontier.Payload.Status == GovernedLoopFrontierStatus.ReviewBlocked)
+        {
+            return run.Frontier;
+        }
+
+        var transition = status switch
+        {
+            CustomLoopRunStatus.NeedsReview when frontier.Payload.Nodes[^1].Status == GovernedLoopNodeExecutionStatus.Running
+                => GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(frontier, binding, null, null, now),
+            CustomLoopRunStatus.NeedsReview when frontier.Payload.Nodes.All(node => node.Status != GovernedLoopNodeExecutionStatus.Running)
+                => GovernedLoopSequentialFrontierMachine.ReviewBlockAggregate(frontier, binding, now),
+            CustomLoopRunStatus.Cancelled
+                => GovernedLoopSequentialFrontierMachine.CancelCurrent(frontier, binding, now),
+            _ => null,
+        };
+        if (transition is null)
+        {
+            return run.Frontier;
+        }
+
+        return transition.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied
+            && transition.Frontier is not null
+                ? transition.Frontier
+                : throw new InvalidOperationException(
+                    "Restart recovery could not atomically project the canonical frontier to its lifecycle posture.");
     }
 
     private static bool HasOpenAttemptSinceCheckpoint(CustomLoopRunRecord run)
     {
-        return run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence
+        var hasUnresolvedDispatch = run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence
             && item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted
             && !HasAuthenticatedTerminalSequentialOutcome(run, item));
+        return hasUnresolvedDispatch || HasUnresolvedRunningFrontierClaim(run);
+    }
+
+    private static bool HasUnresolvedRunningFrontierClaim(CustomLoopRunRecord run)
+    {
+        var runningNodes = run.Frontier?.Payload.Nodes
+            .Where(node => node.Status == GovernedLoopNodeExecutionStatus.Running)
+            .Take(2)
+            .ToArray() ?? [];
+        if (runningNodes.Length != 1)
+        {
+            return false;
+        }
+
+        var running = runningNodes[0];
+        var exactStarts = run.Events.Where(item => item.Sequence > run.Checkpoint.LastCommittedSequence
+            && item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted
+            && string.Equals(item.EventId, running.AttemptOperationId, StringComparison.Ordinal)
+            && item.SequentialNodeEvidence is { } dispatch
+            && string.Equals(dispatch.NodeId, running.NodeId, StringComparison.Ordinal)
+            && dispatch.Attempt == running.Attempt
+            && StartedAttemptMatchesFrontier(run, item, dispatch))
+            .Take(2)
+            .ToArray();
+        return exactStarts.Length != 1 || !HasAuthenticatedTerminalSequentialOutcome(run, exactStarts[0]);
     }
 
     private static bool HasAuthenticatedTerminalSequentialOutcome(CustomLoopRunRecord run, CustomLoopRunEvent started)
@@ -229,37 +302,84 @@ public sealed class CustomLoopRecoveryService
                 Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
                 Disposition: CustomLoopSequentialNodeDisposition.Unknown,
             } dispatch
+            || started.Kind is not (CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
+            || started.Iteration is not > 0
+            || started.Attempt != dispatch.Attempt
+            || run.SequentialAdapterBinding is not { } binding
+            || !SequentialBindingMatchesRun(dispatch, run, binding)
             || !CustomLoopSequentialNodeEvidenceHash.Matches(dispatch)
-            || !CustomLoopSequentialOutcomeArtifactHash.Matches(started))
+            || !CustomLoopSequentialOutcomeArtifactHash.Matches(started)
+            || !StartedAttemptMatchesFrontier(run, started, dispatch))
         {
             return false;
         }
 
-        return run.Events.Any(item => item.Sequence > started.Sequence
+        var terminals = run.Events.Where(item => item.Sequence > started.Sequence
             && item.SequentialNodeEvidence is { } outcome
             && item.Iteration == started.Iteration
             && string.Equals(item.StepId, started.StepId, StringComparison.Ordinal)
             && item.Attempt == started.Attempt
+            && SameSequentialBinding(outcome, dispatch)
             && string.Equals(outcome.NodeId, dispatch.NodeId, StringComparison.Ordinal)
             && outcome.Attempt == dispatch.Attempt
-            && IsResolvedSequentialOutcome(outcome)
+            && IsResolvedSequentialOutcome(item.Kind, outcome)
             && CustomLoopSequentialNodeEvidenceHash.Matches(outcome)
-            && CustomLoopSequentialOutcomeArtifactHash.Matches(item));
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(item))
+            .Take(2)
+            .ToArray();
+        return terminals.Length == 1;
     }
 
-    private static bool IsResolvedSequentialOutcome(CustomLoopSequentialNodeEvidence evidence)
+    private static bool StartedAttemptMatchesFrontier(
+        CustomLoopRunRecord run,
+        CustomLoopRunEvent started,
+        CustomLoopSequentialNodeEvidence dispatch)
     {
-        return evidence is
+        var matchingNodes = run.Frontier?.Payload.Nodes.Where(node => node is
         {
-            Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
-            Disposition: CustomLoopSequentialNodeDisposition.Completed,
+            Attempt: { } attempt,
+            AttemptOperationId: { } attemptOperationId,
         }
-            or
-        {
-            Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
-            Disposition: CustomLoopSequentialNodeDisposition.Rejected,
-        };
+            && attempt == dispatch.Attempt
+            && started.Attempt == attempt
+            && string.Equals(attemptOperationId, started.EventId, StringComparison.Ordinal)
+            && string.Equals(node.NodeId, dispatch.NodeId, StringComparison.Ordinal)
+            && string.Equals(
+                started.StepId,
+                node.Descriptor.Kind == GovernedLoopNodeKind.Exit ? "exit" : node.NodeId,
+                StringComparison.Ordinal))
+            .Take(2)
+            .ToArray() ?? [];
+        return matchingNodes.Length == 1;
     }
+
+    private static bool SequentialBindingMatchesRun(
+        CustomLoopSequentialNodeEvidence evidence,
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialAdapterBinding binding)
+        => string.Equals(evidence.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(evidence.RunId, run.Id, StringComparison.Ordinal)
+            && Equals(evidence.Revision, binding.ExecutionBinding.Revision)
+            && evidence.ExecutionGeneration == binding.ExecutionBinding.ExecutionGeneration;
+
+    private static bool SameSequentialBinding(
+        CustomLoopSequentialNodeEvidence candidate,
+        CustomLoopSequentialNodeEvidence expected)
+        => string.Equals(candidate.WorkspaceId, expected.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(candidate.RunId, expected.RunId, StringComparison.Ordinal)
+            && Equals(candidate.Revision, expected.Revision)
+            && candidate.ExecutionGeneration == expected.ExecutionGeneration;
+
+    private static bool IsResolvedSequentialOutcome(
+        CustomLoopRunEventKind eventKind,
+        CustomLoopSequentialNodeEvidence evidence)
+        => (eventKind, evidence.Kind, evidence.Disposition) is
+            (CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.ExitDecisionCompleted,
+                CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                CustomLoopSequentialNodeDisposition.Completed)
+            or (CustomLoopRunEventKind.NodeAttemptFailed,
+                CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+                CustomLoopSequentialNodeDisposition.Rejected);
 
     private static CustomLoopExecutionClock StopAtLastDurableUpdate(CustomLoopExecutionClock clock, DateTimeOffset durableStop)
     {

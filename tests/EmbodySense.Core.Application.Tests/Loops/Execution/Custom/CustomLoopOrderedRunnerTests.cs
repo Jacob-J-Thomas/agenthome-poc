@@ -19,7 +19,9 @@ using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Tests.Loops.Admission;
@@ -39,6 +41,7 @@ using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Authority;
 using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -217,14 +220,17 @@ public sealed class CustomLoopOrderedRunnerTests
     [Theory]
     [InlineData(PublicationAuthorityBehavior.DefinitiveDeny)]
     [InlineData(PublicationAuthorityBehavior.DefinitiveDenyReplay)]
-    public async Task Exact_new_or_replayed_durable_publication_deny_fails_without_append_or_fabricated_outcome(
+    public async Task Exact_new_or_replayed_durable_publication_deny_after_completed_exit_requires_review_without_append(
         PublicationAuthorityBehavior behavior)
     {
         var result = await RunWithPublicationAuthorityAsync(behavior);
 
         AssertValidAuthorityDecision(result.Authority.LastDecision);
-        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Result.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Result.Status);
         Assert.Equal("conversation_publication_authority_denied", result.Result.Run!.FailureCode);
+        Assert.Equal("Exact durable authority denied the canonical conversation publication before append.", result.Result.Run.FailureDetail);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, result.Result.Run.Frontier!.Payload.Status);
+        AssertCompletedOutcomeIsSoleCurrentNodeTerminal(result.Result.Run);
         Assert.Single(result.Publisher.Requests);
         Assert.Equal(0, result.Publisher.AppendCount);
         Assert.DoesNotContain(result.Result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublished);
@@ -1058,6 +1064,7 @@ public sealed class CustomLoopOrderedRunnerTests
 
         Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
         Assert.Equal("run_deadline_exceeded", result.Run!.FailureCode);
+        Assert.Equal(GovernedLoopFrontierStatus.Failed, result.Run.Frontier!.Payload.Status);
         Assert.Empty(executor.Requests);
         Assert.Empty(publisher.Requests);
         Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Rejected, evidence.Requests[^1].Disposition);
@@ -1119,7 +1126,7 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
-    public async Task Canonical_deadline_before_deterministic_exit_is_a_run_boundary_and_never_dispatches_the_exit_node()
+    public async Task Canonical_deadline_before_deterministic_exit_rejects_selected_exit_without_provider_dispatch()
     {
         var context = await SequentialContextAsync(Run(SequentialDefinition()));
         var store = new FakeRunStore(context.Run);
@@ -1135,11 +1142,20 @@ public sealed class CustomLoopOrderedRunnerTests
 
         Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
         Assert.Equal("run_deadline_exceeded", result.Run!.FailureCode);
+        Assert.Equal(GovernedLoopFrontierStatus.Failed, result.Run.Frontier!.Payload.Status);
         Assert.Single(executor.Requests);
         Assert.Empty(publisher.Requests);
-        Assert.Equal(["trigger", "infer-01"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
-        Assert.DoesNotContain(result.Run.Events, item => item.StepId == "exit");
-        Assert.Single(evidence.AuditRequests);
+        Assert.Equal(["trigger", "infer-01", "exit"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Rejected, evidence.Requests[^1].Disposition);
+        var rejection = Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            Disposition: CustomLoopSequentialNodeDisposition.Rejected,
+            NodeId: "exit",
+        });
+        Assert.Equal(result.Run.Frontier.Payload.Nodes[^1].OutcomeEvidenceId, rejection.EventId);
+        Assert.Equal(result.Run.Frontier.Payload.Nodes[^1].OutcomeEvidenceHash, rejection.SequentialNodeEvidence!.OutcomeArtifactHash);
+        Assert.Equal(2, evidence.AuditRequests.Count);
     }
 
     [Fact]
@@ -1161,6 +1177,71 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Empty(executor.Requests);
         Assert.Empty(evidence.Requests);
         Assert.Empty(store.Writes);
+    }
+
+    [Fact]
+    public async Task Canonical_cancellation_after_running_claim_cancels_frontier_before_handler_or_provider_dispatch()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var store = new FakeRunStore(context.Run)
+        {
+            AfterUpdate = candidate =>
+            {
+                if (candidate.Frontier?.Payload.Nodes[^1].Status == GovernedLoopNodeExecutionStatus.Running
+                    && !candidate.Events.Any(item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted }))
+                {
+                    cancellation.Cancel();
+                }
+
+                return Task.CompletedTask;
+            },
+        };
+        var executor = new QueueExecutor(Result("must not run"));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.RunAsync(
+            new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web),
+            cancellation.Token);
+
+        Assert.True(result.Status == CustomLoopOrderedRunStatus.Cancelled, $"{result.Detail} {result.Run?.FailureCode}: {result.Run?.FailureDetail} Validation: {string.Join("; ", store.ValidationFailures.Select(item => item.Code + ": " + item.Message))}");
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Cancelled, result.Run.Frontier!.Payload.Status);
+        Assert.Empty(executor.Requests);
+        Assert.Equal(["trigger"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.DoesNotContain(result.Run.Events, item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted });
+    }
+
+    [Fact]
+    public async Task Canonical_missing_or_substituted_frontier_never_falls_back_to_legacy_dispatch()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var substitute = await SequentialContextAsync(Run(SequentialDefinition(inferenceCount: 2)));
+        foreach (var invalidRun in new[]
+        {
+            context.Run with { Frontier = null },
+            context.Run with { Frontier = substitute.Run.Frontier },
+        })
+        {
+            var store = new FakeRunStore(invalidRun, validateSeed: false);
+            var executor = new QueueExecutor(Result("must not run"));
+            var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+            var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+            var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+                1,
+                context.Anchor,
+                context.Plan,
+                context.Artifact,
+                AuditSchema.Actors.Web));
+
+            Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, result.Status);
+            Assert.False(result.ProviderWasInvoked);
+            Assert.Empty(executor.Requests);
+            Assert.Empty(evidence.Requests);
+            Assert.Empty(store.Writes);
+        }
     }
 
     [Fact]
@@ -1374,16 +1455,15 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
-    public async Task Canonical_durable_pause_at_the_final_dispatch_boundary_resumes_with_the_next_attempt()
+    public async Task Canonical_durable_pause_at_the_final_dispatch_boundary_blocks_automatic_retry()
     {
         var context = await SequentialContextAsync(Run(SequentialDefinition()));
-        var ledger = new SequentialAuditLedger();
         var firstStore = new FakeRunStore(context.Run);
         var firstExecutor = new QueueExecutor(Result("must not run"));
         var audit = new RecordingAuditLog();
         var firstRunner = Runner(firstStore, firstExecutor, audit: audit);
         var lifecycle = new CustomLoopLifecycleService(firstStore, new FakeControlOperationStore(), firstRunner, new AvailableModel(), firstRunner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
-        var firstEvidence = new SequentialEvidenceHarness(firstStore, context.Evidence, ledger);
+        var firstEvidence = new SequentialEvidenceHarness(firstStore, context.Evidence);
         var firstAdapter = new GovernedLoopSequentialOrderedRuntimeAdapter(firstRunner, firstEvidence, firstEvidence);
         CustomLoopControlResult? pause = null;
         audit.AfterAppend = async auditEvent =>
@@ -1403,32 +1483,322 @@ public sealed class CustomLoopOrderedRunnerTests
         var firstRejection = Assert.Single(paused.Run!.Events, item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection });
         Assert.Equal(1, firstRejection.Attempt);
 
-        var resumable = ResumeReady(paused.Run, "resume-canonical-paused-attempt");
-        var resumedStore = new FakeRunStore(resumable);
-        var resumedExecutor = new QueueExecutor(Result("resumed outcome"));
-        var resumedAudit = new RecordingAuditLog();
-        var resumedEvidence = new SequentialEvidenceHarness(resumedStore, context.Evidence, ledger);
-        var resumedAdapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(resumedStore, resumedExecutor, audit: resumedAudit), resumedEvidence, resumedEvidence);
-
-        var resumed = await resumedAdapter.ResumeAsync(new GovernedLoopSequentialOrderedResumeRequest(
-            1,
-            context.Anchor,
-            context.Plan,
-            context.Artifact,
-            resumable.LifecycleVersion,
+        var resumed = await lifecycle.ResumeAsync(new CustomLoopResumeRequest(
+            paused.Run.Id,
+            paused.Run.LifecycleVersion,
             "resume-canonical-paused-attempt",
             AuditSchema.Actors.Cli));
 
-        Assert.True(resumed.Status == CustomLoopOrderedRunStatus.Completed, resumed.Detail);
-        Assert.Single(resumedExecutor.Requests);
-        Assert.Equal(2, resumedExecutor.Requests[0].Attempt);
-        Assert.Equal([1, 2], resumed.Run!.Events
-            .Where(item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted && item.StepId == "infer-01")
-            .Select(item => item.Attempt));
-        var resumedStartAudit = Assert.Single(resumedAudit.Events, item => item.Action == AuditSchema.Actions.LoopNodeAttempt && item.Outcome == AuditSchema.Outcomes.Started);
-        Assert.Equal(2, Assert.IsType<int>(resumedStartAudit.Metadata["attempt"]));
-        Assert.Single(resumed.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted && item.StepId == "infer-01" && item.Attempt == 2);
-        Assert.DoesNotContain(resumed.Run.Events, item => item.ToolEvidence is not null);
+        Assert.Equal(CustomLoopControlStatus.NeedsReview, resumed.Status);
+        Assert.Empty(firstExecutor.Requests);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, resumed.Run!.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, resumed.Run.Frontier!.Payload.Status);
+        Assert.Single(resumed.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted && item.StepId == "infer-01");
+        Assert.DoesNotContain(resumed.Run.Events, item => item.Attempt == 2);
+    }
+
+    [Fact]
+    public async Task Canonical_paused_review_blocked_frontier_cancels_without_provider_or_attempt_retry()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("must not run"));
+        var audit = new RecordingAuditLog();
+        var runner = Runner(store, executor, audit: audit);
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(runner, evidence, evidence);
+        audit.AfterAppend = async auditEvent =>
+        {
+            if (auditEvent.Action == AuditSchema.Actions.LoopNodeAttempt && auditEvent.Outcome == AuditSchema.Outcomes.Started)
+            {
+                _ = await lifecycle.PauseAsync(new CustomLoopPauseRequest(store.Current.Id, store.Current.LifecycleVersion, "pause-canonical-before-cancel", AuditSchema.Actors.Web));
+            }
+        };
+
+        var paused = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
+        var cancelled = await lifecycle.CancelAsync(new CustomLoopCancelRequest(
+            paused.Run!.Id,
+            paused.Run.LifecycleVersion,
+            "cancel-canonical-paused-run",
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Paused, paused.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, paused.Run.Frontier!.Payload.Status);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, cancelled.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, cancelled.Run!.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Cancelled, cancelled.Run.Frontier!.Payload.Status);
+        Assert.Empty(executor.Requests);
+        Assert.DoesNotContain(cancelled.Run.Events, item => item.Attempt == 2);
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Canonical_resume_with_missing_or_substituted_pinned_graph_restores_the_undispatched_ready_checkpoint(bool substituteArtifact)
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        context.Store.GraphReadResult = substituteArtifact
+            ? new GovernedLoopGraphRevisionArtifactReadResult(
+                GovernedLoopRevisionStoreReadStatus.Ready,
+                3,
+                GovernedLoopSequentialApplicationTestFixture.LinearArtifact(2, owningRole: context.Artifact.Graph.OwningRole))
+            : new GovernedLoopGraphRevisionArtifactReadResult(GovernedLoopRevisionStoreReadStatus.NotFound, 3, null);
+        var paused = PausedAtCanonicalReadyCheckpoint(context.Run);
+        var store = new FakeRunStore(paused);
+        var executor = new QueueExecutor(Result("must not run"));
+        var audit = new RecordingAuditLog();
+        var runner = Runner(store, executor, audit: audit);
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(runner, evidence, evidence);
+        var resumeExecutor = new GovernedLoopSequentialResumeExecutor(
+            store,
+            evidence,
+            context.Store,
+            context.Store,
+            adapter,
+            runner);
+        var lifecycle = new CustomLoopLifecycleService(
+            store,
+            new FakeControlOperationStore(),
+            resumeExecutor,
+            new AvailableModel(),
+            runner,
+            audit,
+            new TestExecutionGate(),
+            new FixedTimeProvider(_now.AddSeconds(2)));
+
+        var result = await lifecycle.ResumeAsync(new CustomLoopResumeRequest(
+            paused.Id,
+            paused.LifecycleVersion,
+            substituteArtifact ? "resume-substituted-pinned-graph" : "resume-missing-pinned-graph",
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Paused, result.Run!.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Active, result.Run.Frontier!.Payload.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, result.Run.Frontier.Payload.Nodes[^1].Status);
+        Assert.DoesNotContain(result.Run.Frontier.Payload.Nodes, node => node.Status == GovernedLoopNodeExecutionStatus.Running);
+        Assert.Equal([CustomLoopRunStatus.Running, CustomLoopRunStatus.Paused], store.Writes.Select(item => item.Status));
+        Assert.Empty(executor.Requests);
+        Assert.Equal(0, executor.ProviderRequestStartedCount);
+        Assert.Empty(evidence.Requests);
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Canonical_resume_with_incomplete_admission_audit_preserves_the_paused_ready_checkpoint_without_fabricating_an_attempt()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var paused = PausedAtCanonicalReadyCheckpoint(context.Run, retainAdmissionAudit: false);
+        var store = new FakeRunStore(paused);
+        var executor = new QueueExecutor(Result("must not run"));
+        var audit = new RecordingAuditLog();
+        var runner = Runner(store, executor, audit: audit);
+        var gate = new TestExecutionGate();
+        var lifecycle = new CustomLoopLifecycleService(
+            store,
+            new FakeControlOperationStore(),
+            runner,
+            new AvailableModel(),
+            runner,
+            audit,
+            gate,
+            new FixedTimeProvider(_now.AddSeconds(2)));
+
+        var result = await lifecycle.ResumeAsync(new CustomLoopResumeRequest(
+            paused.Id,
+            paused.LifecycleVersion,
+            "resume-canonical-incomplete-audit",
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Paused, result.Run!.Status);
+        Assert.Equal(paused.LifecycleVersion, result.Run.LifecycleVersion);
+        Assert.Equal(GovernedLoopFrontierStatus.Active, result.Run.Frontier!.Payload.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, result.Run.Frontier.Payload.Nodes[^1].Status);
+        Assert.DoesNotContain(result.Run.Frontier.Payload.Nodes, node => node.Status == GovernedLoopNodeExecutionStatus.Running);
+        Assert.Empty(store.Writes);
+        Assert.Empty(executor.Requests);
+        Assert.Equal(0, gate.AcquisitionCount);
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Restart_recovery_quarantines_an_incomplete_canonical_admission_at_its_undispatched_ready_checkpoint()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var interrupted = PausedAtCanonicalReadyCheckpoint(context.Run, retainAdmissionAudit: false);
+        var ready = interrupted.Frontier!.Payload.Nodes[^1];
+        var store = new FakeRunStore(interrupted);
+        var audit = new RecordingAuditLog();
+
+        var recovered = Assert.Single(await new CustomLoopRecoveryService(
+            store,
+            audit,
+            new FixedTimeProvider(interrupted.UpdatedAtUtc.AddSeconds(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.NeedsReview, recovered.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store.Current.Status);
+        Assert.Equal("recovery_incomplete_admission_audit", store.Current.FailureCode);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, store.Current.Frontier!.Payload.Status);
+        var blocked = store.Current.Frontier.Payload.Nodes[^1];
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, blocked.Status);
+        Assert.Equal(ready.Attempt, blocked.Attempt);
+        Assert.Equal(ready.AttemptOperationId, blocked.AttemptOperationId);
+        Assert.Equal(ready.OutcomeEvidenceId, blocked.OutcomeEvidenceId);
+        Assert.Equal(ready.OutcomeEvidenceHash, blocked.OutcomeEvidenceHash);
+        Assert.DoesNotContain(store.Current.Events, item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.NodeAttemptCompleted);
+        Assert.All(audit.Events, item => Assert.Equal(false, item.Metadata["admissionAuditComplete"]));
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Restart_recovery_completes_cancellation_from_an_undispatched_canonical_ready_checkpoint()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var running = ResumeReady(PausedAtCanonicalReadyCheckpoint(context.Run), "resume-canonical-ready-for-recovery");
+        var store = new FakeRunStore(running);
+        var executor = new QueueExecutor(Result("must not run"));
+        var lifecycleAudit = new RecordingAuditLog();
+        var runner = Runner(store, executor, audit: lifecycleAudit);
+        var cancellationSignal = new NoActiveAttemptCancellationSignal();
+        var lifecycle = new CustomLoopLifecycleService(
+            store,
+            new FakeControlOperationStore(),
+            runner,
+            new AvailableModel(),
+            cancellationSignal,
+            lifecycleAudit,
+            new TestExecutionGate(),
+            new FixedTimeProvider(running.UpdatedAtUtc.AddSeconds(1)));
+        var cancel = await lifecycle.CancelAsync(new CustomLoopCancelRequest(
+            running.Id,
+            running.LifecycleVersion,
+            "cancel-canonical-ready-for-recovery",
+            AuditSchema.Actors.Web));
+
+        Assert.True(cancel.Status == CustomLoopControlStatus.CancelRequested, cancel.Detail);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, store.Current.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Active, store.Current.Frontier!.Payload.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, store.Current.Frontier.Payload.Nodes[^1].Status);
+
+        var recoveryAudit = new RecordingAuditLog();
+        var recovered = Assert.Single(await new CustomLoopRecoveryService(
+            store,
+            recoveryAudit,
+            new FixedTimeProvider(store.Current.UpdatedAtUtc.AddSeconds(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.Cancelled, recovered.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, store.Current.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Cancelled, store.Current.Frontier!.Payload.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, store.Current.Frontier.Payload.Nodes[^1].Status);
+        Assert.Null(store.Current.FailureCode);
+        Assert.DoesNotContain(store.Current.Events, item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.NodeAttemptCompleted);
+        Assert.All(recoveryAudit.Events, item => Assert.Equal(false, item.Metadata["openAttemptAfterCheckpoint"]));
+        Assert.Equal(1, cancellationSignal.RequestCount);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Canonical_resume_failure_after_the_exact_attempt_claim_projects_review_without_provider_dispatch_or_synthetic_outcome()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var paused = PausedAtCanonicalReadyCheckpoint(context.Run);
+        var store = new FakeRunStore(paused)
+        {
+            AfterUpdate = candidate => candidate.Frontier?.Payload.Nodes[^1].Status == GovernedLoopNodeExecutionStatus.Running
+                ? throw new IOException("Crash after the exact frontier attempt claim.")
+                : Task.CompletedTask,
+        };
+        var executor = new QueueExecutor(Result("must not run"));
+        var audit = new RecordingAuditLog();
+        var runner = Runner(store, executor, audit: audit);
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(runner, evidence, evidence);
+        var resumeExecutor = new GovernedLoopSequentialResumeExecutor(
+            store,
+            evidence,
+            context.Store,
+            context.Store,
+            adapter,
+            runner);
+        var lifecycle = new CustomLoopLifecycleService(
+            store,
+            new FakeControlOperationStore(),
+            resumeExecutor,
+            new AvailableModel(),
+            runner,
+            audit,
+            new TestExecutionGate(),
+            new FixedTimeProvider(_now.AddSeconds(2)));
+
+        var result = await lifecycle.ResumeAsync(new CustomLoopResumeRequest(
+            paused.Id,
+            paused.LifecycleVersion,
+            "resume-after-canonical-attempt-claim",
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run!.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, result.Run.Frontier!.Payload.Status);
+        var blocked = result.Run.Frontier.Payload.Nodes[^1];
+        Assert.Equal(GovernedLoopNodeExecutionStatus.ReviewBlocked, blocked.Status);
+        Assert.Equal(1, blocked.Attempt);
+        Assert.NotNull(blocked.AttemptOperationId);
+        Assert.Null(blocked.OutcomeEvidenceId);
+        Assert.Null(blocked.OutcomeEvidenceHash);
+        Assert.Empty(executor.Requests);
+        Assert.Equal(0, executor.ProviderRequestStartedCount);
+        Assert.Empty(evidence.Requests);
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Canonical_pause_boundary_audit_failure_from_ready_frontier_parks_review_without_provider_dispatch()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("must not run"));
+        var audit = new RecordingAuditLog
+        {
+            FailPredicate = item => item.Action == AuditSchema.Actions.LoopRunLifecycle
+                && item.Outcome == AuditSchema.Outcomes.Succeeded
+                && Equals(item.Metadata.GetValueOrDefault("terminalStatus"), "paused")
+                && Equals(item.Metadata.GetValueOrDefault("lifecycleCommitPending"), true),
+        };
+        var runner = Runner(store, executor, audit: audit);
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(runner, evidence, evidence);
+        CustomLoopControlResult? pause = null;
+        evidence.AfterRetain = async request =>
+        {
+            if (request.Dispatch.Node.Descriptor.Kind == EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Trigger)
+            {
+                pause = await lifecycle.PauseAsync(new CustomLoopPauseRequest(store.Current.Id, store.Current.LifecycleVersion, "pause-canonical-ready-boundary", AuditSchema.Actors.Web));
+            }
+        };
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.PauseRequested, pause!.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run!.Status);
+        Assert.Equal("pause_boundary_audit_failed", result.Run.FailureCode);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, result.Run.Frontier!.Payload.Status);
+        var current = result.Run.Frontier.Payload.Nodes[^1];
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, current.Status);
+        Assert.Null(current.Attempt);
+        Assert.Null(current.AttemptOperationId);
+        Assert.Null(current.OutcomeEvidenceId);
+        Assert.Null(current.OutcomeEvidenceHash);
+        Assert.Empty(executor.Requests);
+        Assert.Equal(0, executor.ProviderRequestStartedCount);
+        Assert.Equal(["trigger"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.Empty(store.ValidationFailures);
     }
 
     [Fact]
@@ -1531,13 +1901,21 @@ public sealed class CustomLoopOrderedRunnerTests
 
         Assert.Equal(CustomLoopRecoveryStatus.NeedsReview, recovered.Status);
         Assert.Equal(CustomLoopRunStatus.NeedsReview, recoveryStore.Current.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, recoveryStore.Current.Frontier!.Payload.Status);
+        var blocked = recoveryStore.Current.Frontier.Payload.Nodes[^1];
+        Assert.Equal(GovernedLoopNodeExecutionStatus.ReviewBlocked, blocked.Status);
+        Assert.Equal(interrupted.Frontier!.Payload.Nodes[^1].Attempt, blocked.Attempt);
+        Assert.Equal(interrupted.Frontier.Payload.Nodes[^1].AttemptOperationId, blocked.AttemptOperationId);
         Assert.Equal("recovery_open_attempt", recoveryStore.Current.FailureCode);
         Assert.All(recoveryAudit.Events, item => Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]));
         Assert.Empty(executor.Requests);
     }
 
-    [Fact]
-    public async Task Restart_recovery_quarantines_a_canonical_terminal_with_substituted_iteration_coordinates()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Restart_recovery_quarantines_a_canonical_terminal_with_substituted_attempt_coordinates(
+        bool substituteStartOperationId)
     {
         var context = await SequentialContextAsync(Run(SequentialDefinition()));
         CustomLoopRunRecord? retainedOutcome = null;
@@ -1567,18 +1945,31 @@ public sealed class CustomLoopOrderedRunnerTests
         var events = interrupted.Events.ToArray();
         var terminalIndex = Array.FindIndex(events, item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome }
             && string.Equals(item.StepId, "infer-01", StringComparison.Ordinal));
-        var terminal = events[terminalIndex];
-        var substituted = terminal with { Iteration = terminal.Iteration!.Value + 1 };
-        var terminalEvidence = terminal.SequentialNodeEvidence!;
+        var substitutedIndex = terminalIndex;
+        var source = events[terminalIndex];
+        if (substituteStartOperationId)
+        {
+            substitutedIndex = Array.FindIndex(events, item => item.SequentialNodeEvidence is
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+                NodeId: "infer-01",
+            });
+            source = events[substitutedIndex];
+        }
+
+        var substituted = substituteStartOperationId
+            ? source with { EventId = source.EventId + "-substituted" }
+            : source with { Iteration = source.Iteration!.Value + 1 };
+        var sourceEvidence = source.SequentialNodeEvidence!;
         substituted = substituted with
         {
-            SequentialNodeEvidence = CustomLoopSequentialNodeEvidenceHash.Apply(terminalEvidence with
+            SequentialNodeEvidence = CustomLoopSequentialNodeEvidenceHash.Apply(sourceEvidence with
             {
                 OutcomeArtifactHash = CustomLoopSequentialOutcomeArtifactHash.Compute(substituted),
                 EvidenceHash = string.Empty,
             }),
         };
-        events[terminalIndex] = substituted;
+        events[substitutedIndex] = substituted;
         var malformed = interrupted with { Events = events };
         var validation = CustomLoopRunValidator.Validate(malformed);
         Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
@@ -1592,6 +1983,64 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal("recovery_open_attempt", recoveryStore.Current.FailureCode);
         Assert.All(recoveryAudit.Events, item => Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]));
         Assert.Single(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Canonical_restart_after_running_claim_without_dispatch_evidence_blocks_once_without_provider_redispatch()
+    {
+        var context = await SequentialContextAsync(Run(SequentialDefinition()));
+        CustomLoopRunRecord? retainedClaim = null;
+        var firstStore = new FakeRunStore(context.Run)
+        {
+            AfterUpdate = candidate =>
+            {
+                if (retainedClaim is null
+                    && candidate.Frontier?.Payload.Nodes[^1].Status == GovernedLoopNodeExecutionStatus.Running
+                    && !candidate.Events.Any(item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted }))
+                {
+                    retainedClaim = candidate;
+                    throw new IOException("Simulated process loss after the durable Running claim.");
+                }
+
+                return Task.CompletedTask;
+            },
+        };
+        var firstExecutor = new QueueExecutor(Result("must not run"));
+        var firstEvidence = new SequentialEvidenceHarness(firstStore, context.Evidence);
+        var firstAdapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(firstStore, firstExecutor), firstEvidence, firstEvidence);
+
+        _ = await firstAdapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Empty(firstExecutor.Requests);
+        var retained = Assert.IsType<CustomLoopRunRecord>(retainedClaim);
+        var retainedAttempt = retained.Frontier!.Payload.Nodes[^1];
+        var recoveryStore = new FakeRunStore(retained);
+        var recoveryAudit = new RecordingAuditLog();
+        var recovery = new CustomLoopRecoveryService(recoveryStore, recoveryAudit, new FixedTimeProvider(retained.UpdatedAtUtc.AddSeconds(1)));
+
+        var result = Assert.Single(await recovery.RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run.Status);
+        Assert.Equal("recovery_open_attempt", result.Run.FailureCode);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, result.Run.Frontier!.Payload.Status);
+        var blocked = result.Run.Frontier.Payload.Nodes[^1];
+        Assert.Equal(GovernedLoopNodeExecutionStatus.ReviewBlocked, blocked.Status);
+        Assert.Equal(retainedAttempt.Attempt, blocked.Attempt);
+        Assert.Equal(retainedAttempt.AttemptOperationId, blocked.AttemptOperationId);
+        Assert.Null(blocked.OutcomeEvidenceId);
+        Assert.Null(blocked.OutcomeEvidenceHash);
+        Assert.DoesNotContain(result.Run.Events, item => item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted });
+        Assert.All(recoveryAudit.Events, item => Assert.Equal(true, item.Metadata["openAttemptAfterCheckpoint"]));
+        Assert.Empty(firstExecutor.Requests);
+        Assert.Equal(["trigger"], firstEvidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.Empty(recoveryStore.ValidationFailures);
+        Assert.Empty(await recovery.RecoverAsync(AuditSchema.Actors.Web));
     }
 
     [Fact]
@@ -1755,10 +2204,10 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Theory]
-    [InlineData(GovernedLoopEffectAuthorityUsageStoreStatus.GrantCompleted, CustomLoopOrderedRunStatus.Failed, CustomLoopRunStatus.Failed)]
+    [InlineData(GovernedLoopEffectAuthorityUsageStoreStatus.GrantCompleted, CustomLoopOrderedRunStatus.NeedsReview, CustomLoopRunStatus.NeedsReview)]
     [InlineData(GovernedLoopEffectAuthorityUsageStoreStatus.Unavailable, CustomLoopOrderedRunStatus.NeedsReview, CustomLoopRunStatus.NeedsReview)]
     [InlineData(GovernedLoopEffectAuthorityUsageStoreStatus.Conflict, CustomLoopOrderedRunStatus.NeedsReview, CustomLoopRunStatus.NeedsReview)]
-    public async Task Canonical_completion_rejection_stops_before_completed_callback(
+    public async Task Canonical_completion_rejection_after_completed_exit_stops_before_completed_callback(
         GovernedLoopEffectAuthorityUsageStoreStatus beginStatus,
         CustomLoopOrderedRunStatus expectedResult,
         CustomLoopRunStatus expectedRunStatus)
@@ -1790,32 +2239,44 @@ public sealed class CustomLoopOrderedRunnerTests
 
         Assert.Equal(expectedResult, result.Status);
         Assert.Equal(expectedRunStatus, result.Run!.Status);
+        var expectedCode = beginStatus == GovernedLoopEffectAuthorityUsageStoreStatus.GrantCompleted
+            ? "canonical_completion_authority_denied"
+            : "canonical_completion_authority_unavailable";
+        var expectedDetail = beginStatus == GovernedLoopEffectAuthorityUsageStoreStatus.GrantCompleted
+            ? "The exact grant already completed another bound run; this run cannot commit successful terminal state."
+            : $"Canonical successful completion was rejected with `{beginStatus}` before terminal persistence and requires review.";
+        Assert.Equal(expectedCode, result.Run.FailureCode);
+        Assert.Equal(expectedDetail, result.Run.FailureDetail);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, result.Run.Frontier!.Payload.Status);
+        AssertCompletedOutcomeIsSoleCurrentNodeTerminal(result.Run);
         Assert.Single(usage.CompletionBegins);
         Assert.Empty(usage.CompletionCompletes);
         Assert.DoesNotContain(store.Writes, item => item.Status == CustomLoopRunStatus.Completed);
     }
 
     [Fact]
-    public async Task Canonical_precommitted_exit_resume_completes_first_bound_grant_without_provider_redispatch()
+    public async Task Canonical_atomic_exit_survives_post_commit_process_loss_without_provider_redispatch()
     {
         var context = await SequentialContextAsync(
             Run(SequentialDefinition()),
             AuthorityGrantCompletionConstraintKind.FirstBoundRunCompletion);
-        CustomLoopRunRecord? retainedCheckpoint = null;
+        var usage = new RecordingEffectAuthorityUsageStore();
+        CustomLoopRunRecord? retainedTerminal = null;
         var captured = false;
         var crashingStore = new FakeRunStore(context.Run)
         {
             AfterUpdate = candidate =>
             {
                 if (!captured
-                    && candidate.Status == CustomLoopRunStatus.Running
+                    && candidate.Status == CustomLoopRunStatus.Completed
                     && candidate.Checkpoint.PendingExitDecision == false
-                    && candidate.Events[^1].Kind == CustomLoopRunEventKind.CheckpointCommitted
+                    && candidate.Events[^1].Kind == CustomLoopRunEventKind.LifecycleChanged
+                    && candidate.Frontier?.Payload.Status == GovernedLoopFrontierStatus.Completed
                     && candidate.Events.Any(item => item.Kind == CustomLoopRunEventKind.ExitDecisionCompleted))
                 {
                     captured = true;
-                    retainedCheckpoint = candidate;
-                    throw new IOException("Simulated process loss after the terminal checkpoint committed.");
+                    retainedTerminal = candidate;
+                    throw new IOException("Simulated process loss after the atomic terminal successor committed.");
                 }
 
                 return Task.CompletedTask;
@@ -1824,20 +2285,32 @@ public sealed class CustomLoopOrderedRunnerTests
         var firstExecutor = new QueueExecutor(Result("checkpointed output"));
         var firstEvidence = new SequentialEvidenceHarness(crashingStore, context.Evidence);
         var firstAdapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
-            Runner(crashingStore, firstExecutor),
+            Runner(
+                crashingStore,
+                firstExecutor,
+                firstBoundRunCompletionBoundary: new GovernedLoopFirstBoundRunCompletionBoundary(
+                    usage,
+                    new RecordingEffectAuthorityTransaction(),
+                    new FixedTimeProvider(GovernedLoopSequentialApplicationTestFixture.Now))),
             firstEvidence,
             firstEvidence);
 
-        _ = await firstAdapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+        var first = await firstAdapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
             1,
             context.Anchor,
             context.Plan,
             context.Artifact,
             AuditSchema.Actors.Web));
 
-        var resumable = ResumeReady(Assert.IsType<CustomLoopRunRecord>(retainedCheckpoint), "resume-terminal-checkpoint");
-        var usage = new RecordingEffectAuthorityUsageStore();
-        var resumedStore = new FakeRunStore(resumable);
+        Assert.Equal(CustomLoopOrderedRunStatus.Completed, first.Status);
+        var durable = Assert.IsType<CustomLoopRunRecord>(retainedTerminal);
+        Assert.Equal(CustomLoopRunStatus.Completed, durable.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Completed, durable.Frontier!.Payload.Status);
+        Assert.Equal(CustomLoopRunEventKind.CheckpointCommitted, durable.Events[^2].Kind);
+        Assert.Equal(durable.Events[^2].Sequence, durable.Checkpoint.LastCommittedSequence);
+        Assert.DoesNotContain(crashingStore.Writes, item => item.Status == CustomLoopRunStatus.Running && item.Frontier?.Payload.Status == GovernedLoopFrontierStatus.Completed);
+
+        var resumedStore = new FakeRunStore(durable);
         var resumedExecutor = new QueueExecutor();
         var resumedEvidence = new SequentialEvidenceHarness(resumedStore, context.Evidence);
         var resumedAdapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
@@ -1851,21 +2324,59 @@ public sealed class CustomLoopOrderedRunnerTests
             resumedEvidence,
             resumedEvidence);
 
-        var result = await resumedAdapter.ResumeAsync(new GovernedLoopSequentialOrderedResumeRequest(
+        var result = await resumedAdapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
             1,
             context.Anchor,
             context.Plan,
             context.Artifact,
-            resumable.LifecycleVersion,
-            "resume-terminal-checkpoint",
             AuditSchema.Actors.Cli));
 
         Assert.True(result.Status == CustomLoopOrderedRunStatus.Completed, result.Detail);
         Assert.Empty(resumedExecutor.Requests);
         Assert.Single(firstExecutor.Requests);
-        Assert.Single(usage.CompletionBegins);
-        Assert.Single(usage.CompletionCompletes);
+        Assert.Equal(2, usage.CompletionBegins.Count);
+        Assert.Equal(2, usage.CompletionCompletes.Count);
         Assert.Equal("checkpointed output", result.Run!.FinalOutput);
+    }
+
+    [Fact]
+    public async Task Canonical_atomic_exit_conflict_retains_running_frontier_and_no_partial_terminal_projection()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            AuthorityGrantCompletionConstraintKind.FirstBoundRunCompletion);
+        var store = new FakeRunStore(context.Run)
+        {
+            ConflictOnAtomicTerminalWrite = true,
+        };
+        var executor = new QueueExecutor(Result("conflicted output"));
+        var usage = new RecordingEffectAuthorityUsageStore();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(
+                store,
+                executor,
+                firstBoundRunCompletionBoundary: new GovernedLoopFirstBoundRunCompletionBoundary(
+                    usage,
+                    new RecordingEffectAuthorityTransaction(),
+                    new FixedTimeProvider(GovernedLoopSequentialApplicationTestFixture.Now))),
+            evidence,
+            evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Running, store.Current.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Active, store.Current.Frontier!.Payload.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Running, store.Current.Frontier.Payload.Nodes[^1].Status);
+        Assert.Single(executor.Requests);
+        Assert.DoesNotContain(store.Writes, item => item.Status == CustomLoopRunStatus.Completed || item.Frontier?.Payload.Status == GovernedLoopFrontierStatus.Completed);
+        Assert.DoesNotContain(store.Current.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted && item.Sequence > store.Current.Checkpoint.LastCommittedSequence);
     }
 
     [Theory]
@@ -2164,7 +2675,7 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
-    public async Task Canonical_exit_prepublication_capability_denial_replays_without_provider_or_publication_redispatch()
+    public async Task Canonical_exit_prepublication_capability_failure_after_completed_exit_replays_without_redispatch()
     {
         var conversation = new CustomLoopConversationReference("conversation-one", "version-one", _now);
         var context = await SequentialContextAsync(Run(SequentialDefinition(includeConversation: true), conversation));
@@ -2184,8 +2695,11 @@ public sealed class CustomLoopOrderedRunnerTests
 
         var denied = await firstAdapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web));
 
-        Assert.Equal(CustomLoopOrderedRunStatus.Failed, denied.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, denied.Status);
         Assert.Equal("capability_revalidation_check_failed_before_publication", denied.Run!.FailureCode);
+        Assert.Equal("Custom-loop capability revalidation could not complete before conversation publication: IOException.", denied.Run.FailureDetail);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, denied.Run.Frontier!.Payload.Status);
+        AssertCompletedOutcomeIsSoleCurrentNodeTerminal(denied.Run);
         Assert.Single(firstExecutor.Requests);
         Assert.Empty(firstPublisher.Requests);
         var preTerminal = firstStore.Writes.Last(item => item.Status == CustomLoopRunStatus.Running
@@ -2215,8 +2729,11 @@ public sealed class CustomLoopOrderedRunnerTests
             "resume-publication-capability-denial",
             AuditSchema.Actors.Cli));
 
-        Assert.Equal(CustomLoopOrderedRunStatus.Failed, replay.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, replay.Status);
         Assert.Equal("capability_revalidation_check_failed_before_publication", replay.Run!.FailureCode);
+        Assert.Equal("Custom-loop capability revalidation could not complete before conversation publication: IOException.", replay.Run.FailureDetail);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, replay.Run.Frontier!.Payload.Status);
+        AssertCompletedOutcomeIsSoleCurrentNodeTerminal(replay.Run);
         Assert.Empty(resumedExecutor.Requests);
         Assert.Empty(resumedPublisher.Requests);
         Assert.Single(firstExecutor.Requests);
@@ -4374,6 +4891,18 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.True(validation.IsValid, string.Join(", ", validation.Errors));
     }
 
+    private static void AssertCompletedOutcomeIsSoleCurrentNodeTerminal(CustomLoopRunRecord run)
+    {
+        var current = Assert.IsType<GovernedLoopFrontierPosture>(run.Frontier).Payload.Nodes[^1];
+        var terminal = Assert.Single(run.Events, item => item.SequentialNodeEvidence is { Kind: not CustomLoopSequentialNodeEvidenceKind.DispatchStarted } evidence
+            && string.Equals(evidence.NodeId, current.NodeId, StringComparison.Ordinal)
+            && evidence.Attempt == current.Attempt);
+        Assert.Equal(CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, terminal.SequentialNodeEvidence!.Kind);
+        Assert.Equal(CustomLoopSequentialNodeDisposition.Completed, terminal.SequentialNodeEvidence.Disposition);
+        Assert.Equal(terminal.EventId, current.OutcomeEvidenceId);
+        Assert.Equal(terminal.SequentialNodeEvidence.OutcomeArtifactHash, current.OutcomeEvidenceHash);
+    }
+
     private static CustomLoopDefinition SequentialDefinition(
         int inferenceCount = 1,
         bool includeConversation = false,
@@ -4483,6 +5012,14 @@ public sealed class CustomLoopOrderedRunnerTests
             admissionEvidence,
             GovernedLoopSequentialApplicationTestFixture.Now,
             string.Empty));
+        var outcome = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionTerminalOutcome(
+            1,
+            intent,
+            GovernedLoopAdmissionDisposition.Admitted,
+            receipt,
+            null,
+            GovernedLoopSequentialApplicationTestFixture.Now,
+            string.Empty));
         var binding = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
             1,
             intent.WorkspaceId,
@@ -4506,16 +5043,34 @@ public sealed class CustomLoopOrderedRunnerTests
             artifact.Graph.EntryNodeId,
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed);
+        var initializedFrontier = GovernedLoopSequentialFrontierMachine.Initialize(
+            binding,
+            plan,
+            admitted.EventId,
+            admitted.EventId,
+            admitted.SequentialNodeEvidence!.OutcomeArtifactHash,
+            admitted.TimestampUtc);
+        var frontier = Assert.IsType<GovernedLoopFrontierPosture>(initializedFrontier.Frontier);
         var boundRun = CustomLoopAdmissionRequestHash.Apply(run with
         {
             AdmittedDefinition = projectedDefinition,
             CapabilityAdmission = capabilityAdmission,
             SequentialInvocationSnapshot = invocation,
             SequentialAdapterBinding = binding,
+            Frontier = frontier,
             Events = [admitted, .. run.Events.Skip(1)],
             AdmissionRequestHash = string.Empty,
         });
+        seedHarness.StoreReadResult = new GovernedLoopAdmissionStoreReadResult(
+            GovernedLoopAdmissionStoreReadStatus.Found,
+            2,
+            outcome);
+        seedHarness.GraphReadResult = new GovernedLoopGraphRevisionArtifactReadResult(
+            GovernedLoopRevisionStoreReadStatus.Ready,
+            2,
+            artifact);
         return new SequentialTestContext(
+            seedHarness,
             artifact,
             anchor,
             plan,
@@ -4598,6 +5153,50 @@ public sealed class CustomLoopOrderedRunnerTests
     private static CustomLoopContextOutputPolicy Output(bool retain, bool publish)
     {
         return new CustomLoopContextOutputPolicy(retain, publish);
+    }
+
+    private static CustomLoopRunRecord PausedAtCanonicalReadyCheckpoint(CustomLoopRunRecord run, bool retainAdmissionAudit = true)
+    {
+        var retained = retainAdmissionAudit
+            ? run.Events.ToArray()
+            : run.Events.Where(item => item.Kind != CustomLoopRunEventKind.AdmissionAuditCompleted).ToArray();
+        var pausedEvent = new CustomLoopRunEvent(
+            retained.Length + 1,
+            retainAdmissionAudit ? "pause-canonical-ready" : "pause-canonical-ready-incomplete-audit",
+            _now.AddSeconds(1),
+            CustomLoopRunEventKind.LifecycleChanged,
+            null,
+            null,
+            null,
+            "The canonical run paused at its exact undispatched Ready checkpoint.",
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+        var paused = run with
+        {
+            LifecycleVersion = retained.Length + 1,
+            Status = CustomLoopRunStatus.Paused,
+            UpdatedAtUtc = pausedEvent.TimestampUtc,
+            CompletedAtUtc = null,
+            ExecutionClock = CustomLoopExecutionClock.NotStarted(),
+            Events = [.. retained, pausedEvent],
+            FinalOutput = null,
+            FailureCode = null,
+            FailureDetail = null,
+        };
+        var validation = CustomLoopRunValidator.Validate(paused);
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+        Assert.Equal(GovernedLoopFrontierStatus.Active, paused.Frontier!.Payload.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, paused.Frontier.Payload.Nodes[^1].Status);
+        return paused;
     }
 
     private static CustomLoopRunRecord ResumeReady(CustomLoopRunRecord run, string operationId)
@@ -4927,6 +5526,7 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     private sealed record SequentialTestContext(
+        GovernedLoopAdmissionTestHarness Store,
         GovernedLoopGraphRevisionArtifact Artifact,
         GovernedLoopSequentialRunAnchor Anchor,
         GovernedLoopSequentialPlan Plan,
@@ -4957,6 +5557,8 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Func<Task>? AfterAuditRecord { get; set; }
 
+        public Func<GovernedLoopSequentialOrderedNodeEvidenceRequest, Task>? AfterRetain { get; set; }
+
         public Task<GovernedLoopSequentialRunEvidence?> ResolveAsync(string runId, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -4968,7 +5570,7 @@ public sealed class CustomLoopOrderedRunnerTests
                 : null);
         }
 
-        public Task<GovernedLoopSequentialNodeHandlerResult> RetainAsync(
+        public async Task<GovernedLoopSequentialNodeHandlerResult> RetainAsync(
             GovernedLoopSequentialOrderedNodeEvidenceRequest request,
             CancellationToken cancellationToken = default)
         {
@@ -5006,14 +5608,14 @@ public sealed class CustomLoopOrderedRunnerTests
                 || !CustomLoopSequentialNodeEvidenceHash.Matches(durable)
                 || !CustomLoopSequentialOutcomeArtifactHash.Matches(orderedEvent))
             {
-                return Task.FromResult(new GovernedLoopSequentialNodeHandlerResult(GovernedLoopSequentialNodeHandlerResultStatus.Unknown, string.Empty));
+                return new GovernedLoopSequentialNodeHandlerResult(GovernedLoopSequentialNodeHandlerResultStatus.Unknown, string.Empty);
             }
 
             var identity = $"{binding.ExecutionBinding.RunId}/{binding.ExecutionBinding.ExecutionGeneration}/{dispatch.Node.NodeId}/{dispatch.Attempt}";
             if (_identityEvents.TryGetValue(identity, out var prior)
                 && (!string.Equals(prior.EventId, orderedEvent!.EventId, StringComparison.Ordinal) || prior.Sequence != orderedEvent.Sequence))
             {
-                return Task.FromResult(new GovernedLoopSequentialNodeHandlerResult(GovernedLoopSequentialNodeHandlerResultStatus.Unknown, string.Empty));
+                return new GovernedLoopSequentialNodeHandlerResult(GovernedLoopSequentialNodeHandlerResultStatus.Unknown, string.Empty);
             }
 
             _identityEvents[identity] = (orderedEvent!.EventId, orderedEvent.Sequence);
@@ -5037,11 +5639,16 @@ public sealed class CustomLoopOrderedRunnerTests
                 durable.EvidenceHash);
             if (!GovernedLoopSequentialNodeEvidenceHash.Matches(receipt))
             {
-                return Task.FromResult(new GovernedLoopSequentialNodeHandlerResult(GovernedLoopSequentialNodeHandlerResultStatus.Unknown, string.Empty));
+                return new GovernedLoopSequentialNodeHandlerResult(GovernedLoopSequentialNodeHandlerResultStatus.Unknown, string.Empty);
             }
 
             _receipts[receipt.EvidenceHash] = receipt;
-            return Task.FromResult(new GovernedLoopSequentialNodeHandlerResult(request.Disposition, receipt.EvidenceHash));
+            if (AfterRetain is not null)
+            {
+                await AfterRetain(request);
+            }
+
+            return new GovernedLoopSequentialNodeHandlerResult(request.Disposition, receipt.EvidenceHash);
         }
 
         Task<GovernedLoopSequentialNodeEvidenceReceipt?> IGovernedLoopSequentialNodeEvidenceSource.ResolveAsync(
@@ -5128,6 +5735,8 @@ public sealed class CustomLoopOrderedRunnerTests
         public bool ConflictOnOutcomeWrite { get; init; }
 
         public bool ConflictOnPublicationWrite { get; init; }
+
+        public bool ConflictOnAtomicTerminalWrite { get; init; }
 
         public bool ConcurrentNeedsReviewOnOutcomeConflict { get; init; }
 
@@ -5234,6 +5843,11 @@ public sealed class CustomLoopOrderedRunnerTests
         {
             Assert.False(cancellationToken.IsCancellationRequested);
             BeforeUpdate?.Invoke(run, cancellationToken);
+            if (ConflictOnAtomicTerminalWrite && run.Status == CustomLoopRunStatus.Completed)
+            {
+                return CustomLoopRunStoreResult.VersionConflict(Current, expectedLifecycleVersion);
+            }
+
             if (ConflictOnOutcomeWrite && !OutcomeConflictInjected && run.Events.Skip(Current.Events.Length).Any(item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved))
             {
                 OutcomeConflictInjected = true;
@@ -5355,6 +5969,28 @@ public sealed class CustomLoopOrderedRunnerTests
             }
 
             return (CustomLoopInferenceAttemptResult)outcome;
+        }
+    }
+
+    private sealed class NoActiveAttemptCancellationSignal : ICustomLoopExecutionCancellationSignal
+    {
+        public int RequestCount { get; private set; }
+
+        public IDisposable? TryRegisterActiveRun(string runId) => null;
+
+        public void CancelActiveAttempt(string runId)
+        {
+        }
+
+        public Task<CustomLoopAttemptCancellationResult> RequestActiveAttemptCancellationAsync(
+            string runId,
+            string operationId,
+            CancellationToken cancellationToken = default)
+        {
+            RequestCount++;
+            return Task.FromResult(new CustomLoopAttemptCancellationResult(
+                CustomLoopAttemptCancellationStatus.NoActiveAttempt,
+                "The undispatched Ready checkpoint has no active provider attempt."));
         }
     }
 

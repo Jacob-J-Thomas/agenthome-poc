@@ -40,5 +40,11 @@ public enum GovernedLoopExecutionValidationErrorCode
     /// <summary>An immutable identity or attribution changed across a transition.</summary>
     ImmutableEvidenceChanged,
     /// <summary>Previously retained effect or projection evidence is absent from a proposed successor.</summary>
-    HistoricalEvidenceMissing
+    HistoricalEvidenceMissing,
+    /// <summary>Canonical evidence does not match its exact retained content hash.</summary>
+    IntegrityMismatch,
+    /// <summary>The frontier exceeds its admitted concurrent-node ceiling.</summary>
+    ConcurrencyCeilingExceeded,
+    /// <summary>Frontier nodes do not form one contiguous deterministic plan prefix.</summary>
+    PlanPrefixInvalid
 }

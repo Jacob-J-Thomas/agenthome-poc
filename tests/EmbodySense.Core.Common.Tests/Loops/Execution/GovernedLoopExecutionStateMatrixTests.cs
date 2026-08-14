@@ -19,7 +19,7 @@ public sealed class GovernedLoopExecutionStateMatrixTests
         Assert.False(GovernedLoopExecutionStateMatrix.IsSupported(GovernedLoopProjectionClass.Unknown));
         Assert.False(GovernedLoopExecutionStateMatrix.IsSupported((GovernedLoopProjectionClass)99));
         Assert.False(GovernedLoopExecutionStateMatrix.IsEffectOriginNodeValid(GovernedLoopEffectOrigin.Unknown, true));
-        Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceShapeValid(GovernedLoopNodeExecutionStatus.Unknown, null, false));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceShapeValid(GovernedLoopNodeExecutionStatus.Unknown, null, false, false, false));
         Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Unknown, []));
         Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Active, null));
         Assert.False(GovernedLoopExecutionStateMatrix.IsProjectionStateValid(GovernedLoopProjectionClass.Unknown, GovernedLoopProjectionStatus.Pending, false, false, false));
@@ -28,22 +28,24 @@ public sealed class GovernedLoopExecutionStateMatrixTests
     [Fact]
     public void State_shape_matrices_match_the_complete_schema_one_truth_sets()
     {
-        var actualNodes = new HashSet<(GovernedLoopNodeExecutionStatus Status, int? Attempt, bool HasOutcomeEvidence)>(
+        var actualNodes = new HashSet<(GovernedLoopNodeExecutionStatus Status, int? Attempt, bool HasAttemptOperation, bool HasOutcomeEvidence, bool HasOutcomeEvidenceHash)>(
             from status in Enum.GetValues<GovernedLoopNodeExecutionStatus>()
             from attempt in new int?[] { null, 1 }
+            from hasAttemptOperation in new[] { false, true }
             from hasOutcomeEvidence in new[] { false, true }
-            where GovernedLoopExecutionStateMatrix.IsNodeEvidenceShapeValid(status, attempt, hasOutcomeEvidence)
-            select (status, attempt, hasOutcomeEvidence));
-        HashSet<(GovernedLoopNodeExecutionStatus, int?, bool)> expectedNodes =
+            from hasOutcomeEvidenceHash in new[] { false, true }
+            where GovernedLoopExecutionStateMatrix.IsNodeEvidenceShapeValid(status, attempt, hasAttemptOperation, hasOutcomeEvidence, hasOutcomeEvidenceHash)
+            select (status, attempt, hasAttemptOperation, hasOutcomeEvidence, hasOutcomeEvidenceHash));
+        HashSet<(GovernedLoopNodeExecutionStatus, int?, bool, bool, bool)> expectedNodes =
         [
-            (GovernedLoopNodeExecutionStatus.Ready, null, false),
-            (GovernedLoopNodeExecutionStatus.Running, 1, false),
-            (GovernedLoopNodeExecutionStatus.Completed, 1, true),
-            (GovernedLoopNodeExecutionStatus.Skipped, null, false),
-            (GovernedLoopNodeExecutionStatus.Skipped, null, true),
-            (GovernedLoopNodeExecutionStatus.Waiting, 1, false),
-            (GovernedLoopNodeExecutionStatus.Failed, 1, true),
-            (GovernedLoopNodeExecutionStatus.ReviewBlocked, 1, false)
+            (GovernedLoopNodeExecutionStatus.Ready, null, false, false, false),
+            (GovernedLoopNodeExecutionStatus.Running, 1, true, false, false),
+            (GovernedLoopNodeExecutionStatus.Completed, 1, true, true, true),
+            (GovernedLoopNodeExecutionStatus.Skipped, null, false, true, true),
+            (GovernedLoopNodeExecutionStatus.Waiting, 1, true, false, false),
+            (GovernedLoopNodeExecutionStatus.Failed, 1, true, true, true),
+            (GovernedLoopNodeExecutionStatus.ReviewBlocked, 1, true, false, false),
+            (GovernedLoopNodeExecutionStatus.ReviewBlocked, 1, true, true, true)
         ];
         AssertSetEqual(expectedNodes, actualNodes);
 
@@ -127,12 +129,15 @@ public sealed class GovernedLoopExecutionStateMatrixTests
         Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Active, [running]));
         Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Waiting, [waiting]));
         Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.ReviewBlocked, [review]));
+        Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.ReviewBlocked, [ready]));
         Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Completed, [completed, skipped]));
         Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Failed, [failed, ready]));
         Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Cancelled, [running]));
         Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Active, [waiting]));
         Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Waiting, [waiting, ready]));
         Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.ReviewBlocked, [review, running]));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.ReviewBlocked, [ready, running]));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.ReviewBlocked, [completed]));
         Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Completed, [completed, ready]));
         Assert.False(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Failed, [failed, waiting]));
     }

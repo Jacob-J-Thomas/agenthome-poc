@@ -4,6 +4,7 @@ using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Sequential;
 
@@ -383,8 +384,27 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
             CapabilityAdmission = receipt.Evidence.CapabilityAdmission,
             SequentialInvocationSnapshot = invocation,
             SequentialAdapterBinding = binding,
+            Frontier = AssertInitialFrontier(request, admitted, triggerEvidence, now),
         };
         return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static GovernedLoopFrontierPosture AssertInitialFrontier(
+        GovernedLoopSequentialMaterializationRequest request,
+        CustomLoopRunEvent admitted,
+        CustomLoopSequentialNodeEvidence triggerEvidence,
+        DateTimeOffset now)
+    {
+        var initialized = GovernedLoopSequentialFrontierMachine.Initialize(
+            request.AdapterBinding,
+            request.Plan,
+            admitted.EventId,
+            admitted.EventId,
+            triggerEvidence.OutcomeArtifactHash,
+            now);
+        return initialized.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied && initialized.Frontier is not null
+            ? initialized.Frontier
+            : throw new InvalidOperationException(initialized.Detail);
     }
 
     private static bool MatchesExpectedAdmission(
@@ -413,6 +433,7 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
             && string.Equals(run.AdmittedDefinition.ContentHash, definition.ContentHash, StringComparison.Ordinal)
             && string.Equals(run.SequentialInvocationSnapshot?.ContentHash, invocation.ContentHash, StringComparison.Ordinal)
             && string.Equals(run.SequentialAdapterBinding?.ContentHash, request.AdapterBinding.ContentHash, StringComparison.Ordinal)
+            && GovernedLoopSequentialFrontierMachine.Validate(run.Frontier, request.AdapterBinding, request.Plan)
             && string.Equals(
                 GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(run.CapabilityAdmission),
                 GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(receipt.Evidence.CapabilityAdmission),
@@ -432,6 +453,9 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
                 Attempt: 1,
             }
             && string.Equals(trigger.NodeId, request.Plan.Nodes[0].NodeId, StringComparison.Ordinal)
+            && string.Equals(run.Frontier?.Payload.Nodes[0].AttemptOperationId, initial.EventId, StringComparison.Ordinal)
+            && string.Equals(run.Frontier?.Payload.Nodes[0].OutcomeEvidenceId, initial.EventId, StringComparison.Ordinal)
+            && string.Equals(run.Frontier?.Payload.Nodes[0].OutcomeEvidenceHash, trigger.OutcomeArtifactHash, StringComparison.Ordinal)
             && CustomLoopSequentialNodeEvidenceHash.Matches(trigger)
             && CustomLoopSequentialOutcomeArtifactHash.Matches(initial)
             && CustomLoopAdmissionRequestHash.Matches(run);

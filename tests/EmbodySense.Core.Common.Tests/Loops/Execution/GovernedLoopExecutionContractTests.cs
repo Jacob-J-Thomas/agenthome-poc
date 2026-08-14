@@ -13,9 +13,9 @@ public sealed class GovernedLoopExecutionContractTests
     public void Canonical_running_evidence_set_requires_one_exact_binding_across_all_planes()
     {
         var binding = Binding();
-        var node = GovernedLoopNodeExecutionEvidence.Create("infer", ["edge-trigger-infer"], 1, GovernedLoopNodeExecutionStatus.Running, null);
+        var node = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Running);
         var lifecycle = GovernedLoopRunLifecycle.Create(binding, GovernedLoopRunLifecyclePayload.Create(1, 1, GovernedLoopRunStatus.Running, _createdAtUtc, _updatedAtUtc, null));
-        var frontier = GovernedLoopFrontierPosture.Create(binding, GovernedLoopFrontierPayload.Create(1, 1, GovernedLoopFrontierStatus.Active, [node], _updatedAtUtc));
+        var frontier = GovernedLoopExecutionTestFixture.Frontier(binding, GovernedLoopFrontierStatus.Active, nodes: [node]);
         var effect = GovernedLoopEffectPosture.Create(binding, Effect(GovernedLoopEffectPhase.IntentPrepared, GovernedLoopEffectOutcome.None, GovernedLoopEffectEvidenceStatus.Pending));
         var projection = GovernedLoopProjectionPosture.Create(
             binding,
@@ -25,7 +25,7 @@ public sealed class GovernedLoopExecutionContractTests
 
         Assert.True(GovernedLoopExecutionValidator.Validate(evidence).IsValid);
         Assert.Same(binding, evidence.Lifecycle.Binding);
-        Assert.Same(binding, evidence.Frontier.Binding);
+        Assert.Equal(binding, evidence.Frontier.Binding);
         Assert.Same(binding, evidence.Effects[0].Binding);
         Assert.Same(binding, evidence.Projections[0].Binding);
     }
@@ -35,8 +35,8 @@ public sealed class GovernedLoopExecutionContractTests
     {
         var binding = Binding();
         var lifecycle = GovernedLoopRunLifecycle.Create(binding, GovernedLoopRunLifecyclePayload.Create(1, 2, GovernedLoopRunStatus.NeedsReview, _createdAtUtc, _updatedAtUtc, _updatedAtUtc));
-        var node = GovernedLoopNodeExecutionEvidence.Create("infer", ["edge-trigger-infer"], 1, GovernedLoopNodeExecutionStatus.ReviewBlocked, null);
-        var frontier = GovernedLoopFrontierPosture.Create(binding, GovernedLoopFrontierPayload.Create(1, 2, GovernedLoopFrontierStatus.ReviewBlocked, [node], _updatedAtUtc));
+        var node = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.ReviewBlocked);
+        var frontier = GovernedLoopExecutionTestFixture.Frontier(binding, GovernedLoopFrontierStatus.ReviewBlocked, 2, [node]);
         var ambiguous = GovernedLoopEffectPosture.Create(binding, Effect(GovernedLoopEffectPhase.DispatchBoundaryReached, GovernedLoopEffectOutcome.OutcomeUnknown, GovernedLoopEffectEvidenceStatus.Incomplete));
 
         var validation = GovernedLoopExecutionValidator.ValidateComposition(1, lifecycle, frontier, [ambiguous], []);
@@ -52,8 +52,8 @@ public sealed class GovernedLoopExecutionContractTests
     {
         var binding = Binding();
         var lifecycle = GovernedLoopRunLifecycle.Create(binding, GovernedLoopRunLifecyclePayload.Create(1, 2, GovernedLoopRunStatus.Completed, _createdAtUtc, _updatedAtUtc, _updatedAtUtc));
-        var node = GovernedLoopNodeExecutionEvidence.Create("infer", ["edge-trigger-infer"], 1, GovernedLoopNodeExecutionStatus.Completed, "node-outcome");
-        var frontier = GovernedLoopFrontierPosture.Create(binding, GovernedLoopFrontierPayload.Create(1, 2, GovernedLoopFrontierStatus.Completed, [node], _updatedAtUtc));
+        var node = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Completed);
+        var frontier = GovernedLoopExecutionTestFixture.Frontier(binding, GovernedLoopFrontierStatus.Completed, 2, [node]);
         var openEffect = GovernedLoopEffectPosture.Create(binding, Effect(GovernedLoopEffectPhase.IntentPrepared, GovernedLoopEffectOutcome.None, GovernedLoopEffectEvidenceStatus.Pending));
         var committed = Effect(GovernedLoopEffectPhase.Committed, GovernedLoopEffectOutcome.Succeeded, GovernedLoopEffectEvidenceStatus.Complete, "provider-outcome");
 
@@ -62,6 +62,55 @@ public sealed class GovernedLoopExecutionContractTests
         Assert.Contains(validation.Errors, error => error.Code == GovernedLoopExecutionValidationErrorCode.TerminalEvidenceUnresolved);
         Assert.False(GovernedLoopExecutionStateMatrix.IsEffectDispatchEligible(committed));
         Assert.False(GovernedLoopExecutionStateMatrix.IsEffectTransitionAllowed(GovernedLoopEffectPhase.Committed, GovernedLoopEffectPhase.DispatchBoundaryReached));
+    }
+
+    [Fact]
+    public void Bound_frontier_coordinate_factory_preserves_validation_hashing_and_defensive_copies()
+    {
+        var binding = Binding();
+        var ready = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready);
+        GovernedLoopNodeExecutionEvidence[] source = [ready];
+
+        var frontier = GovernedLoopFrontierPosture.Create(
+            binding,
+            GovernedLoopExecutionTestFixture.WorkspaceId,
+            new string('b', 64),
+            new string('c', 64),
+            new string('d', 64),
+            1,
+            GovernedLoopExecutionLimits.Schema1ConcurrencyCeiling,
+            GovernedLoopFrontierStatus.Active,
+            source,
+            _updatedAtUtc,
+            string.Empty);
+        source[0] = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Running);
+
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, frontier.Payload.Nodes[0].Status);
+        Assert.True(GovernedLoopFrontierContractHash.Matches(frontier));
+        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPosture.Create(
+            binding,
+            frontier.WorkspaceId,
+            frontier.GraphArtifactHash,
+            frontier.GraphLayoutHash,
+            frontier.AdmissionReceiptHash,
+            frontier.Payload.FrontierVersion,
+            frontier.Payload.ConcurrencyCeiling,
+            frontier.Payload.Status,
+            frontier.Payload.Nodes,
+            frontier.Payload.UpdatedAtUtc,
+            new string('9', 64)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => GovernedLoopFrontierPosture.Create(
+            binding,
+            frontier.WorkspaceId,
+            frontier.GraphArtifactHash,
+            frontier.GraphLayoutHash,
+            frontier.AdmissionReceiptHash,
+            frontier.Payload.FrontierVersion,
+            2,
+            frontier.Payload.Status,
+            frontier.Payload.Nodes,
+            frontier.Payload.UpdatedAtUtc,
+            frontier.Payload.ContentHash));
     }
 
     private static GovernedLoopExecutionBinding Binding(long generation = 1)

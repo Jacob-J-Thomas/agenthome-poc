@@ -234,7 +234,22 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         const string Prompt = "must never dispatch";
         var prepared = await PrepareInterruptedAdmissionAsync(paths, workspace.ServerStatePath, definitionSnapshot, OperationId, Prompt);
         var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, OperationId + ".json");
-        File.SetAttributes(receiptPath, FileAttributes.ReadOnly);
+        var receiptAttributes = File.GetAttributes(receiptPath);
+        UnixFileMode? receiptDirectoryMode = null;
+        if (OperatingSystem.IsWindows())
+        {
+            File.SetAttributes(receiptPath, receiptAttributes | FileAttributes.ReadOnly);
+        }
+        else
+        {
+            receiptDirectoryMode = File.GetUnixFileMode(paths.CustomLoopInvocationOperationsPath);
+            File.SetUnixFileMode(
+                paths.CustomLoopInvocationOperationsPath,
+                receiptDirectoryMode.Value
+                & ~UnixFileMode.UserWrite
+                & ~UnixFileMode.GroupWrite
+                & ~UnixFileMode.OtherWrite);
+        }
 
         LoopRunInvocationResponse response;
         try
@@ -243,7 +258,14 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         }
         finally
         {
-            File.SetAttributes(receiptPath, FileAttributes.Normal);
+            if (OperatingSystem.IsWindows())
+            {
+                File.SetAttributes(receiptPath, receiptAttributes);
+            }
+            else
+            {
+                File.SetUnixFileMode(paths.CustomLoopInvocationOperationsPath, receiptDirectoryMode!.Value);
+            }
         }
 
         Assert.Equal(CustomLoopAdmissionStatus.AuditUnavailable.ToString(), response.AdmissionStatus);

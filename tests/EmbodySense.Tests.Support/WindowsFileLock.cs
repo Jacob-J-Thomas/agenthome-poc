@@ -4,6 +4,8 @@ namespace EmbodySense.Tests.Support;
 
 public sealed class WindowsFileLock : IDisposable
 {
+    private static readonly TimeSpan _readyTimeout = TimeSpan.FromSeconds(30);
+
     private readonly Process _process;
     private readonly string _readyPath;
     private readonly string _releasePath;
@@ -82,7 +84,7 @@ public sealed class WindowsFileLock : IDisposable
     private void WaitForReady()
     {
         var timeout = Stopwatch.StartNew();
-        while (!File.Exists(_readyPath) && !_process.HasExited && timeout.Elapsed < TimeSpan.FromSeconds(5))
+        while (!File.Exists(_readyPath) && !_process.HasExited && timeout.Elapsed < _readyTimeout)
         {
             Thread.Sleep(10);
         }

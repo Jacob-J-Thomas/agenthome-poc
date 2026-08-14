@@ -16,6 +16,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -186,6 +187,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             CapabilityAdmission = capabilityAdmission,
             SequentialInvocationSnapshot = null,
             SequentialAdapterBinding = null,
+            Frontier = null,
             Events = [context.Run.Events[0] with { SequentialNodeEvidence = null }],
         });
         Assert.True(CustomLoopRunValidator.Validate(legacy).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(legacy).Errors));
@@ -489,7 +491,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         Assert.Null(await secondStore.ResolveAsync(loserHash));
     }
 
-    private static SequentialContext CreateContext()
+    internal static SequentialContext CreateContext()
     {
         var graph = LinearGraph();
         var revisionArtifact = GovernedLoopRevisionArtifactFactory.Create(
@@ -608,6 +610,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             CapabilityAdmission = capabilityAdmission,
             SequentialInvocationSnapshot = invocation,
             SequentialAdapterBinding = binding,
+            Frontier = CreateInitialFrontier(binding, plan, admitted),
         };
         run = CustomLoopAdmissionRequestHash.Apply(run);
         Assert.True(CustomLoopRunValidator.Validate(run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(run).Errors));
@@ -657,9 +660,55 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             CapabilityAdmission = capabilityAdmission,
             SequentialInvocationSnapshot = null,
             SequentialAdapterBinding = null,
+            Frontier = null,
             Events = [run.Events[0] with { SequentialNodeEvidence = null }],
         });
     }
+
+    private static GovernedLoopFrontierPosture CreateInitialFrontier(
+        GovernedLoopSequentialAdapterBinding binding,
+        GovernedLoopSequentialPlan plan,
+        CustomLoopRunEvent admitted)
+    {
+        var trigger = plan.Nodes[0];
+        var next = plan.Nodes[1];
+        var triggerEvidence = GovernedLoopNodeExecutionEvidence.Create(
+            trigger.Ordinal,
+            trigger.NodeId,
+            trigger.Descriptor,
+            ControlEdges(trigger.IncomingControlEdgeId),
+            ControlEdges(trigger.OutgoingControlEdgeId),
+            GovernedLoopNodeExecutionStatus.Completed,
+            1,
+            "attempt-trigger-1",
+            admitted.EventId,
+            admitted.SequentialNodeEvidence!.OutcomeArtifactHash);
+        var readyEvidence = GovernedLoopNodeExecutionEvidence.Create(
+            next.Ordinal,
+            next.NodeId,
+            next.Descriptor,
+            ControlEdges(next.IncomingControlEdgeId),
+            ControlEdges(next.OutgoingControlEdgeId),
+            GovernedLoopNodeExecutionStatus.Ready);
+        var payload = GovernedLoopFrontierPayload.Create(
+            1,
+            1,
+            GovernedLoopExecutionLimits.Schema1ConcurrencyCeiling,
+            GovernedLoopFrontierStatus.Active,
+            [triggerEvidence, readyEvidence],
+            admitted.TimestampUtc,
+            string.Empty);
+        return GovernedLoopFrontierPosture.Create(
+            binding.ExecutionBinding,
+            binding.WorkspaceId,
+            binding.GraphArtifactHash,
+            binding.GraphLayoutHash,
+            binding.AdmissionReceiptHash,
+            payload);
+    }
+
+    private static string[] ControlEdges(string? edgeId)
+        => edgeId is null ? [] : [edgeId];
 
     private static GovernedLoopGraphDefinition LinearGraph()
     {
@@ -827,7 +876,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
 
     private static string Hash(char value) => new(value, 64);
 
-    private sealed record SequentialContext(
+    internal sealed record SequentialContext(
         CustomLoopRunRecord Run,
         GovernedLoopSequentialInvocationSnapshot Invocation,
         GovernedLoopSequentialAdapterBinding Binding,

@@ -55,6 +55,12 @@ public sealed record LoopRunSnapshot(
     string? FailureDetail)
 {
     /// <summary>
+    /// Gets the bounded canonical execution frontier when this run was admitted through the governed graph runtime.
+    /// Legacy human-compatible runs deliberately expose <see langword="null"/> instead of inferred progress.
+    /// </summary>
+    public LoopRunFrontierSnapshot? Frontier { get; init; }
+
+    /// <summary>
     /// Gets the canonical disposition for each correlated conversation-publication operation.
     /// The projection is derived from the ordered durable protocol events; raw events remain available through <see cref="Events"/>.
     /// </summary>
