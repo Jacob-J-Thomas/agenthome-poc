@@ -254,8 +254,11 @@ function Get-VerificationCoverageFileKey {
         $relativeProjectFileName = $normalizedFileName.Substring($PackageName.Length + 1)
         $candidatePath = Join-Path $SourceProjectDirectories[$PackageName] $relativeProjectFileName
     }
+    elseif ($SourceProjectDirectories.ContainsKey($PackageName)) {
+        $candidatePath = Join-Path $SourceProjectDirectories[$PackageName] $normalizedFileName
+    }
     else {
-        $candidatePath = Join-Path $RepositoryRoot $normalizedFileName
+        throw "Coverage package '$PackageName' has no canonical production source directory."
     }
 
     return [IO.Path]::GetFullPath($candidatePath)
@@ -902,7 +905,8 @@ public static class VerificationCoverageParallelProcessor
             var projectDirectory = sourceProjectDirectories[packageName];
             candidatePath = Path.Combine(projectDirectory, normalized.Substring(packageName.Length + 1));
         }
-        else candidatePath = Path.Combine(repositoryRoot, normalized);
+        else if (sourceProjectDirectories.ContainsKey(packageName)) candidatePath = Path.Combine(sourceProjectDirectories[packageName], normalized);
+        else throw new InvalidDataException(string.Format(CultureInfo.InvariantCulture, "Coverage package '{0}' has no canonical production source directory.", packageName));
         return Path.GetFullPath(candidatePath);
     }
 

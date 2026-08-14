@@ -604,6 +604,10 @@ try {
     Assert-Contains -Actual (Get-Content -LiteralPath (Join-Path $passingRepository "scripts\verify-coverage.ps1") -Raw) -Expected '[ValidateRange(1, 2)] [int]$MaximumCoverageWorkers = 2' -Message "Production coverage verification must default to two workers and reject larger hosted fan-out before execution."
 
     Write-CoverageReport -RepositoryRoot $passingRepository -Name "parallel-probe" -Packages @($aliasPackage) -LastWriteTimeUtc $freshWriteTimeUtc
+    $packageRelativeClass = New-CoverageClass -Name "Fixture.One.PackageRelative" -FileName "Authority/AuthorityActorId.cs" -Lines @(
+        (New-CoverageLine -Number 7 -Hits 1)
+    )
+    Write-CoverageReport -RepositoryRoot $passingRepository -Name "package-relative-probe" -Packages @((New-CoveragePackage -Name "Fixture.One" -Classes @($packageRelativeClass))) -LastWriteTimeUtc $freshWriteTimeUtc
     $parallelSourceProjects = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
     foreach ($packageName in @("Fixture.One", "Fixture.Two")) { $parallelSourceProjects.Add($packageName, (Join-Path $passingRepository "src\$packageName")) }
     $parallelRoot = Join-Path $passingRepository "tests\Fixture.Tests\TestResults"
@@ -611,6 +615,9 @@ try {
     $parallelItems = @($parallelFiles | ForEach-Object { [pscustomobject]@{ Path = $_.FullName; Root = $parallelRoot; Description = "Coverage parallel equivalence report"; Reduce = $true } })
     $singleWorkerReduction = Invoke-VerificationCoverageWorkers -WorkItems $parallelItems -RepositoryRoot $passingRepository -SourceProjectDirectories $parallelSourceProjects -MaximumWorkers 1
     $twoWorkerReduction = Invoke-VerificationCoverageWorkers -WorkItems $parallelItems -RepositoryRoot $passingRepository -SourceProjectDirectories $parallelSourceProjects -MaximumWorkers 2
+    $expectedPackageRelativePath = [IO.Path]::GetFullPath((Join-Path $parallelSourceProjects["Fixture.One"] "Authority/AuthorityActorId.cs"))
+    Assert-True -Condition (@($singleWorkerReduction.Lines | Where-Object { $_.Package -ceq "Fixture.One" -and $_.File -ceq $expectedPackageRelativePath -and $_.Line -eq 7 -and $_.Hits -eq 1 }).Count -eq 1) -Message "Single-worker reduction must resolve a Cobertura package-relative filename beneath the canonical production project."
+    Assert-True -Condition (@($twoWorkerReduction.Lines | Where-Object { $_.Package -ceq "Fixture.One" -and $_.File -ceq $expectedPackageRelativePath -and $_.Line -eq 7 -and $_.Hits -eq 1 }).Count -eq 1) -Message "Parallel reduction must resolve a Cobertura package-relative filename beneath the canonical production project."
     $singleWorkerEvidence = [ordered]@{ snapshots = @($singleWorkerReduction.Snapshots | ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.Sha256)" }); packages = @($singleWorkerReduction.Packages); lines = @($singleWorkerReduction.Lines) } | ConvertTo-Json -Depth 5 -Compress
     $twoWorkerEvidence = [ordered]@{ snapshots = @($twoWorkerReduction.Snapshots | ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.Sha256)" }); packages = @($twoWorkerReduction.Packages); lines = @($twoWorkerReduction.Lines) } | ConvertTo-Json -Depth 5 -Compress
     Assert-True -Condition ($singleWorkerEvidence -ceq $twoWorkerEvidence) -Message "One- and two-worker authenticated reductions must be deterministic and equivalent."
