@@ -8,7 +8,11 @@ $artifactScriptPath = Join-Path $repoRoot "scripts\verification-artifacts.ps1"
 $scheduleScriptPath = Join-Path $repoRoot "scripts\verification-schedule.ps1"
 $coverageEvidenceScriptPath = Join-Path $repoRoot "scripts\verification-coverage-evidence.ps1"
 $laneScriptPath = Join-Path $repoRoot "scripts\verification-test-lanes.ps1"
-$probeExecutable = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+$probeCommand = Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1
+$probeExecutable = [string]$probeCommand.Source
+if ([string]::IsNullOrWhiteSpace($probeExecutable) -or -not (Test-Path -LiteralPath $probeExecutable -PathType Leaf)) {
+    throw "The parallel verifier contract requires one resolvable Node executable."
+}
 $probePath = Join-Path $PSScriptRoot "verification-parallel-probe.mjs"
 $assertionCount = 0
 

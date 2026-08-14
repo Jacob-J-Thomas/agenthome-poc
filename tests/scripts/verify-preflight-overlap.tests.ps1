@@ -18,7 +18,11 @@ $testPlanScript = Get-Content -LiteralPath $testPlanScriptPath -Raw
 $prepareTestPlanScript = Get-Content -LiteralPath $prepareTestPlanScriptPath -Raw
 $frontendScript = Get-Content -LiteralPath $frontendScriptPath -Raw
 $powerShellExecutable = (Get-Process -Id $PID).Path
-$nodeExecutable = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+$nodeCommand = Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1
+$nodeExecutable = [string]$nodeCommand.Source
+if ([string]::IsNullOrWhiteSpace($nodeExecutable) -or -not (Test-Path -LiteralPath $nodeExecutable -PathType Leaf)) {
+    throw "The preflight overlap contract requires one resolvable Node executable."
+}
 $parallelProbePath = Join-Path $PSScriptRoot "verification-parallel-probe.mjs"
 $assertionCount = 0
 
