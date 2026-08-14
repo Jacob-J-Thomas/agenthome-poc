@@ -3485,13 +3485,77 @@ public sealed class DefaultConversationTurnRecoveryTests
 
     internal static async Task CreateHistoryStageRetirementEvidencePairsAsync(WorkspacePaths paths, string turnId, int count)
     {
-        for (var index = 0; index < count; index++)
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
+        if (count == 0)
         {
-            var coordination = new SubstitutingTurnStoreCoordination(
-                DefaultConversationTurnStoreOperation.List,
-                DefaultConversationTurnArchivePhase.AfterPartialHistoryStageWrite,
-                _ => Task.FromException(new IOException($"Injected incomplete history stage interruption {index}.")));
-            await Assert.ThrowsAsync<IOException>(() => new DefaultConversationTurnStore(paths, coordination).ListIncompleteAsync());
+            Assert.Empty(GetHistoryStageRetirementEvidencePaths(paths, turnId, ".retirement-intent"));
+            Assert.Empty(GetHistoryStageRetirementEvidencePaths(paths, turnId, ".retired"));
+            return;
+        }
+
+        var sourceActivePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, turnId + ".json");
+        var canonicalActiveBytes = await File.ReadAllBytesAsync(sourceActivePath);
+        var coordination = new SubstitutingTurnStoreCoordination(
+            DefaultConversationTurnStoreOperation.List,
+            DefaultConversationTurnArchivePhase.AfterPartialHistoryStageWrite,
+            _ => Task.FromException(new IOException("Injected canonical incomplete history stage interruption.")));
+        await Assert.ThrowsAsync<IOException>(() => new DefaultConversationTurnStore(paths, coordination).ListIncompleteAsync());
+        var firstIntentPath = Assert.Single(GetHistoryStageRetirementEvidencePaths(paths, turnId, ".retirement-intent"));
+        var firstRetiredPath = Assert.Single(GetHistoryStageRetirementEvidencePaths(paths, turnId, ".retired"));
+        Assert.Equal([1], await File.ReadAllBytesAsync(firstIntentPath));
+        var firstRetiredBytes = await File.ReadAllBytesAsync(firstRetiredPath);
+        Assert.Single(firstRetiredBytes);
+
+        if (count > 1)
+        {
+            var fixtureRoot = Path.Combine(paths.RootPath, $".retirement-evidence-fixture-{Guid.NewGuid():N}");
+            try
+            {
+                var fixturePaths = new WorkspacePaths(fixtureRoot);
+                Directory.CreateDirectory(fixturePaths.DefaultConversationActiveTurnsPath);
+                var fixtureActivePath = Path.Combine(fixturePaths.DefaultConversationActiveTurnsPath, turnId + ".json");
+                var fixtureBytes = canonicalActiveBytes;
+                await File.WriteAllBytesAsync(fixtureActivePath, fixtureBytes);
+                var targetPrefix = $".{turnId}.json.archive-history.";
+                Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+
+                for (var index = 1; index < count; index++)
+                {
+                    var fixtureCoordination = new SubstitutingTurnStoreCoordination(
+                        DefaultConversationTurnStoreOperation.List,
+                        DefaultConversationTurnArchivePhase.AfterPartialHistoryStageWrite,
+                        _ => Task.FromException(new IOException("Injected isolated canonical history stage interruption.")));
+                    var fixtureStore = new DefaultConversationTurnStore(fixturePaths, fixtureCoordination);
+                    var fixtureFailure = await Record.ExceptionAsync(() => fixtureStore.ListIncompleteAsync());
+                    Assert.True(
+                        fixtureFailure is IOException,
+                        $"The isolated canonical history-stage interruption did not fail as expected. failure={fixtureFailure?.GetType().Name ?? "none"} active={File.Exists(fixtureActivePath)} history=[{string.Join(',', Directory.Exists(fixturePaths.DefaultConversationTurnHistoryPath) ? Directory.EnumerateFileSystemEntries(fixturePaths.DefaultConversationTurnHistoryPath).Select(Path.GetFileName) : [])}]");
+                    var fixtureIntentPath = Assert.Single(GetHistoryStageRetirementEvidencePaths(fixturePaths, turnId, ".retirement-intent"));
+                    var fixtureRetiredPath = Assert.Single(GetHistoryStageRetirementEvidencePaths(fixturePaths, turnId, ".retired"));
+                    Assert.Equal([1], await File.ReadAllBytesAsync(fixtureIntentPath));
+                    Assert.Equal(firstRetiredBytes, await File.ReadAllBytesAsync(fixtureRetiredPath));
+                    var fixtureIntentName = Path.GetFileName(fixtureIntentPath);
+                    var fixtureRetiredName = Path.GetFileName(fixtureRetiredPath);
+                    Assert.StartsWith(targetPrefix, fixtureIntentName, StringComparison.Ordinal);
+                    Assert.StartsWith(targetPrefix, fixtureRetiredName, StringComparison.Ordinal);
+                    var targetIntentPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, fixtureIntentName);
+                    var targetRetiredPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, fixtureRetiredName);
+                    File.Move(fixtureIntentPath, targetIntentPath, overwrite: false);
+                    File.Move(fixtureRetiredPath, targetRetiredPath, overwrite: false);
+                    Assert.True(File.Exists(fixtureActivePath));
+                    Assert.Empty(GetHistoryStageRetirementEvidencePaths(fixturePaths, turnId, ".retirement-intent"));
+                    Assert.Empty(GetHistoryStageRetirementEvidencePaths(fixturePaths, turnId, ".retired"));
+                }
+
+                Assert.Equal(fixtureBytes, await File.ReadAllBytesAsync(fixtureActivePath));
+            }
+            finally
+            {
+                if (Directory.Exists(fixtureRoot))
+                {
+                    Directory.Delete(fixtureRoot, recursive: true);
+                }
+            }
         }
 
         Assert.Equal(count, GetHistoryStageRetirementEvidencePaths(paths, turnId, ".retirement-intent").Count);

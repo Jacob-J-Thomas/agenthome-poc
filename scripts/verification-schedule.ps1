@@ -61,7 +61,7 @@ function Get-VerificationPreflightNestedProcessContractWeight {
         [int]$ResourceCapacity
     )
 
-    return $ResourceCapacity
+    return [Math]::Min(2, $ResourceCapacity)
 }
 
 function Assert-VerificationPreflightContractClassification {

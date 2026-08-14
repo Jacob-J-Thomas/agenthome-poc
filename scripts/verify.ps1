@@ -326,7 +326,7 @@ try {
         $preflightMaximumWorkers = [Math]::Min(4, $hardwareBoundedResourceCapacity)
         $preflightResourceCapacity = $preflightMaximumWorkers
         $preflightProcessHeavyWeight = [Math]::Max(1, [int][Math]::Ceiling($preflightResourceCapacity / 2.0))
-        $preflightMaximumProcessHeavyWorkers = 1
+        $preflightMaximumProcessHeavyWorkers = [Math]::Min(2, $preflightMaximumWorkers)
         $preflightCoverageContractWeight = Get-VerificationPreflightCoverageContractWeight -ResourceCapacity $preflightResourceCapacity
         $preflightFrontendWeight = Get-VerificationPreflightFrontendWeight -ResourceCapacity $preflightResourceCapacity
         $preflightNestedProcessContractWeight = Get-VerificationPreflightNestedProcessContractWeight -ResourceCapacity $preflightResourceCapacity
@@ -374,7 +374,7 @@ try {
                 throw "Preflight script contract '$contractScript' reached execution without a resource classification."
             }
         }
-        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-post-build-contracts phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers nested_process_contract_weight=$preflightNestedProcessContractWeight nested_process_contracts=$($preflightNestedProcessContractScripts.Count) nested_process_isolation=full-resource-capacity configuration=$Configuration"
+        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-post-build-contracts phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers nested_process_contract_weight=$preflightNestedProcessContractWeight nested_process_contracts=$($preflightNestedProcessContractScripts.Count) nested_process_isolation=two-wide-disjoint-temp configuration=$Configuration"
         Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers | Out-Null
         Reset-VerificationParallelPhaseState
         $script:LastCompletedVerificationPhase = "pull-request-preflight"

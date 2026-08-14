@@ -902,7 +902,7 @@ public sealed class GovernedLoopAdmissionStoreTests
         }
         else
         {
-            Verification.CoverageChildProcessAssembly.AddVstestArguments(startInfo, typeof(GovernedLoopAdmissionStoreTests).Assembly.Location, CrossProcessHostTestName);
+            Verification.CoverageChildProcessAssembly.AddUninstrumentedVstestArguments(startInfo, typeof(GovernedLoopAdmissionStoreTests).Assembly.Location, CrossProcessHostTestName);
         }
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         startInfo.Environment[CrossProcessMode] = mode;
@@ -952,15 +952,15 @@ public sealed class GovernedLoopAdmissionStoreTests
         Assert.Equal(expectedHashes, GetDirectoryHashes(pristineDirectory));
 
         var successful = new ProcessStartInfo("dotnet");
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+        Verification.CoverageChildProcessAssembly.AddUninstrumentedVstestArguments(
             successful,
             currentAssemblyPath,
             CrossProcessHostTestName,
             pristineDirectory);
-        Assert.Contains("--Collect:XPlat Code Coverage", successful.ArgumentList);
-        Assert.Contains($"--ResultsDirectory:{workspace.File("Results")}", successful.ArgumentList);
-        Assert.Single(Directory.EnumerateDirectories(workspace.File("Invocations")));
-        Assert.True(Directory.Exists(workspace.File("Results")));
+        Assert.Equal(expectedTermination.ArgumentList, successful.ArgumentList);
+        Assert.DoesNotContain("--Collect:XPlat Code Coverage", successful.ArgumentList);
+        Assert.False(Directory.Exists(workspace.File("Invocations")));
+        Assert.False(Directory.Exists(workspace.File("Results")));
         Assert.Equal(expectedHashes, GetDirectoryHashes(pristineDirectory));
     }
 

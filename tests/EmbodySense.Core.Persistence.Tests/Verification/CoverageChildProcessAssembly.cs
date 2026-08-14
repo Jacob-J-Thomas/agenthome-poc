@@ -6,70 +6,14 @@ internal static class CoverageChildProcessAssembly
 {
     internal const string IsolatedAssemblyDirectoryVariable = "EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY";
 
-    internal static void AddVstestArguments(ProcessStartInfo startInfo, string currentAssemblyPath, string fullyQualifiedTestName)
-        => AddVstestArguments(
+    internal static void AddUninstrumentedVstestArguments(ProcessStartInfo startInfo, string currentAssemblyPath, string fullyQualifiedTestName)
+        => AddUninstrumentedVstestArguments(
             startInfo,
             currentAssemblyPath,
             fullyQualifiedTestName,
             Environment.GetEnvironmentVariable(IsolatedAssemblyDirectoryVariable));
 
-    internal static void AddVstestArguments(
-        ProcessStartInfo startInfo,
-        string currentAssemblyPath,
-        string fullyQualifiedTestName,
-        string? isolatedAssemblyDirectory)
-    {
-        ArgumentNullException.ThrowIfNull(startInfo);
-        ArgumentException.ThrowIfNullOrWhiteSpace(currentAssemblyPath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(fullyQualifiedTestName);
-
-        startInfo.ArgumentList.Add("vstest");
-        if (string.IsNullOrWhiteSpace(isolatedAssemblyDirectory))
-        {
-            startInfo.ArgumentList.Add(currentAssemblyPath);
-            startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=" + fullyQualifiedTestName);
-            return;
-        }
-
-        var isolationRoot = Directory.GetParent(isolatedAssemblyDirectory)?.FullName
-            ?? throw new DirectoryNotFoundException("The isolated coverage child-process root is unavailable.");
-        var collectorDirectory = Path.Combine(isolationRoot, "Collector");
-        var runSettingsPath = Path.Combine(isolationRoot, "verification-pull-request.runsettings");
-        var resultsDirectory = Path.Combine(isolationRoot, "Results");
-        if (!Directory.Exists(collectorDirectory))
-        {
-            throw new DirectoryNotFoundException($"The isolated coverage collector is unavailable: `{collectorDirectory}`.");
-        }
-        if (!File.Exists(runSettingsPath))
-        {
-            throw new FileNotFoundException("The isolated coverage runsettings file is unavailable.", runSettingsPath);
-        }
-
-        var executionDirectory = Path.Combine(isolationRoot, "Invocations", Guid.NewGuid().ToString("N"));
-        CopyDirectory(isolatedAssemblyDirectory, executionDirectory);
-        var isolatedPath = Path.Combine(executionDirectory, Path.GetFileName(currentAssemblyPath));
-        if (!File.Exists(isolatedPath))
-        {
-            throw new FileNotFoundException("The isolated coverage child-process assembly is unavailable.", isolatedPath);
-        }
-
-        Directory.CreateDirectory(resultsDirectory);
-        startInfo.ArgumentList.Add(isolatedPath);
-        startInfo.ArgumentList.Add("--TestAdapterPath:" + collectorDirectory);
-        startInfo.ArgumentList.Add("--Settings:" + runSettingsPath);
-        startInfo.ArgumentList.Add("--Collect:XPlat Code Coverage");
-        startInfo.ArgumentList.Add("--ResultsDirectory:" + resultsDirectory);
-        startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=" + fullyQualifiedTestName);
-    }
-
-    internal static void AddExpectedTerminationVstestArguments(ProcessStartInfo startInfo, string currentAssemblyPath, string fullyQualifiedTestName)
-        => AddExpectedTerminationVstestArguments(
-            startInfo,
-            currentAssemblyPath,
-            fullyQualifiedTestName,
-            Environment.GetEnvironmentVariable(IsolatedAssemblyDirectoryVariable));
-
-    internal static void AddExpectedTerminationVstestArguments(
+    internal static void AddUninstrumentedVstestArguments(
         ProcessStartInfo startInfo,
         string currentAssemblyPath,
         string fullyQualifiedTestName,
@@ -86,8 +30,9 @@ internal static class CoverageChildProcessAssembly
         }
         else
         {
-            // An intentionally terminated testhost cannot flush useful hit data. Read the immutable
-            // verifier copy directly; the outer verifier re-hashes it after every child has exited.
+            // This child executes the exact existing xUnit identity, while the parent lane owns
+            // production hit evidence. Reading the immutable verifier copy avoids collector work
+            // whose Windows baseline contributed no production line absent from the parent lane.
             if (!Directory.Exists(isolatedAssemblyDirectory))
             {
                 throw new DirectoryNotFoundException($"The immutable coverage child-process directory is unavailable: `{isolatedAssemblyDirectory}`.");
@@ -105,16 +50,17 @@ internal static class CoverageChildProcessAssembly
         startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=" + fullyQualifiedTestName);
     }
 
-    private static void CopyDirectory(string sourceDirectory, string destinationDirectory)
-    {
-        Directory.CreateDirectory(destinationDirectory);
-        foreach (var directory in Directory.EnumerateDirectories(sourceDirectory, "*", SearchOption.AllDirectories))
-        {
-            Directory.CreateDirectory(Path.Combine(destinationDirectory, Path.GetRelativePath(sourceDirectory, directory)));
-        }
-        foreach (var file in Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories))
-        {
-            File.Copy(file, Path.Combine(destinationDirectory, Path.GetRelativePath(sourceDirectory, file)));
-        }
-    }
+    internal static void AddExpectedTerminationVstestArguments(ProcessStartInfo startInfo, string currentAssemblyPath, string fullyQualifiedTestName)
+        => AddExpectedTerminationVstestArguments(
+            startInfo,
+            currentAssemblyPath,
+            fullyQualifiedTestName,
+            Environment.GetEnvironmentVariable(IsolatedAssemblyDirectoryVariable));
+
+    internal static void AddExpectedTerminationVstestArguments(
+        ProcessStartInfo startInfo,
+        string currentAssemblyPath,
+        string fullyQualifiedTestName,
+        string? isolatedAssemblyDirectory)
+        => AddUninstrumentedVstestArguments(startInfo, currentAssemblyPath, fullyQualifiedTestName, isolatedAssemblyDirectory);
 }

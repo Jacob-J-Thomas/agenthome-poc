@@ -915,7 +915,9 @@ public sealed class CustomLoopFrontierStoreTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+        // The parent intentionally kills this child before VSTest can finalize a coverage report.
+        // Reuse the immutable verifier assembly without starting a collector that cannot emit evidence.
+        Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(
             startInfo,
             typeof(CustomLoopFrontierStoreTests).Assembly.Location,
             "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopFrontierStoreTests.External_process_crash_probe_child_stages_one_authenticated_successor_while_holding_the_mutation_lease");
