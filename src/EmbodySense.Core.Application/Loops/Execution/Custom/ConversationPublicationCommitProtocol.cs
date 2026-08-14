@@ -37,6 +37,7 @@ public static class ConversationPublicationCommitProtocol
                     // A yielded continuation prevents a callback captured by a returning boundary from
                     // crossing into the append after the boundary has already closed.
                     await Task.Yield();
+                    CancellationTokenSource appendLifetime;
                     lock (callbackStateSync)
                     {
                         if (!boundaryActive)
@@ -49,9 +50,14 @@ public static class ConversationPublicationCommitProtocol
                         {
                             throw new InvalidOperationException("The conversation publication append callback may be invoked at most once.");
                         }
+
+                        // Admission and lifetime capture are one atomic operation. Once the callback wins
+                        // admission, boundary shutdown may cancel this child lifetime but cannot dispose
+                        // its parent before the callback has captured it.
+                        appendLifetime = CancellationTokenSource.CreateLinkedTokenSource(token, boundaryLifetime.Token);
                     }
 
-                    using var appendLifetime = CancellationTokenSource.CreateLinkedTokenSource(token, boundaryLifetime.Token);
+                    using var appendLifetimeScope = appendLifetime;
                     try
                     {
                         value = await commitAppend(appendLifetime.Token);
