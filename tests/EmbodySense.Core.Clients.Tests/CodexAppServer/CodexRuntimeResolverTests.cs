@@ -1,3 +1,4 @@
+using System.Text.Json;
 using EmbodySense.Core.Clients.CodexAppServer;
 using EmbodySense.Core.Clients.CodexAppServer.Models;
 using EmbodySense.Tests.Support;
@@ -7,6 +8,16 @@ namespace EmbodySense.Core.Clients.Tests.CodexAppServer;
 [Collection(CodexRuntimeEnvironmentCollection.Name)]
 public sealed class CodexRuntimeResolverTests
 {
+    [Fact]
+    public void Probe_deadline_is_positive_and_cannot_exceed_the_production_default()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(15), CodexRuntimeResolver.DefaultProbeTimeout);
+        Assert.NotNull(new CodexRuntimeResolver(TimeSpan.FromMilliseconds(50)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CodexRuntimeResolver(TimeSpan.Zero));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CodexRuntimeResolver(TimeSpan.FromTicks(-1)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CodexRuntimeResolver(CodexRuntimeResolver.DefaultProbeTimeout + TimeSpan.FromTicks(1)));
+    }
+
     [Fact]
     public async Task Explicit_compatible_executable_reports_version_and_model()
     {
@@ -331,24 +342,25 @@ public sealed class CodexRuntimeResolverTests
     [Fact]
     public async Task Candidate_probe_uses_one_deadline_across_all_protocol_stages()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         using var workspace = new TestWorkspace();
+        var protocolStageMarkerPath = workspace.File("probe-stages.txt");
         var executable = await CreateFakeExecutableAsync(
             workspace,
             "staged-delay",
             "codex-cli staged-delay-test",
-            stageDelaySeconds: 6,
+            protocolStageDelayMilliseconds: 2_600,
+            protocolStageMarkerPath: protocolStageMarkerPath,
             advertisedModels: ["gpt-test"]);
 
-        var result = await new CodexRuntimeResolver().ResolveAsync(executable, "gpt-test");
+        Assert.Equal(TimeSpan.FromSeconds(15), CodexRuntimeResolver.DefaultProbeTimeout);
+        var result = await new CodexRuntimeResolver(TimeSpan.FromSeconds(5)).ResolveAsync(executable, "gpt-test");
 
         Assert.Equal(CodexRuntimeResolutionStatus.ProbeFailed, result.Status);
         Assert.Equal("codex-cli staged-delay-test", result.Version);
-        Assert.Contains("timed out after 15 seconds", result.Detail, StringComparison.Ordinal);
+        Assert.Contains("timed out after 5 seconds", result.Detail, StringComparison.Ordinal);
+        Assert.Equal(
+            ["initialize-started", "initialize-completed", "model-list-started"],
+            await File.ReadAllLinesAsync(protocolStageMarkerPath));
     }
 
     private static async Task<string> CreateFakeExecutableAsync(
@@ -359,93 +371,29 @@ public sealed class CodexRuntimeResolverTests
         int versionExitCode = 0,
         bool omitModelCatalog = false,
         bool requestBeforeInitialize = false,
-        int stageDelaySeconds = 0,
+        int versionDelayMilliseconds = 0,
+        int protocolStageDelayMilliseconds = 0,
+        string? protocolStageMarkerPath = null,
         int modelPageSize = int.MaxValue,
         params string[] advertisedModels)
     {
         var directory = workspace.File(relativeDirectory);
         Directory.CreateDirectory(directory);
-        var scriptPath = Path.Combine(directory, "codex.ps1");
-        var commandPath = Path.Combine(directory, "codex.cmd");
-        var modelLiterals = string.Join(", ", advertisedModels.Select(model => "'" + model.Replace("'", "''") + "'"));
-        await File.WriteAllTextAsync(scriptPath, $$"""
-            if ($args -contains "--version") {
-                if ({{stageDelaySeconds}} -gt 0) {
-                    Start-Sleep -Seconds {{stageDelaySeconds}}
-                }
-
-                if ({{versionExitCode}} -ne 0) {
-                    [Console]::Error.WriteLine("simulated version failure")
-                    exit {{versionExitCode}}
-                }
-
-                Write-Output '{{version.Replace("'", "''")}}'
-                exit 0
-            }
-
-            $failAppServer = ${{failAppServer.ToString().ToLowerInvariant()}}
-            $omitModelCatalog = ${{omitModelCatalog.ToString().ToLowerInvariant()}}
-            $requestBeforeInitialize = ${{requestBeforeInitialize.ToString().ToLowerInvariant()}}
-            $stageDelaySeconds = {{stageDelaySeconds}}
-            $modelPageSize = {{modelPageSize}}
-            if ($failAppServer) {
-                [Console]::Error.WriteLine("simulated app-server startup failure")
-                exit 7
-            }
-
-            $advertisedModels = @({{modelLiterals}})
-
-            function Write-ProtocolJson($value) {
-                $value | ConvertTo-Json -Compress -Depth 20
-                [Console]::Out.Flush()
-            }
-
-            while (($line = [Console]::In.ReadLine()) -ne $null) {
-                $message = $line | ConvertFrom-Json
-                switch ($message.method) {
-                    "initialize" {
-                        if ($stageDelaySeconds -gt 0) {
-                            Start-Sleep -Seconds $stageDelaySeconds
-                        }
-
-                        if ($requestBeforeInitialize) {
-                            Write-ProtocolJson @{ id = 99; method = "unsupported/probe"; params = @{} }
-                            $clientResponse = [Console]::In.ReadLine() | ConvertFrom-Json
-                            if ($clientResponse.id -ne 99 -or $clientResponse.error.code -ne -32601) {
-                                [Console]::Error.WriteLine("runtime probe did not decline the server request")
-                                exit 8
-                            }
-                        }
-
-                        Write-ProtocolJson @{ id = $message.id; result = @{} }
-                    }
-
-                    "initialized" {
-                    }
-
-                    "model/list" {
-                        if ($stageDelaySeconds -gt 0) {
-                            Start-Sleep -Seconds $stageDelaySeconds
-                        }
-
-                        $offset = if ($null -eq $message.params.cursor) { 0 } else { [int]$message.params.cursor }
-                        $page = @($advertisedModels | Select-Object -Skip $offset -First $modelPageSize)
-                        $models = @($page | ForEach-Object { @{ id = $_; model = $_ } })
-                        if ($omitModelCatalog) {
-                            Write-ProtocolJson @{ id = $message.id; result = @{} }
-                        } else {
-                            $nextOffset = $offset + $page.Count
-                            $nextCursor = if ($nextOffset -lt $advertisedModels.Count) { "$nextOffset" } else { $null }
-                            Write-ProtocolJson @{ id = $message.id; result = @{ data = $models; nextCursor = $nextCursor } }
-                        }
-                    }
-                }
-            }
-            """);
-        await File.WriteAllTextAsync(commandPath, """
-            @echo off
-            "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0codex.ps1" %*
-            """);
-        return commandPath;
+        var configurationPath = Path.Combine(directory, "probe-config.json");
+        var configuration = new
+        {
+            version,
+            advertisedModels,
+            failAppServer,
+            versionExitCode,
+            omitModelCatalog,
+            requestBeforeInitialize,
+            versionDelayMilliseconds,
+            protocolStageDelayMilliseconds,
+            protocolStageMarkerPath,
+            modelPageSize
+        };
+        await File.WriteAllTextAsync(configurationPath, JsonSerializer.Serialize(configuration, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        return await CancellationHostExecutable.CreateAsync(workspace, relativeDirectory, "codex-runtime-probe", "probe-config.json");
     }
 }
