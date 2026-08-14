@@ -422,8 +422,9 @@ try {
 
     $coverageStartedUtc = [DateTime]::UtcNow
     Add-ProfiledRequiredGatePhase -Name "git-diff-check" -FileName "git" -Arguments @("diff", "--check") -TimeoutSeconds 60 -OutputPath (Join-Path $verificationLogsPath "git-diff-check.log")
-    Add-ProfiledRequiredGatePhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-whitespace.log")
-    Add-ProfiledRequiredGatePhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-naming-style.log")
+    # Omitting a formatter subcommand makes one workspace load run whitespace plus the
+    # explicitly selected IDE1006 style analyzer; --verify-no-changes keeps both fail-closed.
+    Add-ProfiledRequiredGatePhase -Name "format-csharp" -FileName "dotnet" -Arguments @("format", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-csharp.log")
     foreach ($isolation in $isolations) {
         foreach ($lane in $isolation.Lanes) {
             Add-TestExecutionPhase -Isolation $isolation -Lane $lane

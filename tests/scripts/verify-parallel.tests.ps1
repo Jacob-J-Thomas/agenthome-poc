@@ -113,12 +113,11 @@ Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTest
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 10) -eq 4) -Message "A lower explicit worker request must remain authoritative below the required-gate ceiling."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 4) -eq 4) -Message "A hosted four-core request must not be expanded beyond its explicit four-worker bound."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 2) -eq 2) -Message "A smaller host must reduce required-gate workers to its physical processor count."
-Assert-True -Condition ($requiredGateProfiles.Count -eq 12) -Message "The exact nine-assembly test plan, two format gates, and git-diff gate must have checked-in duration/resource profiles."
+Assert-True -Condition ($requiredGateProfiles.Count -eq 11) -Message "The exact nine-assembly test plan, one combined format process, and git-diff gate must have checked-in duration/resource profiles."
 Assert-True -Condition (@($requiredGateProfiles | Group-Object Name -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Required gate scheduling profiles must have exact unique names."
 Assert-VerificationRequiredGateSchedule -Phases $requiredGateProfiles
 $expectedRequiredGateNames = @(
-    "format-naming-style"
-    "format-whitespace"
+    "format-csharp"
     "git-diff-check"
     "tests-EmbodySense.Cli.Command.Tests-all"
     "tests-EmbodySense.Core.Application.Tests-all"
@@ -130,10 +129,9 @@ $expectedRequiredGateNames = @(
     "tests-EmbodySense.IntegrationTests-all"
     "tests-EmbodySense.Web.Tests-all"
 )
-Assert-True -Condition ((@($requiredGateProfiles.Name | Sort-Object) -join "`n") -ceq (@($expectedRequiredGateNames | Sort-Object) -join "`n")) -Message "Required-gate profiles must equal the canonical nine-assembly catalog plus both formats and git-diff exactly."
+Assert-True -Condition ((@($requiredGateProfiles.Name | Sort-Object) -join "`n") -ceq (@($expectedRequiredGateNames | Sort-Object) -join "`n")) -Message "Required-gate profiles must equal the canonical nine-assembly catalog plus the combined formatter and git-diff exactly."
 $declaredRequiredGateNames = [Collections.Generic.List[string]]::new()
-$declaredRequiredGateNames.Add("format-naming-style")
-$declaredRequiredGateNames.Add("format-whitespace")
+$declaredRequiredGateNames.Add("format-csharp")
 $declaredRequiredGateNames.Add("git-diff-check")
 $testProjects = @(Get-ChildItem -Path (Join-Path $repoRoot "tests") -Recurse -Filter "*.csproj" | Where-Object { $_.Name -ne "EmbodySense.CancellationHost.csproj" -and $_.Name -ne "EmbodySense.Tests.Support.csproj" } | Sort-Object FullName)
 foreach ($testProject in $testProjects) {
@@ -149,10 +147,8 @@ foreach ($processHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-al
     $processHeavyProfile = Get-VerificationRequiredGateScheduleProfile -Name $processHeavyGateName
     Assert-True -Condition ($processHeavyProfile.Weight -eq 3 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "An internally parallel assembly gate '$processHeavyGateName' must retain its bounded logical weight."
 }
-foreach ($formatGateName in @("format-naming-style", "format-whitespace")) {
-    $formatProfile = Get-VerificationRequiredGateScheduleProfile -Name $formatGateName
-    Assert-True -Condition ($formatProfile.Weight -eq 6 -and $formatProfile.ResourceClass -ceq "CpuBound") -Message "Format gate '$formatGateName' must reserve the two-heavy schedule's remaining logical capacity and overlap only immutable test-output execution."
-}
+$formatProfile = Get-VerificationRequiredGateScheduleProfile -Name "format-csharp"
+Assert-True -Condition ($formatProfile.EstimatedDurationSeconds -eq 100 -and $formatProfile.Weight -eq 6 -and $formatProfile.ResourceClass -ceq "CpuBound") -Message "The combined formatter must reserve the two-heavy schedule's remaining logical capacity for one bounded solution load."
 
 $requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 4 -MaximumResourceCapacity 12 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
 Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -le 480) -Message "The checked-in duration estimates must keep the two-heavy required-gate schedule at or below eight minutes; this bound excludes verifier preflight and is not whole-run timing proof. Actual required-gate estimate: $($requiredGateVirtualSchedule.MakespanSeconds)."
@@ -161,9 +157,9 @@ foreach ($assemblyGateName in @("tests-EmbodySense.Core.Persistence.Tests-all", 
 }
 $initialResourceCapacity = ($requiredGateProfiles | Where-Object { $requiredGateVirtualSchedule.Starts[$_.Name] -eq 0 } | Measure-Object -Property Weight -Sum).Sum
 Assert-True -Condition ($initialResourceCapacity -eq 12) -Message "Two assembly-wide phases and one format gate must fill all twelve logical units without admitting an oversubscribing fourth process."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-naming-style"] -eq 0) -Message "The longer format gate must use the third initial process slot without admitting a third heavy assembly."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-csharp"] -eq 0) -Message "The combined format gate must use the third initial process slot without admitting a third heavy assembly."
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Web.Tests-all"] -gt 0) -Message "The third internally parallel assembly must wait for one of the two admitted heavy slots."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Application.Tests-all"] -ge ($requiredGateVirtualSchedule.Starts["format-whitespace"] + 35)) -Message "Ordinary test work must wait until both CPU-bound format gates drain their full remaining-capacity reservations."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Application.Tests-all"] -ge ($requiredGateVirtualSchedule.Starts["format-csharp"] + 100)) -Message "Ordinary test work must wait until the combined CPU-bound format gate drains its full remaining-capacity reservation."
 $processHeavyProfiles = @($requiredGateProfiles | Where-Object ResourceClass -CEQ "ProcessHeavy")
 foreach ($startSecond in @($processHeavyProfiles | ForEach-Object { $requiredGateVirtualSchedule.Starts[$_.Name] } | Sort-Object -Unique)) {
     $activeProcessHeavy = @($processHeavyProfiles | Where-Object {
@@ -172,9 +168,7 @@ foreach ($startSecond in @($processHeavyProfiles | ForEach-Object { $requiredGat
     })
     Assert-True -Condition ($activeProcessHeavy.Count -le 2) -Message "The virtual required-gate schedule must never overlap more than two coverage-instrumented process-heavy assemblies."
 }
-foreach ($formatGateName in @("format-naming-style", "format-whitespace")) {
-    Assert-True -Condition ($requiredGateVirtualSchedule.Starts[$formatGateName] -lt 300) -Message "Format gate '$formatGateName' must execute while the longest immutable assembly gate is still running."
-}
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-csharp"] -lt 300) -Message "The combined format gate must execute while the longest immutable assembly gate is still running."
 
 $counterexamplePhases = @(
     [pscustomobject]@{ Name = "long-ordinary"; EstimatedDurationSeconds = 100; SchedulingPrioritySeconds = 100; ResourceClass = "Ordinary" }
