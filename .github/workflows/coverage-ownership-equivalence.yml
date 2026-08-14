@@ -50,6 +50,11 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
+      - name: Validate exact Windows parallel contract
+        shell: pwsh
+        timeout-minutes: 4
+        run: ./tests/scripts/verify-parallel.tests.ps1
+
       - name: Collect exact unfiltered and filtered evidence
         shell: pwsh
         run: |

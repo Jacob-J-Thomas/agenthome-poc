@@ -16,6 +16,11 @@ if ([string]::IsNullOrWhiteSpace($probeExecutable) -or -not (Test-Path -LiteralP
 $probePath = Join-Path $PSScriptRoot "verification-parallel-probe.mjs"
 $assertionCount = 0
 
+function Write-ContractStage {
+    param([Parameter(Mandatory = $true)] [string]$Name)
+    Write-Host "VERIFY_PARALLEL_CONTRACT_STAGE name=$Name"
+}
+
 function Assert-True {
     param([bool]$Condition, [string]$Message)
 
@@ -442,6 +447,7 @@ catch {
 $scenarioRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-parallel-verifier-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scenarioRoot | Out-Null
 try {
+    Write-ContractStage -Name "ordinary-capacity"
     Assert-True -Condition (Test-Path -LiteralPath $probePath -PathType Leaf) -Message "The lightweight cross-platform child-process probe must be checked in."
     $baseArguments = @($probePath, "basic")
     $sixUnitCapacity = 6
@@ -458,6 +464,7 @@ try {
     Assert-Contains -Actual (Get-Content -Raw (Join-Path $scenarioRoot "first.log")) -Expected "probe=first" -Message "Each phase must retain isolated output."
 
     $weightedArguments = @($probePath, "weighted")
+    Write-ContractStage -Name "logical-weight"
     $activeRoot = Join-Path $scenarioRoot "weighted-active"
     New-Item -ItemType Directory -Path $activeRoot | Out-Null
     $heavyWeight = 3
@@ -471,6 +478,7 @@ try {
     Assert-True -Condition (@($weightedResults | Where-Object { $_.Weight -eq $heavyWeight -and $_.EffectiveWeight -eq $heavyWeight -and $_.ResourceClass -ceq "ProcessHeavy" }).Count -eq 4) -Message "Weighted result evidence must preserve the declared process-heavy posture without adapting its weight downward."
 
     $physicalHeavyRoot = Join-Path $scenarioRoot "physical-heavy-active"
+    Write-ContractStage -Name "physical-heavy"
     New-Item -ItemType Directory -Path $physicalHeavyRoot | Out-Null
     Reset-VerificationParallelPhaseState
     foreach ($name in @("physical-heavy-first", "physical-heavy-second")) {
@@ -480,6 +488,7 @@ try {
     Assert-True -Condition ($physicalHeavyResults.Count -eq 2) -Message "Two evidence-weighted process-heavy phases must overlap within eight logical units and the four-process ceiling."
 
     $exclusiveRoot = Join-Path $scenarioRoot "full-capacity-active"
+    Write-ContractStage -Name "full-capacity-exclusion"
     New-Item -ItemType Directory -Path $exclusiveRoot | Out-Null
     Reset-VerificationParallelPhaseState
     Add-VerificationParallelPhase -Name "full-capacity-format" -FileName $probeExecutable -Arguments ($weightedArguments + @("full-capacity-format", $exclusiveRoot, "1", "1")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "full-capacity-format.log") -EstimatedDurationSeconds 2 -Weight 4 -ResourceClass CpuBound
@@ -491,6 +500,7 @@ try {
         [pscustomobject]@{ Name = "process-heavy"; ResourceClass = "ProcessHeavy"; Weight = 3; Maximum = 2; Count = 4 },
         [pscustomobject]@{ Name = "cpu-bound"; ResourceClass = "CpuBound"; Weight = 2; Maximum = 1; Count = 3 }
     )) {
+        Write-ContractStage -Name "resource-class-$($resourceClassScenario.Name)"
         $resourceClassRoot = Join-Path $scenarioRoot "$($resourceClassScenario.Name)-active"
         New-Item -ItemType Directory -Path $resourceClassRoot | Out-Null
         Reset-VerificationParallelPhaseState
@@ -504,11 +514,13 @@ try {
     }
 
     Reset-VerificationParallelPhaseState
+    Write-ContractStage -Name "worker-limits-and-fairness"
     Add-VerificationParallelPhase -Name "one-worker-heavy" -FileName $probeExecutable -Arguments ($baseArguments + @("one-worker-heavy", "10", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "one-worker-heavy.log") -Weight 3 -ResourceClass ProcessHeavy
     $oneWorkerResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 1 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 1 -MaximumCpuBoundWorkers 1)
     Assert-True -Condition ($oneWorkerResults.Count -eq 1 -and $oneWorkerResults[0].ResourceClass -ceq "ProcessHeavy") -Message "One-worker hosts must preserve process-heavy execution after effective class-limit capping."
 
     Reset-VerificationParallelPhaseState
+    Write-ContractStage -Name "invalid-resource-limits"
     Add-VerificationParallelPhase -Name "invalid-resource-limit" -FileName $probeExecutable -Arguments ($baseArguments + @("invalid-resource-limit", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "invalid-resource-limit.log")
     try {
         Invoke-VerificationParallelPhases -MaximumWorkers 2 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 3 | Out-Null
@@ -522,6 +534,7 @@ try {
     New-Item -ItemType Directory -Path $workerBoundRoot | Out-Null
     $workerBound = 2
     Reset-VerificationParallelPhaseState
+    Write-ContractStage -Name "worker-capacity"
     foreach ($name in @("worker-first", "worker-second", "worker-third", "worker-fourth")) {
         Add-VerificationParallelPhase -Name $name -FileName $probeExecutable -Arguments ($weightedArguments + @($name, $workerBoundRoot, $workerBound.ToString([Globalization.CultureInfo]::InvariantCulture), $workerBound.ToString([Globalization.CultureInfo]::InvariantCulture))) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log")
     }
@@ -575,6 +588,7 @@ try {
         Assert-True -Condition (-not (Test-Path -LiteralPath $underweightedOutput)) -Message "An underweighted $underweightedClass phase must fail before execution."
     }
 
+    Write-ContractStage -Name "dependencies"
     Reset-VerificationParallelPhaseState
     Add-VerificationParallelPhase -Name "dependency-prerequisite" -FileName $probeExecutable -Arguments ($baseArguments + @("dependency-prerequisite", "50", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "dependency-prerequisite.log")
     Add-VerificationParallelPhase -Name "dependency-dependent" -FileName $probeExecutable -Arguments ($baseArguments + @("dependency-dependent", "10", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "dependency-dependent.log") -DependsOn @("dependency-prerequisite") -EstimatedDurationSeconds 100
@@ -608,6 +622,7 @@ try {
     }
     Assert-True -Condition (-not (Test-Path -LiteralPath $failedDependencyOutput)) -Message "A failed prerequisite must prevent dependent process admission."
 
+    Write-ContractStage -Name "failure-aggregation"
     Reset-VerificationParallelPhaseState
     Add-VerificationParallelPhase -Name "failure" -FileName $probeExecutable -Arguments ($baseArguments + @("failure", "50", "17")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "failure.log") -Weight 3 -ResourceClass ProcessHeavy
     Add-VerificationParallelPhase -Name "success" -FileName $probeExecutable -Arguments ($baseArguments + @("success", "300", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "success.log") -Weight 3 -ResourceClass ProcessHeavy
@@ -622,6 +637,7 @@ try {
     Assert-Contains -Actual (Get-Content -Raw (Join-Path $scenarioRoot "success.log")) -Expected "probe=success" -Message "The harness must drain already-running peers before reporting failure."
 
     $laneTempRoot = Join-Path $scenarioRoot "lane-temp"
+    Write-ContractStage -Name "environment"
     New-Item -ItemType Directory -Path $laneTempRoot | Out-Null
     Reset-VerificationParallelPhaseState
     Add-VerificationParallelPhase -Name "environment" -FileName $probeExecutable -Arguments ($baseArguments + @("environment", "10", "0", "-")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "environment.log") -Environment @{ VERIFY_PARALLEL_PROBE = "scoped-child"; TEMP = $laneTempRoot; TMP = $laneTempRoot; TMPDIR = $laneTempRoot }
@@ -632,6 +648,7 @@ try {
     Assert-True -Condition ([string]::IsNullOrEmpty($env:VERIFY_PARALLEL_PROBE)) -Message "Per-phase environment overrides cannot mutate the verifier process environment."
 
     $orderPath = Join-Path $scenarioRoot "priority-order.txt"
+    Write-ContractStage -Name "priority"
     Reset-VerificationParallelPhaseState
     Add-VerificationParallelPhase -Name "low" -FileName $probeExecutable -Arguments ($baseArguments + @("low", "10", "0", $orderPath)) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "low.log") -EstimatedDurationSeconds 1
     Add-VerificationParallelPhase -Name "tie-zulu" -FileName $probeExecutable -Arguments ($baseArguments + @("tie-zulu", "10", "0", $orderPath)) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "tie-zulu.log") -EstimatedDurationSeconds 50
@@ -641,6 +658,7 @@ try {
     $order = @(Get-Content -LiteralPath $orderPath)
     Assert-True -Condition ($order.Count -eq 4 -and $order[0] -ceq "high" -and $order[1] -ceq "tie-alpha" -and $order[2] -ceq "tie-zulu" -and $order[3] -ceq "low") -Message "Ordinary phases must retain longest-estimate ordering, with exact-name ordering for deterministic ties."
 
+    Write-ContractStage -Name "timeout"
     Reset-VerificationParallelPhaseState
     Add-VerificationParallelPhase -Name "timeout" -FileName $probeExecutable -Arguments ($baseArguments + @("timeout", "5000", "0")) -TimeoutSeconds 1 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "timeout.log")
     try {
@@ -662,6 +680,7 @@ try {
     }
 
     $artifactSource = Join-Path $scenarioRoot "artifact-source"
+    Write-ContractStage -Name "artifacts"
     $artifactCopy = Join-Path $scenarioRoot "artifact-copy"
     New-Item -ItemType Directory -Path (Join-Path $artifactSource "nested") -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $artifactSource "nested\assembly.dll") -Value "immutable" -Encoding UTF8
