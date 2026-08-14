@@ -427,12 +427,34 @@ function Read-EquivalenceResults {
     $accountedReports = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
     $testIds = [Collections.Generic.List[string]]::new()
     $laneTestIdEvidence = [Collections.Generic.List[object]]::new()
+    $laneSettingsEvidence = [Collections.Generic.List[object]]::new()
     $trxEvidence = [Collections.Generic.List[object]]::new()
     $reportEvidence = [Collections.Generic.List[object]]::new()
     $canonicalSettingsHash = (Get-FileHash -LiteralPath $canonicalRunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
     foreach ($laneName in $expectedLaneNames) {
         $profileName = "tests-$laneName"
         $projectName = Get-VerificationCoverageLaneTestProjectName -Bindings $coverageLaneBindings -LaneName $profileName
+        $testProject = @($TestProjects | Where-Object BaseName -CEQ $projectName)
+        $lanePrefix = "$projectName-"
+        if ($testProject.Count -ne 1 -or -not $laneName.StartsWith($lanePrefix, [StringComparison]::Ordinal)) {
+            throw "$Mode lane '$laneName' does not bind one exact canonical test project and shard."
+        }
+        $shardName = $laneName.Substring($lanePrefix.Length)
+        $laneSettingsPath = Join-Path (Join-Path (Join-Path (Join-Path $fullRoot "CoverageIsolation") $projectName) "LaneSettings") "$shardName.runsettings"
+        $laneSettings = Read-VerificationCoverageHashSnapshot -Path $laneSettingsPath -Root $fullRoot -Description "$Mode lane '$laneName' runsettings"
+        if ($Mode -ceq "UnfilteredEvidence") {
+            if ($laneSettings.Sha256 -cne $canonicalSettingsHash) { throw "$Mode lane '$laneName' is not exact canonical unfiltered collection." }
+        }
+        else {
+            $expectedLaneSettingsPath = Join-Path $SettingsProbeRoot "$projectName-$shardName.runsettings"
+            $laneSelection = Get-VerificationCoverageLaneSelection -Ownership $Ownership -TestProject $testProject[0] -LaneName $shardName
+            Write-VerificationCoverageRunSettings -SourcePath $canonicalRunSettingsPath -DestinationPath $expectedLaneSettingsPath -Selection $laneSelection
+            $expectedLaneSettings = Read-VerificationCoverageHashSnapshot -Path $expectedLaneSettingsPath -Root $SettingsProbeRoot -Description "$Mode lane '$laneName' expected runsettings"
+            if ($laneSettings.Length -ne $expectedLaneSettings.Length -or $laneSettings.Sha256 -cne $expectedLaneSettings.Sha256) {
+                throw "$Mode lane '$laneName' does not use the exact current lane-specific ownership filter."
+            }
+        }
+        $laneSettingsEvidence.Add([pscustomobject][ordered]@{ lane = $laneName; length = $laneSettings.Length; sha256 = $laneSettings.Sha256 })
         $laneRoot = Join-Path $standardRoot $laneName
         [void](Assert-VerificationCoverageOrdinaryPath -Path $laneRoot -Root $fullRoot -PathType Container -Description "$Mode lane '$laneName' root")
         $trxPath = Join-Path $laneRoot "$laneName.trx"
@@ -496,7 +518,7 @@ function Read-EquivalenceResults {
             if ($laneSettings.Sha256 -cne $canonicalSettingsHash) { throw "$Mode project '$projectName' is not exact canonical unfiltered collection." }
         }
         else {
-            $expectedSettingsPath = Join-Path $SettingsProbeRoot "$projectName.runsettings"
+            $expectedSettingsPath = Join-Path $SettingsProbeRoot "$projectName-project.runsettings"
             $selection = Get-VerificationCoverageSelection -Ownership $Ownership -TestProject $testProject
             Write-VerificationCoverageRunSettings -SourcePath $canonicalRunSettingsPath -DestinationPath $expectedSettingsPath -Selection $selection
             $expectedSettings = Read-VerificationCoverageHashSnapshot -Path $expectedSettingsPath -Root $SettingsProbeRoot -Description "$Mode project '$projectName' expected runsettings"
@@ -554,6 +576,7 @@ function Read-EquivalenceResults {
         TestIds = $executedIds
         TestIdSha256 = Get-VerificationCoverageOwnershipRecordSha256 -Records $executedIds
         TestIdsByLane = @($laneTestIdEvidence | Sort-Object lane)
+        LaneSettings = @($laneSettingsEvidence | Sort-Object lane)
         GlobalLineSet = $globalLineSet
         Packages = $packages
         Reports = @($reportEvidence | Sort-Object testProject, sha256)
@@ -596,6 +619,14 @@ if ($unfiltered.TestIds.Count -ne $filtered.TestIds.Count -or
 }
 if ($unfiltered.TestIdsByLane.Count -ne $filtered.TestIdsByLane.Count) {
     throw "Filtered coverage execution does not preserve the exact unfiltered lane inventory."
+}
+if ($unfiltered.LaneSettings.Count -ne $filtered.LaneSettings.Count) {
+    throw "Filtered coverage runsettings do not preserve the exact unfiltered lane inventory."
+}
+for ($index = 0; $index -lt $unfiltered.LaneSettings.Count; $index++) {
+    if ($unfiltered.LaneSettings[$index].lane -cne $filtered.LaneSettings[$index].lane) {
+        throw "Filtered coverage runsettings do not preserve the exact unfiltered lane identity."
+    }
 }
 for ($index = 0; $index -lt $unfiltered.TestIdsByLane.Count; $index++) {
     $left = $unfiltered.TestIdsByLane[$index]
@@ -670,6 +701,7 @@ $report = [ordered]@{
         inventorySha256 = $unfiltered.InventorySnapshot.Sha256
         binaryManifestSha256 = $unfiltered.BinaryManifestSnapshot.Sha256
         reports = @($unfiltered.Reports)
+        laneSettings = @($unfiltered.LaneSettings)
         trx = @($unfiltered.Trx)
     }
     filtered = [ordered]@{
@@ -677,6 +709,7 @@ $report = [ordered]@{
         inventorySha256 = $filtered.InventorySnapshot.Sha256
         binaryManifestSha256 = $filtered.BinaryManifestSnapshot.Sha256
         reports = @($filtered.Reports)
+        laneSettings = @($filtered.LaneSettings)
         trx = @($filtered.Trx)
     }
 }

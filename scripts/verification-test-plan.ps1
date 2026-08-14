@@ -81,7 +81,13 @@ function New-VerificationProjectCoverageIsolation {
         Write-VerificationCoverageRunSettings -SourcePath $PullRequestRunSettingsPath -DestinationPath $runSettingsPath -Selection $coverageSelection
     }
     Copy-Item -LiteralPath $runSettingsPath -Destination $childRunSettingsPath
+    $runSettingsSha256 = (Get-FileHash -LiteralPath $runSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ((Get-FileHash -LiteralPath $childRunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $runSettingsSha256) {
+        throw "Coverage isolation parent and child runsettings do not byte-match for '$($TestProject.BaseName)'."
+    }
 
+    $laneSettingsRoot = Join-Path $projectRoot "LaneSettings"
+    New-Item -ItemType Directory -Path $laneSettingsRoot | Out-Null
     $laneCopies = [Collections.Generic.List[object]]::new()
     foreach ($lane in $Lanes) {
         $laneDirectory = Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework
@@ -103,6 +109,15 @@ function New-VerificationProjectCoverageIsolation {
         if (-not $SkipCoverage -and $TestProject.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") {
             $laneEnvironment.EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory
         }
+        $laneCoverageSelection = Get-VerificationCoverageLaneSelection -Ownership $CoverageOwnership -TestProject $TestProject -LaneName $lane.Name
+        $laneRunSettingsPath = Join-Path $laneSettingsRoot "$($lane.Name).runsettings"
+        if ($CoverageOwnershipMode -ceq "UnfilteredEvidence") {
+            Copy-Item -LiteralPath $PullRequestRunSettingsPath -Destination $laneRunSettingsPath
+        }
+        else {
+            Write-VerificationCoverageRunSettings -SourcePath $PullRequestRunSettingsPath -DestinationPath $laneRunSettingsPath -Selection $laneCoverageSelection
+        }
+        $laneRunSettingsSha256 = (Get-FileHash -LiteralPath $laneRunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
         $laneCopies.Add([pscustomobject]@{
             Name = "$($TestProject.BaseName)-$($lane.Name)"
             ProjectName = $TestProject.BaseName
@@ -114,6 +129,9 @@ function New-VerificationProjectCoverageIsolation {
             ResultsPath = Join-Path $StandardTestResultsRoot "$($TestProject.BaseName)-$($lane.Name)"
             FixtureRoot = $laneFixtureRoot
             Environment = $laneEnvironment
+            RunSettingsPath = $laneRunSettingsPath
+            RunSettingsSha256 = $laneRunSettingsSha256
+            CoverageSelection = $laneCoverageSelection
         })
     }
 
@@ -125,6 +143,7 @@ function New-VerificationProjectCoverageIsolation {
         PristineManifest = $pristineManifest
         CollectorDirectory = $collectorDirectory
         RunSettingsPath = $runSettingsPath
+        RunSettingsSha256 = $runSettingsSha256
         ChildRunSettingsPath = $childRunSettingsPath
         ChildInvocationsRoot = Join-Path $childCoverageRoot "Invocations"
         CoverageSelection = $coverageSelection
@@ -174,6 +193,7 @@ function Write-VerificationTestPreparationPlan {
             pristineManifest = @(ConvertTo-VerificationTestPlanManifest -Manifest $isolation.PristineManifest)
             collectorDirectory = [string]$isolation.CollectorDirectory
             runSettingsPath = [string]$isolation.RunSettingsPath
+            runSettingsSha256 = [string]$isolation.RunSettingsSha256
             childRunSettingsPath = [string]$isolation.ChildRunSettingsPath
             childInvocationsRoot = [string]$isolation.ChildInvocationsRoot
             childResultsPath = [string]$isolation.ChildResultsPath
@@ -195,6 +215,13 @@ function Write-VerificationTestPreparationPlan {
                     directory = [string]$lane.Directory
                     resultsPath = [string]$lane.ResultsPath
                     fixtureRoot = [string]$lane.FixtureRoot
+                    runSettingsPath = [string]$lane.RunSettingsPath
+                    runSettingsSha256 = [string]$lane.RunSettingsSha256
+                    coverageSelection = [ordered]@{
+                        selectedFileCount = [int]$lane.CoverageSelection.SelectedFiles.Count
+                        excludedFileCount = [int]$lane.CoverageSelection.ExcludedFiles.Count
+                        includedPackageCount = [int]$lane.CoverageSelection.IncludedPackages.Count
+                    }
                     environment = @($lane.Environment.GetEnumerator() | Sort-Object Key -CaseSensitive | ForEach-Object {
                         [ordered]@{ name = [string]$_.Key; value = [string]$_.Value }
                     })
@@ -243,6 +270,34 @@ function Assert-VerificationTestPlanPath {
     if (-not (Test-VerificationTestPlanSamePath -Left $Actual -Right $Expected)) {
         throw "$Description does not match its exact preparation topology. Expected '$([IO.Path]::GetFullPath($Expected))'; actual '$([IO.Path]::GetFullPath($Actual))'."
     }
+}
+
+function Get-VerificationTestPlanSha256 {
+    param([Parameter(Mandatory = $true)] [byte[]]$Bytes)
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($algorithm.ComputeHash($Bytes))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Get-VerificationExpectedRunSettingsEvidence {
+    param(
+        [Parameter(Mandatory = $true)] [object]$CoverageOwnership,
+        [Parameter(Mandatory = $true)] [ValidateSet("Standard", "UnfilteredEvidence", "FilteredEvidence")] [string]$CoverageOwnershipMode,
+        [Parameter(Mandatory = $true)] [object]$CoverageSelection
+    )
+
+    [byte[]]$bytes = if ($CoverageOwnershipMode -ceq "UnfilteredEvidence") {
+        [IO.File]::ReadAllBytes([string]$CoverageOwnership.RunSettingsPath)
+    }
+    else {
+        Get-VerificationCoverageRunSettingsBytes -SourcePath ([string]$CoverageOwnership.RunSettingsPath) -Selection $CoverageSelection
+    }
+    return [pscustomobject]@{ Length = $bytes.Length; Sha256 = Get-VerificationTestPlanSha256 -Bytes $bytes }
 }
 
 function ConvertFrom-VerificationTestPlanManifest {
@@ -317,7 +372,7 @@ function Read-VerificationTestPreparationPlan {
     for ($projectIndex = 0; $projectIndex -lt $TestProjects.Count; $projectIndex++) {
         $testProject = $TestProjects[$projectIndex]
         $record = $planIsolations[$projectIndex]
-        Assert-VerificationCoverageOwnershipProperties -Value $record -Expected @("canonicalAssemblyPath", "childInvocationsRoot", "childResultsPath", "childRunSettingsPath", "collectorDirectory", "coverageSelection", "lanes", "pristineDirectory", "pristineManifest", "projectName", "projectPath", "runSettingsPath", "sourceDirectory", "sourceManifest") -Description "Verification test preparation project"
+        Assert-VerificationCoverageOwnershipProperties -Value $record -Expected @("canonicalAssemblyPath", "childInvocationsRoot", "childResultsPath", "childRunSettingsPath", "collectorDirectory", "coverageSelection", "lanes", "pristineDirectory", "pristineManifest", "projectName", "projectPath", "runSettingsPath", "runSettingsSha256", "sourceDirectory", "sourceManifest") -Description "Verification test preparation project"
         if ([string]$record.projectName -cne $testProject.BaseName) { throw "Verification test preparation project order or identity is invalid at index $projectIndex." }
         Assert-VerificationTestPlanPath -Actual ([string]$record.projectPath) -Expected $testProject.FullName -Description "Verification test project path"
 
@@ -352,10 +407,17 @@ function Read-VerificationTestPreparationPlan {
         $runSettingsHash = (Get-FileHash -LiteralPath $runSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
         $childRunSettingsHash = (Get-FileHash -LiteralPath $childRunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($runSettingsHash -cne $childRunSettingsHash) { throw "Verification test preparation parent and child runsettings do not byte-match for '$($testProject.BaseName)'." }
+        if ([string]$record.runSettingsSha256 -cnotmatch '^[0-9a-f]{64}$' -or [string]$record.runSettingsSha256 -cne $runSettingsHash) {
+            throw "Verification test preparation runsettings hash is invalid for '$($testProject.BaseName)'."
+        }
 
         $sourceManifest = @(ConvertFrom-VerificationTestPlanManifest -Entries @($record.sourceManifest) -Description "$($testProject.BaseName) source manifest")
         $pristineManifest = @(ConvertFrom-VerificationTestPlanManifest -Entries @($record.pristineManifest) -Description "$($testProject.BaseName) pristine manifest")
         $coverageSelection = Get-VerificationCoverageSelection -Ownership $CoverageOwnership -TestProject $testProject
+        $expectedRunSettings = Get-VerificationExpectedRunSettingsEvidence -CoverageOwnership $CoverageOwnership -CoverageOwnershipMode $CoverageOwnershipMode -CoverageSelection $coverageSelection
+        if ((Get-Item -LiteralPath $runSettingsPath).Length -ne $expectedRunSettings.Length -or $runSettingsHash -cne $expectedRunSettings.Sha256) {
+            throw "Verification test preparation runsettings do not match the exact current ownership selection for '$($testProject.BaseName)'."
+        }
         Assert-VerificationCoverageOwnershipProperties -Value $record.coverageSelection -Expected @("excludedFileCount", "includedPackageCount", "primaryRootCount", "selectedFileCount") -Description "$($testProject.BaseName) coverage selection"
         if ([long]$record.coverageSelection.selectedFileCount -ne $coverageSelection.SelectedFiles.Count -or [long]$record.coverageSelection.excludedFileCount -ne $coverageSelection.ExcludedFiles.Count -or [long]$record.coverageSelection.primaryRootCount -ne $coverageSelection.PrimaryRoots.Count -or [long]$record.coverageSelection.includedPackageCount -ne $coverageSelection.IncludedPackages.Count) {
             throw "Verification test preparation coverage selection does not match the current ownership map for '$($testProject.BaseName)'."
@@ -368,7 +430,7 @@ function Read-VerificationTestPreparationPlan {
         for ($laneIndex = 0; $laneIndex -lt $expectedLanes.Count; $laneIndex++) {
             $expectedLane = $expectedLanes[$laneIndex]
             $laneRecord = $laneRecords[$laneIndex]
-            Assert-VerificationCoverageOwnershipProperties -Value $laneRecord -Expected @("assemblyPath", "directory", "environment", "filter", "fixtureRoot", "name", "projectName", "resultsPath", "shardName") -Description "Verification test preparation lane"
+            Assert-VerificationCoverageOwnershipProperties -Value $laneRecord -Expected @("assemblyPath", "coverageSelection", "directory", "environment", "filter", "fixtureRoot", "name", "projectName", "resultsPath", "runSettingsPath", "runSettingsSha256", "shardName") -Description "Verification test preparation lane"
             $laneIdentity = "$($testProject.BaseName)-$($expectedLane.Name)"
             $expectedFilter = if ($testProject.Name -eq "EmbodySense.E2ETests.csproj") { Get-VerificationTestLaneFilter -Lane $expectedLane -AdditionalExclusions @("BrowserFlowTests") } else { Get-VerificationTestLaneFilter -Lane $expectedLane }
             if ([string]$laneRecord.name -cne $laneIdentity -or [string]$laneRecord.projectName -cne $testProject.BaseName -or [string]$laneRecord.shardName -cne $expectedLane.Name -or [string]$laneRecord.filter -cne $expectedFilter) {
@@ -378,11 +440,13 @@ function Read-VerificationTestPreparationPlan {
             $laneAssemblyPath = Join-Path $laneDirectory "$($testProject.BaseName).dll"
             $laneResultsPath = Join-Path $StandardTestResultsRoot $laneIdentity
             $laneFixtureRoot = Get-VerificationLaneFixturePath -PhysicalTempRoot $VerificationPhysicalTempRoot -RunIdentity $FixtureRunIdentity -LaneIdentity $laneIdentity
+            $laneRunSettingsPath = Join-Path (Join-Path $projectRoot "LaneSettings") "$($expectedLane.Name).runsettings"
             Assert-VerificationTestPlanPath -Actual ([string]$laneRecord.directory) -Expected $laneDirectory -Description "$laneIdentity directory"
             Assert-VerificationTestPlanPath -Actual ([string]$laneRecord.assemblyPath) -Expected $laneAssemblyPath -Description "$laneIdentity assembly"
             Assert-VerificationTestPlanPath -Actual ([string]$laneRecord.resultsPath) -Expected $laneResultsPath -Description "$laneIdentity results root"
             Assert-VerificationTestPlanPath -Actual ([string]$laneRecord.fixtureRoot) -Expected $laneFixtureRoot -Description "$laneIdentity fixture root"
-            if (-not (Test-Path -LiteralPath $laneDirectory -PathType Container) -or -not (Test-Path -LiteralPath $laneAssemblyPath -PathType Leaf) -or -not (Test-Path -LiteralPath $laneFixtureRoot -PathType Container)) {
+            Assert-VerificationTestPlanPath -Actual ([string]$laneRecord.runSettingsPath) -Expected $laneRunSettingsPath -Description "$laneIdentity runsettings"
+            if (-not (Test-Path -LiteralPath $laneDirectory -PathType Container) -or -not (Test-Path -LiteralPath $laneAssemblyPath -PathType Leaf) -or -not (Test-Path -LiteralPath $laneFixtureRoot -PathType Container) -or -not (Test-Path -LiteralPath $laneRunSettingsPath -PathType Leaf)) {
                 throw "Verification test preparation lane artifact or reserved fixture root is missing for '$laneIdentity'."
             }
             if (@(Get-ChildItem -LiteralPath $laneFixtureRoot -Force).Count -ne 0) {
@@ -408,6 +472,16 @@ function Read-VerificationTestPreparationPlan {
             if ($environment.Count -ne $expectedEnvironment.Count -or @($expectedEnvironment.Keys | Where-Object { -not $environment.ContainsKey($_) -or [string]$environment[$_] -cne [string]$expectedEnvironment[$_] }).Count -ne 0) {
                 throw "Verification test preparation lane environment is not exact for '$laneIdentity'."
             }
+            $laneCoverageSelection = Get-VerificationCoverageLaneSelection -Ownership $CoverageOwnership -TestProject $testProject -LaneName $expectedLane.Name
+            Assert-VerificationCoverageOwnershipProperties -Value $laneRecord.coverageSelection -Expected @("excludedFileCount", "includedPackageCount", "selectedFileCount") -Description "$laneIdentity coverage selection"
+            if ([long]$laneRecord.coverageSelection.selectedFileCount -ne $laneCoverageSelection.SelectedFiles.Count -or [long]$laneRecord.coverageSelection.excludedFileCount -ne $laneCoverageSelection.ExcludedFiles.Count -or [long]$laneRecord.coverageSelection.includedPackageCount -ne $laneCoverageSelection.IncludedPackages.Count) {
+                throw "Verification test preparation lane coverage selection does not match the current ownership map for '$laneIdentity'."
+            }
+            $laneRunSettingsHash = (Get-FileHash -LiteralPath $laneRunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $expectedLaneRunSettings = Get-VerificationExpectedRunSettingsEvidence -CoverageOwnership $CoverageOwnership -CoverageOwnershipMode $CoverageOwnershipMode -CoverageSelection $laneCoverageSelection
+            if ([string]$laneRecord.runSettingsSha256 -cnotmatch '^[0-9a-f]{64}$' -or [string]$laneRecord.runSettingsSha256 -cne $laneRunSettingsHash -or (Get-Item -LiteralPath $laneRunSettingsPath).Length -ne $expectedLaneRunSettings.Length -or $laneRunSettingsHash -cne $expectedLaneRunSettings.Sha256) {
+                throw "Verification test preparation lane runsettings do not match the exact current ownership selection for '$laneIdentity'."
+            }
             $lanes.Add([pscustomobject]@{
                 Name = $laneIdentity
                 ProjectName = $testProject.BaseName
@@ -419,6 +493,9 @@ function Read-VerificationTestPreparationPlan {
                 ResultsPath = $laneResultsPath
                 FixtureRoot = $laneFixtureRoot
                 Environment = $environment
+                RunSettingsPath = $laneRunSettingsPath
+                RunSettingsSha256 = $laneRunSettingsHash
+                CoverageSelection = $laneCoverageSelection
             })
         }
         $isolations.Add([pscustomobject]@{
@@ -429,6 +506,7 @@ function Read-VerificationTestPreparationPlan {
             PristineManifest = $pristineManifest
             CollectorDirectory = $collectorDirectory
             RunSettingsPath = $runSettingsPath
+            RunSettingsSha256 = $runSettingsHash
             ChildRunSettingsPath = $childRunSettingsPath
             ChildInvocationsRoot = $childInvocationsRoot
             CoverageSelection = $coverageSelection

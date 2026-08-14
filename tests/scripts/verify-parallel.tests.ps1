@@ -8,7 +8,8 @@ $artifactScriptPath = Join-Path $repoRoot "scripts\verification-artifacts.ps1"
 $scheduleScriptPath = Join-Path $repoRoot "scripts\verification-schedule.ps1"
 $coverageEvidenceScriptPath = Join-Path $repoRoot "scripts\verification-coverage-evidence.ps1"
 $laneScriptPath = Join-Path $repoRoot "scripts\verification-test-lanes.ps1"
-$powerShellExecutable = (Get-Process -Id $PID).Path
+$probeExecutable = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+$probePath = Join-Path $PSScriptRoot "verification-parallel-probe.mjs"
 $assertionCount = 0
 
 function Assert-True {
@@ -188,6 +189,7 @@ $sourceProjects = @(Get-ChildItem -Path (Join-Path $repoRoot "src") -Directory -
 } | Sort-Object FullName)
 Assert-True -Condition ($coverageOwnership.Owners.Count -eq $sourceProjects.Count) -Message "Coverage ownership must assign every production project to one primary test lane."
 Assert-True -Condition ($coverageOwnership.TestProjectNames.Count -eq $testProjects.Count) -Message "Coverage ownership must classify every canonical test project."
+Assert-True -Condition ($coverageOwnership.LaneSelectionsByTestProject.Count -eq 4) -Message "Lane ownership must classify exactly the four multi-lane test projects."
 $actualProductionFiles = @($sourceProjects | ForEach-Object {
     Get-ChildItem -LiteralPath $_.FullName -Recurse -Filter "*.cs" -File | Where-Object { $_.FullName -notmatch '[\\/](?:bin|obj)[\\/]' } | ForEach-Object {
         [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/')
@@ -222,6 +224,32 @@ try {
         }
         if ($coverageOwnership.ExceptionsByTestProject.ContainsKey($testProject.BaseName)) {
             Assert-True -Condition (@($coverageOwnership.ExceptionsByTestProject[$testProject.BaseName] | Where-Object { $selection.SelectedFiles -cnotcontains $_ }).Count -eq 0) -Message "Coverage lane '$($testProject.BaseName)' must retain every authenticated cross-owner exception file."
+        }
+
+        $projectLanes = @(Get-VerificationTestProjectLanes -TestProject $testProject)
+        foreach ($lane in $projectLanes) {
+            $laneSelection = Get-VerificationCoverageLaneSelection -Ownership $coverageOwnership -TestProject $testProject -LaneName $lane.Name
+            Assert-True -Condition ($laneSelection.SelectedFiles.Count -gt 0) -Message "Coverage shard '$($testProject.BaseName)/$($lane.Name)' must retain authenticated production source."
+            Assert-True -Condition (($laneSelection.SelectedFiles.Count + $laneSelection.ExcludedFiles.Count) -eq $coverageOwnership.ProductionFiles.Count) -Message "Coverage shard '$($testProject.BaseName)/$($lane.Name)' must partition the current production source inventory."
+            Assert-True -Condition ((@($laneSelection.IncludedPackages) -join "`n") -ceq (@($selection.IncludedPackages) -join "`n")) -Message "Every shard must retain generated-source instrumentation for all project-owned packages."
+            Assert-True -Condition (@($laneSelection.SelectedFiles | Where-Object { $selection.SelectedFiles -cnotcontains $_ }).Count -eq 0) -Message "Coverage shard '$($testProject.BaseName)/$($lane.Name)' cannot escape its project ownership."
+            if ($coverageOwnership.LaneSelectionsByTestProject.ContainsKey($testProject.BaseName)) {
+                $laneOwnership = $coverageOwnership.LaneSelectionsByTestProject[$testProject.BaseName]
+                if ($lane.Name -ceq $laneOwnership.PrimaryLane) {
+                    Assert-True -Condition ((@($laneSelection.SelectedFiles) -join "`n") -ceq (@($selection.SelectedFiles) -join "`n")) -Message "Each multi-lane project must retain one complete primary denominator shard."
+                }
+                else {
+                    Assert-True -Condition ($laneSelection.SelectedFiles.Count -lt $selection.SelectedFiles.Count) -Message "Each declared secondary shard must use a strict authenticated source subset."
+                }
+            }
+            else {
+                Assert-True -Condition ((@($laneSelection.SelectedFiles) -join "`n") -ceq (@($selection.SelectedFiles) -join "`n")) -Message "An unsharded project must retain its complete project-level selection."
+            }
+
+            $generatedLaneRunSettingsPath = Join-Path $coverageSettingsProbeRoot "$($testProject.BaseName)-$($lane.Name).runsettings"
+            Write-VerificationCoverageRunSettings -SourcePath $canonicalRunSettingsPath -DestinationPath $generatedLaneRunSettingsPath -Selection $laneSelection
+            [xml]$generatedLaneRunSettings = Get-Content -LiteralPath $generatedLaneRunSettingsPath -Raw
+            Assert-True -Condition (@($generatedLaneRunSettings.RunSettings.DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.SelectNodes("Include")).Count -eq 1) -Message "Each shard must generate one exact assembly include filter."
         }
 
         $generatedRunSettingsPath = Join-Path $coverageSettingsProbeRoot "$($testProject.BaseName).runsettings"
@@ -302,6 +330,7 @@ try {
         owners = @([ordered]@{ package = $sourcePackage; sourceRoot = "src/$sourcePackage"; testProject = $testPackage })
     }
     [IO.File]::WriteAllText($sourceProjectManifestPath, ($sourceProjectManifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $sourceProjectProbeRoot "tests/verification-coverage-lane-ownership.json"), ([ordered]@{ schemaVersion = 1; projects = [ordered]@{} } | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
     $probeTestProjects = [IO.FileInfo[]]@((Get-Item -LiteralPath $testProjectPath))
     $sourceProjectOwnership = Read-VerificationCoverageOwnership -ManifestPath $sourceProjectManifestPath -RepositoryRoot $sourceProjectProbeRoot -TestProjects $probeTestProjects
     Assert-True -Condition ($sourceProjectOwnership.Owners.Count -eq 1) -Message "Canonical production project inventory must admit one exact owned source project."
@@ -409,37 +438,14 @@ catch {
 $scenarioRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-parallel-verifier-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scenarioRoot | Out-Null
 try {
-    $probePath = Join-Path $scenarioRoot "probe.ps1"
-    @'
-param([string]$Name, [int]$DelayMilliseconds, [int]$ExitCode, [string]$OrderPath, [string]$SynchronizationRoot, [int]$ExpectedConcurrent)
-if (-not [string]::IsNullOrWhiteSpace($OrderPath) -and $OrderPath -cne "-") { Add-Content -LiteralPath $OrderPath -Value $Name }
-if (-not [string]::IsNullOrWhiteSpace($SynchronizationRoot) -and $SynchronizationRoot -cne "-" -and $ExpectedConcurrent -gt 0) {
-    New-Item -ItemType Directory -Path $SynchronizationRoot -Force | Out-Null
-    Set-Content -LiteralPath (Join-Path $SynchronizationRoot "$Name.ready") -Value "ready" -Encoding UTF8
-    $synchronizationDeadline = [DateTimeOffset]::UtcNow.AddSeconds(20)
-    while (@(Get-ChildItem -LiteralPath $SynchronizationRoot -Filter "*.ready" -File).Count -lt $ExpectedConcurrent) {
-        if ([DateTimeOffset]::UtcNow -ge $synchronizationDeadline) { exit 41 }
-        Start-Sleep -Milliseconds 10
-    }
-}
-Start-Sleep -Milliseconds $DelayMilliseconds
-Write-Output "probe=$Name"
-Write-Output "environment=$env:VERIFY_PARALLEL_PROBE"
-Write-Output "physical_temp=$([IO.Path]::GetFullPath([IO.Path]::GetTempPath()))"
-exit $ExitCode
-'@ | Set-Content -LiteralPath $probePath -Encoding UTF8
-
-    $baseArguments = @("-NoProfile")
-    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
-        $baseArguments += @("-ExecutionPolicy", "Bypass")
-    }
-    $baseArguments += @("-File", $probePath)
+    Assert-True -Condition (Test-Path -LiteralPath $probePath -PathType Leaf) -Message "The lightweight cross-platform child-process probe must be checked in."
+    $baseArguments = @($probePath, "basic")
     $sixUnitCapacity = 6
     $successfulProbeTimeoutSeconds = 30
     $synchronizationRoot = Join-Path $scenarioRoot "overlap"
     Reset-VerificationParallelPhaseState
     foreach ($name in @("first", "second", "third", "fourth", "fifth", "sixth")) {
-        Add-VerificationParallelPhase -Name $name -FileName $powerShellExecutable -Arguments ($baseArguments + @($name, "50", "0", "-", $synchronizationRoot, $sixUnitCapacity.ToString([Globalization.CultureInfo]::InvariantCulture))) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log")
+        Add-VerificationParallelPhase -Name $name -FileName $probeExecutable -Arguments ($baseArguments + @($name, "50", "0", "-", $synchronizationRoot, $sixUnitCapacity.ToString([Globalization.CultureInfo]::InvariantCulture))) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log")
     }
     $results = @(Invoke-VerificationParallelPhases -MaximumWorkers $sixUnitCapacity -MaximumResourceCapacity $sixUnitCapacity)
 
@@ -447,44 +453,14 @@ exit $ExitCode
     Assert-True -Condition (@(Get-ChildItem -LiteralPath $synchronizationRoot -Filter "*.ready" -File).Count -eq 6) -Message "Six ordinary probes must be able to pack the explicit six-unit logical capacity."
     Assert-Contains -Actual (Get-Content -Raw (Join-Path $scenarioRoot "first.log")) -Expected "probe=first" -Message "Each phase must retain isolated output."
 
-    $weightedProbePath = Join-Path $scenarioRoot "weighted-probe.ps1"
-    @'
-param([string]$Name, [string]$ActiveRoot, [int]$ExpectedConcurrent, [int]$MaximumExpectedConcurrent)
-$activePath = Join-Path $ActiveRoot "$Name.active"
-try {
-    Set-Content -LiteralPath $activePath -Value "active" -Encoding UTF8
-    $synchronizationDeadline = [DateTimeOffset]::UtcNow.AddSeconds(20)
-    while (@(Get-ChildItem -LiteralPath $ActiveRoot -Filter "*.active" -File).Count -lt $ExpectedConcurrent) {
-        if ([DateTimeOffset]::UtcNow -ge $synchronizationDeadline) { exit 42 }
-        Start-Sleep -Milliseconds 10
-    }
-    $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds(250)
-    while ([DateTimeOffset]::UtcNow -lt $deadline) {
-        $activeCount = @(Get-ChildItem -LiteralPath $ActiveRoot -Filter "*.active" -File).Count
-        if ($activeCount -gt $MaximumExpectedConcurrent) {
-            Write-Output "overcommitted=$activeCount"
-            exit 43
-        }
-        Start-Sleep -Milliseconds 10
-    }
-    Write-Output "weighted_probe=$Name"
-}
-finally {
-    Remove-Item -LiteralPath $activePath -Force -ErrorAction SilentlyContinue
-}
-'@ | Set-Content -LiteralPath $weightedProbePath -Encoding UTF8
-    $weightedArguments = @("-NoProfile")
-    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
-        $weightedArguments += @("-ExecutionPolicy", "Bypass")
-    }
-    $weightedArguments += @("-File", $weightedProbePath)
+    $weightedArguments = @($probePath, "weighted")
     $activeRoot = Join-Path $scenarioRoot "weighted-active"
     New-Item -ItemType Directory -Path $activeRoot | Out-Null
     $heavyWeight = 3
     $expectedHeavyConcurrency = [Math]::Floor($sixUnitCapacity / $heavyWeight)
     Reset-VerificationParallelPhaseState
     foreach ($name in @("heavy-first", "heavy-second", "heavy-third", "heavy-fourth")) {
-        Add-VerificationParallelPhase -Name $name -FileName $powerShellExecutable -Arguments ($weightedArguments + @($name, $activeRoot, $expectedHeavyConcurrency.ToString([Globalization.CultureInfo]::InvariantCulture), $expectedHeavyConcurrency.ToString([Globalization.CultureInfo]::InvariantCulture))) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log") -Weight $heavyWeight -ResourceClass ProcessHeavy
+        Add-VerificationParallelPhase -Name $name -FileName $probeExecutable -Arguments ($weightedArguments + @($name, $activeRoot, $expectedHeavyConcurrency.ToString([Globalization.CultureInfo]::InvariantCulture), $expectedHeavyConcurrency.ToString([Globalization.CultureInfo]::InvariantCulture))) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log") -Weight $heavyWeight -ResourceClass ProcessHeavy
     }
     $weightedResults = @(Invoke-VerificationParallelPhases -MaximumWorkers $sixUnitCapacity -MaximumResourceCapacity $sixUnitCapacity)
     Assert-True -Condition ($weightedResults.Count -eq 4) -Message "Every weighted phase must be scheduled and aggregated."
@@ -494,7 +470,7 @@ finally {
     New-Item -ItemType Directory -Path $physicalHeavyRoot | Out-Null
     Reset-VerificationParallelPhaseState
     foreach ($name in @("physical-heavy-first", "physical-heavy-second")) {
-        Add-VerificationParallelPhase -Name $name -FileName $powerShellExecutable -Arguments ($weightedArguments + @($name, $physicalHeavyRoot, "2", "2")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log") -Weight 3 -ResourceClass ProcessHeavy
+        Add-VerificationParallelPhase -Name $name -FileName $probeExecutable -Arguments ($weightedArguments + @($name, $physicalHeavyRoot, "2", "2")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log") -Weight 3 -ResourceClass ProcessHeavy
     }
     $physicalHeavyResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
     Assert-True -Condition ($physicalHeavyResults.Count -eq 2) -Message "Two evidence-weighted process-heavy phases must overlap within eight logical units and the four-process ceiling."
@@ -502,8 +478,8 @@ finally {
     $exclusiveRoot = Join-Path $scenarioRoot "full-capacity-active"
     New-Item -ItemType Directory -Path $exclusiveRoot | Out-Null
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "full-capacity-format" -FileName $powerShellExecutable -Arguments ($weightedArguments + @("full-capacity-format", $exclusiveRoot, "1", "1")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "full-capacity-format.log") -EstimatedDurationSeconds 2 -Weight 4 -ResourceClass CpuBound
-    Add-VerificationParallelPhase -Name "excluded-ordinary" -FileName $powerShellExecutable -Arguments ($weightedArguments + @("excluded-ordinary", $exclusiveRoot, "1", "1")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "excluded-ordinary.log")
+    Add-VerificationParallelPhase -Name "full-capacity-format" -FileName $probeExecutable -Arguments ($weightedArguments + @("full-capacity-format", $exclusiveRoot, "1", "1")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "full-capacity-format.log") -EstimatedDurationSeconds 2 -Weight 4 -ResourceClass CpuBound
+    Add-VerificationParallelPhase -Name "excluded-ordinary" -FileName $probeExecutable -Arguments ($weightedArguments + @("excluded-ordinary", $exclusiveRoot, "1", "1")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "excluded-ordinary.log")
     $exclusiveResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 4 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
     Assert-True -Condition ($exclusiveResults.Count -eq 2) -Message "A full-capacity CPU phase must exclude ordinary work and then allow the plan to drain."
 
@@ -516,7 +492,7 @@ finally {
         Reset-VerificationParallelPhaseState
         foreach ($index in 1..$resourceClassScenario.Count) {
             $name = "$($resourceClassScenario.Name)-$index"
-            Add-VerificationParallelPhase -Name $name -FileName $powerShellExecutable -Arguments ($weightedArguments + @($name, $resourceClassRoot, $resourceClassScenario.Maximum.ToString([Globalization.CultureInfo]::InvariantCulture), $resourceClassScenario.Maximum.ToString([Globalization.CultureInfo]::InvariantCulture))) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log") -Weight $resourceClassScenario.Weight -ResourceClass $resourceClassScenario.ResourceClass
+            Add-VerificationParallelPhase -Name $name -FileName $probeExecutable -Arguments ($weightedArguments + @($name, $resourceClassRoot, $resourceClassScenario.Maximum.ToString([Globalization.CultureInfo]::InvariantCulture), $resourceClassScenario.Maximum.ToString([Globalization.CultureInfo]::InvariantCulture))) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log") -Weight $resourceClassScenario.Weight -ResourceClass $resourceClassScenario.ResourceClass
         }
 
         $resourceClassResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 6 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
@@ -524,12 +500,12 @@ finally {
     }
 
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "one-worker-heavy" -FileName $powerShellExecutable -Arguments ($baseArguments + @("one-worker-heavy", "10", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "one-worker-heavy.log") -Weight 3 -ResourceClass ProcessHeavy
+    Add-VerificationParallelPhase -Name "one-worker-heavy" -FileName $probeExecutable -Arguments ($baseArguments + @("one-worker-heavy", "10", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "one-worker-heavy.log") -Weight 3 -ResourceClass ProcessHeavy
     $oneWorkerResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 1 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 1 -MaximumCpuBoundWorkers 1)
     Assert-True -Condition ($oneWorkerResults.Count -eq 1 -and $oneWorkerResults[0].ResourceClass -ceq "ProcessHeavy") -Message "One-worker hosts must preserve process-heavy execution after effective class-limit capping."
 
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "invalid-resource-limit" -FileName $powerShellExecutable -Arguments ($baseArguments + @("invalid-resource-limit", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "invalid-resource-limit.log")
+    Add-VerificationParallelPhase -Name "invalid-resource-limit" -FileName $probeExecutable -Arguments ($baseArguments + @("invalid-resource-limit", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "invalid-resource-limit.log")
     try {
         Invoke-VerificationParallelPhases -MaximumWorkers 2 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 3 | Out-Null
         throw "Expected invalid resource-class concurrency limit failure."
@@ -543,7 +519,7 @@ finally {
     $workerBound = 2
     Reset-VerificationParallelPhaseState
     foreach ($name in @("worker-first", "worker-second", "worker-third", "worker-fourth")) {
-        Add-VerificationParallelPhase -Name $name -FileName $powerShellExecutable -Arguments ($weightedArguments + @($name, $workerBoundRoot, $workerBound.ToString([Globalization.CultureInfo]::InvariantCulture), $workerBound.ToString([Globalization.CultureInfo]::InvariantCulture))) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log")
+        Add-VerificationParallelPhase -Name $name -FileName $probeExecutable -Arguments ($weightedArguments + @($name, $workerBoundRoot, $workerBound.ToString([Globalization.CultureInfo]::InvariantCulture), $workerBound.ToString([Globalization.CultureInfo]::InvariantCulture))) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log")
     }
     $workerBoundResults = @(Invoke-VerificationParallelPhases -MaximumWorkers $workerBound -MaximumResourceCapacity $sixUnitCapacity)
     Assert-True -Condition ($workerBoundResults.Count -eq 4) -Message "A worker ceiling below logical capacity must still drain every admitted phase."
@@ -571,7 +547,7 @@ finally {
 
     $oversizedOutput = Join-Path $scenarioRoot "oversized.log"
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "oversized" -FileName $powerShellExecutable -Arguments ($baseArguments + @("oversized", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $oversizedOutput -Weight 7 -ResourceClass ProcessHeavy
+    Add-VerificationParallelPhase -Name "oversized" -FileName $probeExecutable -Arguments ($baseArguments + @("oversized", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $oversizedOutput -Weight 7 -ResourceClass ProcessHeavy
     try {
         Invoke-VerificationParallelPhases -MaximumWorkers $sixUnitCapacity -MaximumResourceCapacity $sixUnitCapacity | Out-Null
         throw "Expected oversized resource declaration failure."
@@ -584,7 +560,7 @@ finally {
     foreach ($underweightedClass in @("CpuBound", "ProcessHeavy")) {
         $underweightedOutput = Join-Path $scenarioRoot "underweighted-$underweightedClass.log"
         Reset-VerificationParallelPhaseState
-        Add-VerificationParallelPhase -Name "underweighted-$underweightedClass" -FileName $powerShellExecutable -Arguments ($baseArguments + @("underweighted-$underweightedClass", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $underweightedOutput -Weight 1 -ResourceClass $underweightedClass
+        Add-VerificationParallelPhase -Name "underweighted-$underweightedClass" -FileName $probeExecutable -Arguments ($baseArguments + @("underweighted-$underweightedClass", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $underweightedOutput -Weight 1 -ResourceClass $underweightedClass
         try {
             Invoke-VerificationParallelPhases -MaximumWorkers $sixUnitCapacity -MaximumResourceCapacity $sixUnitCapacity | Out-Null
             throw "Expected underweighted resource-class failure."
@@ -596,14 +572,14 @@ finally {
     }
 
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "dependency-prerequisite" -FileName $powerShellExecutable -Arguments ($baseArguments + @("dependency-prerequisite", "50", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "dependency-prerequisite.log")
-    Add-VerificationParallelPhase -Name "dependency-dependent" -FileName $powerShellExecutable -Arguments ($baseArguments + @("dependency-dependent", "10", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "dependency-dependent.log") -DependsOn @("dependency-prerequisite") -EstimatedDurationSeconds 100
+    Add-VerificationParallelPhase -Name "dependency-prerequisite" -FileName $probeExecutable -Arguments ($baseArguments + @("dependency-prerequisite", "50", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "dependency-prerequisite.log")
+    Add-VerificationParallelPhase -Name "dependency-dependent" -FileName $probeExecutable -Arguments ($baseArguments + @("dependency-dependent", "10", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "dependency-dependent.log") -DependsOn @("dependency-prerequisite") -EstimatedDurationSeconds 100
     $dependencyResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 2 -MaximumResourceCapacity 2)
     Assert-True -Condition ($dependencyResults.Count -eq 2 -and (Test-Path -LiteralPath (Join-Path $scenarioRoot "dependency-dependent.log"))) -Message "A successful prerequisite must admit its dependent phase even when the dependent has higher scheduling priority."
 
     Reset-VerificationParallelPhaseState
     $unknownDependencyOutput = Join-Path $scenarioRoot "unknown-dependency.log"
-    Add-VerificationParallelPhase -Name "unknown-dependency" -FileName $powerShellExecutable -Arguments ($baseArguments + @("unknown-dependency", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $unknownDependencyOutput -DependsOn @("missing-prerequisite")
+    Add-VerificationParallelPhase -Name "unknown-dependency" -FileName $probeExecutable -Arguments ($baseArguments + @("unknown-dependency", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $unknownDependencyOutput -DependsOn @("missing-prerequisite")
     $null = Invoke-ExpectedFailure -ExpectedMessage "depends on unknown phase 'missing-prerequisite'" -Action {
         Invoke-VerificationParallelPhases -MaximumWorkers 2 -MaximumResourceCapacity 2
     }
@@ -612,8 +588,8 @@ finally {
     Reset-VerificationParallelPhaseState
     $cycleFirstOutput = Join-Path $scenarioRoot "cycle-first.log"
     $cycleSecondOutput = Join-Path $scenarioRoot "cycle-second.log"
-    Add-VerificationParallelPhase -Name "cycle-first" -FileName $powerShellExecutable -Arguments ($baseArguments + @("cycle-first", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $cycleFirstOutput -DependsOn @("cycle-second")
-    Add-VerificationParallelPhase -Name "cycle-second" -FileName $powerShellExecutable -Arguments ($baseArguments + @("cycle-second", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $cycleSecondOutput -DependsOn @("cycle-first")
+    Add-VerificationParallelPhase -Name "cycle-first" -FileName $probeExecutable -Arguments ($baseArguments + @("cycle-first", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $cycleFirstOutput -DependsOn @("cycle-second")
+    Add-VerificationParallelPhase -Name "cycle-second" -FileName $probeExecutable -Arguments ($baseArguments + @("cycle-second", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $cycleSecondOutput -DependsOn @("cycle-first")
     $null = Invoke-ExpectedFailure -ExpectedMessage "dependencies contain a cycle" -Action {
         Invoke-VerificationParallelPhases -MaximumWorkers 2 -MaximumResourceCapacity 2
     }
@@ -621,16 +597,16 @@ finally {
 
     Reset-VerificationParallelPhaseState
     $failedDependencyOutput = Join-Path $scenarioRoot "failed-dependency.log"
-    Add-VerificationParallelPhase -Name "failed-prerequisite" -FileName $powerShellExecutable -Arguments ($baseArguments + @("failed-prerequisite", "10", "17")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "failed-prerequisite.log")
-    Add-VerificationParallelPhase -Name "failed-dependency" -FileName $powerShellExecutable -Arguments ($baseArguments + @("failed-dependency", "10", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath $failedDependencyOutput -DependsOn @("failed-prerequisite")
+    Add-VerificationParallelPhase -Name "failed-prerequisite" -FileName $probeExecutable -Arguments ($baseArguments + @("failed-prerequisite", "10", "17")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "failed-prerequisite.log")
+    Add-VerificationParallelPhase -Name "failed-dependency" -FileName $probeExecutable -Arguments ($baseArguments + @("failed-dependency", "10", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath $failedDependencyOutput -DependsOn @("failed-prerequisite")
     $null = Invoke-ExpectedFailure -ExpectedMessage "prerequisite phases did not pass: failed-prerequisite" -Action {
         Invoke-VerificationParallelPhases -MaximumWorkers 2 -MaximumResourceCapacity 2
     }
     Assert-True -Condition (-not (Test-Path -LiteralPath $failedDependencyOutput)) -Message "A failed prerequisite must prevent dependent process admission."
 
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "failure" -FileName $powerShellExecutable -Arguments ($baseArguments + @("failure", "50", "17")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "failure.log") -Weight 3 -ResourceClass ProcessHeavy
-    Add-VerificationParallelPhase -Name "success" -FileName $powerShellExecutable -Arguments ($baseArguments + @("success", "300", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "success.log") -Weight 3 -ResourceClass ProcessHeavy
+    Add-VerificationParallelPhase -Name "failure" -FileName $probeExecutable -Arguments ($baseArguments + @("failure", "50", "17")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "failure.log") -Weight 3 -ResourceClass ProcessHeavy
+    Add-VerificationParallelPhase -Name "success" -FileName $probeExecutable -Arguments ($baseArguments + @("success", "300", "0")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "success.log") -Weight 3 -ResourceClass ProcessHeavy
     try {
         Invoke-VerificationParallelPhases -MaximumWorkers $sixUnitCapacity -MaximumResourceCapacity $sixUnitCapacity | Out-Null
         throw "Expected aggregate failure."
@@ -644,7 +620,7 @@ finally {
     $laneTempRoot = Join-Path $scenarioRoot "lane-temp"
     New-Item -ItemType Directory -Path $laneTempRoot | Out-Null
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "environment" -FileName $powerShellExecutable -Arguments ($baseArguments + @("environment", "10", "0", "-")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "environment.log") -Environment @{ VERIFY_PARALLEL_PROBE = "scoped-child"; TEMP = $laneTempRoot; TMP = $laneTempRoot; TMPDIR = $laneTempRoot }
+    Add-VerificationParallelPhase -Name "environment" -FileName $probeExecutable -Arguments ($baseArguments + @("environment", "10", "0", "-")) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "environment.log") -Environment @{ VERIFY_PARALLEL_PROBE = "scoped-child"; TEMP = $laneTempRoot; TMP = $laneTempRoot; TMPDIR = $laneTempRoot }
     Invoke-VerificationParallelPhases -MaximumResourceCapacity 1 | Out-Null
     $environmentLog = Get-Content -Raw (Join-Path $scenarioRoot "environment.log")
     Assert-Contains -Actual $environmentLog -Expected "environment=scoped-child" -Message "Per-phase environment overrides must reach only the child ProcessStartInfo."
@@ -653,16 +629,16 @@ finally {
 
     $orderPath = Join-Path $scenarioRoot "priority-order.txt"
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "low" -FileName $powerShellExecutable -Arguments ($baseArguments + @("low", "10", "0", $orderPath)) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "low.log") -EstimatedDurationSeconds 1
-    Add-VerificationParallelPhase -Name "tie-zulu" -FileName $powerShellExecutable -Arguments ($baseArguments + @("tie-zulu", "10", "0", $orderPath)) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "tie-zulu.log") -EstimatedDurationSeconds 50
-    Add-VerificationParallelPhase -Name "tie-alpha" -FileName $powerShellExecutable -Arguments ($baseArguments + @("tie-alpha", "10", "0", $orderPath)) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "tie-alpha.log") -EstimatedDurationSeconds 50
-    Add-VerificationParallelPhase -Name "high" -FileName $powerShellExecutable -Arguments ($baseArguments + @("high", "10", "0", $orderPath)) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "high.log") -EstimatedDurationSeconds 100
+    Add-VerificationParallelPhase -Name "low" -FileName $probeExecutable -Arguments ($baseArguments + @("low", "10", "0", $orderPath)) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "low.log") -EstimatedDurationSeconds 1
+    Add-VerificationParallelPhase -Name "tie-zulu" -FileName $probeExecutable -Arguments ($baseArguments + @("tie-zulu", "10", "0", $orderPath)) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "tie-zulu.log") -EstimatedDurationSeconds 50
+    Add-VerificationParallelPhase -Name "tie-alpha" -FileName $probeExecutable -Arguments ($baseArguments + @("tie-alpha", "10", "0", $orderPath)) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "tie-alpha.log") -EstimatedDurationSeconds 50
+    Add-VerificationParallelPhase -Name "high" -FileName $probeExecutable -Arguments ($baseArguments + @("high", "10", "0", $orderPath)) -TimeoutSeconds $successfulProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "high.log") -EstimatedDurationSeconds 100
     Invoke-VerificationParallelPhases -MaximumResourceCapacity 1 | Out-Null
     $order = @(Get-Content -LiteralPath $orderPath)
     Assert-True -Condition ($order.Count -eq 4 -and $order[0] -ceq "high" -and $order[1] -ceq "tie-alpha" -and $order[2] -ceq "tie-zulu" -and $order[3] -ceq "low") -Message "Ordinary phases must retain longest-estimate ordering, with exact-name ordering for deterministic ties."
 
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "timeout" -FileName $powerShellExecutable -Arguments ($baseArguments + @("timeout", "5000", "0")) -TimeoutSeconds 1 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "timeout.log")
+    Add-VerificationParallelPhase -Name "timeout" -FileName $probeExecutable -Arguments ($baseArguments + @("timeout", "5000", "0")) -TimeoutSeconds 1 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "timeout.log")
     try {
         Invoke-VerificationParallelPhases -MaximumResourceCapacity 1 | Out-Null
         throw "Expected aggregate timeout."
@@ -672,9 +648,9 @@ finally {
     }
 
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "duplicate" -FileName $powerShellExecutable -Arguments ($baseArguments + @("one", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "one.log")
+    Add-VerificationParallelPhase -Name "duplicate" -FileName $probeExecutable -Arguments ($baseArguments + @("one", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "one.log")
     try {
-        Add-VerificationParallelPhase -Name "duplicate" -FileName $powerShellExecutable -Arguments ($baseArguments + @("two", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "two.log")
+        Add-VerificationParallelPhase -Name "duplicate" -FileName $probeExecutable -Arguments ($baseArguments + @("two", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "two.log")
         throw "Expected duplicate declaration failure."
     }
     catch {

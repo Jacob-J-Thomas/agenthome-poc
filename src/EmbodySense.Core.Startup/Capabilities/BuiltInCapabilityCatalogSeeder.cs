@@ -61,7 +61,8 @@ public sealed class BuiltInCapabilityCatalogSeeder
 
     private async Task SeedDescriptorAsync(CapabilityCatalogService service, CapabilityCatalogStore store, CapabilityDescriptor descriptor, CancellationToken cancellationToken)
     {
-        // Every nonterminal pass applies or observes one finite catalog-wide bootstrap operation; one final pass observes convergence.
+        // Each pass proves one contiguous built-in receipt prefix. It may then advance that exact prefix through
+        // consecutive generation-bound mutations; any competing catalog write forces a bounded re-read and re-proof.
         var maximumConvergenceAttempts = checked(
             (BuiltInCapabilityCatalog.Descriptors.Count * BootstrapOperationIds(descriptor.Id).Length) + 1);
         for (var attempt = 0; attempt < maximumConvergenceAttempts; attempt++)
@@ -77,7 +78,13 @@ public sealed class BuiltInCapabilityCatalogSeeder
 
                 RequireCommitted(declared, descriptor.Id);
                 await ObserveAppliedAsync(declared, cancellationToken);
-                continue;
+                if (declared.Entry is null || declared.CatalogRevision is null)
+                {
+                    continue;
+                }
+
+                existing = declared.Entry;
+                catalogRevision = declared.CatalogRevision.Value;
             }
             RequireMatchingRetainedDescriptor(existing, descriptor);
 
@@ -87,59 +94,60 @@ public sealed class BuiltInCapabilityCatalogSeeder
                 return;
             }
 
-            if (existing.Lifecycle.Installation != CapabilityInstallationState.Installed)
+            var restartRequired = false;
+            while (true)
             {
-                var installed = await MutateBootstrapStageAsync(store, CapabilityCatalogMutationKind.Install, descriptor.Id, catalogRevision, provedGeneration.Value, OperationId("install", descriptor.Id), cancellationToken);
-                if (installed.Status == CapabilityCatalogMutationStatus.Conflict)
+                CapabilityCatalogMutationKind kind;
+                string action;
+                if (existing.Lifecycle.Installation != CapabilityInstallationState.Installed)
                 {
-                    continue;
+                    kind = CapabilityCatalogMutationKind.Install;
+                    action = "install";
+                }
+                else if (existing.Lifecycle.Trust != CapabilityTrustState.Verified)
+                {
+                    kind = CapabilityCatalogMutationKind.Verify;
+                    action = "verify";
+                }
+                else if (existing.Lifecycle.Enablement != CapabilityEnablementState.Enabled)
+                {
+                    kind = CapabilityCatalogMutationKind.Enable;
+                    action = "enable";
+                }
+                else if (existing.Lifecycle.Health != CapabilityHealthState.Healthy)
+                {
+                    kind = CapabilityCatalogMutationKind.MarkHealthy;
+                    action = "healthy";
+                }
+                else
+                {
+                    return;
                 }
 
-                RequireCommitted(installed, descriptor.Id);
-                await ObserveAppliedAsync(installed, cancellationToken);
-                continue;
-            }
-
-            if (existing.Lifecycle.Trust != CapabilityTrustState.Verified)
-            {
-                var verified = await MutateBootstrapStageAsync(store, CapabilityCatalogMutationKind.Verify, descriptor.Id, catalogRevision, provedGeneration.Value, OperationId("verify", descriptor.Id), cancellationToken);
-                if (verified.Status == CapabilityCatalogMutationStatus.Conflict)
+                var result = await MutateBootstrapStageAsync(store, kind, descriptor.Id, catalogRevision, provedGeneration.Value, OperationId(action, descriptor.Id), cancellationToken);
+                if (result.Status == CapabilityCatalogMutationStatus.Conflict)
                 {
-                    continue;
+                    restartRequired = true;
+                    break;
                 }
 
-                RequireCommitted(verified, descriptor.Id);
-                await ObserveAppliedAsync(verified, cancellationToken);
-                continue;
-            }
-
-            if (existing.Lifecycle.Enablement != CapabilityEnablementState.Enabled)
-            {
-                var enabled = await MutateBootstrapStageAsync(store, CapabilityCatalogMutationKind.Enable, descriptor.Id, catalogRevision, provedGeneration.Value, OperationId("enable", descriptor.Id), cancellationToken);
-                if (enabled.Status == CapabilityCatalogMutationStatus.Conflict)
+                RequireCommitted(result, descriptor.Id);
+                await ObserveAppliedAsync(result, cancellationToken);
+                if (result.Status != CapabilityCatalogMutationStatus.Applied || result.Entry is null || result.CatalogRevision is null)
                 {
-                    continue;
+                    restartRequired = true;
+                    break;
                 }
 
-                RequireCommitted(enabled, descriptor.Id);
-                await ObserveAppliedAsync(enabled, cancellationToken);
-                continue;
+                existing = result.Entry;
+                catalogRevision = result.CatalogRevision.Value;
+                provedGeneration = checked(provedGeneration.Value + 1);
             }
 
-            if (existing.Lifecycle.Health != CapabilityHealthState.Healthy)
+            if (restartRequired)
             {
-                var healthy = await MutateBootstrapStageAsync(store, CapabilityCatalogMutationKind.MarkHealthy, descriptor.Id, catalogRevision, provedGeneration.Value, OperationId("healthy", descriptor.Id), cancellationToken);
-                if (healthy.Status == CapabilityCatalogMutationStatus.Conflict)
-                {
-                    continue;
-                }
-
-                RequireCommitted(healthy, descriptor.Id);
-                await ObserveAppliedAsync(healthy, cancellationToken);
                 continue;
             }
-
-            return;
         }
 
         throw new InvalidOperationException($"Built-in capability `{descriptor.Id.Value}` did not converge after bounded optimistic retries.");

@@ -8,7 +8,8 @@ $script:VerificationRequiredGateMaximumProcessHeavyWorkers = 4
 $script:VerificationRequiredGateMaximumCpuBoundWorkers = 1
 $script:VerificationRequiredGateScheduleProfiles = @(
     # Startup's runtime wrappers retain their shared serial xUnit collection inside three isolated
-    # process lanes. Every shard is a checked-in exact class partition validated before launch.
+    # process lanes, except the independently rooted quota-boundary class that uses runtime-2's
+    # second bounded thread. Every shard is a checked-in exact class partition validated before launch.
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-shard-1"; EstimatedDurationSeconds = 90; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-shard-2"; EstimatedDurationSeconds = 75; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-shard-3"; EstimatedDurationSeconds = 90; Weight = 3; ResourceClass = "ProcessHeavy" }

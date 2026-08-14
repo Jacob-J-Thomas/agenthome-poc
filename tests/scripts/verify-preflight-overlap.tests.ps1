@@ -18,6 +18,8 @@ $testPlanScript = Get-Content -LiteralPath $testPlanScriptPath -Raw
 $prepareTestPlanScript = Get-Content -LiteralPath $prepareTestPlanScriptPath -Raw
 $frontendScript = Get-Content -LiteralPath $frontendScriptPath -Raw
 $powerShellExecutable = (Get-Process -Id $PID).Path
+$nodeExecutable = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+$parallelProbePath = Join-Path $PSScriptRoot "verification-parallel-probe.mjs"
 $assertionCount = 0
 
 function Assert-True {
@@ -116,6 +118,8 @@ Assert-NotContains -Actual $verifyScript -Expected 'Invoke-CheckedNativePhase -N
 Assert-NotContains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "frontend-tests"' -Message "Frontend tests must not execute a second time in the required-gate plan."
 Assert-Contains -Actual $frontendScript -Expected 'Invoke-NpmVerificationPhase -Name "npm-ci" -NpmArguments @("ci", "--include=dev")' -Message "The composed phase must install the exact development dependency set."
 Assert-Contains -Actual $frontendScript -Expected 'Invoke-NpmVerificationPhase -Name "frontend-tests" -NpmArguments @("test")' -Message "The composed phase must execute the unchanged frontend test command after install."
+Assert-Contains -Actual $frontendScript -Expected '[int]$InstallTimeoutSeconds = 300' -Message "The production frontend install must retain its exact five-minute default timeout."
+Assert-Contains -Actual $frontendScript -Expected '[int]$TestTimeoutSeconds = 300' -Message "The production frontend test command must retain its exact five-minute default timeout."
 Assert-Contains -Actual $frontendScript -Expected '@("/d", "/s", "/c", "npm.cmd $($NpmArguments -join '' '')")' -Message "Windows frontend commands must retain explicit cmd.exe argument handling."
 Assert-Contains -Actual $frontendScript -Expected 'Add-VerificationParallelPhase -Name $Name' -Message "Each frontend dependency must retain bounded scheduler ownership and a distinct failure name."
 Assert-Contains -Actual $frontendScript -Expected '-OutputPath (Join-Path $logsPathRoot "$Name.log")' -Message "Install and test output must remain in distinct diagnostic logs."
@@ -191,8 +195,6 @@ try {
     $fixtureRunSettingsPath = Join-Path $fixtureProjectRoot "verification-pull-request.runsettings"
     $fixtureChildRoot = Split-Path -Parent $fixturePristineDirectory
     $fixtureChildRunSettingsPath = Join-Path $fixtureChildRoot "verification-pull-request.runsettings"
-    [IO.File]::WriteAllText($fixtureRunSettingsPath, "<RunSettings />", [Text.UTF8Encoding]::new($false))
-    Copy-Item -LiteralPath $fixtureRunSettingsPath -Destination $fixtureChildRunSettingsPath
     $fixtureLaneDirectory = Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $fixtureProjectRoot "all") -Configuration "Release" -TargetFramework "net10.0"
     New-Item -ItemType Directory -Path $fixtureLaneDirectory | Out-Null
     Copy-Item -LiteralPath (Join-Path $fixtureSourceDirectory "$fixtureProjectName.dll") -Destination $fixtureLaneDirectory
@@ -200,19 +202,32 @@ try {
     $fixtureLaneRoot = Get-VerificationLaneFixturePath -PhysicalTempRoot $fixturePhysicalTempRoot -RunIdentity $fixtureRunIdentity -LaneIdentity $fixtureLaneIdentity
     New-Item -ItemType Directory -Path $fixtureLaneRoot | Out-Null
     $fixtureExceptions = [Collections.Generic.Dictionary[string, string[]]]::new([StringComparer]::Ordinal)
+    $fixtureLaneSelections = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $canonicalRunSettingsPath = Join-Path $repoRoot "tests/verification-pull-request.runsettings"
     $fixtureOwnership = [pscustomobject]@{
         CollectorVersion = "10.0.1"
-        RunSettingsSha256 = "a" * 64
+        RunSettingsPath = $canonicalRunSettingsPath
+        RunSettingsSha256 = (Get-FileHash -LiteralPath $canonicalRunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
         OwnershipSha256 = "b" * 64
         Owners = @([pscustomobject]@{ Package = "EmbodySense.Fixture"; SourceRoot = "src/EmbodySense.Fixture"; TestProject = $fixtureProjectName })
         ProductionFiles = @("src/EmbodySense.Fixture/Fixture.cs")
         ExceptionsByTestProject = $fixtureExceptions
+        LaneSelectionsByTestProject = $fixtureLaneSelections
         TestProjectNames = @($fixtureProjectName)
     }
     $fixtureProject = [IO.FileInfo]::new($fixtureProjectPath)
     $fixtureSelection = Get-VerificationCoverageSelection -Ownership $fixtureOwnership -TestProject $fixtureProject
     $fixtureLaneDefinition = @(Get-VerificationTestProjectLanes -TestProject $fixtureProject)[0]
     $fixtureLaneFilter = Get-VerificationTestLaneFilter -Lane $fixtureLaneDefinition
+    $fixtureLaneSelection = Get-VerificationCoverageLaneSelection -Ownership $fixtureOwnership -TestProject $fixtureProject -LaneName $fixtureLaneDefinition.Name
+    Write-VerificationCoverageRunSettings -SourcePath $canonicalRunSettingsPath -DestinationPath $fixtureRunSettingsPath -Selection $fixtureSelection
+    Copy-Item -LiteralPath $fixtureRunSettingsPath -Destination $fixtureChildRunSettingsPath
+    $fixtureLaneSettingsRoot = Join-Path $fixtureProjectRoot "LaneSettings"
+    New-Item -ItemType Directory -Path $fixtureLaneSettingsRoot | Out-Null
+    $fixtureLaneRunSettingsPath = Join-Path $fixtureLaneSettingsRoot "all.runsettings"
+    Write-VerificationCoverageRunSettings -SourcePath $canonicalRunSettingsPath -DestinationPath $fixtureLaneRunSettingsPath -Selection $fixtureLaneSelection
+    $fixtureRunSettingsSha256 = (Get-FileHash -LiteralPath $fixtureRunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $fixtureLaneRunSettingsSha256 = (Get-FileHash -LiteralPath $fixtureLaneRunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $fixtureSourceManifest = @(Get-VerificationDirectoryManifest -Directory $fixtureSourceDirectory)
     $fixturePristineManifest = @(Get-VerificationDirectoryManifest -Directory $fixturePristineDirectory)
     $fixtureIsolation = [pscustomobject]@{
@@ -223,6 +238,7 @@ try {
         PristineManifest = $fixturePristineManifest
         CollectorDirectory = $fixtureCollectorDirectory
         RunSettingsPath = $fixtureRunSettingsPath
+        RunSettingsSha256 = $fixtureRunSettingsSha256
         ChildRunSettingsPath = $fixtureChildRunSettingsPath
         ChildInvocationsRoot = Join-Path $fixtureChildRoot "Invocations"
         CoverageSelection = $fixtureSelection
@@ -238,6 +254,9 @@ try {
             Manifest = $fixturePristineManifest
             ResultsPath = Join-Path $fixtureStandardResultsRoot $fixtureLaneIdentity
             FixtureRoot = $fixtureLaneRoot
+            RunSettingsPath = $fixtureLaneRunSettingsPath
+            RunSettingsSha256 = $fixtureLaneRunSettingsSha256
+            CoverageSelection = $fixtureLaneSelection
             Environment = @{
                 EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $fixtureLaneRoot "catalog-trust"
                 TEMP = $fixtureLaneRoot
@@ -250,6 +269,15 @@ try {
     Write-VerificationTestPreparationPlan -PlanPath $fixturePlanPath -RepositoryRoot $planFixtureRoot -VerificationResultsPath $fixtureResultsRoot -Configuration "Release" -SkipCoverage $false -CoverageOwnershipMode "Standard" -FixtureRunIdentity $fixtureRunIdentity -CoverageOwnership $fixtureOwnership -Isolations @($fixtureIsolation)
     $hydrated = @(Read-VerificationTestPreparationPlan -PlanPath $fixturePlanPath -RepositoryRoot $planFixtureRoot -VerificationResultsPath $fixtureResultsRoot -CoverageIsolationRoot $fixtureIsolationRoot -StandardTestResultsRoot $fixtureStandardResultsRoot -VerificationPhysicalTempRoot $fixturePhysicalTempRoot -FixtureRunIdentity $fixtureRunIdentity -Configuration "Release" -SkipCoverage $false -CoverageOwnershipMode "Standard" -CoverageOwnership $fixtureOwnership -TestProjects @($fixtureProject))
     Assert-True -Condition ($hydrated.Count -eq 1 -and $hydrated[0].Lanes.Count -eq 1 -and $hydrated[0].Lanes[0].Environment.Count -eq 4) -Message "The schema-1 handoff must hydrate one exact project/lane/environment topology."
+    [IO.File]::AppendAllText($fixtureLaneRunSettingsPath, "<!--tampered-->", [Text.UTF8Encoding]::new($false))
+    try {
+        Read-VerificationTestPreparationPlan -PlanPath $fixturePlanPath -RepositoryRoot $planFixtureRoot -VerificationResultsPath $fixtureResultsRoot -CoverageIsolationRoot $fixtureIsolationRoot -StandardTestResultsRoot $fixtureStandardResultsRoot -VerificationPhysicalTempRoot $fixturePhysicalTempRoot -FixtureRunIdentity $fixtureRunIdentity -Configuration "Release" -SkipCoverage $false -CoverageOwnershipMode "Standard" -CoverageOwnership $fixtureOwnership -TestProjects @($fixtureProject) | Out-Null
+        throw "Expected tampered lane runsettings to fail."
+    }
+    catch {
+        Assert-Contains -Actual $_.Exception.Message -Expected "lane runsettings do not match the exact current ownership selection" -Message "The parent handoff must authenticate each lane-specific filter before execution."
+    }
+    Write-VerificationCoverageRunSettings -SourcePath $canonicalRunSettingsPath -DestinationPath $fixtureLaneRunSettingsPath -Selection $fixtureLaneSelection
     $fixtureResiduePath = Join-Path $fixtureLaneRoot "unexpected-residue"
     [IO.File]::WriteAllText($fixtureResiduePath, "residue", [Text.UTF8Encoding]::new($false))
     try {
@@ -283,12 +311,7 @@ function Get-PreflightTimingArguments {
         [string]$SynchronizationRoot
     )
 
-    $arguments = @("-NoProfile")
-    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
-        $arguments += @("-ExecutionPolicy", "Bypass")
-    }
-    $arguments += @("-File", $ScriptPath, "-Role", $Role, "-SynchronizationRoot", $SynchronizationRoot)
-    return [string[]]$arguments
+    return [string[]]@($ScriptPath, "timed", $Role, $SynchronizationRoot)
 }
 
 function Read-PreflightTiming {
@@ -315,53 +338,8 @@ function Read-PreflightTiming {
 $behaviorRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-preflight-dependency-boundary-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $behaviorRoot | Out-Null
 try {
-    $timingScriptPath = Join-Path $behaviorRoot "timed-phase.ps1"
-    [IO.File]::WriteAllText($timingScriptPath, @'
-param([string]$Role, [string]$SynchronizationRoot)
-Write-Output "start=$([DateTime]::UtcNow.Ticks)"
-[IO.File]::WriteAllText((Join-Path $SynchronizationRoot "$Role.started"), [DateTime]::UtcNow.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture), [Text.UTF8Encoding]::new($false))
-if ($Role -ceq "build") {
-    $requiredOverlapRoles = @("ordinary", "nested-first", "nested-second")
-    $overlapDeadline = [DateTime]::UtcNow.AddSeconds(20)
-    foreach ($requiredRole in $requiredOverlapRoles) {
-        $requiredMarker = Join-Path $SynchronizationRoot "$requiredRole.started"
-        while (-not (Test-Path -LiteralPath $requiredMarker -PathType Leaf)) {
-            if ([DateTime]::UtcNow -ge $overlapDeadline) {
-                throw "Timed out waiting for required preflight overlap marker: $requiredRole"
-            }
-            Start-Sleep -Milliseconds 10
-        }
-    }
-    Start-Sleep -Milliseconds 200
-}
-elseif ($Role -ceq "frontend") {
-    Start-Sleep -Milliseconds 150
-}
-elseif ($Role -ceq "coverage") {
-    Start-Sleep -Milliseconds 400
-}
-elseif ($Role -ceq "prepare") {
-    Start-Sleep -Milliseconds 400
-}
-elseif ($Role.StartsWith("format-", [StringComparison]::Ordinal)) {
-    Start-Sleep -Milliseconds 1000
-}
-elseif ($Role -ceq "ordinary") {
-    $coverageMarker = Join-Path $SynchronizationRoot "coverage.started"
-    $coverageDeadline = [DateTime]::UtcNow.AddSeconds(20)
-    while (-not (Test-Path -LiteralPath $coverageMarker -PathType Leaf)) {
-        if ([DateTime]::UtcNow -ge $coverageDeadline) {
-            throw "Timed out waiting for the build-dependent coverage phase to overlap ordinary work."
-        }
-        Start-Sleep -Milliseconds 10
-    }
-    Start-Sleep -Milliseconds 200
-}
-elseif ($Role.StartsWith("nested-", [StringComparison]::Ordinal)) {
-    Start-Sleep -Milliseconds 200
-}
-Write-Output "end=$([DateTime]::UtcNow.Ticks)"
-'@, [Text.UTF8Encoding]::new($false))
+    Assert-True -Condition (Test-Path -LiteralPath $parallelProbePath -PathType Leaf) -Message "The preflight DAG must use the checked-in lightweight cross-platform child-process probe."
+    $timingScriptPath = $parallelProbePath
 
     Reset-VerificationParallelPhaseState
     $buildOutputPath = Join-Path $behaviorRoot "build.log"
@@ -372,13 +350,13 @@ Write-Output "end=$([DateTime]::UtcNow.Ticks)"
     $nestedFirstOutputPath = Join-Path $behaviorRoot "nested-first.log"
     $nestedSecondOutputPath = Join-Path $behaviorRoot "nested-second.log"
     $timingPhaseTimeoutSeconds = 30
-    Add-VerificationParallelPhase -Name "build" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "build" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $buildOutputPath -EstimatedDurationSeconds 90 -Weight 3 -ResourceClass "ProcessHeavy"
-    Add-VerificationParallelPhase -Name "frontend" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "frontend" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $frontendOutputPath -EstimatedDurationSeconds 70 -Weight 2 -ResourceClass "CpuBound"
-    Add-VerificationParallelPhase -Name "ordinary" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "ordinary" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $ordinaryOutputPath -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
-    Add-VerificationParallelPhase -Name "coverage" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "coverage" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $coverageOutputPath -DependsOn @("build") -EstimatedDurationSeconds 75 -Weight 3 -ResourceClass "ProcessHeavy"
-    Add-VerificationParallelPhase -Name "prepare" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "prepare" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $prepareOutputPath -DependsOn @("build") -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
-    Add-VerificationParallelPhase -Name "nested-first" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-first" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $nestedFirstOutputPath -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
-    Add-VerificationParallelPhase -Name "nested-second" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-second" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $nestedSecondOutputPath -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
+    Add-VerificationParallelPhase -Name "build" -FileName $nodeExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "build" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $buildOutputPath -EstimatedDurationSeconds 90 -Weight 3 -ResourceClass "ProcessHeavy"
+    Add-VerificationParallelPhase -Name "frontend" -FileName $nodeExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "frontend" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $frontendOutputPath -EstimatedDurationSeconds 70 -Weight 2 -ResourceClass "CpuBound"
+    Add-VerificationParallelPhase -Name "ordinary" -FileName $nodeExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "ordinary" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $ordinaryOutputPath -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
+    Add-VerificationParallelPhase -Name "coverage" -FileName $nodeExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "coverage" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $coverageOutputPath -DependsOn @("build") -EstimatedDurationSeconds 75 -Weight 3 -ResourceClass "ProcessHeavy"
+    Add-VerificationParallelPhase -Name "prepare" -FileName $nodeExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "prepare" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $prepareOutputPath -DependsOn @("build") -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
+    Add-VerificationParallelPhase -Name "nested-first" -FileName $nodeExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-first" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $nestedFirstOutputPath -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
+    Add-VerificationParallelPhase -Name "nested-second" -FileName $nodeExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-second" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $nestedSecondOutputPath -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
     $overlapResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
     Assert-True -Condition ($overlapResults.Count -eq 7 -and @($overlapResults | Where-Object { $_.ExitCode -ne 0 }).Count -eq 0) -Message "The bounded preflight DAG must complete its exact phase set successfully."
     Assert-True -Condition (@($overlapResults | Select-Object -ExpandProperty Name | Sort-Object) -join "," -ceq "build,coverage,frontend,nested-first,nested-second,ordinary,prepare") -Message "The preflight DAG must contain only build-dependent coverage/preparation, frontend, nested contracts, and explicitly safe ordinary work."
@@ -477,32 +455,14 @@ $frontendFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-fronte
 $fakeBinPath = Join-Path $frontendFixtureRoot "bin"
 New-Item -ItemType Directory -Path $fakeBinPath | Out-Null
 try {
-    $fakeNpmScriptPath = Join-Path $frontendFixtureRoot "fake-npm.ps1"
-    [IO.File]::WriteAllText($fakeNpmScriptPath, @'
-param(
-    [Parameter(Position = 0)] [string]$Operation,
-    [Parameter(ValueFromRemainingArguments = $true)] [string[]]$RemainingArguments
-)
-Add-Content -LiteralPath $env:EMBODYSENSE_FAKE_NPM_ORDER_PATH -Value $Operation
-[IO.File]::WriteAllText($env:EMBODYSENSE_FAKE_NPM_PID_PATH, [string]$PID, [Text.UTF8Encoding]::new($false))
-Write-Output "fake-$Operation-output"
-if ($Operation -ceq "ci") {
-    $delay = [int]$env:EMBODYSENSE_FAKE_NPM_INSTALL_DELAY_MILLISECONDS
-    if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
-    exit ([int]$env:EMBODYSENSE_FAKE_NPM_INSTALL_EXIT_CODE)
-}
-if ($Operation -ceq "test") { exit ([int]$env:EMBODYSENSE_FAKE_NPM_TEST_EXIT_CODE) }
-exit 97
-'@, [Text.UTF8Encoding]::new($false))
-
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
         $npmShimPath = Join-Path $fakeBinPath "npm.cmd"
-        $shim = "@echo off`r`n`"$powerShellExecutable`" -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$fakeNpmScriptPath`" %*`r`nexit /b %ERRORLEVEL%`r`n"
+        $shim = "@echo off`r`n`"$nodeExecutable`" `"$parallelProbePath`" npm %*`r`nexit /b %ERRORLEVEL%`r`n"
         [IO.File]::WriteAllText($npmShimPath, $shim, [Text.Encoding]::ASCII)
     }
     else {
         $npmShimPath = Join-Path $fakeBinPath "npm"
-        $shim = "#!/bin/sh`nexec `"$powerShellExecutable`" -NoLogo -NoProfile -File `"$fakeNpmScriptPath`" `"`$@`"`n"
+        $shim = "#!/bin/sh`nexec `"$nodeExecutable`" `"$parallelProbePath`" npm `"`$@`"`n"
         [IO.File]::WriteAllText($npmShimPath, $shim, [Text.UTF8Encoding]::new($false))
         & chmod 700 $npmShimPath
         if ($LASTEXITCODE -ne 0) { throw "Could not make the fake npm shim executable." }
@@ -528,8 +488,8 @@ exit 97
     $normalizedTestFailure = Normalize-ConsoleDiagnostic $testFailure.Output
     Assert-Contains -Actual $normalizedTestFailure -Expected "VERIFY_PARALLEL_PHASE_COMPLETE name=frontend-tests status=failed exit_code=13" -Message "Frontend failure identity, terminal status, and exit code must remain explicit. Actual: $normalizedTestFailure"
 
-    $installTimeout = Invoke-FrontendFixture -Name "install-timeout" -FixtureRoot $frontendFixtureRoot -FakeBinPath $fakeBinPath -InstallDelayMilliseconds 30000 -InstallTimeoutSeconds 15
-    Assert-True -Condition ($installTimeout.ExitCode -ne 0 -and $installTimeout.ElapsedSeconds -lt 25) -Message "A stalled npm install must fail inside its bounded timeout after allowing contended Windows child startup."
+    $installTimeout = Invoke-FrontendFixture -Name "install-timeout" -FixtureRoot $frontendFixtureRoot -FakeBinPath $fakeBinPath -InstallDelayMilliseconds 30000 -InstallTimeoutSeconds 5
+    Assert-True -Condition ($installTimeout.ExitCode -ne 0 -and $installTimeout.ElapsedSeconds -lt 15) -Message "A stalled lightweight npm fixture must fail inside its private bound without changing the production timeout."
     Assert-Contains -Actual $installTimeout.Output -Expected "VERIFY_CHILD_TIMEOUT name=npm-ci" -Message "Install timeout evidence must retain its exact phase identity."
     Assert-True -Condition ((@(Get-Content -LiteralPath $installTimeout.OrderPath) -join ",") -ceq "ci") -Message "A timed-out install must prevent frontend test admission."
     $timedOutPid = [int](Get-Content -LiteralPath $installTimeout.PidPath -Raw)

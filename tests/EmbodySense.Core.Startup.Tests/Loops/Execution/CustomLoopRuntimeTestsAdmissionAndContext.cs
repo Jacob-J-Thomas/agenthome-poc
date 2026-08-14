@@ -16,9 +16,6 @@ public sealed class CustomLoopRuntimeTestsAdmissionAndContext
     public Task Public_runtime_translates_unsupported_discovery_index_schema_for_run_list_reads() => CustomLoopRuntimeTests.Public_runtime_translates_unsupported_discovery_index_schema_for_run_list_reads();
 
     [Fact]
-    public Task Invocation_quota_pressure_prunes_expired_completed_receipts_before_accepting_a_new_operation() => CustomLoopRuntimeTests.Invocation_quota_pressure_prunes_expired_completed_receipts_before_accepting_a_new_operation();
-
-    [Fact]
     public Task Context_capture_bounds_selected_conversation_entries_and_aggregates_all_omissions_once() => CustomLoopRuntimeTests.Context_capture_bounds_selected_conversation_entries_and_aggregates_all_omissions_once();
 
     [Fact]

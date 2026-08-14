@@ -8,6 +8,7 @@ on:
       - "scripts/collect-coverage-ownership-equivalence.ps1"
       - "scripts/verification-coverage-evidence.ps1"
       - "scripts/verification-test-lanes.ps1"
+      - "scripts/verification-test-plan.ps1"
       - "scripts/verify-coverage-ownership-equivalence.ps1"
       - "scripts/verify-coverage.ps1"
       - "scripts/verify-with-watchdog.ps1"
@@ -16,6 +17,7 @@ on:
       - "tests/scripts/verify-coverage.tests.ps1"
       - "tests/scripts/verify-parallel.tests.ps1"
       - "tests/verification-coverage-ownership.json"
+      - "tests/verification-coverage-lane-ownership.json"
       - "tests/verification-pull-request.runsettings"
 
 permissions:

@@ -212,8 +212,13 @@ public sealed class BuiltInCapabilityCatalogSeederTests
         Assert.Equal($"builtin-declare-{descriptor.Id.Value.Replace('/', '-')}-v1", preserved.LastOperationId);
     }
 
-    [Fact]
-    public async Task Seed_reproves_bootstrap_receipts_after_each_transaction_and_stops_for_an_interleaved_operator_touch()
+    [Theory]
+    [InlineData("declare", CapabilityCatalogMutationStatus.NoChange)]
+    [InlineData("install", CapabilityCatalogMutationStatus.NoChange)]
+    [InlineData("verify", CapabilityCatalogMutationStatus.NoChange)]
+    [InlineData("enable", CapabilityCatalogMutationStatus.Applied)]
+    [InlineData("healthy", CapabilityCatalogMutationStatus.Applied)]
+    public async Task Seed_preserves_an_operator_touch_interleaved_after_any_bootstrap_stage(string afterAction, CapabilityCatalogMutationStatus expectedOperatorStatus)
     {
         using var workspace = new TestWorkspace();
         using var trustRoot = new TestWorkspace();
@@ -221,25 +226,25 @@ public sealed class BuiltInCapabilityCatalogSeederTests
         var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
         var service = new CapabilityCatalogService(new CapabilityCatalogStore(paths, provider));
         var descriptor = BuiltInCapabilityCatalog.Descriptors[0];
-        var declareOperationId = $"builtin-declare-{descriptor.Id.Value.Replace('/', '-')}-v1";
+        var operationPrefix = descriptor.Id.Value.Replace('/', '-');
+        var afterOperationId = $"builtin-{afterAction}-{operationPrefix}-v1";
+        var operatorOperationId = $"operator-touch-after-{afterAction}";
         CapabilityCatalogMutationResult? operatorTouch = null;
-        var observer = new InterleavingBuiltInCapabilityCatalogSeedObserver(declareOperationId, async (_, cancellationToken) =>
+        var observer = new InterleavingBuiltInCapabilityCatalogSeedObserver(afterOperationId, async (_, cancellationToken) =>
         {
-            operatorTouch = await service.DisableAsync(descriptor.Id, await ReadCatalogRevisionAsync(service), "operator-touch-between-bootstrap-stages", cancellationToken);
+            operatorTouch = await service.DisableAsync(descriptor.Id, await ReadCatalogRevisionAsync(service), operatorOperationId, cancellationToken);
         });
 
         await new BuiltInCapabilityCatalogSeeder(provider, observer).SeedAsync(paths);
 
         Assert.Equal(1, observer.InterleavingCount);
-        Assert.Equal(CapabilityCatalogMutationStatus.NoChange, Assert.IsType<CapabilityCatalogMutationResult>(operatorTouch).Status);
+        Assert.Equal(expectedOperatorStatus, Assert.IsType<CapabilityCatalogMutationResult>(operatorTouch).Status);
         var preserved = (await ReadBuiltInsAsync(new CapabilityCatalogStore(paths, provider))).Single(entry => entry.Descriptor.Id.Equals(descriptor.Id));
-        Assert.Equal(CapabilityInstallationState.NotInstalled, preserved.Lifecycle.Installation);
         Assert.Equal(CapabilityEnablementState.Disabled, preserved.Lifecycle.Enablement);
-        Assert.Equal(CapabilityTrustState.Unverified, preserved.Lifecycle.Trust);
-        Assert.Equal(CapabilityHealthState.Unknown, preserved.Lifecycle.Health);
         var receipts = await new CapabilityCatalogStore(paths, provider).ReadOperationReceiptsAsync(descriptor.Id);
         Assert.Equal(CapabilityCatalogReadStatus.Available, receipts.Status);
-        Assert.Equal([declareOperationId, "operator-touch-between-bootstrap-stages"], receipts.Receipts.Select(receipt => receipt.OperationId).Order(StringComparer.Ordinal));
+        Assert.Contains(receipts.Receipts, receipt => string.Equals(receipt.OperationId, operatorOperationId, StringComparison.Ordinal));
+        Assert.DoesNotContain(receipts.Receipts, receipt => string.Equals(receipt.OperationId, $"builtin-healthy-{operationPrefix}-v1", StringComparison.Ordinal) && !string.Equals(afterAction, "healthy", StringComparison.Ordinal));
     }
 
     [Fact]

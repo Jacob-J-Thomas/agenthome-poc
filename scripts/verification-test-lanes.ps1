@@ -414,6 +414,101 @@ function Read-VerificationCoverageOwnership {
         (@(Compare-Object -ReferenceObject $actualTestProjectNames -DifferenceObject $declaredTestProjectNames -CaseSensitive).Count -ne 0)) {
         throw "Verification coverage ownership must classify every canonical test project exactly."
     }
+
+    $laneManifestPath = Join-Path (Split-Path -Parent $fullManifestPath) "verification-coverage-lane-ownership.json"
+    [void](Assert-VerificationCoverageOwnershipOrdinaryItem -Path $laneManifestPath -PathType Leaf -Description "Verification coverage lane ownership manifest" -RepositoryRoot $RepositoryRoot -ValidatedPaths $validatedOrdinaryPaths)
+    $laneDocument = $null
+    try {
+        $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+        $laneJson = $strictUtf8.GetString([IO.File]::ReadAllBytes($laneManifestPath))
+        $laneDocument = [Text.Json.JsonDocument]::Parse($laneJson)
+        Assert-VerificationCoverageOwnershipJsonPropertiesUnique -Element $laneDocument.RootElement -Path '$'
+        if ($laneDocument.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object -or
+            $laneDocument.RootElement.GetProperty("schemaVersion").ValueKind -ne [Text.Json.JsonValueKind]::Number -or
+            $laneDocument.RootElement.GetProperty("projects").ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+            throw "The lane manifest has invalid schema-1 JSON value types."
+        }
+        foreach ($projectProperty in $laneDocument.RootElement.GetProperty("projects").EnumerateObject()) {
+            if ($projectProperty.Value.ValueKind -ne [Text.Json.JsonValueKind]::Object -or
+                $projectProperty.Value.GetProperty("primaryLane").ValueKind -ne [Text.Json.JsonValueKind]::String -or
+                $projectProperty.Value.GetProperty("secondaryFiles").ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+                throw "Coverage lane project '$($projectProperty.Name)' has invalid JSON value types."
+            }
+            foreach ($laneProperty in $projectProperty.Value.GetProperty("secondaryFiles").EnumerateObject()) {
+                if ($laneProperty.Value.ValueKind -ne [Text.Json.JsonValueKind]::Array) {
+                    throw "Coverage lane '$($projectProperty.Name)/$($laneProperty.Name)' must be a JSON array."
+                }
+                foreach ($pathElement in $laneProperty.Value.EnumerateArray()) {
+                    if ($pathElement.ValueKind -ne [Text.Json.JsonValueKind]::String) {
+                        throw "Coverage lane '$($projectProperty.Name)/$($laneProperty.Name)' must contain only source-path strings."
+                    }
+                }
+            }
+        }
+        $laneManifest = ConvertFrom-Json -InputObject $laneJson
+    }
+    catch {
+        throw "Verification coverage lane ownership manifest is corrupt: $($_.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $laneDocument) { $laneDocument.Dispose() }
+    }
+
+    Assert-VerificationCoverageOwnershipProperties -Value $laneManifest -Expected @("projects", "schemaVersion") -Description "Verification coverage lane ownership manifest"
+    if ($laneManifest.schemaVersion -isnot [long] -or [long]$laneManifest.schemaVersion -ne 1) {
+        throw "Verification coverage lane ownership schema is invalid."
+    }
+    $expectedMultiLaneProjects = @($TestProjects | Where-Object { @(Get-VerificationTestProjectLanes -TestProject $_).Count -gt 1 } | ForEach-Object BaseName | Sort-Object -CaseSensitive)
+    $actualMultiLaneProjects = @($laneManifest.projects.PSObject.Properties | ForEach-Object Name | Sort-Object -CaseSensitive)
+    if ($actualMultiLaneProjects.Count -ne $expectedMultiLaneProjects.Count -or
+        @(Compare-Object -ReferenceObject $expectedMultiLaneProjects -DifferenceObject $actualMultiLaneProjects -CaseSensitive).Count -ne 0) {
+        throw "Verification coverage lane ownership must classify every and only multi-lane test project."
+    }
+
+    $laneSelectionsByTestProject = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $laneOwnershipRecords = [Collections.Generic.List[string]]::new()
+    foreach ($testProjectName in $expectedMultiLaneProjects) {
+        $record = $laneManifest.projects.PSObject.Properties[$testProjectName].Value
+        Assert-VerificationCoverageOwnershipProperties -Value $record -Expected @("primaryLane", "secondaryFiles") -Description "Verification coverage lane project '$testProjectName'"
+        $testProject = @($TestProjects | Where-Object BaseName -CEQ $testProjectName)
+        if ($testProject.Count -ne 1) { throw "Verification coverage lane project '$testProjectName' is not canonical." }
+        $laneNames = @(Get-VerificationTestProjectLanes -TestProject $testProject[0] | ForEach-Object Name)
+        $primaryLane = [string]$record.primaryLane
+        if ($laneNames -cnotcontains $primaryLane) { throw "Verification coverage primary lane '$testProjectName/$primaryLane' is not checked in." }
+        $expectedSecondaryLaneNames = @($laneNames | Where-Object { $_ -cne $primaryLane } | Sort-Object -CaseSensitive)
+        $actualSecondaryLaneNames = @($record.secondaryFiles.PSObject.Properties | ForEach-Object Name | Sort-Object -CaseSensitive)
+        if ($actualSecondaryLaneNames.Count -ne $expectedSecondaryLaneNames.Count -or
+            @(Compare-Object -ReferenceObject $expectedSecondaryLaneNames -DifferenceObject $actualSecondaryLaneNames -CaseSensitive).Count -ne 0) {
+            throw "Verification coverage secondary lanes for '$testProjectName' do not exactly match the checked-in lane inventory."
+        }
+
+        $allowedFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($owner in @($owners | Where-Object TestProject -CEQ $testProjectName)) {
+            foreach ($sourceFile in @($orderedProductionFiles | Where-Object { $_.StartsWith("$($owner.SourceRoot)/", [StringComparison]::Ordinal) })) { [void]$allowedFiles.Add($sourceFile) }
+        }
+        if ($exceptionsByTestProject.ContainsKey($testProjectName)) {
+            foreach ($sourceFile in $exceptionsByTestProject[$testProjectName]) { [void]$allowedFiles.Add($sourceFile) }
+        }
+
+        $secondaryFiles = [Collections.Generic.Dictionary[string, string[]]]::new([StringComparer]::Ordinal)
+        $laneOwnershipRecords.Add("lane-primary" + [char]0 + $testProjectName + [char]0 + $primaryLane)
+        foreach ($laneName in $expectedSecondaryLaneNames) {
+            $paths = @($record.secondaryFiles.PSObject.Properties[$laneName].Value)
+            $orderedPaths = @($paths | Sort-Object -CaseSensitive)
+            if ($paths.Count -eq 0 -or @($paths | Group-Object -CaseSensitive | Where-Object Count -ne 1).Count -ne 0 -or
+                ($paths -join "`n") -cne ($orderedPaths -join "`n")) {
+                throw "Verification coverage secondary lane '$testProjectName/$laneName' must contain a nonempty, sorted, unique source list."
+            }
+            foreach ($sourceFile in $paths) {
+                if (-not $allowedFiles.Contains([string]$sourceFile)) {
+                    throw "Verification coverage secondary lane '$testProjectName/$laneName' selects a source outside its project ownership: $sourceFile"
+                }
+                $laneOwnershipRecords.Add("lane-file" + [char]0 + $testProjectName + [char]0 + $laneName + [char]0 + [string]$sourceFile)
+            }
+            $secondaryFiles.Add($laneName, [string[]]$paths)
+        }
+        $laneSelectionsByTestProject.Add($testProjectName, [pscustomobject]@{ PrimaryLane = $primaryLane; SecondaryFiles = $secondaryFiles })
+    }
     $collectorContract = Get-VerificationCoverageCollectorContract -RepositoryRoot $RepositoryRoot -ValidatedPaths $validatedOrdinaryPaths
     $ownershipRecords = [Collections.Generic.List[string]]::new()
     foreach ($owner in @($owners | Sort-Object Package -CaseSensitive)) {
@@ -424,6 +519,7 @@ function Read-VerificationCoverageOwnership {
             $ownershipRecords.Add("exception" + [char]0 + $testProjectName + [char]0 + $relativePath)
         }
     }
+    foreach ($record in $laneOwnershipRecords) { $ownershipRecords.Add($record) }
 
     return [pscustomobject]@{
         CollectorVersion = $collectorContract.CollectorVersion
@@ -433,6 +529,7 @@ function Read-VerificationCoverageOwnership {
         Owners = @($owners)
         ProductionFiles = $orderedProductionFiles
         ExceptionsByTestProject = $exceptionsByTestProject
+        LaneSelectionsByTestProject = $laneSelectionsByTestProject
         TestProjectNames = $actualTestProjectNames
     }
 }
@@ -546,10 +643,57 @@ function Get-VerificationCoverageSelection {
     }
 }
 
-function Write-VerificationCoverageRunSettings {
+function Get-VerificationCoverageLaneSelection {
+    param(
+        [Parameter(Mandatory = $true)] [object]$Ownership,
+        [Parameter(Mandatory = $true)] [System.IO.FileInfo]$TestProject,
+        [Parameter(Mandatory = $true)] [string]$LaneName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LaneName)) { throw "Verification coverage lane name cannot be empty." }
+    $projectSelection = Get-VerificationCoverageSelection -Ownership $Ownership -TestProject $TestProject
+    $testProjectName = $TestProject.BaseName
+    $checkedInLanes = @(Get-VerificationTestProjectLanes -TestProject $TestProject | ForEach-Object Name)
+    if ($checkedInLanes -cnotcontains $LaneName) {
+        throw "Verification coverage selection requested an unknown lane: $testProjectName/$LaneName"
+    }
+    if (-not $Ownership.LaneSelectionsByTestProject.ContainsKey($testProjectName)) {
+        if ($checkedInLanes.Count -ne 1) { throw "Verification coverage multi-lane selection is missing for '$testProjectName'." }
+        return $projectSelection
+    }
+
+    $laneOwnership = $Ownership.LaneSelectionsByTestProject[$testProjectName]
+    if ($LaneName -ceq $laneOwnership.PrimaryLane) { return $projectSelection }
+    if (-not $laneOwnership.SecondaryFiles.ContainsKey($LaneName)) {
+        throw "Verification coverage secondary lane selection is missing for '$testProjectName/$LaneName'."
+    }
+
+    $projectSelected = [Collections.Generic.HashSet[string]]::new([string[]]$projectSelection.SelectedFiles, [StringComparer]::Ordinal)
+    $selectedFiles = [string[]]$laneOwnership.SecondaryFiles[$LaneName]
+    foreach ($sourceFile in $selectedFiles) {
+        if (-not $projectSelected.Contains($sourceFile)) {
+            throw "Verification coverage secondary lane '$testProjectName/$LaneName' escaped its project selection: $sourceFile"
+        }
+        $owner = @($Ownership.Owners | Where-Object { $sourceFile.StartsWith("$($_.SourceRoot)/", [StringComparison]::Ordinal) })
+        if ($owner.Count -ne 1) { throw "Verification coverage secondary lane source does not bind one production package: $sourceFile" }
+    }
+    $orderedPackages = @($projectSelection.IncludedPackages)
+    $selectedFileSet = [Collections.Generic.HashSet[string]]::new([string[]]$selectedFiles, [StringComparer]::Ordinal)
+    $excludedFiles = @($Ownership.ProductionFiles | Where-Object { -not $selectedFileSet.Contains($_) } | Sort-Object -CaseSensitive)
+    return [pscustomobject]@{
+        TestProject = $testProjectName
+        PrimaryRoots = @()
+        IncludedPackages = $orderedPackages
+        SelectedFiles = $selectedFiles
+        ExcludedFiles = $excludedFiles
+        IncludeAssemblyPatterns = @($orderedPackages | ForEach-Object { "[$_]*" })
+        ExcludeByFilePatterns = @(Get-VerificationCoverageExcludeByFilePatterns -Ownership $Ownership -IncludedPackages $orderedPackages -SelectedFiles $selectedFiles)
+    }
+}
+
+function Get-VerificationCoverageRunSettingsBytes {
     param(
         [Parameter(Mandatory = $true)] [string]$SourcePath,
-        [Parameter(Mandatory = $true)] [string]$DestinationPath,
         [Parameter(Mandatory = $true)] [object]$Selection
     )
 
@@ -590,13 +734,28 @@ function Write-VerificationCoverageRunSettings {
     $writerSettings.Indent = $true
     $writerSettings.NewLineChars = [Environment]::NewLine
     $writerSettings.NewLineHandling = [Xml.NewLineHandling]::Replace
-    $writer = [Xml.XmlWriter]::Create([IO.Path]::GetFullPath($DestinationPath), $writerSettings)
+    $stream = [IO.MemoryStream]::new()
+    $writer = [Xml.XmlWriter]::Create($stream, $writerSettings)
     try {
         $document.Save($writer)
+        $writer.Flush()
+        return ,([byte[]]$stream.ToArray())
     }
     finally {
         $writer.Dispose()
+        $stream.Dispose()
     }
+}
+
+function Write-VerificationCoverageRunSettings {
+    param(
+        [Parameter(Mandatory = $true)] [string]$SourcePath,
+        [Parameter(Mandatory = $true)] [string]$DestinationPath,
+        [Parameter(Mandatory = $true)] [object]$Selection
+    )
+
+    $bytes = Get-VerificationCoverageRunSettingsBytes -SourcePath $SourcePath -Selection $Selection
+    [IO.File]::WriteAllBytes([IO.Path]::GetFullPath($DestinationPath), $bytes)
 }
 
 function Assert-VerificationCoverageOwnershipReports {
@@ -800,14 +959,16 @@ function Get-VerificationTestProjectLanes {
 
     if ($TestProject.BaseName -ceq "EmbodySense.Core.Startup.Tests") {
         return @(
-            # The six wrappers retain their shared serial xUnit collection within each process.
-            # Separate immutable assembly copies and fixture roots allow three measured process
-            # lanes without sharing provider, catalog, trust, or file-backed runtime state.
+            # Six wrappers retain their shared serial xUnit collection within each process. The
+            # independently rooted invocation-retention boundary uses the second bounded xUnit
+            # thread inside runtime-2. Immutable assembly copies and fixture roots keep all three
+            # process lanes disjoint from every other provider, catalog, trust, and runtime state.
             (New-VerificationTestLane -Name "runtime-1" -IncludeFullyQualifiedName @(
                 "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsResumeAndAuthority."
             ))
             (New-VerificationTestLane -Name "runtime-2" -IncludeFullyQualifiedName @(
                 "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsAdmissionAndContext."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsInvocationRetention."
                 "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsCompletionConstraints."
             ))
             (New-VerificationTestLane -Name "runtime-3" -IncludeFullyQualifiedName @(

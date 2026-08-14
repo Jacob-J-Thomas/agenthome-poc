@@ -280,12 +280,13 @@ $runtimePrefixes = @($startupLanes | Where-Object { $_.Name.StartsWith("runtime-
 $expectedRuntimePrefixes = @(
     "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsAdmissionAndContext."
     "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsDurabilityAndRecovery."
+    "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsInvocationRetention."
     "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsPublicationAndConcurrency."
     "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsAdmissionAndBinding."
     "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsCompletionConstraints."
     "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsResumeAndAuthority."
 )
-Assert-True -Condition ((@($runtimePrefixes | Sort-Object -CaseSensitive) -join "`n") -ceq (@($expectedRuntimePrefixes | Sort-Object -CaseSensitive) -join "`n")) -Message "All six serialized Startup runtime wrappers must belong to exactly one isolated process lane."
+Assert-True -Condition ((@($runtimePrefixes | Sort-Object -CaseSensitive) -join "`n") -ceq (@($expectedRuntimePrefixes | Sort-Object -CaseSensitive) -join "`n")) -Message "All six serialized and one independently rooted Startup runtime wrappers must belong to exactly one isolated process lane."
 $startupShardTwoPrefixes = @($startupLanes | Where-Object Name -CEQ "shard-2" | Select-Object -ExpandProperty IncludeFullyQualifiedName)
 foreach ($sharedTrustPrefix in @(
     "EmbodySense.Core.Startup.Tests.Configuration.WorkspaceConfigurationReaderTests."
@@ -300,6 +301,9 @@ $null = Invoke-ExpectedFailure -ExpectedMessage "unsafe fully-qualified-name pre
 Assert-Contains -Actual $verifyScript -Expected 'Read-VerificationCoverageOwnership -ManifestPath $coverageOwnershipManifestPath -RepositoryRoot $repoRoot -TestProjects $testProjects' -Message "The verifier must validate the checked-in coverage ownership map against exact current source and test-project inventories before execution."
 Assert-Contains -Actual $testPlanScript -Expected 'Write-VerificationCoverageRunSettings -SourcePath $PullRequestRunSettingsPath -DestinationPath $runSettingsPath -Selection $coverageSelection' -Message "Every canonical test lane must receive its fail-closed source-owned coverage filter."
 Assert-Contains -Actual $testPlanScript -Expected 'Copy-Item -LiteralPath $runSettingsPath -Destination $childRunSettingsPath' -Message "Every child-process collector must inherit the exact parent ownership filter."
+Assert-Contains -Actual $testPlanScript -Expected 'Get-VerificationCoverageLaneSelection -Ownership $CoverageOwnership -TestProject $TestProject -LaneName $lane.Name' -Message "Every sharded process must derive its exact checked-in source selection independently."
+Assert-Contains -Actual $testPlanScript -Expected 'runSettingsSha256 = [string]$lane.RunSettingsSha256' -Message "The preparation handoff must authenticate every lane-specific runsettings file."
+Assert-Contains -Actual $verifyScript -Expected '$Lane.RunSettingsPath' -Message "Each VSTest shard must execute with its own authenticated coverage settings."
 Assert-Contains -Actual $laneScript -Expected '$Selection.IncludeAssemblyPatterns' -Message "Coverage ownership must restrict instrumentation to exact primary and exception-owner production assemblies."
 Assert-Contains -Actual $laneScript -Expected '$Selection.ExcludeByFilePatterns' -Message "Coverage ownership must derive Coverlet exclusions from the validated current source inventory."
 Assert-Contains -Actual $laneScript -Expected '$singleHit[0].InnerText -cne "true"' -Message "Generated lane settings must reject any attempt to weaken the canonical single-hit collector contract."
@@ -313,6 +317,8 @@ Assert-Contains -Actual $coverageEquivalenceScript -Expected 'Get-VerificationCo
 Assert-Contains -Actual $coverageEquivalenceScript -Expected 'Get-VerificationCoverageLaneTestProjectName -Bindings $coverageLaneBindings -LaneName $profileName' -Message "Every equivalence report must bind its exact shard lane back to one canonical test project."
 Assert-True -Condition ($coverageEquivalenceScript.IndexOf('$projectName-all', [StringComparison]::Ordinal) -lt 0) -Message "Explicit ownership evidence cannot assume one unsharded all lane per test project."
 Assert-Contains -Actual $coverageEquivalenceScript -Expected 'parent/child settings evidence differs' -Message "Each evidence mode must authenticate an exact parent/child runsettings copy independently."
+Assert-Contains -Actual $coverageEquivalenceScript -Expected 'does not use the exact current lane-specific ownership filter' -Message "Filtered evidence must authenticate every lane-specific selection, not only the project-level child filter."
+Assert-Contains -Actual $coverageEquivalenceScript -Expected 'LaneSettings' -Message "The equivalence report must retain exact per-lane settings evidence for both modes."
 Assert-Contains -Actual $verifyScript -Expected 'coverage-ownership-binary-manifest.json' -Message "Each explicit evidence collection must persist its authenticated pristine and child binary manifest."
 Assert-Contains -Actual $coverageEquivalenceCollectionScript -Expected '-DeadlineSeconds 600' -Message "Both explicit evidence collections must retain the immutable per-run 600-second watchdog cap."
 Assert-Contains -Actual $coverageEquivalenceCollectionScript -Expected 'UnfilteredEvidence", "FilteredEvidence' -Message "The explicit evidence command must collect unfiltered then filtered results on one clean head."
@@ -320,6 +326,7 @@ Assert-True -Condition ($coverageEquivalenceCollectionScript.IndexOf('$LASTEXITC
 Assert-Contains -Actual $coverageEquivalenceWorkflow -Expected 'ref: ${{ github.event.pull_request.head.sha || github.sha }}' -Message "Authoritative Windows equivalence must check out the exact candidate head rather than a synthetic merge ref."
 Assert-Contains -Actual $coverageEquivalenceWorkflow -Expected 'timeout-minutes: 30' -Message "The two capped evidence collections must retain one bounded Windows workflow owner."
 Assert-Contains -Actual $coverageEquivalenceWorkflow -Expected './scripts/collect-coverage-ownership-equivalence.ps1 -EvidenceRoot $evidenceRoot' -Message "The Windows workflow must run the exact sequential equivalence collector."
+Assert-Contains -Actual $coverageEquivalenceWorkflow -Expected 'tests/verification-coverage-lane-ownership.json' -Message "A lane ownership change must always trigger authoritative Windows equivalence."
 Assert-Contains -Actual $coverageEquivalenceWorkflow -Expected 'ARTIFACT_DIGEST: ${{ steps.evidence_upload.outputs.artifact-digest }}' -Message "The Windows workflow must expose GitHub's immutable uploaded-artifact digest with its exact-head evidence."
 foreach ($parallelAssemblyInfoPath in @(
     "tests\EmbodySense.Core.Persistence.Tests\AssemblyInfo.cs",
@@ -342,6 +349,10 @@ foreach ($startupRuntimeWrapper in @(
     $startupRuntimeWrapperSource = Get-Content -LiteralPath (Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\$startupRuntimeWrapper") -Raw
     Assert-Contains -Actual $startupRuntimeWrapperSource -Expected '[Collection(LoopRuntimeIntegrationCollection.Name)]' -Message "Startup runtime wrapper '$startupRuntimeWrapper' must serialize shared file-backed runtime state."
 }
+$independentRuntimeWrapperSource = Get-Content -LiteralPath (Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\CustomLoopRuntimeTestsInvocationRetention.cs") -Raw
+Assert-Contains -Actual $independentRuntimeWrapperSource -Expected '[Collection(IndependentLoopRuntimeIntegrationCollection.Name)]' -Message "The exact invocation-retention boundary must use the independent bounded Startup collection."
+$independentRuntimeCollection = Get-Content -LiteralPath (Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\IndependentLoopRuntimeIntegrationCollection.cs") -Raw
+Assert-Contains -Actual $independentRuntimeCollection -Expected '[CollectionDefinition(Name)]' -Message "The independent invocation-retention boundary must declare a distinct parallelizable xUnit collection."
 Assert-Contains -Actual $persistenceEnvironmentCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Persistence process-environment mutation must remain exclusive of all assembly tests."
 Assert-Contains -Actual $persistenceCapabilityCatalogTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Capability-catalog trust-root mutation must retain process-environment serialization."
 Assert-Contains -Actual $persistenceCapabilityCatalogStoreTest -Expected 'Contended_cross_process_lock_fails_closed_without_writing' -Message "Integration sharding must not become the sole source of catalog-lock contention coverage; Persistence must retain the deterministic public regression."

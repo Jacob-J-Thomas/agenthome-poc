@@ -116,7 +116,7 @@ function Add-TestExecutionPhase {
     $trxName = "$($Lane.Name).trx"
     $arguments = @(
         "vstest", $Lane.AssemblyPath,
-        "--Settings:$(if ($SkipCoverage) { $stressRunSettingsPath } else { $Isolation.RunSettingsPath })",
+        "--Settings:$(if ($SkipCoverage) { $stressRunSettingsPath } else { $Lane.RunSettingsPath })",
         "--TestAdapterPath:$($Isolation.CollectorDirectory)",
         "--TestCaseFilter:$($Lane.Filter)",
         "--Logger:trx;LogFileName=$trxName",
@@ -377,6 +377,12 @@ try {
             $childSettingsHash = (Get-FileHash -LiteralPath $isolation.ChildRunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($parentSettingsHash -cne $childSettingsHash) {
                 throw "Coverage ownership evidence child settings do not byte-match parent settings for '$($isolation.Project.BaseName)'."
+            }
+            foreach ($lane in $isolation.Lanes) {
+                $laneSettingsHash = (Get-FileHash -LiteralPath $lane.RunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($laneSettingsHash -cne $lane.RunSettingsSha256) {
+                    throw "Coverage ownership evidence lane settings changed after preparation for '$($lane.Name)'."
+                }
             }
             $binaryManifestProjects.Add([ordered]@{
                 project = $isolation.Project.BaseName
