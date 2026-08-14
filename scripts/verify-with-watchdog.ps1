@@ -6,7 +6,10 @@ param(
     [int]$MaximumTestWorkers = [Math]::Min(8, [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount * 1.5))),
 
     [ValidateRange(1, 600)]
-    [int]$DeadlineSeconds = 600
+    [int]$DeadlineSeconds = 600,
+
+    [ValidateSet("Standard", "UnfilteredEvidence", "FilteredEvidence")]
+    [string]$CoverageOwnershipMode = "Standard"
 )
 
 Set-StrictMode -Version Latest
@@ -29,7 +32,8 @@ if ($runningOnWindows) {
 $arguments += @(
     "-File", (Join-Path $PSScriptRoot "verify.ps1"),
     "-Configuration", $Configuration,
-    "-MaximumTestWorkers", $MaximumTestWorkers.ToString([Globalization.CultureInfo]::InvariantCulture)
+    "-MaximumTestWorkers", $MaximumTestWorkers.ToString([Globalization.CultureInfo]::InvariantCulture),
+    "-CoverageOwnershipMode", $CoverageOwnershipMode
 )
 
 $startInfo = New-VerificationProcessStartInfo -FileName $powerShellExecutable -Arguments $arguments -WorkingDirectory $repoRoot

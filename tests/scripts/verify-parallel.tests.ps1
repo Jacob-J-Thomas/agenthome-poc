@@ -6,6 +6,7 @@ $phaseScriptPath = Join-Path $repoRoot "scripts\verification-phase.ps1"
 $parallelScriptPath = Join-Path $repoRoot "scripts\verification-parallel.ps1"
 $artifactScriptPath = Join-Path $repoRoot "scripts\verification-artifacts.ps1"
 $scheduleScriptPath = Join-Path $repoRoot "scripts\verification-schedule.ps1"
+$coverageEvidenceScriptPath = Join-Path $repoRoot "scripts\verification-coverage-evidence.ps1"
 $laneScriptPath = Join-Path $repoRoot "scripts\verification-test-lanes.ps1"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $assertionCount = 0
@@ -26,10 +27,21 @@ function Assert-Contains {
     Assert-True -Condition ($Actual.IndexOf($Expected, [StringComparison]::Ordinal) -ge 0) -Message "$Message Expected '$Expected'. Actual: $Actual"
 }
 
+function Invoke-ExpectedFailure {
+    param([scriptblock]$Action, [string]$ExpectedMessage)
+
+    $failureMessage = $null
+    try { & $Action | Out-Null } catch { $failureMessage = $_.Exception.Message }
+    if ($null -eq $failureMessage) { throw "Expected the action to fail, but it completed successfully." }
+    Assert-Contains -Actual $failureMessage -Expected $ExpectedMessage -Message "Failure diagnostic mismatch."
+    return $failureMessage
+}
+
 . $phaseScriptPath
 . $parallelScriptPath
 . $artifactScriptPath
 . $scheduleScriptPath
+. $coverageEvidenceScriptPath
 . $laneScriptPath
 
 function Get-VirtualVerificationSchedule {
@@ -133,7 +145,151 @@ Assert-True -Condition ((@($requiredGateProfiles.Name | Sort-Object) -join "`n")
 $declaredRequiredGateNames = [Collections.Generic.List[string]]::new()
 $declaredRequiredGateNames.Add("format-csharp")
 $declaredRequiredGateNames.Add("git-diff-check")
-$testProjects = @(Get-ChildItem -Path (Join-Path $repoRoot "tests") -Recurse -Filter "*.csproj" | Where-Object { $_.Name -ne "EmbodySense.CancellationHost.csproj" -and $_.Name -ne "EmbodySense.Tests.Support.csproj" } | Sort-Object FullName)
+$testProjects = @(Get-VerificationCanonicalTestProjects -RepositoryRoot $repoRoot)
+$allTestProjects = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot "tests") -Recurse -Filter "*.csproj" -File | Sort-Object FullName)
+$expectedHelperProjects = @(@("EmbodySense.CancellationHost.csproj", "EmbodySense.Tests.Support.csproj") | Sort-Object -CaseSensitive)
+$actualHelperProjects = @($allTestProjects | Where-Object { $testProjects.FullName -cnotcontains $_.FullName } | ForEach-Object Name | Sort-Object -CaseSensitive)
+Assert-True -Condition (($actualHelperProjects -join "`n") -ceq ($expectedHelperProjects -join "`n")) -Message "Canonical coverage test-project discovery must exclude only the exact helper-project catalog."
+$coverageOwnership = Read-VerificationCoverageOwnership -ManifestPath (Join-Path $repoRoot "tests/verification-coverage-ownership.json") -RepositoryRoot $repoRoot -TestProjects $testProjects
+$sourceProjects = @(Get-ChildItem -Path (Join-Path $repoRoot "src") -Directory -Recurse | Where-Object {
+    Test-Path -LiteralPath (Join-Path $_.FullName "$($_.Name).csproj") -PathType Leaf
+} | Sort-Object FullName)
+Assert-True -Condition ($coverageOwnership.Owners.Count -eq $sourceProjects.Count) -Message "Coverage ownership must assign every production project to one primary test lane."
+Assert-True -Condition ($coverageOwnership.TestProjectNames.Count -eq $testProjects.Count) -Message "Coverage ownership must classify every canonical test project."
+$actualProductionFiles = @($sourceProjects | ForEach-Object {
+    Get-ChildItem -LiteralPath $_.FullName -Recurse -Filter "*.cs" -File | Where-Object { $_.FullName -notmatch '[\\/](?:bin|obj)[\\/]' } | ForEach-Object {
+        [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/')
+    }
+} | Sort-Object -CaseSensitive)
+Assert-True -Condition (($actualProductionFiles -join "`n") -ceq (@($coverageOwnership.ProductionFiles) -join "`n")) -Message "Coverage ownership must derive its complete production source inventory from the exact current tree, including zero-hit files."
+Assert-True -Condition ($coverageOwnership.OwnershipSha256 -cmatch '^[0-9a-f]{64}$') -Message "Coverage ownership must expose one deterministic structural digest for auditable equivalence evidence."
+Assert-True -Condition ($coverageOwnership.CollectorVersion -ceq "10.0.1") -Message "Coverage ownership must bind the one exact resolved collector version."
+$lineSetProbe = Get-VerificationCoverageLineSetEvidence -Ownership $coverageOwnership -RepositoryRoot $repoRoot -Lines @(
+    [pscustomobject]@{ Package = "EmbodySense.Core.Clients"; File = (Join-Path $repoRoot "src/EmbodySense.Core.Clients/obj/Release/net10.0/System.Text.RegularExpressions.Generator/RegexGenerator.g.cs"); Line = 9; Hits = 3 }
+    [pscustomobject]@{ Package = "EmbodySense.Core.Common"; File = (Join-Path $repoRoot "src/EmbodySense.Core.Common/Authority/AuthorityActorId.cs"); Line = 7; Hits = 0 }
+)
+Assert-True -Condition ($lineSetProbe.CoverableLineCount -eq 2 -and $lineSetProbe.CoverableLineSha256 -ceq "e7ca37bc7ee071add7faaed9d5960f272b475a5c999c51c6ddffce29572b86b3") -Message "Coverage evidence must preserve the canonical package/path/line denominator serializer, including generated production source."
+Assert-True -Condition ($lineSetProbe.HitLineCount -eq 1 -and $lineSetProbe.HitLineSha256 -ceq "135bc1d2e0a09fed310d906e70c8774e7af9a00a079d7378b2d943bc55149e30") -Message "Coverage evidence must preserve the canonical package/path/line hit serializer, including generated production source."
+$coverageSettingsProbeRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-coverage-ownership-" + [Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $coverageSettingsProbeRoot | Out-Null
+try {
+    $canonicalRunSettingsPath = Join-Path $repoRoot "tests/verification-pull-request.runsettings"
+    $canonicalRunSettingsHash = (Get-FileHash -LiteralPath $canonicalRunSettingsPath -Algorithm SHA256).Hash
+    foreach ($testProject in $testProjects) {
+        $selection = Get-VerificationCoverageSelection -Ownership $coverageOwnership -TestProject $testProject
+        Assert-True -Condition ($selection.SelectedFiles.Count -gt 0) -Message "Coverage lane '$($testProject.BaseName)' must retain at least one authenticated production source file."
+        Assert-True -Condition ($selection.IncludedPackages.Count -gt 0) -Message "Coverage lane '$($testProject.BaseName)' must instrument at least one exact production assembly."
+        Assert-True -Condition (@($selection.IncludeAssemblyPatterns | Where-Object { $_ -cnotmatch '^\[EmbodySense(?:\.[A-Za-z0-9]+)+\]\*$' }).Count -eq 0) -Message "Coverage lane '$($testProject.BaseName)' must encode only exact production assembly includes."
+        Assert-True -Condition (($selection.SelectedFiles.Count + $selection.ExcludedFiles.Count) -eq $coverageOwnership.ProductionFiles.Count) -Message "Coverage lane '$($testProject.BaseName)' must partition the exact production source inventory."
+        Assert-True -Condition (@(Compare-Object -ReferenceObject $coverageOwnership.ProductionFiles -DifferenceObject @($selection.SelectedFiles + $selection.ExcludedFiles) -CaseSensitive).Count -eq 0) -Message "Coverage lane '$($testProject.BaseName)' selection and exclusion sets must cover the exact current source inventory."
+        foreach ($primaryRoot in @($selection.PrimaryRoots)) {
+            $missingPrimaryFiles = @($coverageOwnership.ProductionFiles | Where-Object {
+                $_.StartsWith("$primaryRoot/", [StringComparison]::Ordinal) -and $selection.SelectedFiles -cnotcontains $_
+            })
+            Assert-True -Condition ($missingPrimaryFiles.Count -eq 0) -Message "Coverage lane '$($testProject.BaseName)' must instrument every file, including zero-hit files, in primary source root '$primaryRoot'."
+        }
+        if ($coverageOwnership.ExceptionsByTestProject.ContainsKey($testProject.BaseName)) {
+            Assert-True -Condition (@($coverageOwnership.ExceptionsByTestProject[$testProject.BaseName] | Where-Object { $selection.SelectedFiles -cnotcontains $_ }).Count -eq 0) -Message "Coverage lane '$($testProject.BaseName)' must retain every authenticated cross-owner exception file."
+        }
+
+        $generatedRunSettingsPath = Join-Path $coverageSettingsProbeRoot "$($testProject.BaseName).runsettings"
+        Write-VerificationCoverageRunSettings -SourcePath $canonicalRunSettingsPath -DestinationPath $generatedRunSettingsPath -Selection $selection
+        [xml]$generatedRunSettings = Get-Content -LiteralPath $generatedRunSettingsPath -Raw
+        $configuration = $generatedRunSettings.RunSettings.DataCollectionRunSettings.DataCollectors.DataCollector.Configuration
+        Assert-True -Condition ([string]$configuration.SingleHit -ceq "true") -Message "Coverage lane '$($testProject.BaseName)' must retain canonical single-hit collection."
+        $includeNodes = @($configuration.SelectNodes("Include"))
+        Assert-True -Condition ($includeNodes.Count -eq 1) -Message "Coverage lane '$($testProject.BaseName)' must generate one exact Coverlet assembly include list."
+        $actualIncludes = @(([string]$includeNodes[0].InnerText).Split(',', [StringSplitOptions]::RemoveEmptyEntries) | Sort-Object -CaseSensitive)
+        $expectedIncludes = @($selection.IncludeAssemblyPatterns | Sort-Object -CaseSensitive)
+        Assert-True -Condition (($actualIncludes -join "`n") -ceq ($expectedIncludes -join "`n")) -Message "Coverage lane '$($testProject.BaseName)' generated settings must exactly encode its primary and exception-owner assemblies."
+        $expectedExcludeNodeCount = if ($selection.ExcludeByFilePatterns.Count -eq 0) { 0 } else { 1 }
+        $excludeNodes = @($configuration.SelectNodes("ExcludeByFile"))
+        Assert-True -Condition ($excludeNodes.Count -eq $expectedExcludeNodeCount) -Message "Coverage lane '$($testProject.BaseName)' must generate only the necessary exact Coverlet exclusion list."
+        $actualExclusions = if ($expectedExcludeNodeCount -eq 0) { @() } else { @(([string]$excludeNodes[0].InnerText).Split(',', [StringSplitOptions]::RemoveEmptyEntries) | Sort-Object -CaseSensitive) }
+        $expectedExclusions = @($selection.ExcludeByFilePatterns | Sort-Object -CaseSensitive)
+        Assert-True -Condition (($actualExclusions -join "`n") -ceq ($expectedExclusions -join "`n")) -Message "Coverage lane '$($testProject.BaseName)' generated settings must exactly encode the computed exclusion complement."
+        Assert-True -Condition (@($actualExclusions | Where-Object { $_ -match '/(?:bin|obj)/' }).Count -eq 0) -Message "Coverage lane '$($testProject.BaseName)' cannot exclude production bin/obj source that contributes to the existing denominator."
+    }
+    Assert-True -Condition ((Get-FileHash -LiteralPath $canonicalRunSettingsPath -Algorithm SHA256).Hash -ceq $canonicalRunSettingsHash) -Message "Lane-specific generation cannot mutate the canonical coverage settings input."
+}
+finally {
+    if (Test-Path -LiteralPath $coverageSettingsProbeRoot) { Remove-Item -LiteralPath $coverageSettingsProbeRoot -Recurse -Force }
+}
+
+$binaryEvidenceProbeRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-binary-evidence-" + [Guid]::NewGuid().ToString("N"))
+$binaryEvidenceRoot = Join-Path $binaryEvidenceProbeRoot "canonical"
+New-Item -ItemType Directory -Path (Join-Path $binaryEvidenceRoot "symbols") -Force | Out-Null
+try {
+    $binaryPath = Join-Path $binaryEvidenceRoot "assembly.dll"
+    $symbolsPath = Join-Path $binaryEvidenceRoot "symbols/assembly.pdb"
+    [IO.File]::WriteAllBytes($binaryPath, [byte[]](1, 2, 3, 4))
+    [IO.File]::WriteAllBytes($symbolsPath, [byte[]](5, 6, 7, 8))
+    $binaryEntries = @(
+        [pscustomobject][ordered]@{ path = "assembly.dll"; length = [long]4; sha256 = (Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+        [pscustomobject][ordered]@{ path = "symbols/assembly.pdb"; length = [long]4; sha256 = (Get-FileHash -LiteralPath $symbolsPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+    )
+    $binaryEvidence = Read-VerificationCoverageBinaryInventoryEvidence -Entries $binaryEntries -BinaryRoot $binaryEvidenceRoot -ResultsRoot $binaryEvidenceProbeRoot -Description "Binary evidence probe"
+    Assert-True -Condition ($binaryEvidence.Count -eq 2 -and $binaryEvidence.Sha256 -cmatch '^[0-9a-f]{64}$') -Message "Binary equivalence evidence must authenticate the complete recursive DLL/PDB inventory."
+
+    $traversalEntries = @(
+        [pscustomobject][ordered]@{ path = "sub/../../assembly.dll"; length = [long]4; sha256 = $binaryEntries[0].sha256 }
+        $binaryEntries[1]
+    )
+    $null = Invoke-ExpectedFailure -ExpectedMessage "invalid, unsafe, or duplicate DLL/PDB entry" -Action {
+        Read-VerificationCoverageBinaryInventoryEvidence -Entries $traversalEntries -BinaryRoot $binaryEvidenceRoot -ResultsRoot $binaryEvidenceProbeRoot -Description "Traversal probe"
+    }
+    $null = Invoke-ExpectedFailure -ExpectedMessage "does not exactly equal the actual recursive DLL/PDB inventory" -Action {
+        Read-VerificationCoverageBinaryInventoryEvidence -Entries @($binaryEntries[0]) -BinaryRoot $binaryEvidenceRoot -ResultsRoot $binaryEvidenceProbeRoot -Description "Omission probe"
+    }
+
+    [IO.File]::WriteAllBytes((Join-Path $binaryEvidenceRoot "unexpected.dll"), [byte[]](9, 10, 11, 12))
+    $null = Invoke-ExpectedFailure -ExpectedMessage "does not exactly equal the actual recursive DLL/PDB inventory" -Action {
+        Read-VerificationCoverageBinaryInventoryEvidence -Entries $binaryEntries -BinaryRoot $binaryEvidenceRoot -ResultsRoot $binaryEvidenceProbeRoot -Description "Extra binary probe"
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $binaryEvidenceProbeRoot) { Remove-Item -LiteralPath $binaryEvidenceProbeRoot -Recurse -Force }
+}
+
+$sourceProjectProbeRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-source-project-evidence-" + [Guid]::NewGuid().ToString("N"))
+$sourcePackage = "EmbodySense.Core.OwnershipProbe"
+$testPackage = "$sourcePackage.Tests"
+$sourcePackageRoot = Join-Path $sourceProjectProbeRoot "src/$sourcePackage"
+$testPackageRoot = Join-Path $sourceProjectProbeRoot "tests/$testPackage"
+New-Item -ItemType Directory -Path $sourcePackageRoot, $testPackageRoot -Force | Out-Null
+try {
+    [IO.File]::WriteAllText((Join-Path $sourcePackageRoot "$sourcePackage.csproj"), '<Project Sdk="Microsoft.NET.Sdk" />', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $sourcePackageRoot "OwnedSource.cs"), 'namespace EmbodySense.Core.OwnershipProbe;', [Text.UTF8Encoding]::new($false))
+    $testProjectPath = Join-Path $testPackageRoot "$testPackage.csproj"
+    [IO.File]::WriteAllText($testProjectPath, '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="coverlet.collector" Version="10.0.1" /></ItemGroup></Project>', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $sourceProjectProbeRoot "tests/verification-pull-request.runsettings"), '<RunSettings />', [Text.UTF8Encoding]::new($false))
+    $sourceProjectManifestPath = Join-Path $sourceProjectProbeRoot "tests/verification-coverage-ownership.json"
+    $sourceProjectManifest = [ordered]@{
+        schemaVersion = 1
+        exceptions = [ordered]@{}
+        owners = @([ordered]@{ package = $sourcePackage; sourceRoot = "src/$sourcePackage"; testProject = $testPackage })
+    }
+    [IO.File]::WriteAllText($sourceProjectManifestPath, ($sourceProjectManifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+    $probeTestProjects = [IO.FileInfo[]]@((Get-Item -LiteralPath $testProjectPath))
+    $sourceProjectOwnership = Read-VerificationCoverageOwnership -ManifestPath $sourceProjectManifestPath -RepositoryRoot $sourceProjectProbeRoot -TestProjects $probeTestProjects
+    Assert-True -Condition ($sourceProjectOwnership.Owners.Count -eq 1) -Message "Canonical production project inventory must admit one exact owned source project."
+
+    [IO.File]::WriteAllText((Join-Path $sourcePackageRoot "Unexpected.csproj"), '<Project Sdk="Microsoft.NET.Sdk" />', [Text.UTF8Encoding]::new($false))
+    $null = Invoke-ExpectedFailure -ExpectedMessage "must use one owned canonical src/<package>/<package>.csproj path" -Action {
+        Read-VerificationCoverageOwnership -ManifestPath $sourceProjectManifestPath -RepositoryRoot $sourceProjectProbeRoot -TestProjects $probeTestProjects
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $sourceProjectProbeRoot) { Remove-Item -LiteralPath $sourceProjectProbeRoot -Recurse -Force }
+}
+
+try {
+    Get-VerificationCoverageSelection -Ownership $coverageOwnership -TestProject ([IO.FileInfo]::new((Join-Path $repoRoot "tests/Unclassified.Tests.csproj"))) | Out-Null
+    throw "Expected unclassified coverage lane rejection."
+}
+catch {
+    Assert-Contains -Actual $_.Exception.Message -Expected "unclassified test project" -Message "A new test project without explicit coverage ownership must fail closed."
+}
 foreach ($testProject in $testProjects) {
     foreach ($lane in @(Get-VerificationTestProjectLanes -TestProject $testProject)) {
         $declaredRequiredGateNames.Add("tests-$($testProject.BaseName)-$($lane.Name)")

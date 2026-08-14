@@ -3,7 +3,9 @@ param(
     [string]$ResultsRoot,
     [string]$ManifestPath,
     [string]$ReportPath,
-    [ValidateRange(1, 2)] [int]$MaximumCoverageWorkers = 2
+    [ValidateRange(1, 2)] [int]$MaximumCoverageWorkers = 2,
+    [ValidateSet("Standard", "UnfilteredEvidence", "FilteredEvidence")]
+    [string]$CoverageOwnershipMode = "Standard"
 )
 
 Set-StrictMode -Version Latest
@@ -13,6 +15,10 @@ $threshold = 0.90
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $testsPath = Join-Path $repoRoot "tests"
 . (Join-Path $PSScriptRoot "verification-coverage-evidence.ps1")
+$coverageOwnershipScriptPath = Join-Path $PSScriptRoot "verification-test-lanes.ps1"
+if (Test-Path -LiteralPath $coverageOwnershipScriptPath -PathType Leaf) {
+    . $coverageOwnershipScriptPath
+}
 
 $sourceProjectDirectories = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
 Get-ChildItem -Path (Join-Path $repoRoot "src") -Directory -Recurse | Where-Object {
@@ -25,6 +31,7 @@ $expectedPackages = @($sourceProjectDirectories.Keys | Sort-Object)
 $coverageFiles = @()
 $coverageReductionLines = @()
 $coverageObservedPackages = @()
+$coverageOwnership = $null
 if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
     $fullResultsRoot = [IO.Path]::GetFullPath($ResultsRoot)
     [void](Assert-VerificationCoverageOrdinaryPath -Path $fullResultsRoot -Root $fullResultsRoot -PathType Container -Description "Coverage results root")
@@ -93,6 +100,12 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
     if ($laneReportCount + $childReportCount -ne $manifestReports.Count -or $aliasReportCount -ne $manifestAliases.Count) {
         throw "Coverage report manifest counts do not match its exact report and alias inventories."
     }
+    $coverageOwnership = $null
+    $coverageOwnershipManifestPath = Join-Path $testsPath "verification-coverage-ownership.json"
+    if (Test-Path -LiteralPath $coverageOwnershipManifestPath -PathType Leaf) {
+        $canonicalTestProjects = @(Get-VerificationCanonicalTestProjects -RepositoryRoot $repoRoot)
+        $coverageOwnership = Read-VerificationCoverageOwnership -ManifestPath $coverageOwnershipManifestPath -RepositoryRoot $repoRoot -TestProjects $canonicalTestProjects
+    }
 
     $reportEvidenceByPath = [Collections.Generic.Dictionary[string, object]]::new((Get-VerificationCoveragePathComparer))
     $manifestPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
@@ -146,6 +159,13 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
             }
             $reportRecord | Add-Member -NotePropertyName LaneResultsRoot -NotePropertyValue $laneResultsRoot
             $reportRecord | Add-Member -NotePropertyName DeploymentPath -NotePropertyValue $deploymentPath
+            if ($null -ne $coverageOwnership) {
+                $matchingTestProjects = @($coverageOwnership.TestProjectNames | Where-Object { [string]$entry.laneName -ceq "tests-$_-all" })
+                if ($matchingTestProjects.Count -ne 1) {
+                    throw "Coverage lane '$([string]$entry.laneName)' does not bind one exact coverage-owned test project."
+                }
+                $reportRecord | Add-Member -NotePropertyName TestProjectName -NotePropertyValue $matchingTestProjects[0]
+            }
         }
         else {
             $projectName = [string]$entry.projectName
@@ -165,6 +185,9 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
                 }
             }
             else { $childProjectsByRoot.Add($childResultsRoot, $projectName) }
+            if ($null -ne $coverageOwnership) {
+                $reportRecord | Add-Member -NotePropertyName TestProjectName -NotePropertyValue $projectName
+            }
         }
         $reportEvidenceByPath.Add($path, $reportRecord)
     }
@@ -238,6 +261,15 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
             throw "Coverage report manifest staging alias does not byte-match its canonical report: $path"
         }
     }
+    if ($null -ne $coverageOwnership -and $CoverageOwnershipMode -cne "UnfilteredEvidence") {
+        $ownershipReports = @($reportEvidenceByPath.Values | ForEach-Object {
+            [pscustomobject]@{
+                TestProjectName = $_.TestProjectName
+                ProductionFiles = @($_.Snapshot.ProductionFiles)
+            }
+        })
+        Assert-VerificationCoverageOwnershipReports -Ownership $coverageOwnership -RepositoryRoot $repoRoot -Reports $ownershipReports
+    }
     $coverageReductionLines = @($workerResult.Lines)
     $coverageObservedPackages = @($workerResult.Packages)
 }
@@ -262,6 +294,17 @@ else {
 
 if ($coverageFiles.Count -eq 0) {
     throw "Coverage output was not found in the exact current-run report inventory. Run the canonical verifier first."
+}
+if ($CoverageOwnershipMode -cne "Standard" -and $null -eq $coverageOwnership) {
+    throw "Coverage ownership evidence mode requires the exact current checked-in ownership manifest."
+}
+if ($null -ne $coverageOwnership) {
+    $lineSetEvidence = Get-VerificationCoverageLineSetEvidence -Ownership $coverageOwnership -RepositoryRoot $repoRoot -Lines $coverageReductionLines
+    $platformName = if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) { "windows" } else { "nonWindows" }
+    Write-Output "VERIFY_COVERAGE_LINE_SET platform=$platformName coverable_lines=$($lineSetEvidence.CoverableLineCount) coverable_sha256=$($lineSetEvidence.CoverableLineSha256) hit_lines=$($lineSetEvidence.HitLineCount) hit_sha256=$($lineSetEvidence.HitLineSha256) ownership_sha256=$($coverageOwnership.OwnershipSha256) mode=$CoverageOwnershipMode"
+    if ($CoverageOwnershipMode -cne "Standard") {
+        Write-Output "VERIFY_COVERAGE_OWNERSHIP_EVIDENCE mode=$CoverageOwnershipMode status=collection-only"
+    }
 }
 
 $failures = @()

@@ -8,7 +8,9 @@ param(
     [ValidateSet("PullRequest", "Stress")]
     [string]$VerificationTier = "PullRequest",
     [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Release"
+    [string]$Configuration = "Release",
+    [ValidateSet("Standard", "UnfilteredEvidence", "FilteredEvidence")]
+    [string]$CoverageOwnershipMode = "Standard"
 )
 
 Set-StrictMode -Version Latest
@@ -20,6 +22,7 @@ $testsPath = Join-Path $repoRoot "tests"
 $e2eProjectPath = Join-Path $testsPath "EmbodySense.E2ETests\EmbodySense.E2ETests.csproj"
 $persistenceTestProjectPath = Join-Path $testsPath "EmbodySense.Core.Persistence.Tests\EmbodySense.Core.Persistence.Tests.csproj"
 $pullRequestRunSettingsPath = Join-Path $testsPath "verification-pull-request.runsettings"
+$coverageOwnershipManifestPath = Join-Path $testsPath "verification-coverage-ownership.json"
 $stressRunSettingsPath = Join-Path $testsPath "verification-stress.runsettings"
 $stressResultsPath = Join-Path $testsPath "EmbodySense.Core.Persistence.Tests\TestResults\VerificationStress"
 $verificationResultsPath = Join-Path $testsPath "VerificationResults"
@@ -68,6 +71,16 @@ if ($VerificationTier -eq "Stress" -and ($RunBrowserE2E -or $BrowserE2EOnly)) {
     throw "The Stress verification tier cannot be combined with browser E2E switches."
 }
 
+if ($CoverageOwnershipMode -cne "Standard") {
+    if ($VerificationTier -cne "PullRequest" -or $SkipCoverage -or $RunBrowserE2E -or $BrowserE2EOnly -or $Configuration -cne "Release") {
+        throw "Coverage ownership evidence collection requires the exact Release pull-request verifier with coverage and without browser-only modes."
+    }
+    $gitStatus = @(& git status --porcelain=v1 --untracked-files=all)
+    if ($LASTEXITCODE -ne 0 -or $gitStatus.Count -ne 0) {
+        throw "Coverage ownership evidence collection requires a clean committed worktree."
+    }
+}
+
 function Invoke-CheckedNativePhase {
     param(
         [Parameter(Mandatory = $true)] [string]$Name,
@@ -92,7 +105,8 @@ function Get-TestProjectFilter {
 function Get-ProjectCoverageIsolation {
     param(
         [System.IO.FileInfo]$TestProject,
-        [object[]]$Lanes
+        [object[]]$Lanes,
+        [object]$CoverageOwnership
     )
 
     [xml]$project = Get-Content -LiteralPath $TestProject.FullName -Raw
@@ -143,8 +157,14 @@ function Get-ProjectCoverageIsolation {
     $pristineManifest = @(Copy-VerifiedDirectory -SourceDirectory $sourceDirectory -DestinationDirectory $pristineDirectory -Description "$($TestProject.BaseName) pristine copy")
     [void](Copy-VerifiedDirectory -SourceDirectory $collectorSource -DestinationDirectory $collectorDirectory -Description "$($TestProject.BaseName) collector copy")
     [void](Copy-VerifiedDirectory -SourceDirectory $collectorSource -DestinationDirectory $childCollectorDirectory -Description "$($TestProject.BaseName) child collector copy")
-    Copy-Item -LiteralPath $pullRequestRunSettingsPath -Destination $runSettingsPath
-    Copy-Item -LiteralPath $pullRequestRunSettingsPath -Destination $childRunSettingsPath
+    $coverageSelection = Get-VerificationCoverageSelection -Ownership $CoverageOwnership -TestProject $TestProject
+    if ($CoverageOwnershipMode -ceq "UnfilteredEvidence") {
+        Copy-Item -LiteralPath $pullRequestRunSettingsPath -Destination $runSettingsPath
+    }
+    else {
+        Write-VerificationCoverageRunSettings -SourcePath $pullRequestRunSettingsPath -DestinationPath $runSettingsPath -Selection $coverageSelection
+    }
+    Copy-Item -LiteralPath $runSettingsPath -Destination $childRunSettingsPath
 
     $laneCopies = [Collections.Generic.List[object]]::new()
     foreach ($lane in $Lanes) {
@@ -187,6 +207,9 @@ function Get-ProjectCoverageIsolation {
         PristineManifest = $pristineManifest
         CollectorDirectory = $collectorDirectory
         RunSettingsPath = $runSettingsPath
+        ChildRunSettingsPath = $childRunSettingsPath
+        ChildInvocationsRoot = Join-Path $childCoverageRoot "Invocations"
+        CoverageSelection = $coverageSelection
         ChildResultsPath = $childResultsPath
         CanonicalAssemblyPath = Join-Path $pristineDirectory $testAssemblyName
         Lanes = @($laneCopies)
@@ -389,10 +412,32 @@ try {
     }
 
     Write-Output "VERIFY_REQUIRED_TEST_CONTRACT identity=TestCase.Id partition_identity=XunitTestCaseUniqueID filter=VerificationTier!=Stress"
-    $testProjects = @(Get-ChildItem -Path $testsPath -Recurse -Filter "*.csproj" | Where-Object { $_.Name -ne "EmbodySense.CancellationHost.csproj" -and $_.Name -ne "EmbodySense.Tests.Support.csproj" } | Sort-Object FullName)
+    $testProjects = @(Get-VerificationCanonicalTestProjects -RepositoryRoot $repoRoot)
+    $coverageOwnership = Read-VerificationCoverageOwnership -ManifestPath $coverageOwnershipManifestPath -RepositoryRoot $repoRoot -TestProjects $testProjects
+    Write-Output "VERIFY_COVERAGE_OWNERSHIP schema_version=1 ownership_sha256=$($coverageOwnership.OwnershipSha256) collector_version=$($coverageOwnership.CollectorVersion) source_files=$($coverageOwnership.ProductionFiles.Count) test_projects=$($testProjects.Count)"
+    if ($CoverageOwnershipMode -cne "Standard") {
+        $headSha = (& git rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $headSha -cnotmatch '^[0-9a-f]{40}$') {
+            throw "Coverage ownership evidence collection could not bind one exact Git head."
+        }
+        $evidenceContextPath = Join-Path $verificationResultsPath "coverage-ownership-evidence-context.json"
+        $evidenceContext = [ordered]@{
+            schemaVersion = 1
+            mode = $CoverageOwnershipMode
+            headSha = $headSha
+            platform = if ($runningOnWindows) { "windows" } else { "nonWindows" }
+            collectorVersion = $coverageOwnership.CollectorVersion
+            ownershipSha256 = $coverageOwnership.OwnershipSha256
+            runSettingsSha256 = $coverageOwnership.RunSettingsSha256
+        }
+        [IO.File]::WriteAllText($evidenceContextPath, ($evidenceContext | ConvertTo-Json -Depth 3), [Text.UTF8Encoding]::new($false))
+        Write-Output "VERIFY_COVERAGE_OWNERSHIP_EVIDENCE_CONTEXT mode=$CoverageOwnershipMode head_sha=$headSha platform=$($evidenceContext.platform) path=$evidenceContextPath"
+    }
     $isolations = [Collections.Generic.List[object]]::new()
     foreach ($testProject in $testProjects) {
-        $isolations.Add((Get-ProjectCoverageIsolation -TestProject $testProject -Lanes @(Get-VerificationTestProjectLanes -TestProject $testProject)))
+        $isolation = Get-ProjectCoverageIsolation -TestProject $testProject -Lanes @(Get-VerificationTestProjectLanes -TestProject $testProject) -CoverageOwnership $coverageOwnership
+        Write-Output "VERIFY_COVERAGE_SELECTION project=$($testProject.BaseName) selected_files=$($isolation.CoverageSelection.SelectedFiles.Count) excluded_files=$($isolation.CoverageSelection.ExcludedFiles.Count) primary_roots=$($isolation.CoverageSelection.PrimaryRoots.Count)"
+        $isolations.Add($isolation)
     }
 
     foreach ($isolation in $isolations) {
@@ -446,6 +491,66 @@ try {
     }
     Write-Output "VERIFY_ARTIFACT_ISOLATION_COMPLETE projects=$($isolations.Count) lanes=$($testResults.Count)"
 
+    if ($CoverageOwnershipMode -cne "Standard") {
+        $binaryManifestProjects = [Collections.Generic.List[object]]::new()
+        foreach ($isolation in @($isolations | Sort-Object { $_.Project.BaseName })) {
+            $canonicalBinaries = @($isolation.PristineManifest | Where-Object {
+                [IO.Path]::GetExtension([string]$_.RelativePath) -cin @(".dll", ".pdb")
+            } | Sort-Object RelativePath | ForEach-Object {
+                [ordered]@{ path = [string]$_.RelativePath; length = [long]$_.Length; sha256 = [string]$_.Sha256 }
+            })
+            if ($canonicalBinaries.Count -eq 0) {
+                throw "Coverage ownership evidence has no canonical DLL/PDB inventory for '$($isolation.Project.BaseName)'."
+            }
+            $invocations = [Collections.Generic.List[object]]::new()
+            if (Test-Path -LiteralPath $isolation.ChildInvocationsRoot -PathType Container) {
+                foreach ($invocationDirectory in @(Get-ChildItem -LiteralPath $isolation.ChildInvocationsRoot -Directory -Force | Sort-Object FullName)) {
+                    $invocationId = [Guid]::Empty
+                    if (-not [Guid]::TryParseExact($invocationDirectory.Name, "N", [ref]$invocationId)) {
+                        throw "Coverage ownership evidence child invocation has an unsafe identity: $($invocationDirectory.FullName)"
+                    }
+                    $binaryEntries = @(Get-VerificationDirectoryManifest -Directory $invocationDirectory.FullName | Where-Object {
+                        [IO.Path]::GetExtension([string]$_.RelativePath) -cin @(".dll", ".pdb")
+                    } | Sort-Object RelativePath | ForEach-Object {
+                        [ordered]@{ path = [string]$_.RelativePath; length = [long]$_.Length; sha256 = [string]$_.Sha256 }
+                    })
+                    if ($binaryEntries.Count -eq 0) {
+                        throw "Coverage ownership evidence child invocation is missing its DLL/PDB inventory: $($invocationDirectory.FullName)"
+                    }
+                    $invocationRecords = @($binaryEntries | ForEach-Object { "$($_.path)" + [char]0 + "$($_.length)" + [char]0 + "$($_.sha256)" })
+                    $invocations.Add([ordered]@{
+                        relativeRoot = [IO.Path]::GetRelativePath($verificationResultsPath, $invocationDirectory.FullName).Replace('\', '/')
+                        binarySha256 = Get-VerificationCoverageOwnershipRecordSha256 -Records $invocationRecords
+                        binaries = $binaryEntries
+                    })
+                }
+            }
+            $parentSettingsHash = (Get-FileHash -LiteralPath $isolation.RunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $childSettingsHash = (Get-FileHash -LiteralPath $isolation.ChildRunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($parentSettingsHash -cne $childSettingsHash) {
+                throw "Coverage ownership evidence child settings do not byte-match parent settings for '$($isolation.Project.BaseName)'."
+            }
+            $binaryManifestProjects.Add([ordered]@{
+                project = $isolation.Project.BaseName
+                canonicalRoot = [IO.Path]::GetRelativePath($verificationResultsPath, $isolation.PristineDirectory).Replace('\', '/')
+                canonicalBinaries = $canonicalBinaries
+                parentSettingsPath = [IO.Path]::GetRelativePath($verificationResultsPath, $isolation.RunSettingsPath).Replace('\', '/')
+                childSettingsPath = [IO.Path]::GetRelativePath($verificationResultsPath, $isolation.ChildRunSettingsPath).Replace('\', '/')
+                settingsSha256 = $parentSettingsHash
+                childInvocations = @($invocations)
+            })
+        }
+        $binaryManifestPath = Join-Path $verificationResultsPath "coverage-ownership-binary-manifest.json"
+        $binaryManifest = [ordered]@{
+            schemaVersion = 1
+            mode = $CoverageOwnershipMode
+            headSha = $headSha
+            projects = @($binaryManifestProjects)
+        }
+        [IO.File]::WriteAllText($binaryManifestPath, ($binaryManifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+        Write-Output "VERIFY_COVERAGE_OWNERSHIP_BINARY_MANIFEST mode=$CoverageOwnershipMode projects=$($binaryManifestProjects.Count) path=$binaryManifestPath"
+    }
+
     $inventoryArguments = @("-NoProfile")
     if ($runningOnWindows) { $inventoryArguments += @("-ExecutionPolicy", "Bypass") }
     $inventoryArguments += @("-File", (Join-Path $PSScriptRoot "verify-test-inventory.ps1"), "-ExpectedInventoryPath", $verificationInventoryPath, "-ResultsRoot", $standardTestResultsRoot, "-ReportPath", $verificationInventoryReportPath)
@@ -455,7 +560,7 @@ try {
         Write-CoverageManifest -TestResults $testResults -Isolations @($isolations) -MinimumWriteTimeUtc $coverageStartedUtc -VerificationResultsPath $verificationResultsPath -ManifestPath $coverageManifestPath
         $coverageArguments = @("-NoProfile")
         if ($runningOnWindows) { $coverageArguments += @("-ExecutionPolicy", "Bypass") }
-        $coverageArguments += @("-File", (Join-Path $PSScriptRoot "verify-coverage.ps1"), "-MinimumWriteTimeUtc", $coverageStartedUtc.ToString("O"), "-ResultsRoot", $verificationResultsPath, "-ManifestPath", $coverageManifestPath, "-ReportPath", $coverageSummaryPath)
+        $coverageArguments += @("-File", (Join-Path $PSScriptRoot "verify-coverage.ps1"), "-MinimumWriteTimeUtc", $coverageStartedUtc.ToString("O"), "-ResultsRoot", $verificationResultsPath, "-ManifestPath", $coverageManifestPath, "-ReportPath", $coverageSummaryPath, "-CoverageOwnershipMode", $CoverageOwnershipMode)
         Add-VerificationParallelPhase -Name "coverage-thresholds" -FileName $powerShellExecutable -Arguments $coverageArguments -TimeoutSeconds 180 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "coverage-thresholds.log")
     }
     Write-Output "VERIFY_PARALLEL_PLAN kind=reconciliation phases=$($script:VerificationParallelPhases.Count) maximum_resource_capacity=$([Math]::Min(2, $hardwareBoundedResourceCapacity))"
@@ -472,4 +577,7 @@ finally {
 
 $verificationStopwatch.Stop()
 $elapsedText = $verificationStopwatch.Elapsed.TotalSeconds.ToString("0.###", [Globalization.CultureInfo]::InvariantCulture)
+if ($CoverageOwnershipMode -cne "Standard") {
+    Write-Output "VERIFY_COVERAGE_OWNERSHIP_EVIDENCE_COMPLETE mode=$CoverageOwnershipMode status=collection-only elapsed_seconds=$elapsedText"
+}
 Write-Output "VERIFY_COMPLETE schema_version=1 status=passed elapsed_seconds=$elapsedText"

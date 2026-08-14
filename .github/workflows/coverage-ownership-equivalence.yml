@@ -1,0 +1,84 @@
+name: Coverage ownership equivalence
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/coverage-ownership-equivalence.yml"
+      - "scripts/collect-coverage-ownership-equivalence.ps1"
+      - "scripts/verification-coverage-evidence.ps1"
+      - "scripts/verification-test-lanes.ps1"
+      - "scripts/verify-coverage-ownership-equivalence.ps1"
+      - "scripts/verify-coverage.ps1"
+      - "scripts/verify-with-watchdog.ps1"
+      - "scripts/verify.ps1"
+      - "tests/scripts/verify-bounded-phases.tests.ps1"
+      - "tests/scripts/verify-coverage.tests.ps1"
+      - "tests/scripts/verify-parallel.tests.ps1"
+      - "tests/verification-coverage-ownership.json"
+      - "tests/verification-pull-request.runsettings"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-ownership-equivalence-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  exact-head-windows-equivalence:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out exact candidate head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Collect exact unfiltered and filtered evidence
+        shell: pwsh
+        run: |
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "coverage-ownership-equivalence"
+          ./scripts/collect-coverage-ownership-equivalence.ps1 -EvidenceRoot $evidenceRoot
+
+      - name: Upload authenticated equivalence evidence
+        id: evidence_upload
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-ownership-equivalence-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/coverage-ownership-equivalence/**
+            tests/VerificationResults/**
+            tests/**/TestResults/**/*.trx
+            tests/**/TestResults/**/coverage.cobertura.xml
+
+      - name: Record exact-head artifact provenance
+        if: always() && steps.evidence_upload.outcome == 'success'
+        shell: pwsh
+        env:
+          ARTIFACT_DIGEST: ${{ steps.evidence_upload.outputs.artifact-digest }}
+          ARTIFACT_ID: ${{ steps.evidence_upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence_upload.outputs.artifact-url }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Exact candidate head: ``$env:CANDIDATE_SHA``"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "GitHub run ID: ``${{ github.run_id }}``"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Artifact ID: ``$env:ARTIFACT_ID``"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Artifact SHA-256: ``$env:ARTIFACT_DIGEST``"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Artifact URL: $env:ARTIFACT_URL"

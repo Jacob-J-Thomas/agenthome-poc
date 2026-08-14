@@ -11,6 +11,10 @@ $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
 $watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
 $coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
 $coverageEvidenceScriptPath = Join-Path $repoRoot "scripts\verification-coverage-evidence.ps1"
+$laneScriptPath = Join-Path $repoRoot "scripts\verification-test-lanes.ps1"
+$coverageEquivalenceScriptPath = Join-Path $repoRoot "scripts\verify-coverage-ownership-equivalence.ps1"
+$coverageEquivalenceCollectionScriptPath = Join-Path $repoRoot "scripts\collect-coverage-ownership-equivalence.ps1"
+$coverageEquivalenceWorkflowPath = Join-Path $repoRoot ".github\workflows\coverage-ownership-equivalence.yml"
 $verifyWorkflowPath = Join-Path $repoRoot ".github\workflows\verify.yml"
 $stressWorkflowPath = Join-Path $repoRoot ".github\workflows\verification-stress.yml"
 $pullRequestSettingsPath = Join-Path $repoRoot "tests\verification-pull-request.runsettings"
@@ -140,9 +144,12 @@ $watchdogScript = Get-Content -LiteralPath $watchdogScriptPath -Raw
 $phaseScript = Get-Content -LiteralPath $phaseScriptPath -Raw
 $parallelScript = Get-Content -LiteralPath $parallelScriptPath -Raw
 $scheduleScript = Get-Content -LiteralPath $scheduleScriptPath -Raw
-$laneScript = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\verification-test-lanes.ps1") -Raw
 $coverageScript = Get-Content -LiteralPath $coverageScriptPath -Raw
 $coverageEvidenceScript = Get-Content -LiteralPath $coverageEvidenceScriptPath -Raw
+$laneScript = Get-Content -LiteralPath $laneScriptPath -Raw
+$coverageEquivalenceScript = Get-Content -LiteralPath $coverageEquivalenceScriptPath -Raw
+$coverageEquivalenceCollectionScript = Get-Content -LiteralPath $coverageEquivalenceCollectionScriptPath -Raw
+$coverageEquivalenceWorkflow = Get-Content -LiteralPath $coverageEquivalenceWorkflowPath -Raw
 $verifyWorkflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
 $stressWorkflow = Get-Content -LiteralPath $stressWorkflowPath -Raw
 $pullRequestSettings = Get-Content -LiteralPath $pullRequestSettingsPath -Raw
@@ -197,8 +204,32 @@ foreach ($tempVariable in @("TEMP", "TMP", "TMPDIR")) {
 Assert-Contains -Actual $verifyScript -Expected 'Remove-Item -LiteralPath $laneFixtureRoot -Recurse -Force' -Message "Lane fixture roots must be cleaned after ordinary verifier completion."
 Assert-Contains -Actual $verifyScript -Expected '"vstest", $Lane.AssemblyPath' -Message "Test lanes must execute isolated assemblies."
 Assert-Contains -Actual $laneScript -Expected 'return @((New-VerificationTestLane -Name "all"))' -Message "Each test assembly must execute through one exact stable-ID lane."
-Assert-True -Condition ($laneScript.IndexOf('$TestProject.', [StringComparison]::Ordinal) -lt 0) -Message "Assembly-wide execution must not inspect project identity or retain project-specific sharding branches."
+$lanePolicyStart = $laneScript.IndexOf('function Get-VerificationTestProjectLanes', [StringComparison]::Ordinal)
+$lanePolicyEnd = $laneScript.IndexOf('function Get-VerificationTestLaneFilter', $lanePolicyStart, [StringComparison]::Ordinal)
+Assert-True -Condition ($lanePolicyStart -ge 0 -and $lanePolicyEnd -gt $lanePolicyStart) -Message "The one-lane policy must retain an exact inspectable function boundary."
+$lanePolicySource = $laneScript.Substring($lanePolicyStart, $lanePolicyEnd - $lanePolicyStart)
+Assert-True -Condition ($lanePolicySource.IndexOf('$TestProject.', [StringComparison]::Ordinal) -lt 0) -Message "Assembly-wide execution must not inspect project identity or retain project-specific sharding branches."
 Assert-True -Condition ([regex]::Matches($laneScript, 'New-VerificationTestLane -Name "all"').Count -eq 1) -Message "The one-lane policy must have exactly one scheduler declaration."
+Assert-Contains -Actual $verifyScript -Expected 'Read-VerificationCoverageOwnership -ManifestPath $coverageOwnershipManifestPath -RepositoryRoot $repoRoot -TestProjects $testProjects' -Message "The verifier must validate the checked-in coverage ownership map against exact current source and test-project inventories before execution."
+Assert-Contains -Actual $verifyScript -Expected 'Write-VerificationCoverageRunSettings -SourcePath $pullRequestRunSettingsPath -DestinationPath $runSettingsPath -Selection $coverageSelection' -Message "Every canonical test lane must receive its fail-closed source-owned coverage filter."
+Assert-Contains -Actual $verifyScript -Expected 'Copy-Item -LiteralPath $runSettingsPath -Destination $childRunSettingsPath' -Message "Every child-process collector must inherit the exact parent ownership filter."
+Assert-Contains -Actual $laneScript -Expected '$Selection.IncludeAssemblyPatterns' -Message "Coverage ownership must restrict instrumentation to exact primary and exception-owner production assemblies."
+Assert-Contains -Actual $laneScript -Expected '$Selection.ExcludeByFilePatterns' -Message "Coverage ownership must derive Coverlet exclusions from the validated current source inventory."
+Assert-Contains -Actual $laneScript -Expected '$singleHit[0].InnerText -cne "true"' -Message "Generated lane settings must reject any attempt to weaken the canonical single-hit collector contract."
+Assert-True -Condition ($laneScript.IndexOf('"**/obj/**/*.cs"', [StringComparison]::Ordinal) -lt 0) -Message "Coverage ownership cannot exclude generated production source that contributes to the existing denominator."
+Assert-Contains -Actual $coverageEquivalenceScript -Expected 'Filtered package' -Message "Explicit ownership evidence must compare each package's coverable and hit line sets, not just global totals."
+Assert-Contains -Actual $coverageEquivalenceScript -Expected 'executed TestCase.Id inventory' -Message "Explicit ownership evidence must reconcile exact test identities in both collections."
+Assert-Contains -Actual $coverageEquivalenceScript -Expected 'canonicalBinarySha256' -Message "Explicit ownership evidence must compare exact canonical DLL/PDB inventories across collection modes."
+Assert-Contains -Actual $coverageEquivalenceScript -Expected 'childInvocationSha256' -Message "Explicit ownership evidence must compare the per-project multiset of child-process binary inventories without depending on invocation GUID paths."
+Assert-Contains -Actual $coverageEquivalenceScript -Expected 'TestIdsByLane' -Message "Explicit ownership evidence must compare exact TestCase.Id assignments per canonical lane as well as globally."
+Assert-Contains -Actual $coverageEquivalenceScript -Expected 'parent/child settings evidence differs' -Message "Each evidence mode must authenticate an exact parent/child runsettings copy independently."
+Assert-Contains -Actual $verifyScript -Expected 'coverage-ownership-binary-manifest.json' -Message "Each explicit evidence collection must persist its authenticated pristine and child binary manifest."
+Assert-Contains -Actual $coverageEquivalenceCollectionScript -Expected '-DeadlineSeconds 600' -Message "Both explicit evidence collections must retain the immutable per-run 600-second watchdog cap."
+Assert-Contains -Actual $coverageEquivalenceCollectionScript -Expected 'UnfilteredEvidence", "FilteredEvidence' -Message "The explicit evidence command must collect unfiltered then filtered results on one clean head."
+Assert-Contains -Actual $coverageEquivalenceWorkflow -Expected 'ref: ${{ github.event.pull_request.head.sha || github.sha }}' -Message "Authoritative Windows equivalence must check out the exact candidate head rather than a synthetic merge ref."
+Assert-Contains -Actual $coverageEquivalenceWorkflow -Expected 'timeout-minutes: 30' -Message "The two capped evidence collections must retain one bounded Windows workflow owner."
+Assert-Contains -Actual $coverageEquivalenceWorkflow -Expected './scripts/collect-coverage-ownership-equivalence.ps1 -EvidenceRoot $evidenceRoot' -Message "The Windows workflow must run the exact sequential equivalence collector."
+Assert-Contains -Actual $coverageEquivalenceWorkflow -Expected 'ARTIFACT_DIGEST: ${{ steps.evidence_upload.outputs.artifact-digest }}' -Message "The Windows workflow must expose GitHub's immutable uploaded-artifact digest with its exact-head evidence."
 foreach ($parallelAssemblyInfoPath in @(
     "tests\EmbodySense.Core.Persistence.Tests\AssemblyInfo.cs",
     "tests\EmbodySense.Core.Startup.Tests\AssemblyInfo.cs",

@@ -154,6 +154,77 @@ function Read-VerificationCoverageHashSnapshot {
     }
 }
 
+function Read-VerificationCoverageBinaryInventoryEvidence {
+    param(
+        [Parameter(Mandatory = $true)] [object[]]$Entries,
+        [Parameter(Mandatory = $true)] [string]$BinaryRoot,
+        [Parameter(Mandatory = $true)] [string]$ResultsRoot,
+        [Parameter(Mandatory = $true)] [string]$Description
+    )
+
+    $binaryRootItem = Assert-VerificationCoverageOrdinaryPath -Path $BinaryRoot -Root $ResultsRoot -PathType Container -Description "$Description root"
+    if ($Entries.Count -eq 0) { throw "$Description binary inventory is empty." }
+
+    $actualByRelativePath = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    foreach ($file in @(Get-ChildItem -LiteralPath $binaryRootItem.FullName -Recurse -File -Force | Where-Object {
+        [IO.Path]::GetExtension($_.Name) -cin @(".dll", ".pdb")
+    } | Sort-Object FullName)) {
+        $snapshot = Read-VerificationCoverageHashSnapshot -Path $file.FullName -Root $binaryRootItem.FullName -Description "$Description binary"
+        $relativePath = [IO.Path]::GetRelativePath($binaryRootItem.FullName, $snapshot.FullName).Replace('\', '/')
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or $relativePath -ceq "." -or
+            $relativePath.StartsWith("../", [StringComparison]::Ordinal) -or
+            -not $actualByRelativePath.TryAdd($relativePath, $snapshot)) {
+            throw "$Description actual DLL/PDB inventory contains an unsafe or duplicate path."
+        }
+    }
+    if ($actualByRelativePath.Count -eq 0) { throw "$Description actual DLL/PDB inventory is empty." }
+
+    $records = [Collections.Generic.List[string]]::new()
+    $manifestPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($entry in $Entries) {
+        $actualProperties = @($entry.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+        $expectedProperties = @("length", "path", "sha256")
+        if ($actualProperties.Count -ne $expectedProperties.Count -or
+            @(Compare-Object -ReferenceObject $expectedProperties -DifferenceObject $actualProperties -CaseSensitive).Count -ne 0) {
+            throw "$Description binary entry does not have its exact schema-1 property set."
+        }
+
+        $relativePath = [string]$entry.path
+        $segments = @($relativePath.Split('/'))
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or $relativePath.Contains('\', [StringComparison]::Ordinal) -or
+            $relativePath.Contains(':', [StringComparison]::Ordinal) -or [IO.Path]::IsPathRooted($relativePath) -or
+            @($segments | Where-Object { [string]::IsNullOrWhiteSpace($_) -or $_ -ceq "." -or $_ -ceq ".." }).Count -ne 0 -or
+            [IO.Path]::GetExtension($relativePath) -cnotin @(".dll", ".pdb") -or -not $manifestPaths.Add($relativePath) -or
+            ($entry.length -isnot [long]) -or [long]$entry.length -lt 1 -or [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "$Description contains an invalid, unsafe, or duplicate DLL/PDB entry."
+        }
+
+        $resolvedPath = [IO.Path]::GetFullPath((Join-Path $binaryRootItem.FullName $relativePath))
+        if (-not (Test-VerificationCoverageDescendantPath -Path $resolvedPath -Root $binaryRootItem.FullName) -or
+            -not $actualByRelativePath.ContainsKey($relativePath)) {
+            throw "$Description binary inventory omits, adds, or escapes its declared root: $relativePath"
+        }
+        $snapshot = $actualByRelativePath[$relativePath]
+        if (-not (Test-VerificationCoverageSamePath -Left $resolvedPath -Right $snapshot.FullName) -or
+            $snapshot.Length -ne [long]$entry.length -or $snapshot.Sha256 -cne [string]$entry.sha256) {
+            throw "$Description binary evidence does not match its immutable file: $relativePath"
+        }
+        $records.Add($relativePath + [char]0 + "$([long]$entry.length)" + [char]0 + [string]$entry.sha256)
+    }
+
+    $actualPaths = @($actualByRelativePath.Keys | Sort-Object -CaseSensitive)
+    $expectedPaths = @($manifestPaths | Sort-Object -CaseSensitive)
+    if ($actualPaths.Count -ne $expectedPaths.Count -or
+        @(Compare-Object -ReferenceObject $expectedPaths -DifferenceObject $actualPaths -CaseSensitive).Count -ne 0) {
+        throw "$Description binary manifest does not exactly equal the actual recursive DLL/PDB inventory."
+    }
+
+    return [pscustomobject]@{
+        Count = $records.Count
+        Sha256 = Get-VerificationCoverageOwnershipRecordSha256 -Records @($records)
+    }
+}
+
 function Get-VerificationCoverageFileKey {
     param(
         [Parameter(Mandatory = $true)] [string]$PackageName,
@@ -187,7 +258,7 @@ function Get-VerificationCoverageFileKey {
         $candidatePath = Join-Path $RepositoryRoot $normalizedFileName
     }
 
-    return [IO.Path]::GetFullPath($candidatePath).ToUpperInvariant()
+    return [IO.Path]::GetFullPath($candidatePath)
 }
 
 function Read-VerificationCoverageReductionSnapshot {
@@ -207,6 +278,7 @@ function Read-VerificationCoverageReductionSnapshot {
     }
 
     $expectedPackages = [Collections.Generic.HashSet[string]]::new($SourceProjectDirectories.Keys, [StringComparer]::Ordinal)
+    $observedProductionFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $packageFileLines = if ($null -eq $Destination) {
         [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     }
@@ -217,7 +289,7 @@ function Read-VerificationCoverageReductionSnapshot {
         $packageName = [string]$package.name
         if (-not $expectedPackages.Contains($packageName)) { continue }
         if (-not $packageFileLines.ContainsKey($packageName)) {
-            $packageFileLines.Add($packageName, [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal))
+            $packageFileLines.Add($packageName, [Collections.Generic.Dictionary[string, object]]::new((Get-VerificationCoveragePathComparer)))
         }
 
         $packageFiles = $packageFileLines[$packageName]
@@ -225,6 +297,7 @@ function Read-VerificationCoverageReductionSnapshot {
             $classLines = $class.SelectNodes("lines/line")
             if ($classLines.Count -eq 0) { continue }
             $fileKey = Get-VerificationCoverageFileKey -PackageName $packageName -FileName ([string]$class.filename) -RepositoryRoot $RepositoryRoot -SourceProjectDirectories $SourceProjectDirectories
+            [void]$observedProductionFiles.Add($fileKey)
             if (-not $packageFiles.ContainsKey($fileKey)) {
                 $packageFiles.Add($fileKey, [Collections.Generic.Dictionary[int, int]]::new())
             }
@@ -263,6 +336,7 @@ function Read-VerificationCoverageReductionSnapshot {
             Sha256 = $captured.Sha256
         }
         Lines = @($lines)
+        ProductionFiles = @($observedProductionFiles | Sort-Object -CaseSensitive)
     }
 }
 
@@ -550,6 +624,7 @@ public sealed class VerificationCoverageParallelSnapshot
     public long Length { get; set; }
     public DateTime LastWriteTimeUtc { get; set; }
     public string Sha256 { get; set; }
+    public string[] ProductionFiles { get; set; }
 }
 
 public sealed class VerificationCoverageParallelLine
@@ -609,6 +684,11 @@ public static class VerificationCoverageParallelProcessor
                     {
                         Merge(itemResult.Lines, merged);
                     }
+                    itemResult.Snapshot.ProductionFiles = itemResult.Lines
+                        .SelectMany(package => package.Value.Keys)
+                        .Distinct(StringComparer.Ordinal)
+                        .OrderBy(path => path, StringComparer.Ordinal)
+                        .ToArray();
                     itemResult.Lines.Clear();
                     itemResults[item.Index] = itemResult;
                 }
@@ -656,7 +736,7 @@ public static class VerificationCoverageParallelProcessor
             SortedDictionary<string, SortedDictionary<int, int>> packageFiles;
             if (!destination.TryGetValue(package.Key, out packageFiles))
             {
-                packageFiles = new SortedDictionary<string, SortedDictionary<int, int>>(StringComparer.Ordinal);
+                packageFiles = new SortedDictionary<string, SortedDictionary<int, int>>(GetPathComparer());
                 destination.Add(package.Key, packageFiles);
             }
             foreach (var file in package.Value)
@@ -731,7 +811,8 @@ public static class VerificationCoverageParallelProcessor
                 FullName = after.FullName,
                 Length = after.Length,
                 LastWriteTimeUtc = after.LastWriteTimeUtc,
-                Sha256 = BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant()
+                Sha256 = BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant(),
+                ProductionFiles = new string[0]
             }
         };
         if (bytes != null) Reduce(bytes, item, repositoryRoot, sourceProjectDirectories, result.Lines);
@@ -773,7 +854,7 @@ public static class VerificationCoverageParallelProcessor
             Dictionary<string, Dictionary<int, int>> packageFiles;
             if (!destination.TryGetValue(packageName, out packageFiles))
             {
-                packageFiles = new Dictionary<string, Dictionary<int, int>>(StringComparer.Ordinal);
+                packageFiles = new Dictionary<string, Dictionary<int, int>>(GetPathComparer());
                 destination.Add(packageName, packageFiles);
             }
 
@@ -822,7 +903,12 @@ public static class VerificationCoverageParallelProcessor
             candidatePath = Path.Combine(projectDirectory, normalized.Substring(packageName.Length + 1));
         }
         else candidatePath = Path.Combine(repositoryRoot, normalized);
-        return Path.GetFullPath(candidatePath).ToUpperInvariant();
+        return Path.GetFullPath(candidatePath);
+    }
+
+    private static StringComparer GetPathComparer()
+    {
+        return Path.DirectorySeparatorChar == '\\' ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
     }
 }
 '@
@@ -848,9 +934,11 @@ function Invoke-VerificationCoverageWorkers {
             if ([bool]$item.Reduce) {
                 $reduction = Read-VerificationCoverageReductionSnapshot -Path $path -Root ([string]$item.Root) -Description ([string]$item.Description) -RepositoryRoot $RepositoryRoot -SourceProjectDirectories $SourceProjectDirectories -Destination $packageFileLines
                 $snapshot = $reduction.Snapshot
+                $snapshot | Add-Member -NotePropertyName ProductionFiles -NotePropertyValue @($reduction.ProductionFiles)
             }
             else {
                 $snapshot = Read-VerificationCoverageHashSnapshot -Path $path -Root ([string]$item.Root) -Description ([string]$item.Description)
+                $snapshot | Add-Member -NotePropertyName ProductionFiles -NotePropertyValue @()
             }
             $snapshot | Add-Member -NotePropertyName Index -NotePropertyValue $index
             $snapshots.Add($snapshot)

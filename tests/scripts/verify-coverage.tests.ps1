@@ -690,7 +690,7 @@ try {
     $failingResult = Invoke-CoverageVerification -RepositoryRoot $failingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc
     Assert-True -Condition ($failingResult.ExitCode -ne 0) -Message "Below-threshold coverage must fail."
     $separator = [IO.Path]::DirectorySeparatorChar
-    $expectedGap = "COVERAGE_GAP package=Fixture.One uncovered=2 total=10 file=SRC${separator}FIXTURE.ONE${separator}FILE.CS lines=9,10"
+    $expectedGap = "COVERAGE_GAP package=Fixture.One uncovered=2 total=10 file=src${separator}Fixture.One${separator}File.cs lines=9,10"
     Assert-Contains -Actual $failingResult.Output -Expected $expectedGap -Message "Coverage gaps must remain stable and actionable."
     Assert-Contains -Actual $failingResult.Output -Expected "Fixture.One line coverage 80% is below 90%" -Message "Below-threshold diagnostics must preserve the enforced threshold."
     $failingExternalResult = Invoke-CoverageVerification -RepositoryRoot $failingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ExternalProcess
