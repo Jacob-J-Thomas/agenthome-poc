@@ -7,6 +7,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
+using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
@@ -14,6 +15,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
@@ -114,6 +116,44 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
     }
 
     [Fact]
+    public async Task Concrete_factory_admits_transform_followed_by_validate_with_graph_wide_authority()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var candidate = TransformValidateCandidate();
+        var normalized = GovernedLoopGraphNormalizer.Normalize(candidate);
+        Assert.True(normalized.IsValid);
+        var reference = normalized.Graph!.RevisionReference;
+        var request = new GovernedLoopGraphAuthoringRequest(
+            1,
+            new GovernedLoopRevisionLifecycleRequest(
+                1,
+                "create-transform-validate-loop",
+                GovernedLoopRevisionOperationKind.CreateDraft,
+                reference.GraphId,
+                Actor(),
+                GovernedLoopRevisionLifecycleStatus.Unknown,
+                0,
+                null,
+                null,
+                reference,
+                null,
+                null),
+            candidate);
+
+        var result = await GovernedLoopGraphAuthoringFactory.Create(
+            paths,
+            new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath),
+            new RecordingNodeCatalog(ExactPureCatalog(candidate)),
+            new RecordingAuthorityProvider(Authority()),
+            new RecordingActorAuthorizer(),
+            new FixedTimeProvider(_now)).MutateAsync(request);
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, result.Status);
+        Assert.Empty(result.GraphValidationErrors);
+    }
+
+    [Fact]
     public void Production_default_factory_composes_without_touching_workspace_state()
     {
         using var workspace = new TestWorkspace();
@@ -194,6 +234,69 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
                     new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 200, 0),
                 ]));
 
+    private static GovernedLoopGraphCandidate TransformValidateCandidate()
+    {
+        var baseline = Candidate();
+        var identity = new GovernedLoopNodeDefinition(
+            "identity",
+            GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+            [
+                Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                Port(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        var validation = new GovernedLoopNodeDefinition(
+            "schema-check",
+            GovernedLoopSequentialNodeDescriptors.SchemaConformance,
+            [
+                Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                new GovernedLoopPortDefinition(
+                    GovernedLoopPureNodeVocabulary.ResultPort,
+                    GovernedLoopPortDirection.Output,
+                    GovernedLoopBindingKind.Data,
+                    "boolean",
+                    Required: true),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+
+        return baseline with
+        {
+            Nodes = [baseline.Nodes![0], identity, validation, baseline.Nodes[1], baseline.Nodes[2]],
+            ControlEdges =
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-identity", "trigger", "identity", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("identity-to-schema", "identity", "schema-check", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("schema-to-infer", "schema-check", "infer", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success),
+            ],
+            Bindings =
+            [
+                new GovernedLoopBindingDefinition("request-to-identity", GovernedLoopBindingKind.Data, "trigger", "request", "identity", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("identity-output-to-schema", GovernedLoopBindingKind.Data, "identity", GovernedLoopPureNodeVocabulary.OutputPort, "schema-check", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("identity-to-request", GovernedLoopBindingKind.Data, "identity", GovernedLoopPureNodeVocabulary.OutputPort, "infer", "request"),
+                new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ],
+            ValueSchemas =
+            [
+                new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, false),
+                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
+            ],
+            DisplayMetadata = new GovernedLoopDisplayMetadata(
+                "Transform and validate",
+                "Display only.",
+                [
+                    new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Start.", 0, 0),
+                    new GovernedLoopNodeDisplayMetadata("identity", "Transform", "Transform.", 100, 0),
+                    new GovernedLoopNodeDisplayMetadata("schema-check", "Validate", "Validate.", 200, 0),
+                    new GovernedLoopNodeDisplayMetadata("infer", "Inference", "Answer.", 300, 0),
+                    new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 400, 0),
+                ]),
+        };
+    }
+
     private static GovernedLoopNodeDefinition[] Nodes()
         =>
         [
@@ -233,11 +336,24 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
                     false,
                     null,
                     null,
-                    node.Ports.Select(port => new GovernedLoopCatalogPortContract(port.Id, port.Direction, port.BindingKind, schemas[port.ValueSchemaId], port.Required)).ToArray(),
+                    node.Ports.Select(port => new GovernedLoopCatalogPortContract(port.Id, port.Direction, port.BindingKind, GovernedLoopValueKindSet.Create([schemas[port.ValueSchemaId]]), port.Required)).ToArray(),
                     node.Parameters.Select(parameter => new GovernedLoopCatalogParameterContract(parameter.Key, GovernedLoopParameterValueKind.Text, true, 1, CustomLoopLimits.MaxGraphParameterValueCharacters, null, null, [])).ToArray(),
                     node.AuthorityCeiling.CapabilityIds,
                     new GovernedLoopNodeResourceBudget(0, 0, 0, 0));
             }).ToArray());
+    }
+
+    private static GovernedLoopNodeCatalogSnapshot ExactPureCatalog(GovernedLoopGraphCandidate candidate)
+    {
+        var snapshot = Catalog(candidate);
+        return snapshot with
+        {
+            Descriptors =
+            [
+                .. snapshot.Descriptors.Where(descriptor => !GovernedLoopPureNodeCatalogContract.TryResolve(descriptor.Descriptor, out _)),
+                .. GovernedLoopPureNodeCatalogContract.Descriptors,
+            ],
+        };
     }
 
     private static GovernedLoopAuthoritySnapshot Authority()
@@ -261,10 +377,10 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
             _workspaceId,
             ContextualRoleInstructionSourceProbeStatus.Ready,
             role.PolicyMaxima.CapabilityIds,
-            CustomLoopLimits.MaxGraphNodeAttempts,
-            100_000,
-            CustomLoopLimits.MaxGraphNodeEvidenceItems,
-            100);
+            CustomLoopLimits.MaxGraphAggregateAttempts,
+            CustomLoopLimits.MaxGraphAggregatePayloadCharacters,
+            CustomLoopLimits.MaxGraphAggregateEvidenceItems,
+            CustomLoopLimits.MaxGraphAggregateResourceUnits);
     }
 
     private static ContextualRoleRevisionPin RolePin()

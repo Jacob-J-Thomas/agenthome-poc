@@ -302,6 +302,7 @@ internal static class CustomLoopRunArtifactCodec
         {
             Content(runEvent.Detail);
             Content(runEvent.CanonicalOutput);
+            Content(runEvent.PureNodeOutcomeJson);
             foreach (var block in runEvent.ContextBlocks)
             {
                 Content(block.SourceId);
@@ -708,6 +709,7 @@ internal static class CustomLoopRunArtifactCodec
     {
         var detailId = contents.Reference(runEvent.Detail);
         var canonicalOutputId = ReferenceIdentifier(runEvent.CanonicalOutput, contents);
+        var pureNodeOutcomeJsonId = ReferenceIdentifier(runEvent.PureNodeOutcomeJson, contents);
         foreach (var block in runEvent.ContextBlocks)
         {
             _ = contents.Reference(block.SourceId);
@@ -746,7 +748,15 @@ internal static class CustomLoopRunArtifactCodec
             }
         }
 
-        return runEvent with { Detail = detailId, ContextBlocks = [], CanonicalOutput = canonicalOutputId, ToolAuthority = null, ToolEvidence = null };
+        return runEvent with
+        {
+            Detail = detailId,
+            ContextBlocks = [],
+            CanonicalOutput = canonicalOutputId,
+            ToolAuthority = null,
+            ToolEvidence = null,
+            PureNodeOutcomeJson = pureNodeOutcomeJsonId,
+        };
     }
 
     private static void ProjectPreparedDefinition(JsonObject definition)
@@ -892,6 +902,7 @@ internal static class CustomLoopRunArtifactCodec
             var sourceEvent = sourceEvents[eventIndex];
             ReferenceIdentifierProperty(runEvent, "detail");
             ReferenceIdentifierProperty(runEvent, "canonicalOutput");
+            ReferenceIdentifierProperty(runEvent, "pureNodeOutcomeJson");
             var contextBlockReferences = new JsonArray();
             foreach (var sourceBlock in sourceEvent.ContextBlocks)
             {

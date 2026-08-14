@@ -4,6 +4,7 @@ using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Loops.Custom;
 
 namespace EmbodySense.Core.Application.Tests.Loops.GraphValidation;
 
@@ -25,6 +26,12 @@ public sealed class GovernedLoopAuthoritySnapshotProviderTests
         Assert.Equal(ContextualRoleInstructionSourceProbeStatus.Ready, snapshot.SourceStatus);
         Assert.Equal(role.PolicyMaxima.CapabilityIds, snapshot.CapabilityIds);
         Assert.Matches("^[0-9a-f]{64}$", snapshot.SourceEvidenceId);
+        Assert.Equal(CustomLoopLimits.MaxGraphAggregateAttempts, snapshot.MaxAttempts);
+        Assert.Equal(CustomLoopLimits.MaxGraphAggregatePayloadCharacters, snapshot.MaxPayloadCharacters);
+        Assert.Equal(CustomLoopLimits.MaxGraphAggregateEvidenceItems, snapshot.MaxEvidenceItems);
+        Assert.Equal(CustomLoopLimits.MaxGraphAggregateResourceUnits, snapshot.MaxResourceUnits);
+        Assert.True(snapshot.MaxPayloadCharacters > CustomLoopLimits.MaxGraphNodePayloadCharacters);
+        Assert.True(snapshot.MaxEvidenceItems > CustomLoopLimits.MaxGraphNodeEvidenceItems);
     }
 
     [Fact]

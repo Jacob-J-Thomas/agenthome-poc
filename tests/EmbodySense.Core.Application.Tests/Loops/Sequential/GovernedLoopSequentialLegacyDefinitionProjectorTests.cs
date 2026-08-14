@@ -63,6 +63,24 @@ public sealed class GovernedLoopSequentialLegacyDefinitionProjectorTests
     }
 
     [Fact]
+    public void CompatibilityProjectionSelectsInferenceNodesWithoutTreatingPurePlanOrdinalsAsInferenceIndexes()
+    {
+        var artifact = GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact();
+        var plan = Assert.IsType<GovernedLoopSequentialPlan>(GovernedLoopSequentialPlanBuilder.Build(artifact).Plan);
+        var invocation = Invocation(includeConversation: true);
+        var binding = Binding(artifact, invocation);
+
+        var result = GovernedLoopSequentialLegacyDefinitionProjector.Project(binding, invocation, plan, artifact);
+
+        Assert.Equal(GovernedLoopSequentialLegacyDefinitionProjectionStatus.Ready, result.Status);
+        var definition = Assert.IsType<CustomLoopDefinition>(result.Definition);
+        var inference = Assert.Single(definition.InferenceSteps);
+        Assert.Equal("infer", inference.Id);
+        Assert.Equal("Answer from the exact transformed request.", inference.Instruction);
+        Assert.True(CustomLoopDefinitionValidator.Validate(definition).IsValid);
+    }
+
+    [Fact]
     public void Projection_rejects_binding_invocation_artifact_and_plan_substitution()
     {
         var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact();
@@ -194,6 +212,9 @@ public sealed class GovernedLoopSequentialLegacyDefinitionProjectorTests
         Assert.Equal(
             GovernedLoopSequentialLegacyDefinitionProjectionStatus.InvalidPlan,
             GovernedLoopSequentialLegacyDefinitionProjector.ProjectPrepared(binding.AdmissionOperationId, invocation, null, artifact).Status);
+        Assert.Equal(
+            GovernedLoopSequentialLegacyDefinitionProjectionStatus.InvalidArtifact,
+            GovernedLoopSequentialLegacyDefinitionProjector.ProjectPrepared(binding.AdmissionOperationId, invocation, plan, null).Status);
     }
 
     private static GovernedLoopSequentialInvocationSnapshot Invocation(bool includeConversation)

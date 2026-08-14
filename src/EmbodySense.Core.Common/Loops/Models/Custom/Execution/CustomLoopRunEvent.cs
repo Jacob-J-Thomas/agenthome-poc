@@ -56,4 +56,9 @@ public sealed record CustomLoopRunEvent(
     /// <summary>Gets exact canonical sequential-node dispatch or outcome evidence, or null for legacy-only events.</summary>
     [JsonRequired]
     public CustomLoopSequentialNodeEvidence? SequentialNodeEvidence { get; init; }
+
+    /// <summary>Gets the bounded canonical pure-node outcome JSON, or null when the event does not complete a Transform or Validate node.</summary>
+    /// <remarks>The Application boundary verifies this retained text against the event's exact immutable graph revision before execution can resume.</remarks>
+    [JsonRequired]
+    public string? PureNodeOutcomeJson { get; init; }
 }

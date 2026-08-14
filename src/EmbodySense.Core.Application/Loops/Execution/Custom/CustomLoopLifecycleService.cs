@@ -344,6 +344,14 @@ public sealed class CustomLoopLifecycleService
 
         if (run.Status == CustomLoopRunStatus.Paused)
         {
+            if (CustomLoopRecoveryService.HasRestartSafePureAttemptSinceCheckpoint(run))
+            {
+                const string Detail = "Cancellation found a recovery-parked deterministic pure-node attempt whose start/outcome audits and terminal disposition require reconciliation; the run was attention-blocked without dispatch.";
+                var parked = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, Detail);
+                var parkedOutcome = parked.Run is null ? parked.Status : CustomLoopControlStatus.NeedsReview;
+                return await CompleteAsync(operation, parkedOutcome, parked.Run ?? parked.CurrentRun, parked.AuditRecorded, parked.Detail);
+            }
+
             var cancelled = await PersistTransitionAsync(run, CustomLoopRunStatus.Cancelled, operation.Actor, operation.OperationId, "The safely paused run was cancelled atomically without provider dispatch.");
             var outcome = cancelled.Run is null ? cancelled.Status : cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning;
             return await CompleteAsync(operation, outcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);

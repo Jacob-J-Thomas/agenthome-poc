@@ -23,6 +23,13 @@ public static class GovernedLoopSequentialAuditOperationId
         return Derive("governed-loop-sequential-node-outcome-audit-v1", evidenceHash);
     }
 
+    /// <summary>Derives a node-start-audit identity from the exact durable dispatch evidence hash.</summary>
+    public static string ForNodeStart(string evidenceHash)
+    {
+        RequireHash(evidenceHash, nameof(evidenceHash));
+        return Derive("governed-loop-sequential-node-start-audit-v1", evidenceHash);
+    }
+
     /// <summary>Derives a terminal-lifecycle-audit identity from the exact durable terminal event artifact.</summary>
     public static string ForTerminalLifecycle(string terminalArtifactHash)
     {

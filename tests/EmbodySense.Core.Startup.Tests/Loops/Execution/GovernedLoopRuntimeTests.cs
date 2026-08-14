@@ -26,6 +26,7 @@ using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -1053,7 +1054,7 @@ internal static class GovernedLoopRuntimeTests
                         port.Id,
                         port.Direction,
                         port.BindingKind,
-                        schemas[port.ValueSchemaId],
+                        GovernedLoopValueKindSet.Create([schemas[port.ValueSchemaId]]),
                         port.Required)).ToArray(),
                     node.Parameters.Select(parameter => new GovernedLoopCatalogParameterContract(
                         parameter.Key,

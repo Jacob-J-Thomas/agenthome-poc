@@ -90,8 +90,7 @@ public static class GovernedLoopSequentialLegacyDefinitionProjector
             var graphNodes = graph.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
             var displayNodes = graph.DisplayMetadata.Nodes.ToDictionary(node => node.NodeId, StringComparer.Ordinal);
             var inferenceSteps = plan.Nodes
-                .Skip(1)
-                .SkipLast(1)
+                .Where(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference))
                 .Select(node =>
                 {
                     var graphNode = graphNodes[node.NodeId];

@@ -30,6 +30,81 @@ public sealed class CustomLoopRunValidatorTests
     private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
 
     [Fact]
+    public void Same_durable_version_requires_every_valid_field_event_and_frontier_hash_to_match()
+    {
+        var run = CreateSequentialRun();
+        var exactCopy = run with
+        {
+            Events = run.Events.Select(item => item with { ContextBlocks = [.. item.ContextBlocks] }).ToArray(),
+        };
+        var substitutedEvent = run with
+        {
+            Events = [run.Events[0] with { Detail = "Substituted same-version evidence." }],
+        };
+        var substitutedFrontier = WithPureFrontier(run, "transform-1");
+
+        Assert.True(CustomLoopRunValidator.HasSameDurableVersion(run, exactCopy));
+        Assert.False(CustomLoopRunValidator.HasSameDurableVersion(run, substitutedEvent));
+        Assert.True(CustomLoopRunValidator.Validate(substitutedFrontier).IsValid);
+        Assert.False(CustomLoopRunValidator.HasSameDurableVersion(run, substitutedFrontier));
+        Assert.False(CustomLoopRunValidator.HasSameDurableVersion(run, run with { UpdatedAtUtc = run.UpdatedAtUtc.AddTicks(1) }));
+    }
+
+    [Fact]
+    public void Exact_durable_event_prefix_accepts_an_unchanged_record_and_a_valid_later_successor()
+    {
+        var prefix = CreateSequentialRun();
+        var later = CreateRunningSequentialRun(prefix);
+
+        Assert.True(CustomLoopRunValidator.Validate(prefix).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(prefix).Errors));
+        Assert.True(CustomLoopRunValidator.Validate(later).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(later).Errors));
+        Assert.True(CustomLoopRunValidator.HasExactDurableEventPrefix(prefix, prefix));
+        Assert.True(CustomLoopRunValidator.HasExactDurableEventPrefix(prefix, later));
+    }
+
+    [Fact]
+    public void Exact_durable_event_prefix_rejects_substitution_regression_invalid_shapes_and_admission_drift()
+    {
+        var prefix = CreateSequentialRun();
+        var later = CreateRunningSequentialRun(prefix);
+        var substitutedTrigger = WithSequentialEvidence(
+            later.Events[0] with { Detail = "A valid later record substituted its durable trigger prefix." },
+            later.SequentialAdapterBinding!,
+            "trigger-node",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+        var substituted = later with
+        {
+            Events = [substitutedTrigger, .. later.Events.Skip(1)],
+            Frontier = ReplaceTriggerOutcome(
+                later.Frontier!,
+                substitutedTrigger.EventId,
+                substitutedTrigger.SequentialNodeEvidence!.OutcomeArtifactHash),
+        };
+        var invalidPrefix = prefix with { Events = [] };
+        var divergentSameVersionPrefix = prefix with
+        {
+            LifecycleVersion = later.LifecycleVersion,
+            UpdatedAtUtc = later.UpdatedAtUtc,
+        };
+        var originalAdmission = CreateRun();
+        var driftedAdmission = CreateRun(loopId: "loop-beta");
+
+        Assert.True(CustomLoopRunValidator.Validate(substituted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(substituted).Errors));
+        Assert.True(CustomLoopRunValidator.Validate(divergentSameVersionPrefix).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(divergentSameVersionPrefix).Errors));
+        Assert.True(CustomLoopRunValidator.Validate(originalAdmission).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(originalAdmission).Errors));
+        Assert.True(CustomLoopRunValidator.Validate(driftedAdmission).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(driftedAdmission).Errors));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(prefix, substituted));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(later, prefix));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(divergentSameVersionPrefix, later));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(invalidPrefix, later));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(originalAdmission, driftedAdmission));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(null, later));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(prefix, null));
+    }
+
+    [Fact]
     public void Sequential_trigger_evidence_is_payload_bound_and_required_to_match_exact_run_coordinates()
     {
         var run = CreateSequentialRun();
@@ -190,6 +265,86 @@ public sealed class CustomLoopRunValidatorTests
 
         AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], mismatchedStart, mismatchedOutcome] }), "sequential_inference_step_mismatch");
         AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], unknownStart, unknownOutcome] }), "sequential_inference_step_mismatch");
+    }
+
+    [Fact]
+    public void Pure_node_outcomes_are_bounded_hash_bound_and_coupled_to_exact_frontier_nodes()
+    {
+        var run = WithPureFrontier(CreateSequentialRun(), "transform-1");
+        var start = PureSequentialEvent(2, "pure-start", CustomLoopRunEventKind.NodeAttemptStarted, run.SequentialAdapterBinding!, "transform-1");
+        var completion = PureSequentialEvent(3, "pure-complete", CustomLoopRunEventKind.NodeAttemptCompleted, run.SequentialAdapterBinding!, "transform-1", "{\"schemaVersion\":1}");
+        var valid = run with { Events = [run.Events[0], start, completion] };
+
+        Assert.True(CustomLoopRunValidator.Validate(valid).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(valid).Errors));
+        Assert.Equal(CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes, start.TraceReservationUtf8Bytes);
+        Assert.True(CustomLoopSequentialOutcomeArtifactHash.Matches(completion));
+
+        var tampered = valid with { Events = [run.Events[0], start, completion with { PureNodeOutcomeJson = "{}" }] };
+        AssertCodes(CustomLoopRunValidator.Validate(tampered), "invalid_sequential_node_evidence");
+
+        var oversized = PureSequentialEvent(
+            3,
+            "pure-oversized",
+            CustomLoopRunEventKind.NodeAttemptCompleted,
+            run.SequentialAdapterBinding!,
+            "transform-1",
+            new string('x', CustomLoopLimits.MaxGraphPureNodeOutcomeUtf8Bytes + 1));
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], start, oversized] }), "pure_node_outcome_too_large");
+
+        var ambientProvider = PureSequentialEvent(
+            3,
+            "pure-provider",
+            CustomLoopRunEventKind.NodeAttemptCompleted,
+            run.SequentialAdapterBinding!,
+            "transform-1",
+            "{}",
+            provider: "forbidden-provider");
+        AssertCodes(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], start, ambientProvider] }), "invalid_pure_node_outcome_payload");
+    }
+
+    [Fact]
+    public void Pure_node_attempt_coordinates_require_the_exact_reservation_or_prior_pure_dispatch()
+    {
+        var run = WithPureFrontier(CreateSequentialRun(), "validate-1", GovernedLoopNodeKind.Validate);
+        var validStart = PureSequentialEvent(2, "pure-start", CustomLoopRunEventKind.NodeAttemptStarted, run.SequentialAdapterBinding!, "validate-1");
+        var validFailure = PureSequentialEvent(
+            3,
+            "pure-failed",
+            CustomLoopRunEventKind.NodeAttemptFailed,
+            run.SequentialAdapterBinding!,
+            "validate-1",
+            evidenceKind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            disposition: CustomLoopSequentialNodeDisposition.Rejected);
+        var invalidStart = PureSequentialEvent(
+            2,
+            "pure-start-invalid",
+            CustomLoopRunEventKind.NodeAttemptStarted,
+            run.SequentialAdapterBinding!,
+            "validate-1",
+            reservation: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
+
+        Assert.True(CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], validStart, validFailure] }).IsValid);
+        AssertCodes(
+            CustomLoopRunValidator.Validate(run with { Events = [run.Events[0], invalidStart, validFailure] }),
+            "sequential_pure_node_step_mismatch",
+            "attempt_trace_reservation_required");
+    }
+
+    [Fact]
+    public void Sequential_checkpoints_may_retain_only_exact_completed_pure_frontier_outputs()
+    {
+        var run = WithPureFrontier(CreateSequentialRun(), "transform-1");
+        var start = PureSequentialEvent(2, "pure-start", CustomLoopRunEventKind.NodeAttemptStarted, run.SequentialAdapterBinding!, "transform-1");
+        var completion = PureSequentialEvent(3, "pure-complete", CustomLoopRunEventKind.NodeAttemptCompleted, run.SequentialAdapterBinding!, "transform-1", "{}");
+        var retained = new CustomLoopRetainedOutput("transform-1", 1, "transformed", CustomLoopTraceContentHash.Compute("transformed"));
+        var checkpoint = run.Checkpoint with { CurrentIterationResult = retained };
+        var valid = run with { Events = [run.Events[0], start, completion], Checkpoint = checkpoint };
+        var missingOutcome = run with { Checkpoint = checkpoint };
+        var legacy = CreateRun() with { Checkpoint = CreateRun().Checkpoint with { CurrentIterationResult = retained } };
+
+        Assert.True(CustomLoopRunValidator.Validate(valid).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(valid).Errors));
+        AssertCodes(CustomLoopRunValidator.Validate(missingOutcome), "unknown_retained_step");
+        AssertCodes(CustomLoopRunValidator.Validate(legacy), "unknown_retained_step");
     }
 
     [Fact]
@@ -1285,6 +1440,40 @@ public sealed class CustomLoopRunValidatorTests
             payload);
     }
 
+    private static CustomLoopRunRecord WithPureFrontier(
+        CustomLoopRunRecord run,
+        string nodeId,
+        GovernedLoopNodeKind kind = GovernedLoopNodeKind.Transform)
+    {
+        var current = run.Frontier!;
+        var source = current.Payload.Nodes[1];
+        var pure = GovernedLoopNodeExecutionEvidence.Create(
+            source.PlanOrdinal,
+            nodeId,
+            new GovernedLoopNodeDescriptor(kind, kind == GovernedLoopNodeKind.Transform ? "identity" : "schema-conformance", 1),
+            source.IncomingControlEdgeIds,
+            source.OutgoingControlEdgeIds,
+            source.Status);
+        var payload = GovernedLoopFrontierPayload.Create(
+            current.Payload.SchemaVersion,
+            current.Payload.FrontierVersion,
+            current.Payload.ConcurrencyCeiling,
+            current.Payload.Status,
+            [current.Payload.Nodes[0], pure],
+            current.Payload.UpdatedAtUtc,
+            string.Empty);
+        return run with
+        {
+            Frontier = GovernedLoopFrontierPosture.Create(
+                current.Binding,
+                current.WorkspaceId,
+                current.GraphArtifactHash,
+                current.GraphLayoutHash,
+                current.AdmissionReceiptHash,
+                payload),
+        };
+    }
+
     private static GovernedLoopFrontierPosture CreateSkippedFrontier(CustomLoopRunRecord run)
     {
         const string ExitEdgeId = "edge-step-1-exit";
@@ -1536,6 +1725,36 @@ public sealed class CustomLoopRunValidatorTests
                 : null,
         };
         return WithSequentialEvidence(runEvent, binding, nodeId, 1, evidenceKind, disposition);
+    }
+
+    private static CustomLoopRunEvent PureSequentialEvent(
+        long sequence,
+        string eventId,
+        CustomLoopRunEventKind eventKind,
+        GovernedLoopSequentialAdapterBinding binding,
+        string nodeId,
+        string? outcomeJson = null,
+        CustomLoopSequentialNodeEvidenceKind evidenceKind = CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+        CustomLoopSequentialNodeDisposition disposition = CustomLoopSequentialNodeDisposition.Completed,
+        int? reservation = null,
+        string? provider = null)
+    {
+        var runEvent = Event(sequence, eventId, eventKind, iteration: 1, attempt: 1) with
+        {
+            StepId = nodeId,
+            Provider = provider,
+            PureNodeOutcomeJson = outcomeJson,
+            TraceReservationUtf8Bytes = eventKind == CustomLoopRunEventKind.NodeAttemptStarted
+                ? reservation ?? CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes
+                : null,
+        };
+        var actualKind = eventKind == CustomLoopRunEventKind.NodeAttemptStarted
+            ? CustomLoopSequentialNodeEvidenceKind.DispatchStarted
+            : evidenceKind;
+        var actualDisposition = eventKind == CustomLoopRunEventKind.NodeAttemptStarted
+            ? CustomLoopSequentialNodeDisposition.Unknown
+            : disposition;
+        return WithSequentialEvidence(runEvent, binding, nodeId, 1, actualKind, actualDisposition);
     }
 
     private static CustomLoopToolAuthoritySnapshot Authority(CustomLoopToolAssignment[] effectiveAssignments)
