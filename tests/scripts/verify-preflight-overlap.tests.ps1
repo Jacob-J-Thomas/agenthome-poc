@@ -6,9 +6,16 @@ $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
 $phaseScriptPath = Join-Path $repoRoot "scripts\verification-phase.ps1"
 $parallelScriptPath = Join-Path $repoRoot "scripts\verification-parallel.ps1"
 $scheduleScriptPath = Join-Path $repoRoot "scripts\verification-schedule.ps1"
+$artifactScriptPath = Join-Path $repoRoot "scripts\verification-artifacts.ps1"
+$tempScriptPath = Join-Path $repoRoot "scripts\verification-temp.ps1"
+$testLaneScriptPath = Join-Path $repoRoot "scripts\verification-test-lanes.ps1"
+$testPlanScriptPath = Join-Path $repoRoot "scripts\verification-test-plan.ps1"
+$prepareTestPlanScriptPath = Join-Path $repoRoot "scripts\prepare-verification-test-plan.ps1"
 $frontendScriptPath = Join-Path $repoRoot "scripts\verify-frontend.ps1"
 $verifyScript = Get-Content -LiteralPath $verifyScriptPath -Raw
 $scheduleScript = Get-Content -LiteralPath $scheduleScriptPath -Raw
+$testPlanScript = Get-Content -LiteralPath $testPlanScriptPath -Raw
+$prepareTestPlanScript = Get-Content -LiteralPath $prepareTestPlanScriptPath -Raw
 $frontendScript = Get-Content -LiteralPath $frontendScriptPath -Raw
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $assertionCount = 0
@@ -46,6 +53,10 @@ function Normalize-ConsoleDiagnostic {
 . $phaseScriptPath
 . $parallelScriptPath
 . $scheduleScriptPath
+. $artifactScriptPath
+. $tempScriptPath
+. $testLaneScriptPath
+. $testPlanScriptPath
 
 Assert-Contains -Actual $verifyScript -Expected '$normalPullRequestVerification = $VerificationTier -eq "PullRequest" -and -not $BrowserE2EOnly' -Message "Only the complete pull-request verifier may use the split preflight."
 Assert-Contains -Actual $verifyScript -Expected '$preflightProcessHeavyWeight = [Math]::Min(3, [Math]::Max(1, [int][Math]::Ceiling($preflightResourceCapacity / 2.0)))' -Message "The preflight build must retain bounded weight while leaving one nested-process slot on a four-core host."
@@ -59,14 +70,21 @@ Assert-Contains -Actual $verifyScript -Expected '$preflightResourceCapacity = [M
 Assert-Contains -Actual $verifyScript -Expected '$preflightCoverageContractWeight = Get-VerificationPreflightCoverageContractWeight -ResourceCapacity $preflightResourceCapacity' -Message "The coverage contract must use the behavior-tested adaptive resource-weight derivation."
 Assert-Contains -Actual $verifyScript -Expected '$preflightFrontendWeight = Get-VerificationPreflightFrontendWeight -ResourceCapacity $preflightResourceCapacity' -Message "The composed frontend phase must use a behavior-tested adaptive physical-capacity weight."
 Assert-Contains -Actual $verifyScript -Expected '$preflightNestedProcessContractWeight = Get-VerificationPreflightNestedProcessContractWeight -ResourceCapacity $preflightResourceCapacity' -Message "Nested-process script contracts must use the behavior-tested process-heavy preflight weight."
+Assert-Contains -Actual $verifyScript -Expected '$preflightTestPlanWeight = Get-VerificationPreflightTestPlanWeight -ResourceCapacity $preflightResourceCapacity' -Message "Immutable output preparation, discovery, and partitioning must use one behavior-tested preflight weight."
 Assert-Contains -Actual $verifyScript -Expected '$preflightMaximumProcessHeavyWorkers = [Math]::Min(2, $preflightMaximumWorkers)' -Message "The DAG must admit no more than two process-heavy preflight workers."
 Assert-Contains -Actual $scheduleScript -Expected 'return [Math]::Min(3, $ResourceCapacity)' -Message "The shared preflight coverage derivation must clamp its weight to the available capacity."
 Assert-Contains -Actual $scheduleScript -Expected 'return [Math]::Min(2, $ResourceCapacity)' -Message "The shared frontend derivation must use two physical units where available and remain admissible on smaller hosts."
 Assert-Contains -Actual $scheduleScript -Expected 'function Get-VerificationPreflightNestedProcessContractWeight {' -Message "Nested-process script contract admission must have one shared scheduling policy."
-Assert-True -Condition ([regex]::Matches($scheduleScript, [regex]::Escape('return [Math]::Min(3, $ResourceCapacity)')).Count -eq 2) -Message "Coverage and nested-process contracts must each reserve three logical units where available."
+Assert-Contains -Actual $scheduleScript -Expected 'function Get-VerificationPreflightTestPlanWeight {' -Message "Build-dependent test-plan preparation must have one shared scheduling policy."
+Assert-True -Condition ([regex]::Matches($scheduleScript, [regex]::Escape('return [Math]::Min(3, $ResourceCapacity)')).Count -eq 3) -Message "Coverage, nested-process contracts, and test-plan preparation must each reserve three logical units where available."
 Assert-Contains -Actual $scheduleScript -Expected 'function Assert-VerificationPreflightContractClassification {' -Message "Preflight script contract classification must have one shared fail-closed validator."
 Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationPreflightContractClassification -ContractScripts $contractScripts -CoverageContractScript "verify-coverage.tests.ps1" -NestedProcessContractScripts $preflightNestedProcessContractScripts -OrdinaryContractScripts $preflightOrdinaryContractScripts' -Message "The complete platform-applicable contract manifest must be classified before scheduling begins."
 Assert-Contains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "contract-verify-coverage.tests" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "verify-coverage.tests.ps1.log") -DependsOn @("build-pullrequest") -EstimatedDurationSeconds 75 -Weight $preflightCoverageContractWeight -ResourceClass "ProcessHeavy"' -Message "The coverage contract must retain its profile and an explicit successful-build dependency."
+Assert-Contains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "prepare-test-plan" -FileName $powerShellExecutable -Arguments $testPlanArguments -TimeoutSeconds 240 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "prepare-test-plan.log") -DependsOn @("build-pullrequest") -EstimatedDurationSeconds 60 -Weight $preflightTestPlanWeight -ResourceClass "ProcessHeavy"' -Message "Immutable output copying, discovery, and partition reconciliation must be one bounded build-dependent preflight phase."
+Assert-OccurrenceCount -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "prepare-test-plan"' -ExpectedCount 1 -Message "Test-plan preparation must have exactly one scheduler owner."
+Assert-Contains -Actual $prepareTestPlanScript -Expected 'Write-VerificationTestPreparationPlan -PlanPath $planPath' -Message "The child preparation phase must publish one authenticated schema-1 handoff only after partition reconciliation succeeds."
+Assert-Contains -Actual $testPlanScript -Expected 'Read-VerificationTestPreparationPlan' -Message "The parent verifier must hydrate the child plan through the exact shared schema reader."
+Assert-Contains -Actual $verifyScript -Expected '$isolations = @(Read-VerificationTestPreparationPlan -PlanPath $verificationTestPreparationPlanPath' -Message "Required gates must consume the validated build-dependent preparation plan instead of repeating output copying and discovery."
 Assert-Contains -Actual $verifyScript -Expected 'elseif ($preflightNestedProcessContractScripts -ccontains $contractScript) {' -Message "Known descendant-heavy script contracts must be classified explicitly before fail-closed rejection."
 Assert-Contains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 60 -Weight $preflightNestedProcessContractWeight -ResourceClass "ProcessHeavy"' -Message "Descendant-heavy script contracts must receive bounded process-heavy admission."
 Assert-Contains -Actual $verifyScript -Expected 'if ($preflightOrdinaryContractScripts -ccontains $contractScript) {' -Message "Only explicitly classified descendant-free contracts may receive the Ordinary profile."
@@ -88,9 +106,9 @@ Assert-OccurrenceCount -Actual $verifyScript -Expected 'Add-ProfiledRequiredGate
 Assert-NotContains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "format-csharp"' -Message "Combined C# formatting must not be duplicated in preflight."
 Assert-NotContains -Actual $verifyScript -Expected '@("format", "whitespace", "EmbodySense.sln"' -Message "Whitespace validation must not reload the solution separately."
 Assert-NotContains -Actual $verifyScript -Expected '@("format", "style", "EmbodySense.sln"' -Message "IDE1006 validation must not reload the solution separately."
-Assert-Contains -Actual $verifyScript -Expected 'coverage_dependency=build-pullrequest' -Message "The preflight plan must publish the exact coverage dependency edge."
+Assert-Contains -Actual $verifyScript -Expected 'coverage_dependency=build-pullrequest test_plan_dependency=build-pullrequest' -Message "The preflight plan must publish both exact build-dependent edges."
 Assert-Contains -Actual $verifyScript -Expected 'nested_process_contracts=$($preflightNestedProcessContractScripts.Count) ordinary_contracts=$($preflightOrdinaryContractScripts.Count)' -Message "The preflight plan must publish its exact classified contract inventory."
-Assert-Contains -Actual $verifyScript -Expected 'kind=discovery phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$hardwareBoundedResourceCapacity maximum_resource_capacity=$hardwareBoundedResourceCapacity' -Message "Canonical discovery must publish the same hardware-bounded worker and resource limits."
+Assert-NotContains -Actual $verifyScript -Expected 'kind=discovery phases=$($script:VerificationParallelPhases.Count)' -Message "Canonical discovery must not be repeated after the build-dependent preparation plan passes."
 Assert-OccurrenceCount -Actual $verifyScript -Expected 'Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers 1 | Out-Null' -ExpectedCount 1 -Message "The complete preflight DAG must have exactly one bounded scheduler invocation."
 Assert-Contains -Actual $verifyScript -Expected '$script:LastCompletedVerificationPhase = "pull-request-preflight"' -Message "Later failures must identify the successful preflight dependency boundary."
 Assert-Contains -Actual $verifyScript -Expected 'Invoke-CheckedNativePhase -Name "build-$($VerificationTier.ToLowerInvariant())" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900' -Message "Stress and browser-only verification must retain the sequential canonical build path."
@@ -131,17 +149,131 @@ try {
         $coverageWeight = Get-VerificationPreflightCoverageContractWeight -ResourceCapacity $admissionCase.Capacity
         $frontendWeight = Get-VerificationPreflightFrontendWeight -ResourceCapacity $admissionCase.Capacity
         $nestedProcessContractWeight = Get-VerificationPreflightNestedProcessContractWeight -ResourceCapacity $admissionCase.Capacity
+        $testPlanWeight = Get-VerificationPreflightTestPlanWeight -ResourceCapacity $admissionCase.Capacity
         $outputPath = Join-Path $admissionRoot "capacity-$($admissionCase.Capacity).log"
         Add-VerificationParallelPhase -Name "coverage-capacity-$($admissionCase.Capacity)" -FileName $powerShellExecutable -Arguments @("-NoProfile", "-Command", "exit 0") -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $outputPath -EstimatedDurationSeconds 75 -Weight $coverageWeight -ResourceClass "ProcessHeavy"
         $results = @(Invoke-VerificationParallelPhases -MaximumWorkers $admissionCase.Capacity -MaximumResourceCapacity $admissionCase.Capacity)
         Assert-True -Condition ($results.Count -eq 1 -and $results[0].Weight -eq $admissionCase.ExpectedCoverageWeight -and $results[0].ResourceClass -ceq "ProcessHeavy") -Message "Coverage contract capacity $($admissionCase.Capacity) must be admitted as ProcessHeavy with effective weight $($admissionCase.ExpectedCoverageWeight)."
         Assert-True -Condition ($frontendWeight -eq $admissionCase.ExpectedFrontendWeight) -Message "Frontend capacity $($admissionCase.Capacity) must derive effective weight $($admissionCase.ExpectedFrontendWeight)."
         Assert-True -Condition ($nestedProcessContractWeight -eq [Math]::Min(3, $admissionCase.Capacity)) -Message "Nested-process contract capacity $($admissionCase.Capacity) must reserve at most three preflight units."
+        Assert-True -Condition ($testPlanWeight -eq [Math]::Min(3, $admissionCase.Capacity)) -Message "Test-plan preparation capacity $($admissionCase.Capacity) must reserve at most three preflight units."
     }
 }
 finally {
     Reset-VerificationParallelPhaseState
     Remove-Item -LiteralPath $admissionRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$planFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-preflight-test-plan-" + [Guid]::NewGuid().ToString("N"))
+$planFixturePhysicalTempRoot = Join-Path $(if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)) { "/private/tmp" } else { [IO.Path]::GetTempPath() }) ("esp-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+New-Item -ItemType Directory -Path $planFixtureRoot, $planFixturePhysicalTempRoot | Out-Null
+try {
+    $fixtureProjectName = "EmbodySense.Fixture.Tests"
+    $fixtureProjectDirectory = Join-Path (Join-Path $planFixtureRoot "tests") $fixtureProjectName
+    $fixtureProjectPath = Join-Path $fixtureProjectDirectory "$fixtureProjectName.csproj"
+    $fixtureResultsRoot = Join-Path $planFixtureRoot "results"
+    $fixtureIsolationRoot = Join-Path $fixtureResultsRoot "CoverageIsolation"
+    $fixtureStandardResultsRoot = Join-Path $fixtureResultsRoot "StandardTests"
+    $fixturePhysicalTempRoot = $planFixturePhysicalTempRoot
+    $fixtureRunIdentity = [Guid]::NewGuid().ToString("N")
+    New-Item -ItemType Directory -Path $fixtureProjectDirectory, $fixtureResultsRoot | Out-Null
+    [IO.File]::WriteAllText($fixtureProjectPath, '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>', [Text.UTF8Encoding]::new($false))
+    $fixtureSourceDirectory = Join-Path $fixtureProjectDirectory "bin/Release/net10.0"
+    New-Item -ItemType Directory -Path $fixtureSourceDirectory | Out-Null
+    [IO.File]::WriteAllText((Join-Path $fixtureSourceDirectory "$fixtureProjectName.dll"), "fixture", [Text.UTF8Encoding]::new($false))
+    $fixtureProjectRoot = Join-Path $fixtureIsolationRoot $fixtureProjectName
+    $fixturePristineDirectory = Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $fixtureProjectRoot "canonical") -Configuration "Release" -TargetFramework "net10.0"
+    New-Item -ItemType Directory -Path $fixturePristineDirectory | Out-Null
+    Copy-Item -LiteralPath (Join-Path $fixtureSourceDirectory "$fixtureProjectName.dll") -Destination $fixturePristineDirectory
+    $fixtureCollectorDirectory = Join-Path $fixtureProjectRoot "Collector"
+    New-Item -ItemType Directory -Path $fixtureCollectorDirectory | Out-Null
+    [IO.File]::WriteAllText((Join-Path $fixtureCollectorDirectory "collector.dll"), "collector", [Text.UTF8Encoding]::new($false))
+    $fixtureRunSettingsPath = Join-Path $fixtureProjectRoot "verification-pull-request.runsettings"
+    $fixtureChildRoot = Split-Path -Parent $fixturePristineDirectory
+    $fixtureChildRunSettingsPath = Join-Path $fixtureChildRoot "verification-pull-request.runsettings"
+    [IO.File]::WriteAllText($fixtureRunSettingsPath, "<RunSettings />", [Text.UTF8Encoding]::new($false))
+    Copy-Item -LiteralPath $fixtureRunSettingsPath -Destination $fixtureChildRunSettingsPath
+    $fixtureLaneDirectory = Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $fixtureProjectRoot "all") -Configuration "Release" -TargetFramework "net10.0"
+    New-Item -ItemType Directory -Path $fixtureLaneDirectory | Out-Null
+    Copy-Item -LiteralPath (Join-Path $fixtureSourceDirectory "$fixtureProjectName.dll") -Destination $fixtureLaneDirectory
+    $fixtureLaneIdentity = "$fixtureProjectName-all"
+    $fixtureLaneRoot = Get-VerificationLaneFixturePath -PhysicalTempRoot $fixturePhysicalTempRoot -RunIdentity $fixtureRunIdentity -LaneIdentity $fixtureLaneIdentity
+    New-Item -ItemType Directory -Path $fixtureLaneRoot | Out-Null
+    $fixtureExceptions = [Collections.Generic.Dictionary[string, string[]]]::new([StringComparer]::Ordinal)
+    $fixtureOwnership = [pscustomobject]@{
+        CollectorVersion = "10.0.1"
+        RunSettingsSha256 = "a" * 64
+        OwnershipSha256 = "b" * 64
+        Owners = @([pscustomobject]@{ Package = "EmbodySense.Fixture"; SourceRoot = "src/EmbodySense.Fixture"; TestProject = $fixtureProjectName })
+        ProductionFiles = @("src/EmbodySense.Fixture/Fixture.cs")
+        ExceptionsByTestProject = $fixtureExceptions
+        TestProjectNames = @($fixtureProjectName)
+    }
+    $fixtureProject = [IO.FileInfo]::new($fixtureProjectPath)
+    $fixtureSelection = Get-VerificationCoverageSelection -Ownership $fixtureOwnership -TestProject $fixtureProject
+    $fixtureLaneDefinition = @(Get-VerificationTestProjectLanes -TestProject $fixtureProject)[0]
+    $fixtureLaneFilter = Get-VerificationTestLaneFilter -Lane $fixtureLaneDefinition
+    $fixtureSourceManifest = @(Get-VerificationDirectoryManifest -Directory $fixtureSourceDirectory)
+    $fixturePristineManifest = @(Get-VerificationDirectoryManifest -Directory $fixturePristineDirectory)
+    $fixtureIsolation = [pscustomobject]@{
+        Project = $fixtureProject
+        SourceDirectory = $fixtureSourceDirectory
+        SourceManifest = $fixtureSourceManifest
+        PristineDirectory = $fixturePristineDirectory
+        PristineManifest = $fixturePristineManifest
+        CollectorDirectory = $fixtureCollectorDirectory
+        RunSettingsPath = $fixtureRunSettingsPath
+        ChildRunSettingsPath = $fixtureChildRunSettingsPath
+        ChildInvocationsRoot = Join-Path $fixtureChildRoot "Invocations"
+        CoverageSelection = $fixtureSelection
+        ChildResultsPath = Join-Path $fixtureChildRoot "Results"
+        CanonicalAssemblyPath = Join-Path $fixturePristineDirectory "$fixtureProjectName.dll"
+        Lanes = @([pscustomobject]@{
+            Name = $fixtureLaneIdentity
+            ProjectName = $fixtureProjectName
+            ShardName = "all"
+            Filter = $fixtureLaneFilter
+            AssemblyPath = Join-Path $fixtureLaneDirectory "$fixtureProjectName.dll"
+            Directory = $fixtureLaneDirectory
+            Manifest = $fixturePristineManifest
+            ResultsPath = Join-Path $fixtureStandardResultsRoot $fixtureLaneIdentity
+            FixtureRoot = $fixtureLaneRoot
+            Environment = @{
+                EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $fixtureLaneRoot "catalog-trust"
+                TEMP = $fixtureLaneRoot
+                TMP = $fixtureLaneRoot
+                TMPDIR = $fixtureLaneRoot
+            }
+        })
+    }
+    $fixturePlanPath = Join-Path $fixtureResultsRoot "required-test-preparation.json"
+    Write-VerificationTestPreparationPlan -PlanPath $fixturePlanPath -RepositoryRoot $planFixtureRoot -VerificationResultsPath $fixtureResultsRoot -Configuration "Release" -SkipCoverage $false -CoverageOwnershipMode "Standard" -FixtureRunIdentity $fixtureRunIdentity -CoverageOwnership $fixtureOwnership -Isolations @($fixtureIsolation)
+    $hydrated = @(Read-VerificationTestPreparationPlan -PlanPath $fixturePlanPath -RepositoryRoot $planFixtureRoot -VerificationResultsPath $fixtureResultsRoot -CoverageIsolationRoot $fixtureIsolationRoot -StandardTestResultsRoot $fixtureStandardResultsRoot -VerificationPhysicalTempRoot $fixturePhysicalTempRoot -FixtureRunIdentity $fixtureRunIdentity -Configuration "Release" -SkipCoverage $false -CoverageOwnershipMode "Standard" -CoverageOwnership $fixtureOwnership -TestProjects @($fixtureProject))
+    Assert-True -Condition ($hydrated.Count -eq 1 -and $hydrated[0].Lanes.Count -eq 1 -and $hydrated[0].Lanes[0].Environment.Count -eq 4) -Message "The schema-1 handoff must hydrate one exact project/lane/environment topology."
+    $fixtureResiduePath = Join-Path $fixtureLaneRoot "unexpected-residue"
+    [IO.File]::WriteAllText($fixtureResiduePath, "residue", [Text.UTF8Encoding]::new($false))
+    try {
+        Read-VerificationTestPreparationPlan -PlanPath $fixturePlanPath -RepositoryRoot $planFixtureRoot -VerificationResultsPath $fixtureResultsRoot -CoverageIsolationRoot $fixtureIsolationRoot -StandardTestResultsRoot $fixtureStandardResultsRoot -VerificationPhysicalTempRoot $fixturePhysicalTempRoot -FixtureRunIdentity $fixtureRunIdentity -Configuration "Release" -SkipCoverage $false -CoverageOwnershipMode "Standard" -CoverageOwnership $fixtureOwnership -TestProjects @($fixtureProject) | Out-Null
+        throw "Expected a non-empty lane fixture root to fail."
+    }
+    catch {
+        Assert-Contains -Actual $_.Exception.Message -Expected "lane fixture root is not empty before execution" -Message "The parent handoff must fail closed if anything enters a reserved lane fixture root after child preparation."
+    }
+    Remove-Item -LiteralPath $fixtureResiduePath -Force
+    $invalidPlanPath = Join-Path $fixtureResultsRoot "invalid-test-preparation.json"
+    $invalidPlan = (Get-Content -LiteralPath $fixturePlanPath -Raw).Replace('"configuration": "Release"', '"configuration": "Debug"', [StringComparison]::Ordinal)
+    [IO.File]::WriteAllText($invalidPlanPath, $invalidPlan, [Text.UTF8Encoding]::new($false))
+    try {
+        Read-VerificationTestPreparationPlan -PlanPath $invalidPlanPath -RepositoryRoot $planFixtureRoot -VerificationResultsPath $fixtureResultsRoot -CoverageIsolationRoot $fixtureIsolationRoot -StandardTestResultsRoot $fixtureStandardResultsRoot -VerificationPhysicalTempRoot $fixturePhysicalTempRoot -FixtureRunIdentity $fixtureRunIdentity -Configuration "Release" -SkipCoverage $false -CoverageOwnershipMode "Standard" -CoverageOwnership $fixtureOwnership -TestProjects @($fixtureProject) | Out-Null
+        throw "Expected mismatched preparation configuration to fail."
+    }
+    catch {
+        Assert-Contains -Actual $_.Exception.Message -Expected "does not match its exact schema, configuration, coverage mode, or run identity" -Message "The schema-1 handoff must fail closed when its configuration is substituted."
+    }
+}
+finally {
+    Remove-Item -LiteralPath $planFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $planFixturePhysicalTempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 function Get-PreflightTimingArguments {
@@ -208,6 +340,9 @@ elseif ($Role -ceq "frontend") {
 elseif ($Role -ceq "coverage") {
     Start-Sleep -Milliseconds 400
 }
+elseif ($Role -ceq "prepare") {
+    Start-Sleep -Milliseconds 400
+}
 elseif ($Role.StartsWith("format-", [StringComparison]::Ordinal)) {
     Start-Sleep -Milliseconds 1000
 }
@@ -231,6 +366,7 @@ Write-Output "end=$([DateTime]::UtcNow.Ticks)"
     Reset-VerificationParallelPhaseState
     $buildOutputPath = Join-Path $behaviorRoot "build.log"
     $coverageOutputPath = Join-Path $behaviorRoot "coverage.log"
+    $prepareOutputPath = Join-Path $behaviorRoot "prepare.log"
     $frontendOutputPath = Join-Path $behaviorRoot "frontend.log"
     $ordinaryOutputPath = Join-Path $behaviorRoot "ordinary.log"
     $nestedFirstOutputPath = Join-Path $behaviorRoot "nested-first.log"
@@ -240,14 +376,16 @@ Write-Output "end=$([DateTime]::UtcNow.Ticks)"
     Add-VerificationParallelPhase -Name "frontend" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "frontend" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $frontendOutputPath -EstimatedDurationSeconds 70 -Weight 2 -ResourceClass "CpuBound"
     Add-VerificationParallelPhase -Name "ordinary" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "ordinary" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $ordinaryOutputPath -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
     Add-VerificationParallelPhase -Name "coverage" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "coverage" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $coverageOutputPath -DependsOn @("build") -EstimatedDurationSeconds 75 -Weight 3 -ResourceClass "ProcessHeavy"
+    Add-VerificationParallelPhase -Name "prepare" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "prepare" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $prepareOutputPath -DependsOn @("build") -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
     Add-VerificationParallelPhase -Name "nested-first" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-first" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $nestedFirstOutputPath -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
     Add-VerificationParallelPhase -Name "nested-second" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-second" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $nestedSecondOutputPath -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
     $overlapResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
-    Assert-True -Condition ($overlapResults.Count -eq 6 -and @($overlapResults | Where-Object { $_.ExitCode -ne 0 }).Count -eq 0) -Message "The bounded preflight DAG must complete its exact phase set successfully."
-    Assert-True -Condition (@($overlapResults | Select-Object -ExpandProperty Name | Sort-Object) -join "," -ceq "build,coverage,frontend,nested-first,nested-second,ordinary") -Message "The preflight DAG must contain only build, build-dependent coverage, frontend, nested contracts, and explicitly safe ordinary work."
+    Assert-True -Condition ($overlapResults.Count -eq 7 -and @($overlapResults | Where-Object { $_.ExitCode -ne 0 }).Count -eq 0) -Message "The bounded preflight DAG must complete its exact phase set successfully."
+    Assert-True -Condition (@($overlapResults | Select-Object -ExpandProperty Name | Sort-Object) -join "," -ceq "build,coverage,frontend,nested-first,nested-second,ordinary,prepare") -Message "The preflight DAG must contain only build-dependent coverage/preparation, frontend, nested contracts, and explicitly safe ordinary work."
 
     $buildTiming = Read-PreflightTiming -Path $buildOutputPath
     $coverageTiming = Read-PreflightTiming -Path $coverageOutputPath
+    $prepareTiming = Read-PreflightTiming -Path $prepareOutputPath
     $frontendTiming = Read-PreflightTiming -Path $frontendOutputPath
     $ordinaryTiming = Read-PreflightTiming -Path $ordinaryOutputPath
     $nestedFirstTiming = Read-PreflightTiming -Path $nestedFirstOutputPath
@@ -255,6 +393,8 @@ Write-Output "end=$([DateTime]::UtcNow.Ticks)"
     Assert-True -Condition ($frontendTiming.Start -lt $buildTiming.End -and $buildTiming.Start -lt $frontendTiming.End) -Message "The independent frontend chain must overlap the canonical build."
     Assert-True -Condition ($ordinaryTiming.Start -lt $buildTiming.End) -Message "A build-safe contract must backfill capacity after the faster frontend chain completes."
     Assert-True -Condition ($coverageTiming.Start -ge $buildTiming.End) -Message "The coverage contract must start only after the canonical build completes."
+    Assert-True -Condition ($prepareTiming.Start -ge $buildTiming.End) -Message "Test-plan preparation must start only after the canonical build completes."
+    Assert-True -Condition ($prepareTiming.Start -lt $coverageTiming.End -and $coverageTiming.Start -lt $prepareTiming.End) -Message "Coverage contracts and immutable test-plan preparation must overlap in the two admitted post-build process-heavy slots."
     Assert-True -Condition ($coverageTiming.Start -lt $ordinaryTiming.End -and $ordinaryTiming.Start -lt $coverageTiming.End) -Message "Coverage must backfill beside remaining build-safe work instead of extending the serialized post-build tail."
     foreach ($nestedTiming in @($nestedFirstTiming, $nestedSecondTiming)) {
         Assert-True -Condition ($nestedTiming.Start -lt $buildTiming.End -and $buildTiming.Start -lt $nestedTiming.End) -Message "Each descendant-heavy contract must consume the second process-heavy slot while the build is active."
@@ -406,19 +546,23 @@ $contractManifestIndex = $verifyScript.IndexOf('$contractScripts = @(', [StringC
 $browserIndex = $verifyScript.IndexOf('if ($RunBrowserE2E) {', [StringComparison]::Ordinal)
 $isolationIndex = $verifyScript.IndexOf('Write-Output "VERIFY_REQUIRED_TEST_CONTRACT', [StringComparison]::Ordinal)
 $buildIndex = $verifyScript.IndexOf('Add-VerificationParallelPhase -Name "build-pullrequest"', [StringComparison]::Ordinal)
+$testPlanIndex = $verifyScript.IndexOf('Add-VerificationParallelPhase -Name "prepare-test-plan"', [StringComparison]::Ordinal)
 $frontendIndex = $verifyScript.IndexOf('Add-VerificationParallelPhase -Name "frontend-preflight"', [StringComparison]::Ordinal)
 $coverageIndex = $verifyScript.IndexOf('Add-VerificationParallelPhase -Name "contract-verify-coverage.tests"', [StringComparison]::Ordinal)
 $nestedAdmissionIndex = $verifyScript.IndexOf('foreach ($contractScript in $contractScripts) {', [StringComparison]::Ordinal)
-$partitionIndex = $verifyScript.IndexOf('Invoke-CheckedNativePhase -Name "test-partition-reconciliation"', [StringComparison]::Ordinal)
+$planReadIndex = $verifyScript.IndexOf('$isolations = @(Read-VerificationTestPreparationPlan', [StringComparison]::Ordinal)
+$partitionIndex = $prepareTestPlanScript.IndexOf('& $powerShellExecutable @partitionArguments', [StringComparison]::Ordinal)
+$planWriteIndex = $prepareTestPlanScript.IndexOf('Write-VerificationTestPreparationPlan -PlanPath $planPath', [StringComparison]::Ordinal)
 $formatCSharpIndex = $verifyScript.IndexOf('Add-ProfiledRequiredGatePhase -Name "format-csharp"', [StringComparison]::Ordinal)
 $requiredGateInvocationIndex = $verifyScript.IndexOf('Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases)', [StringComparison]::Ordinal)
 Assert-True -Condition ($contractManifestIndex -ge 0 -and $contractManifestIndex -lt $buildIndex) -Message "Every script contract must be classified before any overlap phase is admitted."
-Assert-True -Condition ($buildIndex -lt $buildInvocationIndex -and $frontendIndex -lt $buildInvocationIndex -and $coverageIndex -lt $buildInvocationIndex -and $nestedAdmissionIndex -lt $buildInvocationIndex) -Message "Build, frontend, dependency-ordered coverage, and every classified contract must enter the same bounded DAG."
+Assert-True -Condition ($buildIndex -lt $buildInvocationIndex -and $testPlanIndex -lt $buildInvocationIndex -and $frontendIndex -lt $buildInvocationIndex -and $coverageIndex -lt $buildInvocationIndex -and $nestedAdmissionIndex -lt $buildInvocationIndex) -Message "Build, build-dependent preparation/coverage, frontend, and every classified contract must enter the same bounded DAG."
 Assert-True -Condition ($buildInvocationIndex -lt $preflightCompletionIndex) -Message "The complete preflight DAG must pass before its dependency boundary is recorded."
 Assert-True -Condition ($preflightCompletionIndex -ge 0 -and $preflightCompletionIndex -lt $browserIndex) -Message "Browser execution must wait for the complete preflight DAG."
-Assert-True -Condition ($preflightCompletionIndex -lt $isolationIndex) -Message "Isolation and discovery must wait for the complete preflight DAG."
+Assert-True -Condition ($preflightCompletionIndex -lt $isolationIndex -and $preflightCompletionIndex -lt $planReadIndex) -Message "Required-gate admission must wait for the complete preflight DAG and validated plan hydration."
 Assert-True -Condition ($frontendIndex -ge 0 -and $frontendIndex -lt $preflightCompletionIndex) -Message "Frontend install and tests must complete inside the preflight DAG."
-Assert-True -Condition ($partitionIndex -ge 0 -and $partitionIndex -lt $formatCSharpIndex) -Message "The combined read-only format gate must be admitted only after immutable lane creation, discovery, and exact partition reconciliation."
+Assert-True -Condition ($partitionIndex -ge 0 -and $planWriteIndex -gt $partitionIndex) -Message "The child phase must publish its plan only after exact partition reconciliation."
+Assert-True -Condition ($planReadIndex -ge 0 -and $planReadIndex -lt $formatCSharpIndex) -Message "The combined read-only format gate must be admitted only after the immutable plan is validated."
 Assert-True -Condition ($formatCSharpIndex -lt $requiredGateInvocationIndex) -Message "The authoritative combined format gate must execute inside the bounded required-gate schedule."
 
 Write-Output "Verifier preflight overlap and dependency-boundary contract tests passed ($assertionCount assertions)."

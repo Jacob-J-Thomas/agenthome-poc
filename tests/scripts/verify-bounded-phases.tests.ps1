@@ -12,6 +12,8 @@ $watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
 $coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
 $coverageEvidenceScriptPath = Join-Path $repoRoot "scripts\verification-coverage-evidence.ps1"
 $laneScriptPath = Join-Path $repoRoot "scripts\verification-test-lanes.ps1"
+$testPlanScriptPath = Join-Path $repoRoot "scripts\verification-test-plan.ps1"
+$prepareTestPlanScriptPath = Join-Path $repoRoot "scripts\prepare-verification-test-plan.ps1"
 $coverageEquivalenceScriptPath = Join-Path $repoRoot "scripts\verify-coverage-ownership-equivalence.ps1"
 $coverageEquivalenceCollectionScriptPath = Join-Path $repoRoot "scripts\collect-coverage-ownership-equivalence.ps1"
 $coverageEquivalenceWorkflowPath = Join-Path $repoRoot ".github\workflows\coverage-ownership-equivalence.yml"
@@ -149,6 +151,8 @@ $scheduleScript = Get-Content -LiteralPath $scheduleScriptPath -Raw
 $coverageScript = Get-Content -LiteralPath $coverageScriptPath -Raw
 $coverageEvidenceScript = Get-Content -LiteralPath $coverageEvidenceScriptPath -Raw
 $laneScript = Get-Content -LiteralPath $laneScriptPath -Raw
+$testPlanScript = Get-Content -LiteralPath $testPlanScriptPath -Raw
+$prepareTestPlanScript = Get-Content -LiteralPath $prepareTestPlanScriptPath -Raw
 $coverageEquivalenceScript = Get-Content -LiteralPath $coverageEquivalenceScriptPath -Raw
 $coverageEquivalenceCollectionScript = Get-Content -LiteralPath $coverageEquivalenceCollectionScriptPath -Raw
 $coverageEquivalenceWorkflow = Get-Content -LiteralPath $coverageEquivalenceWorkflowPath -Raw
@@ -176,7 +180,9 @@ Assert-Contains -Actual $phaseScript -Expected 'VERIFY_CHILD_TIMEOUT name=$Name'
 Assert-Contains -Actual $parallelScript -Expected 'Sort-Object -Property @{ Expression = "SchedulingPrioritySeconds"; Descending = $true }, @{ Expression = "EstimatedDurationSeconds"; Descending = $true }, @{ Expression = "Name"; Descending = $false }' -Message "Parallel phases must prioritize singleton-class backlog before deterministic longest-processing-time and exact-name ties."
 Assert-Contains -Actual $verifyScript -Expected '$hardwareProcessorCount = [Math]::Max(1, [Environment]::ProcessorCount)' -Message "The verifier must normalize the host processor count before deriving bounded concurrency."
 Assert-Contains -Actual $verifyScript -Expected '$hardwareBoundedResourceCapacity = [Math]::Min($MaximumTestWorkers, $hardwareProcessorCount)' -Message "Non-required parallel phases must retain hardware-bounded resource capacity."
-Assert-Contains -Actual $verifyScript -Expected 'Invoke-VerificationParallelPhases -MaximumWorkers $hardwareBoundedResourceCapacity -MaximumResourceCapacity $hardwareBoundedResourceCapacity | Out-Null' -Message "Preflight and discovery must remain bounded to physical hosted-runner capacity even when required gates request logical concurrency."
+Assert-Contains -Actual $verifyScript -Expected '$preflightMaximumWorkers = [Math]::Min(4, $hardwareBoundedResourceCapacity)' -Message "Preflight workers must remain bounded to physical hosted-runner capacity even when required gates request logical concurrency."
+Assert-Contains -Actual $verifyScript -Expected '$preflightResourceCapacity = [Math]::Min(8, [Math]::Max(1, $preflightMaximumWorkers * 2))' -Message "The preflight DAG must retain an explicit bounded logical resource capacity."
+Assert-Contains -Actual $verifyScript -Expected 'Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers 1 | Out-Null' -Message "Preflight execution must apply the physical worker bound and explicit resource-class ceilings."
 Assert-Contains -Actual $parallelScript -Expected 'cannot schedule phases beyond logical resource capacity' -Message "Declared phase weight must fail closed instead of adapting down to available capacity."
 Assert-Contains -Actual $parallelScript -Expected 'resource classes are underweighted' -Message "CPU-bound and process-heavy phases must fail closed when their declared weight is too small."
 Assert-Contains -Actual $parallelScript -Expected '$phase.EffectiveWeight = $phase.Weight' -Message "Scheduler evidence must preserve declared weights exactly."
@@ -187,10 +193,10 @@ Assert-Contains -Actual $parallelScript -Expected 'resource-class limits cannot 
 Assert-Contains -Actual $parallelScript -Expected '$Pending[$index].SchedulingDeferrals -ge 1' -Message "Backfill must reserve a later fitting opportunity for bypassed phases."
 Assert-Contains -Actual $parallelScript -Expected 'VERIFY_CHILD_TIMEOUT name=$($result.Name)' -Message "Parallel timeouts must emit structured watchdog evidence."
 Assert-Contains -Actual $verifyScript -Expected '$testLaneTimeoutSeconds = 480' -Message "Every required lane must fit inside the outer budget."
-Assert-Contains -Actual $verifyScript -Expected 'Get-ProjectCoverageIsolation' -Message "Every test project must execute from isolated exact-build copies."
-Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework' -Message "Every lane must preserve its bin/<Configuration>/<TargetFramework> AppContext suffix."
-Assert-Contains -Actual $verifyScript -Expected 'Copy-VerifiedDirectoryFromManifest -SourceDirectory $pristineDirectory -SourceManifest $pristineManifest -DestinationDirectory $laneDirectory' -Message "Every lane copy must use and verify the already authenticated pristine manifest."
-Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory' -Message "Persistence child-process coverage must receive a process-scoped immutable source."
+Assert-Contains -Actual $testPlanScript -Expected 'New-VerificationProjectCoverageIsolation' -Message "Every test project must execute from isolated exact-build copies."
+Assert-Contains -Actual $testPlanScript -Expected 'Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework' -Message "Every lane must preserve its bin/<Configuration>/<TargetFramework> AppContext suffix."
+Assert-Contains -Actual $testPlanScript -Expected 'Copy-VerifiedDirectoryFromManifest -SourceDirectory $pristineDirectory -SourceManifest $pristineManifest -DestinationDirectory $laneDirectory' -Message "Every lane copy must use and verify the already authenticated pristine manifest."
+Assert-Contains -Actual $testPlanScript -Expected 'EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory' -Message "Persistence child-process coverage must receive a process-scoped immutable source."
 Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationDirectoryManifest -Expected $isolation.PristineManifest -Directory $isolation.PristineDirectory' -Message "Every verifier run must re-hash the immutable pristine source after all child processes exit."
 Assert-Contains -Actual $coverageChildProcess -Expected 'AddExpectedTerminationVstestArguments' -Message "Intentional process-loss cases must retain an exact VSTest testhost path instead of a custom executable helper."
 Assert-Contains -Actual $coverageChildProcess -Expected 'AddUninstrumentedVstestArguments' -Message "Cross-process cases whose exact Windows reports add no unique production hits must retain the real VSTest identity without a redundant collector."
@@ -204,9 +210,9 @@ $frontierStoreTest = Get-Content -LiteralPath (Join-Path $repoRoot "tests/Embody
 Assert-Contains -Actual $frontierStoreTest -Expected 'CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(' -Message "The intentionally terminated frontier probe must not start a coverage collector that cannot finalize evidence."
 Assert-Contains -Actual $verifyScript -Expected 'Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())' -Message "Hosted verification must select the runner-owned ephemeral volume with a local fallback."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot' -Message "Lane fixture isolation must remain short, disjoint, and outside retained repository artifacts."
-Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."
+Assert-Contains -Actual $testPlanScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."
 foreach ($tempVariable in @("TEMP", "TMP", "TMPDIR")) {
-    Assert-Contains -Actual $verifyScript -Expected "$tempVariable = `$laneFixtureRoot" -Message "Every lane and descendant must use the fast isolated '$tempVariable' fixture root."
+    Assert-Contains -Actual $testPlanScript -Expected "$tempVariable = `$laneFixtureRoot" -Message "Every lane and descendant must use the fast isolated '$tempVariable' fixture root."
 }
 Assert-Contains -Actual $verifyScript -Expected 'Remove-Item -LiteralPath $laneFixtureRoot -Recurse -Force' -Message "Lane fixture roots must be cleaned after ordinary verifier completion."
 Assert-Contains -Actual $verifyScript -Expected '"vstest", $Lane.AssemblyPath' -Message "Test lanes must execute isolated assemblies."
@@ -292,8 +298,8 @@ $null = Invoke-ExpectedFailure -ExpectedMessage "unsafe fully-qualified-name pre
     New-VerificationTestLane -Name "unsafe" -IncludeFullyQualifiedName @("EmbodySense.Core.Common.Tests.TypeWithoutBoundary")
 }
 Assert-Contains -Actual $verifyScript -Expected 'Read-VerificationCoverageOwnership -ManifestPath $coverageOwnershipManifestPath -RepositoryRoot $repoRoot -TestProjects $testProjects' -Message "The verifier must validate the checked-in coverage ownership map against exact current source and test-project inventories before execution."
-Assert-Contains -Actual $verifyScript -Expected 'Write-VerificationCoverageRunSettings -SourcePath $pullRequestRunSettingsPath -DestinationPath $runSettingsPath -Selection $coverageSelection' -Message "Every canonical test lane must receive its fail-closed source-owned coverage filter."
-Assert-Contains -Actual $verifyScript -Expected 'Copy-Item -LiteralPath $runSettingsPath -Destination $childRunSettingsPath' -Message "Every child-process collector must inherit the exact parent ownership filter."
+Assert-Contains -Actual $testPlanScript -Expected 'Write-VerificationCoverageRunSettings -SourcePath $PullRequestRunSettingsPath -DestinationPath $runSettingsPath -Selection $coverageSelection' -Message "Every canonical test lane must receive its fail-closed source-owned coverage filter."
+Assert-Contains -Actual $testPlanScript -Expected 'Copy-Item -LiteralPath $runSettingsPath -Destination $childRunSettingsPath' -Message "Every child-process collector must inherit the exact parent ownership filter."
 Assert-Contains -Actual $laneScript -Expected '$Selection.IncludeAssemblyPatterns' -Message "Coverage ownership must restrict instrumentation to exact primary and exception-owner production assemblies."
 Assert-Contains -Actual $laneScript -Expected '$Selection.ExcludeByFilePatterns' -Message "Coverage ownership must derive Coverlet exclusions from the validated current source inventory."
 Assert-Contains -Actual $laneScript -Expected '$singleHit[0].InnerText -cne "true"' -Message "Generated lane settings must reject any attempt to weaken the canonical single-hit collector contract."
@@ -428,7 +434,7 @@ Assert-Contains -Actual $verifyScript -Expected 'maximum_process_heavy=$effectiv
 Assert-Contains -Actual $verifyScript -Expected '-MaximumProcessHeavyWorkers $effectiveRequiredGateMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers $effectiveRequiredGateMaximumCpuBoundWorkers' -Message "Required gate execution must apply both effective fail-closed resource-class limits."
 Assert-Contains -Actual $parallelScript -Expected '$running.Count -lt $MaximumWorkers' -Message "Logical resource capacity cannot bypass the explicit child-process ceiling."
 Assert-Contains -Actual $verifyScript -Expected 'identity=TestCase.Id partition_identity=XunitTestCaseUniqueID' -Message "Stable inventory identities must remain explicit."
-Assert-Contains -Actual $verifyScript -Expected 'verify-test-partition.ps1' -Message "Canonical discovery and declarative lane selection must be reconciled."
+Assert-Contains -Actual $prepareTestPlanScript -Expected 'verify-test-partition.ps1' -Message "Canonical discovery and declarative lane selection must be reconciled before the preparation plan is published."
 Assert-Contains -Actual $verifyScript -Expected 'Write-CoverageManifest' -Message "Coverage must be bound to an exact fresh report manifest."
 Assert-Contains -Actual $verifyScript -Expected 'kind=reconciliation' -Message "Inventory and coverage aggregation must overlap safely."
 Assert-Contains -Actual $verifyScript -Expected '-Name "git-diff-check"' -Message "The canonical verifier must retain git diff validation."

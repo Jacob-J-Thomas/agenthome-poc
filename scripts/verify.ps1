@@ -30,6 +30,7 @@ $verificationLogsPath = Join-Path $verificationResultsPath "Logs"
 $canonicalInventoryRoot = Join-Path $verificationResultsPath "Inventory\Canonical"
 $verificationInventoryPath = Join-Path $verificationResultsPath "required-execution-tests.json"
 $verificationPartitionReportPath = Join-Path $verificationResultsPath "required-test-partition.json"
+$verificationTestPreparationPlanPath = Join-Path $verificationResultsPath "required-test-preparation.json"
 $verificationInventoryReportPath = Join-Path $verificationResultsPath "required-test-report.json"
 $coverageIsolationRoot = Join-Path $verificationResultsPath "CoverageIsolation"
 $standardTestResultsRoot = Join-Path $verificationResultsPath "StandardTests"
@@ -48,6 +49,7 @@ $testLaneTimeoutSeconds = 480
 . (Join-Path $PSScriptRoot "verification-coverage-manifest.ps1")
 . (Join-Path $PSScriptRoot "verification-temp.ps1")
 . (Join-Path $PSScriptRoot "verification-test-lanes.ps1")
+. (Join-Path $PSScriptRoot "verification-test-plan.ps1")
 . (Join-Path $PSScriptRoot "verification-schedule.ps1")
 $hardwareProcessorCount = [Math]::Max(1, [Environment]::ProcessorCount)
 $hardwareBoundedResourceCapacity = [Math]::Min($MaximumTestWorkers, $hardwareProcessorCount)
@@ -90,142 +92,6 @@ function Invoke-CheckedNativePhase {
     )
 
     Invoke-VerificationPhase -Name $Name -FileName $FileName -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $repoRoot
-}
-
-function Get-TestProjectFilter {
-    param([System.IO.FileInfo]$TestProject)
-
-    if ($TestProject.Name -eq "EmbodySense.E2ETests.csproj") {
-        return "(FullyQualifiedName!~BrowserFlowTests)&(VerificationTier!=Stress)"
-    }
-
-    return "VerificationTier!=Stress"
-}
-
-function Get-ProjectCoverageIsolation {
-    param(
-        [System.IO.FileInfo]$TestProject,
-        [object[]]$Lanes,
-        [object]$CoverageOwnership
-    )
-
-    [xml]$project = Get-Content -LiteralPath $TestProject.FullName -Raw
-    $targetFrameworks = @($project.Project.PropertyGroup.TargetFramework | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-    if ($targetFrameworks.Count -ne 1) {
-        throw "Coverage isolation requires one explicit target framework in $($TestProject.Name)."
-    }
-
-    $targetFramework = [string]$targetFrameworks[0]
-    $sourceDirectory = Join-Path (Join-Path (Join-Path $TestProject.DirectoryName "bin") $Configuration) $targetFramework
-    $testAssemblyName = "$($TestProject.BaseName).dll"
-    if (-not (Test-Path -LiteralPath (Join-Path $sourceDirectory $testAssemblyName) -PathType Leaf)) {
-        throw "Coverage isolation source assembly is missing: $(Join-Path $sourceDirectory $testAssemblyName)"
-    }
-
-    $assetsPath = Join-Path $TestProject.DirectoryName "obj\project.assets.json"
-    if (-not (Test-Path -LiteralPath $assetsPath -PathType Leaf)) {
-        throw "Coverage isolation assets are missing: $assetsPath"
-    }
-
-    $assets = Get-Content -LiteralPath $assetsPath -Raw | ConvertFrom-Json
-    $coverletPackage = @($assets.libraries.PSObject.Properties.Name | Where-Object { $_.StartsWith("coverlet.collector/", [StringComparison]::OrdinalIgnoreCase) })
-    if ($coverletPackage.Count -ne 1) {
-        throw "Coverage isolation requires one resolved coverlet.collector package for $($TestProject.Name)."
-    }
-
-    $collectorSource = $null
-    foreach ($packageFolder in $assets.packageFolders.PSObject.Properties.Name) {
-        $candidate = Join-Path (Join-Path (Join-Path $packageFolder $coverletPackage[0]) "build") $targetFramework
-        if (Test-Path -LiteralPath $candidate -PathType Container) {
-            $collectorSource = $candidate
-            break
-        }
-    }
-    if ($null -eq $collectorSource) {
-        throw "Coverage isolation could not locate coverlet.collector binaries for $($TestProject.Name)."
-    }
-
-    $projectRoot = Join-Path $coverageIsolationRoot $TestProject.BaseName
-    $pristineDirectory = Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot "canonical") -Configuration $Configuration -TargetFramework $targetFramework
-    $collectorDirectory = Join-Path $projectRoot "Collector"
-    $runSettingsPath = Join-Path $projectRoot "verification-pull-request.runsettings"
-    $childCoverageRoot = Split-Path -Parent $pristineDirectory
-    $childCollectorDirectory = Join-Path $childCoverageRoot "Collector"
-    $childRunSettingsPath = Join-Path $childCoverageRoot "verification-pull-request.runsettings"
-    $childResultsPath = Join-Path $childCoverageRoot "Results"
-    $sourceManifest = @(Get-VerificationDirectoryManifest -Directory $sourceDirectory)
-    $pristineManifest = @(Copy-VerifiedDirectory -SourceDirectory $sourceDirectory -DestinationDirectory $pristineDirectory -Description "$($TestProject.BaseName) pristine copy")
-    [void](Copy-VerifiedDirectory -SourceDirectory $collectorSource -DestinationDirectory $collectorDirectory -Description "$($TestProject.BaseName) collector copy")
-    [void](Copy-VerifiedDirectory -SourceDirectory $collectorSource -DestinationDirectory $childCollectorDirectory -Description "$($TestProject.BaseName) child collector copy")
-    $coverageSelection = Get-VerificationCoverageSelection -Ownership $CoverageOwnership -TestProject $TestProject
-    if ($CoverageOwnershipMode -ceq "UnfilteredEvidence") {
-        Copy-Item -LiteralPath $pullRequestRunSettingsPath -Destination $runSettingsPath
-    }
-    else {
-        Write-VerificationCoverageRunSettings -SourcePath $pullRequestRunSettingsPath -DestinationPath $runSettingsPath -Selection $coverageSelection
-    }
-    Copy-Item -LiteralPath $runSettingsPath -Destination $childRunSettingsPath
-
-    $laneCopies = [Collections.Generic.List[object]]::new()
-    foreach ($lane in $Lanes) {
-        $laneDirectory = Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework
-        $laneManifest = @(Copy-VerifiedDirectoryFromManifest -SourceDirectory $pristineDirectory -SourceManifest $pristineManifest -DestinationDirectory $laneDirectory -Description "$($TestProject.BaseName)/$($lane.Name) lane copy")
-        $laneIdentity = "$($TestProject.BaseName)-$($lane.Name)"
-        $laneFixtureRoot = Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot -RunIdentity $verificationFixtureRunIdentity -LaneIdentity $laneIdentity
-        if (Test-Path -LiteralPath $laneFixtureRoot) {
-            throw "Verification lane temporary path collision for '$laneIdentity': $laneFixtureRoot"
-        }
-        New-Item -ItemType Directory -Path $laneFixtureRoot | Out-Null
-        $verificationLaneFixtureRoots.Add($laneFixtureRoot)
-        $laneEnvironment = @{
-            EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"
-            TEMP = $laneFixtureRoot
-            TMP = $laneFixtureRoot
-            TMPDIR = $laneFixtureRoot
-        }
-        if (-not $SkipCoverage -and $TestProject.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") {
-            $laneEnvironment.EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $pristineDirectory
-        }
-        $laneCopies.Add([pscustomobject]@{
-            Name = "$($TestProject.BaseName)-$($lane.Name)"
-            ProjectName = $TestProject.BaseName
-            ShardName = $lane.Name
-            Filter = if ($TestProject.Name -eq "EmbodySense.E2ETests.csproj") { Get-VerificationTestLaneFilter -Lane $lane -AdditionalExclusions @("BrowserFlowTests") } else { Get-VerificationTestLaneFilter -Lane $lane }
-            AssemblyPath = Join-Path $laneDirectory $testAssemblyName
-            Directory = $laneDirectory
-            Manifest = $laneManifest
-            ResultsPath = Join-Path $standardTestResultsRoot "$($TestProject.BaseName)-$($lane.Name)"
-            Environment = $laneEnvironment
-        })
-    }
-
-    return [pscustomobject]@{
-        Project = $TestProject
-        SourceDirectory = $sourceDirectory
-        SourceManifest = $sourceManifest
-        PristineDirectory = $pristineDirectory
-        PristineManifest = $pristineManifest
-        CollectorDirectory = $collectorDirectory
-        RunSettingsPath = $runSettingsPath
-        ChildRunSettingsPath = $childRunSettingsPath
-        ChildInvocationsRoot = Join-Path $childCoverageRoot "Invocations"
-        CoverageSelection = $coverageSelection
-        ChildResultsPath = $childResultsPath
-        CanonicalAssemblyPath = Join-Path $pristineDirectory $testAssemblyName
-        Lanes = @($laneCopies)
-    }
-}
-
-function Add-TestDiscoveryPhase {
-    param([string]$Name, [string]$AssemblyPath, [string]$Filter, [string]$OutputPath)
-
-    $diagnosticPath = [IO.Path]::ChangeExtension($OutputPath, ".diag.log")
-    $arguments = @("-NoProfile")
-    if ($runningOnWindows) {
-        $arguments += @("-ExecutionPolicy", "Bypass")
-    }
-    $arguments += @("-File", (Join-Path $PSScriptRoot "write-test-inventory.ps1"), "-TestAssemblyPath", $AssemblyPath, "-Filter", $Filter, "-OutputPath", $OutputPath, "-DiagnosticPath", $diagnosticPath, "-WorkingDirectory", $repoRoot)
-    Add-VerificationParallelPhase -Name "discover-$Name" -FileName $powerShellExecutable -Arguments $arguments -TimeoutSeconds 180 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "discover-$Name.log")
 }
 
 function Add-ProfiledRequiredGatePhase {
@@ -290,6 +156,25 @@ try {
     $script:LastCompletedVerificationPhase = "clean-test-results"
     Write-Output "VERIFY_PHASE_COMPLETE name=clean-test-results elapsed_seconds=$([Math]::Round($cleanupStarted.Elapsed.TotalSeconds, 3)) completed_at_utc=$([DateTimeOffset]::UtcNow.ToString("O"))"
 
+    $normalPullRequestVerification = $VerificationTier -eq "PullRequest" -and -not $BrowserE2EOnly
+    $testProjects = @()
+    if ($normalPullRequestVerification) {
+        $testProjects = @(Get-VerificationCanonicalTestProjects -RepositoryRoot $repoRoot)
+        $fixturePathComparer = if ($runningOnWindows) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+        $reservedFixtureRoots = [Collections.Generic.HashSet[string]]::new($fixturePathComparer)
+        foreach ($testProject in $testProjects) {
+            foreach ($lane in @(Get-VerificationTestProjectLanes -TestProject $testProject)) {
+                $laneIdentity = "$($testProject.BaseName)-$($lane.Name)"
+                $laneFixtureRoot = Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot -RunIdentity $verificationFixtureRunIdentity -LaneIdentity $laneIdentity
+                if (-not $reservedFixtureRoots.Add($laneFixtureRoot) -or (Test-Path -LiteralPath $laneFixtureRoot)) {
+                    throw "Verification lane temporary path collision for '$laneIdentity': $laneFixtureRoot"
+                }
+                New-Item -ItemType Directory -Path $laneFixtureRoot | Out-Null
+                $verificationLaneFixtureRoots.Add($laneFixtureRoot)
+            }
+        }
+    }
+
     $buildArguments = @("build")
     if ($SkipRestore) {
         $buildArguments += "--no-restore"
@@ -297,7 +182,6 @@ try {
     $buildArguments += if ($VerificationTier -eq "Stress") { $persistenceTestProjectPath } elseif ($BrowserE2EOnly) { $e2eProjectPath } else { "EmbodySense.sln" }
     $buildArguments += @("-c", $Configuration, "/p:RestoreIgnoreFailedSources=true")
 
-    $normalPullRequestVerification = $VerificationTier -eq "PullRequest" -and -not $BrowserE2EOnly
     if ($normalPullRequestVerification) {
         $contractScripts = @(
             "verify-preflight-overlap.tests.ps1",
@@ -330,8 +214,16 @@ try {
         $preflightCoverageContractWeight = Get-VerificationPreflightCoverageContractWeight -ResourceCapacity $preflightResourceCapacity
         $preflightFrontendWeight = Get-VerificationPreflightFrontendWeight -ResourceCapacity $preflightResourceCapacity
         $preflightNestedProcessContractWeight = Get-VerificationPreflightNestedProcessContractWeight -ResourceCapacity $preflightResourceCapacity
+        $preflightTestPlanWeight = Get-VerificationPreflightTestPlanWeight -ResourceCapacity $preflightResourceCapacity
 
         Add-VerificationParallelPhase -Name "build-pullrequest" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "build-pullrequest.log") -EstimatedDurationSeconds 90 -Weight $preflightProcessHeavyWeight -ResourceClass "ProcessHeavy"
+        $testPlanArguments = @("-NoProfile")
+        if ($runningOnWindows) {
+            $testPlanArguments += @("-ExecutionPolicy", "Bypass")
+        }
+        $testPlanArguments += @("-File", (Join-Path $PSScriptRoot "prepare-verification-test-plan.ps1"), "-RepositoryRoot", $repoRoot, "-VerificationResultsPath", $verificationResultsPath, "-VerificationPhysicalTempRoot", $verificationPhysicalTempRoot, "-FixtureRunIdentity", $verificationFixtureRunIdentity, "-Configuration", $Configuration, "-CoverageOwnershipMode", $CoverageOwnershipMode)
+        if ($SkipCoverage) { $testPlanArguments += "-SkipCoverage" }
+        Add-VerificationParallelPhase -Name "prepare-test-plan" -FileName $powerShellExecutable -Arguments $testPlanArguments -TimeoutSeconds 240 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "prepare-test-plan.log") -DependsOn @("build-pullrequest") -EstimatedDurationSeconds 60 -Weight $preflightTestPlanWeight -ResourceClass "ProcessHeavy"
         $frontendArguments = @("-NoProfile")
         if ($runningOnWindows) {
             $frontendArguments += @("-ExecutionPolicy", "Bypass")
@@ -357,7 +249,7 @@ try {
                 throw "Preflight script contract '$contractScript' reached execution without a resource classification."
             }
         }
-        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-preflight-dag phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers maximum_cpu_bound=1 build_weight=$preflightProcessHeavyWeight coverage_contract_weight=$preflightCoverageContractWeight frontend_weight=$preflightFrontendWeight nested_process_contract_weight=$preflightNestedProcessContractWeight nested_process_contracts=$($preflightNestedProcessContractScripts.Count) ordinary_contracts=$($preflightOrdinaryContractScripts.Count) coverage_dependency=build-pullrequest configuration=$Configuration"
+        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-preflight-dag phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers maximum_cpu_bound=1 build_weight=$preflightProcessHeavyWeight coverage_contract_weight=$preflightCoverageContractWeight frontend_weight=$preflightFrontendWeight nested_process_contract_weight=$preflightNestedProcessContractWeight test_plan_weight=$preflightTestPlanWeight nested_process_contracts=$($preflightNestedProcessContractScripts.Count) ordinary_contracts=$($preflightOrdinaryContractScripts.Count) coverage_dependency=build-pullrequest test_plan_dependency=build-pullrequest configuration=$Configuration"
         Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers 1 | Out-Null
         Reset-VerificationParallelPhaseState
         $script:LastCompletedVerificationPhase = "pull-request-preflight"
@@ -395,7 +287,6 @@ try {
     }
 
     Write-Output "VERIFY_REQUIRED_TEST_CONTRACT identity=TestCase.Id partition_identity=XunitTestCaseUniqueID filter=VerificationTier!=Stress"
-    $testProjects = @(Get-VerificationCanonicalTestProjects -RepositoryRoot $repoRoot)
     $coverageOwnership = Read-VerificationCoverageOwnership -ManifestPath $coverageOwnershipManifestPath -RepositoryRoot $repoRoot -TestProjects $testProjects
     Write-Output "VERIFY_COVERAGE_OWNERSHIP schema_version=1 ownership_sha256=$($coverageOwnership.OwnershipSha256) collector_version=$($coverageOwnership.CollectorVersion) source_files=$($coverageOwnership.ProductionFiles.Count) test_projects=$($testProjects.Count)"
     if ($CoverageOwnershipMode -cne "Standard") {
@@ -416,37 +307,11 @@ try {
         [IO.File]::WriteAllText($evidenceContextPath, ($evidenceContext | ConvertTo-Json -Depth 3), [Text.UTF8Encoding]::new($false))
         Write-Output "VERIFY_COVERAGE_OWNERSHIP_EVIDENCE_CONTEXT mode=$CoverageOwnershipMode head_sha=$headSha platform=$($evidenceContext.platform) path=$evidenceContextPath"
     }
-    $isolations = [Collections.Generic.List[object]]::new()
-    foreach ($testProject in $testProjects) {
-        $isolation = Get-ProjectCoverageIsolation -TestProject $testProject -Lanes @(Get-VerificationTestProjectLanes -TestProject $testProject) -CoverageOwnership $coverageOwnership
-        Write-Output "VERIFY_COVERAGE_SELECTION project=$($testProject.BaseName) selected_files=$($isolation.CoverageSelection.SelectedFiles.Count) excluded_files=$($isolation.CoverageSelection.ExcludedFiles.Count) primary_roots=$($isolation.CoverageSelection.PrimaryRoots.Count)"
-        $isolations.Add($isolation)
-    }
-
+    $isolations = @(Read-VerificationTestPreparationPlan -PlanPath $verificationTestPreparationPlanPath -RepositoryRoot $repoRoot -VerificationResultsPath $verificationResultsPath -CoverageIsolationRoot $coverageIsolationRoot -StandardTestResultsRoot $standardTestResultsRoot -VerificationPhysicalTempRoot $verificationPhysicalTempRoot -FixtureRunIdentity $verificationFixtureRunIdentity -Configuration $Configuration -SkipCoverage ([bool]$SkipCoverage) -CoverageOwnershipMode $CoverageOwnershipMode -CoverageOwnership $coverageOwnership -TestProjects $testProjects)
     foreach ($isolation in $isolations) {
-        Add-TestDiscoveryPhase -Name "canonical-$($isolation.Project.BaseName)" -AssemblyPath $isolation.CanonicalAssemblyPath -Filter (Get-TestProjectFilter -TestProject $isolation.Project) -OutputPath (Join-Path $canonicalInventoryRoot "$($isolation.Project.BaseName).json")
+        $testProject = $isolation.Project
+        Write-Output "VERIFY_COVERAGE_SELECTION project=$($testProject.BaseName) selected_files=$($isolation.CoverageSelection.SelectedFiles.Count) excluded_files=$($isolation.CoverageSelection.ExcludedFiles.Count) primary_roots=$($isolation.CoverageSelection.PrimaryRoots.Count)"
     }
-    Write-Output "VERIFY_PARALLEL_PLAN kind=discovery phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$hardwareBoundedResourceCapacity maximum_resource_capacity=$hardwareBoundedResourceCapacity"
-    Invoke-VerificationParallelPhases -MaximumWorkers $hardwareBoundedResourceCapacity -MaximumResourceCapacity $hardwareBoundedResourceCapacity | Out-Null
-    Reset-VerificationParallelPhaseState
-
-    $laneDefinitions = @($isolations | ForEach-Object {
-        $projectName = $_.Project.BaseName
-        foreach ($lane in $_.Lanes) {
-            [ordered]@{
-                name = $lane.Name
-                projectName = $projectName
-                filter = $lane.Filter
-            }
-        }
-    })
-    $laneDefinitionPath = Join-Path $verificationResultsPath "required-test-lanes.json"
-    [IO.File]::WriteAllText($laneDefinitionPath, ([ordered]@{ schemaVersion = 1; lanes = $laneDefinitions } | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
-
-    $partitionArguments = @("-NoProfile")
-    if ($runningOnWindows) { $partitionArguments += @("-ExecutionPolicy", "Bypass") }
-    $partitionArguments += @("-File", (Join-Path $PSScriptRoot "verify-test-partition.ps1"), "-CanonicalInventoryRoot", $canonicalInventoryRoot, "-LaneDefinitionPath", $laneDefinitionPath, "-ExpectedExecutionInventoryPath", $verificationInventoryPath, "-ReportPath", $verificationPartitionReportPath)
-    Invoke-CheckedNativePhase -Name "test-partition-reconciliation" -FileName $powerShellExecutable -Arguments $partitionArguments -TimeoutSeconds 120
 
     $coverageStartedUtc = [DateTime]::UtcNow
     Add-ProfiledRequiredGatePhase -Name "git-diff-check" -FileName "git" -Arguments @("diff", "--check") -TimeoutSeconds 60 -OutputPath (Join-Path $verificationLogsPath "git-diff-check.log")

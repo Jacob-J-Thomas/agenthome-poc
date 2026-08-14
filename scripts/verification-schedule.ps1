@@ -75,6 +75,16 @@ function Get-VerificationPreflightNestedProcessContractWeight {
     return [Math]::Min(3, $ResourceCapacity)
 }
 
+function Get-VerificationPreflightTestPlanWeight {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 8)]
+        [int]$ResourceCapacity
+    )
+
+    return [Math]::Min(3, $ResourceCapacity)
+}
+
 function Assert-VerificationPreflightContractClassification {
     param(
         [Parameter(Mandatory = $true)]
