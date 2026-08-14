@@ -224,7 +224,7 @@ public static class GovernedLoopExecutionStateMatrix
 
         return current switch
         {
-            GovernedLoopNodeExecutionStatus.Ready => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Skipped or GovernedLoopNodeExecutionStatus.Failed,
+            GovernedLoopNodeExecutionStatus.Ready => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Skipped or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
             GovernedLoopNodeExecutionStatus.Running => next is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Waiting or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
             GovernedLoopNodeExecutionStatus.Waiting => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
             GovernedLoopNodeExecutionStatus.ReviewBlocked => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Failed,
@@ -275,6 +275,9 @@ public static class GovernedLoopExecutionStateMatrix
                     && next.SkippedControlEdgeIds.Count == 0,
                 GovernedLoopNodeExecutionStatus.Running => next.Attempt == 1 && next.AttemptOperationId is not null,
                 GovernedLoopNodeExecutionStatus.Failed => next.Attempt == 1 && next.OutcomeEvidenceId is not null,
+                GovernedLoopNodeExecutionStatus.ReviewBlocked => next.Attempt == 1
+                    && next.AttemptOperationId is not null
+                    && next.OutcomeEvidenceId is not null,
                 _ => false
             };
         }

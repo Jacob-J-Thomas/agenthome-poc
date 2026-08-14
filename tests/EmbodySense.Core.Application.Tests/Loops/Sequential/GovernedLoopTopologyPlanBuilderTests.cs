@@ -174,6 +174,30 @@ public sealed class GovernedLoopTopologyPlanBuilderTests
     }
 
     [Fact]
+    public void Selected_join_cannot_depend_directly_on_a_prior_cycle_without_iteration_pruning_evidence()
+    {
+        var result = GovernedLoopTopologyPlanBuilder.Build(SelectedJoinAfterCycleArtifact());
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, result.Status);
+        Assert.Null(result.Plan);
+        Assert.Equal("$.graph.controlEdges", result.FailurePath);
+    }
+
+    [Fact]
+    public void Cycles_reject_unsupported_nodes_and_ambiguous_internal_successor_ordering()
+    {
+        var unsupportedNode = GovernedLoopTopologyPlanBuilder.Build(UnsupportedPureCycleArtifact());
+        var ambiguousOrdering = GovernedLoopTopologyPlanBuilder.Build(AmbiguousCycleOrderingArtifact());
+
+        Assert.All(new[] { unsupportedNode, ambiguousOrdering }, result =>
+        {
+            Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, result.Status);
+            Assert.Null(result.Plan);
+            Assert.Equal("$.graph.controlEdges", result.FailurePath);
+        });
+    }
+
+    [Fact]
     public void Duplicate_condition_outcome_and_incomplete_join_fail_before_plan_creation()
     {
         var source = BranchArtifact(GovernedLoopSequentialNodeDescriptors.SelectedJoin).Graph;
@@ -356,6 +380,114 @@ public sealed class GovernedLoopTopologyPlanBuilderTests
         };
         return Artifact(nodes, edges, StandardBindings(includeCondition: true, includeBranches: false));
     }
+
+    private static GovernedLoopGraphRevisionArtifact SelectedJoinAfterCycleArtifact()
+    {
+        var loopInference = BoundedInference("loop-infer", "Continue the bounded admitted cycle.");
+        var nodes = new[]
+        {
+            GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+            loopInference,
+            Condition("condition", includeCycleBudgets: true, "3", "5000"),
+            Identity("bypass"),
+            Join("join", GovernedLoopSequentialNodeDescriptors.SelectedJoin),
+            GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+        };
+        var edges = new[]
+        {
+            Edge("trigger-to-loop-infer", "trigger", "loop-infer", GovernedLoopControlCondition.Always),
+            Edge("trigger-to-bypass", "trigger", "bypass", GovernedLoopControlCondition.Always),
+            Edge("loop-infer-to-condition", "loop-infer", "condition", GovernedLoopControlCondition.Success),
+            Edge("condition-repeat", "condition", "loop-infer", GovernedLoopControlCondition.True),
+            Edge("condition-to-join", "condition", "join", GovernedLoopControlCondition.False),
+            Edge("bypass-to-join", "bypass", "join", GovernedLoopControlCondition.Success),
+            Edge("join-to-exit", "join", "exit", GovernedLoopControlCondition.Success),
+        };
+        var bindings = new GovernedLoopBindingDefinition[]
+        {
+            new("request-to-loop-infer", GovernedLoopBindingKind.Data, "trigger", "request", "loop-infer", "request"),
+            new("context-to-loop-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "loop-infer", "invocation-context"),
+            new("result-to-condition", GovernedLoopBindingKind.Data, "loop-infer", "result", "condition", GovernedLoopTopologyNodeVocabulary.ValuePort),
+            new("result-to-bypass", GovernedLoopBindingKind.Data, "loop-infer", "result", "bypass", GovernedLoopPureNodeVocabulary.InputPort),
+            new("result-to-exit", GovernedLoopBindingKind.Data, "loop-infer", "result", "exit", "result"),
+        };
+        return Artifact(nodes, edges, bindings);
+    }
+
+    private static GovernedLoopGraphRevisionArtifact UnsupportedPureCycleArtifact()
+    {
+        var nodes = new[]
+        {
+            GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+            Identity("identity"),
+            Condition("condition", includeCycleBudgets: true, "3", "5000"),
+            GovernedLoopSequentialApplicationTestFixture.Inference("infer"),
+            GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+        };
+        var edges = new[]
+        {
+            Edge("trigger-to-identity", "trigger", "identity", GovernedLoopControlCondition.Always),
+            Edge("identity-to-condition", "identity", "condition", GovernedLoopControlCondition.Success),
+            Edge("condition-repeat", "condition", "identity", GovernedLoopControlCondition.True),
+            Edge("condition-to-infer", "condition", "infer", GovernedLoopControlCondition.False),
+            Edge("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success),
+        };
+        var bindings = new GovernedLoopBindingDefinition[]
+        {
+            new("request-to-identity", GovernedLoopBindingKind.Data, "trigger", "request", "identity", GovernedLoopPureNodeVocabulary.InputPort),
+            new("identity-to-condition", GovernedLoopBindingKind.Data, "identity", GovernedLoopPureNodeVocabulary.OutputPort, "condition", GovernedLoopTopologyNodeVocabulary.ValuePort),
+            new("identity-to-infer", GovernedLoopBindingKind.Data, "identity", GovernedLoopPureNodeVocabulary.OutputPort, "infer", "request"),
+            new("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+            new("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+        };
+        return Artifact(nodes, edges, bindings);
+    }
+
+    private static GovernedLoopGraphRevisionArtifact AmbiguousCycleOrderingArtifact()
+    {
+        var nodes = new[]
+        {
+            GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+            BoundedInference("infer-a", "Start the bounded cycle."),
+            BoundedInference("infer-b", "Continue the left cycle path."),
+            BoundedInference("infer-c", "Continue the right cycle path."),
+            Condition("condition", includeCycleBudgets: true, "3", "5000"),
+            GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+        };
+        var edges = new[]
+        {
+            Edge("trigger-to-infer-a", "trigger", "infer-a", GovernedLoopControlCondition.Always),
+            Edge("infer-a-to-infer-b", "infer-a", "infer-b", GovernedLoopControlCondition.Success),
+            Edge("infer-a-to-infer-c", "infer-a", "infer-c", GovernedLoopControlCondition.Success),
+            Edge("infer-b-to-condition", "infer-b", "condition", GovernedLoopControlCondition.Success),
+            Edge("infer-c-to-condition", "infer-c", "condition", GovernedLoopControlCondition.Success),
+            Edge("condition-repeat", "condition", "infer-a", GovernedLoopControlCondition.True),
+            Edge("condition-exit", "condition", "exit", GovernedLoopControlCondition.False),
+        };
+        var bindings = new GovernedLoopBindingDefinition[]
+        {
+            new("request-to-infer-a", GovernedLoopBindingKind.Data, "trigger", "request", "infer-a", "request"),
+            new("context-to-infer-a", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer-a", "invocation-context"),
+            new("request-to-infer-b", GovernedLoopBindingKind.Data, "infer-a", "result", "infer-b", "request"),
+            new("context-to-infer-b", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer-b", "invocation-context"),
+            new("request-to-infer-c", GovernedLoopBindingKind.Data, "infer-a", "result", "infer-c", "request"),
+            new("context-to-infer-c", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer-c", "invocation-context"),
+            new("result-to-condition", GovernedLoopBindingKind.Data, "infer-b", "result", "condition", GovernedLoopTopologyNodeVocabulary.ValuePort),
+            new("result-to-exit", GovernedLoopBindingKind.Data, "infer-b", "result", "exit", "result"),
+        };
+        return Artifact(nodes, edges, bindings);
+    }
+
+    private static GovernedLoopNodeDefinition BoundedInference(string id, string instruction)
+        => GovernedLoopSequentialApplicationTestFixture.Inference(id, instruction) with
+        {
+            Parameters = new Dictionary<string, string>
+            {
+                ["instruction"] = instruction,
+                [GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter] = "3",
+                [GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter] = "5000",
+            },
+        };
 
     private static GovernedLoopGraphRevisionArtifact InferenceDecisionCycleArtifact()
     {

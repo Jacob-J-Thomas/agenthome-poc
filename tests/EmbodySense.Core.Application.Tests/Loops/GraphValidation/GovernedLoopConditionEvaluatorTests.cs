@@ -103,6 +103,43 @@ public sealed class GovernedLoopConditionEvaluatorTests
         Assert.Equal("condition.decision.contract", result.ErrorCode);
     }
 
+    [Fact]
+    public void Null_typed_values_fail_at_the_exact_condition_kind_boundary()
+    {
+        var boolean = GovernedLoopConditionEvaluator.Evaluate(
+            BooleanCondition(),
+            Value(GovernedLoopValueKind.Boolean, "null"));
+        var text = GovernedLoopConditionEvaluator.Evaluate(
+            ExactTextCondition("match"),
+            Value(GovernedLoopValueKind.Text, "null"));
+
+        Assert.Equal(GovernedLoopConditionEvaluationStatus.InvalidContract, boolean.Status);
+        Assert.Equal("condition.value.kind", boolean.ErrorCode);
+        Assert.Equal(GovernedLoopControlCondition.Unknown, boolean.SelectedOutcome);
+        Assert.Equal(GovernedLoopConditionEvaluationStatus.InvalidContract, text.Status);
+        Assert.Equal("condition.value.kind", text.ErrorCode);
+        Assert.Equal(GovernedLoopControlCondition.Unknown, text.SelectedOutcome);
+    }
+
+    [Fact]
+    public void Malformed_unicode_parameter_text_fails_closed_without_escaping_normalization()
+    {
+        var source = ModelDecisionCondition();
+        var malformed = source with
+        {
+            Parameters = new Dictionary<string, string>(source.Parameters, StringComparer.Ordinal)
+            {
+                [GovernedLoopTopologyNodeVocabulary.TrueDecisionParameter] = new string('\ud800', 1),
+            },
+        };
+
+        var result = GovernedLoopConditionEvaluator.Evaluate(malformed, Text("approve"));
+
+        Assert.Equal(GovernedLoopConditionEvaluationStatus.InvalidContract, result.Status);
+        Assert.Equal("condition.contract.invalid", result.ErrorCode);
+        Assert.Equal(GovernedLoopControlCondition.Unknown, result.SelectedOutcome);
+    }
+
     private static GovernedLoopNodeDefinition BooleanCondition()
         => Condition(
             GovernedLoopSequentialNodeDescriptors.BooleanCondition,

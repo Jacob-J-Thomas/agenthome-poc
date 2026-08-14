@@ -478,6 +478,63 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Canonical_recovered_open_pure_attempt_honors_cancellation_observed_at_the_durable_refresh_boundary()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact(role));
+        var retained = await CapturePureStartAsync(context, "identity");
+        var recoveryStore = new FakeRunStore(retained);
+        var recoveryAudit = new RecordingAuditLog();
+        var recovery = Assert.Single(await new CustomLoopRecoveryService(
+            recoveryStore,
+            recoveryAudit,
+            new FixedTimeProvider(_now.AddMinutes(1))).RecoverAsync(AuditSchema.Actors.Web));
+        Assert.Equal(CustomLoopRecoveryStatus.Paused, recovery.Status);
+        var resumed = ResumeReady(recovery.Run, "resume-open-pure-cancellation");
+        using var cancellation = new CancellationTokenSource();
+        var readCount = 0;
+        var store = new FakeRunStore(resumed)
+        {
+            BeforeGet = _ =>
+            {
+                if (++readCount == 2)
+                {
+                    cancellation.Cancel();
+                }
+            },
+        };
+        var executor = new QueueExecutor(Result("must not dispatch"));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(store, executor),
+            evidence,
+            evidence);
+
+        var result = await adapter.ResumeAsync(
+            new GovernedLoopSequentialOrderedResumeRequest(
+                1,
+                context.Anchor,
+                context.Plan,
+                context.Artifact,
+                resumed.LifecycleVersion,
+                "resume-open-pure-cancellation",
+                AuditSchema.Actors.Web),
+            cancellation.Token);
+
+        Assert.True(
+            result.Status == CustomLoopOrderedRunStatus.Cancelled,
+            $"{result.Status}: {result.Run?.Status}/{result.Run?.FailureCode}/{result.Run?.FailureDetail}: {result.Detail}");
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Empty(executor.Requests);
+        Assert.Single(result.Run.Events, item => IsPureStart(item, "identity"));
+        Assert.Single(result.Run.Events, item => IsPureRejection(item, "identity"));
+        Assert.Equal(GovernedLoopFrontierStatus.Cancelled, result.Run.Frontier!.Payload.Status);
+        Assert.True(CustomLoopRunValidator.Validate(result.Run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(result.Run).Errors));
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
     public async Task Canonical_cancelled_retained_pure_rejection_requires_recovery_attention()
     {
         var context = await SequentialContextAsync(
@@ -5864,9 +5921,13 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 && Equals(item.AuditEvent.Metadata.GetValueOrDefault("terminalStatus"), terminalStatus.ToString().ToLowerInvariant()));
         Assert.Equal(GovernedLoopSequentialAuditOperationId.ForTerminalLifecycle(terminalArtifactHash), terminalAudit.OperationId);
         Assert.Equal(terminalArtifactHash, terminalAudit.EvidenceHash);
-        Assert.Equal(
-            terminalStatus == CustomLoopRunStatus.Failed ? AuditSchema.Outcomes.Failed : AuditSchema.Outcomes.Succeeded,
-            terminalAudit.AuditEvent.Outcome);
+        var expectedOutcome = terminalStatus switch
+        {
+            CustomLoopRunStatus.Failed => AuditSchema.Outcomes.Failed,
+            CustomLoopRunStatus.NeedsReview => AuditSchema.Outcomes.NeedsReview,
+            _ => AuditSchema.Outcomes.Succeeded,
+        };
+        Assert.Equal(expectedOutcome, terminalAudit.AuditEvent.Outcome);
         Assert.DoesNotContain(
             legacyAudit.Events,
             item => item.Action == AuditSchema.Actions.LoopRunLifecycle && item.Metadata.ContainsKey("terminalStatus"));
@@ -7233,7 +7294,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
         public CustomLoopRunRecord Current { get; private set; }
 
-        public bool ReturnMissing { get; init; }
+        public bool ReturnMissing { get; set; }
 
         public Exception? GetException { get; set; }
 

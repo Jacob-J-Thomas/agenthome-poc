@@ -1020,12 +1020,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var frontier = started.Frontier;
         if (!isCompleted)
         {
-            var blocked = GovernedLoopSequentialFrontierMachine.ReviewBlockRunning(
-                started.Frontier,
+            var blocked = GovernedLoopSequentialFrontierMachine.ReviewBlockReady(
+                run.Frontier,
                 context.Anchor.AdapterBinding,
                 context.Plan,
                 node,
-                activation,
+                selection.Activation,
                 1,
                 attemptOperationId,
                 terminalEvent.EventId,

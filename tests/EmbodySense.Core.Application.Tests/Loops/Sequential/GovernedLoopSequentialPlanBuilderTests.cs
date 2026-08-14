@@ -432,6 +432,81 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
     }
 
     [Fact]
+    public void Entry_terminal_and_inference_outcome_substitutions_fail_at_the_structural_boundary()
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.LinearArtifact().Graph;
+        var invalidEntry = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == source.EntryNodeId
+                ? node with { Descriptor = GovernedLoopSequentialNodeDescriptors.ProviderInference }
+                : node).ToArray());
+        var invalidTerminal = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => source.TerminalNodeIds.Contains(node.Id, StringComparer.Ordinal)
+                ? node with { Descriptor = GovernedLoopSequentialNodeDescriptors.IdentityTransform }
+                : node).ToArray());
+        var invalidInferenceOutcome = GovernedLoopSequentialApplicationTestFixture.Artifact(
+            source.Nodes,
+            source.ControlEdges.Select(edge => edge.FromNodeId == "infer-01"
+                ? edge with { Condition = GovernedLoopControlCondition.Always }
+                : edge).ToArray(),
+            source.TerminalNodeIds,
+            source.OwningRole,
+            source.Bindings,
+            source.ValueSchemas,
+            source.OutputContract,
+            source.AuthorityCeiling);
+
+        Assert.Equal("$.graph.entryNodeId", GovernedLoopSequentialPlanBuilder.Build(invalidEntry).FailurePath);
+        Assert.Equal("$.graph.terminalNodeIds", GovernedLoopSequentialPlanBuilder.Build(invalidTerminal).FailurePath);
+        Assert.Equal("$.graph.controlEdges", GovernedLoopSequentialPlanBuilder.Build(invalidInferenceOutcome).FailurePath);
+        Assert.All(
+            new[] { invalidEntry, invalidTerminal, invalidInferenceOutcome },
+            artifact => Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, GovernedLoopSequentialPlanBuilder.Build(artifact).Status));
+    }
+
+    [Fact]
+    public void Exact_node_and_dataflow_contracts_reject_missing_parameters_extra_ports_and_nondominating_sources()
+    {
+        var pureSource = GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact().Graph;
+        var missingPureParameter = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            pureSource,
+            nodes: pureSource.Nodes.Select(node => node.Id == "validate-length"
+                ? node with
+                {
+                    Parameters = node.Parameters
+                        .Where(parameter => parameter.Key != GovernedLoopPureNodeVocabulary.MaximumParameter)
+                        .ToDictionary(StringComparer.Ordinal),
+                }
+                : node).ToArray());
+        var joinSource = GovernedLoopSequentialApplicationTestFixture.ParallelAllJoinArtifact().Graph;
+        var extraJoinPort = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            joinSource,
+            nodes: joinSource.Nodes.Select(node => node.Id == "join"
+                ? node with
+                {
+                    Ports =
+                    [
+                        .. node.Ports,
+                        GovernedLoopSequentialApplicationTestFixture.Port("unexpected", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+                    ],
+                }
+                : node).ToArray());
+        var nondominatingExitSource = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            joinSource,
+            bindings: joinSource.Bindings.Select(binding => binding.Id == "result-to-exit"
+                ? binding with { FromNodeId = "branch-a", FromPortId = GovernedLoopPureNodeVocabulary.OutputPort }
+                : binding).ToArray());
+
+        Assert.Equal("$.graph.nodes", GovernedLoopSequentialPlanBuilder.Build(missingPureParameter).FailurePath);
+        Assert.Equal("$.graph.nodes", GovernedLoopSequentialPlanBuilder.Build(extraJoinPort).FailurePath);
+        Assert.Equal("$.graph.bindings", GovernedLoopSequentialPlanBuilder.Build(nondominatingExitSource).FailurePath);
+        Assert.All(
+            new[] { missingPureParameter, extraJoinPort, nondominatingExitSource },
+            artifact => Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, GovernedLoopSequentialPlanBuilder.Build(artifact).Status));
+    }
+
+    [Fact]
     public void Missing_artifact_is_rejected_without_exception()
     {
         var result = GovernedLoopSequentialPlanBuilder.Build(null);
@@ -440,4 +515,5 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
         Assert.Null(result.Plan);
         Assert.Equal("$", result.FailurePath);
     }
+
 }

@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
@@ -71,6 +72,58 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(selectedNodeId, frontier.Payload.Nodes[arrival.SourceActivationOrdinal].NodeId);
         Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.TopologyNodeSkipped);
         Assert.Equal(["infer-01", "condition", selectedNodeId, "join", "exit"], evidence.Requests.Select(item => item.Dispatch.Node.NodeId));
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Canonical_unrecognized_model_decision_parks_attention_with_exact_route_evidence_and_no_branch_dispatch()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: ModelDecisionSelectedJoinArtifact);
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("not-an-admitted-decision"));
+        var audit = new RecordingAuditLog();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(store, executor, audit: audit),
+            evidence,
+            evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.True(
+            result.Status == CustomLoopOrderedRunStatus.NeedsReview,
+            $"{result.Status}: {result.Detail} {result.Run?.FailureCode}: {result.Run?.FailureDetail} Validation: {string.Join("; ", store.ValidationFailures.Select(item => item.Code + " at " + item.Field + ": " + item.Message))}");
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run!.Status);
+        Assert.Equal("canonical_condition_route_ambiguous", result.Run.FailureCode);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, result.Run.Frontier!.Payload.Status);
+        var condition = Assert.Single(result.Run.Frontier.Payload.Nodes, node => node.NodeId == "condition");
+        Assert.Equal(GovernedLoopNodeExecutionStatus.ReviewBlocked, condition.Status);
+        Assert.Null(condition.ControlOutcome);
+        Assert.Empty(condition.SelectedControlEdgeIds);
+        Assert.Empty(condition.SkippedControlEdgeIds);
+        Assert.DoesNotContain(result.Run.Frontier.Payload.Nodes, node => node.NodeId is "branch-a" or "branch-b" or "join" or "exit");
+        Assert.Single(executor.Requests);
+        var start = Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is
+        {
+            NodeId: "condition",
+            Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+        });
+        var attention = Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is
+        {
+            NodeId: "condition",
+            Kind: CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            Disposition: CustomLoopSequentialNodeDisposition.NeedsReview,
+        });
+        Assert.Single(evidence.AuditRequests, item => item.OperationId == GovernedLoopSequentialAuditOperationId.ForNodeStart(start.SequentialNodeEvidence!.EvidenceHash));
+        Assert.Single(evidence.AuditRequests, item => item.OperationId == GovernedLoopSequentialAuditOperationId.ForNodeOutcome(attention.SequentialNodeEvidence!.EvidenceHash));
+        AssertSequentialPureTerminalAuditOnce(result.Run, CustomLoopRunStatus.NeedsReview, evidence, audit);
         Assert.Empty(store.ValidationFailures);
     }
 
@@ -234,6 +287,72 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Theory]
+    [InlineData(TopologyClaimReadFailure.Unavailable, CustomLoopOrderedRunStatus.NeedsReview)]
+    [InlineData(TopologyClaimReadFailure.Missing, CustomLoopOrderedRunStatus.NotFound)]
+    [InlineData(TopologyClaimReadFailure.Corrupt, CustomLoopOrderedRunStatus.Conflict)]
+    [InlineData(TopologyClaimReadFailure.Diverged, CustomLoopOrderedRunStatus.Conflict)]
+    public async Task Cancelled_atomic_condition_claim_fails_closed_when_its_durable_outcome_cannot_be_proved(
+        TopologyClaimReadFailure readFailure,
+        CustomLoopOrderedRunStatus expectedStatus)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => ConditionalSelectedJoinArtifact(role));
+        var injected = false;
+        FakeRunStore? store = null;
+        store = new FakeRunStore(context.Run)
+        {
+            BeforeUpdate = (candidate, token) =>
+            {
+                if (injected || !HasTopologyDispatchStart(candidate, "condition"))
+                {
+                    return;
+                }
+
+                injected = true;
+                switch (readFailure)
+                {
+                    case TopologyClaimReadFailure.Unavailable:
+                        store!.GetException = new IOException("Simulated unavailable topology reconciliation read.");
+                        break;
+                    case TopologyClaimReadFailure.Missing:
+                        store!.ReturnMissing = true;
+                        break;
+                    case TopologyClaimReadFailure.Corrupt:
+                        store!.ReadSubstitutionFactory = current => current with { LifecycleVersion = 0 };
+                        break;
+                    case TopologyClaimReadFailure.Diverged:
+                        store!.ReadSubstitutionFactory = current => CreatePureControlSuccessor(
+                            current,
+                            CustomLoopRunStatus.PauseRequested,
+                            "pause-raced-atomic-topology-claim",
+                            "A concurrent controller paused while the atomic topology claim was unresolved.",
+                            current.UpdatedAtUtc.AddSeconds(1));
+                        break;
+                }
+
+                cancellation.Cancel();
+                token.ThrowIfCancellationRequested();
+            },
+        };
+        var executor = new QueueExecutor(Result("select-a"));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.RunAsync(
+            new GovernedLoopSequentialOrderedRunRequest(1, context.Anchor, context.Plan, context.Artifact, AuditSchema.Actors.Web),
+            cancellation.Token);
+
+        Assert.True(injected);
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Single(executor.Requests);
+        Assert.DoesNotContain(store.Current.Events, item => item.SequentialNodeEvidence?.NodeId == "condition");
+        Assert.DoesNotContain(store.Current.Events, item => item.StepId is "branch-a" or "branch-b");
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task Canonical_join_claim_cancellation_after_commit_adopts_exact_outcome_and_cancels_without_redispatch(
@@ -289,6 +408,257 @@ public sealed partial class CustomLoopOrderedRunnerTests
         AssertSequentialPureTerminalAuditOnce(result.Run, CustomLoopRunStatus.Cancelled, evidence, audit);
     }
 
+    [Theory]
+    [InlineData(false, "condition", "select-a", TopologyFrontierConflict.None, TopologyAuditFailure.None)]
+    [InlineData(true, "join", "fanout input", TopologyFrontierConflict.None, TopologyAuditFailure.None)]
+    [InlineData(false, "condition", "select-a", TopologyFrontierConflict.Matching, TopologyAuditFailure.None)]
+    [InlineData(false, "condition", "select-a", TopologyFrontierConflict.ReadUnavailable, TopologyAuditFailure.None)]
+    [InlineData(false, "condition", "select-a", TopologyFrontierConflict.Divergent, TopologyAuditFailure.None)]
+    [InlineData(false, "condition", "select-a", TopologyFrontierConflict.None, TopologyAuditFailure.StartConflict)]
+    [InlineData(false, "condition", "select-a", TopologyFrontierConflict.None, TopologyAuditFailure.StartUnavailable)]
+    [InlineData(false, "condition", "select-a", TopologyFrontierConflict.None, TopologyAuditFailure.OutcomeConflict)]
+    [InlineData(false, "condition", "select-a", TopologyFrontierConflict.None, TopologyAuditFailure.OutcomeUnavailable)]
+    public async Task Restart_recovery_reconciles_a_retained_topology_outcome_without_provider_or_pure_node_redispatch(
+        bool captureJoin,
+        string retainedNodeId,
+        string providerOutput,
+        TopologyFrontierConflict frontierConflict,
+        TopologyAuditFailure auditFailure)
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => captureJoin
+                ? ParallelJoinArtifact(role, GovernedLoopSequentialNodeDescriptors.AllJoin)
+                : ConditionalSelectedJoinArtifact(role));
+        CustomLoopRunRecord? retainedOutcome = null;
+        var crashingStore = new FakeRunStore(context.Run)
+        {
+            AfterUpdate = candidate =>
+            {
+                if (retainedOutcome is null
+                    && candidate.Events[^1] is
+                    {
+                        Kind: CustomLoopRunEventKind.NodeAttemptCompleted,
+                        SequentialNodeEvidence:
+                        {
+                            Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                        } evidence,
+                    }
+                    && string.Equals(evidence.NodeId, retainedNodeId, StringComparison.Ordinal))
+                {
+                    retainedOutcome = candidate;
+                    throw new IOException("Simulated process loss after the deterministic topology outcome became durable.");
+                }
+
+                return Task.CompletedTask;
+            },
+        };
+        var firstExecutor = new QueueExecutor(Result(providerOutput));
+        var firstEvidence = new SequentialEvidenceHarness(crashingStore, context.Evidence);
+        var firstAdapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(crashingStore, firstExecutor),
+            firstEvidence,
+            firstEvidence);
+
+        _ = await firstAdapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        var recoveryStore = new FakeRunStore(Assert.IsType<CustomLoopRunRecord>(retainedOutcome));
+        var recoveryAudit = new RecordingAuditLog();
+        var recovery = Assert.Single(await new CustomLoopRecoveryService(
+            recoveryStore,
+            recoveryAudit,
+            new FixedTimeProvider(_now.AddMinutes(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.Paused, recovery.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Running, recovery.Run.Frontier!.Payload.Nodes[^1].Status);
+        Assert.All(recoveryAudit.Events, item =>
+        {
+            Assert.Equal(false, item.Metadata["openAttemptAfterCheckpoint"]);
+            Assert.Equal(true, item.Metadata["restartSafeDeterministicAttemptAfterCheckpoint"]);
+        });
+
+        var resumable = ResumeReady(recovery.Run, $"resume-retained-{retainedNodeId}-outcome");
+        var matchingConflictInjected = false;
+        FakeRunStore? resumedStore = null;
+        resumedStore = new FakeRunStore(resumable)
+        {
+            RawConflictSuccessorFactory = (current, candidate) =>
+            {
+                if (frontierConflict == TopologyFrontierConflict.None
+                    || matchingConflictInjected
+                    || current.Frontier?.Payload.Nodes.SingleOrDefault(node => string.Equals(node.NodeId, retainedNodeId, StringComparison.Ordinal))?.Status != GovernedLoopNodeExecutionStatus.Running
+                    || candidate.Frontier?.Payload.Nodes.SingleOrDefault(node => string.Equals(node.NodeId, retainedNodeId, StringComparison.Ordinal))?.Status != GovernedLoopNodeExecutionStatus.Completed)
+                {
+                    return null;
+                }
+
+                matchingConflictInjected = true;
+                return frontierConflict switch
+                {
+                    TopologyFrontierConflict.Matching => candidate,
+                    TopologyFrontierConflict.ReadUnavailable => SetUnavailableAndReturn(candidate),
+                    TopologyFrontierConflict.Divergent => CreatePureControlSuccessor(
+                        current,
+                        CustomLoopRunStatus.PauseRequested,
+                        "pause-raced-topology-frontier",
+                        "A concurrent controller changed the durable run while topology advancement reconciled.",
+                        current.UpdatedAtUtc.AddSeconds(1)),
+                    _ => throw new InvalidOperationException("Unexpected topology-frontier conflict."),
+                };
+
+                CustomLoopRunRecord SetUnavailableAndReturn(CustomLoopRunRecord exactCandidate)
+                {
+                    resumedStore!.GetException = new IOException("Simulated unavailable topology-frontier reconciliation read.");
+                    return exactCandidate;
+                }
+            },
+        };
+        var resumedExecutor = new QueueExecutor();
+        var resumedEvidence = new SequentialEvidenceHarness(resumedStore, context.Evidence)
+        {
+            ForcedAuditStatusFactory = auditEvent => auditFailure switch
+            {
+                TopologyAuditFailure.StartConflict when auditEvent.Outcome == AuditSchema.Outcomes.Started
+                    => GovernedLoopSequentialAuditRecordStatus.Conflict,
+                TopologyAuditFailure.StartUnavailable when auditEvent.Outcome == AuditSchema.Outcomes.Started
+                    => GovernedLoopSequentialAuditRecordStatus.Unavailable,
+                TopologyAuditFailure.OutcomeConflict when auditEvent.Outcome == AuditSchema.Outcomes.Succeeded
+                    => GovernedLoopSequentialAuditRecordStatus.Conflict,
+                TopologyAuditFailure.OutcomeUnavailable when auditEvent.Outcome == AuditSchema.Outcomes.Succeeded
+                    => GovernedLoopSequentialAuditRecordStatus.Unavailable,
+                _ => null,
+            },
+        };
+        var resumedAdapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(resumedStore, resumedExecutor),
+            resumedEvidence,
+            resumedEvidence);
+
+        var resumed = await resumedAdapter.ResumeAsync(new GovernedLoopSequentialOrderedResumeRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            resumable.LifecycleVersion,
+            $"resume-retained-{retainedNodeId}-outcome",
+            AuditSchema.Actors.Web));
+
+        var expectedStatus = auditFailure != TopologyAuditFailure.None
+            || frontierConflict == TopologyFrontierConflict.ReadUnavailable
+                ? CustomLoopOrderedRunStatus.NeedsReview
+                : frontierConflict == TopologyFrontierConflict.Divergent
+                    ? CustomLoopOrderedRunStatus.InvalidState
+                    : CustomLoopOrderedRunStatus.Completed;
+        Assert.True(
+            resumed.Status == expectedStatus,
+            $"Expected {expectedStatus}, received {resumed.Status}: {resumed.Detail} {resumed.Run?.FailureCode}/{resumed.Run?.FailureDetail}");
+        Assert.Single(firstExecutor.Requests);
+        Assert.Empty(resumedExecutor.Requests);
+        var durableAfterResume = resumed.Run ?? resumedStore.Current;
+        var retainedCompletion = Assert.Single(durableAfterResume.Events, item => item.SequentialNodeEvidence is
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+        } evidence && string.Equals(evidence.NodeId, retainedNodeId, StringComparison.Ordinal));
+        var outcomeAudits = resumedEvidence.AuditRequests.Where(
+            item => string.Equals(
+                item.OperationId,
+                GovernedLoopSequentialAuditOperationId.ForNodeOutcome(retainedCompletion.SequentialNodeEvidence!.EvidenceHash),
+                StringComparison.Ordinal)).ToArray();
+        Assert.Equal(
+            auditFailure is TopologyAuditFailure.StartConflict or TopologyAuditFailure.StartUnavailable ? 0 : 1,
+            outcomeAudits.Length);
+        if (auditFailure != TopologyAuditFailure.None)
+        {
+            Assert.Equal(auditFailure switch
+            {
+                TopologyAuditFailure.StartConflict => "canonical_start_audit_conflict",
+                TopologyAuditFailure.StartUnavailable => "canonical_start_audit_unavailable",
+                TopologyAuditFailure.OutcomeConflict => "canonical_outcome_audit_conflict",
+                TopologyAuditFailure.OutcomeUnavailable => "canonical_outcome_audit_unavailable",
+                _ => throw new InvalidOperationException("Unexpected topology audit failure."),
+            }, resumed.Run!.FailureCode);
+        }
+
+        Assert.Equal(frontierConflict != TopologyFrontierConflict.None, matchingConflictInjected);
+        Assert.Empty(resumedStore.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Resume_of_a_legacy_running_topology_claim_without_terminal_route_parks_review_without_re_evaluation()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: ConditionalSelectedJoinArtifact);
+        CustomLoopRunRecord? retainedAtomicClaim = null;
+        var interruptedStore = new FakeRunStore(context.Run)
+        {
+            AfterUpdate = candidate =>
+            {
+                if (retainedAtomicClaim is null
+                    && candidate.Events[^1].SequentialNodeEvidence is
+                    {
+                        NodeId: "condition",
+                        Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                    })
+                {
+                    retainedAtomicClaim = candidate;
+                    throw new IOException("Simulated loss after the atomic topology write for legacy-trace reconstruction.");
+                }
+
+                return Task.CompletedTask;
+            },
+        };
+        var firstExecutor = new QueueExecutor(Result("select-a"));
+        var firstEvidence = new SequentialEvidenceHarness(interruptedStore, context.Evidence);
+        var firstAdapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(interruptedStore, firstExecutor),
+            firstEvidence,
+            firstEvidence);
+
+        _ = await firstAdapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        var atomicClaim = Assert.IsType<CustomLoopRunRecord>(retainedAtomicClaim);
+        Assert.Equal(CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, atomicClaim.Events[^1].SequentialNodeEvidence!.Kind);
+        var legacyStartOnly = atomicClaim with { Events = atomicClaim.Events[..^1] };
+        var legacyValidation = CustomLoopRunValidator.Validate(legacyStartOnly);
+        Assert.True(legacyValidation.IsValid, string.Join(Environment.NewLine, legacyValidation.Errors));
+        var resumable = ResumeReady(legacyStartOnly, "resume-legacy-running-topology-claim");
+        var resumedStore = new FakeRunStore(resumable);
+        var resumedExecutor = new QueueExecutor();
+        var resumedEvidence = new SequentialEvidenceHarness(resumedStore, context.Evidence);
+        var resumedAdapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(resumedStore, resumedExecutor),
+            resumedEvidence,
+            resumedEvidence);
+
+        var result = await resumedAdapter.ResumeAsync(new GovernedLoopSequentialOrderedResumeRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            resumable.LifecycleVersion,
+            "resume-legacy-running-topology-claim",
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal("canonical_open_frontier_attempt_requires_review", result.Run!.FailureCode);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run.Status);
+        Assert.Single(firstExecutor.Requests);
+        Assert.Empty(resumedExecutor.Requests);
+        Assert.DoesNotContain(result.Run.Events, item => item.StepId is "branch-a" or "branch-b");
+        Assert.Empty(resumedStore.ValidationFailures);
+    }
+
     [Fact]
     public async Task Canonical_cycle_duration_expiry_before_claim_does_not_start_or_dispatch_the_second_provider_visit()
     {
@@ -338,6 +708,62 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Empty(store.ValidationFailures);
     }
 
+    [Fact]
+    public async Task Canonical_cycle_iteration_exhaustion_does_not_create_or_dispatch_an_unadmitted_third_visit()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => ProviderConditionCycleArtifact(role, maximumDurationMilliseconds: 60_000));
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("continue"), Result("continue"), Result("must not dispatch"));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, executor), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal("canonical_topology_frontier_advancement_failed", result.Run!.FailureCode);
+        Assert.Equal(2, executor.Requests.Count);
+        Assert.Equal(2, executor.ProviderRequestStartedCount);
+        var inferenceStarts = result.Run.Events
+            .Where(item => item.SequentialNodeEvidence is { NodeId: "infer-01", Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted })
+            .OrderBy(item => item.SequentialNodeEvidence!.VisitOrdinal)
+            .ToArray();
+        Assert.Equal([1, 2], inferenceStarts.Select(item => item.SequentialNodeEvidence!.VisitOrdinal).ToArray());
+        Assert.DoesNotContain(result.Run.Frontier!.Payload.Nodes, node => node.NodeId == "infer-01" && node.VisitOrdinal == 3);
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    public enum TopologyClaimReadFailure
+    {
+        Unavailable,
+        Missing,
+        Corrupt,
+        Diverged,
+    }
+
+    public enum TopologyAuditFailure
+    {
+        None,
+        StartConflict,
+        StartUnavailable,
+        OutcomeConflict,
+        OutcomeUnavailable,
+    }
+
+    public enum TopologyFrontierConflict
+    {
+        None,
+        Matching,
+        ReadUnavailable,
+        Divergent,
+    }
+
     private static bool HasTopologyDispatchStart(CustomLoopRunRecord run, string nodeId)
         => run.Events.Any(item => item.SequentialNodeEvidence is
         {
@@ -367,6 +793,45 @@ public sealed partial class CustomLoopOrderedRunnerTests
             Edge("join-to-exit", "join", "exit", GovernedLoopControlCondition.Success),
         };
         return TopologyArtifact(nodes, edges, owningRole, includeCondition: true);
+    }
+
+    private static GovernedLoopGraphRevisionArtifact ModelDecisionSelectedJoinArtifact(ContextualRoleRevisionPin owningRole)
+    {
+        var nodes = new[]
+        {
+            GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+            GovernedLoopSequentialApplicationTestFixture.Inference("infer-01"),
+            new GovernedLoopNodeDefinition(
+                "condition",
+                GovernedLoopSequentialNodeDescriptors.ModelDecisionCondition,
+                [GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopTopologyNodeVocabulary.DecisionPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>
+                {
+                    [GovernedLoopTopologyNodeVocabulary.TrueDecisionParameter] = "approve",
+                    [GovernedLoopTopologyNodeVocabulary.FalseDecisionParameter] = "reject",
+                }),
+            Identity("branch-a"),
+            Identity("branch-b"),
+            Join("join", GovernedLoopSequentialNodeDescriptors.SelectedJoin),
+            GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+        };
+        var edges = new[]
+        {
+            Edge("trigger-to-infer", "trigger", "infer-01", GovernedLoopControlCondition.Always),
+            Edge("infer-to-condition", "infer-01", "condition", GovernedLoopControlCondition.Success),
+            Edge("condition-true", "condition", "branch-a", GovernedLoopControlCondition.True),
+            Edge("condition-false", "condition", "branch-b", GovernedLoopControlCondition.False),
+            Edge("branch-a-to-join", "branch-a", "join", GovernedLoopControlCondition.Success),
+            Edge("branch-b-to-join", "branch-b", "join", GovernedLoopControlCondition.Success),
+            Edge("join-to-exit", "join", "exit", GovernedLoopControlCondition.Success),
+        };
+        return TopologyArtifact(
+            nodes,
+            edges,
+            owningRole,
+            includeCondition: true,
+            conditionPortId: GovernedLoopTopologyNodeVocabulary.DecisionPort);
     }
 
     private static GovernedLoopGraphRevisionArtifact ParallelJoinArtifact(
@@ -448,7 +913,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
         IReadOnlyList<GovernedLoopNodeDefinition> nodes,
         IReadOnlyList<GovernedLoopControlEdgeDefinition> edges,
         ContextualRoleRevisionPin owningRole,
-        bool includeCondition)
+        bool includeCondition,
+        string conditionPortId = GovernedLoopTopologyNodeVocabulary.ValuePort)
     {
         var bindings = new List<GovernedLoopBindingDefinition>
         {
@@ -460,7 +926,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
         };
         if (includeCondition)
         {
-            bindings.Add(new GovernedLoopBindingDefinition("result-to-condition", GovernedLoopBindingKind.Data, "infer-01", "result", "condition", GovernedLoopTopologyNodeVocabulary.ValuePort));
+            bindings.Add(new GovernedLoopBindingDefinition("result-to-condition", GovernedLoopBindingKind.Data, "infer-01", "result", "condition", conditionPortId));
         }
 
         return GovernedLoopSequentialApplicationTestFixture.Artifact(nodes, edges, ["exit"], owningRole, bindings);

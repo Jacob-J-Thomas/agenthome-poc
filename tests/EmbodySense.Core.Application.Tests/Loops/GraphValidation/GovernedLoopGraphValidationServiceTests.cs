@@ -174,6 +174,66 @@ public sealed class GovernedLoopGraphValidationServiceTests
     }
 
     [Fact]
+    public async Task ValidateRejectsTopologyNodesWhoseInstanceSchemaBreaksTheExactReservedContract()
+    {
+        var source = CandidateFromGraph(GovernedLoopSequentialApplicationTestFixture.ParallelAllJoinArtifact().Graph);
+        var candidate = source with
+        {
+            Nodes = source.Nodes!.Select(node => string.Equals(node!.Id, "join", StringComparison.Ordinal)
+                ? node with
+                {
+                    Ports =
+                    [
+                        .. node.Ports,
+                        new GovernedLoopPortDefinition(
+                            "unexpected",
+                            GovernedLoopPortDirection.Output,
+                            GovernedLoopBindingKind.Data,
+                            "text",
+                            true),
+                    ],
+                }
+                : node).ToArray(),
+        };
+
+        var result = await Service(ExactTopologyCatalog(candidate)).ValidateAsync(candidate);
+
+        Assert.Contains(
+            result.Errors,
+            error => error.Code == "node.topology-schema-contract.incompatible"
+                && error.Element.Kind == GovernedLoopGraphElementKind.Node
+                && error.Element.Id == "join"
+                && error.Element.Path == "graph.nodes[join]");
+    }
+
+    [Fact]
+    public async Task ValidateRejectsDuplicateRequiredConditionOutcomesAsAmbiguous()
+    {
+        var source = TopologyConditionCandidate();
+        var candidate = source with
+        {
+            ControlEdges =
+            [
+                .. source.ControlEdges!,
+                new GovernedLoopControlEdgeDefinition(
+                    "condition-true-copy",
+                    "condition",
+                    "branch-b",
+                    GovernedLoopControlCondition.True),
+            ],
+        };
+
+        var result = await Service(ExactTopologyCatalog(candidate)).ValidateAsync(candidate);
+
+        Assert.Contains(
+            result.Errors,
+            error => error.Code == "node.branch-outcome.ambiguous"
+                && error.Element.Kind == GovernedLoopGraphElementKind.Node
+                && error.Element.Id == "condition"
+                && error.Element.Path == "graph.nodes[condition]");
+    }
+
+    [Fact]
     public async Task ValidateAdmitsCanonicalMultiKindPortsAndHashesTheExactAllowedSet()
     {
         var candidate = Candidate();
@@ -1334,6 +1394,15 @@ public sealed class GovernedLoopGraphValidationServiceTests
             .. GovernedLoopPureNodeCatalogContract.Descriptors,
         ];
 
+    private static GovernedLoopNodeCatalogDescriptor[] ExactTopologyCatalog(GovernedLoopGraphCandidate candidate)
+        =>
+        [
+            .. Descriptors(candidate)
+                .Where(descriptor => !GovernedLoopTopologyNodeCatalogContract.TryResolve(descriptor.Descriptor, out _))
+                .DistinctBy(descriptor => descriptor.Descriptor),
+            .. GovernedLoopTopologyNodeCatalogContract.Descriptors,
+        ];
+
     private static IReadOnlyList<(string Name, string NodeId, GovernedLoopGraphCandidate Candidate)> InvalidPureSemanticCandidates()
     {
         var mixed = CandidateFromGraph(GovernedLoopSequentialApplicationTestFixture.MixedPureArtifact().Graph);
@@ -1588,6 +1657,77 @@ public sealed class GovernedLoopGraphValidationServiceTests
                 new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
             ],
             authorityCeiling: GovernedLoopAuthorityCeiling.Create([]));
+        return CandidateFromGraph(artifact.Graph);
+    }
+
+    private static GovernedLoopGraphCandidate TopologyConditionCandidate()
+    {
+        var condition = new GovernedLoopNodeDefinition(
+            "condition",
+            GovernedLoopSequentialNodeDescriptors.ExactTextCondition,
+            [
+                GovernedLoopSequentialApplicationTestFixture.Port(
+                    GovernedLoopTopologyNodeVocabulary.ValuePort,
+                    GovernedLoopPortDirection.Input,
+                    GovernedLoopBindingKind.Data),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>
+            {
+                [GovernedLoopTopologyNodeVocabulary.ExpectedParameter] = "approve",
+            });
+        var nodes = new GovernedLoopNodeDefinition[]
+        {
+            GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+            GovernedLoopSequentialApplicationTestFixture.Inference("infer"),
+            condition,
+            new(
+                "branch-a",
+                GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+                [
+                    GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                    GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+                ],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>()),
+            new(
+                "branch-b",
+                GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+                [
+                    GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                    GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+                ],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>()),
+            new(
+                "join",
+                GovernedLoopSequentialNodeDescriptors.SelectedJoin,
+                [],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>()),
+            GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+        };
+        var artifact = GovernedLoopSequentialApplicationTestFixture.Artifact(
+            nodes,
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("infer-to-condition", "infer", "condition", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("condition-true", "condition", "branch-a", GovernedLoopControlCondition.True),
+                new GovernedLoopControlEdgeDefinition("condition-false", "condition", "branch-b", GovernedLoopControlCondition.False),
+                new GovernedLoopControlEdgeDefinition("branch-a-to-join", "branch-a", "join", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("branch-b-to-join", "branch-b", "join", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("join-to-exit", "join", "exit", GovernedLoopControlCondition.Success),
+            ],
+            ["exit"],
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new GovernedLoopBindingDefinition("result-to-condition", GovernedLoopBindingKind.Data, "infer", "result", "condition", GovernedLoopTopologyNodeVocabulary.ValuePort),
+                new GovernedLoopBindingDefinition("result-to-branch-a", GovernedLoopBindingKind.Data, "infer", "result", "branch-a", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("result-to-branch-b", GovernedLoopBindingKind.Data, "infer", "result", "branch-b", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ]);
         return CandidateFromGraph(artifact.Graph);
     }
 

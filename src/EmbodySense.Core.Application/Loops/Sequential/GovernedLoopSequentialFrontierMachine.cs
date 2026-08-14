@@ -286,6 +286,51 @@ public static class GovernedLoopSequentialFrontierMachine
         DateTimeOffset updatedAtUtc)
         => ResolveRunning(frontier, binding, plan, node, activation, attempt, attemptOperationId, GovernedLoopNodeExecutionStatus.ReviewBlocked, outcomeEvidenceId, outcomeEvidenceHash, null, [], updatedAtUtc, null);
 
+    /// <summary>Atomically claims the exact selected Ready activation and blocks it on review with authenticated outcome evidence.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult ReviewBlockReady(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
+        int attempt,
+        string? attemptOperationId,
+        string? outcomeEvidenceId,
+        string? outcomeEvidenceHash,
+        DateTimeOffset updatedAtUtc)
+    {
+        var selected = Select(frontier, binding, plan);
+        if (selected.Status != GovernedLoopSequentialFrontierSelectionStatus.Ready
+            || !SamePlanNode(selected.Node, node)
+            || !SameActivation(selected.Activation, activation)
+            || attempt != 1)
+        {
+            return Invalid("Schema-1 execution can atomically review-block only the exact deterministic Ready activation at attempt one.");
+        }
+
+        try
+        {
+            var blocked = CopyActivation(
+                activation!,
+                GovernedLoopNodeExecutionStatus.ReviewBlocked,
+                attempt,
+                attemptOperationId,
+                outcomeEvidenceId,
+                outcomeEvidenceHash,
+                null,
+                [],
+                []);
+            var successor = ReplaceActivation(frontier!, binding!, blocked, GovernedLoopFrontierStatus.ReviewBlocked, updatedAtUtc);
+            return TransitionIsValid(frontier!, successor, binding, plan)
+                ? Applied(successor, "The exact selected Ready activation retained one atomic attempt and review outcome without an intermediate durable dispatch posture.")
+                : Invalid("The atomic Ready-to-ReviewBlocked successor violates the canonical activation contract.");
+        }
+        catch (Exception exception) when (IsContractFailure(exception))
+        {
+            return Invalid($"The atomic Ready-to-ReviewBlocked transition was rejected by its bounded contract: {exception.GetType().Name}.");
+        }
+    }
+
     /// <summary>Fails the sole exact active activation without selecting among ambiguous parallel Ready work.</summary>
     public static GovernedLoopSequentialFrontierTransitionResult FailCurrent(
         GovernedLoopFrontierPosture? frontier,
