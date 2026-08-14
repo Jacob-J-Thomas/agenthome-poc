@@ -409,11 +409,17 @@ function Read-EquivalenceResults {
     $binaryEvidence = Read-EquivalenceBinaryManifest -ResultsRoot $fullRoot -ExpectedMode $Mode -HeadSha $HeadSha -TestProjects $TestProjects
     $standardRoot = Join-Path $fullRoot "StandardTests"
     [void](Assert-VerificationCoverageOrdinaryPath -Path $standardRoot -Root $fullRoot -PathType Container -Description "$Mode standard test results root")
-    $expectedLaneNames = @($TestProjects | ForEach-Object { "$($_.BaseName)-all" } | Sort-Object -CaseSensitive)
+    $coverageLaneBindings = Get-VerificationCoverageLaneBindings -TestProjects $TestProjects
+    $expectedLaneNames = @($coverageLaneBindings.Keys | ForEach-Object {
+        if (-not $_.StartsWith("tests-", [StringComparison]::Ordinal)) {
+            throw "$Mode checked-in coverage lane has an invalid profile name: $_"
+        }
+        $_.Substring("tests-".Length)
+    } | Sort-Object -CaseSensitive)
     $actualLaneNames = @(Get-ChildItem -LiteralPath $standardRoot -Directory -Force | ForEach-Object Name | Sort-Object -CaseSensitive)
     if ($actualLaneNames.Count -ne $expectedLaneNames.Count -or
         @(Compare-Object -ReferenceObject $expectedLaneNames -DifferenceObject $actualLaneNames -CaseSensitive).Count -ne 0) {
-        throw "$Mode results do not contain the exact canonical nine-lane directory inventory."
+        throw "$Mode results do not contain the exact checked-in $($expectedLaneNames.Count)-lane directory inventory."
     }
 
     $workItems = [Collections.Generic.List[object]]::new()
@@ -424,9 +430,9 @@ function Read-EquivalenceResults {
     $trxEvidence = [Collections.Generic.List[object]]::new()
     $reportEvidence = [Collections.Generic.List[object]]::new()
     $canonicalSettingsHash = (Get-FileHash -LiteralPath $canonicalRunSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    foreach ($testProject in $TestProjects) {
-        $projectName = $testProject.BaseName
-        $laneName = "$projectName-all"
+    foreach ($laneName in $expectedLaneNames) {
+        $profileName = "tests-$laneName"
+        $projectName = Get-VerificationCoverageLaneTestProjectName -Bindings $coverageLaneBindings -LaneName $profileName
         $laneRoot = Join-Path $standardRoot $laneName
         [void](Assert-VerificationCoverageOrdinaryPath -Path $laneRoot -Root $fullRoot -PathType Container -Description "$Mode lane '$laneName' root")
         $trxPath = Join-Path $laneRoot "$laneName.trx"
@@ -472,27 +478,30 @@ function Read-EquivalenceResults {
                 throw "$Mode lane '$laneName' staging alias does not byte-match its canonical report."
             }
         }
+    }
 
+    foreach ($testProject in $TestProjects) {
+        $projectName = $testProject.BaseName
         $isolationRoot = Join-Path (Join-Path $fullRoot "CoverageIsolation") $projectName
-        [void](Assert-VerificationCoverageOrdinaryPath -Path $isolationRoot -Root $fullRoot -PathType Container -Description "$Mode lane '$laneName' coverage isolation root")
+        [void](Assert-VerificationCoverageOrdinaryPath -Path $isolationRoot -Root $fullRoot -PathType Container -Description "$Mode project '$projectName' coverage isolation root")
         $laneSettingsPath = Join-Path $isolationRoot "verification-pull-request.runsettings"
-        $laneSettings = Read-VerificationCoverageHashSnapshot -Path $laneSettingsPath -Root $fullRoot -Description "$Mode lane '$laneName' runsettings"
+        $laneSettings = Read-VerificationCoverageHashSnapshot -Path $laneSettingsPath -Root $fullRoot -Description "$Mode project '$projectName' runsettings"
         $childSettings = @(Get-ChildItem -LiteralPath (Join-Path $isolationRoot "canonical/bin") -Recurse -Filter "verification-pull-request.runsettings" -File)
-        if ($childSettings.Count -ne 1) { throw "$Mode lane '$laneName' must contain one exact child-process runsettings copy." }
-        $childSettingsSnapshot = Read-VerificationCoverageHashSnapshot -Path $childSettings[0].FullName -Root $fullRoot -Description "$Mode lane '$laneName' child runsettings"
+        if ($childSettings.Count -ne 1) { throw "$Mode project '$projectName' must contain one exact child-process runsettings copy." }
+        $childSettingsSnapshot = Read-VerificationCoverageHashSnapshot -Path $childSettings[0].FullName -Root $fullRoot -Description "$Mode project '$projectName' child runsettings"
         if ($laneSettings.Length -ne $childSettingsSnapshot.Length -or $laneSettings.Sha256 -cne $childSettingsSnapshot.Sha256) {
-            throw "$Mode lane '$laneName' child-process runsettings do not byte-match the parent lane settings."
+            throw "$Mode project '$projectName' child-process runsettings do not byte-match the parent settings."
         }
         if ($Mode -ceq "UnfilteredEvidence") {
-            if ($laneSettings.Sha256 -cne $canonicalSettingsHash) { throw "$Mode lane '$laneName' is not exact canonical unfiltered collection." }
+            if ($laneSettings.Sha256 -cne $canonicalSettingsHash) { throw "$Mode project '$projectName' is not exact canonical unfiltered collection." }
         }
         else {
             $expectedSettingsPath = Join-Path $SettingsProbeRoot "$projectName.runsettings"
             $selection = Get-VerificationCoverageSelection -Ownership $Ownership -TestProject $testProject
             Write-VerificationCoverageRunSettings -SourcePath $canonicalRunSettingsPath -DestinationPath $expectedSettingsPath -Selection $selection
-            $expectedSettings = Read-VerificationCoverageHashSnapshot -Path $expectedSettingsPath -Root $SettingsProbeRoot -Description "$Mode lane '$laneName' expected runsettings"
+            $expectedSettings = Read-VerificationCoverageHashSnapshot -Path $expectedSettingsPath -Root $SettingsProbeRoot -Description "$Mode project '$projectName' expected runsettings"
             if ($laneSettings.Length -ne $expectedSettings.Length -or $laneSettings.Sha256 -cne $expectedSettings.Sha256) {
-                throw "$Mode lane '$laneName' does not use the exact current ownership-derived filter."
+                throw "$Mode project '$projectName' does not use the exact current ownership-derived filter."
             }
         }
 
