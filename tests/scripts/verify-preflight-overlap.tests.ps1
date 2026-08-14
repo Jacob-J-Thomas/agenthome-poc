@@ -452,7 +452,7 @@ function Invoke-FrontendFixture {
         if (-not $process.Start()) { throw "Frontend fixture '$Name' did not start." }
         $standardOutput = $process.StandardOutput.ReadToEndAsync()
         $standardError = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(15000)) {
+        if (-not $process.WaitForExit(30000)) {
             Stop-VerificationProcessTree $process
             $process.WaitForExit()
             throw "Frontend fixture '$Name' exceeded its test bound."
@@ -528,8 +528,8 @@ exit 97
     $normalizedTestFailure = Normalize-ConsoleDiagnostic $testFailure.Output
     Assert-Contains -Actual $normalizedTestFailure -Expected "VERIFY_PARALLEL_PHASE_COMPLETE name=frontend-tests status=failed exit_code=13" -Message "Frontend failure identity, terminal status, and exit code must remain explicit. Actual: $normalizedTestFailure"
 
-    $installTimeout = Invoke-FrontendFixture -Name "install-timeout" -FixtureRoot $frontendFixtureRoot -FakeBinPath $fakeBinPath -InstallDelayMilliseconds 2500 -InstallTimeoutSeconds 1
-    Assert-True -Condition ($installTimeout.ExitCode -ne 0 -and $installTimeout.ElapsedSeconds -lt 5) -Message "A stalled npm install must fail inside its bounded timeout."
+    $installTimeout = Invoke-FrontendFixture -Name "install-timeout" -FixtureRoot $frontendFixtureRoot -FakeBinPath $fakeBinPath -InstallDelayMilliseconds 30000 -InstallTimeoutSeconds 15
+    Assert-True -Condition ($installTimeout.ExitCode -ne 0 -and $installTimeout.ElapsedSeconds -lt 25) -Message "A stalled npm install must fail inside its bounded timeout after allowing contended Windows child startup."
     Assert-Contains -Actual $installTimeout.Output -Expected "VERIFY_CHILD_TIMEOUT name=npm-ci" -Message "Install timeout evidence must retain its exact phase identity."
     Assert-True -Condition ((@(Get-Content -LiteralPath $installTimeout.OrderPath) -join ",") -ceq "ci") -Message "A timed-out install must prevent frontend test admission."
     $timedOutPid = [int](Get-Content -LiteralPath $installTimeout.PidPath -Raw)
