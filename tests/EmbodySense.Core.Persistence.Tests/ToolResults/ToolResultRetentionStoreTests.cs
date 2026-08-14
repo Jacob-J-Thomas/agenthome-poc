@@ -260,6 +260,25 @@ public sealed class ToolResultRetentionStoreTests
         Assert.False(Directory.Exists(Path.Combine(paths.ToolResponsesPath, new string('f', 32))));
     }
 
+    [Fact]
+    public async Task RetainAsync_fails_closed_when_a_cached_manifest_changes_without_a_file_stamp_change()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ToolResultRetentionStore(paths);
+        var retained = await store.RetainAsync(Result(new string('7', 32), "original"), LoopDefinition.CreateDefaultConversation());
+        var manifestPath = workspace.File(retained.ManifestPath!.Replace('/', Path.DirectorySeparatorChar));
+        var originalTimestamp = File.GetLastWriteTimeUtc(manifestPath);
+        var manifest = await File.ReadAllTextAsync(manifestPath);
+        await File.WriteAllTextAsync(manifestPath, manifest.Replace("\"schemaVersion\": 1", "\"schemaVersion\": 2", StringComparison.Ordinal));
+        File.SetLastWriteTimeUtc(manifestPath, originalTimestamp);
+
+        var unavailable = await store.RetainAsync(Result(new string('8', 32), "next"), LoopDefinition.CreateDefaultConversation());
+
+        Assert.Equal(ToolResultRetentionStatus.Unavailable, unavailable.Status);
+        Assert.Contains("InvalidDataException", unavailable.Detail, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("staging")]
     [InlineData("root-file")]

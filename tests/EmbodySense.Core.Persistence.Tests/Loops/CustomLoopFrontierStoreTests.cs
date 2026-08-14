@@ -447,6 +447,26 @@ public sealed class CustomLoopFrontierStoreTests
     }
 
     [Fact]
+    public async Task Crash_probe_ready_marker_poll_treats_a_transient_sharing_violation_as_not_ready()
+    {
+        using var workspace = new TestWorkspace();
+        var readyPath = workspace.File("frontier-crash-ready-sharing");
+        const string Expected = "0123456789abcdef";
+        await File.WriteAllTextAsync(readyPath, Expected);
+
+        using (new FileStream(readyPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var unavailable = await TryReadCrashProbeReadyMarkerAsync(readyPath);
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.Null(unavailable);
+            }
+        }
+
+        Assert.Equal(Expected, await TryReadCrashProbeReadyMarkerAsync(readyPath));
+    }
+
+    [Fact]
     public async Task External_process_crash_probe_child_stages_one_authenticated_successor_while_holding_the_mutation_lease()
     {
         var candidatePath = Environment.GetEnvironmentVariable(CrashProbeCandidatePathVariable);
@@ -941,8 +961,8 @@ public sealed class CustomLoopFrontierStoreTests
         var wait = Stopwatch.StartNew();
         while (true)
         {
-            if (File.Exists(readyPath)
-                && IsCompleteCrashProbeReadyMarker(await File.ReadAllTextAsync(readyPath), expectedMarker))
+            var marker = await TryReadCrashProbeReadyMarkerAsync(readyPath);
+            if (marker is not null && IsCompleteCrashProbeReadyMarker(marker, expectedMarker))
             {
                 return;
             }
@@ -960,6 +980,18 @@ public sealed class CustomLoopFrontierStoreTests
             }
 
             await Task.Delay(TimeSpan.FromMilliseconds(15));
+        }
+    }
+
+    private static async Task<string?> TryReadCrashProbeReadyMarkerAsync(string readyPath)
+    {
+        try
+        {
+            return File.Exists(readyPath) ? await File.ReadAllTextAsync(readyPath) : null;
+        }
+        catch (IOException)
+        {
+            return null;
         }
     }
 

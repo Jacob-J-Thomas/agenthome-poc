@@ -229,18 +229,26 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
         requester.RelinquishWorkspaceHost();
         using var cancellation = new CancellationTokenSource();
+        using var callbackEntered = new ManualResetEventSlim();
+        using var callbackExited = new ManualResetEventSlim();
         using var callbackRelease = new ManualResetEventSlim();
-        using var callback = cancellation.Token.Register(callbackRelease.Wait);
+        using var callback = cancellation.Token.Register(() =>
+        {
+            callbackEntered.Set();
+            callbackRelease.Wait();
+            callbackExited.Set();
+        });
         using var registration = owner.RegisterActiveAttempt("run-blocking-callback", cancellation);
-        var startedAt = Stopwatch.GetTimestamp();
 
         try
         {
-            var result = await requester.RequestCancellationAsync("run-blocking-callback", "cancel-blocking-callback").WaitAsync(TimeSpan.FromSeconds(4));
-            var elapsed = Stopwatch.GetElapsedTime(startedAt);
+            var request = requester.RequestCancellationAsync("run-blocking-callback", "cancel-blocking-callback");
+            Assert.True(callbackEntered.Wait(TimeSpan.FromSeconds(4)), "The routed cancellation callback was not entered within the bounded wait.");
+            Assert.True(SpinWait.SpinUntil(() => request.IsCompleted, TimeSpan.FromSeconds(4)), "The remote broker did not complete while the cancellation callback remained blocked.");
+            var result = await request;
 
             Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, result.Status);
-            Assert.InRange(elapsed, TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(3));
+            Assert.False(callbackExited.IsSet);
         }
         finally
         {

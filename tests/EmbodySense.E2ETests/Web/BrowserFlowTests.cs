@@ -382,7 +382,7 @@ public sealed class BrowserFlowTests
                 await browser.EvaluateStringAsync("document.getElementById('retentionContent').textContent"));
 
             var paths = new WorkspacePaths(workspace.RootPath);
-            var ownershipAcquiredAtUtc = DateTimeOffset.UtcNow.AddSeconds(-25);
+            var ownershipAcquiredAtUtc = DateTimeOffset.UtcNow - CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow + TimeSpan.FromSeconds(15);
             var interruptedRequest = new CustomLoopReceiptCleanupRequest(
                 CustomLoopReceiptCleanupRequest.CurrentSchemaVersion,
                 CustomLoopReceiptArtifactClass.DefinitionMutationReceipt,

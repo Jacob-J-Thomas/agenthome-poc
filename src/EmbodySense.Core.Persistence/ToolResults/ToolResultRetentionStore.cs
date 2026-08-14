@@ -95,7 +95,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             await ValidateRequiredEvictionsAsync(existingArtifacts, prepared.TotalUtf8Bytes, cancellationToken);
             await WriteArtifactAsync(prepared, cancellationToken);
             var retainedArtifact = new RetainedArtifact(Path.Combine(_paths.ToolResponsesPath, prepared.Manifest.RequestId), prepared.Manifest, prepared.TotalUtf8Bytes, contentValidated: true);
-            _accountedArtifacts[prepared.Manifest.RequestId] = CaptureAccountedArtifact(retainedArtifact.Directory, prepared.Manifest, prepared.TotalUtf8Bytes);
+            _accountedArtifacts[prepared.Manifest.RequestId] = CaptureAccountedArtifact(retainedArtifact.Directory, prepared.Manifest, prepared.TotalUtf8Bytes, Sha256(prepared.ManifestBytes));
             existingArtifacts.Add(retainedArtifact);
             var evicted = recoveredEvictions + await EvictToLimitsAsync(existingArtifacts, cancellationToken);
             if (retainedArtifact.Evicted || !Directory.Exists(retainedArtifact.Directory))
@@ -204,9 +204,9 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             }
 
             var manifestPath = Path.Combine(directory, ManifestFileName);
-            var manifest = await ReadManifestAsync(manifestPath, cancellationToken);
+            var (manifest, manifestFileSha256) = await ReadManifestAsync(manifestPath, cancellationToken);
             var totalUtf8Bytes = await ValidateArtifactAsync(directory, requestId, manifest, cancellationToken);
-            _accountedArtifacts[requestId] = CaptureAccountedArtifact(directory, manifest, totalUtf8Bytes);
+            _accountedArtifacts[requestId] = CaptureAccountedArtifact(directory, manifest, totalUtf8Bytes, manifestFileSha256);
             artifacts.Add(new RetainedArtifact(directory, manifest, totalUtf8Bytes, contentValidated: true));
         }
 
@@ -221,14 +221,14 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
     private async Task<RetainedArtifact> RevalidateArtifactAsync(RetainedArtifact artifact, CancellationToken cancellationToken)
     {
         var requestId = artifact.Manifest.RequestId;
-        var manifest = await ReadManifestAsync(Path.Combine(artifact.Directory, ManifestFileName), cancellationToken);
+        var (manifest, manifestFileSha256) = await ReadManifestAsync(Path.Combine(artifact.Directory, ManifestFileName), cancellationToken);
         var totalUtf8Bytes = await ValidateArtifactAsync(artifact.Directory, requestId, manifest, cancellationToken);
-        _accountedArtifacts[requestId] = CaptureAccountedArtifact(artifact.Directory, manifest, totalUtf8Bytes);
+        _accountedArtifacts[requestId] = CaptureAccountedArtifact(artifact.Directory, manifest, totalUtf8Bytes, manifestFileSha256);
         artifact.ContentValidated = true;
         return new RetainedArtifact(artifact.Directory, manifest, totalUtf8Bytes, contentValidated: true);
     }
 
-    private static async Task<ToolResultArtifactManifest> ReadManifestAsync(string manifestPath, CancellationToken cancellationToken)
+    private static async Task<(ToolResultArtifactManifest Manifest, string FileSha256)> ReadManifestAsync(string manifestPath, CancellationToken cancellationToken)
     {
         var file = new FileInfo(manifestPath);
         if (!file.Exists
@@ -247,8 +247,9 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
 
         var bytes = new byte[checked((int)stream.Length)];
         await stream.ReadExactlyAsync(bytes, cancellationToken);
-        return JsonSerializer.Deserialize<ToolResultArtifactManifest>(bytes, _jsonOptions)
+        var manifest = JsonSerializer.Deserialize<ToolResultArtifactManifest>(bytes, _jsonOptions)
             ?? throw new InvalidDataException("A retained tool-response manifest is empty.");
+        return (manifest, Sha256(bytes));
     }
 
     private static async Task<long> ValidateArtifactAsync(string directory, string requestId, ToolResultArtifactManifest manifest, CancellationToken cancellationToken)
@@ -565,7 +566,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             || retained.Sum(artifact => artifact.TotalUtf8Bytes) + additionalUtf8Bytes > ToolResultRetentionLimits.MaxWorkspaceUtf8Bytes;
     }
 
-    private static AccountedArtifactSnapshot CaptureAccountedArtifact(string directory, ToolResultArtifactManifest manifest, long totalUtf8Bytes)
+    private static AccountedArtifactSnapshot CaptureAccountedArtifact(string directory, ToolResultArtifactManifest manifest, long totalUtf8Bytes, string manifestFileSha256)
     {
         if (Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly).Any())
         {
@@ -586,7 +587,13 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
                     return new ArtifactFileStamp(file.Length, file.LastWriteTimeUtc.Ticks);
                 },
                 StringComparer.Ordinal);
-        return new AccountedArtifactSnapshot(manifest, totalUtf8Bytes, files);
+        var observedManifestFileSha256 = ReadManifestFileSha256(directory);
+        if (!string.Equals(observedManifestFileSha256, manifestFileSha256, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("A retained tool-response manifest changed while its accounting snapshot was captured.");
+        }
+
+        return new AccountedArtifactSnapshot(manifest, totalUtf8Bytes, manifestFileSha256, files);
     }
 
     private static bool MatchesAccountedArtifact(string directory, AccountedArtifactSnapshot cached)
@@ -614,7 +621,32 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             }
         }
 
-        return true;
+        return string.Equals(ReadManifestFileSha256(directory), cached.ManifestFileSha256, StringComparison.Ordinal);
+    }
+
+    private static string ReadManifestFileSha256(string directory)
+    {
+        var path = Path.Combine(directory, ManifestFileName);
+        var file = new FileInfo(path);
+        if (!file.Exists || file.Attributes.HasFlag(FileAttributes.ReparsePoint) || file.Length < 1 || file.Length > ToolResultRetentionLimits.MaxManifestUtf8Bytes)
+        {
+            throw new InvalidDataException("A retained tool-response manifest is missing, redirected, empty, or oversized.");
+        }
+
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
+        if (stream.Length != file.Length || stream.Length < 1 || stream.Length > ToolResultRetentionLimits.MaxManifestUtf8Bytes)
+        {
+            throw new InvalidDataException("A retained tool-response manifest changed outside its governed size bound.");
+        }
+
+        var bytes = GC.AllocateUninitializedArray<byte>(checked((int)stream.Length));
+        stream.ReadExactly(bytes);
+        if (stream.Length != bytes.LongLength)
+        {
+            throw new InvalidDataException("A retained tool-response manifest changed while its accounting fingerprint was read.");
+        }
+
+        return Sha256(bytes);
     }
 
     private static void EnsurePlainDirectory(string path)
