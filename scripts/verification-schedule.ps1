@@ -1,18 +1,23 @@
 Set-StrictMode -Version Latest
 
 $script:VerificationRequiredGateResourceCapacity = 12
-# Coverage-instrumented assembly lanes each host internally parallel tests and descendant
-# processes. Two may overlap on the four-core Windows runner; a third waits while the
-# combined CPU-bound C# format gate reserves their remaining logical capacity.
-$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 2
+# Coverage-instrumented lanes use immutable assembly copies, disjoint fixture roots, and an
+# exact stable-ID partition. Persistence and Startup are split into measured class-balanced
+# shards so all four hosted cores can make progress without overlapping tests or artifacts.
+$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 4
 $script:VerificationRequiredGateMaximumCpuBoundWorkers = 1
 $script:VerificationRequiredGateScheduleProfiles = @(
-    # One VSTest process per assembly lets the test runner schedule isolated classes itself and
-    # removes repeated deployment, discovery, instrumentation, and report-write overhead.
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 300; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-all"; EstimatedDurationSeconds = 240; Weight = 3; ResourceClass = "ProcessHeavy" }
+    # Startup's runtime wrappers remain together because they intentionally share one serialized
+    # xUnit collection. Every other shard is a checked-in class partition validated before launch.
     [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-runtime"; EstimatedDurationSeconds = 200; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-shard-1"; EstimatedDurationSeconds = 115; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-shard-2"; EstimatedDurationSeconds = 115; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-shard-3"; EstimatedDurationSeconds = 115; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-shard-4"; EstimatedDurationSeconds = 115; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-shard-1"; EstimatedDurationSeconds = 115; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-shard-2"; EstimatedDurationSeconds = 115; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "format-csharp"; EstimatedDurationSeconds = 100; Weight = 6; ResourceClass = "CpuBound" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-all"; EstimatedDurationSeconds = 50; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-all"; EstimatedDurationSeconds = 25; Weight = 1; ResourceClass = "Ordinary" }
@@ -61,7 +66,7 @@ function Get-VerificationPreflightNestedProcessContractWeight {
         [int]$ResourceCapacity
     )
 
-    return [Math]::Min(2, $ResourceCapacity)
+    return [Math]::Min(3, $ResourceCapacity)
 }
 
 function Assert-VerificationPreflightContractClassification {

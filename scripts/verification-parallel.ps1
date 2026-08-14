@@ -35,6 +35,8 @@ function Add-VerificationParallelPhase {
 
         [hashtable]$Environment,
 
+        [string[]]$DependsOn = @(),
+
         [ValidateRange(1, 86400)]
         [int]$EstimatedDurationSeconds = 1,
 
@@ -49,6 +51,11 @@ function Add-VerificationParallelPhase {
         throw "Parallel verification phase '$Name' is declared more than once."
     }
 
+    $duplicateDependencies = @($DependsOn | Group-Object -CaseSensitive | Where-Object Count -gt 1 | ForEach-Object Name)
+    if (@($DependsOn | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0 -or $duplicateDependencies.Count -gt 0 -or $DependsOn -ccontains $Name) {
+        throw "Parallel verification phase '$Name' has an invalid dependency declaration."
+    }
+
     $script:VerificationParallelPhases += [pscustomobject]@{
         Name = $Name
         FileName = $FileName
@@ -59,6 +66,7 @@ function Add-VerificationParallelPhase {
         CoverageSearchRoot = if ([string]::IsNullOrWhiteSpace($CoverageSearchRoot)) { $null } else { [IO.Path]::GetFullPath($CoverageSearchRoot) }
         TrxPath = if ([string]::IsNullOrWhiteSpace($TrxPath)) { $null } else { [IO.Path]::GetFullPath($TrxPath) }
         Environment = if ($null -eq $Environment) { @{} } else { $Environment.Clone() }
+        DependsOn = @($DependsOn)
         EstimatedDurationSeconds = $EstimatedDurationSeconds
         SchedulingPrioritySeconds = $EstimatedDurationSeconds
         Weight = $Weight
@@ -66,6 +74,63 @@ function Add-VerificationParallelPhase {
         ResourceClass = $ResourceClass
         SchedulingDeferrals = 0
     }
+}
+
+function Assert-VerificationParallelPhaseDependencies {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Phases
+    )
+
+    $phaseNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($phase in $Phases) {
+        [void]$phaseNames.Add([string]$phase.Name)
+    }
+    foreach ($phase in $Phases) {
+        foreach ($dependency in @($phase.DependsOn)) {
+            if (-not $phaseNames.Contains([string]$dependency)) {
+                throw "Parallel verification phase '$($phase.Name)' depends on unknown phase '$dependency'."
+            }
+        }
+    }
+
+    $resolved = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $remaining = [Collections.Generic.List[object]]::new()
+    foreach ($phase in $Phases) { $remaining.Add($phase) }
+    while ($remaining.Count -gt 0) {
+        $madeProgress = $false
+        foreach ($phase in @($remaining)) {
+            $unresolvedDependencies = @($phase.DependsOn | Where-Object { -not $resolved.Contains([string]$_) })
+            if ($unresolvedDependencies.Count -ne 0) {
+                continue
+            }
+
+            [void]$resolved.Add([string]$phase.Name)
+            [void]$remaining.Remove($phase)
+            $madeProgress = $true
+        }
+        if (-not $madeProgress) {
+            throw "Parallel verification phase dependencies contain a cycle involving: $(@($remaining.Name | Sort-Object) -join ',')."
+        }
+    }
+}
+
+function Test-VerificationParallelPhaseDependenciesComplete {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Phase,
+
+        [Collections.Generic.HashSet[string]]$CompletedPhaseNames
+    )
+
+    if ($null -eq $Phase.PSObject.Properties["DependsOn"] -or @($Phase.DependsOn).Count -eq 0) {
+        return $true
+    }
+    if ($null -eq $CompletedPhaseNames) {
+        return $false
+    }
+
+    return @($Phase.DependsOn | Where-Object { -not $CompletedPhaseNames.Contains([string]$_) }).Count -eq 0
 }
 
 function Get-VerificationParallelPhaseSchedulingOrder {
@@ -122,7 +187,9 @@ function Select-VerificationParallelPhase {
             Ordinary = [int]::MaxValue
             CpuBound = [int]::MaxValue
             ProcessHeavy = [int]::MaxValue
-        }
+        },
+
+        [Collections.Generic.HashSet[string]]$CompletedPhaseNames
     )
 
     if ($Pending.Count -eq 0 -or $AvailableCapacity -eq 0) {
@@ -131,6 +198,10 @@ function Select-VerificationParallelPhase {
 
     $fitIndex = -1
     for ($index = 0; $index -lt $Pending.Count; $index++) {
+        if (-not (Test-VerificationParallelPhaseDependenciesComplete -Phase $Pending[$index] -CompletedPhaseNames $CompletedPhaseNames)) {
+            continue
+        }
+
         $resourceClass = if ($null -eq $Pending[$index].PSObject.Properties["ResourceClass"]) { "Ordinary" } else { [string]$Pending[$index].ResourceClass }
         if (-not $AvailableResourceClassSlots.ContainsKey($resourceClass)) {
             throw "Parallel verification phase '$($Pending[$index].Name)' has no admitted concurrency limit for resource class '$resourceClass'."
@@ -148,6 +219,10 @@ function Select-VerificationParallelPhase {
 
     if ($fitIndex -gt 0) {
         for ($index = 0; $index -lt $fitIndex; $index++) {
+            if (-not (Test-VerificationParallelPhaseDependenciesComplete -Phase $Pending[$index] -CompletedPhaseNames $CompletedPhaseNames)) {
+                continue
+            }
+
             $resourceClass = if ($null -eq $Pending[$index].PSObject.Properties["ResourceClass"]) { "Ordinary" } else { [string]$Pending[$index].ResourceClass }
             if ([int]$AvailableResourceClassSlots[$resourceClass] -gt 0 -and $Pending[$index].SchedulingDeferrals -ge 1) {
                 return $null
@@ -155,6 +230,10 @@ function Select-VerificationParallelPhase {
         }
 
         for ($index = 0; $index -lt $fitIndex; $index++) {
+            if (-not (Test-VerificationParallelPhaseDependenciesComplete -Phase $Pending[$index] -CompletedPhaseNames $CompletedPhaseNames)) {
+                continue
+            }
+
             $resourceClass = if ($null -eq $Pending[$index].PSObject.Properties["ResourceClass"]) { "Ordinary" } else { [string]$Pending[$index].ResourceClass }
             if ([int]$AvailableResourceClassSlots[$resourceClass] -gt 0) {
                 $Pending[$index].SchedulingDeferrals++
@@ -185,6 +264,8 @@ function Invoke-VerificationParallelPhases {
     if ($MaximumProcessHeavyWorkers -gt $MaximumWorkers -or $MaximumCpuBoundWorkers -gt $MaximumWorkers) {
         throw "Parallel verification resource-class limits cannot exceed the maximum worker count $MaximumWorkers. process_heavy=$MaximumProcessHeavyWorkers cpu_bound=$MaximumCpuBoundWorkers"
     }
+
+    Assert-VerificationParallelPhaseDependencies -Phases @($script:VerificationParallelPhases)
 
     $oversizedPhases = @($script:VerificationParallelPhases | Where-Object { $_.Weight -gt $MaximumResourceCapacity } | Sort-Object Name)
     if ($oversizedPhases.Count -gt 0) {
@@ -221,6 +302,7 @@ function Invoke-VerificationParallelPhases {
         CpuBound = 0
         ProcessHeavy = 0
     }
+    $completedPhaseNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     try {
         while ($pending.Count -gt 0 -or $running.Count -gt 0) {
             while ($pending.Count -gt 0 -and $running.Count -lt $MaximumWorkers -and $activeResourceCapacity -lt $MaximumResourceCapacity) {
@@ -230,7 +312,7 @@ function Invoke-VerificationParallelPhases {
                     CpuBound = $MaximumCpuBoundWorkers - $activeResourceClassCounts.CpuBound
                     ProcessHeavy = $MaximumProcessHeavyWorkers - $activeResourceClassCounts.ProcessHeavy
                 }
-                $phase = Select-VerificationParallelPhase -Pending $pending -AvailableCapacity $availableCapacity -AvailableResourceClassSlots $availableResourceClassSlots
+                $phase = Select-VerificationParallelPhase -Pending $pending -AvailableCapacity $availableCapacity -AvailableResourceClassSlots $availableResourceClassSlots -CompletedPhaseNames $completedPhaseNames
                 if ($null -eq $phase) {
                     break
                 }
@@ -274,6 +356,10 @@ function Invoke-VerificationParallelPhases {
             }
 
             if ($running.Count -eq 0) {
+                $failedDependencyNames = @($results | Where-Object { $_.TimedOut -or $_.ExitCode -ne 0 } | ForEach-Object Name | Sort-Object)
+                if ($failedDependencyNames.Count -gt 0) {
+                    throw "Parallel verification dependency plan stopped because prerequisite phases did not pass: $($failedDependencyNames -join ',')."
+                }
                 throw "Parallel verification scheduler made no progress within resource capacity $MaximumResourceCapacity."
             }
 
@@ -316,6 +402,9 @@ function Invoke-VerificationParallelPhases {
                 [void]$running.Remove($entry)
                 $activeResourceCapacity -= $entry.Phase.EffectiveWeight
                 $activeResourceClassCounts[$entry.Phase.ResourceClass]--
+                if (-not $timedOut -and $result.ExitCode -eq 0) {
+                    [void]$completedPhaseNames.Add([string]$entry.Phase.Name)
+                }
                 $entry.Process.Dispose()
             }
         }

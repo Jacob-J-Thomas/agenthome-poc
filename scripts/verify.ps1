@@ -317,15 +317,15 @@ try {
         if ($runningOnWindows) {
             $preflightNestedProcessContractScripts = @("verify-sdk-diagnostics.tests.ps1") + $preflightNestedProcessContractScripts
         }
-        $preflightBuildOverlapContractScripts = @(
+        $preflightOrdinaryContractScripts = @(
             "verify-bounded-phases.tests.ps1",
             "verify-test-inventory.tests.ps1",
             "verify-watchdog.tests.ps1"
         )
-        Assert-VerificationPreflightContractClassification -ContractScripts $contractScripts -CoverageContractScript "verify-coverage.tests.ps1" -NestedProcessContractScripts $preflightNestedProcessContractScripts -OrdinaryContractScripts $preflightBuildOverlapContractScripts
+        Assert-VerificationPreflightContractClassification -ContractScripts $contractScripts -CoverageContractScript "verify-coverage.tests.ps1" -NestedProcessContractScripts $preflightNestedProcessContractScripts -OrdinaryContractScripts $preflightOrdinaryContractScripts
         $preflightMaximumWorkers = [Math]::Min(4, $hardwareBoundedResourceCapacity)
-        $preflightResourceCapacity = $preflightMaximumWorkers
-        $preflightProcessHeavyWeight = [Math]::Max(1, [int][Math]::Ceiling($preflightResourceCapacity / 2.0))
+        $preflightResourceCapacity = [Math]::Min(8, [Math]::Max(1, $preflightMaximumWorkers * 2))
+        $preflightProcessHeavyWeight = [Math]::Min(3, [Math]::Max(1, [int][Math]::Ceiling($preflightResourceCapacity / 2.0)))
         $preflightMaximumProcessHeavyWorkers = [Math]::Min(2, $preflightMaximumWorkers)
         $preflightCoverageContractWeight = Get-VerificationPreflightCoverageContractWeight -ResourceCapacity $preflightResourceCapacity
         $preflightFrontendWeight = Get-VerificationPreflightFrontendWeight -ResourceCapacity $preflightResourceCapacity
@@ -338,44 +338,27 @@ try {
         }
         $frontendArguments += @("-File", (Join-Path $PSScriptRoot "verify-frontend.ps1"), "-RepositoryRoot", $repoRoot, "-LogsPath", $verificationLogsPath)
         Add-VerificationParallelPhase -Name "frontend-preflight" -FileName $powerShellExecutable -Arguments $frontendArguments -TimeoutSeconds 590 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "frontend-preflight.log") -EstimatedDurationSeconds 70 -Weight $preflightFrontendWeight -ResourceClass "CpuBound"
-        foreach ($contractScript in $preflightBuildOverlapContractScripts) {
-            $contractArguments = @("-NoProfile")
-            if ($runningOnWindows) {
-                $contractArguments += @("-ExecutionPolicy", "Bypass")
-            }
-            $contractArguments += @("-File", (Join-Path $testsPath "scripts\$contractScript"))
-            Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
-        }
-        $coverageContractArguments = @("-NoProfile")
-        if ($runningOnWindows) {
-            $coverageContractArguments += @("-ExecutionPolicy", "Bypass")
-        }
-        $coverageContractArguments += @("-File", (Join-Path $testsPath "scripts\verify-coverage.tests.ps1"))
-        Add-VerificationParallelPhase -Name "contract-verify-coverage.tests" -FileName $powerShellExecutable -Arguments $coverageContractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "verify-coverage.tests.ps1.log") -EstimatedDurationSeconds 75 -Weight $preflightCoverageContractWeight -ResourceClass "ProcessHeavy"
-        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-build-overlap phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers maximum_cpu_bound=1 build_weight=$preflightProcessHeavyWeight coverage_contract_weight=$preflightCoverageContractWeight frontend_weight=$preflightFrontendWeight ordinary_contract_weight=1 ordinary_contracts=$($preflightBuildOverlapContractScripts.Count) coverage_after_build_by_singleton_lpt=true configuration=$Configuration"
-        Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers 1 | Out-Null
-        Reset-VerificationParallelPhaseState
-        $script:LastCompletedVerificationPhase = "pull-request-build-overlap"
-
         foreach ($contractScript in $contractScripts) {
-            if ($preflightBuildOverlapContractScripts -ccontains $contractScript -or $contractScript -ceq "verify-coverage.tests.ps1") {
-                continue
-            }
-
             $contractArguments = @("-NoProfile")
             if ($runningOnWindows) {
                 $contractArguments += @("-ExecutionPolicy", "Bypass")
             }
             $contractArguments += @("-File", (Join-Path $testsPath "scripts\$contractScript"))
-            if ($preflightNestedProcessContractScripts -ccontains $contractScript) {
+            if ($preflightOrdinaryContractScripts -ccontains $contractScript) {
+                Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
+            }
+            elseif ($contractScript -ceq "verify-coverage.tests.ps1") {
+                Add-VerificationParallelPhase -Name "contract-verify-coverage.tests" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "verify-coverage.tests.ps1.log") -DependsOn @("build-pullrequest") -EstimatedDurationSeconds 75 -Weight $preflightCoverageContractWeight -ResourceClass "ProcessHeavy"
+            }
+            elseif ($preflightNestedProcessContractScripts -ccontains $contractScript) {
                 Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 60 -Weight $preflightNestedProcessContractWeight -ResourceClass "ProcessHeavy"
             }
             else {
                 throw "Preflight script contract '$contractScript' reached execution without a resource classification."
             }
         }
-        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-post-build-contracts phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers nested_process_contract_weight=$preflightNestedProcessContractWeight nested_process_contracts=$($preflightNestedProcessContractScripts.Count) nested_process_isolation=two-wide-disjoint-temp configuration=$Configuration"
-        Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers | Out-Null
+        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-preflight-dag phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers maximum_cpu_bound=1 build_weight=$preflightProcessHeavyWeight coverage_contract_weight=$preflightCoverageContractWeight frontend_weight=$preflightFrontendWeight nested_process_contract_weight=$preflightNestedProcessContractWeight nested_process_contracts=$($preflightNestedProcessContractScripts.Count) ordinary_contracts=$($preflightOrdinaryContractScripts.Count) coverage_dependency=build-pullrequest configuration=$Configuration"
+        Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers 1 | Out-Null
         Reset-VerificationParallelPhaseState
         $script:LastCompletedVerificationPhase = "pull-request-preflight"
     }

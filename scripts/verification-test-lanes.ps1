@@ -692,7 +692,7 @@ function New-VerificationTestLane {
     )
 
     foreach ($value in @($IncludeFullyQualifiedName) + @($ExcludeFullyQualifiedName)) {
-        if ([string]::IsNullOrWhiteSpace($value) -or $value.IndexOfAny(@('(', ')', '&', '|', '~', '=', '!')) -ge 0) {
+        if ([string]::IsNullOrWhiteSpace($value) -or -not $value.EndsWith(".", [StringComparison]::Ordinal) -or $value.IndexOfAny(@('(', ')', '&', '|', '~', '=', '!')) -ge 0) {
             throw "Verification lane '$Name' contains an unsafe fully-qualified-name predicate."
         }
     }
@@ -707,10 +707,172 @@ function New-VerificationTestLane {
 function Get-VerificationTestProjectLanes {
     param([System.IO.FileInfo]$TestProject)
 
-    # One process per assembly avoids repeated VSTest startup, deployment, coverage instrumentation,
-    # and Cobertura serialization. Assembly-level xUnit bounds and explicit collections provide the
-    # safe inner parallelism; the stable-ID partition contract still proves every case exactly once.
+    if ($TestProject.BaseName -ceq "EmbodySense.Core.Persistence.Tests") {
+        return @(
+            (New-VerificationTestLane -Name "shard-1" -IncludeFullyQualifiedName @(
+                "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputResponseStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopDefinitionReceiptRetentionTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurnRecoveryTestsNormalArchival."
+                "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopSequentialEvidenceStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopFrontierStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.Revisions.GovernedLoopRevisionLifecycleStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.Execution.Authority.GovernedLoopEffectAuthorityEvidenceStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurnRecoveryTestsRetirementReservation."
+                "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTraceRetentionStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Capabilities.LocalSkillDependencyManifestDiscoveryTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurnStorePublicBehaviorCoverageTests."
+            ))
+            (New-VerificationTestLane -Name "shard-2" -IncludeFullyQualifiedName @(
+                "EmbodySense.Core.Persistence.Tests.Authority.AuthorityGrantStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring.GovernedLoopGraphRevisionStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.Admission.GovernedLoopAdmissionStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Triggers.TriggerQueueStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Capabilities.CapabilityLifecycleMutationStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Memory.ConversationMemoryStoreTests."
+                "EmbodySense.Core.Persistence.Tests.ToolResults.ToolResultRetentionStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Capabilities.CapabilityArtifactStoreTests."
+                "EmbodySense.Core.Persistence.Tests.ContextualRoles.ContextualRoleCatalogReaderTests."
+                "EmbodySense.Core.Persistence.Tests.Capabilities.CapabilityAuthorityTransactionTests."
+                "EmbodySense.Core.Persistence.Tests.Memory.FileConversationWorkspaceLeaseTests."
+                "EmbodySense.Core.Persistence.Tests.Capabilities.CapabilityDependentAdaptersTests."
+                "EmbodySense.Core.Persistence.Tests.Verification.VerificationPhaseProbeTests."
+                "EmbodySense.Core.Persistence.Tests.Capabilities.LocalCapabilityArtifactSourceTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurnLeaseHardLinkTests."
+                "EmbodySense.Core.Persistence.Tests.Capabilities.CapabilityLifecycleBaselineSourceTests."
+            ))
+            (New-VerificationTestLane -Name "shard-3" -IncludeFullyQualifiedName @(
+                "EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurnRecoveryTests."
+                "EmbodySense.Core.Persistence.Tests.Credentials.CredentialRegistryStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunArtifactMaximumShapeTests."
+                "EmbodySense.Core.Persistence.Tests.ContextualRoles.ContextualRoleRevisionStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Capabilities.CapabilityCatalogStoreTests."
+                "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputRequestStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.DefaultConversationTurnRecoveryTestsRetirementEvidenceBounds."
+                "EmbodySense.Core.Persistence.Tests.HumanInput.Requests.HumanInputRequestStoreInvariantTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.LoopDefinitionStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.LoopRunStoreTests."
+                "EmbodySense.Core.Persistence.Tests.ContextualRoles.WorkspaceContextualRoleInstructionSourceProbeTests."
+            ))
+            (New-VerificationTestLane -Name "shard-4" -IncludeFullyQualifiedName @(
+                "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopControlOperationStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopDefinitionStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopWorkspaceExecutionGateTests."
+                "EmbodySense.Core.Persistence.Tests.Credentials.CredentialLifecyclePersistenceRestartTests."
+                "EmbodySense.Core.Persistence.Tests.Authority.AuthorityProfileStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopInvocationOperationStoreTests."
+                "EmbodySense.Core.Persistence.Tests.Credentials.WindowsCredentialValueProviderTests."
+                "EmbodySense.Core.Persistence.Tests.Capabilities.CapabilityLifecycleTargetResolverTests."
+                "EmbodySense.Core.Persistence.Tests.Loops.PersistencePublicBoundaryCoverageTests."
+                "EmbodySense.Core.Persistence.Tests.Audit.AuditLogTests."
+                "EmbodySense.Core.Persistence.Tests.Capabilities.FileCapabilityCatalogTrustProviderTests."
+                "EmbodySense.Core.Persistence.Tests.Workspace.WorkspaceContextStoreTests."
+            ))
+        )
+    }
+
+    if ($TestProject.BaseName -ceq "EmbodySense.Core.Startup.Tests") {
+        return @(
+            # The six wrapper classes retain their one serialized collection. Prior stress proved
+            # that splitting this collection changes provider-start and catalog-availability timing.
+            (New-VerificationTestLane -Name "runtime" -IncludeFullyQualifiedName @(
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsResumeAndAuthority."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsAdmissionAndContext."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsPublicationAndConcurrency."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsCompletionConstraints."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsDurabilityAndRecovery."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsAdmissionAndBinding."
+            ))
+            (New-VerificationTestLane -Name "shard-1" -IncludeFullyQualifiedName @(
+                "EmbodySense.Core.Startup.Tests.Workspace.WorkspaceInitializerTests."
+                "EmbodySense.Core.Startup.Tests.Loops.LoopAuthoringFacadeTests."
+                "EmbodySense.Core.Startup.Tests.Capabilities.BuiltInCapabilityCatalogSeederTests."
+                "EmbodySense.Core.Startup.Tests.Capabilities.CapabilityAdmissionFactoryTests."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeReceiptRecoveryTests."
+                "EmbodySense.Core.Startup.Tests.Runtime.DefaultConversationRequestReconciliationReaderTests."
+                "EmbodySense.Core.Startup.Tests.Loops.GovernedLoopGraphAuthoringFactoryTests."
+                "EmbodySense.Core.Startup.Tests.Runtime.ConversationTranscriptReaderTests."
+                "EmbodySense.Core.Startup.Tests.Workspace.DefaultContextualRoleSeederTests."
+                "EmbodySense.Core.Startup.Tests.Inference.LlmInferenceClientTests."
+                "EmbodySense.Core.Startup.Tests.Credentials.CredentialLifecycleFactoryTests."
+                "EmbodySense.Core.Startup.Tests.Triggers.TriggerWorkerRuntimeFacadeTests."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.ConversationPublicationEffectAuthorityRequestFactoryTests."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopConversationPublicationAuthorityBoundaryProviderTests."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopReadOnlyWorkspaceToolAdapterTests."
+            ))
+            (New-VerificationTestLane -Name "shard-2" -IncludeFullyQualifiedName @(
+                "EmbodySense.Core.Startup.Tests.Loops.LoopReceiptRetentionFacadeTests."
+                "EmbodySense.Core.Startup.Tests.Configuration.WorkspaceConfigurationReaderTests."
+                "EmbodySense.Core.Startup.Tests.Workspace.WorkspaceStatusReaderTests."
+                "EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryTests."
+                "EmbodySense.Core.Startup.Tests.Capabilities.CapabilityPostureFacadeTests."
+                "EmbodySense.Core.Startup.Tests.Capabilities.CapabilityCatalogFacadeTests."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopInferenceAttemptExecutorTests."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.LoopRunInspectionFacadeTests."
+                "EmbodySense.Core.Startup.Tests.ContextualRoles.ContextualRoleCatalogFacadeTests."
+                "EmbodySense.Core.Startup.Tests.Loops.GovernedLoopAdmissionFactoryTests."
+                "EmbodySense.Core.Startup.Tests.Loops.CustomLoopToolAuthorityProviderTests."
+                "EmbodySense.Core.Startup.Tests.Audit.AuditTailReaderTests."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopConversationPublicationCommitBoundaryTests."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopToolActuationAuthorityBoundaryTests."
+                "EmbodySense.Core.Startup.Tests.Capabilities.CapabilityLifecycleFactoryTests."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.WorkspaceToolEffectAuthorityRequestFactoryTests."
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopExecutionCancellationSignalGroupTests."
+            ))
+        )
+    }
+
     return @((New-VerificationTestLane -Name "all"))
+}
+
+function Get-VerificationCoverageLaneBindings {
+    param([Parameter(Mandatory = $true)] [System.IO.FileInfo[]]$TestProjects)
+
+    $bindings = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    foreach ($testProject in $TestProjects) {
+        foreach ($lane in @(Get-VerificationTestProjectLanes -TestProject $testProject)) {
+            $laneName = "tests-$($testProject.BaseName)-$($lane.Name)"
+            if (-not $bindings.TryAdd($laneName, $testProject.BaseName)) {
+                throw "Verification coverage lane binding is declared more than once: $laneName"
+            }
+        }
+    }
+
+    return ,$bindings
+}
+
+function Get-VerificationCoverageLaneTestProjectName {
+    param(
+        [Parameter(Mandatory = $true)] [Collections.Generic.Dictionary[string, string]]$Bindings,
+        [Parameter(Mandatory = $true)] [string]$LaneName
+    )
+
+    $testProjectName = $null
+    if (-not $Bindings.TryGetValue($LaneName, [ref]$testProjectName)) {
+        throw "Coverage lane '$LaneName' does not bind one exact checked-in test lane."
+    }
+
+    return $testProjectName
+}
+
+function Assert-VerificationCoverageLaneInventory {
+    param(
+        [Parameter(Mandatory = $true)] [Collections.Generic.Dictionary[string, string]]$Bindings,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]]$ObservedLaneNames
+    )
+
+    $expected = [Collections.Generic.HashSet[string]]::new($Bindings.Keys, [StringComparer]::Ordinal)
+    $observed = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($laneName in $ObservedLaneNames) {
+        if (-not $observed.Add($laneName)) {
+            throw "Coverage lane inventory contains a duplicate checked-in lane: $laneName"
+        }
+    }
+    if (-not $expected.SetEquals($observed)) {
+        $missing = @($expected | Where-Object { -not $observed.Contains($_) } | Sort-Object)
+        $unexpected = @($observed | Where-Object { -not $expected.Contains($_) } | Sort-Object)
+        throw "Coverage lane inventory does not equal the checked-in test-lane map. missing=$($missing -join ',') unexpected=$($unexpected -join ',')"
+    }
 }
 
 function Get-VerificationTestLaneFilter {

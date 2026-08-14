@@ -203,10 +203,10 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
 
         if (localHost is not null)
         {
-            return await localHost.CancellationHost.RequestCancellationAsync(runId, cancellationToken);
+            return await localHost.CancellationHost.RequestCancellationAsync(runId, cancellationToken).ConfigureAwait(false);
         }
 
-        return await CustomLoopAttemptCancellationHost.RequestRemoteCancellationAsync(_paths, runId, operationId, cancellationToken);
+        return await CustomLoopAttemptCancellationHost.RequestRemoteCancellationAsync(_paths, runId, operationId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

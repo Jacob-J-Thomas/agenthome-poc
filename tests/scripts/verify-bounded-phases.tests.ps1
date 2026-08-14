@@ -62,6 +62,7 @@ Assert-True -Condition $noOpWasRejected -Message "The negative-test helper must 
 . $phaseScriptPath
 . $tempScriptPath
 . $artifactScriptPath
+. $laneScriptPath
 Reset-VerificationPhaseState
 
 $contextLine = Write-VerificationContext -RepositoryRoot $repoRoot -Configuration Debug -VerificationTier PullRequest
@@ -207,13 +208,46 @@ foreach ($tempVariable in @("TEMP", "TMP", "TMPDIR")) {
 }
 Assert-Contains -Actual $verifyScript -Expected 'Remove-Item -LiteralPath $laneFixtureRoot -Recurse -Force' -Message "Lane fixture roots must be cleaned after ordinary verifier completion."
 Assert-Contains -Actual $verifyScript -Expected '"vstest", $Lane.AssemblyPath' -Message "Test lanes must execute isolated assemblies."
-Assert-Contains -Actual $laneScript -Expected 'return @((New-VerificationTestLane -Name "all"))' -Message "Each test assembly must execute through one exact stable-ID lane."
+Assert-Contains -Actual $laneScript -Expected 'return @((New-VerificationTestLane -Name "all"))' -Message "Unsharded test assemblies must execute through one exact stable-ID lane."
 $lanePolicyStart = $laneScript.IndexOf('function Get-VerificationTestProjectLanes', [StringComparison]::Ordinal)
 $lanePolicyEnd = $laneScript.IndexOf('function Get-VerificationTestLaneFilter', $lanePolicyStart, [StringComparison]::Ordinal)
-Assert-True -Condition ($lanePolicyStart -ge 0 -and $lanePolicyEnd -gt $lanePolicyStart) -Message "The one-lane policy must retain an exact inspectable function boundary."
+Assert-True -Condition ($lanePolicyStart -ge 0 -and $lanePolicyEnd -gt $lanePolicyStart) -Message "The checked-in lane policy must retain an exact inspectable function boundary."
 $lanePolicySource = $laneScript.Substring($lanePolicyStart, $lanePolicyEnd - $lanePolicyStart)
-Assert-True -Condition ($lanePolicySource.IndexOf('$TestProject.', [StringComparison]::Ordinal) -lt 0) -Message "Assembly-wide execution must not inspect project identity or retain project-specific sharding branches."
-Assert-True -Condition ([regex]::Matches($laneScript, 'New-VerificationTestLane -Name "all"').Count -eq 1) -Message "The one-lane policy must have exactly one scheduler declaration."
+Assert-True -Condition ([regex]::Matches($lanePolicySource, '\$TestProject\.BaseName -ceq').Count -eq 2) -Message "Only Persistence and Startup may have project-specific checked-in sharding branches."
+Assert-True -Condition ([regex]::Matches($laneScript, 'New-VerificationTestLane -Name "all"').Count -eq 1) -Message "The fallback one-lane policy must have exactly one scheduler declaration."
+$persistenceProject = [IO.FileInfo]::new((Join-Path $repoRoot "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"))
+$startupProject = [IO.FileInfo]::new((Join-Path $repoRoot "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"))
+$commonProject = [IO.FileInfo]::new((Join-Path $repoRoot "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj"))
+$persistenceLanes = @(Get-VerificationTestProjectLanes -TestProject $persistenceProject)
+$startupLanes = @(Get-VerificationTestProjectLanes -TestProject $startupProject)
+$commonLanes = @(Get-VerificationTestProjectLanes -TestProject $commonProject)
+Assert-True -Condition (($persistenceLanes.Name -join ",") -ceq "shard-1,shard-2,shard-3,shard-4") -Message "Persistence must retain exactly four measured class shards."
+Assert-True -Condition (($startupLanes.Name -join ",") -ceq "runtime,shard-1,shard-2") -Message "Startup must retain its serialized runtime lane and two measured remainder shards."
+Assert-True -Condition ($commonLanes.Count -eq 1 -and $commonLanes[0].Name -ceq "all" -and $commonLanes[0].IncludeFullyQualifiedName.Count -eq 0) -Message "Assemblies without an approved shard map must retain one unfiltered lane."
+$allShardPrefixes = @($persistenceLanes.IncludeFullyQualifiedName) + @($startupLanes.IncludeFullyQualifiedName)
+Assert-True -Condition (@($allShardPrefixes | Group-Object -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Checked-in class prefixes must belong to exactly one shard."
+Assert-True -Condition (@($allShardPrefixes | Where-Object { -not $_.EndsWith(".", [StringComparison]::Ordinal) }).Count -eq 0) -Message "Every class shard predicate must end at an exact fully-qualified type boundary."
+$runtimePrefixes = @($startupLanes | Where-Object Name -CEQ "runtime" | Select-Object -ExpandProperty IncludeFullyQualifiedName)
+$expectedRuntimePrefixes = @(
+    "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsAdmissionAndContext."
+    "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsDurabilityAndRecovery."
+    "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsPublicationAndConcurrency."
+    "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsAdmissionAndBinding."
+    "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsCompletionConstraints."
+    "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsResumeAndAuthority."
+)
+Assert-True -Condition ((@($runtimePrefixes | Sort-Object -CaseSensitive) -join "`n") -ceq (@($expectedRuntimePrefixes | Sort-Object -CaseSensitive) -join "`n")) -Message "All six serialized Startup runtime wrappers must remain in one process lane."
+$startupShardTwoPrefixes = @($startupLanes | Where-Object Name -CEQ "shard-2" | Select-Object -ExpandProperty IncludeFullyQualifiedName)
+foreach ($sharedTrustPrefix in @(
+    "EmbodySense.Core.Startup.Tests.Configuration.WorkspaceConfigurationReaderTests."
+    "EmbodySense.Core.Startup.Tests.Loops.LoopReceiptRetentionFacadeTests."
+    "EmbodySense.Core.Startup.Tests.Workspace.WorkspaceStatusReaderTests."
+)) {
+    Assert-True -Condition ($startupShardTwoPrefixes -ccontains $sharedTrustPrefix) -Message "Shared default-capability trust class '$sharedTrustPrefix' must remain in one Startup lane."
+}
+$null = Invoke-ExpectedFailure -ExpectedMessage "unsafe fully-qualified-name predicate" -Action {
+    New-VerificationTestLane -Name "unsafe" -IncludeFullyQualifiedName @("EmbodySense.Core.Common.Tests.TypeWithoutBoundary")
+}
 Assert-Contains -Actual $verifyScript -Expected 'Read-VerificationCoverageOwnership -ManifestPath $coverageOwnershipManifestPath -RepositoryRoot $repoRoot -TestProjects $testProjects' -Message "The verifier must validate the checked-in coverage ownership map against exact current source and test-project inventories before execution."
 Assert-Contains -Actual $verifyScript -Expected 'Write-VerificationCoverageRunSettings -SourcePath $pullRequestRunSettingsPath -DestinationPath $runSettingsPath -Selection $coverageSelection' -Message "Every canonical test lane must receive its fail-closed source-owned coverage filter."
 Assert-Contains -Actual $verifyScript -Expected 'Copy-Item -LiteralPath $runSettingsPath -Destination $childRunSettingsPath' -Message "Every child-process collector must inherit the exact parent ownership filter."
@@ -287,26 +321,35 @@ foreach ($webSharedRuntimeTest in @(
     Assert-Contains -Actual $webSharedRuntimeTestSource -Expected '[Collection(EphemeralPortApiCollection.Name)]' -Message "Web runtime/API test '$webSharedRuntimeTest' must serialize shared default trust and host state inside the assembly-wide lane."
 }
 foreach ($assemblyProfile in @(
-    'Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 300; Weight = 3; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.Core.Startup.Tests-all"; EstimatedDurationSeconds = 240; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Core.Startup.Tests-runtime"; EstimatedDurationSeconds = 200; Weight = 3; ResourceClass = "ProcessHeavy"'
     'Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; Weight = 3; ResourceClass = "ProcessHeavy"'
     'Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy"'
 )) {
-    Assert-Contains -Actual $scheduleScript -Expected $assemblyProfile -Message "Internally parallel assembly gates must retain exact conservative process-heavy scheduling profiles."
+    Assert-Contains -Actual $scheduleScript -Expected $assemblyProfile -Message "Long process-heavy gates must retain exact conservative scheduling profiles."
 }
-foreach ($assemblyName in @("EmbodySense.Cli.Command.Tests", "EmbodySense.Core.Application.Tests", "EmbodySense.Core.Clients.Tests", "EmbodySense.Core.Common.Tests", "EmbodySense.Core.Persistence.Tests", "EmbodySense.Core.Startup.Tests", "EmbodySense.E2ETests", "EmbodySense.IntegrationTests", "EmbodySense.Web.Tests")) {
+foreach ($shardProfile in @(
+    "tests-EmbodySense.Core.Persistence.Tests-shard-1"
+    "tests-EmbodySense.Core.Persistence.Tests-shard-2"
+    "tests-EmbodySense.Core.Persistence.Tests-shard-3"
+    "tests-EmbodySense.Core.Persistence.Tests-shard-4"
+    "tests-EmbodySense.Core.Startup.Tests-shard-1"
+    "tests-EmbodySense.Core.Startup.Tests-shard-2"
+)) {
+    Assert-Contains -Actual $scheduleScript -Expected "Name = `"$shardProfile`"; EstimatedDurationSeconds = 115; Weight = 3; ResourceClass = `"ProcessHeavy`"" -Message "Every class-balanced shard must retain one exact checked-in scheduling profile."
+}
+foreach ($assemblyName in @("EmbodySense.Cli.Command.Tests", "EmbodySense.Core.Application.Tests", "EmbodySense.Core.Clients.Tests", "EmbodySense.Core.Common.Tests", "EmbodySense.E2ETests", "EmbodySense.IntegrationTests", "EmbodySense.Web.Tests")) {
     Assert-Contains -Actual $scheduleScript -Expected "Name = `"tests-$assemblyName-all`";" -Message "Every production test assembly must have exactly one checked-in required-gate profile."
 }
 foreach ($retiredLane in @("loop-execution-custom-runtime", "loop-execution-governed-runtime", "contextual-roles", "codex-app-server", "runtime-host", "remainder-triggers")) {
     Assert-True -Condition ($laneScript.IndexOf("New-VerificationTestLane -Name `"$retiredLane`"", [StringComparison]::Ordinal) -lt 0) -Message "Assembly-wide execution must not retain report-amplifying lane '$retiredLane'."
 }
 Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateResourceCapacity = 12' -Message "Required gates must retain twelve logical resource units independently of the four-process host ceiling."
-Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 2' -Message "Required gates must enforce an explicit two-process-heavy concurrency ceiling for coverage-instrumented assemblies."
-Assert-Contains -Actual $scheduleScript -Expected 'Two may overlap on the four-core Windows runner' -Message "The required-gate scheduler must document why the two-process-heavy ceiling preserves headroom."
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 4' -Message "Required gates must admit the four exact immutable class shards measured on the hosted runner."
+Assert-Contains -Actual $scheduleScript -Expected 'exact stable-ID partition' -Message "The required-gate scheduler must document the fail-closed partition boundary behind four-way execution."
 Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumCpuBoundWorkers = 1' -Message "Required gates must enforce an explicit one-CPU-bound concurrency ceiling."
 Assert-Contains -Actual $scheduleScript -Expected 'Weight = 3; ResourceClass = "ProcessHeavy"' -Message "Process-heavy required gates must retain their evidence-backed logical weight."
 Assert-Contains -Actual $scheduleScript -Expected '"ProcessHeavy" { 3; break }' -Message "Required-gate profile validation must reject underweighted process-heavy gates."
-Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-csharp"; EstimatedDurationSeconds = 100; Weight = 6; ResourceClass = "CpuBound"' -Message "Combined whitespace and IDE1006 formatting must reserve the two-heavy schedule's remaining capacity."
+Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-csharp"; EstimatedDurationSeconds = 100; Weight = 6; ResourceClass = "CpuBound"' -Message "Combined whitespace and IDE1006 formatting must retain its explicit logical capacity reservation."
 Assert-Contains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-csharp"' -Message "The combined C# formatter must overlap only immutable required-gate test execution."
 Assert-Contains -Actual $verifyScript -Expected '@("format", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal")' -Message "One workspace load must retain both the implicit whitespace formatter and the explicit IDE1006 analyzer."
 Assert-True -Condition ($verifyScript.IndexOf('@("format", "whitespace", "EmbodySense.sln"', [StringComparison]::Ordinal) -lt 0) -Message "The verifier must not repeat the solution load through a separate whitespace process."

@@ -118,14 +118,14 @@ function Get-VirtualVerificationSchedule {
 
 $requiredGateProfiles = @(Get-VerificationRequiredGateScheduleProfiles)
 Assert-True -Condition ((Get-VerificationRequiredGateResourceCapacity) -eq 12) -Message "Required gates must retain the explicit twelve-unit logical resource capacity."
-Assert-True -Condition ((Get-VerificationRequiredGateMaximumProcessHeavyWorkers) -eq 2) -Message "Required gates must admit at most two coverage-instrumented assembly-wide process-heavy phases."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumProcessHeavyWorkers) -eq 4) -Message "Required gates must admit at most four exact immutable process-heavy shards."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumCpuBoundWorkers) -eq 1) -Message "Required gates must admit at most one CPU-bound format gate."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 8 -HardwareProcessorCount 10) -eq 4) -Message "A larger host must retain the checked-in four-process required-gate ceiling."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 4) -eq 4) -Message "A hosted four-core runner must admit exactly four physical required-gate workers."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 10) -eq 4) -Message "A lower explicit worker request must remain authoritative below the required-gate ceiling."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 4) -eq 4) -Message "A hosted four-core request must not be expanded beyond its explicit four-worker bound."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 2) -eq 2) -Message "A smaller host must reduce required-gate workers to its physical processor count."
-Assert-True -Condition ($requiredGateProfiles.Count -eq 11) -Message "The exact nine-assembly test plan, one combined format process, and git-diff gate must have checked-in duration/resource profiles."
+Assert-True -Condition ($requiredGateProfiles.Count -eq 16) -Message "The exact seven unsharded assembly lanes, seven Persistence/Startup shards, one combined formatter, and git-diff gate must have checked-in profiles."
 Assert-True -Condition (@($requiredGateProfiles | Group-Object Name -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Required gate scheduling profiles must have exact unique names."
 Assert-VerificationRequiredGateSchedule -Phases $requiredGateProfiles
 $expectedRequiredGateNames = @(
@@ -135,13 +135,18 @@ $expectedRequiredGateNames = @(
     "tests-EmbodySense.Core.Application.Tests-all"
     "tests-EmbodySense.Core.Clients.Tests-all"
     "tests-EmbodySense.Core.Common.Tests-all"
-    "tests-EmbodySense.Core.Persistence.Tests-all"
-    "tests-EmbodySense.Core.Startup.Tests-all"
+    "tests-EmbodySense.Core.Persistence.Tests-shard-1"
+    "tests-EmbodySense.Core.Persistence.Tests-shard-2"
+    "tests-EmbodySense.Core.Persistence.Tests-shard-3"
+    "tests-EmbodySense.Core.Persistence.Tests-shard-4"
+    "tests-EmbodySense.Core.Startup.Tests-runtime"
+    "tests-EmbodySense.Core.Startup.Tests-shard-1"
+    "tests-EmbodySense.Core.Startup.Tests-shard-2"
     "tests-EmbodySense.E2ETests-all"
     "tests-EmbodySense.IntegrationTests-all"
     "tests-EmbodySense.Web.Tests-all"
 )
-Assert-True -Condition ((@($requiredGateProfiles.Name | Sort-Object) -join "`n") -ceq (@($expectedRequiredGateNames | Sort-Object) -join "`n")) -Message "Required-gate profiles must equal the canonical nine-assembly catalog plus the combined formatter and git-diff exactly."
+Assert-True -Condition ((@($requiredGateProfiles.Name | Sort-Object) -join "`n") -ceq (@($expectedRequiredGateNames | Sort-Object) -join "`n")) -Message "Required-gate profiles must equal the canonical class-sharded test catalog plus the combined formatter and git-diff exactly."
 $declaredRequiredGateNames = [Collections.Generic.List[string]]::new()
 $declaredRequiredGateNames.Add("format-csharp")
 $declaredRequiredGateNames.Add("git-diff-check")
@@ -151,6 +156,25 @@ $expectedHelperProjects = @(@("EmbodySense.CancellationHost.csproj", "EmbodySens
 $actualHelperProjects = @($allTestProjects | Where-Object { $testProjects.FullName -cnotcontains $_.FullName } | ForEach-Object Name | Sort-Object -CaseSensitive)
 Assert-True -Condition (($actualHelperProjects -join "`n") -ceq ($expectedHelperProjects -join "`n")) -Message "Canonical coverage test-project discovery must exclude only the exact helper-project catalog."
 $coverageOwnership = Read-VerificationCoverageOwnership -ManifestPath (Join-Path $repoRoot "tests/verification-coverage-ownership.json") -RepositoryRoot $repoRoot -TestProjects $testProjects
+$coverageLaneBindings = Get-VerificationCoverageLaneBindings -TestProjects $testProjects
+$expectedCoverageLaneNames = @($expectedRequiredGateNames | Where-Object { $_.StartsWith("tests-", [StringComparison]::Ordinal) } | Sort-Object -CaseSensitive)
+Assert-True -Condition ($coverageLaneBindings.Count -eq 14) -Message "Coverage evidence must bind every exact checked-in shard and unsharded test lane."
+Assert-True -Condition ((@($coverageLaneBindings.Keys | Sort-Object -CaseSensitive) -join "`n") -ceq ($expectedCoverageLaneNames -join "`n")) -Message "Coverage lane bindings must equal the required-gate test profiles exactly."
+Assert-True -Condition ((Get-VerificationCoverageLaneTestProjectName -Bindings $coverageLaneBindings -LaneName "tests-EmbodySense.Core.Persistence.Tests-shard-4") -ceq "EmbodySense.Core.Persistence.Tests") -Message "A Persistence shard must bind its exact owning test project."
+Assert-True -Condition ((Get-VerificationCoverageLaneTestProjectName -Bindings $coverageLaneBindings -LaneName "tests-EmbodySense.Core.Startup.Tests-runtime") -ceq "EmbodySense.Core.Startup.Tests") -Message "The serialized Startup runtime shard must bind its exact owning test project."
+Invoke-ExpectedFailure -ExpectedMessage "does not bind one exact checked-in test lane" -Action {
+    Get-VerificationCoverageLaneTestProjectName -Bindings $coverageLaneBindings -LaneName "tests-EmbodySense.Core.Persistence.Tests-invented"
+} | Out-Null
+Assert-VerificationCoverageLaneInventory -Bindings $coverageLaneBindings -ObservedLaneNames $expectedCoverageLaneNames
+Invoke-ExpectedFailure -ExpectedMessage "missing=tests-EmbodySense.Core.Persistence.Tests-shard-4" -Action {
+    Assert-VerificationCoverageLaneInventory -Bindings $coverageLaneBindings -ObservedLaneNames @($expectedCoverageLaneNames | Where-Object { $_ -cne "tests-EmbodySense.Core.Persistence.Tests-shard-4" })
+} | Out-Null
+Invoke-ExpectedFailure -ExpectedMessage "unexpected=tests-EmbodySense.Core.Persistence.Tests-invented" -Action {
+    Assert-VerificationCoverageLaneInventory -Bindings $coverageLaneBindings -ObservedLaneNames @($expectedCoverageLaneNames + "tests-EmbodySense.Core.Persistence.Tests-invented")
+} | Out-Null
+$coverageVerifierScript = Get-Content -LiteralPath (Join-Path $repoRoot "scripts/verify-coverage.ps1") -Raw
+Assert-Contains -Actual $coverageVerifierScript -Expected "Get-VerificationCoverageLaneBindings -TestProjects `$canonicalTestProjects" -Message "Coverage reduction must bind reports to the exact checked-in lane map."
+Assert-Contains -Actual $coverageVerifierScript -Expected "Assert-VerificationCoverageLaneInventory -Bindings `$coverageLaneBindings -ObservedLaneNames @(`$laneNames)" -Message "Coverage reduction must require every checked-in lane report exactly once."
 $sourceProjects = @(Get-ChildItem -Path (Join-Path $repoRoot "src") -Directory -Recurse | Where-Object {
     Test-Path -LiteralPath (Join-Path $_.FullName "$($_.Name).csproj") -PathType Leaf
 } | Sort-Object FullName)
@@ -299,32 +323,41 @@ $declaredRequiredGateProfiles = @($declaredRequiredGateNames | ForEach-Object { 
 Assert-VerificationRequiredGateSchedule -Phases $declaredRequiredGateProfiles
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $declaredRequiredGateNames.Count) -Message "Every dynamically declared required gate must resolve to one checked-in profile."
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $requiredGateProfiles.Count) -Message "The checked-in scheduling catalog cannot retain stale profiles for gates outside the current plan."
-foreach ($processHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-all", "tests-EmbodySense.IntegrationTests-all", "tests-EmbodySense.Web.Tests-all")) {
+foreach ($processHeavyGateName in @(
+    "tests-EmbodySense.Core.Persistence.Tests-shard-1"
+    "tests-EmbodySense.Core.Persistence.Tests-shard-2"
+    "tests-EmbodySense.Core.Persistence.Tests-shard-3"
+    "tests-EmbodySense.Core.Persistence.Tests-shard-4"
+    "tests-EmbodySense.Core.Startup.Tests-runtime"
+    "tests-EmbodySense.Core.Startup.Tests-shard-1"
+    "tests-EmbodySense.Core.Startup.Tests-shard-2"
+    "tests-EmbodySense.IntegrationTests-all"
+    "tests-EmbodySense.Web.Tests-all"
+)) {
     $processHeavyProfile = Get-VerificationRequiredGateScheduleProfile -Name $processHeavyGateName
-    Assert-True -Condition ($processHeavyProfile.Weight -eq 3 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "An internally parallel assembly gate '$processHeavyGateName' must retain its bounded logical weight."
+    Assert-True -Condition ($processHeavyProfile.Weight -eq 3 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "A coverage-instrumented process-heavy gate '$processHeavyGateName' must retain its bounded logical weight."
 }
 $formatProfile = Get-VerificationRequiredGateScheduleProfile -Name "format-csharp"
-Assert-True -Condition ($formatProfile.EstimatedDurationSeconds -eq 100 -and $formatProfile.Weight -eq 6 -and $formatProfile.ResourceClass -ceq "CpuBound") -Message "The combined formatter must reserve the two-heavy schedule's remaining logical capacity for one bounded solution load."
+Assert-True -Condition ($formatProfile.EstimatedDurationSeconds -eq 100 -and $formatProfile.Weight -eq 6 -and $formatProfile.ResourceClass -ceq "CpuBound") -Message "The combined formatter must retain one bounded solution load and an explicit six-unit reservation."
 
-$requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 4 -MaximumResourceCapacity 12 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
-Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -le 480) -Message "The checked-in duration estimates must keep the two-heavy required-gate schedule at or below eight minutes; this bound excludes verifier preflight and is not whole-run timing proof. Actual required-gate estimate: $($requiredGateVirtualSchedule.MakespanSeconds)."
-foreach ($assemblyGateName in @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-all")) {
-    Assert-True -Condition ($requiredGateVirtualSchedule.Starts[$assemblyGateName] -eq 0) -Message "The two longest assembly gates must start at virtual second zero."
+$requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 4 -MaximumResourceCapacity 12 -MaximumProcessHeavyWorkers 4 -MaximumCpuBoundWorkers 1
+Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -eq 425) -Message "The conservative checked-in profiles must retain the exact four-shard virtual schedule; this is not authoritative whole-run timing proof. Actual estimate: $($requiredGateVirtualSchedule.MakespanSeconds)."
+foreach ($initialHeavyGateName in @("tests-EmbodySense.Web.Tests-all", "tests-EmbodySense.Core.Startup.Tests-runtime", "tests-EmbodySense.IntegrationTests-all", "tests-EmbodySense.Core.Persistence.Tests-shard-1")) {
+    Assert-True -Condition ($requiredGateVirtualSchedule.Starts[$initialHeavyGateName] -eq 0) -Message "The four longest admitted heavy lanes must start at virtual second zero."
 }
 $initialResourceCapacity = ($requiredGateProfiles | Where-Object { $requiredGateVirtualSchedule.Starts[$_.Name] -eq 0 } | Measure-Object -Property Weight -Sum).Sum
-Assert-True -Condition ($initialResourceCapacity -eq 12) -Message "Two assembly-wide phases and one format gate must fill all twelve logical units without admitting an oversubscribing fourth process."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-csharp"] -eq 0) -Message "The combined format gate must use the third initial process slot without admitting a third heavy assembly."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Web.Tests-all"] -gt 0) -Message "The third internally parallel assembly must wait for one of the two admitted heavy slots."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Application.Tests-all"] -ge ($requiredGateVirtualSchedule.Starts["format-csharp"] + 100)) -Message "Ordinary test work must wait until the combined CPU-bound format gate drains its full remaining-capacity reservation."
+Assert-True -Condition ($initialResourceCapacity -eq 12) -Message "Four exact process-heavy lanes must fill all twelve logical units without admitting a fifth outer process."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-csharp"] -gt 0) -Message "The combined formatter must wait until two three-unit heavy reservations have drained."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Persistence.Tests-shard-2"] -eq 115) -Message "The next balanced Persistence shard must immediately reuse the first released heavy slot."
 $processHeavyProfiles = @($requiredGateProfiles | Where-Object ResourceClass -CEQ "ProcessHeavy")
 foreach ($startSecond in @($processHeavyProfiles | ForEach-Object { $requiredGateVirtualSchedule.Starts[$_.Name] } | Sort-Object -Unique)) {
     $activeProcessHeavy = @($processHeavyProfiles | Where-Object {
         $phaseStart = $requiredGateVirtualSchedule.Starts[$_.Name]
         $phaseStart -le $startSecond -and ($phaseStart + $_.EstimatedDurationSeconds) -gt $startSecond
     })
-    Assert-True -Condition ($activeProcessHeavy.Count -le 2) -Message "The virtual required-gate schedule must never overlap more than two coverage-instrumented process-heavy assemblies."
+    Assert-True -Condition ($activeProcessHeavy.Count -le 4) -Message "The virtual required-gate schedule must never overlap more than four exact immutable process-heavy lanes."
 }
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-csharp"] -lt 300) -Message "The combined format gate must execute while the longest immutable assembly gate is still running."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-csharp"] -eq 325) -Message "The combined format gate must start at the exact conservative two-slot opening, not oversubscribe the four-heavy wave."
 
 $counterexamplePhases = @(
     [pscustomobject]@{ Name = "long-ordinary"; EstimatedDurationSeconds = 100; SchedulingPrioritySeconds = 100; ResourceClass = "Ordinary" }
@@ -546,6 +579,39 @@ finally {
         }
         Assert-True -Condition (-not (Test-Path -LiteralPath $underweightedOutput)) -Message "An underweighted $underweightedClass phase must fail before execution."
     }
+
+    Reset-VerificationParallelPhaseState
+    Add-VerificationParallelPhase -Name "dependency-prerequisite" -FileName $powerShellExecutable -Arguments ($baseArguments + @("dependency-prerequisite", "50", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "dependency-prerequisite.log")
+    Add-VerificationParallelPhase -Name "dependency-dependent" -FileName $powerShellExecutable -Arguments ($baseArguments + @("dependency-dependent", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "dependency-dependent.log") -DependsOn @("dependency-prerequisite") -EstimatedDurationSeconds 100
+    $dependencyResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 2 -MaximumResourceCapacity 2)
+    Assert-True -Condition ($dependencyResults.Count -eq 2 -and (Test-Path -LiteralPath (Join-Path $scenarioRoot "dependency-dependent.log"))) -Message "A successful prerequisite must admit its dependent phase even when the dependent has higher scheduling priority."
+
+    Reset-VerificationParallelPhaseState
+    $unknownDependencyOutput = Join-Path $scenarioRoot "unknown-dependency.log"
+    Add-VerificationParallelPhase -Name "unknown-dependency" -FileName $powerShellExecutable -Arguments ($baseArguments + @("unknown-dependency", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $unknownDependencyOutput -DependsOn @("missing-prerequisite")
+    $null = Invoke-ExpectedFailure -ExpectedMessage "depends on unknown phase 'missing-prerequisite'" -Action {
+        Invoke-VerificationParallelPhases -MaximumWorkers 2 -MaximumResourceCapacity 2
+    }
+    Assert-True -Condition (-not (Test-Path -LiteralPath $unknownDependencyOutput)) -Message "An unknown dependency must fail before any child starts."
+
+    Reset-VerificationParallelPhaseState
+    $cycleFirstOutput = Join-Path $scenarioRoot "cycle-first.log"
+    $cycleSecondOutput = Join-Path $scenarioRoot "cycle-second.log"
+    Add-VerificationParallelPhase -Name "cycle-first" -FileName $powerShellExecutable -Arguments ($baseArguments + @("cycle-first", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $cycleFirstOutput -DependsOn @("cycle-second")
+    Add-VerificationParallelPhase -Name "cycle-second" -FileName $powerShellExecutable -Arguments ($baseArguments + @("cycle-second", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $cycleSecondOutput -DependsOn @("cycle-first")
+    $null = Invoke-ExpectedFailure -ExpectedMessage "dependencies contain a cycle" -Action {
+        Invoke-VerificationParallelPhases -MaximumWorkers 2 -MaximumResourceCapacity 2
+    }
+    Assert-True -Condition (-not (Test-Path -LiteralPath $cycleFirstOutput) -and -not (Test-Path -LiteralPath $cycleSecondOutput)) -Message "A cyclic dependency graph must fail before any child starts."
+
+    Reset-VerificationParallelPhaseState
+    $failedDependencyOutput = Join-Path $scenarioRoot "failed-dependency.log"
+    Add-VerificationParallelPhase -Name "failed-prerequisite" -FileName $powerShellExecutable -Arguments ($baseArguments + @("failed-prerequisite", "10", "17")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "failed-prerequisite.log")
+    Add-VerificationParallelPhase -Name "failed-dependency" -FileName $powerShellExecutable -Arguments ($baseArguments + @("failed-dependency", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath $failedDependencyOutput -DependsOn @("failed-prerequisite")
+    $null = Invoke-ExpectedFailure -ExpectedMessage "prerequisite phases did not pass: failed-prerequisite" -Action {
+        Invoke-VerificationParallelPhases -MaximumWorkers 2 -MaximumResourceCapacity 2
+    }
+    Assert-True -Condition (-not (Test-Path -LiteralPath $failedDependencyOutput)) -Message "A failed prerequisite must prevent dependent process admission."
 
     Reset-VerificationParallelPhaseState
     Add-VerificationParallelPhase -Name "failure" -FileName $powerShellExecutable -Arguments ($baseArguments + @("failure", "50", "17")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "failure.log") -Weight 3 -ResourceClass ProcessHeavy

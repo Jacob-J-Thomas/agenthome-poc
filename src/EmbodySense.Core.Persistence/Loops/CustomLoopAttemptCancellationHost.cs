@@ -105,7 +105,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         try
         {
-            var result = await attempt.Completion.Task.WaitAsync(_acknowledgementTimeout, cancellationToken);
+            var result = await attempt.Completion.Task.WaitAsync(_acknowledgementTimeout, cancellationToken).ConfigureAwait(false);
             return result with { OwnerId = _ownerId, OwnerProcessId = Environment.ProcessId };
         }
         catch (TimeoutException)

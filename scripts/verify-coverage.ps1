@@ -101,10 +101,12 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
         throw "Coverage report manifest counts do not match its exact report and alias inventories."
     }
     $coverageOwnership = $null
+    $coverageLaneBindings = $null
     $coverageOwnershipManifestPath = Join-Path $testsPath "verification-coverage-ownership.json"
     if (Test-Path -LiteralPath $coverageOwnershipManifestPath -PathType Leaf) {
         $canonicalTestProjects = @(Get-VerificationCanonicalTestProjects -RepositoryRoot $repoRoot)
         $coverageOwnership = Read-VerificationCoverageOwnership -ManifestPath $coverageOwnershipManifestPath -RepositoryRoot $repoRoot -TestProjects $canonicalTestProjects
+        $coverageLaneBindings = Get-VerificationCoverageLaneBindings -TestProjects $canonicalTestProjects
     }
 
     $reportEvidenceByPath = [Collections.Generic.Dictionary[string, object]]::new((Get-VerificationCoveragePathComparer))
@@ -160,11 +162,8 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
             $reportRecord | Add-Member -NotePropertyName LaneResultsRoot -NotePropertyValue $laneResultsRoot
             $reportRecord | Add-Member -NotePropertyName DeploymentPath -NotePropertyValue $deploymentPath
             if ($null -ne $coverageOwnership) {
-                $matchingTestProjects = @($coverageOwnership.TestProjectNames | Where-Object { [string]$entry.laneName -ceq "tests-$_-all" })
-                if ($matchingTestProjects.Count -ne 1) {
-                    throw "Coverage lane '$([string]$entry.laneName)' does not bind one exact coverage-owned test project."
-                }
-                $reportRecord | Add-Member -NotePropertyName TestProjectName -NotePropertyValue $matchingTestProjects[0]
+                $testProjectName = Get-VerificationCoverageLaneTestProjectName -Bindings $coverageLaneBindings -LaneName ([string]$entry.laneName)
+                $reportRecord | Add-Member -NotePropertyName TestProjectName -NotePropertyValue $testProjectName
             }
         }
         else {
@@ -192,6 +191,9 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
         $reportEvidenceByPath.Add($path, $reportRecord)
     }
     if ($actualLaneCount -ne $laneReportCount -or $actualChildCount -ne $childReportCount) { throw "Coverage report manifest report-kind counts do not match its schema-1 totals." }
+    if ($null -ne $coverageOwnership) {
+        Assert-VerificationCoverageLaneInventory -Bindings $coverageLaneBindings -ObservedLaneNames @($laneNames)
+    }
 
     $aliasPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
     $aliasedCanonicalPaths = [Collections.Generic.HashSet[string]]::new((Get-VerificationCoveragePathComparer))
