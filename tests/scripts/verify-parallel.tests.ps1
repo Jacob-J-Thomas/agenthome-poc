@@ -125,7 +125,7 @@ Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTest
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 10) -eq 4) -Message "A lower explicit worker request must remain authoritative below the required-gate ceiling."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 4) -eq 4) -Message "A hosted four-core request must not be expanded beyond its explicit four-worker bound."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 2) -eq 2) -Message "A smaller host must reduce required-gate workers to its physical processor count."
-Assert-True -Condition ($requiredGateProfiles.Count -eq 16) -Message "The exact seven unsharded assembly lanes, seven Persistence/Startup shards, one combined formatter, and git-diff gate must have checked-in profiles."
+Assert-True -Condition ($requiredGateProfiles.Count -eq 22) -Message "The exact five unsharded assembly lanes, fifteen Persistence/Integration/Startup/Web shards, one combined formatter, and git-diff gate must have checked-in profiles."
 Assert-True -Condition (@($requiredGateProfiles | Group-Object Name -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Required gate scheduling profiles must have exact unique names."
 Assert-VerificationRequiredGateSchedule -Phases $requiredGateProfiles
 $expectedRequiredGateNames = @(
@@ -139,12 +139,18 @@ $expectedRequiredGateNames = @(
     "tests-EmbodySense.Core.Persistence.Tests-shard-2"
     "tests-EmbodySense.Core.Persistence.Tests-shard-3"
     "tests-EmbodySense.Core.Persistence.Tests-shard-4"
-    "tests-EmbodySense.Core.Startup.Tests-runtime"
+    "tests-EmbodySense.Core.Startup.Tests-runtime-1"
+    "tests-EmbodySense.Core.Startup.Tests-runtime-2"
+    "tests-EmbodySense.Core.Startup.Tests-runtime-3"
     "tests-EmbodySense.Core.Startup.Tests-shard-1"
     "tests-EmbodySense.Core.Startup.Tests-shard-2"
     "tests-EmbodySense.E2ETests-all"
-    "tests-EmbodySense.IntegrationTests-all"
-    "tests-EmbodySense.Web.Tests-all"
+    "tests-EmbodySense.IntegrationTests-shard-1"
+    "tests-EmbodySense.IntegrationTests-shard-2"
+    "tests-EmbodySense.IntegrationTests-shard-3"
+    "tests-EmbodySense.Web.Tests-shard-1"
+    "tests-EmbodySense.Web.Tests-shard-2"
+    "tests-EmbodySense.Web.Tests-shard-3"
 )
 Assert-True -Condition ((@($requiredGateProfiles.Name | Sort-Object) -join "`n") -ceq (@($expectedRequiredGateNames | Sort-Object) -join "`n")) -Message "Required-gate profiles must equal the canonical class-sharded test catalog plus the combined formatter and git-diff exactly."
 $declaredRequiredGateNames = [Collections.Generic.List[string]]::new()
@@ -158,10 +164,12 @@ Assert-True -Condition (($actualHelperProjects -join "`n") -ceq ($expectedHelper
 $coverageOwnership = Read-VerificationCoverageOwnership -ManifestPath (Join-Path $repoRoot "tests/verification-coverage-ownership.json") -RepositoryRoot $repoRoot -TestProjects $testProjects
 $coverageLaneBindings = Get-VerificationCoverageLaneBindings -TestProjects $testProjects
 $expectedCoverageLaneNames = @($expectedRequiredGateNames | Where-Object { $_.StartsWith("tests-", [StringComparison]::Ordinal) } | Sort-Object -CaseSensitive)
-Assert-True -Condition ($coverageLaneBindings.Count -eq 14) -Message "Coverage evidence must bind every exact checked-in shard and unsharded test lane."
+Assert-True -Condition ($coverageLaneBindings.Count -eq 20) -Message "Coverage evidence must bind every exact checked-in shard and unsharded test lane."
 Assert-True -Condition ((@($coverageLaneBindings.Keys | Sort-Object -CaseSensitive) -join "`n") -ceq ($expectedCoverageLaneNames -join "`n")) -Message "Coverage lane bindings must equal the required-gate test profiles exactly."
 Assert-True -Condition ((Get-VerificationCoverageLaneTestProjectName -Bindings $coverageLaneBindings -LaneName "tests-EmbodySense.Core.Persistence.Tests-shard-4") -ceq "EmbodySense.Core.Persistence.Tests") -Message "A Persistence shard must bind its exact owning test project."
-Assert-True -Condition ((Get-VerificationCoverageLaneTestProjectName -Bindings $coverageLaneBindings -LaneName "tests-EmbodySense.Core.Startup.Tests-runtime") -ceq "EmbodySense.Core.Startup.Tests") -Message "The serialized Startup runtime shard must bind its exact owning test project."
+foreach ($startupRuntimeLaneName in @("tests-EmbodySense.Core.Startup.Tests-runtime-1", "tests-EmbodySense.Core.Startup.Tests-runtime-2", "tests-EmbodySense.Core.Startup.Tests-runtime-3")) {
+    Assert-True -Condition ((Get-VerificationCoverageLaneTestProjectName -Bindings $coverageLaneBindings -LaneName $startupRuntimeLaneName) -ceq "EmbodySense.Core.Startup.Tests") -Message "Startup runtime lane '$startupRuntimeLaneName' must bind its exact owning test project."
+}
 Invoke-ExpectedFailure -ExpectedMessage "does not bind one exact checked-in test lane" -Action {
     Get-VerificationCoverageLaneTestProjectName -Bindings $coverageLaneBindings -LaneName "tests-EmbodySense.Core.Persistence.Tests-invented"
 } | Out-Null
@@ -328,11 +336,17 @@ foreach ($processHeavyGateName in @(
     "tests-EmbodySense.Core.Persistence.Tests-shard-2"
     "tests-EmbodySense.Core.Persistence.Tests-shard-3"
     "tests-EmbodySense.Core.Persistence.Tests-shard-4"
-    "tests-EmbodySense.Core.Startup.Tests-runtime"
+    "tests-EmbodySense.Core.Startup.Tests-runtime-1"
+    "tests-EmbodySense.Core.Startup.Tests-runtime-2"
+    "tests-EmbodySense.Core.Startup.Tests-runtime-3"
     "tests-EmbodySense.Core.Startup.Tests-shard-1"
     "tests-EmbodySense.Core.Startup.Tests-shard-2"
-    "tests-EmbodySense.IntegrationTests-all"
-    "tests-EmbodySense.Web.Tests-all"
+    "tests-EmbodySense.IntegrationTests-shard-1"
+    "tests-EmbodySense.IntegrationTests-shard-2"
+    "tests-EmbodySense.IntegrationTests-shard-3"
+    "tests-EmbodySense.Web.Tests-shard-1"
+    "tests-EmbodySense.Web.Tests-shard-2"
+    "tests-EmbodySense.Web.Tests-shard-3"
 )) {
     $processHeavyProfile = Get-VerificationRequiredGateScheduleProfile -Name $processHeavyGateName
     Assert-True -Condition ($processHeavyProfile.Weight -eq 3 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "A coverage-instrumented process-heavy gate '$processHeavyGateName' must retain its bounded logical weight."
@@ -341,14 +355,14 @@ $formatProfile = Get-VerificationRequiredGateScheduleProfile -Name "format-cshar
 Assert-True -Condition ($formatProfile.EstimatedDurationSeconds -eq 100 -and $formatProfile.Weight -eq 6 -and $formatProfile.ResourceClass -ceq "CpuBound") -Message "The combined formatter must retain one bounded solution load and an explicit six-unit reservation."
 
 $requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 4 -MaximumResourceCapacity 12 -MaximumProcessHeavyWorkers 4 -MaximumCpuBoundWorkers 1
-Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -eq 425) -Message "The conservative checked-in profiles must retain the exact four-shard virtual schedule; this is not authoritative whole-run timing proof. Actual estimate: $($requiredGateVirtualSchedule.MakespanSeconds)."
-foreach ($initialHeavyGateName in @("tests-EmbodySense.Web.Tests-all", "tests-EmbodySense.Core.Startup.Tests-runtime", "tests-EmbodySense.IntegrationTests-all", "tests-EmbodySense.Core.Persistence.Tests-shard-1")) {
+Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -eq 455) -Message "The conservative checked-in profiles must retain the exact isolated-shard virtual schedule; this is not authoritative whole-run timing proof. Actual estimate: $($requiredGateVirtualSchedule.MakespanSeconds)."
+foreach ($initialHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-shard-1", "tests-EmbodySense.Core.Persistence.Tests-shard-2", "tests-EmbodySense.Core.Persistence.Tests-shard-3", "tests-EmbodySense.Core.Persistence.Tests-shard-4")) {
     Assert-True -Condition ($requiredGateVirtualSchedule.Starts[$initialHeavyGateName] -eq 0) -Message "The four longest admitted heavy lanes must start at virtual second zero."
 }
 $initialResourceCapacity = ($requiredGateProfiles | Where-Object { $requiredGateVirtualSchedule.Starts[$_.Name] -eq 0 } | Measure-Object -Property Weight -Sum).Sum
 Assert-True -Condition ($initialResourceCapacity -eq 12) -Message "Four exact process-heavy lanes must fill all twelve logical units without admitting a fifth outer process."
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-csharp"] -gt 0) -Message "The combined formatter must wait until two three-unit heavy reservations have drained."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Persistence.Tests-shard-2"] -eq 115) -Message "The next balanced Persistence shard must immediately reuse the first released heavy slot."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.IntegrationTests-shard-1"] -eq 230) -Message "The longest Integration shard must enter the exact conservative queue after the Persistence and first Startup waves."
 $processHeavyProfiles = @($requiredGateProfiles | Where-Object ResourceClass -CEQ "ProcessHeavy")
 foreach ($startSecond in @($processHeavyProfiles | ForEach-Object { $requiredGateVirtualSchedule.Starts[$_.Name] } | Sort-Object -Unique)) {
     $activeProcessHeavy = @($processHeavyProfiles | Where-Object {
@@ -357,7 +371,7 @@ foreach ($startSecond in @($processHeavyProfiles | ForEach-Object { $requiredGat
     })
     Assert-True -Condition ($activeProcessHeavy.Count -le 4) -Message "The virtual required-gate schedule must never overlap more than four exact immutable process-heavy lanes."
 }
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-csharp"] -eq 325) -Message "The combined format gate must start at the exact conservative two-slot opening, not oversubscribe the four-heavy wave."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-csharp"] -eq 220) -Message "The combined format gate must start at the exact conservative six-unit opening, not oversubscribe the four-heavy wave."
 
 $counterexamplePhases = @(
     [pscustomobject]@{ Name = "long-ordinary"; EstimatedDurationSeconds = 100; SchedulingPrioritySeconds = 100; ResourceClass = "Ordinary" }

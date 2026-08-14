@@ -204,6 +204,20 @@ internal sealed class InMemoryHumanInputResponseLifecycleStore(
         _selections[key] = snapshot.Selection;
     }
 
+    internal void SeedCurrentSnapshot(HumanInputResponseLifecycleStoreSnapshot snapshot)
+    {
+        ReplaceCurrentSnapshot(snapshot);
+        _operationsById.Clear();
+        foreach (var operation in snapshot.Operations)
+        {
+            if (!_operationsById.TryAdd(operation.OperationId, new HumanInputResponseLifecycleStoredOperation(operation.Request.RequestId, operation)))
+            {
+                throw new InvalidOperationException("The seeded response history contains a duplicate operation identity.");
+            }
+        }
+        _generation = checked(snapshot.Request.Operations.Count + snapshot.Operations.Count);
+    }
+
     private HumanInputResponseLifecycleStoreSnapshot? Snapshot(HumanInputRequestReference reference)
     {
         if (_lifecycle is null || RetainedRequest(reference) is null)

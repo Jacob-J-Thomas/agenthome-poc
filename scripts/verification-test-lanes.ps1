@@ -771,15 +771,47 @@ function Get-VerificationTestProjectLanes {
         )
     }
 
+    if ($TestProject.BaseName -ceq "EmbodySense.IntegrationTests") {
+        return @(
+            # The integration assembly contains independent CLI, provider, governance, and
+            # architecture fixtures. Immutable assembly copies and disjoint fixture roots keep
+            # each measured class partition isolated without changing the two-thread xUnit bound.
+            (New-VerificationTestLane -Name "shard-1" -IncludeFullyQualifiedName @(
+                "EmbodySense.IntegrationTests.Core.Governance.Tools.ToolBrokerTests."
+                "EmbodySense.IntegrationTests.Core.Governance.Tools.ToolBrokerActuationAuthorityBoundaryTests."
+                "EmbodySense.IntegrationTests.Core.Capabilities.CapabilityAuthorityWorkspaceMutationIntegrationTests."
+            ))
+            (New-VerificationTestLane -Name "shard-2" -IncludeFullyQualifiedName @(
+                "EmbodySense.IntegrationTests.Cli.CliBehaviorTests."
+                "EmbodySense.IntegrationTests.Architecture.CSharpParameterNamingTests."
+                "EmbodySense.IntegrationTests.Architecture.TestBoundaryGuardTests."
+                "EmbodySense.IntegrationTests.Architecture.ProjectReferenceGuardTests."
+                "EmbodySense.IntegrationTests.Architecture.CredentialReconciliationPublicSurfaceTests."
+                "EmbodySense.IntegrationTests.Architecture.AuthoredGlobalTypeGuardTests."
+            ))
+            (New-VerificationTestLane -Name "shard-3" -IncludeFullyQualifiedName @(
+                "EmbodySense.IntegrationTests.CodexAppServer.CodexAppServerInferenceTests."
+                "EmbodySense.IntegrationTests.Architecture.GovernedLoopExecutionArchitectureTests."
+                "EmbodySense.IntegrationTests.Architecture.ProductionSourceLayoutTests."
+                "EmbodySense.IntegrationTests.Architecture.ModelSourceLayoutTests."
+            ))
+        )
+    }
+
     if ($TestProject.BaseName -ceq "EmbodySense.Core.Startup.Tests") {
         return @(
-            # The six wrapper classes retain their one serialized collection. Prior stress proved
-            # that splitting this collection changes provider-start and catalog-availability timing.
-            (New-VerificationTestLane -Name "runtime" -IncludeFullyQualifiedName @(
+            # The six wrappers retain their shared serial xUnit collection within each process.
+            # Separate immutable assembly copies and fixture roots allow three measured process
+            # lanes without sharing provider, catalog, trust, or file-backed runtime state.
+            (New-VerificationTestLane -Name "runtime-1" -IncludeFullyQualifiedName @(
                 "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsResumeAndAuthority."
+            ))
+            (New-VerificationTestLane -Name "runtime-2" -IncludeFullyQualifiedName @(
                 "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsAdmissionAndContext."
-                "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsPublicationAndConcurrency."
                 "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsCompletionConstraints."
+            ))
+            (New-VerificationTestLane -Name "runtime-3" -IncludeFullyQualifiedName @(
+                "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsPublicationAndConcurrency."
                 "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsDurabilityAndRecovery."
                 "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsAdmissionAndBinding."
             ))
@@ -818,6 +850,33 @@ function Get-VerificationTestProjectLanes {
                 "EmbodySense.Core.Startup.Tests.Capabilities.CapabilityLifecycleFactoryTests."
                 "EmbodySense.Core.Startup.Tests.Loops.Execution.WorkspaceToolEffectAuthorityRequestFactoryTests."
                 "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopExecutionCancellationSignalGroupTests."
+            ))
+        )
+    }
+
+    if ($TestProject.BaseName -ceq "EmbodySense.Web.Tests") {
+        return @(
+            # The Web runtime/API collection remains serialized within each process. Each lane has
+            # an immutable assembly copy plus disjoint trust, temporary, and host state.
+            (New-VerificationTestLane -Name "shard-1" -IncludeFullyQualifiedName @(
+                "EmbodySense.Web.Tests.WebAgentRuntimeHostTests."
+            ))
+            (New-VerificationTestLane -Name "shard-2" -IncludeFullyQualifiedName @(
+                "EmbodySense.Web.Tests.WebSessionHubTests."
+                "EmbodySense.Web.Tests.LoopApiControllerTests."
+                "EmbodySense.Web.Tests.WebApiControllerTests."
+                "EmbodySense.Web.Tests.CapabilityApiControllerTests."
+            ))
+            (New-VerificationTestLane -Name "shard-3" -IncludeFullyQualifiedName @(
+                "EmbodySense.Web.Tests.LoopRunApiControllerTests."
+                "EmbodySense.Web.Tests.WebApprovalCoordinatorTests."
+                "EmbodySense.Web.Tests.SignalRWebClientNotifierTests."
+                "EmbodySense.Web.Tests.WebSessionSecurityTests."
+                "EmbodySense.Web.Tests.WebStreamEventTests."
+                "EmbodySense.Web.Tests.ProgramTests."
+                "EmbodySense.Web.Tests.WebRunOptionsTests."
+                "EmbodySense.Web.Tests.WebClientNotifierTests."
+                "EmbodySense.Web.Tests.WebConversationPublicationObserverTests."
             ))
         )
     }

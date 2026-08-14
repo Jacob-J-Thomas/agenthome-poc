@@ -26,6 +26,7 @@ $coverageChildProcessPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persiste
 $admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTests.cs"
 $persistenceEnvironmentCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\ProcessEnvironmentCollection.cs"
 $persistenceCapabilityCatalogTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Capabilities\FileCapabilityCatalogTrustProviderTests.cs"
+$persistenceCapabilityCatalogStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Capabilities\CapabilityCatalogStoreTests.cs"
 $startupRuntimeCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\LoopRuntimeIntegrationCollection.cs"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $assertionCount = 0
@@ -162,6 +163,7 @@ $coverageChildProcess = Get-Content -LiteralPath $coverageChildProcessPath -Raw
 $admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
 $persistenceEnvironmentCollection = Get-Content -LiteralPath $persistenceEnvironmentCollectionPath -Raw
 $persistenceCapabilityCatalogTest = Get-Content -LiteralPath $persistenceCapabilityCatalogTestPath -Raw
+$persistenceCapabilityCatalogStoreTest = Get-Content -LiteralPath $persistenceCapabilityCatalogStoreTestPath -Raw
 $startupRuntimeCollection = Get-Content -LiteralPath $startupRuntimeCollectionPath -Raw
 
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "Stress")]' -Message "The verifier must expose only the two owned tiers."
@@ -213,21 +215,62 @@ $lanePolicyStart = $laneScript.IndexOf('function Get-VerificationTestProjectLane
 $lanePolicyEnd = $laneScript.IndexOf('function Get-VerificationTestLaneFilter', $lanePolicyStart, [StringComparison]::Ordinal)
 Assert-True -Condition ($lanePolicyStart -ge 0 -and $lanePolicyEnd -gt $lanePolicyStart) -Message "The checked-in lane policy must retain an exact inspectable function boundary."
 $lanePolicySource = $laneScript.Substring($lanePolicyStart, $lanePolicyEnd - $lanePolicyStart)
-Assert-True -Condition ([regex]::Matches($lanePolicySource, '\$TestProject\.BaseName -ceq').Count -eq 2) -Message "Only Persistence and Startup may have project-specific checked-in sharding branches."
+Assert-True -Condition ([regex]::Matches($lanePolicySource, '\$TestProject\.BaseName -ceq').Count -eq 4) -Message "Only Persistence, Integration, Startup, and Web may have project-specific checked-in sharding branches."
 Assert-True -Condition ([regex]::Matches($laneScript, 'New-VerificationTestLane -Name "all"').Count -eq 1) -Message "The fallback one-lane policy must have exactly one scheduler declaration."
 $persistenceProject = [IO.FileInfo]::new((Join-Path $repoRoot "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"))
+$integrationProject = [IO.FileInfo]::new((Join-Path $repoRoot "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"))
 $startupProject = [IO.FileInfo]::new((Join-Path $repoRoot "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"))
+$webProject = [IO.FileInfo]::new((Join-Path $repoRoot "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"))
 $commonProject = [IO.FileInfo]::new((Join-Path $repoRoot "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj"))
 $persistenceLanes = @(Get-VerificationTestProjectLanes -TestProject $persistenceProject)
+$integrationLanes = @(Get-VerificationTestProjectLanes -TestProject $integrationProject)
 $startupLanes = @(Get-VerificationTestProjectLanes -TestProject $startupProject)
+$webLanes = @(Get-VerificationTestProjectLanes -TestProject $webProject)
 $commonLanes = @(Get-VerificationTestProjectLanes -TestProject $commonProject)
 Assert-True -Condition (($persistenceLanes.Name -join ",") -ceq "shard-1,shard-2,shard-3,shard-4") -Message "Persistence must retain exactly four measured class shards."
-Assert-True -Condition (($startupLanes.Name -join ",") -ceq "runtime,shard-1,shard-2") -Message "Startup must retain its serialized runtime lane and two measured remainder shards."
+Assert-True -Condition (($integrationLanes.Name -join ",") -ceq "shard-1,shard-2,shard-3") -Message "Integration must retain exactly three measured isolated class shards."
+Assert-True -Condition (($startupLanes.Name -join ",") -ceq "runtime-1,runtime-2,runtime-3,shard-1,shard-2") -Message "Startup must retain three isolated runtime lanes and two measured remainder shards."
+Assert-True -Condition (($webLanes.Name -join ",") -ceq "shard-1,shard-2,shard-3") -Message "Web must retain three measured isolated class shards."
 Assert-True -Condition ($commonLanes.Count -eq 1 -and $commonLanes[0].Name -ceq "all" -and $commonLanes[0].IncludeFullyQualifiedName.Count -eq 0) -Message "Assemblies without an approved shard map must retain one unfiltered lane."
-$allShardPrefixes = @($persistenceLanes.IncludeFullyQualifiedName) + @($startupLanes.IncludeFullyQualifiedName)
+$allShardPrefixes = @($persistenceLanes.IncludeFullyQualifiedName) + @($integrationLanes.IncludeFullyQualifiedName) + @($startupLanes.IncludeFullyQualifiedName) + @($webLanes.IncludeFullyQualifiedName)
 Assert-True -Condition (@($allShardPrefixes | Group-Object -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Checked-in class prefixes must belong to exactly one shard."
 Assert-True -Condition (@($allShardPrefixes | Where-Object { -not $_.EndsWith(".", [StringComparison]::Ordinal) }).Count -eq 0) -Message "Every class shard predicate must end at an exact fully-qualified type boundary."
-$runtimePrefixes = @($startupLanes | Where-Object Name -CEQ "runtime" | Select-Object -ExpandProperty IncludeFullyQualifiedName)
+$expectedIntegrationPrefixes = @(
+    "EmbodySense.IntegrationTests.Architecture.AuthoredGlobalTypeGuardTests."
+    "EmbodySense.IntegrationTests.Architecture.CSharpParameterNamingTests."
+    "EmbodySense.IntegrationTests.Architecture.CredentialReconciliationPublicSurfaceTests."
+    "EmbodySense.IntegrationTests.Architecture.GovernedLoopExecutionArchitectureTests."
+    "EmbodySense.IntegrationTests.Architecture.ModelSourceLayoutTests."
+    "EmbodySense.IntegrationTests.Architecture.ProductionSourceLayoutTests."
+    "EmbodySense.IntegrationTests.Architecture.ProjectReferenceGuardTests."
+    "EmbodySense.IntegrationTests.Architecture.TestBoundaryGuardTests."
+    "EmbodySense.IntegrationTests.Cli.CliBehaviorTests."
+    "EmbodySense.IntegrationTests.CodexAppServer.CodexAppServerInferenceTests."
+    "EmbodySense.IntegrationTests.Core.Capabilities.CapabilityAuthorityWorkspaceMutationIntegrationTests."
+    "EmbodySense.IntegrationTests.Core.Governance.Tools.ToolBrokerActuationAuthorityBoundaryTests."
+    "EmbodySense.IntegrationTests.Core.Governance.Tools.ToolBrokerTests."
+)
+$integrationPrefixes = @($integrationLanes | Select-Object -ExpandProperty IncludeFullyQualifiedName)
+Assert-True -Condition ((@($integrationPrefixes | Sort-Object -CaseSensitive) -join "`n") -ceq (@($expectedIntegrationPrefixes | Sort-Object -CaseSensitive) -join "`n")) -Message "All thirteen Integration test classes must belong to exactly one isolated process lane."
+$expectedWebPrefixes = @(
+    "EmbodySense.Web.Tests.CapabilityApiControllerTests."
+    "EmbodySense.Web.Tests.LoopApiControllerTests."
+    "EmbodySense.Web.Tests.LoopRunApiControllerTests."
+    "EmbodySense.Web.Tests.ProgramTests."
+    "EmbodySense.Web.Tests.SignalRWebClientNotifierTests."
+    "EmbodySense.Web.Tests.WebAgentRuntimeHostTests."
+    "EmbodySense.Web.Tests.WebApiControllerTests."
+    "EmbodySense.Web.Tests.WebApprovalCoordinatorTests."
+    "EmbodySense.Web.Tests.WebClientNotifierTests."
+    "EmbodySense.Web.Tests.WebConversationPublicationObserverTests."
+    "EmbodySense.Web.Tests.WebRunOptionsTests."
+    "EmbodySense.Web.Tests.WebSessionHubTests."
+    "EmbodySense.Web.Tests.WebSessionSecurityTests."
+    "EmbodySense.Web.Tests.WebStreamEventTests."
+)
+$webPrefixes = @($webLanes | Select-Object -ExpandProperty IncludeFullyQualifiedName)
+Assert-True -Condition ((@($webPrefixes | Sort-Object -CaseSensitive) -join "`n") -ceq (@($expectedWebPrefixes | Sort-Object -CaseSensitive) -join "`n")) -Message "All fourteen Web test classes must belong to exactly one isolated process lane."
+$runtimePrefixes = @($startupLanes | Where-Object { $_.Name.StartsWith("runtime-", [StringComparison]::Ordinal) } | Select-Object -ExpandProperty IncludeFullyQualifiedName)
 $expectedRuntimePrefixes = @(
     "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsAdmissionAndContext."
     "EmbodySense.Core.Startup.Tests.Loops.Execution.CustomLoopRuntimeTestsDurabilityAndRecovery."
@@ -236,7 +279,7 @@ $expectedRuntimePrefixes = @(
     "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsCompletionConstraints."
     "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsResumeAndAuthority."
 )
-Assert-True -Condition ((@($runtimePrefixes | Sort-Object -CaseSensitive) -join "`n") -ceq (@($expectedRuntimePrefixes | Sort-Object -CaseSensitive) -join "`n")) -Message "All six serialized Startup runtime wrappers must remain in one process lane."
+Assert-True -Condition ((@($runtimePrefixes | Sort-Object -CaseSensitive) -join "`n") -ceq (@($expectedRuntimePrefixes | Sort-Object -CaseSensitive) -join "`n")) -Message "All six serialized Startup runtime wrappers must belong to exactly one isolated process lane."
 $startupShardTwoPrefixes = @($startupLanes | Where-Object Name -CEQ "shard-2" | Select-Object -ExpandProperty IncludeFullyQualifiedName)
 foreach ($sharedTrustPrefix in @(
     "EmbodySense.Core.Startup.Tests.Configuration.WorkspaceConfigurationReaderTests."
@@ -295,6 +338,8 @@ foreach ($startupRuntimeWrapper in @(
 }
 Assert-Contains -Actual $persistenceEnvironmentCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Persistence process-environment mutation must remain exclusive of all assembly tests."
 Assert-Contains -Actual $persistenceCapabilityCatalogTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Capability-catalog trust-root mutation must retain process-environment serialization."
+Assert-Contains -Actual $persistenceCapabilityCatalogStoreTest -Expected 'Contended_cross_process_lock_fails_closed_without_writing' -Message "Integration sharding must not become the sole source of catalog-lock contention coverage; Persistence must retain the deterministic public regression."
+Assert-Contains -Actual $persistenceCapabilityCatalogStoreTest -Expected 'Assert.Equal(498, retryTime.TimerCount);' -Message "The catalog-lock regression must prove every bounded retry before failing closed."
 Assert-True -Condition ($admissionStoreTest.IndexOf('Environment.SetEnvironmentVariable', [StringComparison]::Ordinal) -lt 0) -Message "Admission-store tests must pass coverage isolation explicitly instead of mutating process-global environment state."
 Assert-True -Condition ($admissionStoreTest.IndexOf('[Collection(Verification.ProcessEnvironmentCollection.Name)]', [StringComparison]::Ordinal) -lt 0) -Message "Admission-store tests without process-global mutation must remain eligible for the assembly's bounded second xUnit thread."
 Assert-Contains -Actual $admissionStoreTest -Expected 'CrossProcessExpectedGeneration' -Message "The external admission writer race must retain an explicit optimistic-generation coordinate."
@@ -323,12 +368,26 @@ foreach ($webSharedRuntimeTest in @(
     $webSharedRuntimeTestSource = Get-Content -LiteralPath (Join-Path $repoRoot "tests\EmbodySense.Web.Tests\$webSharedRuntimeTest") -Raw
     Assert-Contains -Actual $webSharedRuntimeTestSource -Expected '[Collection(EphemeralPortApiCollection.Name)]' -Message "Web runtime/API test '$webSharedRuntimeTest' must serialize shared default trust and host state inside the assembly-wide lane."
 }
-foreach ($assemblyProfile in @(
-    'Name = "tests-EmbodySense.Core.Startup.Tests-runtime"; EstimatedDurationSeconds = 200; Weight = 3; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; Weight = 3; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy"'
+foreach ($integrationProfile in @(
+    'Name = "tests-EmbodySense.IntegrationTests-shard-1"; EstimatedDurationSeconds = 90; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.IntegrationTests-shard-2"; EstimatedDurationSeconds = 75; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.IntegrationTests-shard-3"; EstimatedDurationSeconds = 90; Weight = 3; ResourceClass = "ProcessHeavy"'
 )) {
-    Assert-Contains -Actual $scheduleScript -Expected $assemblyProfile -Message "Long process-heavy gates must retain exact conservative scheduling profiles."
+    Assert-Contains -Actual $scheduleScript -Expected $integrationProfile -Message "Every isolated Integration lane must retain its measured conservative scheduling profile."
+}
+foreach ($webProfile in @(
+    'Name = "tests-EmbodySense.Web.Tests-shard-1"; EstimatedDurationSeconds = 90; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Web.Tests-shard-2"; EstimatedDurationSeconds = 75; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Web.Tests-shard-3"; EstimatedDurationSeconds = 60; Weight = 3; ResourceClass = "ProcessHeavy"'
+)) {
+    Assert-Contains -Actual $scheduleScript -Expected $webProfile -Message "Every isolated Web lane must retain its measured conservative scheduling profile."
+}
+foreach ($runtimeProfile in @(
+    'Name = "tests-EmbodySense.Core.Startup.Tests-runtime-1"; EstimatedDurationSeconds = 90; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Core.Startup.Tests-runtime-2"; EstimatedDurationSeconds = 90; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Core.Startup.Tests-runtime-3"; EstimatedDurationSeconds = 105; Weight = 3; ResourceClass = "ProcessHeavy"'
+)) {
+    Assert-Contains -Actual $scheduleScript -Expected $runtimeProfile -Message "Every isolated Startup runtime lane must retain its measured conservative scheduling profile."
 }
 foreach ($shardProfile in @(
     "tests-EmbodySense.Core.Persistence.Tests-shard-1"
@@ -340,7 +399,7 @@ foreach ($shardProfile in @(
 )) {
     Assert-Contains -Actual $scheduleScript -Expected "Name = `"$shardProfile`"; EstimatedDurationSeconds = 115; Weight = 3; ResourceClass = `"ProcessHeavy`"" -Message "Every class-balanced shard must retain one exact checked-in scheduling profile."
 }
-foreach ($assemblyName in @("EmbodySense.Cli.Command.Tests", "EmbodySense.Core.Application.Tests", "EmbodySense.Core.Clients.Tests", "EmbodySense.Core.Common.Tests", "EmbodySense.E2ETests", "EmbodySense.IntegrationTests", "EmbodySense.Web.Tests")) {
+foreach ($assemblyName in @("EmbodySense.Cli.Command.Tests", "EmbodySense.Core.Application.Tests", "EmbodySense.Core.Clients.Tests", "EmbodySense.Core.Common.Tests", "EmbodySense.E2ETests")) {
     Assert-Contains -Actual $scheduleScript -Expected "Name = `"tests-$assemblyName-all`";" -Message "Every production test assembly must have exactly one checked-in required-gate profile."
 }
 foreach ($retiredLane in @("loop-execution-custom-runtime", "loop-execution-governed-runtime", "contextual-roles", "codex-app-server", "runtime-host", "remainder-triggers")) {

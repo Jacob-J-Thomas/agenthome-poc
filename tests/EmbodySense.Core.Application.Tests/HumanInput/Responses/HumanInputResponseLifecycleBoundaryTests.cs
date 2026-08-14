@@ -179,24 +179,35 @@ public sealed class HumanInputResponseLifecycleBoundaryTests
             HumanInputResponsePolicyKind.ManualSelection,
             orderedRoleIds: ["selector-role"]);
         var responseLimit = await HumanInputResponseLifecycleHarness.CreateAsync(boundedRequest);
+        var boundedResponses = new List<HumanInputResponseArtifact>(HumanInputResponseContractLimits.MaxResponsesPerRequest);
+        var boundedResponseOperations = new List<HumanInputResponseOperationEvidence>(HumanInputResponseContractLimits.MaxResponsesPerRequest * 2);
         for (var index = 0; index < HumanInputResponseContractLimits.MaxResponsesPerRequest; index++)
         {
+            var isolated = responseLimit.CreateIsolatedResponseStore();
             var responseId = $"bounded-response-{index}";
-            var submit = await responseLimit.Service.MutateAsync(HumanInputResponseLifecycleTestData.Submit(
+            var submit = await isolated.Service.MutateAsync(HumanInputResponseLifecycleTestData.Submit(
                 boundedRequest,
-                responseLimit.Store.CurrentSnapshot!.Request.Head,
+                isolated.Store.CurrentSnapshot!.Request.Head,
                 $"bounded-submit-{index}",
                 responseId));
             Assert.Equal(HumanInputResponseLifecycleMutationStatus.Committed, submit.Status);
-            var reference = Reference(boundedRequest, responseLimit.Store.CurrentSnapshot!.Responses[^1]);
-            var withdraw = await responseLimit.Service.MutateAsync(HumanInputResponseLifecycleTestData.Target(
+            var reference = Reference(boundedRequest, isolated.Store.CurrentSnapshot!.Responses[^1]);
+            var withdraw = await isolated.Service.MutateAsync(HumanInputResponseLifecycleTestData.Target(
                 boundedRequest,
-                responseLimit.Store.CurrentSnapshot.Request.Head,
+                isolated.Store.CurrentSnapshot.Request.Head,
                 HumanInputResponseOperationKind.Withdraw,
                 $"bounded-withdraw-{index}",
                 reference));
             Assert.Equal(HumanInputResponseLifecycleMutationStatus.Committed, withdraw.Status);
+            boundedResponses.AddRange(isolated.Store.CurrentSnapshot.Responses);
+            boundedResponseOperations.AddRange(isolated.Store.CurrentSnapshot.Operations);
         }
+        responseLimit.Store.SeedCurrentSnapshot(new HumanInputResponseLifecycleStoreSnapshot(
+            responseLimit.Store.CurrentSnapshot!.Request,
+            HumanInputResponseLifecycleTestData.Reference(boundedRequest),
+            boundedResponses,
+            boundedResponseOperations,
+            null));
         var exhaustedResponses = await responseLimit.Service.MutateAsync(HumanInputResponseLifecycleTestData.Submit(
             boundedRequest,
             responseLimit.Store.CurrentSnapshot!.Request.Head,
@@ -207,16 +218,25 @@ public sealed class HumanInputResponseLifecycleBoundaryTests
 
         var operationRequest = HumanInputResponseLifecycleTestData.Request(maxTextCharacters: 1);
         var operationLimit = await HumanInputResponseLifecycleHarness.CreateAsync(operationRequest);
+        var boundedOperations = new List<HumanInputResponseOperationEvidence>(HumanInputResponseContractLimits.MaxOperationsPerRequest);
         for (var index = 0; index < HumanInputResponseContractLimits.MaxOperationsPerRequest; index++)
         {
-            var rejected = await operationLimit.Service.MutateAsync(HumanInputResponseLifecycleTestData.Submit(
+            var isolated = operationLimit.CreateIsolatedResponseStore();
+            var rejected = await isolated.Service.MutateAsync(HumanInputResponseLifecycleTestData.Submit(
                 operationRequest,
-                operationLimit.Store.CurrentSnapshot!.Request.Head,
+                isolated.Store.CurrentSnapshot!.Request.Head,
                 $"malformed-operation-{index}",
                 $"malformed-response-{index}",
                 HumanInputResponseLifecycleTestData.Text("xx")));
             Assert.Equal(HumanInputResponseLifecycleMutationStatus.Invalid, rejected.Status);
+            boundedOperations.AddRange(isolated.Store.CurrentSnapshot!.Operations);
         }
+        operationLimit.Store.SeedCurrentSnapshot(new HumanInputResponseLifecycleStoreSnapshot(
+            operationLimit.Store.CurrentSnapshot!.Request,
+            HumanInputResponseLifecycleTestData.Reference(operationRequest),
+            [],
+            boundedOperations,
+            null));
         var exhaustedOperations = await operationLimit.Service.MutateAsync(HumanInputResponseLifecycleTestData.Submit(
             operationRequest,
             operationLimit.Store.CurrentSnapshot!.Request.Head,

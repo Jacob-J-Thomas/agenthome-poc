@@ -31,6 +31,9 @@ internal sealed class HumanInputResponseLifecycleHarness
 
     internal HumanInputResponseLifecycleService Service { get; }
 
+    internal HumanInputResponseLifecycleHarness CreateIsolatedResponseStore()
+        => new(Request, LifecycleHarness);
+
     internal static async Task<HumanInputResponseLifecycleHarness> CreateAsync(HumanInputRequest? request = null)
     {
         request ??= HumanInputResponseLifecycleTestData.Request();
