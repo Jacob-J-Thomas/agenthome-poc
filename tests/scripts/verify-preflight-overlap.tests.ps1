@@ -187,8 +187,20 @@ try {
     [IO.File]::WriteAllText($timingScriptPath, @'
 param([string]$Role, [string]$SynchronizationRoot)
 Write-Output "start=$([DateTime]::UtcNow.Ticks)"
+[IO.File]::WriteAllText((Join-Path $SynchronizationRoot "$Role.started"), [DateTime]::UtcNow.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture), [Text.UTF8Encoding]::new($false))
 if ($Role -ceq "build") {
-    Start-Sleep -Milliseconds 1000
+    $requiredOverlapRoles = @("ordinary", "nested-first", "nested-second")
+    $overlapDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    foreach ($requiredRole in $requiredOverlapRoles) {
+        $requiredMarker = Join-Path $SynchronizationRoot "$requiredRole.started"
+        while (-not (Test-Path -LiteralPath $requiredMarker -PathType Leaf)) {
+            if ([DateTime]::UtcNow -ge $overlapDeadline) {
+                throw "Timed out waiting for required preflight overlap marker: $requiredRole"
+            }
+            Start-Sleep -Milliseconds 10
+        }
+    }
+    Start-Sleep -Milliseconds 200
 }
 elseif ($Role -ceq "frontend") {
     Start-Sleep -Milliseconds 150
