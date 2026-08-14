@@ -166,8 +166,10 @@ public sealed class ConversationPublicationCommitProtocolTests
                     await captured!(CancellationToken.None);
                     return true;
                 }
-                catch (InvalidOperationException)
+                catch (InvalidOperationException exception)
                 {
+                    Assert.IsNotType<ObjectDisposedException>(exception);
+                    Assert.Contains("after its boundary returns", exception.Message, StringComparison.Ordinal);
                     return false;
                 }
             });
