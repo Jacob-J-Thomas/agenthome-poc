@@ -190,7 +190,7 @@ Write-Output "start=$([DateTime]::UtcNow.Ticks)"
 [IO.File]::WriteAllText((Join-Path $SynchronizationRoot "$Role.started"), [DateTime]::UtcNow.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture), [Text.UTF8Encoding]::new($false))
 if ($Role -ceq "build") {
     $requiredOverlapRoles = @("ordinary", "nested-first", "nested-second")
-    $overlapDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    $overlapDeadline = [DateTime]::UtcNow.AddSeconds(20)
     foreach ($requiredRole in $requiredOverlapRoles) {
         $requiredMarker = Join-Path $SynchronizationRoot "$requiredRole.started"
         while (-not (Test-Path -LiteralPath $requiredMarker -PathType Leaf)) {
@@ -212,7 +212,15 @@ elseif ($Role.StartsWith("format-", [StringComparison]::Ordinal)) {
     Start-Sleep -Milliseconds 1000
 }
 elseif ($Role -ceq "ordinary") {
-    Start-Sleep -Milliseconds 1200
+    $coverageMarker = Join-Path $SynchronizationRoot "coverage.started"
+    $coverageDeadline = [DateTime]::UtcNow.AddSeconds(20)
+    while (-not (Test-Path -LiteralPath $coverageMarker -PathType Leaf)) {
+        if ([DateTime]::UtcNow -ge $coverageDeadline) {
+            throw "Timed out waiting for the build-dependent coverage phase to overlap ordinary work."
+        }
+        Start-Sleep -Milliseconds 10
+    }
+    Start-Sleep -Milliseconds 200
 }
 elseif ($Role.StartsWith("nested-", [StringComparison]::Ordinal)) {
     Start-Sleep -Milliseconds 200
@@ -227,12 +235,13 @@ Write-Output "end=$([DateTime]::UtcNow.Ticks)"
     $ordinaryOutputPath = Join-Path $behaviorRoot "ordinary.log"
     $nestedFirstOutputPath = Join-Path $behaviorRoot "nested-first.log"
     $nestedSecondOutputPath = Join-Path $behaviorRoot "nested-second.log"
-    Add-VerificationParallelPhase -Name "build" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "build" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $buildOutputPath -EstimatedDurationSeconds 90 -Weight 3 -ResourceClass "ProcessHeavy"
-    Add-VerificationParallelPhase -Name "frontend" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "frontend" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $frontendOutputPath -EstimatedDurationSeconds 70 -Weight 2 -ResourceClass "CpuBound"
-    Add-VerificationParallelPhase -Name "ordinary" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "ordinary" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $ordinaryOutputPath -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
-    Add-VerificationParallelPhase -Name "coverage" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "coverage" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $coverageOutputPath -DependsOn @("build") -EstimatedDurationSeconds 75 -Weight 3 -ResourceClass "ProcessHeavy"
-    Add-VerificationParallelPhase -Name "nested-first" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-first" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $nestedFirstOutputPath -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
-    Add-VerificationParallelPhase -Name "nested-second" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-second" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $nestedSecondOutputPath -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
+    $timingPhaseTimeoutSeconds = 30
+    Add-VerificationParallelPhase -Name "build" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "build" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $buildOutputPath -EstimatedDurationSeconds 90 -Weight 3 -ResourceClass "ProcessHeavy"
+    Add-VerificationParallelPhase -Name "frontend" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "frontend" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $frontendOutputPath -EstimatedDurationSeconds 70 -Weight 2 -ResourceClass "CpuBound"
+    Add-VerificationParallelPhase -Name "ordinary" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "ordinary" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $ordinaryOutputPath -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
+    Add-VerificationParallelPhase -Name "coverage" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "coverage" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $coverageOutputPath -DependsOn @("build") -EstimatedDurationSeconds 75 -Weight 3 -ResourceClass "ProcessHeavy"
+    Add-VerificationParallelPhase -Name "nested-first" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-first" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $nestedFirstOutputPath -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
+    Add-VerificationParallelPhase -Name "nested-second" -FileName $powerShellExecutable -Arguments (Get-PreflightTimingArguments -ScriptPath $timingScriptPath -Role "nested-second" -SynchronizationRoot $behaviorRoot) -TimeoutSeconds $timingPhaseTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $nestedSecondOutputPath -EstimatedDurationSeconds 60 -Weight 3 -ResourceClass "ProcessHeavy"
     $overlapResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
     Assert-True -Condition ($overlapResults.Count -eq 6 -and @($overlapResults | Where-Object { $_.ExitCode -ne 0 }).Count -eq 0) -Message "The bounded preflight DAG must complete its exact phase set successfully."
     Assert-True -Condition (@($overlapResults | Select-Object -ExpandProperty Name | Sort-Object) -join "," -ceq "build,coverage,frontend,nested-first,nested-second,ordinary") -Message "The preflight DAG must contain only build, build-dependent coverage, frontend, nested contracts, and explicitly safe ordinary work."
