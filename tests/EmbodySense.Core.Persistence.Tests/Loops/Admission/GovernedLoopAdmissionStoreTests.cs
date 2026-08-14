@@ -20,7 +20,6 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops.Admission;
 
-[Collection(Verification.ProcessEnvironmentCollection.Name)]
 public sealed class GovernedLoopAdmissionStoreTests
 {
     private const string CrossProcessMode = "EMBODYSENSE_ADMISSION_STORE_MODE";
@@ -30,6 +29,7 @@ public sealed class GovernedLoopAdmissionStoreTests
     private const string CrossProcessReady = "EMBODYSENSE_ADMISSION_STORE_READY";
     private const string CrossProcessOutput = "EMBODYSENSE_ADMISSION_STORE_OUTPUT";
     private const string CrossProcessOperation = "EMBODYSENSE_ADMISSION_STORE_OPERATION";
+    private const string CrossProcessExpectedGeneration = "EMBODYSENSE_ADMISSION_STORE_EXPECTED_GENERATION";
     private const string CrossProcessHostTestName = "EmbodySense.Core.Persistence.Tests.Loops.Admission.GovernedLoopAdmissionStoreTests.Cross_process_admission_store_host";
     private const char RequestA = '1';
     private const char RequestB = '4';
@@ -591,13 +591,25 @@ public sealed class GovernedLoopAdmissionStoreTests
     {
         using var workspace = new TestWorkspace();
         using var trustRoot = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var workspaceIdentity = WorkspaceId(paths);
+        var seed = await Store(paths, new FileCapabilityCatalogTrustProvider(trustRoot.RootPath))
+            .CommitAsync(Mutation(paths, "seed-admission", RequestA, 0));
+        Assert.Equal(GovernedLoopAdmissionStoreCommitStatus.Committed, seed.Status);
+        Assert.Equal(1, seed.StoreGeneration);
+        var restartedSeed = await Store(paths, new FileCapabilityCatalogTrustProvider(trustRoot.RootPath))
+            .ReadByOperationAsync(workspaceIdentity, "seed-admission");
+        Assert.Equal(GovernedLoopAdmissionStoreReadStatus.Found, restartedSeed.Status);
+        Assert.Equal(1, restartedSeed.StoreGeneration);
+        Assert.NotNull(restartedSeed.Outcome);
+
         var gate = workspace.File("gate");
         var firstReady = workspace.File("first.ready");
         var secondReady = workspace.File("second.ready");
         var firstOutput = workspace.File("first.output");
         var secondOutput = workspace.File("second.output");
-        using var first = StartCrossProcessHost("writer", workspace.RootPath, trustRoot.RootPath, gate, firstReady, firstOutput, "admit-one");
-        using var second = StartCrossProcessHost("writer", workspace.RootPath, trustRoot.RootPath, gate, secondReady, secondOutput, "admit-two");
+        using var first = StartCrossProcessHost("writer", workspace.RootPath, trustRoot.RootPath, gate, firstReady, firstOutput, "admit-one", 1);
+        using var second = StartCrossProcessHost("writer", workspace.RootPath, trustRoot.RootPath, gate, secondReady, secondOutput, "admit-two", 1);
         await Task.WhenAll(WaitForPathAsync(firstReady), WaitForPathAsync(secondReady));
         await File.WriteAllTextAsync(gate, "go");
         await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync());
@@ -606,6 +618,17 @@ public sealed class GovernedLoopAdmissionStoreTests
         var results = new[] { await File.ReadAllTextAsync(firstOutput), await File.ReadAllTextAsync(secondOutput) };
         Assert.Single(results, item => item == GovernedLoopAdmissionStoreCommitStatus.Committed.ToString());
         Assert.Single(results, item => item == GovernedLoopAdmissionStoreCommitStatus.GenerationConflict.ToString());
+        var committed = await Store(paths, new FileCapabilityCatalogTrustProvider(trustRoot.RootPath))
+            .ReadByOperationAsync(workspaceIdentity, "admit-one");
+        var alternate = await Store(paths, new FileCapabilityCatalogTrustProvider(trustRoot.RootPath))
+            .ReadByOperationAsync(workspaceIdentity, "admit-two");
+        Assert.All(new[] { committed, alternate }, result => Assert.Equal(2, result.StoreGeneration));
+        Assert.Single(new[] { committed, alternate }, result => result.Status == GovernedLoopAdmissionStoreReadStatus.Found);
+        Assert.Single(new[] { committed, alternate }, result => result.Status == GovernedLoopAdmissionStoreReadStatus.NotFound);
+        var retainedSeed = await Store(paths, new FileCapabilityCatalogTrustProvider(trustRoot.RootPath))
+            .ReadByOperationAsync(workspaceIdentity, "seed-admission");
+        Assert.Equal(GovernedLoopAdmissionStoreReadStatus.Found, retainedSeed.Status);
+        Assert.Equal(2, retainedSeed.StoreGeneration);
     }
 
     [Theory]
@@ -670,6 +693,17 @@ public sealed class GovernedLoopAdmissionStoreTests
         var ready = Environment.GetEnvironmentVariable(CrossProcessReady)!;
         var output = Environment.GetEnvironmentVariable(CrossProcessOutput)!;
         var operation = Environment.GetEnvironmentVariable(CrossProcessOperation)!;
+        var expectedGenerationText = Environment.GetEnvironmentVariable(CrossProcessExpectedGeneration);
+        var expectedGeneration = string.IsNullOrEmpty(expectedGenerationText)
+            ? 0
+            : long.TryParse(
+                expectedGenerationText,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var parsedGeneration)
+                && parsedGeneration >= 0
+                    ? parsedGeneration
+                    : throw new InvalidOperationException("The admission-store child expected generation is malformed.");
         await File.WriteAllTextAsync(ready, "ready");
         await WaitForPathAsync(gate);
         GovernedLoopAdmissionStoreOptions? options = usesExpectedTerminationHost
@@ -696,22 +730,8 @@ public sealed class GovernedLoopAdmissionStoreTests
             : null;
         var paths = new WorkspacePaths(workspace);
         var store = new GovernedLoopAdmissionStore(paths, new FileCapabilityCatalogTrustProvider(trustRoot), options);
-        var mutation = Mutation(paths, operation, operation.EndsWith("two", StringComparison.Ordinal) ? RequestB : RequestA, 0);
-        var retryWindow = Stopwatch.StartNew();
-        GovernedLoopAdmissionStoreCommitResult result;
-        do
-        {
-            result = await store.CommitAsync(mutation);
-            if (mode != "writer"
-                || result.Status != GovernedLoopAdmissionStoreCommitStatus.Unavailable
-                || retryWindow.Elapsed >= TimeSpan.FromSeconds(15))
-            {
-                break;
-            }
-
-            await Task.Delay(50);
-        }
-        while (true);
+        var mutation = Mutation(paths, operation, operation.EndsWith("two", StringComparison.Ordinal) ? RequestB : RequestA, expectedGeneration);
+        var result = await store.CommitAsync(mutation);
         await File.WriteAllTextAsync(output, result.Status.ToString());
     }
 
@@ -844,7 +864,8 @@ public sealed class GovernedLoopAdmissionStoreTests
         string gate,
         string ready,
         string output,
-        string operation)
+        string operation,
+        long expectedGeneration = 0)
     {
         var startInfo = new ProcessStartInfo("dotnet")
         {
@@ -870,6 +891,7 @@ public sealed class GovernedLoopAdmissionStoreTests
         startInfo.Environment[CrossProcessReady] = ready;
         startInfo.Environment[CrossProcessOutput] = output;
         startInfo.Environment[CrossProcessOperation] = operation;
+        startInfo.Environment[CrossProcessExpectedGeneration] = expectedGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture);
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process admission-store host did not start.");
     }
 
@@ -894,32 +916,31 @@ public sealed class GovernedLoopAdmissionStoreTests
         File.WriteAllBytes(pristineAssemblyPath, [0x01, 0x02, 0x03, 0x04]);
         File.WriteAllBytes(Path.Combine(pristineDirectory, "dependency.dll"), [0x05, 0x06, 0x07, 0x08]);
         var expectedHashes = GetDirectoryHashes(pristineDirectory);
-        var originalDirectory = Environment.GetEnvironmentVariable(Verification.CoverageChildProcessAssembly.IsolatedAssemblyDirectoryVariable);
-        try
-        {
-            Environment.SetEnvironmentVariable(Verification.CoverageChildProcessAssembly.IsolatedAssemblyDirectoryVariable, pristineDirectory);
-            var expectedTermination = new ProcessStartInfo("dotnet");
-            Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(expectedTermination, currentAssemblyPath, CrossProcessHostTestName);
+        var expectedTermination = new ProcessStartInfo("dotnet");
+        Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(
+            expectedTermination,
+            currentAssemblyPath,
+            CrossProcessHostTestName,
+            pristineDirectory);
 
-            Assert.Equal(
-                ["vstest", pristineAssemblyPath, $"--TestCaseFilter:FullyQualifiedName={CrossProcessHostTestName}"],
-                expectedTermination.ArgumentList);
-            Assert.False(Directory.Exists(workspace.File("Invocations")));
-            Assert.False(Directory.Exists(workspace.File("Results")));
-            Assert.Equal(expectedHashes, GetDirectoryHashes(pristineDirectory));
+        Assert.Equal(
+            ["vstest", pristineAssemblyPath, $"--TestCaseFilter:FullyQualifiedName={CrossProcessHostTestName}"],
+            expectedTermination.ArgumentList);
+        Assert.False(Directory.Exists(workspace.File("Invocations")));
+        Assert.False(Directory.Exists(workspace.File("Results")));
+        Assert.Equal(expectedHashes, GetDirectoryHashes(pristineDirectory));
 
-            var successful = new ProcessStartInfo("dotnet");
-            Verification.CoverageChildProcessAssembly.AddVstestArguments(successful, currentAssemblyPath, CrossProcessHostTestName);
-            Assert.Contains("--Collect:XPlat Code Coverage", successful.ArgumentList);
-            Assert.Contains($"--ResultsDirectory:{workspace.File("Results")}", successful.ArgumentList);
-            Assert.Single(Directory.EnumerateDirectories(workspace.File("Invocations")));
-            Assert.True(Directory.Exists(workspace.File("Results")));
-            Assert.Equal(expectedHashes, GetDirectoryHashes(pristineDirectory));
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(Verification.CoverageChildProcessAssembly.IsolatedAssemblyDirectoryVariable, originalDirectory);
-        }
+        var successful = new ProcessStartInfo("dotnet");
+        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+            successful,
+            currentAssemblyPath,
+            CrossProcessHostTestName,
+            pristineDirectory);
+        Assert.Contains("--Collect:XPlat Code Coverage", successful.ArgumentList);
+        Assert.Contains($"--ResultsDirectory:{workspace.File("Results")}", successful.ArgumentList);
+        Assert.Single(Directory.EnumerateDirectories(workspace.File("Invocations")));
+        Assert.True(Directory.Exists(workspace.File("Results")));
+        Assert.Equal(expectedHashes, GetDirectoryHashes(pristineDirectory));
     }
 
     private static IReadOnlyList<string> GetDirectoryHashes(string directory)

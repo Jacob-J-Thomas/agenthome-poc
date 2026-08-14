@@ -2,8 +2,8 @@ Set-StrictMode -Version Latest
 
 $script:VerificationRequiredGateResourceCapacity = 12
 # Coverage-instrumented assembly lanes each host internally parallel tests and descendant
-# processes. Two may overlap on the four-core Windows runner; a third waits while ordinary
-# and CPU-bound gates may still backfill the remaining physical slots and logical capacity.
+# processes. Two may overlap on the four-core Windows runner; a third waits while one
+# CPU-bound format gate reserves their remaining logical capacity and ordinary work waits.
 $script:VerificationRequiredGateMaximumProcessHeavyWorkers = 2
 $script:VerificationRequiredGateMaximumCpuBoundWorkers = 1
 $script:VerificationRequiredGateScheduleProfiles = @(
@@ -13,9 +13,9 @@ $script:VerificationRequiredGateScheduleProfiles = @(
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-all"; EstimatedDurationSeconds = 240; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "format-naming-style"; EstimatedDurationSeconds = 65; Weight = 2; ResourceClass = "CpuBound" }
+    [pscustomobject]@{ Name = "format-naming-style"; EstimatedDurationSeconds = 65; Weight = 6; ResourceClass = "CpuBound" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-all"; EstimatedDurationSeconds = 50; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "format-whitespace"; EstimatedDurationSeconds = 35; Weight = 2; ResourceClass = "CpuBound" }
+    [pscustomobject]@{ Name = "format-whitespace"; EstimatedDurationSeconds = 35; Weight = 6; ResourceClass = "CpuBound" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-all"; EstimatedDurationSeconds = 25; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Clients.Tests-all"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }
     [pscustomobject]@{ Name = "tests-EmbodySense.E2ETests-all"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }

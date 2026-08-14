@@ -7,21 +7,31 @@ internal static class CoverageChildProcessAssembly
     internal const string IsolatedAssemblyDirectoryVariable = "EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY";
 
     internal static void AddVstestArguments(ProcessStartInfo startInfo, string currentAssemblyPath, string fullyQualifiedTestName)
+        => AddVstestArguments(
+            startInfo,
+            currentAssemblyPath,
+            fullyQualifiedTestName,
+            Environment.GetEnvironmentVariable(IsolatedAssemblyDirectoryVariable));
+
+    internal static void AddVstestArguments(
+        ProcessStartInfo startInfo,
+        string currentAssemblyPath,
+        string fullyQualifiedTestName,
+        string? isolatedAssemblyDirectory)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
         ArgumentException.ThrowIfNullOrWhiteSpace(currentAssemblyPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(fullyQualifiedTestName);
 
         startInfo.ArgumentList.Add("vstest");
-        var isolatedDirectory = Environment.GetEnvironmentVariable(IsolatedAssemblyDirectoryVariable);
-        if (string.IsNullOrWhiteSpace(isolatedDirectory))
+        if (string.IsNullOrWhiteSpace(isolatedAssemblyDirectory))
         {
             startInfo.ArgumentList.Add(currentAssemblyPath);
             startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=" + fullyQualifiedTestName);
             return;
         }
 
-        var isolationRoot = Directory.GetParent(isolatedDirectory)?.FullName
+        var isolationRoot = Directory.GetParent(isolatedAssemblyDirectory)?.FullName
             ?? throw new DirectoryNotFoundException("The isolated coverage child-process root is unavailable.");
         var collectorDirectory = Path.Combine(isolationRoot, "Collector");
         var runSettingsPath = Path.Combine(isolationRoot, "verification-pull-request.runsettings");
@@ -36,7 +46,7 @@ internal static class CoverageChildProcessAssembly
         }
 
         var executionDirectory = Path.Combine(isolationRoot, "Invocations", Guid.NewGuid().ToString("N"));
-        CopyDirectory(isolatedDirectory, executionDirectory);
+        CopyDirectory(isolatedAssemblyDirectory, executionDirectory);
         var isolatedPath = Path.Combine(executionDirectory, Path.GetFileName(currentAssemblyPath));
         if (!File.Exists(isolatedPath))
         {
@@ -53,14 +63,24 @@ internal static class CoverageChildProcessAssembly
     }
 
     internal static void AddExpectedTerminationVstestArguments(ProcessStartInfo startInfo, string currentAssemblyPath, string fullyQualifiedTestName)
+        => AddExpectedTerminationVstestArguments(
+            startInfo,
+            currentAssemblyPath,
+            fullyQualifiedTestName,
+            Environment.GetEnvironmentVariable(IsolatedAssemblyDirectoryVariable));
+
+    internal static void AddExpectedTerminationVstestArguments(
+        ProcessStartInfo startInfo,
+        string currentAssemblyPath,
+        string fullyQualifiedTestName,
+        string? isolatedAssemblyDirectory)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
         ArgumentException.ThrowIfNullOrWhiteSpace(currentAssemblyPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(fullyQualifiedTestName);
 
         startInfo.ArgumentList.Add("vstest");
-        var isolatedDirectory = Environment.GetEnvironmentVariable(IsolatedAssemblyDirectoryVariable);
-        if (string.IsNullOrWhiteSpace(isolatedDirectory))
+        if (string.IsNullOrWhiteSpace(isolatedAssemblyDirectory))
         {
             startInfo.ArgumentList.Add(currentAssemblyPath);
         }
@@ -68,12 +88,12 @@ internal static class CoverageChildProcessAssembly
         {
             // An intentionally terminated testhost cannot flush useful hit data. Read the immutable
             // verifier copy directly; the outer verifier re-hashes it after every child has exited.
-            if (!Directory.Exists(isolatedDirectory))
+            if (!Directory.Exists(isolatedAssemblyDirectory))
             {
-                throw new DirectoryNotFoundException($"The immutable coverage child-process directory is unavailable: `{isolatedDirectory}`.");
+                throw new DirectoryNotFoundException($"The immutable coverage child-process directory is unavailable: `{isolatedAssemblyDirectory}`.");
             }
 
-            var isolatedPath = Path.Combine(isolatedDirectory, Path.GetFileName(currentAssemblyPath));
+            var isolatedPath = Path.Combine(isolatedAssemblyDirectory, Path.GetFileName(currentAssemblyPath));
             if (!File.Exists(isolatedPath))
             {
                 throw new FileNotFoundException("The immutable coverage child-process assembly is unavailable.", isolatedPath);

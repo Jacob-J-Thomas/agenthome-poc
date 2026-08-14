@@ -222,7 +222,10 @@ foreach ($startupRuntimeWrapper in @(
 }
 Assert-Contains -Actual $persistenceEnvironmentCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Persistence process-environment mutation must remain exclusive of all assembly tests."
 Assert-Contains -Actual $persistenceCapabilityCatalogTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Capability-catalog trust-root mutation must retain process-environment serialization."
-Assert-Contains -Actual $admissionStoreTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Coverage child-directory mutation must retain process-environment serialization."
+Assert-True -Condition ($admissionStoreTest.IndexOf('Environment.SetEnvironmentVariable', [StringComparison]::Ordinal) -lt 0) -Message "Admission-store tests must pass coverage isolation explicitly instead of mutating process-global environment state."
+Assert-True -Condition ($admissionStoreTest.IndexOf('[Collection(Verification.ProcessEnvironmentCollection.Name)]', [StringComparison]::Ordinal) -lt 0) -Message "Admission-store tests without process-global mutation must remain eligible for the assembly's bounded second xUnit thread."
+Assert-Contains -Actual $admissionStoreTest -Expected 'CrossProcessExpectedGeneration' -Message "The external admission writer race must retain an explicit optimistic-generation coordinate."
+Assert-Contains -Actual $coverageChildProcess -Expected 'string? isolatedAssemblyDirectory' -Message "Coverage child-process helpers must expose an explicit isolation-directory seam without process-global mutation."
 foreach ($webSharedRuntimeTest in @(
     "CapabilityApiControllerTests.cs",
     "LoopApiControllerTests.cs",
@@ -254,8 +257,8 @@ Assert-Contains -Actual $scheduleScript -Expected 'Two may overlap on the four-c
 Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumCpuBoundWorkers = 1' -Message "Required gates must enforce an explicit one-CPU-bound concurrency ceiling."
 Assert-Contains -Actual $scheduleScript -Expected 'Weight = 3; ResourceClass = "ProcessHeavy"' -Message "Process-heavy required gates must retain their evidence-backed logical weight."
 Assert-Contains -Actual $scheduleScript -Expected '"ProcessHeavy" { 3; break }' -Message "Required-gate profile validation must reject underweighted process-heavy gates."
-Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-whitespace"; EstimatedDurationSeconds = 35; Weight = 2; ResourceClass = "CpuBound"' -Message "Whitespace formatting must retain one checked-in CPU-bound required-gate profile."
-Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-naming-style"; EstimatedDurationSeconds = 65; Weight = 2; ResourceClass = "CpuBound"' -Message "Naming/style formatting must retain one checked-in CPU-bound required-gate profile."
+Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-whitespace"; EstimatedDurationSeconds = 35; Weight = 6; ResourceClass = "CpuBound"' -Message "Whitespace formatting must reserve the two-heavy schedule's remaining capacity."
+Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-naming-style"; EstimatedDurationSeconds = 65; Weight = 6; ResourceClass = "CpuBound"' -Message "Naming/style formatting must reserve the two-heavy schedule's remaining capacity."
 Assert-Contains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-whitespace"' -Message "Whitespace formatting must overlap only immutable required-gate test execution."
 Assert-Contains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-naming-style"' -Message "Naming/style formatting must overlap only immutable required-gate test execution."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationRequiredGateScheduleProfile -Name $Name' -Message "Every required gate must obtain checked-in duration and resource metadata by exact name."
