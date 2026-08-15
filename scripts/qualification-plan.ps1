@@ -25,6 +25,7 @@ $script:QualificationSourceMappings = @(
         Prefix = "src/EmbodySense.Core.Application/"
         TestProjects = @(
             "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Clients.Tests/EmbodySense.Core.Clients.Tests.csproj",
             "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
             "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
             "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
@@ -34,6 +35,7 @@ $script:QualificationSourceMappings = @(
         Prefix = "src/EmbodySense.Core.Clients/"
         TestProjects = @(
             "tests/EmbodySense.Core.Clients.Tests/EmbodySense.Core.Clients.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
             "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
         )
     },
@@ -54,7 +56,9 @@ $script:QualificationSourceMappings = @(
             "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj",
             "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
             "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
-            "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
+            "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj",
+            "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj",
+            "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
         )
     },
     [pscustomobject]@{
@@ -78,10 +82,34 @@ $script:QualificationSourceMappings = @(
 
 $script:QualificationBehavioralConsumerMappings = @(
     [pscustomobject]@{
+        SourceProject = "src/EmbodySense.Core.Application/EmbodySense.Core.Application.csproj"
+        TestProject = "tests/EmbodySense.Core.Clients.Tests/EmbodySense.Core.Clients.Tests.csproj"
+        EvidencePath = "tests/EmbodySense.Core.Clients.Tests/Capabilities/ConfiguredCapabilityArtifactTrustVerifierTests.cs"
+        RequiredNamespace = "EmbodySense.Core.Application.Capabilities.Models"
+    },
+    [pscustomobject]@{
+        SourceProject = "src/EmbodySense.Core.Clients/EmbodySense.Core.Clients.csproj"
+        TestProject = "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        EvidencePath = "tests/EmbodySense.Core.Startup.Tests/Inference/LlmInferenceClientTests.cs"
+        RequiredNamespace = "EmbodySense.Core.Clients.CodexAppServer"
+    },
+    [pscustomobject]@{
         SourceProject = "src/EmbodySense.Core.Persistence/EmbodySense.Core.Persistence.csproj"
         TestProject = "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj"
         EvidencePath = "tests/EmbodySense.Cli.Command.Tests/CliCommandTests.cs"
         RequiredNamespace = "EmbodySense.Core.Persistence.Capabilities"
+    },
+    [pscustomobject]@{
+        SourceProject = "src/EmbodySense.Core.Persistence/EmbodySense.Core.Persistence.csproj"
+        TestProject = "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj"
+        EvidencePath = "tests/EmbodySense.E2ETests/Web/WebClientFlowTests.cs"
+        RequiredNamespace = "EmbodySense.Core.Persistence.Memory"
+    },
+    [pscustomobject]@{
+        SourceProject = "src/EmbodySense.Core.Persistence/EmbodySense.Core.Persistence.csproj"
+        TestProject = "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
+        EvidencePath = "tests/EmbodySense.Web.Tests/WebAgentRuntimeHostTests.cs"
+        RequiredNamespace = "EmbodySense.Core.Persistence.Loops"
     },
     [pscustomobject]@{
         SourceProject = "src/EmbodySense.Core.Startup/EmbodySense.Core.Startup.csproj"

@@ -40,6 +40,7 @@ $applicationPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.A
 Assert-True -Condition ($applicationPlan.RequiresBuild -and $applicationPlan.RequiresArchitecture -and $applicationPlan.RequiresCSharpFormat) -Message "Application C# changes must compile, format, and retain architecture validation."
 $expectedApplicationConsumers = @(
     "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+    "tests/EmbodySense.Core.Clients.Tests/EmbodySense.Core.Clients.Tests.csproj",
     "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
     "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
     "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
@@ -58,9 +59,10 @@ Assert-True -Condition (@($cliCommandPlan.TestSelections | Where-Object { @($_.N
 $clientsPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Clients/CodexAppServer/CodexAppServerInferenceClient.cs")
 $expectedClientsConsumers = @(
     "tests/EmbodySense.Core.Clients.Tests/EmbodySense.Core.Clients.Tests.csproj",
+    "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
     "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
 )
-Assert-Equal -Actual ($clientsPlan.TestProjects -join "|") -Expected ($expectedClientsConsumers -join "|") -Message "Clients production changes must execute the owning suite and app-server Integration behavior."
+Assert-Equal -Actual ($clientsPlan.TestProjects -join "|") -Expected ($expectedClientsConsumers -join "|") -Message "Clients production changes must execute the owning suite, Startup composition, and app-server Integration behavior."
 Assert-True -Condition (@($clientsPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Clients production consumers must run as complete suites."
 
 $developerInstructionsPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Common/Governance/Tools/EmbodySenseDeveloperInstructions.cs")
@@ -92,9 +94,11 @@ $expectedPersistenceConsumers = @(
     "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj",
     "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
     "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
-    "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
+    "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj",
+    "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj",
+    "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
 )
-Assert-Equal -Actual ($persistencePlan.TestProjects -join "|") -Expected ($expectedPersistenceConsumers -join "|") -Message "Persistence production changes must execute the owning suite, CLI initialization behavior, Startup composition, and direct Integration behavior."
+Assert-Equal -Actual ($persistencePlan.TestProjects -join "|") -Expected ($expectedPersistenceConsumers -join "|") -Message "Persistence production changes must execute the owning suite, CLI initialization behavior, Startup composition, hosted Web behavior, non-browser E2E, and direct Integration behavior."
 Assert-True -Condition (@($persistencePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Persistence production consumers must run as complete suites."
 
 $focusedImplementationPath = "src/EmbodySense.Core.Persistence/Loops/CustomLoopAttemptCancellationHost.cs"
@@ -503,6 +507,7 @@ function Get-DirectTestProjectConsumers {
 
 foreach ($consumerContract in @(
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Application/"; Project = "src/EmbodySense.Core.Application/EmbodySense.Core.Application.csproj"; Label = "Application" },
+    [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Clients/"; Project = "src/EmbodySense.Core.Clients/EmbodySense.Core.Clients.csproj"; Label = "Clients" },
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Common/"; Project = "src/EmbodySense.Core.Common/EmbodySense.Core.Common.csproj"; Label = "Common" },
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Persistence/"; Project = "src/EmbodySense.Core.Persistence/EmbodySense.Core.Persistence.csproj"; Label = "Persistence" },
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Startup/"; Project = "src/EmbodySense.Core.Startup/EmbodySense.Core.Startup.csproj"; Label = "Startup" }
