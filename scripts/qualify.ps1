@@ -81,32 +81,6 @@ function Test-QualificationCommitPath {
     return $LASTEXITCODE -eq 0
 }
 
-function Get-QualificationTestFilter {
-    param(
-        [Parameter(Mandatory = $true)] [string]$ProjectName,
-        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]]$Namespaces,
-        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]]$Classes
-    )
-
-    $clauses = [Collections.Generic.List[string]]::new()
-    $focusedClauses = [Collections.Generic.List[string]]::new()
-    foreach ($namespace in $Namespaces) {
-        $focusedClauses.Add("FullyQualifiedName~$namespace")
-    }
-    foreach ($class in $Classes) {
-        $focusedClauses.Add("FullyQualifiedName~$class.")
-    }
-    if ($focusedClauses.Count -gt 0) {
-        $clauses.Add("($($focusedClauses -join '|'))")
-    }
-    if ($ProjectName -ceq "EmbodySense.E2ETests") {
-        $clauses.Add("(FullyQualifiedName!~BrowserFlowTests)")
-    }
-    $clauses.Add("(VerificationTier!=Stress)")
-
-    return $clauses -join "&"
-}
-
 function Add-QualificationPhase {
     param(
         [Parameter(Mandatory = $true)] [string]$Name,
@@ -314,7 +288,7 @@ try {
     Invoke-QualificationWave
 
     if ($plan.RequiresWorkflowValidation) {
-        Add-QualificationPhase -Name "workflow-format" -FileName "npx" -Arguments @("prettier", "--check", "--end-of-line", "auto", ".github/workflows/*.{yml,yaml}") -TimeoutSeconds 60 -EstimatedDurationSeconds 10 -Weight 1 -ResourceClass "Ordinary"
+        Add-QualificationPhase -Name "github-yaml-format" -FileName "npx" -Arguments @("prettier", "--check", "--end-of-line", "auto", ".github/workflows/*.{yml,yaml}", ".github/dependabot.yml") -TimeoutSeconds 60 -EstimatedDurationSeconds 10 -Weight 1 -ResourceClass "Ordinary"
     }
 
     if ($plan.RequiresDrawioValidation) {

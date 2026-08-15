@@ -273,6 +273,13 @@ public sealed class BrowserFlowTests
 Assert-True -Condition (Test-QualificationContainsDirectXunitTest -Content $customFactSource) -Message "A file-local FactAttribute subtype must retain its direct-test namespace selection."
 $customFactClasses = @(Get-QualificationDirectXunitTestClasses -Path "tests/EmbodySense.E2ETests/Web/BrowserFlowTests.cs" -Content $customFactSource)
 Assert-Equal -Actual ($customFactClasses -join "|") -Expected "EmbodySense.E2ETests.Web.BrowserFlowTests" -Message "Custom FactAttribute methods must retain the exact declaring test class."
+$browserQualificationFilter = Get-QualificationTestFilter -ProjectName "EmbodySense.E2ETests" -Namespaces @() -Classes $customFactClasses
+Assert-Equal -Actual $browserQualificationFilter -Expected "(FullyQualifiedName!~BrowserFlowTests)&(VerificationTier!=Stress)" -Message "An installed-browser test edit must qualify the non-browser E2E slice without selecting and excluding the same class."
+$nonBrowserQualificationFilter = Get-QualificationTestFilter -ProjectName "EmbodySense.E2ETests" -Namespaces @() -Classes @("EmbodySense.E2ETests.Web.WebClientFlowTests")
+Assert-Equal -Actual $nonBrowserQualificationFilter -Expected "(FullyQualifiedName~EmbodySense.E2ETests.Web.WebClientFlowTests.)&(FullyQualifiedName!~BrowserFlowTests)&(VerificationTier!=Stress)" -Message "A non-browser E2E test edit must retain its exact class while installed-browser tests remain promotion-owned."
+$browserTestPlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.E2ETests/Web/BrowserFlowTests.cs") -TestClassesByPath @{ "tests/EmbodySense.E2ETests/Web/BrowserFlowTests.cs" = $customFactClasses }
+Assert-Equal -Actual ($browserTestPlan.TestProjects -join "|") -Expected "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj" -Message "An installed-browser test edit must retain its owning E2E project in qualification."
+Assert-True -Condition ($browserTestPlan.TestSelections.Count -eq 1 -and @($browserTestPlan.TestSelections[0].Namespaces).Count -eq 0 -and @($browserTestPlan.TestSelections[0].Classes).Count -eq 0) -Message "Installed-browser source changes must be represented as a full non-browser E2E qualification selection while promotion owns the changed class."
 
 $mismatchedClassRejected = $false
 try {
@@ -301,6 +308,9 @@ Assert-True -Condition (@($webPlan.TestSelections | Where-Object { @($_.Namespac
 $verifierPlan = Get-QualificationPlan -ChangedPaths @("scripts/qualify.ps1", ".github/workflows/qualification.yml")
 Assert-True -Condition ($verifierPlan.RequiresVerifierContracts -and -not $verifierPlan.RequiresBuild -and $verifierPlan.TestProjects.Count -eq 0) -Message "Verifier-only changes must run verifier contracts without an unrelated solution build."
 Assert-True -Condition ($verifierPlan.RequiresFrontend -and $verifierPlan.RequiresWorkflowValidation) -Message "Workflow changes must install the pinned frontend toolchain and parse every workflow through Prettier."
+$dependabotPlan = Get-QualificationPlan -ChangedPaths @(".github/dependabot.yml")
+Assert-True -Condition ($dependabotPlan.RequiresFrontend -and $dependabotPlan.RequiresWorkflowValidation -and $dependabotPlan.RequiresVerifierContracts) -Message "Dependabot configuration changes must install the pinned parser and validate GitHub YAML syntax."
+Assert-True -Condition (-not $dependabotPlan.RequiresBuild -and $dependabotPlan.TestProjects.Count -eq 0) -Message "Dependabot syntax validation must not trigger unrelated compilation or test suites."
 
 $sharedTestPlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Tests.Support/TestWorkspace.cs")
 Assert-Equal -Actual $sharedTestPlan.TestProjects.Count -Expected 9 -Message "Shared test infrastructure must conservatively select every production test project."
@@ -614,7 +624,8 @@ Assert-True -Condition ($qualificationScript.IndexOf('@("format", "EmbodySense.s
 Assert-True -Condition ($qualificationScript.IndexOf('Add-QualificationPhase -Name "format-changed"', [StringComparison]::Ordinal) -ge 0) -Message "Changed-file formatting must remain an explicit bounded phase."
 Assert-True -Condition ($qualificationScript.IndexOf('Invoke-QualificationWave', $qualificationScript.IndexOf('Add-QualificationPhase -Name "git-diff-check"', [StringComparison]::Ordinal), [StringComparison]::Ordinal) -ge 0) -Message "Tests, workflow validation, changed-file formatting, and diff-check must complete in the second bounded wave."
 Assert-True -Condition ($qualificationScript.IndexOf('@("diff", "--check", "$mergeBase..$HeadCommit")', [StringComparison]::Ordinal) -ge 0) -Message "Qualification must diff-check the exact selected range."
-Assert-True -Condition ($qualificationScript.IndexOf('@("prettier", "--check", "--end-of-line", "auto", ".github/workflows/*.{yml,yaml}")', [StringComparison]::Ordinal) -ge 0) -Message "Workflow formatting must ignore checkout-only CRLF conversion while validating both supported workflow filename extensions."
+Assert-True -Condition ($qualificationScript.IndexOf('Add-QualificationPhase -Name "github-yaml-format"', [StringComparison]::Ordinal) -ge 0) -Message "GitHub YAML validation must remain an explicit bounded qualification phase."
+Assert-True -Condition ($qualificationScript.IndexOf('@("prettier", "--check", "--end-of-line", "auto", ".github/workflows/*.{yml,yaml}", ".github/dependabot.yml")', [StringComparison]::Ordinal) -ge 0) -Message "GitHub YAML formatting must ignore checkout-only CRLF conversion while validating both workflow extensions and Dependabot configuration."
 Assert-True -Condition ($watchdogScript.IndexOf('Test-VerificationDeadlineExceeded -ElapsedTicks $stopwatch.Elapsed.Ticks -DeadlineTicks $deadlineTicks', [StringComparison]::Ordinal) -ge 0) -Message "The running watchdog must use the tested inclusive deadline decision."
 Assert-True -Condition ($watchdogScript.IndexOf('Stop-VerificationProcessTree $process', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must terminate the full verifier process tree."
 Assert-True -Condition ($verifyScript.IndexOf('VERIFY_COMPLETE schema_version=1 status=passed', [StringComparison]::Ordinal) -ge 0) -Message "The verifier must emit an exact terminal marker only after successful completion."

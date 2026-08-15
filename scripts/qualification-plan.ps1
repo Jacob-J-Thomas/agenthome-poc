@@ -11,6 +11,9 @@ $script:QualificationTestProjects = @(
     "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj",
     "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
 )
+$script:QualificationE2ETestProjectName = "EmbodySense.E2ETests"
+$script:QualificationInstalledBrowserTestPath = "tests/EmbodySense.E2ETests/Web/BrowserFlowTests.cs"
+$script:QualificationInstalledBrowserTestClass = "EmbodySense.E2ETests.Web.BrowserFlowTests"
 
 $script:QualificationSourceMappings = @(
     [pscustomobject]@{
@@ -562,6 +565,36 @@ function Test-QualificationContainsFocusedHelperReference {
     return $false
 }
 
+function Get-QualificationTestFilter {
+    param(
+        [Parameter(Mandatory = $true)] [string]$ProjectName,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]]$Namespaces,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]]$Classes
+    )
+
+    $isE2EProject = $ProjectName -ceq $script:QualificationE2ETestProjectName
+    $clauses = [Collections.Generic.List[string]]::new()
+    $focusedClauses = [Collections.Generic.List[string]]::new()
+    foreach ($namespace in $Namespaces) {
+        $focusedClauses.Add("FullyQualifiedName~$namespace")
+    }
+    foreach ($class in $Classes) {
+        if ($isE2EProject -and $class -ceq $script:QualificationInstalledBrowserTestClass) {
+            continue
+        }
+        $focusedClauses.Add("FullyQualifiedName~$class.")
+    }
+    if ($focusedClauses.Count -gt 0) {
+        $clauses.Add("($($focusedClauses -join '|'))")
+    }
+    if ($isE2EProject) {
+        $clauses.Add("(FullyQualifiedName!~BrowserFlowTests)")
+    }
+    $clauses.Add("(VerificationTier!=Stress)")
+
+    return $clauses -join "&"
+}
+
 function Get-QualificationPlan {
     param(
         [Parameter(Mandatory = $true)] [string[]]$ChangedPaths,
@@ -631,7 +664,7 @@ function Get-QualificationPlan {
             $classified = $true
         }
 
-        if ($path.StartsWith(".github/workflows/", [StringComparison]::Ordinal)) {
+        if ($path.StartsWith(".github/workflows/", [StringComparison]::Ordinal) -or $path -ceq ".github/dependabot.yml") {
             $requiresFrontend = $true
             $requiresWorkflowValidation = $true
         }
@@ -706,6 +739,13 @@ function Get-QualificationPlan {
                     $requiresArchitecture = $true
                 }
                 [void]$testProjects.Add($mapping.TestProject)
+                if ($path -ceq $script:QualificationInstalledBrowserTestPath) {
+                    [void]$unfilteredTestProjects.Add($mapping.TestProject)
+                    [void]$filteredTestNamespaces.Remove($mapping.TestProject)
+                    [void]$filteredTestClasses.Remove($mapping.TestProject)
+                    $classified = $true
+                    break
+                }
                 if (Test-QualificationFilterableTestSource -Path $path) {
                     $hasNamespaces = $TestNamespacesByPath.ContainsKey($path)
                     $hasClasses = $TestClassesByPath.ContainsKey($path)
