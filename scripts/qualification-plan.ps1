@@ -36,7 +36,13 @@ $script:QualificationSourceMappings = @(
         )
     },
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Common/"; TestProjects = @("tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj") },
-    [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Persistence/"; TestProjects = @("tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj") },
+    [pscustomobject]@{
+        Prefix = "src/EmbodySense.Core.Persistence/"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
     [pscustomobject]@{
         Prefix = "src/EmbodySense.Core.Startup/"
         TestProjects = @(
@@ -51,6 +57,18 @@ $script:QualificationSourceMappings = @(
         TestProjects = @(
             "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj",
             "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
+        )
+    }
+)
+
+$script:QualificationExactSourceMappings = @(
+    [pscustomobject]@{
+        Path = "src/EmbodySense.Core.Common/Governance/Tools/EmbodySenseDeveloperInstructions.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
         )
     }
 )
@@ -366,6 +384,20 @@ function Get-QualificationPlan {
         if ($path -ceq "package.json" -or $path -ceq "package-lock.json" -or $path -ceq "eslint.config.js" -or $path -ceq ".prettierignore" -or $path.StartsWith("tests/frontend/", [StringComparison]::Ordinal) -or $path.StartsWith("src/EmbodySense.Web/wwwroot/", [StringComparison]::Ordinal)) {
             $requiresFrontend = $true
             $classified = $true
+        }
+
+        foreach ($mapping in $script:QualificationExactSourceMappings) {
+            if ($path -ceq $mapping.Path) {
+                $requiresBuild = $true
+                $requiresArchitecture = $true
+                foreach ($testProject in $mapping.TestProjects) {
+                    [void]$testProjects.Add($testProject)
+                    [void]$unfilteredTestProjects.Add($testProject)
+                    [void]$filteredTestNamespaces.Remove($testProject)
+                }
+                $classified = $true
+                break
+            }
         }
 
         foreach ($mapping in $script:QualificationSourceMappings) {
