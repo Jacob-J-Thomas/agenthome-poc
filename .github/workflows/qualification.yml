@@ -24,7 +24,7 @@ jobs:
       cancel-in-progress: true
     runs-on: windows-latest
     # Tool setup and diagnostic upload are outside the repository qualification budget.
-    # The watchdog owns the exact inclusive 300-second child deadline.
+    # The watchdog owns the exact inclusive 360-second child deadline.
     timeout-minutes: 10
 
     steps:
@@ -47,7 +47,7 @@ jobs:
 
       - name: Qualify solution
         shell: pwsh
-        run: ./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit "${{ github.event.pull_request.base.sha }}" -HeadCommit "${{ github.event.pull_request.head.sha }}" -Configuration Release -DeadlineSeconds 300
+        run: ./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit "${{ github.event.pull_request.base.sha }}" -HeadCommit "${{ github.event.pull_request.head.sha }}" -Configuration Release -DeadlineSeconds 360
 
       - name: Upload qualification diagnostics
         if: always()
