@@ -15,7 +15,13 @@ $script:QualificationTestProjects = @(
 $script:QualificationSourceMappings = @(
     [pscustomobject]@{ Prefix = "src/EmbodySense.Cli.Command/"; TestProjects = @("tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj") },
     [pscustomobject]@{ Prefix = "src/EmbodySense.Cli/"; TestProjects = @("tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj") },
-    [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Application/"; TestProjects = @("tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj") },
+    [pscustomobject]@{
+        Prefix = "src/EmbodySense.Core.Application/"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
+        )
+    },
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Clients/"; TestProjects = @("tests/EmbodySense.Core.Clients.Tests/EmbodySense.Core.Clients.Tests.csproj") },
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Common/"; TestProjects = @("tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj") },
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Persistence/"; TestProjects = @("tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj") },

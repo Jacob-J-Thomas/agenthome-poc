@@ -163,7 +163,12 @@ try {
             }
         }
         if (Test-QualificationFilterableTestSource -Path $normalizedPath) {
-            $content = Get-QualificationBlobContent -Path $normalizedPath -Commits @($HeadCommit, $mergeBase)
+            if (-not (Test-QualificationCommitPath -Path $normalizedPath -Commit $HeadCommit)) {
+                $testNamespacesByPath[$normalizedPath] = [string[]]::new(0)
+                continue
+            }
+
+            $content = Get-QualificationBlobContent -Path $normalizedPath -Commits @($HeadCommit)
             $declaredNamespace = Get-QualificationDeclaredTestNamespace -Path $normalizedPath -Content $content
             if (Test-QualificationContainsDirectXunitTest -Content $content) {
                 $testNamespacesByPath[$normalizedPath] = @($declaredNamespace)
