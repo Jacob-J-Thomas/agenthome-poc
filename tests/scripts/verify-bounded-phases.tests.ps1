@@ -14,6 +14,7 @@ $coverageEvidenceScriptPath = Join-Path $repoRoot "scripts\verification-coverage
 $verifyWorkflowPath = Join-Path $repoRoot ".github\workflows\verify.yml"
 $qualificationWorkflowPath = Join-Path $repoRoot ".github\workflows\qualification.yml"
 $browserWorkflowPath = Join-Path $repoRoot ".github\workflows\browser-e2e.yml"
+$promotionCancellationWorkflowPath = Join-Path $repoRoot ".github\workflows\promotion-cancellation.yaml"
 $codeqlWorkflowPath = Join-Path $repoRoot ".github\workflows\codeql.yml"
 $dependencyReviewWorkflowPath = Join-Path $repoRoot ".github\workflows\dependency-review.yml"
 $stressWorkflowPath = Join-Path $repoRoot ".github\workflows\verification-stress.yml"
@@ -152,6 +153,7 @@ $coverageEvidenceScript = Get-Content -LiteralPath $coverageEvidenceScriptPath -
 $verifyWorkflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
 $qualificationWorkflow = Get-Content -LiteralPath $qualificationWorkflowPath -Raw
 $browserWorkflow = Get-Content -LiteralPath $browserWorkflowPath -Raw
+$promotionCancellationWorkflow = Get-Content -LiteralPath $promotionCancellationWorkflowPath -Raw
 $codeqlWorkflow = Get-Content -LiteralPath $codeqlWorkflowPath -Raw
 $dependencyReviewWorkflow = Get-Content -LiteralPath $dependencyReviewWorkflowPath -Raw
 $stressWorkflow = Get-Content -LiteralPath $stressWorkflowPath -Raw
@@ -323,6 +325,14 @@ $browserJobConditionIndex = $browserWorkflow.IndexOf("    if:", $browserJobIndex
 $browserJobConcurrencyIndex = $browserWorkflow.IndexOf("    concurrency:", $browserJobIndex, [StringComparison]::Ordinal)
 Assert-True -Condition ($browserJobIndex -ge 0 -and $browserJobConditionIndex -gt $browserJobIndex -and $browserJobConcurrencyIndex -gt $browserJobConditionIndex) -Message "Browser cancellation must be job-scoped after eligibility so a skipped metadata edit cannot cancel real promotion."
 Assert-True -Condition ($browserWorkflow.IndexOf("`nconcurrency:", [StringComparison]::Ordinal) -lt 0) -Message "Browser verification must not use workflow-scoped cancellation for ineligible metadata edits."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "types: [converted_to_draft]" -Message "Returning a pull request to draft must trigger cancellation of obsolete promotion work."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "name: cancel-obsolete-verify" -Message "Draft demotion must emit a distinct non-required verifier cancellation context."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected 'group: verify-${{ github.event.pull_request.number }}' -Message "Draft demotion must enter the active verifier concurrency group."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "name: cancel-obsolete-browser-e2e" -Message "Draft demotion must emit a distinct non-required browser cancellation context."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected 'group: browser-e2e-${{ github.event.pull_request.number }}' -Message "Draft demotion must enter the active browser concurrency group."
+Assert-True -Condition (([regex]::Matches($promotionCancellationWorkflow, "cancel-in-progress: true").Count) -eq 2) -Message "Both promotion cancellation jobs must stop their superseded Windows work."
+Assert-True -Condition ($promotionCancellationWorkflow.IndexOf("actions/checkout", [StringComparison]::Ordinal) -lt 0 -and $promotionCancellationWorkflow.IndexOf("actions/setup-", [StringComparison]::Ordinal) -lt 0) -Message "Draft demotion cancellation must not consume checkout or tool-setup time."
+Assert-True -Condition ($promotionCancellationWorkflow.IndexOf("`n    name: verify`n", [StringComparison]::Ordinal) -lt 0 -and $promotionCancellationWorkflow.IndexOf("`n    name: browser-e2e`n", [StringComparison]::Ordinal) -lt 0) -Message "Draft demotion must not publish either required promotion context."
 Assert-True -Condition ($verifyWorkflow.IndexOf('ref: ${{ github.event.pull_request.head.sha }}', [StringComparison]::Ordinal) -lt 0) -Message "Promotion verification must retain the generated merge-ref checkout it documents."
 Assert-True -Condition ($browserWorkflow.IndexOf('ref: ${{ github.event.pull_request.head.sha }}', [StringComparison]::Ordinal) -lt 0) -Message "Installed-browser promotion must retain the generated merge-ref checkout it documents."
 Assert-Contains -Actual $readme -Expected "GitHub's generated merge ref for the current reviewed head/base pair" -Message "README promotion authority must match the workflow checkout."

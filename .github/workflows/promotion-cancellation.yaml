@@ -1,0 +1,30 @@
+name: Cancel superseded promotion
+
+on:
+  pull_request:
+    types: [converted_to_draft]
+
+permissions: {}
+
+jobs:
+  cancel-obsolete-verify:
+    name: cancel-obsolete-verify
+    concurrency:
+      group: verify-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Cancel superseded exhaustive verification
+        run: echo "The shared concurrency group canceled any active verify promotion."
+
+  cancel-obsolete-browser-e2e:
+    name: cancel-obsolete-browser-e2e
+    concurrency:
+      group: browser-e2e-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Cancel superseded installed-browser verification
+        run: echo "The shared concurrency group canceled any active browser-e2e promotion."

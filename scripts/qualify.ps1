@@ -314,7 +314,7 @@ try {
     Invoke-QualificationWave
 
     if ($plan.RequiresWorkflowValidation) {
-        Add-QualificationPhase -Name "workflow-format" -FileName "npx" -Arguments @("prettier", "--check", "--end-of-line", "auto", ".github/workflows/*.yml") -TimeoutSeconds 60 -EstimatedDurationSeconds 10 -Weight 1 -ResourceClass "Ordinary"
+        Add-QualificationPhase -Name "workflow-format" -FileName "npx" -Arguments @("prettier", "--check", "--end-of-line", "auto", ".github/workflows/*.{yml,yaml}") -TimeoutSeconds 60 -EstimatedDurationSeconds 10 -Weight 1 -ResourceClass "Ordinary"
     }
 
     if ($plan.RequiresDrawioValidation) {
