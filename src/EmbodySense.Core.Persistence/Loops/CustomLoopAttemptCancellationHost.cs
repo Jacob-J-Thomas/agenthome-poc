@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
 
@@ -23,10 +24,12 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 {
     private static readonly TimeSpan _acknowledgementTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan _connectionIoTimeout = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan _routingCompletionMargin = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan _maximumRemoteRequestDuration = TimeSpan.FromSeconds(CustomLoopAttemptCancellationContractLimits.MaxRemoteRequestSeconds);
     // Connection and request-write time must not consume the owner's acknowledgement budget. The response window includes
-    // the server read and write bounds plus one I/O interval of scheduling margin.
+    // the server read and write bounds. The shared end-to-end budget also retains one final scheduling interval for the caller.
     private static readonly TimeSpan _remoteConnectionTimeout = _acknowledgementTimeout + _connectionIoTimeout;
-    private static readonly TimeSpan _remoteResponseTimeout = _acknowledgementTimeout + _connectionIoTimeout + _connectionIoTimeout + _connectionIoTimeout;
+    private static readonly TimeSpan _remoteResponseTimeout = _maximumRemoteRequestDuration - _remoteConnectionTimeout - _connectionIoTimeout - _routingCompletionMargin;
     private static readonly JsonSerializerOptions _wireJsonOptions = new(JsonSerializerDefaults.Web);
     private const int MaxWireUtf8Bytes = 4 * 1024;
 
