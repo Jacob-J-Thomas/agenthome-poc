@@ -89,17 +89,19 @@ Assert-True -Condition (@($commonPlan.TestSelections | Where-Object { @($_.Names
 
 $persistencePlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Persistence/Capabilities/CapabilityCatalogStore.cs")
 $expectedPersistenceConsumers = @(
+    "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj",
     "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
     "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
     "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
 )
-Assert-Equal -Actual ($persistencePlan.TestProjects -join "|") -Expected ($expectedPersistenceConsumers -join "|") -Message "Persistence production changes must execute the owning suite, Startup composition, and direct Integration behavior."
+Assert-Equal -Actual ($persistencePlan.TestProjects -join "|") -Expected ($expectedPersistenceConsumers -join "|") -Message "Persistence production changes must execute the owning suite, CLI initialization behavior, Startup composition, and direct Integration behavior."
 Assert-True -Condition (@($persistencePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Persistence production consumers must run as complete suites."
 
 $startupPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Startup/Runtime/AgentRuntime.cs")
 $expectedStartupConsumers = @(
     "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj",
     "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+    "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj",
     "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj",
     "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
 )
@@ -461,8 +463,19 @@ foreach ($consumerContract in @(
 )) {
     $sourceMappings = @($script:QualificationSourceMappings | Where-Object { $_.Prefix -ceq $consumerContract.Prefix })
     Assert-Equal -Actual $sourceMappings.Count -Expected 1 -Message "$($consumerContract.Label) must have exactly one explicit source-ownership mapping."
-    $actualConsumers = @(Get-DirectTestProjectConsumers -ReferencedProject $consumerContract.Project)
-    Assert-Equal -Actual ($actualConsumers -join "|") -Expected (@($sourceMappings[0].TestProjects | Sort-Object) -join "|") -Message "$($consumerContract.Label) qualification ownership must match every direct test-project consumer."
+    $requiredConsumers = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($directConsumer in @(Get-DirectTestProjectConsumers -ReferencedProject $consumerContract.Project)) {
+        [void]$requiredConsumers.Add($directConsumer)
+    }
+    foreach ($behavioralConsumer in @($script:QualificationBehavioralConsumerMappings | Where-Object { $_.SourceProject -ceq $consumerContract.Project })) {
+        Assert-True -Condition ($script:QualificationTestProjects -ccontains $behavioralConsumer.TestProject) -Message "Behavioral consumer '$($behavioralConsumer.TestProject)' must be a canonical qualification test project."
+        $evidenceFullPath = Join-Path $repoRoot $behavioralConsumer.EvidencePath
+        Assert-True -Condition (Test-Path -LiteralPath $evidenceFullPath -PathType Leaf) -Message "Behavioral consumer evidence '$($behavioralConsumer.EvidencePath)' must exist."
+        $evidenceContent = Get-Content -LiteralPath $evidenceFullPath -Raw
+        Assert-True -Condition ($evidenceContent.IndexOf("using $($behavioralConsumer.RequiredNamespace);", [StringComparison]::Ordinal) -ge 0) -Message "Behavioral consumer evidence '$($behavioralConsumer.EvidencePath)' must retain its '$($behavioralConsumer.RequiredNamespace)' boundary."
+        [void]$requiredConsumers.Add($behavioralConsumer.TestProject)
+    }
+    Assert-Equal -Actual (@($requiredConsumers | Sort-Object) -join "|") -Expected (@($sourceMappings[0].TestProjects | Sort-Object) -join "|") -Message "$($consumerContract.Label) qualification ownership must match every direct and checked behavioral test-project consumer."
 }
 
 $lfMarker = "VERIFY_COMPLETE schema_version=1 status=passed elapsed_seconds=600`n"

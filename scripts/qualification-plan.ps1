@@ -51,6 +51,7 @@ $script:QualificationSourceMappings = @(
     [pscustomobject]@{
         Prefix = "src/EmbodySense.Core.Persistence/"
         TestProjects = @(
+            "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj",
             "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
             "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
             "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
@@ -61,6 +62,7 @@ $script:QualificationSourceMappings = @(
         TestProjects = @(
             "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj",
             "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj",
             "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj",
             "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
         )
@@ -71,6 +73,21 @@ $script:QualificationSourceMappings = @(
             "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj",
             "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
         )
+    }
+)
+
+$script:QualificationBehavioralConsumerMappings = @(
+    [pscustomobject]@{
+        SourceProject = "src/EmbodySense.Core.Persistence/EmbodySense.Core.Persistence.csproj"
+        TestProject = "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj"
+        EvidencePath = "tests/EmbodySense.Cli.Command.Tests/CliCommandTests.cs"
+        RequiredNamespace = "EmbodySense.Core.Persistence.Capabilities"
+    },
+    [pscustomobject]@{
+        SourceProject = "src/EmbodySense.Core.Startup/EmbodySense.Core.Startup.csproj"
+        TestProject = "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj"
+        EvidencePath = "tests/EmbodySense.E2ETests/Web/WebClientFlowTests.cs"
+        RequiredNamespace = "EmbodySense.Core.Startup.Loops.Execution.Models"
     }
 )
 
