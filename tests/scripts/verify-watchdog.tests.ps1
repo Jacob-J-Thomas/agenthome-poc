@@ -40,9 +40,11 @@ $applicationPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.A
 Assert-True -Condition ($applicationPlan.RequiresBuild -and $applicationPlan.RequiresArchitecture -and $applicationPlan.RequiresCSharpFormat) -Message "Application C# changes must compile, format, and retain architecture validation."
 $expectedApplicationConsumers = @(
     "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+    "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+    "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
     "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
 )
-Assert-Equal -Actual ($applicationPlan.TestProjects -join "|") -Expected ($expectedApplicationConsumers -join "|") -Message "Application production changes must execute the owning suite and downstream integration boundary."
+Assert-Equal -Actual ($applicationPlan.TestProjects -join "|") -Expected ($expectedApplicationConsumers -join "|") -Message "Application production changes must execute every direct test-project consumer."
 Assert-True -Condition (@($applicationPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Application production consumers must run as complete suites even when the same test class also changed."
 
 $cliCommandPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Cli.Command/RunCommand.cs")
@@ -110,6 +112,11 @@ Assert-Equal -Actual @($testOnlyPlan.TestSelections[0].Namespaces).Count -Expect
 Assert-Equal -Actual @($testOnlyPlan.TestSelections[0].Classes).Count -Expected 1 -Message "A test-only edit must not expand to its entire large test assembly."
 Assert-Equal -Actual $testOnlyPlan.TestSelections[0].Classes[0] -Expected "EmbodySense.Core.Application.Tests.Loops.RunnerTests" -Message "A test-only edit must retain its exact filename-matching class as the fail-closed test filter."
 Assert-True -Condition (-not $testOnlyPlan.RequiresVerifierContracts) -Message "An unrelated test-only edit must not pay the verifier-contract wave."
+
+$testProjectPlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj")
+Assert-True -Condition ($testProjectPlan.RequiresBuild -and $testProjectPlan.RequiresArchitecture) -Message "A changed test project must compile and execute the architecture boundary lane."
+Assert-Equal -Actual ($testProjectPlan.TestProjects -join "|") -Expected "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj" -Message "A changed test project must retain its complete owning suite."
+Assert-True -Condition (@($testProjectPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "A changed test project must run unfiltered."
 
 $deletedTestSourcePlan = Get-QualificationPlan -ChangedPaths @($applicationTestPath) -TestNamespacesByPath @{ $applicationTestPath = [string[]]::new(0) }
 Assert-Equal -Actual $deletedTestSourcePlan.TestSelections.Count -Expected 1 -Message "A deleted test source must retain its surviving owning project."
@@ -447,6 +454,7 @@ function Get-DirectTestProjectConsumers {
 }
 
 foreach ($consumerContract in @(
+    [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Application/"; Project = "src/EmbodySense.Core.Application/EmbodySense.Core.Application.csproj"; Label = "Application" },
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Common/"; Project = "src/EmbodySense.Core.Common/EmbodySense.Core.Common.csproj"; Label = "Common" },
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Persistence/"; Project = "src/EmbodySense.Core.Persistence/EmbodySense.Core.Persistence.csproj"; Label = "Persistence" },
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Startup/"; Project = "src/EmbodySense.Core.Startup/EmbodySense.Core.Startup.csproj"; Label = "Startup" }

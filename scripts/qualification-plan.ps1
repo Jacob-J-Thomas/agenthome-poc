@@ -25,6 +25,8 @@ $script:QualificationSourceMappings = @(
         Prefix = "src/EmbodySense.Core.Application/"
         TestProjects = @(
             "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
             "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
         )
     },
@@ -561,6 +563,9 @@ function Get-QualificationPlan {
         foreach ($mapping in $script:QualificationTestMappings) {
             if ($path.StartsWith($mapping.Prefix, [StringComparison]::Ordinal)) {
                 $requiresBuild = $true
+                if ($path -ceq $mapping.TestProject) {
+                    $requiresArchitecture = $true
+                }
                 [void]$testProjects.Add($mapping.TestProject)
                 if (Test-QualificationFilterableTestSource -Path $path) {
                     $hasNamespaces = $TestNamespacesByPath.ContainsKey($path)
