@@ -50,7 +50,8 @@ $script:QualificationSourceMappings = @(
         Prefix = "src/EmbodySense.Core.Persistence/"
         TestProjects = @(
             "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
-            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
         )
     },
     [pscustomobject]@{
@@ -180,6 +181,18 @@ function Get-QualificationTestProject {
     }
 
     return $null
+}
+
+function Get-QualificationTestProjectPrefix {
+    param([Parameter(Mandatory = $true)] [string]$TestProject)
+
+    foreach ($mapping in $script:QualificationTestMappings) {
+        if ($mapping.TestProject -ceq $TestProject) {
+            return $mapping.Prefix
+        }
+    }
+
+    throw "Qualification has no source prefix for test project '$TestProject'."
 }
 
 function Get-QualificationLinkedTestMapping {
@@ -335,6 +348,81 @@ function Test-QualificationContainsDirectXunitTest {
     return @(Get-QualificationDirectXunitTestTypeNames -Content $Content).Count -gt 0
 }
 
+function Test-QualificationContainsIdentifierReference {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Content,
+        [Parameter(Mandatory = $true)] [ValidateNotNullOrEmpty()] [string]$Identifier
+    )
+
+    Initialize-QualificationCSharpParser
+    $root = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Content).GetCompilationUnitRoot()
+    foreach ($token in $root.DescendantTokens()) {
+        if ($token.RawKind -eq [int][Microsoft.CodeAnalysis.CSharp.SyntaxKind]::IdentifierToken -and $token.ValueText -ceq $Identifier) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-QualificationExternalTestClassConsumerPaths {
+    param(
+        [Parameter(Mandatory = $true)] [string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[0-9a-fA-F]{40}$')] [string]$Commit,
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [ValidateNotNullOrEmpty()] [string]$TestClass
+    )
+
+    $normalizedPath = ConvertTo-QualificationPath -Path $Path
+    $testProject = Get-QualificationTestProject -Path $normalizedPath
+    if ($null -eq $testProject) {
+        throw "Qualification cannot inspect test-class consumers outside a known test project: '$normalizedPath'."
+    }
+
+    $projectPrefix = Get-QualificationTestProjectPrefix -TestProject $testProject
+    $separatorIndex = $TestClass.LastIndexOf('.')
+    $identifier = if ($separatorIndex -lt 0) { $TestClass } else { $TestClass.Substring($separatorIndex + 1) }
+    if ([string]::IsNullOrWhiteSpace($identifier)) {
+        throw "Qualification test class must end in a non-empty identifier: '$TestClass'."
+    }
+
+    $grepLines = @(& git -C $RepositoryRoot grep -l -F $identifier $Commit -- $projectPrefix 2>$null)
+    $grepExitCode = $LASTEXITCODE
+    if ($grepExitCode -eq 1) {
+        return [string[]]::new(0)
+    }
+    if ($grepExitCode -ne 0) {
+        throw "Qualification could not enumerate exact-head consumers of '$TestClass'."
+    }
+
+    $commitPrefix = "$Commit`:"
+    $consumerPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($grepLine in $grepLines) {
+        if (-not $grepLine.StartsWith($commitPrefix, [StringComparison]::Ordinal)) {
+            throw "Qualification received malformed exact-head grep evidence '$grepLine'."
+        }
+
+        $candidatePath = ConvertTo-QualificationPath -Path $grepLine.Substring($commitPrefix.Length)
+        if ($candidatePath -ceq $normalizedPath) {
+            continue
+        }
+        if (-not $candidatePath.StartsWith($projectPrefix, [StringComparison]::Ordinal) -or -not $candidatePath.EndsWith(".cs", [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Qualification found an out-of-project test-class consumer '$candidatePath'."
+        }
+
+        $objectName = "$Commit`:$candidatePath"
+        $contentLines = @(& git -C $RepositoryRoot cat-file blob $objectName 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Qualification could not read exact-head consumer '$candidatePath'."
+        }
+        if (Test-QualificationContainsIdentifierReference -Content ($contentLines -join "`n") -Identifier $identifier) {
+            [void]$consumerPaths.Add($candidatePath)
+        }
+    }
+
+    return [string[]]@($consumerPaths | Sort-Object)
+}
+
 function Test-QualificationContainsFocusedHelperReference {
     param(
         [Parameter(Mandatory = $true)] [string]$Content,
@@ -356,7 +444,7 @@ function Test-QualificationContainsFocusedHelperReference {
     Initialize-QualificationCSharpParser
     $root = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Content).GetCompilationUnitRoot()
     foreach ($token in $root.DescendantTokens()) {
-        if ($identifiers.Contains($token.ValueText)) {
+        if ($token.RawKind -eq [int][Microsoft.CodeAnalysis.CSharp.SyntaxKind]::IdentifierToken -and $identifiers.Contains($token.ValueText)) {
             return $true
         }
     }

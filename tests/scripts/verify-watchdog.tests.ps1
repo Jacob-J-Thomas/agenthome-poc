@@ -88,9 +88,10 @@ Assert-True -Condition (@($commonPlan.TestSelections | Where-Object { @($_.Names
 $persistencePlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Persistence/Capabilities/CapabilityCatalogStore.cs")
 $expectedPersistenceConsumers = @(
     "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
-    "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+    "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+    "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
 )
-Assert-Equal -Actual ($persistencePlan.TestProjects -join "|") -Expected ($expectedPersistenceConsumers -join "|") -Message "Persistence production changes must execute the owning suite and Startup composition behavior."
+Assert-Equal -Actual ($persistencePlan.TestProjects -join "|") -Expected ($expectedPersistenceConsumers -join "|") -Message "Persistence production changes must execute the owning suite, Startup composition, and direct Integration behavior."
 Assert-True -Condition (@($persistencePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Persistence production consumers must run as complete suites."
 
 $startupPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Startup/Runtime/AgentRuntime.cs")
@@ -208,6 +209,19 @@ Assert-True -Condition (Test-QualificationContainsDirectXunitTest -Content $dire
 Assert-True -Condition (-not (Test-QualificationContainsDirectXunitTest -Content $syntaxAwareSource)) -Message "Test-shaped text in strings or comments must not make a helper namespace filterable."
 $directTestClasses = @(Get-QualificationDirectXunitTestClasses -Path $applicationTestPath -Content $directTestSource)
 Assert-Equal -Actual ($directTestClasses -join "|") -Expected "EmbodySense.Core.Application.Tests.Loops.RunnerTests" -Message "A direct xUnit source must produce its exact filename-matching class filter."
+Assert-True -Condition (-not (Test-QualificationContainsIdentifierReference -Content 'private const string Example = "RunnerTests";' -Identifier "RunnerTests")) -Message "Test-class consumer discovery must ignore class-shaped string content."
+
+$sharedDirectTestPath = "tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialRunMaterializerTests.cs"
+$sharedDirectTestClass = "EmbodySense.Core.Application.Tests.Loops.Sequential.GovernedLoopSequentialRunMaterializerTests"
+$currentCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
+Assert-True -Condition ($LASTEXITCODE -eq 0 -and $currentCommit -match '^[0-9a-f]{40}$') -Message "The test-class consumer contract must bind one exact repository commit."
+$sharedDirectTestConsumers = @(Get-QualificationExternalTestClassConsumerPaths -RepositoryRoot $repoRoot -Commit $currentCommit -Path $sharedDirectTestPath -TestClass $sharedDirectTestClass)
+$expectedSharedDirectTestConsumers = @(
+    "tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialBindingResolverTests.cs",
+    "tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialFrontierMachineTests.cs",
+    "tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialInvocationCoordinatorTests.cs"
+)
+Assert-Equal -Actual ($sharedDirectTestConsumers -join "|") -Expected ($expectedSharedDirectTestConsumers -join "|") -Message "A direct xUnit class used as cross-file test infrastructure must expose every exact-head consumer and force full-project qualification."
 
 $customFactSource = @'
 namespace EmbodySense.E2ETests.Web;
@@ -434,6 +448,7 @@ function Get-DirectTestProjectConsumers {
 
 foreach ($consumerContract in @(
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Common/"; Project = "src/EmbodySense.Core.Common/EmbodySense.Core.Common.csproj"; Label = "Common" },
+    [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Persistence/"; Project = "src/EmbodySense.Core.Persistence/EmbodySense.Core.Persistence.csproj"; Label = "Persistence" },
     [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Startup/"; Project = "src/EmbodySense.Core.Startup/EmbodySense.Core.Startup.csproj"; Label = "Startup" }
 )) {
     $sourceMappings = @($script:QualificationSourceMappings | Where-Object { $_.Prefix -ceq $consumerContract.Prefix })
@@ -508,6 +523,7 @@ Assert-True -Condition ($qualificationScript.IndexOf('$testNamespacesByPath[$nor
 Assert-True -Condition ($qualificationPlanScript.IndexOf('[Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Content)', [StringComparison]::Ordinal) -ge 0) -Message "Changed test class and namespace ownership must come from a Roslyn C# syntax tree, not a source-text regex."
 Assert-True -Condition ($qualificationPlanScript.IndexOf('TestProjects = @(', [StringComparison]::Ordinal) -ge 0) -Message "Source ownership must support explicit downstream consumer closures."
 Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationDirectXunitTestClasses -Path $normalizedPath -Content $content', [StringComparison]::Ordinal) -ge 0) -Message "Only syntax-authenticated filename-matching xUnit classes may retain class-filtered qualification."
+Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationExternalTestClassConsumerPaths -RepositoryRoot $repoRoot -Commit $HeadCommit', [StringComparison]::Ordinal) -ge 0) -Message "A direct xUnit class used by another exact-head test source must restore full-project qualification."
 $qualificationContractStart = $qualificationScript.IndexOf('if ($plan.RequiresVerifierContracts)', [StringComparison]::Ordinal)
 $qualificationContractEnd = $qualificationScript.IndexOf('if ($plan.RequiresDrawioValidation)', $qualificationContractStart, [StringComparison]::Ordinal)
 Assert-True -Condition ($qualificationContractStart -ge 0 -and $qualificationContractEnd -gt $qualificationContractStart) -Message "Qualification must retain one explicit verifier-contract scheduling block."

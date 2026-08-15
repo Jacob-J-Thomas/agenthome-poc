@@ -179,7 +179,14 @@ try {
             $content = Get-QualificationBlobContent -Path $normalizedPath -Commits @($HeadCommit)
             $declaredNamespace = Get-QualificationDeclaredTestNamespace -Path $normalizedPath -Content $content
             if (Test-QualificationContainsDirectXunitTest -Content $content) {
-                $testClassesByPath[$normalizedPath] = @(Get-QualificationDirectXunitTestClasses -Path $normalizedPath -Content $content)
+                $directTestClasses = @(Get-QualificationDirectXunitTestClasses -Path $normalizedPath -Content $content)
+                $externalConsumerPaths = @(Get-QualificationExternalTestClassConsumerPaths -RepositoryRoot $repoRoot -Commit $HeadCommit -Path $normalizedPath -TestClass $directTestClasses[0])
+                if ($externalConsumerPaths.Count -gt 0) {
+                    $testNamespacesByPath[$normalizedPath] = [string[]]::new(0)
+                }
+                else {
+                    $testClassesByPath[$normalizedPath] = $directTestClasses
+                }
             }
             else {
                 $focusedHelperMapping = Get-QualificationFocusedHelperMapping -Path $normalizedPath
