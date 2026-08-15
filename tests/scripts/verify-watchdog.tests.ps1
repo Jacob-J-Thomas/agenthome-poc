@@ -64,12 +64,26 @@ Assert-True -Condition (@($clientsPlan.TestSelections | Where-Object { @($_.Name
 $developerInstructionsPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Common/Governance/Tools/EmbodySenseDeveloperInstructions.cs")
 $expectedDeveloperInstructionsConsumers = @(
     "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+    "tests/EmbodySense.Core.Clients.Tests/EmbodySense.Core.Clients.Tests.csproj",
     "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj",
+    "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
     "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
     "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
 )
 Assert-Equal -Actual ($developerInstructionsPlan.TestProjects -join "|") -Expected ($expectedDeveloperInstructionsConsumers -join "|") -Message "Shared developer-instruction changes must execute every behavioral consumer suite."
 Assert-True -Condition (@($developerInstructionsPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Shared developer-instruction consumers must run as complete suites."
+
+$commonPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Common/Governance/Tools/ToolResultRetentionLimits.cs")
+$expectedCommonConsumers = @(
+    "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+    "tests/EmbodySense.Core.Clients.Tests/EmbodySense.Core.Clients.Tests.csproj",
+    "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj",
+    "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+    "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+    "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
+)
+Assert-Equal -Actual ($commonPlan.TestProjects -join "|") -Expected ($expectedCommonConsumers -join "|") -Message "General Common changes must execute every direct test-project consumer."
+Assert-True -Condition (@($commonPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Common production consumers must run as complete suites."
 
 $persistencePlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Persistence/Capabilities/CapabilityCatalogStore.cs")
 $expectedPersistenceConsumers = @(
@@ -216,7 +230,7 @@ catch {
 Assert-True -Condition $mismatchedClassRejected -Message "A direct test class that cannot be bound to its project path and filename must fail closed."
 
 $crossProjectRenamePlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Application/Loops/OldRunner.cs", "src/EmbodySense.Core.Common/Loops/NewRunner.cs")
-Assert-Equal -Actual $crossProjectRenamePlan.TestProjects.Count -Expected 3 -Message "A cross-project rename must select both owners and the former owner's downstream integration boundary."
+Assert-Equal -Actual $crossProjectRenamePlan.TestProjects.Count -Expected 6 -Message "A cross-project rename into Common must select both owners, the former owner's downstream boundary, and every direct Common consumer."
 Assert-True -Condition ($crossProjectRenamePlan.TestProjects -ccontains "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj") -Message "A cross-project rename must retain the former owner."
 Assert-True -Condition ($crossProjectRenamePlan.TestProjects -ccontains "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj") -Message "A cross-project rename must select the destination owner."
 Assert-True -Condition ($crossProjectRenamePlan.TestProjects -ccontains "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj") -Message "A cross-project rename must retain the Application owner's downstream integration boundary."
@@ -363,31 +377,44 @@ foreach ($consumerProject in $script:QualificationTestProjects) {
     }
 }
 
-$startupSourceMappings = @($script:QualificationSourceMappings | Where-Object { $_.Prefix -ceq "src/EmbodySense.Core.Startup/" })
-Assert-Equal -Actual $startupSourceMappings.Count -Expected 1 -Message "Startup must have exactly one explicit source-ownership mapping."
-$actualStartupConsumers = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-foreach ($testProject in $script:QualificationTestProjects) {
-    $testProjectPath = Join-Path $repoRoot $testProject
-    [xml]$testProjectXml = Get-Content -LiteralPath $testProjectPath -Raw
-    foreach ($itemGroup in @($testProjectXml.Project.ItemGroup)) {
-        $projectReferenceProperty = $itemGroup.PSObject.Properties["ProjectReference"]
-        if ($null -eq $projectReferenceProperty) {
-            continue
-        }
-        foreach ($projectReference in @($projectReferenceProperty.Value)) {
-            if ($null -eq $projectReference -or [string]::IsNullOrWhiteSpace($projectReference.Include)) {
+function Get-DirectTestProjectConsumers {
+    param([Parameter(Mandatory = $true)] [string]$ReferencedProject)
+
+    $consumers = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($testProject in $script:QualificationTestProjects) {
+        $testProjectPath = Join-Path $repoRoot $testProject
+        [xml]$testProjectXml = Get-Content -LiteralPath $testProjectPath -Raw
+        foreach ($itemGroup in @($testProjectXml.Project.ItemGroup)) {
+            $projectReferenceProperty = $itemGroup.PSObject.Properties["ProjectReference"]
+            if ($null -eq $projectReferenceProperty) {
                 continue
             }
+            foreach ($projectReference in @($projectReferenceProperty.Value)) {
+                if ($null -eq $projectReference -or [string]::IsNullOrWhiteSpace($projectReference.Include)) {
+                    continue
+                }
 
-            $referencedFullPath = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $testProjectPath) $projectReference.Include))
-            $referencedPath = [IO.Path]::GetRelativePath($repoRoot, $referencedFullPath).Replace('\', '/')
-            if ($referencedPath -ceq "src/EmbodySense.Core.Startup/EmbodySense.Core.Startup.csproj") {
-                [void]$actualStartupConsumers.Add($testProject)
+                $referencedFullPath = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $testProjectPath) $projectReference.Include))
+                $referencedPath = [IO.Path]::GetRelativePath($repoRoot, $referencedFullPath).Replace('\', '/')
+                if ($referencedPath -ceq $ReferencedProject) {
+                    [void]$consumers.Add($testProject)
+                }
             }
         }
     }
+
+    return [string[]]@($consumers | Sort-Object)
 }
-Assert-Equal -Actual (@($actualStartupConsumers | Sort-Object) -join "|") -Expected (@($startupSourceMappings[0].TestProjects | Sort-Object) -join "|") -Message "Startup qualification ownership must match every direct test-project consumer."
+
+foreach ($consumerContract in @(
+    [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Common/"; Project = "src/EmbodySense.Core.Common/EmbodySense.Core.Common.csproj"; Label = "Common" },
+    [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Startup/"; Project = "src/EmbodySense.Core.Startup/EmbodySense.Core.Startup.csproj"; Label = "Startup" }
+)) {
+    $sourceMappings = @($script:QualificationSourceMappings | Where-Object { $_.Prefix -ceq $consumerContract.Prefix })
+    Assert-Equal -Actual $sourceMappings.Count -Expected 1 -Message "$($consumerContract.Label) must have exactly one explicit source-ownership mapping."
+    $actualConsumers = @(Get-DirectTestProjectConsumers -ReferencedProject $consumerContract.Project)
+    Assert-Equal -Actual ($actualConsumers -join "|") -Expected (@($sourceMappings[0].TestProjects | Sort-Object) -join "|") -Message "$($consumerContract.Label) qualification ownership must match every direct test-project consumer."
+}
 
 $lfMarker = "VERIFY_COMPLETE schema_version=1 status=passed elapsed_seconds=600`n"
 $crlfMarker = "VERIFY_COMPLETE schema_version=1 status=passed elapsed_seconds=599.999`r`n"

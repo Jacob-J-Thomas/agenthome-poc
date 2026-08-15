@@ -35,7 +35,17 @@ $script:QualificationSourceMappings = @(
             "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
         )
     },
-    [pscustomobject]@{ Prefix = "src/EmbodySense.Core.Common/"; TestProjects = @("tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj") },
+    [pscustomobject]@{
+        Prefix = "src/EmbodySense.Core.Common/"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Clients.Tests/EmbodySense.Core.Clients.Tests.csproj",
+            "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
+        )
+    },
     [pscustomobject]@{
         Prefix = "src/EmbodySense.Core.Persistence/"
         TestProjects = @(
