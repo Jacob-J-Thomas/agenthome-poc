@@ -80,13 +80,20 @@ function Test-QualificationCommitPath {
 function Get-QualificationTestFilter {
     param(
         [Parameter(Mandatory = $true)] [string]$ProjectName,
-        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]]$Namespaces
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]]$Namespaces,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]]$Classes
     )
 
     $clauses = [Collections.Generic.List[string]]::new()
-    if ($Namespaces.Count -gt 0) {
-        $namespaceClauses = @($Namespaces | ForEach-Object { "FullyQualifiedName~$_" })
-        $clauses.Add("($($namespaceClauses -join '|'))")
+    $focusedClauses = [Collections.Generic.List[string]]::new()
+    foreach ($namespace in $Namespaces) {
+        $focusedClauses.Add("FullyQualifiedName~$namespace")
+    }
+    foreach ($class in $Classes) {
+        $focusedClauses.Add("FullyQualifiedName~$class.")
+    }
+    if ($focusedClauses.Count -gt 0) {
+        $clauses.Add("($($focusedClauses -join '|'))")
     }
     if ($ProjectName -ceq "EmbodySense.E2ETests") {
         $clauses.Add("(FullyQualifiedName!~BrowserFlowTests)")
@@ -141,6 +148,7 @@ try {
         throw "Qualification could not enumerate the exact changed paths."
     }
     $testNamespacesByPath = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $testClassesByPath = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $focusedHelperRelevantPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($changedPath in $changedPaths) {
         $normalizedPath = ConvertTo-QualificationPath -Path $changedPath
@@ -171,7 +179,7 @@ try {
             $content = Get-QualificationBlobContent -Path $normalizedPath -Commits @($HeadCommit)
             $declaredNamespace = Get-QualificationDeclaredTestNamespace -Path $normalizedPath -Content $content
             if (Test-QualificationContainsDirectXunitTest -Content $content) {
-                $testNamespacesByPath[$normalizedPath] = @($declaredNamespace)
+                $testClassesByPath[$normalizedPath] = @(Get-QualificationDirectXunitTestClasses -Path $normalizedPath -Content $content)
             }
             else {
                 $focusedHelperMapping = Get-QualificationFocusedHelperMapping -Path $normalizedPath
@@ -180,7 +188,7 @@ try {
         }
     }
     $availableTestProjects = @($script:QualificationTestProjects | Where-Object { Test-QualificationCommitPath -Path $_ -Commit $HeadCommit })
-    $plan = Get-QualificationPlan -ChangedPaths $changedPaths -TestNamespacesByPath $testNamespacesByPath -FocusedHelperRelevantPaths @($focusedHelperRelevantPaths) -AvailableTestProjects $availableTestProjects
+    $plan = Get-QualificationPlan -ChangedPaths $changedPaths -TestNamespacesByPath $testNamespacesByPath -TestClassesByPath $testClassesByPath -FocusedHelperRelevantPaths @($focusedHelperRelevantPaths) -AvailableTestProjects $availableTestProjects
 
     if (Test-Path -LiteralPath $resultsRoot) {
         Remove-Item -LiteralPath $resultsRoot -Recurse -Force
@@ -205,6 +213,7 @@ try {
             [ordered]@{
                 project = $_.Project
                 namespaces = @($_.Namespaces)
+                classes = @($_.Classes)
             }
         })
     }
@@ -271,7 +280,7 @@ try {
         $trxPath = Join-Path $projectResultsRoot "$projectName.trx"
         $projectFixtureRoot = Join-Path $fixtureRoot $projectName
         New-Item -ItemType Directory -Path $projectFixtureRoot -Force | Out-Null
-        $testFilter = Get-QualificationTestFilter -ProjectName $projectName -Namespaces @($testSelection.Namespaces)
+        $testFilter = Get-QualificationTestFilter -ProjectName $projectName -Namespaces @($testSelection.Namespaces) -Classes @($testSelection.Classes)
         $testEnvironment = @{
             EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $projectFixtureRoot "catalog-trust"
             TEMP = $projectFixtureRoot
@@ -281,7 +290,7 @@ try {
         Add-QualificationPhase -Name "tests-$projectName" -FileName "dotnet" -Arguments @("test", $testProject, "--configuration", $Configuration, "--no-build", "--no-restore", "--settings", "tests/verification-stress.runsettings", "--filter", $testFilter, "--logger", "trx;LogFileName=$projectName.trx", "--results-directory", $projectResultsRoot, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds 180 -EstimatedDurationSeconds 90 -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy" -Environment $testEnvironment -TrxPath $trxPath
     }
     $integrationSelection = @($plan.TestSelections | Where-Object { $_.Project -ceq "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj" })
-    $integrationRunsUnfiltered = $integrationSelection.Count -eq 1 -and @($integrationSelection[0].Namespaces).Count -eq 0
+    $integrationRunsUnfiltered = $integrationSelection.Count -eq 1 -and @($integrationSelection[0].Namespaces).Count -eq 0 -and @($integrationSelection[0].Classes).Count -eq 0
     $integrationProjectAvailable = $availableTestProjects -ccontains "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
     if ($plan.RequiresArchitecture -and $integrationProjectAvailable -and -not $integrationRunsUnfiltered) {
         $architectureResultsRoot = Join-Path $testResultsRoot "Architecture"

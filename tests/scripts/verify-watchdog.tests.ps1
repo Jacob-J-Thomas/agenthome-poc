@@ -35,14 +35,15 @@ Assert-True -Condition (-not $docsPlan.RequiresBuild -and -not $docsPlan.Require
 
 $applicationTestPath = "tests/EmbodySense.Core.Application.Tests/Loops/RunnerTests.cs"
 $applicationTestNamespaces = @{ $applicationTestPath = "EmbodySense.Core.Application.Tests.Loops" }
-$applicationPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Application/Loops/Runner.cs", $applicationTestPath) -TestNamespacesByPath $applicationTestNamespaces
+$applicationTestClasses = @{ $applicationTestPath = "EmbodySense.Core.Application.Tests.Loops.RunnerTests" }
+$applicationPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Application/Loops/Runner.cs", $applicationTestPath) -TestClassesByPath $applicationTestClasses
 Assert-True -Condition ($applicationPlan.RequiresBuild -and $applicationPlan.RequiresArchitecture -and $applicationPlan.RequiresCSharpFormat) -Message "Application C# changes must compile, format, and retain architecture validation."
 $expectedApplicationConsumers = @(
     "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
     "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
 )
 Assert-Equal -Actual ($applicationPlan.TestProjects -join "|") -Expected ($expectedApplicationConsumers -join "|") -Message "Application production changes must execute the owning suite and downstream integration boundary."
-Assert-True -Condition (@($applicationPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "Application production consumers must run as complete suites even when the same namespace's tests also changed."
+Assert-True -Condition (@($applicationPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Application production consumers must run as complete suites even when the same test class also changed."
 
 $cliCommandPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Cli.Command/RunCommand.cs")
 $expectedCliCommandConsumers = @(
@@ -50,7 +51,7 @@ $expectedCliCommandConsumers = @(
     "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
 )
 Assert-Equal -Actual ($cliCommandPlan.TestProjects -join "|") -Expected ($expectedCliCommandConsumers -join "|") -Message "CLI Command production changes must execute the owning suite and real-process Integration behavior."
-Assert-True -Condition (@($cliCommandPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "CLI Command production consumers must run as complete suites."
+Assert-True -Condition (@($cliCommandPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "CLI Command production consumers must run as complete suites."
 
 $clientsPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Clients/CodexAppServer/CodexAppServerInferenceClient.cs")
 $expectedClientsConsumers = @(
@@ -58,7 +59,7 @@ $expectedClientsConsumers = @(
     "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
 )
 Assert-Equal -Actual ($clientsPlan.TestProjects -join "|") -Expected ($expectedClientsConsumers -join "|") -Message "Clients production changes must execute the owning suite and app-server Integration behavior."
-Assert-True -Condition (@($clientsPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "Clients production consumers must run as complete suites."
+Assert-True -Condition (@($clientsPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Clients production consumers must run as complete suites."
 
 $developerInstructionsPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Common/Governance/Tools/EmbodySenseDeveloperInstructions.cs")
 $expectedDeveloperInstructionsConsumers = @(
@@ -68,7 +69,7 @@ $expectedDeveloperInstructionsConsumers = @(
     "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
 )
 Assert-Equal -Actual ($developerInstructionsPlan.TestProjects -join "|") -Expected ($expectedDeveloperInstructionsConsumers -join "|") -Message "Shared developer-instruction changes must execute every behavioral consumer suite."
-Assert-True -Condition (@($developerInstructionsPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "Shared developer-instruction consumers must run as complete suites."
+Assert-True -Condition (@($developerInstructionsPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Shared developer-instruction consumers must run as complete suites."
 
 $persistencePlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Persistence/Capabilities/CapabilityCatalogStore.cs")
 $expectedPersistenceConsumers = @(
@@ -76,7 +77,7 @@ $expectedPersistenceConsumers = @(
     "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
 )
 Assert-Equal -Actual ($persistencePlan.TestProjects -join "|") -Expected ($expectedPersistenceConsumers -join "|") -Message "Persistence production changes must execute the owning suite and Startup composition behavior."
-Assert-True -Condition (@($persistencePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "Persistence production consumers must run as complete suites."
+Assert-True -Condition (@($persistencePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Persistence production consumers must run as complete suites."
 
 $startupPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Startup/Runtime/AgentRuntime.cs")
 $expectedStartupConsumers = @(
@@ -86,24 +87,26 @@ $expectedStartupConsumers = @(
     "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
 )
 Assert-Equal -Actual ($startupPlan.TestProjects -join "|") -Expected ($expectedStartupConsumers -join "|") -Message "Startup production changes must execute every direct interface consumer suite."
-Assert-True -Condition (@($startupPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "Startup production consumers must run as complete suites."
+Assert-True -Condition (@($startupPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Startup production consumers must run as complete suites."
 
-$testOnlyPlan = Get-QualificationPlan -ChangedPaths @($applicationTestPath) -TestNamespacesByPath $applicationTestNamespaces
+$testOnlyPlan = Get-QualificationPlan -ChangedPaths @($applicationTestPath) -TestClassesByPath $applicationTestClasses
 Assert-Equal -Actual $testOnlyPlan.TestSelections.Count -Expected 1 -Message "A test-only edit must select exactly its owning project."
-Assert-Equal -Actual @($testOnlyPlan.TestSelections[0].Namespaces).Count -Expected 1 -Message "A test-only edit must not expand to its entire large test assembly."
-Assert-Equal -Actual $testOnlyPlan.TestSelections[0].Namespaces[0] -Expected "EmbodySense.Core.Application.Tests.Loops" -Message "A test-only edit must retain its declared namespace as the fail-closed test filter."
+Assert-Equal -Actual @($testOnlyPlan.TestSelections[0].Namespaces).Count -Expected 0 -Message "A direct test edit must not broaden to its containing namespace."
+Assert-Equal -Actual @($testOnlyPlan.TestSelections[0].Classes).Count -Expected 1 -Message "A test-only edit must not expand to its entire large test assembly."
+Assert-Equal -Actual $testOnlyPlan.TestSelections[0].Classes[0] -Expected "EmbodySense.Core.Application.Tests.Loops.RunnerTests" -Message "A test-only edit must retain its exact filename-matching class as the fail-closed test filter."
 Assert-True -Condition (-not $testOnlyPlan.RequiresVerifierContracts) -Message "An unrelated test-only edit must not pay the verifier-contract wave."
 
 $deletedTestSourcePlan = Get-QualificationPlan -ChangedPaths @($applicationTestPath) -TestNamespacesByPath @{ $applicationTestPath = [string[]]::new(0) }
 Assert-Equal -Actual $deletedTestSourcePlan.TestSelections.Count -Expected 1 -Message "A deleted test source must retain its surviving owning project."
 Assert-Equal -Actual @($deletedTestSourcePlan.TestSelections[0].Namespaces).Count -Expected 0 -Message "Deleting the final test in a namespace must run the remaining project unfiltered instead of scheduling an empty namespace."
+Assert-Equal -Actual @($deletedTestSourcePlan.TestSelections[0].Classes).Count -Expected 0 -Message "Deleting a test source must not leave a stale class filter."
 
-$helperConsumerPlan = Get-QualificationPlan -ChangedPaths @($applicationTestPath) -TestNamespacesByPath $applicationTestNamespaces -FocusedHelperRelevantPaths @($applicationTestPath)
+$helperConsumerPlan = Get-QualificationPlan -ChangedPaths @($applicationTestPath) -TestClassesByPath $applicationTestClasses -FocusedHelperRelevantPaths @($applicationTestPath)
 Assert-True -Condition $helperConsumerPlan.RequiresVerifierContracts -Message "A syntax-proven focused-helper consumer change must revalidate the checked helper map."
 
 $unchangedHelperConsumerRejected = $false
 try {
-    Get-QualificationPlan -ChangedPaths @($applicationTestPath) -TestNamespacesByPath $applicationTestNamespaces -FocusedHelperRelevantPaths @("tests/EmbodySense.Core.Application.Tests/Loops/UnchangedTests.cs") | Out-Null
+    Get-QualificationPlan -ChangedPaths @($applicationTestPath) -TestClassesByPath $applicationTestClasses -FocusedHelperRelevantPaths @("tests/EmbodySense.Core.Application.Tests/Loops/UnchangedTests.cs") | Out-Null
 }
 catch {
     $unchangedHelperConsumerRejected = $_.Exception.Message.Contains("unchanged path", [StringComparison]::Ordinal)
@@ -111,12 +114,13 @@ catch {
 Assert-True -Condition $unchangedHelperConsumerRejected -Message "Focused-helper relevance must be bound to the exact changed-path inventory."
 
 $secondApplicationTestPath = "tests/EmbodySense.Core.Application.Tests/Loops/OtherRunnerTests.cs"
-$sameNamespacePlan = Get-QualificationPlan -ChangedPaths @($applicationTestPath, $secondApplicationTestPath) -TestNamespacesByPath @{ $applicationTestPath = "EmbodySense.Core.Application.Tests.Loops"; $secondApplicationTestPath = "EmbodySense.Core.Application.Tests.Loops" }
-Assert-Equal -Actual @($sameNamespacePlan.TestSelections[0].Namespaces).Count -Expected 1 -Message "Changed direct tests in one namespace must deduplicate to one focused selection."
+$sameNamespacePlan = Get-QualificationPlan -ChangedPaths @($applicationTestPath, $secondApplicationTestPath) -TestClassesByPath @{ $applicationTestPath = "EmbodySense.Core.Application.Tests.Loops.RunnerTests"; $secondApplicationTestPath = "EmbodySense.Core.Application.Tests.Loops.OtherRunnerTests" }
+Assert-Equal -Actual @($sameNamespacePlan.TestSelections[0].Classes).Count -Expected 2 -Message "Changed direct tests in one namespace must retain both exact classes."
 
 $helperTestPath = "tests/EmbodySense.Core.Application.Tests/Loops/RunnerFixture.cs"
-$helperTestPlan = Get-QualificationPlan -ChangedPaths @($applicationTestPath, $helperTestPath) -TestNamespacesByPath @{ $applicationTestPath = "EmbodySense.Core.Application.Tests.Loops"; $helperTestPath = "" }
+$helperTestPlan = Get-QualificationPlan -ChangedPaths @($applicationTestPath, $helperTestPath) -TestNamespacesByPath @{ $helperTestPath = "" } -TestClassesByPath $applicationTestClasses
 Assert-Equal -Actual @($helperTestPlan.TestSelections[0].Namespaces).Count -Expected 0 -Message "A helper edit must restore the full owning project even when a direct test in the same namespace also changed."
+Assert-Equal -Actual @($helperTestPlan.TestSelections[0].Classes).Count -Expected 0 -Message "A helper edit must clear direct class filters when it restores the full owning project."
 
 foreach ($helperModelPath in @(
     "tests/EmbodySense.Core.Persistence.Tests/Verification/Models/VerificationPhaseBudget.cs",
@@ -142,14 +146,14 @@ $integrationHelperPlan = Get-QualificationPlan -ChangedPaths @($integrationHelpe
 Assert-Equal -Actual @($integrationHelperPlan.TestSelections[0].Namespaces).Count -Expected 1 -Message "A reviewed same-namespace helper must remain focused."
 Assert-Equal -Actual $integrationHelperPlan.TestSelections[0].Namespaces[0] -Expected "EmbodySense.IntegrationTests.Core.Governance.Tools" -Message "The result-retention helper must select its exact ToolBroker consumer namespace."
 
-$missingNamespaceRejected = $false
+$missingSelectionRejected = $false
 try {
     Get-QualificationPlan -ChangedPaths @($applicationTestPath) | Out-Null
 }
 catch {
-    $missingNamespaceRejected = $_.Exception.Message.Contains("missing the declared namespace", [StringComparison]::Ordinal)
+    $missingSelectionRejected = $_.Exception.Message.Contains("exactly one authenticated namespace or class selection", [StringComparison]::Ordinal)
 }
-Assert-True -Condition $missingNamespaceRejected -Message "A changed test source without authenticated namespace ownership must fail closed."
+Assert-True -Condition $missingSelectionRejected -Message "A changed test source without authenticated class or namespace ownership must fail closed."
 
 $parsedNamespace = Get-QualificationDeclaredTestNamespace -Path $applicationTestPath -Content "namespace EmbodySense.Core.Application.Tests.Loops;`npublic sealed class RunnerTests {}"
 Assert-Equal -Actual $parsedNamespace -Expected "EmbodySense.Core.Application.Tests.Loops" -Message "File-scoped test namespaces must be parsed exactly."
@@ -184,6 +188,8 @@ public sealed class RunnerTests
 '@
 Assert-True -Condition (Test-QualificationContainsDirectXunitTest -Content $directTestSource) -Message "A real xUnit method attribute must permit direct-test namespace selection."
 Assert-True -Condition (-not (Test-QualificationContainsDirectXunitTest -Content $syntaxAwareSource)) -Message "Test-shaped text in strings or comments must not make a helper namespace filterable."
+$directTestClasses = @(Get-QualificationDirectXunitTestClasses -Path $applicationTestPath -Content $directTestSource)
+Assert-Equal -Actual ($directTestClasses -join "|") -Expected "EmbodySense.Core.Application.Tests.Loops.RunnerTests" -Message "A direct xUnit source must produce its exact filename-matching class filter."
 
 $customFactSource = @'
 namespace EmbodySense.E2ETests.Web;
@@ -197,6 +203,17 @@ public sealed class BrowserFlowTests
 }
 '@
 Assert-True -Condition (Test-QualificationContainsDirectXunitTest -Content $customFactSource) -Message "A file-local FactAttribute subtype must retain its direct-test namespace selection."
+$customFactClasses = @(Get-QualificationDirectXunitTestClasses -Path "tests/EmbodySense.E2ETests/Web/BrowserFlowTests.cs" -Content $customFactSource)
+Assert-Equal -Actual ($customFactClasses -join "|") -Expected "EmbodySense.E2ETests.Web.BrowserFlowTests" -Message "Custom FactAttribute methods must retain the exact declaring test class."
+
+$mismatchedClassRejected = $false
+try {
+    Get-QualificationDirectXunitTestClasses -Path $applicationTestPath -Content $customFactSource | Out-Null
+}
+catch {
+    $mismatchedClassRejected = $_.Exception.Message.Contains("does not belong to owning project", [StringComparison]::Ordinal) -or $_.Exception.Message.Contains("filename-matching", [StringComparison]::Ordinal)
+}
+Assert-True -Condition $mismatchedClassRejected -Message "A direct test class that cannot be bound to its project path and filename must fail closed."
 
 $crossProjectRenamePlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Application/Loops/OldRunner.cs", "src/EmbodySense.Core.Common/Loops/NewRunner.cs")
 Assert-Equal -Actual $crossProjectRenamePlan.TestProjects.Count -Expected 3 -Message "A cross-project rename must select both owners and the former owner's downstream integration boundary."
@@ -211,7 +228,7 @@ $expectedWebConsumers = @(
     "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
 )
 Assert-Equal -Actual ($webPlan.TestProjects -join "|") -Expected ($expectedWebConsumers -join "|") -Message "Web changes must execute the owning suite and non-browser hosted E2E behavior."
-Assert-True -Condition (@($webPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "Web production consumers must run as complete suites; the E2E runner separately excludes installed-browser tests."
+Assert-True -Condition (@($webPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Web production consumers must run as complete suites; the E2E runner separately excludes installed-browser tests."
 
 $verifierPlan = Get-QualificationPlan -ChangedPaths @("scripts/qualify.ps1", ".github/workflows/qualification.yml")
 Assert-True -Condition ($verifierPlan.RequiresVerifierContracts -and -not $verifierPlan.RequiresBuild -and $verifierPlan.TestProjects.Count -eq 0) -Message "Verifier-only changes must run verifier contracts without an unrelated solution build."
@@ -227,7 +244,7 @@ $linkedCommonFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySe
 Assert-Equal -Actual $linkedCommonFixturePlan.TestProjects.Count -Expected 2 -Message "A linked Common fixture must select both the Common and Persistence consumers."
 Assert-True -Condition ($linkedCommonFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj") -Message "A linked Common fixture must retain its source project."
 Assert-True -Condition ($linkedCommonFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj") -Message "A linked Common fixture must execute its Persistence consumer."
-Assert-True -Condition (@($linkedCommonFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "Linked test inputs must run every consuming suite without namespace filtering."
+Assert-True -Condition (@($linkedCommonFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Linked test inputs must run every consuming suite without focused filtering."
 
 $frontendConfigurationPlan = Get-QualificationPlan -ChangedPaths @("eslint.config.js", ".prettierignore")
 Assert-True -Condition ($frontendConfigurationPlan.RequiresFrontend -and $frontendConfigurationPlan.TestProjects.Count -eq 0) -Message "Tracked lint and formatting configuration must run frontend verification without unrelated .NET tests."
@@ -235,7 +252,7 @@ Assert-True -Condition ($frontendConfigurationPlan.RequiresFrontend -and $fronte
 $runSettingsPlan = Get-QualificationPlan -ChangedPaths @("tests/verification-pull-request.runsettings", "tests/verification-stress.runsettings")
 Assert-True -Condition ($runSettingsPlan.RequiresBuild -and $runSettingsPlan.RequiresVerifierContracts) -Message "Changed runsettings must compile and verify their orchestration contracts."
 Assert-Equal -Actual $runSettingsPlan.TestProjects.Count -Expected 9 -Message "Changed runsettings must conservatively execute every affected full test project."
-Assert-True -Condition (@($runSettingsPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "Runsettings changes cannot retain namespace-filtered test selections."
+Assert-True -Condition (@($runSettingsPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Runsettings changes cannot retain focused test selections."
 
 $attributesPlan = Get-QualificationPlan -ChangedPaths @(".gitattributes")
 Assert-True -Condition ($attributesPlan.RequiresBuild -and $attributesPlan.RequiresArchitecture) -Message "Repository attribute changes must retain build and architecture validation."
@@ -270,12 +287,13 @@ Assert-True -Condition $unclassifiedRejected -Message "Unknown paths must fail c
 $trackedPaths = @(& git -C $repoRoot ls-files)
 Assert-True -Condition ($LASTEXITCODE -eq 0 -and $trackedPaths.Count -gt 0) -Message "The qualification ownership contract must enumerate the tracked repository."
 $trackedTestNamespaces = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+$trackedTestClasses = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
 foreach ($trackedPath in $trackedPaths) {
     if (Test-QualificationFilterableTestSource -Path $trackedPath) {
         $trackedSource = Get-Content -LiteralPath (Join-Path $repoRoot $trackedPath) -Raw
         $trackedNamespace = Get-QualificationDeclaredTestNamespace -Path $trackedPath -Content $trackedSource
         if (Test-QualificationContainsDirectXunitTest -Content $trackedSource) {
-            $trackedTestNamespaces.Add($trackedPath, @($trackedNamespace))
+            $trackedTestClasses.Add($trackedPath, @(Get-QualificationDirectXunitTestClasses -Path $trackedPath -Content $trackedSource))
         }
         else {
             $focusedHelperMapping = Get-QualificationFocusedHelperMapping -Path $trackedPath
@@ -283,7 +301,7 @@ foreach ($trackedPath in $trackedPaths) {
         }
     }
 }
-$trackedPlan = Get-QualificationPlan -ChangedPaths $trackedPaths -TestNamespacesByPath $trackedTestNamespaces
+$trackedPlan = Get-QualificationPlan -ChangedPaths $trackedPaths -TestNamespacesByPath $trackedTestNamespaces -TestClassesByPath $trackedTestClasses
 Assert-Equal -Actual $trackedPlan.ChangedPaths.Count -Expected $trackedPaths.Count -Message "Every currently tracked path must have explicit qualification ownership."
 
 $mappedHelperPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -426,17 +444,17 @@ Assert-True -Condition ($watchdogScript.IndexOf('[switch]$Qualification', [Strin
 Assert-True -Condition ($watchdogScript.IndexOf('"qualify.ps1"', [StringComparison]::Ordinal) -ge 0) -Message "Qualification must execute through its dedicated bounded orchestrator."
 Assert-True -Condition ($watchdogScript.IndexOf('Qualification requires exact -BaseCommit and -HeadCommit values.', [StringComparison]::Ordinal) -ge 0) -Message "Qualification must bind its exact comparison commits."
 Assert-True -Condition ($qualificationScript.IndexOf('git diff --no-renames --name-only --diff-filter=ACMRDTUXB "$mergeBase..$HeadCommit"', [StringComparison]::Ordinal) -ge 0) -Message "Qualification selection must derive both sides of renames from the exact merge-base-to-head diff."
-Assert-True -Condition ($qualificationScript.IndexOf('git cat-file blob $objectName', [StringComparison]::Ordinal) -ge 0) -Message "Test-only qualification must authenticate its namespace from an exact edge blob, including deleted or renamed sources."
+Assert-True -Condition ($qualificationScript.IndexOf('git cat-file blob $objectName', [StringComparison]::Ordinal) -ge 0) -Message "Test-only qualification must authenticate its class or helper namespace from an exact edge blob, including deleted or renamed sources."
 Assert-True -Condition ($qualificationScript.IndexOf('foreach ($commit in @($HeadCommit, $mergeBase))', [StringComparison]::Ordinal) -ge 0) -Message "Focused-helper consumers must be syntax-checked on both sides of the exact edge."
-Assert-True -Condition ($qualificationScript.IndexOf('-FocusedHelperRelevantPaths @($focusedHelperRelevantPaths) -AvailableTestProjects $availableTestProjects', [StringComparison]::Ordinal) -ge 0) -Message "The exact-edge qualifier must bind helper-map and surviving-project evidence into its plan."
+Assert-True -Condition ($qualificationScript.IndexOf('-TestClassesByPath $testClassesByPath -FocusedHelperRelevantPaths @($focusedHelperRelevantPaths) -AvailableTestProjects $availableTestProjects', [StringComparison]::Ordinal) -ge 0) -Message "The exact-edge qualifier must bind class, helper-map, and surviving-project evidence into its plan."
 Assert-True -Condition ($qualificationScript.IndexOf('Test-QualificationCommitPath -Path $drawioPath -Commit $HeadCommit', [StringComparison]::Ordinal) -ge 0) -Message "Deleted draw.io paths must be skipped from exact-head XML validation."
 Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationBlobContent -Path $drawioPath -Commits @($HeadCommit)', [StringComparison]::Ordinal) -ge 0) -Message "Surviving draw.io XML must be read from the authenticated exact head blob."
-Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationTestFilter -ProjectName $projectName -Namespaces @($testSelection.Namespaces)', [StringComparison]::Ordinal) -ge 0) -Message "Test-only edits must execute their declared namespace rather than the entire owning assembly."
+Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationTestFilter -ProjectName $projectName -Namespaces @($testSelection.Namespaces) -Classes @($testSelection.Classes)', [StringComparison]::Ordinal) -ge 0) -Message "Test-only edits must execute their authenticated classes or helper namespaces rather than the entire owning assembly."
 Assert-True -Condition ($qualificationScript.IndexOf('if (-not (Test-QualificationCommitPath -Path $normalizedPath -Commit $HeadCommit))', [StringComparison]::Ordinal) -ge 0) -Message "Deleted test sources must be detected against the exact head before namespace selection."
 Assert-True -Condition ($qualificationScript.IndexOf('$testNamespacesByPath[$normalizedPath] = [string[]]::new(0)', [StringComparison]::Ordinal) -ge 0) -Message "A deleted test source must restore full-project selection for the surviving owner."
-Assert-True -Condition ($qualificationPlanScript.IndexOf('[Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Content)', [StringComparison]::Ordinal) -ge 0) -Message "Changed test namespace ownership must come from a Roslyn C# syntax tree, not a source-text regex."
+Assert-True -Condition ($qualificationPlanScript.IndexOf('[Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Content)', [StringComparison]::Ordinal) -ge 0) -Message "Changed test class and namespace ownership must come from a Roslyn C# syntax tree, not a source-text regex."
 Assert-True -Condition ($qualificationPlanScript.IndexOf('TestProjects = @(', [StringComparison]::Ordinal) -ge 0) -Message "Source ownership must support explicit downstream consumer closures."
-Assert-True -Condition ($qualificationScript.IndexOf('Test-QualificationContainsDirectXunitTest -Content $content', [StringComparison]::Ordinal) -ge 0) -Message "Only test files that declare a direct xUnit method may retain namespace-filtered qualification."
+Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationDirectXunitTestClasses -Path $normalizedPath -Content $content', [StringComparison]::Ordinal) -ge 0) -Message "Only syntax-authenticated filename-matching xUnit classes may retain class-filtered qualification."
 $qualificationContractStart = $qualificationScript.IndexOf('if ($plan.RequiresVerifierContracts)', [StringComparison]::Ordinal)
 $qualificationContractEnd = $qualificationScript.IndexOf('if ($plan.RequiresDrawioValidation)', $qualificationContractStart, [StringComparison]::Ordinal)
 Assert-True -Condition ($qualificationContractStart -ge 0 -and $qualificationContractEnd -gt $qualificationContractStart) -Message "Qualification must retain one explicit verifier-contract scheduling block."

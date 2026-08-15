@@ -240,7 +240,7 @@ function Get-QualificationDeclaredTestNamespace {
     return $declaredNamespace
 }
 
-function Test-QualificationContainsDirectXunitTest {
+function Get-QualificationDirectXunitTestTypeNames {
     param([Parameter(Mandatory = $true)] [string]$Content)
 
     Initialize-QualificationCSharpParser
@@ -269,18 +269,56 @@ function Test-QualificationContainsDirectXunitTest {
         }
     }
 
+    $directTestTypeNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($methodDeclaration in @($root.DescendantNodes() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax] })) {
         foreach ($attributeList in @($methodDeclaration.AttributeLists)) {
             foreach ($attribute in @($attributeList.Attributes)) {
                 $simpleName = @($attribute.Name.ToString() -split '::|\.')[-1]
                 if ($testAttributeNames.Contains($simpleName)) {
-                    return $true
+                    $containingType = $methodDeclaration.Parent
+                    while ($null -ne $containingType -and $containingType -isnot [Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax]) {
+                        $containingType = $containingType.Parent
+                    }
+                    if ($containingType -isnot [Microsoft.CodeAnalysis.CSharp.Syntax.ClassDeclarationSyntax] -or $containingType.Parent -isnot [Microsoft.CodeAnalysis.CSharp.Syntax.BaseNamespaceDeclarationSyntax]) {
+                        throw "Qualification requires direct xUnit methods to belong to one top-level class."
+                    }
+                    if ($null -ne $containingType.TypeParameterList -and $containingType.TypeParameterList.Parameters.Count -gt 0) {
+                        throw "Qualification does not class-filter a generic xUnit test type."
+                    }
+
+                    [void]$directTestTypeNames.Add($containingType.Identifier.ValueText)
                 }
             }
         }
     }
 
-    return $false
+    return [string[]]@($directTestTypeNames | Sort-Object)
+}
+
+function Get-QualificationDirectXunitTestClasses {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [string]$Content
+    )
+
+    $declaredNamespace = Get-QualificationDeclaredTestNamespace -Path $Path -Content $Content
+    $typeNames = @(Get-QualificationDirectXunitTestTypeNames -Content $Content)
+    if ($typeNames.Count -eq 0) {
+        return [string[]]::new(0)
+    }
+
+    $expectedTypeName = [IO.Path]::GetFileNameWithoutExtension($Path)
+    if ($typeNames.Count -ne 1 -or $typeNames[0] -cne $expectedTypeName) {
+        throw "Qualification requires exactly one filename-matching top-level direct xUnit test class in '$Path'. Found: $($typeNames -join ', ')."
+    }
+
+    return [string[]]@("$declaredNamespace.$expectedTypeName")
+}
+
+function Test-QualificationContainsDirectXunitTest {
+    param([Parameter(Mandatory = $true)] [string]$Content)
+
+    return @(Get-QualificationDirectXunitTestTypeNames -Content $Content).Count -gt 0
 }
 
 function Test-QualificationContainsFocusedHelperReference {
@@ -316,6 +354,7 @@ function Get-QualificationPlan {
     param(
         [Parameter(Mandatory = $true)] [string[]]$ChangedPaths,
         [Collections.IDictionary]$TestNamespacesByPath = @{},
+        [Collections.IDictionary]$TestClassesByPath = @{},
         [AllowEmptyCollection()] [string[]]$FocusedHelperRelevantPaths = @(),
         [AllowNull()] [AllowEmptyCollection()] [string[]]$AvailableTestProjects = $null
     )
@@ -351,6 +390,7 @@ function Get-QualificationPlan {
     $testProjects = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $unfilteredTestProjects = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $filteredTestNamespaces = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $filteredTestClasses = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $unclassifiedPaths = [Collections.Generic.List[string]]::new()
     $requiresBuild = $false
     $requiresFrontend = $false
@@ -394,6 +434,7 @@ function Get-QualificationPlan {
                     [void]$testProjects.Add($testProject)
                     [void]$unfilteredTestProjects.Add($testProject)
                     [void]$filteredTestNamespaces.Remove($testProject)
+                    [void]$filteredTestClasses.Remove($testProject)
                 }
                 $classified = $true
                 break
@@ -408,6 +449,7 @@ function Get-QualificationPlan {
                     [void]$testProjects.Add($testProject)
                     [void]$unfilteredTestProjects.Add($testProject)
                     [void]$filteredTestNamespaces.Remove($testProject)
+                    [void]$filteredTestClasses.Remove($testProject)
                 }
                 $classified = $true
                 break
@@ -419,36 +461,62 @@ function Get-QualificationPlan {
                 $requiresBuild = $true
                 [void]$testProjects.Add($mapping.TestProject)
                 if (Test-QualificationFilterableTestSource -Path $path) {
-                    if (-not $TestNamespacesByPath.ContainsKey($path)) {
-                        throw "Qualification is missing the declared namespace for changed test source '$path'."
+                    $hasNamespaces = $TestNamespacesByPath.ContainsKey($path)
+                    $hasClasses = $TestClassesByPath.ContainsKey($path)
+                    if ($hasNamespaces -eq $hasClasses) {
+                        throw "Qualification requires exactly one authenticated namespace or class selection for changed test source '$path'."
                     }
 
-                    $testNamespaces = @($TestNamespacesByPath[$path])
-                    if ($testNamespaces.Count -eq 0 -or @($testNamespaces | Where-Object { [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
+                    if ($hasNamespaces) {
+                        $testNamespaces = @($TestNamespacesByPath[$path])
+                    }
+                    else {
+                        $testClasses = @($TestClassesByPath[$path])
+                    }
+                    if (($hasNamespaces -and ($testNamespaces.Count -eq 0 -or @($testNamespaces | Where-Object { [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0)) -or ($hasClasses -and ($testClasses.Count -eq 0 -or @($testClasses | Where-Object { [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0))) {
                         [void]$unfilteredTestProjects.Add($mapping.TestProject)
                         [void]$filteredTestNamespaces.Remove($mapping.TestProject)
+                        [void]$filteredTestClasses.Remove($mapping.TestProject)
                         $classified = $true
                         break
                     }
 
                     $projectNamespace = [IO.Path]::GetFileNameWithoutExtension($mapping.TestProject)
-                    foreach ($testNamespaceValue in $testNamespaces) {
-                        $testNamespace = [string]$testNamespaceValue
-                        if ($testNamespace -cne $projectNamespace -and -not $testNamespace.StartsWith("$projectNamespace.", [StringComparison]::Ordinal)) {
-                            throw "Qualification test namespace '$testNamespace' does not belong to owning project '$projectNamespace' for '$path'."
-                        }
-
-                        if (-not $unfilteredTestProjects.Contains($mapping.TestProject)) {
-                            if (-not $filteredTestNamespaces.ContainsKey($mapping.TestProject)) {
-                                $filteredTestNamespaces.Add($mapping.TestProject, [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal))
+                    if ($hasNamespaces) {
+                        foreach ($testNamespaceValue in $testNamespaces) {
+                            $testNamespace = [string]$testNamespaceValue
+                            if ($testNamespace -cne $projectNamespace -and -not $testNamespace.StartsWith("$projectNamespace.", [StringComparison]::Ordinal)) {
+                                throw "Qualification test namespace '$testNamespace' does not belong to owning project '$projectNamespace' for '$path'."
                             }
-                            [void]$filteredTestNamespaces[$mapping.TestProject].Add($testNamespace)
+
+                            if (-not $unfilteredTestProjects.Contains($mapping.TestProject)) {
+                                if (-not $filteredTestNamespaces.ContainsKey($mapping.TestProject)) {
+                                    $filteredTestNamespaces.Add($mapping.TestProject, [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal))
+                                }
+                                [void]$filteredTestNamespaces[$mapping.TestProject].Add($testNamespace)
+                            }
+                        }
+                    }
+                    else {
+                        foreach ($testClassValue in $testClasses) {
+                            $testClass = [string]$testClassValue
+                            if (-not $testClass.StartsWith("$projectNamespace.", [StringComparison]::Ordinal)) {
+                                throw "Qualification test class '$testClass' does not belong to owning project '$projectNamespace' for '$path'."
+                            }
+
+                            if (-not $unfilteredTestProjects.Contains($mapping.TestProject)) {
+                                if (-not $filteredTestClasses.ContainsKey($mapping.TestProject)) {
+                                    $filteredTestClasses.Add($mapping.TestProject, [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal))
+                                }
+                                [void]$filteredTestClasses[$mapping.TestProject].Add($testClass)
+                            }
                         }
                     }
                 }
                 else {
                     [void]$unfilteredTestProjects.Add($mapping.TestProject)
                     [void]$filteredTestNamespaces.Remove($mapping.TestProject)
+                    [void]$filteredTestClasses.Remove($mapping.TestProject)
                 }
                 $classified = $true
                 break
@@ -462,6 +530,7 @@ function Get-QualificationPlan {
                 [void]$testProjects.Add($testProject)
                 [void]$unfilteredTestProjects.Add($testProject)
                 [void]$filteredTestNamespaces.Remove($testProject)
+                [void]$filteredTestClasses.Remove($testProject)
             }
             $classified = $true
         }
@@ -472,6 +541,7 @@ function Get-QualificationPlan {
                 [void]$testProjects.Add($testProject)
                 [void]$unfilteredTestProjects.Add($testProject)
                 [void]$filteredTestNamespaces.Remove($testProject)
+                [void]$filteredTestClasses.Remove($testProject)
             }
             $classified = $true
         }
@@ -483,6 +553,7 @@ function Get-QualificationPlan {
                 [void]$testProjects.Add($testProject)
                 [void]$unfilteredTestProjects.Add($testProject)
                 [void]$filteredTestNamespaces.Remove($testProject)
+                [void]$filteredTestClasses.Remove($testProject)
             }
             $classified = $true
         }
@@ -499,6 +570,7 @@ function Get-QualificationPlan {
                 [void]$testProjects.Add($testProject)
                 [void]$unfilteredTestProjects.Add($testProject)
                 [void]$filteredTestNamespaces.Remove($testProject)
+                [void]$filteredTestClasses.Remove($testProject)
             }
             $classified = $true
         }
@@ -530,17 +602,26 @@ function Get-QualificationPlan {
         foreach ($testProject in $scheduledTestProjects) {
             if ($unfilteredTestProjects.Contains($testProject)) {
                 $namespaces = [string[]]::new(0)
-            }
-            elseif ($filteredTestNamespaces.ContainsKey($testProject)) {
-                $namespaces = [string[]]@($filteredTestNamespaces[$testProject] | Sort-Object)
+                $classes = [string[]]::new(0)
             }
             else {
-                throw "Qualification test project '$testProject' has neither full-project nor namespace ownership."
+                $namespaces = [string[]]::new(0)
+                $classes = [string[]]::new(0)
+                if ($filteredTestNamespaces.ContainsKey($testProject)) {
+                    $namespaces = [string[]]@($filteredTestNamespaces[$testProject] | Sort-Object)
+                }
+                if ($filteredTestClasses.ContainsKey($testProject)) {
+                    $classes = [string[]]@($filteredTestClasses[$testProject] | Sort-Object)
+                }
+                if ($namespaces.Count -eq 0 -and $classes.Count -eq 0) {
+                    throw "Qualification test project '$testProject' has neither full-project, namespace, nor class ownership."
+                }
             }
 
             [pscustomobject]@{
                 Project = $testProject
                 Namespaces = $namespaces
+                Classes = $classes
             }
         }
     )
