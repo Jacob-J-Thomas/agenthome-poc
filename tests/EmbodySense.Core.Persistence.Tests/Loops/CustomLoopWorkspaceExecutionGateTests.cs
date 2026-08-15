@@ -254,7 +254,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
 
             Assert.True(cancellation.IsCancellationRequested);
             Assert.False(callbackCompleted.IsSet);
-            Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, result.Status);
+            Assert.True(result.Status == CustomLoopAttemptCancellationStatus.SignalDelivered, $"Expected routed delivery after the callback started, but received {result.Status}: {result.Detail}");
         }
         finally
         {
