@@ -238,12 +238,6 @@ try {
         $frontendArguments += @("-File", (Join-Path $PSScriptRoot "verify-frontend.ps1"), "-RepositoryRoot", $repoRoot, "-LogsPath", $logsRoot)
         Add-QualificationPhase -Name "frontend" -FileName $powerShellExecutable -Arguments $frontendArguments -TimeoutSeconds 240 -EstimatedDurationSeconds 60 -Weight $qualificationCpuBoundWeight -ResourceClass "CpuBound"
     }
-    Invoke-QualificationWave
-
-    if ($plan.RequiresWorkflowValidation) {
-        Add-QualificationPhase -Name "workflow-format" -FileName "npx" -Arguments @("prettier", "--check", "--end-of-line", "auto", ".github/workflows/*.yml") -TimeoutSeconds 60 -EstimatedDurationSeconds 10 -Weight 1 -ResourceClass "Ordinary"
-        Invoke-QualificationWave
-    }
 
     if ($plan.RequiresVerifierContracts) {
         $contractScripts = @(
@@ -263,7 +257,11 @@ try {
             $contractArguments += @("-File", (Join-Path $repoRoot "tests\scripts\$contractScript"))
             Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -EstimatedDurationSeconds 30 -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy"
         }
-        Invoke-QualificationWave
+    }
+    Invoke-QualificationWave
+
+    if ($plan.RequiresWorkflowValidation) {
+        Add-QualificationPhase -Name "workflow-format" -FileName "npx" -Arguments @("prettier", "--check", "--end-of-line", "auto", ".github/workflows/*.yml") -TimeoutSeconds 60 -EstimatedDurationSeconds 10 -Weight 1 -ResourceClass "Ordinary"
     }
 
     if ($plan.RequiresDrawioValidation) {
@@ -280,7 +278,6 @@ try {
         }
     }
 
-    Reset-VerificationParallelPhaseState
     foreach ($testSelection in $plan.TestSelections) {
         $testProject = $testSelection.Project
         $projectName = [IO.Path]::GetFileNameWithoutExtension($testProject)
@@ -304,17 +301,11 @@ try {
         $architectureResultsRoot = Join-Path $testResultsRoot "Architecture"
         Add-QualificationPhase -Name "tests-architecture" -FileName "dotnet" -Arguments @("test", "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj", "--configuration", $Configuration, "--no-build", "--no-restore", "--settings", "tests/verification-stress.runsettings", "--filter", "FullyQualifiedName~Architecture&VerificationTier!=Stress", "--logger", "trx;LogFileName=Architecture.trx", "--results-directory", $architectureResultsRoot, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds 120 -EstimatedDurationSeconds 20 -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy" -TrxPath (Join-Path $architectureResultsRoot "Architecture.trx")
     }
-    Invoke-QualificationWave
-
     if ($plan.RequiresCSharpFormat) {
         $existingCSharpFiles = @($plan.ChangedCSharpFiles | Where-Object { Test-Path -LiteralPath (Join-Path $repoRoot $_) -PathType Leaf })
         if ($existingCSharpFiles.Count -gt 0) {
-            $formatArguments = @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal", "--include") + $existingCSharpFiles
-            Add-QualificationPhase -Name "format-changed-whitespace" -FileName "dotnet" -Arguments $formatArguments -TimeoutSeconds 90 -EstimatedDurationSeconds 30 -Weight $qualificationCpuBoundWeight -ResourceClass "CpuBound"
-            Invoke-QualificationWave
-            $styleArguments = @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal", "--include") + $existingCSharpFiles
-            Add-QualificationPhase -Name "format-changed-style" -FileName "dotnet" -Arguments $styleArguments -TimeoutSeconds 90 -EstimatedDurationSeconds 45 -Weight $qualificationCpuBoundWeight -ResourceClass "CpuBound"
-            Invoke-QualificationWave
+            $formatArguments = @("format", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal", "--include") + $existingCSharpFiles
+            Add-QualificationPhase -Name "format-changed" -FileName "dotnet" -Arguments $formatArguments -TimeoutSeconds 90 -EstimatedDurationSeconds 45 -Weight $qualificationCpuBoundWeight -ResourceClass "CpuBound"
         }
     }
 
