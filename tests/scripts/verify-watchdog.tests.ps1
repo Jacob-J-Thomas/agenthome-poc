@@ -44,6 +44,22 @@ $expectedApplicationConsumers = @(
 Assert-Equal -Actual ($applicationPlan.TestProjects -join "|") -Expected ($expectedApplicationConsumers -join "|") -Message "Application production changes must execute the owning suite and downstream integration boundary."
 Assert-True -Condition (@($applicationPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "Application production consumers must run as complete suites even when the same namespace's tests also changed."
 
+$cliCommandPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Cli.Command/RunCommand.cs")
+$expectedCliCommandConsumers = @(
+    "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj",
+    "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
+)
+Assert-Equal -Actual ($cliCommandPlan.TestProjects -join "|") -Expected ($expectedCliCommandConsumers -join "|") -Message "CLI Command production changes must execute the owning suite and real-process Integration behavior."
+Assert-True -Condition (@($cliCommandPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "CLI Command production consumers must run as complete suites."
+
+$clientsPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Clients/CodexAppServer/CodexAppServerInferenceClient.cs")
+$expectedClientsConsumers = @(
+    "tests/EmbodySense.Core.Clients.Tests/EmbodySense.Core.Clients.Tests.csproj",
+    "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
+)
+Assert-Equal -Actual ($clientsPlan.TestProjects -join "|") -Expected ($expectedClientsConsumers -join "|") -Message "Clients production changes must execute the owning suite and app-server Integration behavior."
+Assert-True -Condition (@($clientsPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "Clients production consumers must run as complete suites."
+
 $startupPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Startup/Runtime/AgentRuntime.cs")
 $expectedStartupConsumers = @(
     "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj",
@@ -172,7 +188,12 @@ Assert-True -Condition ($crossProjectRenamePlan.TestProjects -ccontains "tests/E
 
 $webPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Web/wwwroot/js/governed.js")
 Assert-True -Condition ($webPlan.RequiresBuild -and $webPlan.RequiresFrontend) -Message "Web assets must retain both their owning Web build/tests and frontend checks."
-Assert-Equal -Actual $webPlan.TestProjects[0] -Expected "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj" -Message "Web assets must select Web tests."
+$expectedWebConsumers = @(
+    "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj",
+    "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
+)
+Assert-Equal -Actual ($webPlan.TestProjects -join "|") -Expected ($expectedWebConsumers -join "|") -Message "Web changes must execute the owning suite and non-browser hosted E2E behavior."
+Assert-True -Condition (@($webPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 }).Count -eq 0) -Message "Web production consumers must run as complete suites; the E2E runner separately excludes installed-browser tests."
 
 $verifierPlan = Get-QualificationPlan -ChangedPaths @("scripts/qualify.ps1", ".github/workflows/qualification.yml")
 Assert-True -Condition ($verifierPlan.RequiresVerifierContracts -and -not $verifierPlan.RequiresBuild -and $verifierPlan.TestProjects.Count -eq 0) -Message "Verifier-only changes must run verifier contracts without an unrelated solution build."
