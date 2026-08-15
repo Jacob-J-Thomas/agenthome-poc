@@ -131,26 +131,110 @@ try {
     $validatedFocusedImplementationPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($changedPath in $changedPaths) {
         $normalizedPath = ConvertTo-QualificationPath -Path $changedPath
+        $focusedImplementationMappingsForChangedPath = [Collections.Generic.List[object]]::new()
+        $focusedImplementationMappingPathsForChangedPath = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         foreach ($focusedImplementationMapping in @(Get-QualificationFocusedImplementationMappingsForPath -Path $normalizedPath)) {
+            if ($focusedImplementationMappingPathsForChangedPath.Add($focusedImplementationMapping.Path)) {
+                $focusedImplementationMappingsForChangedPath.Add($focusedImplementationMapping)
+            }
+        }
+        if ($normalizedPath.EndsWith(".cs", [StringComparison]::OrdinalIgnoreCase)) {
+            foreach ($focusedImplementationMapping in @($script:QualificationFocusedImplementationMappings | Where-Object { $_.Kind -ceq "PublicConstantContract" })) {
+                if ($focusedImplementationMappingPathsForChangedPath.Contains($focusedImplementationMapping.Path)) {
+                    continue
+                }
+
+                $containsContractReference = $false
+                foreach ($commit in @($HeadCommit, $mergeBase)) {
+                    if (-not (Test-QualificationCommitPath -Path $normalizedPath -Commit $commit)) {
+                        continue
+                    }
+
+                    $edgeContent = Get-QualificationBlobContent -Path $normalizedPath -Commits @($commit)
+                    if ((Test-QualificationContainsIdentifierReference -Content $edgeContent -Identifier $focusedImplementationMapping.TypeName) -or (Test-QualificationContainsIdentifierReference -Content $edgeContent -Identifier $focusedImplementationMapping.MemberName)) {
+                        $containsContractReference = $true
+                        break
+                    }
+                }
+                if ($containsContractReference) {
+                    [void]$focusedImplementationMappingPathsForChangedPath.Add($focusedImplementationMapping.Path)
+                    $focusedImplementationMappingsForChangedPath.Add($focusedImplementationMapping)
+                    [void]$focusedHelperRelevantPaths.Add($normalizedPath)
+                }
+            }
+        }
+
+        foreach ($focusedImplementationMapping in $focusedImplementationMappingsForChangedPath) {
             if (-not $validatedFocusedImplementationPaths.Add($focusedImplementationMapping.Path)) {
                 continue
             }
 
             $mappedImplementationPath = ConvertTo-QualificationPath -Path $focusedImplementationMapping.Path
-            $existingEdgeCount = 0
-            foreach ($commit in @($HeadCommit, $mergeBase)) {
-                if (-not (Test-QualificationCommitPath -Path $mappedImplementationPath -Commit $commit)) {
-                    continue
-                }
+            switch ($focusedImplementationMapping.Kind) {
+                "InternalSealed" {
+                    $existingEdgeCount = 0
+                    foreach ($commit in @($HeadCommit, $mergeBase)) {
+                        if (-not (Test-QualificationCommitPath -Path $mappedImplementationPath -Commit $commit)) {
+                            continue
+                        }
 
-                $existingEdgeCount++
-                $implementationContent = Get-QualificationBlobContent -Path $mappedImplementationPath -Commits @($commit)
-                if (-not (Test-QualificationFocusedImplementationSource -Content $implementationContent)) {
-                    throw "Focused implementation mapping '$mappedImplementationPath' is only valid for one syntax-valid top-level internal sealed non-partial type on every existing side of the exact edge."
+                        $existingEdgeCount++
+                        $implementationContent = Get-QualificationBlobContent -Path $mappedImplementationPath -Commits @($commit)
+                        if (-not (Test-QualificationFocusedImplementationSource -Content $implementationContent)) {
+                            throw "Focused implementation mapping '$mappedImplementationPath' is only valid for one syntax-valid top-level internal sealed non-partial type on every existing side of the exact edge."
+                        }
+                    }
+                    if ($existingEdgeCount -eq 0) {
+                        throw "Focused implementation mapping '$mappedImplementationPath' has no source on either side of the exact edge."
+                    }
                 }
-            }
-            if ($existingEdgeCount -eq 0) {
-                throw "Focused implementation mapping '$mappedImplementationPath' has no source on either side of the exact edge."
+                "PrivateMethod" {
+                    if (-not (Test-QualificationCommitPath -Path $mappedImplementationPath -Commit $HeadCommit) -or -not (Test-QualificationCommitPath -Path $mappedImplementationPath -Commit $mergeBase)) {
+                        throw "Focused private-method mapping '$mappedImplementationPath' requires the source on both sides of the exact edge."
+                    }
+
+                    $baseImplementationContent = Get-QualificationBlobContent -Path $mappedImplementationPath -Commits @($mergeBase)
+                    $headImplementationContent = Get-QualificationBlobContent -Path $mappedImplementationPath -Commits @($HeadCommit)
+                    if (-not (Test-QualificationFocusedPrivateMethodEdge -BaseContent $baseImplementationContent -HeadContent $headImplementationContent -TypeName $focusedImplementationMapping.TypeName -MemberName $focusedImplementationMapping.MemberName)) {
+                        throw "Focused private-method mapping '$mappedImplementationPath' permits changes only inside the body of private method '$($focusedImplementationMapping.MemberName)' on one public sealed non-partial type."
+                    }
+                }
+                "PublicConstantContract" {
+                    if (-not (Test-QualificationCommitPath -Path $mappedImplementationPath -Commit $HeadCommit)) {
+                        throw "Focused public-constant mapping '$mappedImplementationPath' requires the contract on the exact head."
+                    }
+
+                    foreach ($commit in @($HeadCommit, $mergeBase)) {
+                        if (-not (Test-QualificationCommitPath -Path $mappedImplementationPath -Commit $commit)) {
+                            continue
+                        }
+
+                        $implementationContent = Get-QualificationBlobContent -Path $mappedImplementationPath -Commits @($commit)
+                        if (-not (Test-QualificationPublicConstantContractSource -Content $implementationContent -TypeName $focusedImplementationMapping.TypeName -MemberName $focusedImplementationMapping.MemberName)) {
+                            throw "Focused public-constant mapping '$mappedImplementationPath' requires one public static class containing only bounded integer constant '$($focusedImplementationMapping.MemberName)'."
+                        }
+                    }
+
+                    $actualReferencePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                    foreach ($identifier in @($focusedImplementationMapping.TypeName, $focusedImplementationMapping.MemberName)) {
+                        foreach ($referencePath in @(Get-QualificationExactIdentifierReferencePaths -RepositoryRoot $repoRoot -Commit $HeadCommit -Identifier $identifier)) {
+                            [void]$actualReferencePaths.Add($referencePath)
+                        }
+                    }
+                    $expectedReferencePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                    foreach ($referencePath in @($focusedImplementationMapping.ReferencePaths)) {
+                        $normalizedReferencePath = ConvertTo-QualificationPath -Path $referencePath
+                        if (-not $expectedReferencePaths.Add($normalizedReferencePath)) {
+                            throw "Focused public-constant mapping '$mappedImplementationPath' repeats reference path '$normalizedReferencePath'."
+                        }
+                    }
+                    if ((@($actualReferencePaths | Sort-Object) -join "|") -cne (@($expectedReferencePaths | Sort-Object) -join "|")) {
+                        throw "Focused public-constant mapping '$mappedImplementationPath' has reference drift. Expected $(@($expectedReferencePaths | Sort-Object) -join ', '); found $(@($actualReferencePaths | Sort-Object) -join ', ')."
+                    }
+                }
+                default {
+                    throw "Focused implementation mapping '$mappedImplementationPath' has unsupported kind '$($focusedImplementationMapping.Kind)'."
+                }
             }
 
             foreach ($testMapping in @($focusedImplementationMapping.Tests)) {

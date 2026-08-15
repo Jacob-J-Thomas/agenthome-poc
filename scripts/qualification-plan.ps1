@@ -136,7 +136,46 @@ $script:QualificationExactSourceMappings = @(
 
 $script:QualificationFocusedImplementationMappings = @(
     [pscustomobject]@{
+        Kind = "PrivateMethod"
+        Path = "src/EmbodySense.Core.Application/Loops/Execution/Custom/CustomLoopLifecycleService.cs"
+        TypeName = "CustomLoopLifecycleService"
+        MemberName = "TryCancelActiveAttemptAsync"
+        ReferencePaths = @()
+        Tests = @(
+            [pscustomobject]@{
+                Path = "tests/EmbodySense.Core.Application.Tests/Loops/Execution/Custom/CustomLoopLifecycleServiceTests.cs"
+                Class = "EmbodySense.Core.Application.Tests.Loops.Execution.Custom.CustomLoopLifecycleServiceTests"
+            }
+        )
+    },
+    [pscustomobject]@{
+        Kind = "PublicConstantContract"
+        Path = "src/EmbodySense.Core.Common/Loops/Execution/CustomLoopAttemptCancellationContractLimits.cs"
+        TypeName = "CustomLoopAttemptCancellationContractLimits"
+        MemberName = "MaxRemoteRequestSeconds"
+        ReferencePaths = @(
+            "src/EmbodySense.Core.Application/Loops/Execution/Custom/CustomLoopLifecycleService.cs",
+            "src/EmbodySense.Core.Common/Loops/Execution/CustomLoopAttemptCancellationContractLimits.cs",
+            "src/EmbodySense.Core.Persistence/Loops/CustomLoopAttemptCancellationHost.cs",
+            "tests/EmbodySense.Core.Application.Tests/Loops/Execution/Custom/CustomLoopLifecycleServiceTests.cs"
+        )
+        Tests = @(
+            [pscustomobject]@{
+                Path = "tests/EmbodySense.Core.Application.Tests/Loops/Execution/Custom/CustomLoopLifecycleServiceTests.cs"
+                Class = "EmbodySense.Core.Application.Tests.Loops.Execution.Custom.CustomLoopLifecycleServiceTests"
+            },
+            [pscustomobject]@{
+                Path = "tests/EmbodySense.Core.Persistence.Tests/Loops/CustomLoopWorkspaceExecutionGateTests.cs"
+                Class = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopWorkspaceExecutionGateTests"
+            }
+        )
+    },
+    [pscustomobject]@{
+        Kind = "InternalSealed"
         Path = "src/EmbodySense.Core.Persistence/Loops/CustomLoopAttemptCancellationHost.cs"
+        TypeName = "CustomLoopAttemptCancellationHost"
+        MemberName = $null
+        ReferencePaths = @()
         Tests = @(
             [pscustomobject]@{
                 Path = "tests/EmbodySense.Core.Persistence.Tests/Loops/CustomLoopWorkspaceExecutionGateTests.cs"
@@ -297,7 +336,7 @@ function Get-QualificationFocusedImplementationMappingsForPath {
     param([Parameter(Mandatory = $true)] [string]$Path)
 
     foreach ($mapping in $script:QualificationFocusedImplementationMappings) {
-        if ($Path -ceq $mapping.Path -or @($mapping.Tests | Where-Object { $Path -ceq $_.Path }).Count -gt 0) {
+        if ($Path -ceq $mapping.Path -or @($mapping.Tests | Where-Object { $Path -ceq $_.Path }).Count -gt 0 -or @($mapping.ReferencePaths | Where-Object { $Path -ceq $_ }).Count -gt 0) {
             Write-Output $mapping
         }
     }
@@ -461,6 +500,116 @@ function Test-QualificationFocusedImplementationSource {
         $modifiers -cnotcontains "protected"
 }
 
+function Test-QualificationFocusedPrivateMethodEdge {
+    param(
+        [Parameter(Mandatory = $true)] [string]$BaseContent,
+        [Parameter(Mandatory = $true)] [string]$HeadContent,
+        [Parameter(Mandatory = $true)] [ValidateNotNullOrEmpty()] [string]$TypeName,
+        [Parameter(Mandatory = $true)] [ValidateNotNullOrEmpty()] [string]$MemberName
+    )
+
+    Initialize-QualificationCSharpParser
+    $contents = @($BaseContent, $HeadContent)
+    $methods = [Collections.Generic.List[object]]::new()
+    foreach ($content in $contents) {
+        $syntaxTree = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($content)
+        if (@($syntaxTree.GetDiagnostics() | Where-Object { $_.Severity -eq [Microsoft.CodeAnalysis.DiagnosticSeverity]::Error }).Count -gt 0) {
+            return $false
+        }
+
+        $root = $syntaxTree.GetCompilationUnitRoot()
+        $topLevelTypes = @(
+            $root.DescendantNodes() |
+                Where-Object {
+                    $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax] -and
+                    $null -eq ($_.Ancestors() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax] } | Select-Object -First 1)
+                }
+        )
+        if ($topLevelTypes.Count -ne 1 -or $topLevelTypes[0] -isnot [Microsoft.CodeAnalysis.CSharp.Syntax.ClassDeclarationSyntax] -or $topLevelTypes[0].Identifier.ValueText -cne $TypeName) {
+            return $false
+        }
+
+        $typeModifiers = @($topLevelTypes[0].Modifiers | ForEach-Object { $_.ValueText })
+        if ($typeModifiers -cnotcontains "public" -or $typeModifiers -cnotcontains "sealed" -or $typeModifiers -ccontains "partial") {
+            return $false
+        }
+
+        $matchingMethods = @(
+            $topLevelTypes[0].Members |
+                Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax] -and $_.Identifier.ValueText -ceq $MemberName }
+        )
+        if ($matchingMethods.Count -ne 1 -or $null -eq $matchingMethods[0].Body -or $null -ne $matchingMethods[0].ExpressionBody) {
+            return $false
+        }
+
+        $methodModifiers = @($matchingMethods[0].Modifiers | ForEach-Object { $_.ValueText })
+        if ($methodModifiers -cnotcontains "private" -or $methodModifiers -ccontains "public" -or $methodModifiers -ccontains "protected" -or $methodModifiers -ccontains "internal") {
+            return $false
+        }
+
+        $methods.Add($matchingMethods[0])
+    }
+
+    $baseMethod = $methods[0]
+    $headMethod = $methods[1]
+    $basePrefix = $BaseContent.Substring(0, $baseMethod.Body.Span.Start)
+    $headPrefix = $HeadContent.Substring(0, $headMethod.Body.Span.Start)
+    $baseSuffix = $BaseContent.Substring($baseMethod.Body.Span.End)
+    $headSuffix = $HeadContent.Substring($headMethod.Body.Span.End)
+    return $basePrefix -ceq $headPrefix -and $baseSuffix -ceq $headSuffix
+}
+
+function Test-QualificationPublicConstantContractSource {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Content,
+        [Parameter(Mandatory = $true)] [ValidateNotNullOrEmpty()] [string]$TypeName,
+        [Parameter(Mandatory = $true)] [ValidateNotNullOrEmpty()] [string]$MemberName
+    )
+
+    Initialize-QualificationCSharpParser
+    $syntaxTree = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Content)
+    if (@($syntaxTree.GetDiagnostics() | Where-Object { $_.Severity -eq [Microsoft.CodeAnalysis.DiagnosticSeverity]::Error }).Count -gt 0) {
+        return $false
+    }
+
+    $root = $syntaxTree.GetCompilationUnitRoot()
+    $topLevelTypes = @(
+        $root.DescendantNodes() |
+            Where-Object {
+                $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax] -and
+                $null -eq ($_.Ancestors() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax] } | Select-Object -First 1)
+            }
+    )
+    if ($topLevelTypes.Count -ne 1 -or $topLevelTypes[0] -isnot [Microsoft.CodeAnalysis.CSharp.Syntax.ClassDeclarationSyntax] -or $topLevelTypes[0].Identifier.ValueText -cne $TypeName) {
+        return $false
+    }
+
+    $typeModifiers = @($topLevelTypes[0].Modifiers | ForEach-Object { $_.ValueText })
+    if ($typeModifiers.Count -ne 2 -or $typeModifiers -cnotcontains "public" -or $typeModifiers -cnotcontains "static") {
+        return $false
+    }
+    if ($topLevelTypes[0].Members.Count -ne 1 -or $topLevelTypes[0].Members[0] -isnot [Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax]) {
+        return $false
+    }
+
+    $field = $topLevelTypes[0].Members[0]
+    $fieldModifiers = @($field.Modifiers | ForEach-Object { $_.ValueText })
+    if ($fieldModifiers.Count -ne 2 -or $fieldModifiers -cnotcontains "public" -or $fieldModifiers -cnotcontains "const" -or $field.Declaration.Type.ToString() -cne "int") {
+        return $false
+    }
+    if ($field.Declaration.Variables.Count -ne 1 -or $field.Declaration.Variables[0].Identifier.ValueText -cne $MemberName) {
+        return $false
+    }
+
+    $initializer = $field.Declaration.Variables[0].Initializer
+    if ($null -eq $initializer -or $initializer.Value -isnot [Microsoft.CodeAnalysis.CSharp.Syntax.LiteralExpressionSyntax] -or $initializer.Value.RawKind -ne [int][Microsoft.CodeAnalysis.CSharp.SyntaxKind]::NumericLiteralExpression) {
+        return $false
+    }
+
+    $value = $initializer.Value.Token.Value
+    return $value -is [int] -and $value -ge 1 -and $value -le 60
+}
+
 function Test-QualificationContainsIdentifierReference {
     param(
         [Parameter(Mandatory = $true)] [string]$Content,
@@ -476,6 +625,47 @@ function Test-QualificationContainsIdentifierReference {
     }
 
     return $false
+}
+
+function Get-QualificationExactIdentifierReferencePaths {
+    param(
+        [Parameter(Mandatory = $true)] [string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[0-9a-fA-F]{40}$')] [string]$Commit,
+        [Parameter(Mandatory = $true)] [ValidateNotNullOrEmpty()] [string]$Identifier
+    )
+
+    $grepLines = @(& git -C $RepositoryRoot grep -l -F $Identifier $Commit -- src tests 2>$null)
+    $grepExitCode = $LASTEXITCODE
+    if ($grepExitCode -eq 1) {
+        return [string[]]::new(0)
+    }
+    if ($grepExitCode -ne 0) {
+        throw "Qualification could not enumerate exact-head references to '$Identifier'."
+    }
+
+    $commitPrefix = "$Commit`:"
+    $referencePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($grepLine in $grepLines) {
+        if (-not $grepLine.StartsWith($commitPrefix, [StringComparison]::Ordinal)) {
+            throw "Qualification received malformed exact-head grep evidence '$grepLine'."
+        }
+
+        $candidatePath = ConvertTo-QualificationPath -Path $grepLine.Substring($commitPrefix.Length)
+        if (-not $candidatePath.EndsWith(".cs", [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+
+        $objectName = "$Commit`:$candidatePath"
+        $contentLines = @(& git -C $RepositoryRoot cat-file blob $objectName 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Qualification could not read exact-head reference '$candidatePath'."
+        }
+        if (Test-QualificationContainsIdentifierReference -Content ($contentLines -join "`n") -Identifier $Identifier) {
+            [void]$referencePaths.Add($candidatePath)
+        }
+    }
+
+    return [string[]]@($referencePaths | Sort-Object)
 }
 
 function Get-QualificationExternalTestClassConsumerPaths {

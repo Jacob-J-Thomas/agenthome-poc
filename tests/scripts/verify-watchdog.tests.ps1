@@ -124,6 +124,46 @@ Assert-True -Condition (-not (Test-QualificationFocusedImplementationSource -Con
 Assert-True -Condition (-not (Test-QualificationFocusedImplementationSource -Content "internal sealed class First {}`ninternal sealed class Second {}")) -Message "Multiple top-level implementations must not use one focused mapping."
 Assert-True -Condition (-not (Test-QualificationFocusedImplementationSource -Content "internal sealed class Candidate {")) -Message "A syntax-invalid implementation must not use focused qualification."
 
+$focusedPrivateMethodPath = "src/EmbodySense.Core.Application/Loops/Execution/Custom/CustomLoopLifecycleService.cs"
+$focusedPrivateMethodTestClass = "EmbodySense.Core.Application.Tests.Loops.Execution.Custom.CustomLoopLifecycleServiceTests"
+$focusedPrivateMethodPlan = Get-QualificationPlan -ChangedPaths @($focusedPrivateMethodPath)
+Assert-Equal -Actual ($focusedPrivateMethodPlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj" -Message "A reviewed private-method change must select only its checked behavioral project."
+Assert-Equal -Actual ($focusedPrivateMethodPlan.TestSelections[0].Classes -join "|") -Expected $focusedPrivateMethodTestClass -Message "A reviewed private-method change must select its exact checked behavioral class."
+
+$privateMethodBase = @'
+public sealed class Candidate
+{
+    public void Visible() { }
+
+    private int Handle()
+    {
+        return 1;
+    }
+}
+'@
+$privateMethodHead = $privateMethodBase.Replace("return 1;", "return 2;")
+Assert-True -Condition (Test-QualificationFocusedPrivateMethodEdge -BaseContent $privateMethodBase -HeadContent $privateMethodHead -TypeName "Candidate" -MemberName "Handle") -Message "A body-only private method change must remain eligible for focused qualification."
+Assert-True -Condition (-not (Test-QualificationFocusedPrivateMethodEdge -BaseContent $privateMethodBase -HeadContent $privateMethodHead.Replace("public void Visible() { }", "public void Visible() { Console.WriteLine(); }") -TypeName "Candidate" -MemberName "Handle")) -Message "A second changed member must invalidate focused private-method qualification."
+Assert-True -Condition (-not (Test-QualificationFocusedPrivateMethodEdge -BaseContent $privateMethodBase -HeadContent $privateMethodHead.Replace("private int Handle()", "internal int Handle()") -TypeName "Candidate" -MemberName "Handle")) -Message "A changed private method signature must invalidate focused qualification."
+Assert-True -Condition (-not (Test-QualificationFocusedPrivateMethodEdge -BaseContent $privateMethodBase -HeadContent $privateMethodHead.Replace("public sealed class Candidate", "public sealed partial class Candidate") -TypeName "Candidate" -MemberName "Handle")) -Message "A partial public type must invalidate focused private-method qualification."
+
+$focusedContractPath = "src/EmbodySense.Core.Common/Loops/Execution/CustomLoopAttemptCancellationContractLimits.cs"
+$focusedContractPlan = Get-QualificationPlan -ChangedPaths @($focusedContractPath)
+$expectedFocusedContractProjects = @(
+    "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+    "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
+)
+Assert-Equal -Actual ($focusedContractPlan.TestProjects -join "|") -Expected ($expectedFocusedContractProjects -join "|") -Message "A reviewed one-member contract must select only its complete checked behavioral boundary."
+Assert-Equal -Actual ($focusedContractPlan.TestSelections[0].Classes -join "|") -Expected $focusedPrivateMethodTestClass -Message "The cancellation contract must retain its lifecycle behavior class."
+Assert-Equal -Actual ($focusedContractPlan.TestSelections[1].Classes -join "|") -Expected $focusedImplementationTestClass -Message "The cancellation contract must retain its remote-host behavior class."
+Assert-Equal -Actual @(Get-QualificationFocusedImplementationMappingsForPath -Path $focusedPrivateMethodPath).Count -Expected 2 -Message "Changing a known contract consumer must revalidate both its private-method edge and the shared contract reference map."
+
+$constantContractSource = "public static class DeadlineContract { public const int Seconds = 10; }"
+Assert-True -Condition (Test-QualificationPublicConstantContractSource -Content $constantContractSource -TypeName "DeadlineContract" -MemberName "Seconds") -Message "One bounded public integer constant must remain eligible for reviewed contract qualification."
+Assert-True -Condition (-not (Test-QualificationPublicConstantContractSource -Content "public static class DeadlineContract { public const int Seconds = 10; public const int Other = 1; }" -TypeName "DeadlineContract" -MemberName "Seconds")) -Message "An added contract member must invalidate focused qualification."
+Assert-True -Condition (-not (Test-QualificationPublicConstantContractSource -Content "public static class DeadlineContract { public static int Seconds => 10; }" -TypeName "DeadlineContract" -MemberName "Seconds")) -Message "Executable public contract behavior must invalidate constant-only qualification."
+Assert-True -Condition (-not (Test-QualificationPublicConstantContractSource -Content "public static class DeadlineContract { public const int Seconds = 0; }" -TypeName "DeadlineContract" -MemberName "Seconds")) -Message "An unbounded contract value must invalidate focused qualification."
+
 $startupPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Startup/Runtime/AgentRuntime.cs")
 $expectedStartupConsumers = @(
     "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj",
@@ -434,11 +474,32 @@ foreach ($mapping in $script:QualificationFocusedImplementationMappings) {
     Assert-True -Condition $mappedImplementationPaths.Add($mapping.Path) -Message "Focused implementation mappings must have unique production paths."
     Assert-True -Condition ($trackedPaths -ccontains $mapping.Path) -Message "Focused implementation '$($mapping.Path)' must be tracked."
     $implementationSource = Get-Content -LiteralPath (Join-Path $repoRoot $mapping.Path) -Raw
-    Assert-True -Condition (Test-QualificationFocusedImplementationSource -Content $implementationSource) -Message "Focused implementation '$($mapping.Path)' must remain one top-level internal sealed non-partial type."
+    switch ($mapping.Kind) {
+        "InternalSealed" {
+            Assert-True -Condition (Test-QualificationFocusedImplementationSource -Content $implementationSource) -Message "Focused implementation '$($mapping.Path)' must remain one top-level internal sealed non-partial type."
+        }
+        "PrivateMethod" {
+            Assert-True -Condition (Test-QualificationFocusedPrivateMethodEdge -BaseContent $implementationSource -HeadContent $implementationSource -TypeName $mapping.TypeName -MemberName $mapping.MemberName) -Message "Focused private-method implementation '$($mapping.Path)' must retain its exact public type and private method shape."
+            Assert-Equal -Actual @($mapping.ReferencePaths).Count -Expected 0 -Message "A private-method mapping must not declare public-contract reference paths."
+        }
+        "PublicConstantContract" {
+            Assert-True -Condition (Test-QualificationPublicConstantContractSource -Content $implementationSource -TypeName $mapping.TypeName -MemberName $mapping.MemberName) -Message "Focused public contract '$($mapping.Path)' must remain one bounded integer constant."
+            $actualReferencePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach ($identifier in @($mapping.TypeName, $mapping.MemberName)) {
+                foreach ($referencePath in @(Get-QualificationExactIdentifierReferencePaths -RepositoryRoot $repoRoot -Commit $currentCommit -Identifier $identifier)) {
+                    [void]$actualReferencePaths.Add($referencePath)
+                }
+            }
+            Assert-Equal -Actual (@($actualReferencePaths | Sort-Object) -join "|") -Expected (@($mapping.ReferencePaths | Sort-Object) -join "|") -Message "Focused public contract '$($mapping.Path)' must enumerate every exact-head C# reference."
+        }
+        default {
+            throw "Focused implementation '$($mapping.Path)' has unsupported kind '$($mapping.Kind)'."
+        }
+    }
     Assert-True -Condition (@($mapping.Tests).Count -gt 0) -Message "Focused implementation '$($mapping.Path)' must retain at least one public-boundary test."
 
     foreach ($testMapping in @($mapping.Tests)) {
-        $mappingKey = "$($testMapping.Path)|$($testMapping.Class)"
+        $mappingKey = "$($mapping.Path)|$($testMapping.Path)|$($testMapping.Class)"
         Assert-True -Condition $mappedImplementationTests.Add($mappingKey) -Message "Focused implementation test entries must be unique."
         Assert-True -Condition ($trackedPaths -ccontains $testMapping.Path) -Message "Focused implementation test '$($testMapping.Path)' must be tracked."
         $mappedTestProject = Get-QualificationTestProject -Path $testMapping.Path
