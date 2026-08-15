@@ -4513,11 +4513,19 @@ test("stalled lifecycle receipt reads stop at one bounded deadline and retain th
     "/api/loop-runs/controls/operation-stalled",
     () => new Promise(() => {}),
   );
+  let scheduledDeadlineMilliseconds = null;
+  app.context.setTimeout = (handler, delay) => {
+    scheduledDeadlineMilliseconds = delay;
+    queueMicrotask(handler);
+    return 1;
+  };
+  app.context.clearTimeout = () => {};
 
-  const startedAt = performance.now();
-  await app.context.reconcilePendingLifecycleRequests(startedAt + 25);
+  await app.context.reconcilePendingLifecycleRequests(performance.now() + 25);
 
-  assert.ok(performance.now() - startedAt < 1000);
+  assert.ok(
+    scheduledDeadlineMilliseconds > 0 && scheduledDeadlineMilliseconds <= 25,
+  );
   assert.equal(
     vm.runInContext("pendingLifecycleRequests.size", app.context),
     1,
@@ -7106,7 +7114,13 @@ test("a stalled invocation receipt read is aborted at the overall reconciliation
     () => new Promise(() => {}),
   );
   const app = await loadLoopBuilder({ server });
-  const startedAt = Date.now();
+  let scheduledDeadlineMilliseconds = null;
+  app.context.setTimeout = (handler, delay) => {
+    scheduledDeadlineMilliseconds = delay;
+    queueMicrotask(handler);
+    return 1;
+  };
+  app.context.clearTimeout = () => {};
 
   const result = await app.context.reconcileInvocationOperation(
     "invoke-stalled",
@@ -7114,7 +7128,9 @@ test("a stalled invocation receipt read is aborted at the overall reconciliation
   );
 
   assert.equal(result.kind, "unknown");
-  assert.ok(Date.now() - startedAt < 500);
+  assert.ok(
+    scheduledDeadlineMilliseconds > 0 && scheduledDeadlineMilliseconds <= 25,
+  );
   const receiptCalls = server.calls.filter(
     (call) => call.url === "/api/loop-runs/invocations/invoke-stalled",
   );
@@ -7139,7 +7155,16 @@ test("invocation reconciliation remains bounded when the wall clock moves backwa
       : new Promise(() => {});
   });
   const app = await loadLoopBuilder({ server, Date: RegressingDate });
-  const startedAt = performance.now();
+  let scheduledTimeoutCount = 0;
+  let scheduledDeadlineMilliseconds = null;
+  app.context.waitForInvocationReconciliationRetry = async () => {};
+  app.context.setTimeout = (handler, delay) => {
+    scheduledTimeoutCount++;
+    scheduledDeadlineMilliseconds = delay;
+    if (scheduledTimeoutCount === 2) queueMicrotask(handler);
+    return scheduledTimeoutCount;
+  };
+  app.context.clearTimeout = () => {};
 
   const result = await app.context.reconcileInvocationOperation(
     "invoke-clock-regression",
@@ -7147,7 +7172,11 @@ test("invocation reconciliation remains bounded when the wall clock moves backwa
   );
 
   assert.equal(result.kind, "unknown");
-  assert.ok(performance.now() - startedAt < 500);
+  assert.equal(receiptReads, 2);
+  assert.equal(scheduledTimeoutCount, 2);
+  assert.ok(
+    scheduledDeadlineMilliseconds > 0 && scheduledDeadlineMilliseconds <= 25,
+  );
 });
 
 test("slower run detail responses cannot overwrite a newer run selection", async () => {

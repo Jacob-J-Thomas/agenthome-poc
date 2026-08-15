@@ -189,19 +189,44 @@ try {
 param([string]$Role, [string]$SynchronizationRoot)
 Write-Output "start=$([DateTime]::UtcNow.Ticks)"
 if ($Role -ceq "build") {
-    Start-Sleep -Milliseconds 1000
+    $ordinaryReadyPath = Join-Path $SynchronizationRoot "ordinary.ready"
+    $ordinaryReadyDeadline = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path -LiteralPath $ordinaryReadyPath -PathType Leaf)) {
+        if ($ordinaryReadyDeadline.ElapsedMilliseconds -ge 5000) {
+            throw "Build did not observe ordinary backfill before its bounded synchronization deadline."
+        }
+        Start-Sleep -Milliseconds 10
+    }
 }
 elseif ($Role -ceq "frontend") {
     Start-Sleep -Milliseconds 150
 }
 elseif ($Role -ceq "coverage") {
+    $ordinaryReadyPath = Join-Path $SynchronizationRoot "ordinary.ready"
+    $ordinaryReadyDeadline = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path -LiteralPath $ordinaryReadyPath -PathType Leaf)) {
+        if ($ordinaryReadyDeadline.ElapsedMilliseconds -ge 5000) {
+            throw "Coverage did not observe the ordinary phase before its bounded synchronization deadline."
+        }
+        Start-Sleep -Milliseconds 10
+    }
+    [IO.File]::WriteAllText((Join-Path $SynchronizationRoot "coverage.started"), "started", [Text.UTF8Encoding]::new($false))
     Start-Sleep -Milliseconds 400
 }
 elseif ($Role.StartsWith("format-", [StringComparison]::Ordinal)) {
     Start-Sleep -Milliseconds 1000
 }
 elseif ($Role -ceq "ordinary") {
-    Start-Sleep -Milliseconds 1200
+    [IO.File]::WriteAllText((Join-Path $SynchronizationRoot "ordinary.ready"), "ready", [Text.UTF8Encoding]::new($false))
+    $coverageStartedPath = Join-Path $SynchronizationRoot "coverage.started"
+    $coverageStartedDeadline = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path -LiteralPath $coverageStartedPath -PathType Leaf)) {
+        if ($coverageStartedDeadline.ElapsedMilliseconds -ge 5000) {
+            throw "Ordinary work did not observe coverage admission before its bounded synchronization deadline."
+        }
+        Start-Sleep -Milliseconds 10
+    }
+    Start-Sleep -Milliseconds 200
 }
 elseif ($Role.StartsWith("nested-", [StringComparison]::Ordinal)) {
     Start-Sleep -Milliseconds 200

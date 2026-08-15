@@ -2,6 +2,7 @@ name: Browser E2E
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
     branches: [main]
 
@@ -10,6 +11,11 @@ permissions:
 
 jobs:
   browser-e2e:
+    name: browser-e2e
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    concurrency:
+      group: browser-e2e-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     runs-on: windows-latest
     timeout-minutes: 45
     steps:

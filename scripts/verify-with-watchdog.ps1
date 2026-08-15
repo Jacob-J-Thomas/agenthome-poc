@@ -1,11 +1,19 @@
 param(
+    [switch]$Qualification,
+
+    [ValidatePattern('^$|^[0-9a-fA-F]{40}$')]
+    [string]$BaseCommit = "",
+
+    [ValidatePattern('^$|^[0-9a-fA-F]{40}$')]
+    [string]$HeadCommit = "",
+
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
 
     [ValidateRange(1, 8)]
     [int]$MaximumTestWorkers = [Math]::Min(8, [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount * 1.5))),
 
-    [ValidateRange(1, 600)]
+    [ValidateRange(1, 900)]
     [int]$DeadlineSeconds = 600
 )
 
@@ -13,7 +21,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$resultsRoot = Join-Path $repoRoot "tests\VerificationResults"
+$verificationMode = if ($Qualification) { "qualification" } else { "promotion" }
+$resultsRoot = Join-Path $repoRoot $(if ($Qualification) { "tests\QualificationResults" } else { "tests\VerificationResults" })
 $watchdogLogPath = Join-Path $resultsRoot "watchdog.log"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
@@ -21,16 +30,28 @@ $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 . (Join-Path $PSScriptRoot "verification-deadline.ps1")
 
+if ($Qualification -and ([string]::IsNullOrWhiteSpace($BaseCommit) -or [string]::IsNullOrWhiteSpace($HeadCommit))) {
+    throw "Qualification requires exact -BaseCommit and -HeadCommit values."
+}
+if (-not $Qualification -and (-not [string]::IsNullOrWhiteSpace($BaseCommit) -or -not [string]::IsNullOrWhiteSpace($HeadCommit))) {
+    throw "Commit selection is valid only with -Qualification."
+}
+
 $arguments = @("-NoProfile")
 if ($runningOnWindows) {
     $arguments += @("-ExecutionPolicy", "Bypass")
 }
 
 $arguments += @(
-    "-File", (Join-Path $PSScriptRoot "verify.ps1"),
-    "-Configuration", $Configuration,
-    "-MaximumTestWorkers", $MaximumTestWorkers.ToString([Globalization.CultureInfo]::InvariantCulture)
+    "-File", (Join-Path $PSScriptRoot $(if ($Qualification) { "qualify.ps1" } else { "verify.ps1" })),
+    "-Configuration", $Configuration
 )
+if ($Qualification) {
+    $arguments += @("-BaseCommit", $BaseCommit, "-HeadCommit", $HeadCommit, "-MaximumWorkers", ([Math]::Min(4, $MaximumTestWorkers)).ToString([Globalization.CultureInfo]::InvariantCulture))
+}
+else {
+    $arguments += @("-MaximumTestWorkers", $MaximumTestWorkers.ToString([Globalization.CultureInfo]::InvariantCulture))
+}
 
 $startInfo = New-VerificationProcessStartInfo -FileName $powerShellExecutable -Arguments $arguments -WorkingDirectory $repoRoot
 $startInfo.RedirectStandardOutput = $true
@@ -43,7 +64,7 @@ $deadlineExceeded = $false
 $cancellationRequested = $false
 $stopwatch = [Diagnostics.Stopwatch]::StartNew()
 
-Write-Output "VERIFY_WATCHDOG_START schema_version=1 deadline_seconds=$DeadlineSeconds started_at_utc=$([DateTimeOffset]::UtcNow.ToString("O"))"
+Write-Output "VERIFY_WATCHDOG_START schema_version=1 mode=$verificationMode deadline_seconds=$DeadlineSeconds started_at_utc=$([DateTimeOffset]::UtcNow.ToString("O"))"
 try {
     if (-not $process.Start()) {
         throw "The verifier process API returned false."
@@ -83,7 +104,7 @@ try {
     $elapsedTicks = if ($deadlineExceeded) { $deadlineTicks + 1L } else { $stopwatch.Elapsed.Ticks }
     $exitCode = if ($deadlineExceeded) { $null } else { $process.ExitCode }
     $disposition = Get-VerificationDeadlineDisposition -ElapsedTicks $elapsedTicks -DeadlineTicks $deadlineTicks -ProcessExited $process.HasExited -ExitCode $exitCode -CompletionMarkerCount $completionMarkerCount -ChildTimedOut $childTimedOut -CancellationRequested $cancellationRequested
-    Write-Output "VERIFY_WATCHDOG_COMPLETE schema_version=1 status=$($disposition.Code) elapsed_seconds=$([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) marker_count=$completionMarkerCount child_exit_code=$($process.ExitCode) log=$watchdogLogPath"
+    Write-Output "VERIFY_WATCHDOG_COMPLETE schema_version=1 mode=$verificationMode status=$($disposition.Code) elapsed_seconds=$([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) marker_count=$completionMarkerCount child_exit_code=$($process.ExitCode) log=$watchdogLogPath"
     if (-not $disposition.Succeeded) {
         throw "Verification watchdog failed closed: $($disposition.Code). $($disposition.Message) Log: $watchdogLogPath"
     }

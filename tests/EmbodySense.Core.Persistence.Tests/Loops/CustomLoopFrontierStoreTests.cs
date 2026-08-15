@@ -447,6 +447,22 @@ public sealed class CustomLoopFrontierStoreTests
     }
 
     [Fact]
+    public async Task Crash_probe_ready_marker_is_published_from_a_closed_file_without_overwriting_existing_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var readyPath = workspace.File("frontier-crash-ready");
+        const string Expected = "0123456789abcdef";
+
+        await PublishCrashProbeReadyMarkerAsync(readyPath, Expected);
+
+        Assert.Equal(Expected, await File.ReadAllTextAsync(readyPath));
+        Assert.Empty(Directory.EnumerateFiles(workspace.RootPath, "frontier-crash-ready.*.tmp"));
+        await Assert.ThrowsAsync<IOException>(() => PublishCrashProbeReadyMarkerAsync(readyPath, "replacement"));
+        Assert.Equal(Expected, await File.ReadAllTextAsync(readyPath));
+        Assert.Empty(Directory.EnumerateFiles(workspace.RootPath, "frontier-crash-ready.*.tmp"));
+    }
+
+    [Fact]
     public async Task External_process_crash_probe_child_stages_one_authenticated_successor_while_holding_the_mutation_lease()
     {
         var candidatePath = Environment.GetEnvironmentVariable(CrashProbeCandidatePathVariable);
@@ -491,7 +507,7 @@ public sealed class CustomLoopFrontierStoreTests
             staging.Flush(flushToDisk: true);
         }
 
-        await File.WriteAllTextAsync(readyPath, frontier.Payload.ContentHash);
+        await PublishCrashProbeReadyMarkerAsync(readyPath, frontier.Payload.ContentHash);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
         while (!File.Exists(releasePath))
         {
@@ -974,6 +990,23 @@ public sealed class CustomLoopFrontierStoreTests
         }
 
         throw new InvalidDataException("The frontier crash-probe ready marker contains malformed evidence.");
+    }
+
+    private static async Task PublishCrashProbeReadyMarkerAsync(string readyPath, string marker)
+    {
+        var stagingPath = $"{readyPath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await File.WriteAllTextAsync(stagingPath, marker);
+            File.Move(stagingPath, readyPath);
+        }
+        finally
+        {
+            if (File.Exists(stagingPath))
+            {
+                File.Delete(stagingPath);
+            }
+        }
     }
 
     private static string RequireCrashProbePath(string variable)

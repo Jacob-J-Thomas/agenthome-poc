@@ -1,0 +1,52 @@
+name: Cancel superseded promotion
+
+on:
+  pull_request:
+    types: [converted_to_draft]
+
+permissions:
+  actions: write
+  pull-requests: read
+
+jobs:
+  cancel-obsolete-promotion:
+    name: cancel-obsolete-promotion
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Cancel only older promotion runs while the pull request remains draft
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pullNumber = context.payload.pull_request.number;
+            const headBranch = context.payload.pull_request.head.ref;
+            const live = await github.rest.pulls.get({ owner, repo, pull_number: pullNumber });
+
+            if (!live.data.draft) {
+              core.info(`PR #${pullNumber} is no longer draft; retaining every promotion run.`);
+              return;
+            }
+
+            for (const workflow_id of ["verify.yml", "browser-e2e.yml"]) {
+              const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+                owner,
+                repo,
+                workflow_id,
+                branch: headBranch,
+                event: "pull_request",
+                per_page: 100,
+              });
+              const obsolete = runs.filter(
+                (run) =>
+                  run.id < context.runId &&
+                  run.status !== "completed" &&
+                  run.pull_requests.some((pull) => pull.number === pullNumber),
+              );
+
+              for (const run of obsolete) {
+                await github.rest.actions.cancelWorkflowRun({ owner, repo, run_id: run.id });
+                core.info(`Cancelled older ${workflow_id} run ${run.id} for draft PR #${pullNumber}.`);
+              }
+            }

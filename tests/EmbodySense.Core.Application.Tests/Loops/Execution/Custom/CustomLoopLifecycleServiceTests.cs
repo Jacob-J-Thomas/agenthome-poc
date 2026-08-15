@@ -9,6 +9,7 @@ using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -426,6 +427,26 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Equal(CustomLoopControlOperationState.Pending, pending!.State);
         Assert.Equal(CustomLoopControlStatus.CancelRequested, replay.Status);
         Assert.Equal(2, cancellation.AttemptCount);
+        Assert.Equal([run.Id], cancellation.RunIds);
+        var completed = await operations.GetAsync(request.OperationId);
+        Assert.Equal(CustomLoopControlOperationState.Complete, completed!.State);
+        Assert.Equal(CustomLoopControlStatus.CancelRequested, completed.Outcome);
+    }
+
+    [Fact]
+    public async Task Cancellation_routing_waits_for_an_acknowledgement_beyond_the_legacy_three_second_budget()
+    {
+        var run = Run("run-cancel-slow-acknowledgement", CustomLoopRunStatus.Running);
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var cancellation = new RecordingCancellationSignal(acknowledgementDelay: TimeSpan.FromMilliseconds(3250));
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
+        var request = Cancel(run, "cancel-slow-acknowledgement");
+
+        var result = await service.CancelAsync(request);
+
+        Assert.Equal(10, CustomLoopAttemptCancellationContractLimits.MaxRemoteRequestSeconds);
+        Assert.Equal(CustomLoopControlStatus.CancelRequested, result.Status);
         Assert.Equal([run.Id], cancellation.RunIds);
         var completed = await operations.GetAsync(request.OperationId);
         Assert.Equal(CustomLoopControlOperationState.Complete, completed!.State);
@@ -1622,7 +1643,7 @@ public sealed class CustomLoopLifecycleServiceTests
         }
     }
 
-    private sealed class RecordingCancellationSignal(int failuresBeforeSuccess = 0) : ICustomLoopExecutionCancellationSignal
+    private sealed class RecordingCancellationSignal(int failuresBeforeSuccess = 0, TimeSpan acknowledgementDelay = default) : ICustomLoopExecutionCancellationSignal
     {
         private int _remainingFailures = failuresBeforeSuccess;
 
@@ -1654,10 +1675,15 @@ public sealed class CustomLoopLifecycleServiceTests
             RunIds.Add(runId);
         }
 
-        public Task<CustomLoopAttemptCancellationResult> RequestActiveAttemptCancellationAsync(string runId, string operationId, CancellationToken cancellationToken = default)
+        public async Task<CustomLoopAttemptCancellationResult> RequestActiveAttemptCancellationAsync(string runId, string operationId, CancellationToken cancellationToken = default)
         {
             CancelActiveAttempt(runId);
-            return Task.FromResult(new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.SignalDelivered, "The test cancellation signal was delivered."));
+            if (acknowledgementDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(acknowledgementDelay, cancellationToken);
+            }
+
+            return new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.SignalDelivered, "The test cancellation signal was delivered.");
         }
 
         private sealed class Registration(Action release) : IDisposable

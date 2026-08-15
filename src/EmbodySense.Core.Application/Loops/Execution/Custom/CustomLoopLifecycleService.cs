@@ -580,7 +580,7 @@ public sealed class CustomLoopLifecycleService
     {
         try
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(CustomLoopAttemptCancellationContractLimits.MaxRemoteRequestSeconds));
             var result = await _cancellationSignal.RequestActiveAttemptCancellationAsync(runId, operationId, timeout.Token);
             var owner = result.OwnerId is null || result.OwnerProcessId is null ? string.Empty : $" Owner generation `{result.OwnerId}` in process {result.OwnerProcessId} handled the route.";
             return result.Status switch

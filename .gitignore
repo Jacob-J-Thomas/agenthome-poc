@@ -2,6 +2,7 @@ bin/
 obj/
 TestResults/
 tests/VerificationResults/
+tests/QualificationResults/
 .vs/
 .vscode/
 .idea/

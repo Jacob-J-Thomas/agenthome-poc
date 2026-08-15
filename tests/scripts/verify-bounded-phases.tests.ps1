@@ -12,10 +12,17 @@ $watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
 $coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
 $coverageEvidenceScriptPath = Join-Path $repoRoot "scripts\verification-coverage-evidence.ps1"
 $verifyWorkflowPath = Join-Path $repoRoot ".github\workflows\verify.yml"
+$qualificationWorkflowPath = Join-Path $repoRoot ".github\workflows\qualification.yml"
+$browserWorkflowPath = Join-Path $repoRoot ".github\workflows\browser-e2e.yml"
+$promotionCancellationWorkflowPath = Join-Path $repoRoot ".github\workflows\promotion-cancellation.yaml"
+$codeqlWorkflowPath = Join-Path $repoRoot ".github\workflows\codeql.yml"
+$dependencyReviewWorkflowPath = Join-Path $repoRoot ".github\workflows\dependency-review.yml"
 $stressWorkflowPath = Join-Path $repoRoot ".github\workflows\verification-stress.yml"
 $pullRequestSettingsPath = Join-Path $repoRoot "tests\verification-pull-request.runsettings"
 $stressSettingsPath = Join-Path $repoRoot "tests\verification-stress.runsettings"
 $gitIgnorePath = Join-Path $repoRoot ".gitignore"
+$readmePath = Join-Path $repoRoot "README.md"
+$verificationDocumentationPath = Join-Path $repoRoot "docs\VERIFICATION.md"
 $maximumTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopRunArtifactMaximumShapeTests.cs"
 $retentionTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopTraceRetentionStoreTests.cs"
 $coverageChildProcessPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\CoverageChildProcessAssembly.cs"
@@ -144,10 +151,17 @@ $laneScript = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\verificatio
 $coverageScript = Get-Content -LiteralPath $coverageScriptPath -Raw
 $coverageEvidenceScript = Get-Content -LiteralPath $coverageEvidenceScriptPath -Raw
 $verifyWorkflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
+$qualificationWorkflow = Get-Content -LiteralPath $qualificationWorkflowPath -Raw
+$browserWorkflow = Get-Content -LiteralPath $browserWorkflowPath -Raw
+$promotionCancellationWorkflow = Get-Content -LiteralPath $promotionCancellationWorkflowPath -Raw
+$codeqlWorkflow = Get-Content -LiteralPath $codeqlWorkflowPath -Raw
+$dependencyReviewWorkflow = Get-Content -LiteralPath $dependencyReviewWorkflowPath -Raw
 $stressWorkflow = Get-Content -LiteralPath $stressWorkflowPath -Raw
 $pullRequestSettings = Get-Content -LiteralPath $pullRequestSettingsPath -Raw
 $stressSettings = Get-Content -LiteralPath $stressSettingsPath -Raw
 $gitIgnore = Get-Content -LiteralPath $gitIgnorePath -Raw
+$readme = Get-Content -LiteralPath $readmePath -Raw
+$verificationDocumentation = Get-Content -LiteralPath $verificationDocumentationPath -Raw
 $maximumTest = Get-Content -LiteralPath $maximumTestPath -Raw
 $retentionTest = Get-Content -LiteralPath $retentionTestPath -Raw
 $coverageChildProcess = Get-Content -LiteralPath $coverageChildProcessPath -Raw
@@ -276,6 +290,7 @@ Assert-Contains -Actual $verifyScript -Expected '-Name "git-diff-check"' -Messag
 Assert-Contains -Actual $verifyScript -Expected '-Name "frontend-preflight"' -Message "The canonical verifier must retain frontend validation exactly once behind its npm install dependency."
 Assert-Contains -Actual $verifyScript -Expected 'VERIFY_COMPLETE schema_version=1 status=passed' -Message "A successful standard run must emit exact terminal evidence."
 Assert-Contains -Actual $gitIgnore -Expected 'tests/VerificationResults/' -Message "Generated verifier diagnostics must remain uploadable without dirtying a local worktree."
+Assert-Contains -Actual $gitIgnore -Expected 'tests/QualificationResults/' -Message "Generated qualification diagnostics must remain uploadable without dirtying a local worktree."
 Assert-Contains -Actual $coverageEvidenceScript -Expected 'if (!fileLines.TryGetValue(line.Key, out existingHits) || line.Value > existingHits)' -Message "Split coverage must merge duplicate source lines by maximum hits in the authenticated reduction owner."
 Assert-Contains -Actual $coverageScript -Expected 'Coverage report manifest contains duplicate report paths.' -Message "Duplicate report evidence must fail closed."
 Assert-Contains -Actual $coverageScript -Expected 'missing, stale, or unexpected reports' -Message "Coverage manifest reconciliation must reject extra or missing files."
@@ -289,7 +304,67 @@ Assert-Contains -Actual $stressWorkflow -Expected "schedule:" -Message "The stre
 Assert-Contains -Actual $stressWorkflow -Expected "-VerificationTier Stress" -Message "The scheduled workflow must invoke the stress tier."
 Assert-Contains -Actual $stressWorkflow -Expected "if: always()" -Message "Stress diagnostics must be retained on failure."
 Assert-Contains -Actual $verifyWorkflow -Expected "./scripts/verify-with-watchdog.ps1 -Configuration Release" -Message "Standard CI must enter through the external watchdog."
+Assert-Contains -Actual $verifyWorkflow -Expected "github.event.pull_request.draft == false" -Message "Full verification must be a promotion gate for merge candidates and main."
+Assert-Contains -Actual $verifyWorkflow -Expected "types: [opened, synchronize, reopened, ready_for_review, edited]" -Message "Every non-draft metadata edit must rerun substantive verification under the protected context."
+Assert-Contains -Actual $verifyWorkflow -Expected "name: verify" -Message "Verification must always emit the exact protected context name."
+Assert-Contains -Actual $verifyWorkflow -Expected 'group: verify-${{ github.event.pull_request.number || github.ref }}' -Message "A newer promotion edge must cancel superseded full verification work."
+Assert-Contains -Actual $verifyWorkflow -Expected "cancel-in-progress: true" -Message "Full verification must release its Windows runner when superseded."
+$verifyJobIndex = $verifyWorkflow.IndexOf("  verify:", [StringComparison]::Ordinal)
+$verifyJobConditionIndex = $verifyWorkflow.IndexOf("    if:", $verifyJobIndex, [StringComparison]::Ordinal)
+$verifyJobConcurrencyIndex = $verifyWorkflow.IndexOf("    concurrency:", $verifyJobIndex, [StringComparison]::Ordinal)
+Assert-True -Condition ($verifyJobIndex -ge 0 -and $verifyJobConditionIndex -gt $verifyJobIndex -and $verifyJobConcurrencyIndex -gt $verifyJobConditionIndex) -Message "Full verification cancellation must remain job-scoped behind non-draft eligibility."
+Assert-True -Condition ($verifyWorkflow.IndexOf("`nconcurrency:", [StringComparison]::Ordinal) -lt 0) -Message "Full verification must not use workflow-scoped cancellation for ineligible metadata edits."
+Assert-True -Condition ($verifyWorkflow.IndexOf("-SkipCoverage", [StringComparison]::Ordinal) -lt 0) -Message "Promotion verification must retain exact coverage collection and reduction."
+Assert-Contains -Actual $browserWorkflow -Expected "github.event.pull_request.draft == false" -Message "Installed-browser verification must be a promotion gate for merge candidates and main."
+Assert-Contains -Actual $browserWorkflow -Expected "types: [opened, synchronize, reopened, ready_for_review, edited]" -Message "Every non-draft metadata edit must rerun installed-browser verification under the protected context."
+Assert-Contains -Actual $browserWorkflow -Expected "name: browser-e2e" -Message "Installed-browser verification must always emit the exact protected context name."
+Assert-Contains -Actual $browserWorkflow -Expected 'group: browser-e2e-${{ github.event.pull_request.number || github.ref }}' -Message "A newer promotion edge must cancel superseded installed-browser work."
+Assert-Contains -Actual $browserWorkflow -Expected "cancel-in-progress: true" -Message "Installed-browser verification must release its Windows runner when superseded."
+$browserJobIndex = $browserWorkflow.IndexOf("  browser-e2e:", [StringComparison]::Ordinal)
+$browserJobConditionIndex = $browserWorkflow.IndexOf("    if:", $browserJobIndex, [StringComparison]::Ordinal)
+$browserJobConcurrencyIndex = $browserWorkflow.IndexOf("    concurrency:", $browserJobIndex, [StringComparison]::Ordinal)
+Assert-True -Condition ($browserJobIndex -ge 0 -and $browserJobConditionIndex -gt $browserJobIndex -and $browserJobConcurrencyIndex -gt $browserJobConditionIndex) -Message "Browser cancellation must remain job-scoped behind non-draft eligibility."
+Assert-True -Condition ($browserWorkflow.IndexOf("`nconcurrency:", [StringComparison]::Ordinal) -lt 0) -Message "Browser verification must not use workflow-scoped cancellation for ineligible metadata edits."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "types: [converted_to_draft]" -Message "Returning a pull request to draft must trigger cancellation of obsolete promotion work."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "name: cancel-obsolete-promotion" -Message "Draft demotion must emit one distinct non-required cancellation context."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "actions: write" -Message "Draft demotion requires narrowly scoped authority to cancel obsolete workflow runs."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "pull-requests: read" -Message "Draft demotion must re-read live pull-request eligibility before cancellation."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "uses: actions/github-script@v8" -Message "Draft demotion must use the bounded GitHub API cancellation path."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "github.rest.pulls.get" -Message "Draft demotion must re-read live pull-request state."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "if (!live.data.draft)" -Message "A stale demotion event must retain every newer promotion after the pull request is ready again."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected '["verify.yml", "browser-e2e.yml"]' -Message "Draft demotion may cancel only the two exhaustive promotion workflows."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "run.id < context.runId" -Message "Draft demotion must never cancel a workflow run newer than its own event run."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected 'run.status !== "completed"' -Message "Draft demotion must not rewrite terminal workflow evidence."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "pull.number === pullNumber" -Message "Draft demotion cancellation must remain scoped to the exact pull request."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "github.rest.actions.cancelWorkflowRun" -Message "Draft demotion must cancel each authenticated older promotion run explicitly."
+Assert-True -Condition ($promotionCancellationWorkflow.IndexOf("concurrency:", [StringComparison]::Ordinal) -lt 0 -and $promotionCancellationWorkflow.IndexOf("cancel-in-progress:", [StringComparison]::Ordinal) -lt 0) -Message "Draft demotion must not use unordered cross-workflow concurrency cancellation."
+Assert-True -Condition ($promotionCancellationWorkflow.IndexOf("actions/checkout", [StringComparison]::Ordinal) -lt 0 -and $promotionCancellationWorkflow.IndexOf("actions/setup-", [StringComparison]::Ordinal) -lt 0) -Message "Draft demotion cancellation must not consume checkout or tool-setup time."
+Assert-True -Condition ($promotionCancellationWorkflow.IndexOf("`n    name: verify`n", [StringComparison]::Ordinal) -lt 0 -and $promotionCancellationWorkflow.IndexOf("`n    name: browser-e2e`n", [StringComparison]::Ordinal) -lt 0) -Message "Draft demotion must not publish either required promotion context."
+Assert-True -Condition ($verifyWorkflow.IndexOf('ref: ${{ github.event.pull_request.head.sha }}', [StringComparison]::Ordinal) -lt 0) -Message "Promotion verification must retain the generated merge-ref checkout it documents."
+Assert-True -Condition ($browserWorkflow.IndexOf('ref: ${{ github.event.pull_request.head.sha }}', [StringComparison]::Ordinal) -lt 0) -Message "Installed-browser promotion must retain the generated merge-ref checkout it documents."
+Assert-Contains -Actual $readme -Expected "GitHub's generated merge ref for the current reviewed head/base pair" -Message "README promotion authority must match the workflow checkout."
+Assert-Contains -Actual $verificationDocumentation -Expected "generated merge-ref checkout" -Message "Verification documentation must distinguish exact-head qualification from merge-ref promotion."
+Assert-Contains -Actual $qualificationWorkflow -Expected "converted_to_draft," -Message "Returning a pull request to draft must retain qualification."
+Assert-Contains -Actual $qualificationWorkflow -Expected "edited," -Message "Every retargeted pull-request edge must receive qualification."
+Assert-Contains -Actual $qualificationWorkflow -Expected "name: qualification" -Message "Every metadata edit must rerun qualification under its stable context name."
+Assert-Contains -Actual $qualificationWorkflow -Expected "cancel-in-progress: true" -Message "Superseded qualification runs must not monopolize Windows capacity."
+$qualificationJobIndex = $qualificationWorkflow.IndexOf("  qualification:", [StringComparison]::Ordinal)
+$qualificationJobConcurrencyIndex = $qualificationWorkflow.IndexOf("    concurrency:", $qualificationJobIndex, [StringComparison]::Ordinal)
+Assert-True -Condition ($qualificationJobIndex -ge 0 -and $qualificationJobConcurrencyIndex -gt $qualificationJobIndex) -Message "Qualification cancellation must remain job-scoped for every pull-request edit."
+Assert-True -Condition ($qualificationWorkflow.IndexOf("`nconcurrency:", [StringComparison]::Ordinal) -lt 0) -Message "Qualification must not use workflow-scoped cancellation for ineligible metadata edits."
+Assert-Contains -Actual $qualificationWorkflow -Expected './scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit "${{ github.event.pull_request.base.sha }}" -HeadCommit "${{ github.event.pull_request.head.sha }}" -Configuration Release -DeadlineSeconds 360' -Message "Qualification must bind the exact PR edge under one six-minute watchdog."
+Assert-True -Condition ($qualificationWorkflow.IndexOf("run: ./scripts/verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "Qualification cannot bypass the watchdog."
+Assert-True -Condition ($qualificationWorkflow.IndexOf("coverage.cobertura.xml", [StringComparison]::Ordinal) -lt 0) -Message "Qualification must not claim or upload absent coverage evidence."
+Assert-Contains -Actual $codeqlWorkflow -Expected "types: [opened, synchronize, reopened, edited]" -Message "CodeQL must observe a retargeted pull request edge."
+Assert-Contains -Actual $codeqlWorkflow -Expected 'name: Analyze ${{ matrix.language }}' -Message "Every metadata edit must rerun CodeQL under its stable analysis names."
+Assert-Contains -Actual $dependencyReviewWorkflow -Expected "types: [opened, synchronize, reopened, edited]" -Message "Dependency review must observe a retargeted pull request edge."
+Assert-Contains -Actual $dependencyReviewWorkflow -Expected "name: dependency-review" -Message "Every metadata edit must rerun dependency review under its protected context name."
+foreach ($workflowText in @($verifyWorkflow, $browserWorkflow, $qualificationWorkflow, $codeqlWorkflow, $dependencyReviewWorkflow)) {
+    Assert-True -Condition ($workflowText.IndexOf("metadata-edit", [StringComparison]::Ordinal) -lt 0) -Message "No workflow may replace a protected context with an unevaluated skipped metadata name."
+}
 Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./scripts/verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "Standard CI cannot bypass the watchdog."
+Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900" -Message "Promotion must have one explicit bounded fifteen-minute certification window."
+Assert-Contains -Actual $verifyWorkflow -Expected "timeout-minutes: 20" -Message "Workflow setup and diagnostic upload must remain bounded outside the measured promotion child."
 Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./tests/scripts/", [StringComparison]::Ordinal) -lt 0) -Message "Repository script tests must execute inside the measured verifier child."
 foreach ($contractScript in @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1")) {
     Assert-Contains -Actual $verifyScript -Expected $contractScript -Message "The measured verifier must own '$contractScript'."

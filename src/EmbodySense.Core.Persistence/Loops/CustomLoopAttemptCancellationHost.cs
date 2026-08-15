@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
 
@@ -23,6 +24,12 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 {
     private static readonly TimeSpan _acknowledgementTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan _connectionIoTimeout = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan _routingCompletionMargin = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan _maximumRemoteRequestDuration = TimeSpan.FromSeconds(CustomLoopAttemptCancellationContractLimits.MaxRemoteRequestSeconds);
+    // Connection and request-write time must not consume the owner's acknowledgement budget. The response window includes
+    // the server read and write bounds. The shared end-to-end budget also retains one final scheduling interval for the caller.
+    private static readonly TimeSpan _remoteConnectionTimeout = _acknowledgementTimeout + _connectionIoTimeout;
+    private static readonly TimeSpan _remoteResponseTimeout = _maximumRemoteRequestDuration - _remoteConnectionTimeout - _connectionIoTimeout - _routingCompletionMargin;
     private static readonly JsonSerializerOptions _wireJsonOptions = new(JsonSerializerDefaults.Web);
     private const int MaxWireUtf8Bytes = 4 * 1024;
 
@@ -139,11 +146,25 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         try
         {
             using var client = new NamedPipeClientStream(".", descriptor.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(_acknowledgementTimeout + TimeSpan.FromSeconds(1));
-            await client.ConnectAsync(timeout.Token);
-            await WriteFrameAsync(client, request, timeout.Token);
-            var response = await ReadFrameAsync<CancellationWireResponse>(client, timeout.Token);
+            using (var connectTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                connectTimeout.CancelAfter(_remoteConnectionTimeout);
+                await client.ConnectAsync(connectTimeout.Token);
+            }
+
+            using (var writeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                writeTimeout.CancelAfter(_connectionIoTimeout);
+                await WriteFrameAsync(client, request, writeTimeout.Token);
+            }
+
+            CancellationWireResponse response;
+            using (var responseTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                responseTimeout.CancelAfter(_remoteResponseTimeout);
+                response = await ReadFrameAsync<CancellationWireResponse>(client, responseTimeout.Token);
+            }
+
             if (response.SchemaVersion != 1 || !Enum.IsDefined(response.Status) || response.Status == CustomLoopAttemptCancellationStatus.Unknown || string.IsNullOrWhiteSpace(response.Detail))
             {
                 return new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.Invalid, "The workspace-host owner returned an invalid cancellation acknowledgement.");
