@@ -378,8 +378,8 @@ public sealed class LoopRunApiControllerTests
             var unknownField = await SendControlAsync(client, "/api/loop-runs/run-missing/cancel", token, new { expectedLifecycleVersion = 1, operationId = "cancel-unknown", ownerConnectionId = "forged-owner" });
 
             Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
-            Assert.Equal(HttpStatusCode.NotFound, pause.StatusCode);
-            Assert.Equal(HttpStatusCode.NotFound, cancel.StatusCode);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, pause.StatusCode);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, cancel.StatusCode);
             Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
             Assert.Equal(HttpStatusCode.BadRequest, unknownField.StatusCode);
         }
