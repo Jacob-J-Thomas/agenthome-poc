@@ -189,7 +189,14 @@ try {
 param([string]$Role, [string]$SynchronizationRoot)
 Write-Output "start=$([DateTime]::UtcNow.Ticks)"
 if ($Role -ceq "build") {
-    Start-Sleep -Milliseconds 1000
+    $ordinaryReadyPath = Join-Path $SynchronizationRoot "ordinary.ready"
+    $ordinaryReadyDeadline = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path -LiteralPath $ordinaryReadyPath -PathType Leaf)) {
+        if ($ordinaryReadyDeadline.ElapsedMilliseconds -ge 5000) {
+            throw "Build did not observe ordinary backfill before its bounded synchronization deadline."
+        }
+        Start-Sleep -Milliseconds 10
+    }
 }
 elseif ($Role -ceq "frontend") {
     Start-Sleep -Milliseconds 150
