@@ -156,9 +156,13 @@ Assert-True -Condition ($crossNamespaceHelperPlan.TestSelections[0].Namespaces -
 
 $integrationHelperPath = "tests/EmbodySense.IntegrationTests/Core/Governance/Tools/ImmediateToolResultRetentionStore.cs"
 $integrationHelperMapping = Get-QualificationFocusedHelperMapping -Path $integrationHelperPath
-$integrationHelperPlan = Get-QualificationPlan -ChangedPaths @($integrationHelperPath) -TestNamespacesByPath @{ $integrationHelperPath = @($integrationHelperMapping.ConsumerNamespaces) }
-Assert-Equal -Actual @($integrationHelperPlan.TestSelections[0].Namespaces).Count -Expected 1 -Message "A reviewed same-namespace helper must remain focused."
-Assert-Equal -Actual $integrationHelperPlan.TestSelections[0].Namespaces[0] -Expected "EmbodySense.IntegrationTests.Core.Governance.Tools" -Message "The result-retention helper must select its exact ToolBroker consumer namespace."
+$integrationHelperPlan = Get-QualificationPlan -ChangedPaths @($integrationHelperPath) -TestClassesByPath @{ $integrationHelperPath = @($integrationHelperMapping.ConsumerClasses) }
+Assert-Equal -Actual @($integrationHelperPlan.TestSelections[0].Namespaces).Count -Expected 0 -Message "A reviewed single-class helper must not broaden to its containing namespace."
+Assert-Equal -Actual @($integrationHelperPlan.TestSelections[0].Classes).Count -Expected 1 -Message "A reviewed single-class helper must remain focused."
+Assert-Equal -Actual $integrationHelperPlan.TestSelections[0].Classes[0] -Expected "EmbodySense.IntegrationTests.Core.Governance.Tools.ToolBrokerTests" -Message "The result-retention helper must select its exact ToolBroker consumer class."
+$integrationConsumerPath = "tests/EmbodySense.IntegrationTests/Core/Governance/Tools/ToolBrokerTests.cs"
+$integrationHelperAndConsumerPlan = Get-QualificationPlan -ChangedPaths @($integrationHelperPath, $integrationConsumerPath) -TestClassesByPath @{ $integrationHelperPath = @($integrationHelperMapping.ConsumerClasses); $integrationConsumerPath = "EmbodySense.IntegrationTests.Core.Governance.Tools.ToolBrokerTests" }
+Assert-Equal -Actual @($integrationHelperAndConsumerPlan.TestSelections[0].Classes).Count -Expected 1 -Message "A helper and its directly changed consumer must deduplicate to one exact class."
 
 $missingSelectionRejected = $false
 try {
@@ -311,7 +315,15 @@ foreach ($trackedPath in $trackedPaths) {
         }
         else {
             $focusedHelperMapping = Get-QualificationFocusedHelperMapping -Path $trackedPath
-            $trackedTestNamespaces.Add($trackedPath, $(if ($null -eq $focusedHelperMapping) { [string[]]::new(0) } else { [string[]]@($focusedHelperMapping.ConsumerNamespaces) }))
+            if ($null -eq $focusedHelperMapping) {
+                $trackedTestNamespaces.Add($trackedPath, [string[]]::new(0))
+            }
+            elseif (@($focusedHelperMapping.ConsumerClasses).Count -gt 0) {
+                $trackedTestClasses.Add($trackedPath, [string[]]@($focusedHelperMapping.ConsumerClasses))
+            }
+            else {
+                $trackedTestNamespaces.Add($trackedPath, [string[]]@($focusedHelperMapping.ConsumerNamespaces))
+            }
         }
     }
 }
@@ -324,8 +336,12 @@ foreach ($mapping in $script:QualificationFocusedHelperMappings) {
     Assert-True -Condition ($trackedPaths -ccontains $mapping.Path) -Message "Focused helper '$($mapping.Path)' must be tracked."
     $helperSource = Get-Content -LiteralPath (Join-Path $repoRoot $mapping.Path) -Raw
     Assert-True -Condition (-not (Test-QualificationContainsDirectXunitTest -Content $helperSource)) -Message "Focused helper '$($mapping.Path)' must not directly declare an xUnit test."
+    $usesNamespaceMap = @($mapping.ConsumerNamespaces).Count -gt 0
+    $usesClassMap = @($mapping.ConsumerClasses).Count -gt 0
+    Assert-True -Condition ($usesNamespaceMap -ne $usesClassMap) -Message "Focused helper '$($mapping.Path)' must use exactly one namespace or class consumer map."
     $helperIdentifier = [IO.Path]::GetFileNameWithoutExtension($mapping.Path)
     $actualConsumerNamespaces = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $actualConsumerClasses = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($candidatePath in $trackedPaths) {
         if ($candidatePath -ceq $mapping.Path -or -not $candidatePath.EndsWith(".cs", [StringComparison]::OrdinalIgnoreCase) -or $null -eq (Get-QualificationTestProject -Path $candidatePath)) {
             continue
@@ -336,10 +352,20 @@ foreach ($mapping in $script:QualificationFocusedHelperMappings) {
             continue
         }
 
-        [void]$actualConsumerNamespaces.Add((Get-QualificationDeclaredTestNamespace -Path $candidatePath -Content $candidateSource))
+        if ($usesClassMap) {
+            $candidateClasses = @(Get-QualificationDirectXunitTestClasses -Path $candidatePath -Content $candidateSource)
+            Assert-True -Condition ($candidateClasses.Count -gt 0) -Message "Class-focused helper '$($mapping.Path)' has a non-test consumer '$candidatePath'."
+            foreach ($candidateClass in $candidateClasses) {
+                [void]$actualConsumerClasses.Add($candidateClass)
+            }
+        }
+        else {
+            [void]$actualConsumerNamespaces.Add((Get-QualificationDeclaredTestNamespace -Path $candidatePath -Content $candidateSource))
+        }
     }
 
     Assert-Equal -Actual (@($actualConsumerNamespaces | Sort-Object) -join "|") -Expected (@($mapping.ConsumerNamespaces | Sort-Object) -join "|") -Message "Focused helper '$($mapping.Path)' must enumerate every syntax-proven consumer namespace."
+    Assert-Equal -Actual (@($actualConsumerClasses | Sort-Object) -join "|") -Expected (@($mapping.ConsumerClasses | Sort-Object) -join "|") -Message "Focused helper '$($mapping.Path)' must enumerate every syntax-proven consumer class."
 }
 
 foreach ($consumerProject in $script:QualificationTestProjects) {

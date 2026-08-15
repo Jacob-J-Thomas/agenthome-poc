@@ -125,6 +125,7 @@ $script:QualificationFocusedHelperMappings = @(
             "EmbodySense.Core.Application.Tests.Capabilities",
             "EmbodySense.Core.Application.Tests.Credentials"
         )
+        ConsumerClasses = @()
     },
     [pscustomobject]@{
         Path = "tests/EmbodySense.Core.Persistence.Tests/Verification/Models/VerificationPhaseBudget.cs"
@@ -132,6 +133,7 @@ $script:QualificationFocusedHelperMappings = @(
             "EmbodySense.Core.Persistence.Tests.Loops",
             "EmbodySense.Core.Persistence.Tests.Verification"
         )
+        ConsumerClasses = @()
     },
     [pscustomobject]@{
         Path = "tests/EmbodySense.Core.Persistence.Tests/Verification/Models/VerificationPhaseClassification.cs"
@@ -140,10 +142,12 @@ $script:QualificationFocusedHelperMappings = @(
             "EmbodySense.Core.Persistence.Tests.Verification",
             "EmbodySense.Core.Persistence.Tests.Verification.Models"
         )
+        ConsumerClasses = @()
     },
     [pscustomobject]@{
         Path = "tests/EmbodySense.IntegrationTests/Core/Governance/Tools/ImmediateToolResultRetentionStore.cs"
-        ConsumerNamespaces = @("EmbodySense.IntegrationTests.Core.Governance.Tools")
+        ConsumerNamespaces = @()
+        ConsumerClasses = @("EmbodySense.IntegrationTests.Core.Governance.Tools.ToolBrokerTests")
     }
 )
 $script:QualificationCSharpParserInitialized = $false

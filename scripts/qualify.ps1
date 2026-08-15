@@ -183,7 +183,15 @@ try {
             }
             else {
                 $focusedHelperMapping = Get-QualificationFocusedHelperMapping -Path $normalizedPath
-                $testNamespacesByPath[$normalizedPath] = if ($null -eq $focusedHelperMapping) { [string[]]::new(0) } else { [string[]]@($focusedHelperMapping.ConsumerNamespaces) }
+                if ($null -eq $focusedHelperMapping) {
+                    $testNamespacesByPath[$normalizedPath] = [string[]]::new(0)
+                }
+                elseif (@($focusedHelperMapping.ConsumerClasses).Count -gt 0) {
+                    $testClassesByPath[$normalizedPath] = [string[]]@($focusedHelperMapping.ConsumerClasses)
+                }
+                else {
+                    $testNamespacesByPath[$normalizedPath] = [string[]]@($focusedHelperMapping.ConsumerNamespaces)
+                }
             }
         }
     }
