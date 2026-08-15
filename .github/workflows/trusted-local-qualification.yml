@@ -1,0 +1,81 @@
+name: Trusted Local Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Exact lowercase 40-character base commit already present in this repository
+        required: true
+        type: string
+      head_sha:
+        description: Exact lowercase 40-character head commit already present in this repository
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trusted-local-qualification
+  cancel-in-progress: false
+
+jobs:
+  qualification:
+    if: github.repository == 'Jacob-J-Thomas/agenthome-poc' && github.actor == 'Jacob-J-Thomas'
+    runs-on: [agenthome-trusted-ephemeral-macos-arm64]
+    timeout-minutes: 10
+
+    steps:
+      - name: Validate immutable inputs
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          if ($env:BASE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'base_sha must be a lowercase 40-character commit SHA.' }
+          if ($env:HEAD_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'head_sha must be a lowercase 40-character commit SHA.' }
+
+      - name: Check out exact head
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+
+      - name: Prove repository ancestry
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          git cat-file -e "$env:BASE_SHA^{commit}"
+          if ($LASTEXITCODE -ne 0) { throw 'base_sha is unavailable as a repository commit.' }
+          git cat-file -e "$env:HEAD_SHA^{commit}"
+          if ($LASTEXITCODE -ne 0) { throw 'head_sha is unavailable as a repository commit.' }
+          if ((git rev-parse HEAD) -cne $env:HEAD_SHA) { throw 'The checkout does not match head_sha.' }
+          git merge-base --is-ancestor $env:BASE_SHA $env:HEAD_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'base_sha must be an ancestor of head_sha.' }
+
+      - name: Install pinned .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Qualify exact edge
+        shell: pwsh
+        run: ./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit '${{ inputs.base_sha }}' -HeadCommit '${{ inputs.head_sha }}' -Configuration Release -DeadlineSeconds 360
+
+      - name: Upload qualification diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: trusted-local-qualification-${{ github.run_attempt }}
+          path: tests/QualificationResults/**
+          if-no-files-found: error
+          retention-days: 14
