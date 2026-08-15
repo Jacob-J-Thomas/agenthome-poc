@@ -25,7 +25,6 @@ $testResultsRoot = Join-Path $resultsRoot "Tests"
 $planPath = Join-Path $resultsRoot "qualification-plan.json"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
-$fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-qualification-" + [Guid]::NewGuid().ToString("N"))
 $qualificationResourceCapacity = [Math]::Min(4, [Math]::Max(1, [Environment]::ProcessorCount))
 $qualificationProcessHeavyWeight = [Math]::Min(2, $qualificationResourceCapacity)
 $qualificationCpuBoundWeight = [Math]::Min(2, $qualificationResourceCapacity)
@@ -33,6 +32,11 @@ $qualificationCpuBoundWeight = [Math]::Min(2, $qualificationResourceCapacity)
 . (Join-Path $PSScriptRoot "qualification-plan.ps1")
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 . (Join-Path $PSScriptRoot "verification-parallel.ps1")
+. (Join-Path $PSScriptRoot "verification-temp.ps1")
+$qualificationRunnerTemp = if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:RUNNER_TEMP } elseif ($runningOnWindows) { [IO.Path]::GetTempPath() } else { "/tmp" }
+$qualificationPhysicalTempRoot = Resolve-VerificationPhysicalTempRoot -RunnerTemp $qualificationRunnerTemp -SystemTempPath ([IO.Path]::GetTempPath())
+$qualificationFixtureRunIdentity = [Guid]::NewGuid().ToString("N")
+$qualificationFixtureRoots = [Collections.Generic.List[string]]::new()
 
 function Assert-QualificationCommit {
     param([Parameter(Mandatory = $true)] [string]$Commit)
@@ -150,8 +154,50 @@ try {
     $testNamespacesByPath = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $testClassesByPath = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $focusedHelperRelevantPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $validatedFocusedImplementationPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($changedPath in $changedPaths) {
         $normalizedPath = ConvertTo-QualificationPath -Path $changedPath
+        foreach ($focusedImplementationMapping in @(Get-QualificationFocusedImplementationMappingsForPath -Path $normalizedPath)) {
+            if (-not $validatedFocusedImplementationPaths.Add($focusedImplementationMapping.Path)) {
+                continue
+            }
+
+            $mappedImplementationPath = ConvertTo-QualificationPath -Path $focusedImplementationMapping.Path
+            $existingEdgeCount = 0
+            foreach ($commit in @($HeadCommit, $mergeBase)) {
+                if (-not (Test-QualificationCommitPath -Path $mappedImplementationPath -Commit $commit)) {
+                    continue
+                }
+
+                $existingEdgeCount++
+                $implementationContent = Get-QualificationBlobContent -Path $mappedImplementationPath -Commits @($commit)
+                if (-not (Test-QualificationFocusedImplementationSource -Content $implementationContent)) {
+                    throw "Focused implementation mapping '$mappedImplementationPath' is only valid for one syntax-valid top-level internal sealed non-partial type on every existing side of the exact edge."
+                }
+            }
+            if ($existingEdgeCount -eq 0) {
+                throw "Focused implementation mapping '$mappedImplementationPath' has no source on either side of the exact edge."
+            }
+
+            foreach ($testMapping in @($focusedImplementationMapping.Tests)) {
+                $mappedTestPath = ConvertTo-QualificationPath -Path $testMapping.Path
+                if (-not (Test-QualificationCommitPath -Path $mappedTestPath -Commit $HeadCommit)) {
+                    throw "Focused implementation mapping '$mappedImplementationPath' names missing exact-head test source '$mappedTestPath'."
+                }
+
+                $mappedTestContent = Get-QualificationBlobContent -Path $mappedTestPath -Commits @($HeadCommit)
+                $mappedTestClasses = @(Get-QualificationDirectXunitTestClasses -Path $mappedTestPath -Content $mappedTestContent)
+                if ($mappedTestClasses.Count -ne 1 -or $mappedTestClasses[0] -cne $testMapping.Class) {
+                    throw "Focused implementation mapping '$mappedImplementationPath' expected exact-head test class '$($testMapping.Class)' in '$mappedTestPath' but found '$($mappedTestClasses -join ', ')'."
+                }
+
+                $mappedExternalConsumerPaths = @(Get-QualificationExternalTestClassConsumerPaths -RepositoryRoot $repoRoot -Commit $HeadCommit -Path $mappedTestPath -TestClass $mappedTestClasses[0])
+                if ($mappedExternalConsumerPaths.Count -gt 0) {
+                    throw "Focused implementation mapping '$mappedImplementationPath' cannot select test class '$($mappedTestClasses[0])' because exact-head test sources consume it: $($mappedExternalConsumerPaths -join ', ')."
+                }
+            }
+        }
+
         $testProject = Get-QualificationTestProject -Path $normalizedPath
         if ($null -ne $testProject) {
             if ($normalizedPath.EndsWith(".csproj", [StringComparison]::OrdinalIgnoreCase) -or $null -ne (Get-QualificationFocusedHelperMapping -Path $normalizedPath)) {
@@ -208,7 +254,7 @@ try {
     if (Test-Path -LiteralPath $resultsRoot) {
         Remove-Item -LiteralPath $resultsRoot -Recurse -Force
     }
-    New-Item -ItemType Directory -Path $logsRoot, $testResultsRoot, $fixtureRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $logsRoot, $testResultsRoot -Force | Out-Null
     $planEvidence = [ordered]@{
         schemaVersion = 1
         baseCommit = $BaseCommit.ToLowerInvariant()
@@ -290,8 +336,12 @@ try {
         $projectName = [IO.Path]::GetFileNameWithoutExtension($testProject)
         $projectResultsRoot = Join-Path $testResultsRoot $projectName
         $trxPath = Join-Path $projectResultsRoot "$projectName.trx"
-        $projectFixtureRoot = Join-Path $fixtureRoot $projectName
-        New-Item -ItemType Directory -Path $projectFixtureRoot -Force | Out-Null
+        $projectFixtureRoot = Get-VerificationLaneFixturePath -PhysicalTempRoot $qualificationPhysicalTempRoot -RunIdentity $qualificationFixtureRunIdentity -LaneIdentity $projectName
+        if (Test-Path -LiteralPath $projectFixtureRoot) {
+            throw "Qualification lane temporary path collision for '$projectName': $projectFixtureRoot"
+        }
+        New-Item -ItemType Directory -Path $projectFixtureRoot | Out-Null
+        $qualificationFixtureRoots.Add($projectFixtureRoot)
         $testFilter = Get-QualificationTestFilter -ProjectName $projectName -Namespaces @($testSelection.Namespaces) -Classes @($testSelection.Classes)
         $testEnvironment = @{
             EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $projectFixtureRoot "catalog-trust"
@@ -321,8 +371,10 @@ try {
 }
 finally {
     Pop-Location
-    if (Test-Path -LiteralPath $fixtureRoot) {
-        Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
+    foreach ($qualificationFixtureRoot in $qualificationFixtureRoots) {
+        if (Test-Path -LiteralPath $qualificationFixtureRoot) {
+            Remove-Item -LiteralPath $qualificationFixtureRoot -Recurse -Force
+        }
     }
 }
 

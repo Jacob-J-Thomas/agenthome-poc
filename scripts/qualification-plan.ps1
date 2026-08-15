@@ -103,6 +103,18 @@ $script:QualificationExactSourceMappings = @(
     }
 )
 
+$script:QualificationFocusedImplementationMappings = @(
+    [pscustomobject]@{
+        Path = "src/EmbodySense.Core.Persistence/Loops/CustomLoopAttemptCancellationHost.cs"
+        Tests = @(
+            [pscustomobject]@{
+                Path = "tests/EmbodySense.Core.Persistence.Tests/Loops/CustomLoopWorkspaceExecutionGateTests.cs"
+                Class = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopWorkspaceExecutionGateTests"
+            }
+        )
+    }
+)
+
 $script:QualificationTestMappings = @(
     [pscustomobject]@{ Prefix = "tests/EmbodySense.Cli.Command.Tests/"; TestProject = "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj" },
     [pscustomobject]@{ Prefix = "tests/EmbodySense.Core.Application.Tests/"; TestProject = "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj" },
@@ -238,6 +250,28 @@ function Get-QualificationFocusedHelperMapping {
     return $null
 }
 
+function Get-QualificationFocusedImplementationMapping {
+    param([Parameter(Mandatory = $true)] [string]$Path)
+
+    foreach ($mapping in $script:QualificationFocusedImplementationMappings) {
+        if ($Path -ceq $mapping.Path) {
+            return $mapping
+        }
+    }
+
+    return $null
+}
+
+function Get-QualificationFocusedImplementationMappingsForPath {
+    param([Parameter(Mandatory = $true)] [string]$Path)
+
+    foreach ($mapping in $script:QualificationFocusedImplementationMappings) {
+        if ($Path -ceq $mapping.Path -or @($mapping.Tests | Where-Object { $Path -ceq $_.Path }).Count -gt 0) {
+            Write-Output $mapping
+        }
+    }
+}
+
 function Test-QualificationFilterableTestSource {
     param([Parameter(Mandatory = $true)] [string]$Path)
 
@@ -365,6 +399,35 @@ function Test-QualificationContainsDirectXunitTest {
     param([Parameter(Mandatory = $true)] [string]$Content)
 
     return @(Get-QualificationDirectXunitTestTypeNames -Content $Content).Count -gt 0
+}
+
+function Test-QualificationFocusedImplementationSource {
+    param([Parameter(Mandatory = $true)] [string]$Content)
+
+    Initialize-QualificationCSharpParser
+    $syntaxTree = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Content)
+    if (@($syntaxTree.GetDiagnostics() | Where-Object { $_.Severity -eq [Microsoft.CodeAnalysis.DiagnosticSeverity]::Error }).Count -gt 0) {
+        return $false
+    }
+
+    $root = $syntaxTree.GetCompilationUnitRoot()
+    $topLevelTypes = @(
+        $root.DescendantNodes() |
+            Where-Object {
+                $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax] -and
+                $null -eq ($_.Ancestors() | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax] } | Select-Object -First 1)
+            }
+    )
+    if ($topLevelTypes.Count -ne 1) {
+        return $false
+    }
+
+    $modifiers = @($topLevelTypes[0].Modifiers | ForEach-Object { $_.ValueText })
+    return $modifiers -ccontains "internal" -and
+        $modifiers -ccontains "sealed" -and
+        $modifiers -cnotcontains "partial" -and
+        $modifiers -cnotcontains "public" -and
+        $modifiers -cnotcontains "protected"
 }
 
 function Test-QualificationContainsIdentifierReference {
@@ -532,6 +595,9 @@ function Get-QualificationPlan {
         if ($focusedHelperRelevantPathSet.Contains($path)) {
             $requiresVerifierContracts = $true
         }
+        if (@(Get-QualificationFocusedImplementationMappingsForPath -Path $path).Count -gt 0) {
+            $requiresVerifierContracts = $true
+        }
         if ($path.StartsWith("scripts/", [StringComparison]::Ordinal) -or $path.StartsWith("tests/scripts/", [StringComparison]::Ordinal) -or $path.StartsWith(".github/", [StringComparison]::Ordinal)) {
             $requiresVerifierContracts = $true
             $classified = $true
@@ -547,33 +613,61 @@ function Get-QualificationPlan {
             $classified = $true
         }
 
-        foreach ($mapping in $script:QualificationExactSourceMappings) {
-            if ($path -ceq $mapping.Path) {
-                $requiresBuild = $true
-                $requiresArchitecture = $true
-                foreach ($testProject in $mapping.TestProjects) {
-                    [void]$testProjects.Add($testProject)
-                    [void]$unfilteredTestProjects.Add($testProject)
-                    [void]$filteredTestNamespaces.Remove($testProject)
-                    [void]$filteredTestClasses.Remove($testProject)
+        $focusedImplementationMapping = Get-QualificationFocusedImplementationMapping -Path $path
+        if ($null -ne $focusedImplementationMapping) {
+            $requiresBuild = $true
+            $requiresArchitecture = $true
+            $requiresVerifierContracts = $true
+            foreach ($testMapping in @($focusedImplementationMapping.Tests)) {
+                $testProject = Get-QualificationTestProject -Path $testMapping.Path
+                if ($null -eq $testProject) {
+                    throw "Focused implementation mapping '$path' names an unknown test source '$($testMapping.Path)'."
                 }
-                $classified = $true
-                break
-            }
-        }
 
-        foreach ($mapping in $script:QualificationSourceMappings) {
-            if ($path.StartsWith($mapping.Prefix, [StringComparison]::Ordinal)) {
-                $requiresBuild = $true
-                $requiresArchitecture = $true
-                foreach ($testProject in $mapping.TestProjects) {
-                    [void]$testProjects.Add($testProject)
-                    [void]$unfilteredTestProjects.Add($testProject)
-                    [void]$filteredTestNamespaces.Remove($testProject)
-                    [void]$filteredTestClasses.Remove($testProject)
+                $projectNamespace = [IO.Path]::GetFileNameWithoutExtension($testProject)
+                if ([string]::IsNullOrWhiteSpace($testMapping.Class) -or -not $testMapping.Class.StartsWith("$projectNamespace.", [StringComparison]::Ordinal)) {
+                    throw "Focused implementation mapping '$path' names an invalid test class '$($testMapping.Class)'."
                 }
-                $classified = $true
-                break
+
+                [void]$testProjects.Add($testProject)
+                if (-not $unfilteredTestProjects.Contains($testProject)) {
+                    if (-not $filteredTestClasses.ContainsKey($testProject)) {
+                        $filteredTestClasses.Add($testProject, [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal))
+                    }
+                    [void]$filteredTestClasses[$testProject].Add($testMapping.Class)
+                }
+            }
+            $classified = $true
+        }
+        else {
+            foreach ($mapping in $script:QualificationExactSourceMappings) {
+                if ($path -ceq $mapping.Path) {
+                    $requiresBuild = $true
+                    $requiresArchitecture = $true
+                    foreach ($testProject in $mapping.TestProjects) {
+                        [void]$testProjects.Add($testProject)
+                        [void]$unfilteredTestProjects.Add($testProject)
+                        [void]$filteredTestNamespaces.Remove($testProject)
+                        [void]$filteredTestClasses.Remove($testProject)
+                    }
+                    $classified = $true
+                    break
+                }
+            }
+
+            foreach ($mapping in $script:QualificationSourceMappings) {
+                if ($path.StartsWith($mapping.Prefix, [StringComparison]::Ordinal)) {
+                    $requiresBuild = $true
+                    $requiresArchitecture = $true
+                    foreach ($testProject in $mapping.TestProjects) {
+                        [void]$testProjects.Add($testProject)
+                        [void]$unfilteredTestProjects.Add($testProject)
+                        [void]$filteredTestNamespaces.Remove($testProject)
+                        [void]$filteredTestClasses.Remove($testProject)
+                    }
+                    $classified = $true
+                    break
+                }
             }
         }
 

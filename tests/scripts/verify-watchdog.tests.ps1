@@ -97,6 +97,29 @@ $expectedPersistenceConsumers = @(
 Assert-Equal -Actual ($persistencePlan.TestProjects -join "|") -Expected ($expectedPersistenceConsumers -join "|") -Message "Persistence production changes must execute the owning suite, CLI initialization behavior, Startup composition, and direct Integration behavior."
 Assert-True -Condition (@($persistencePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Persistence production consumers must run as complete suites."
 
+$focusedImplementationPath = "src/EmbodySense.Core.Persistence/Loops/CustomLoopAttemptCancellationHost.cs"
+$focusedImplementationTestPath = "tests/EmbodySense.Core.Persistence.Tests/Loops/CustomLoopWorkspaceExecutionGateTests.cs"
+$focusedImplementationTestClass = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopWorkspaceExecutionGateTests"
+$focusedImplementationPlan = Get-QualificationPlan -ChangedPaths @($focusedImplementationPath)
+Assert-Equal -Actual ($focusedImplementationPlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj" -Message "A reviewed internal implementation must select only its checked public-boundary test project."
+Assert-Equal -Actual @($focusedImplementationPlan.TestSelections[0].Namespaces).Count -Expected 0 -Message "A reviewed internal implementation must not broaden to a namespace filter."
+Assert-Equal -Actual ($focusedImplementationPlan.TestSelections[0].Classes -join "|") -Expected $focusedImplementationTestClass -Message "A reviewed internal implementation must select its exact checked public-boundary test class."
+Assert-True -Condition ($focusedImplementationPlan.RequiresBuild -and $focusedImplementationPlan.RequiresArchitecture -and $focusedImplementationPlan.RequiresCSharpFormat -and $focusedImplementationPlan.RequiresVerifierContracts) -Message "A focused implementation change must retain compilation, architecture, formatting, and mapping-contract validation."
+
+$focusedImplementationAndTestPlan = Get-QualificationPlan -ChangedPaths @($focusedImplementationPath, $focusedImplementationTestPath) -TestClassesByPath @{ $focusedImplementationTestPath = $focusedImplementationTestClass }
+Assert-Equal -Actual @($focusedImplementationAndTestPlan.TestSelections).Count -Expected 1 -Message "A focused implementation and its directly changed boundary test must retain one owning project."
+Assert-Equal -Actual ($focusedImplementationAndTestPlan.TestSelections[0].Classes -join "|") -Expected $focusedImplementationTestClass -Message "A focused implementation and its directly changed boundary test must deduplicate to one exact class."
+$focusedImplementationTestOnlyPlan = Get-QualificationPlan -ChangedPaths @($focusedImplementationTestPath) -TestClassesByPath @{ $focusedImplementationTestPath = $focusedImplementationTestClass }
+Assert-True -Condition $focusedImplementationTestOnlyPlan.RequiresVerifierContracts -Message "Changing a mapped public-boundary test must revalidate its focused implementation mapping."
+
+$focusedImplementationSource = Get-Content -LiteralPath (Join-Path $repoRoot $focusedImplementationPath) -Raw
+Assert-True -Condition (Test-QualificationFocusedImplementationSource -Content $focusedImplementationSource) -Message "The reviewed cancellation host must remain one top-level internal sealed non-partial implementation type."
+Assert-True -Condition (-not (Test-QualificationFocusedImplementationSource -Content "public sealed class Candidate {}")) -Message "A public implementation must not use focused qualification."
+Assert-True -Condition (-not (Test-QualificationFocusedImplementationSource -Content "internal partial class Candidate {}")) -Message "A partial implementation must not use focused qualification."
+Assert-True -Condition (-not (Test-QualificationFocusedImplementationSource -Content "internal class Candidate {}")) -Message "A non-sealed implementation must not use focused qualification."
+Assert-True -Condition (-not (Test-QualificationFocusedImplementationSource -Content "internal sealed class First {}`ninternal sealed class Second {}")) -Message "Multiple top-level implementations must not use one focused mapping."
+Assert-True -Condition (-not (Test-QualificationFocusedImplementationSource -Content "internal sealed class Candidate {")) -Message "A syntax-invalid implementation must not use focused qualification."
+
 $startupPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Core.Startup/Runtime/AgentRuntime.cs")
 $expectedStartupConsumers = @(
     "tests/EmbodySense.Cli.Command.Tests/EmbodySense.Cli.Command.Tests.csproj",
@@ -391,6 +414,29 @@ foreach ($mapping in $script:QualificationFocusedHelperMappings) {
     Assert-Equal -Actual (@($actualConsumerClasses | Sort-Object) -join "|") -Expected (@($mapping.ConsumerClasses | Sort-Object) -join "|") -Message "Focused helper '$($mapping.Path)' must enumerate every syntax-proven consumer class."
 }
 
+$mappedImplementationPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$mappedImplementationTests = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($mapping in $script:QualificationFocusedImplementationMappings) {
+    Assert-True -Condition $mappedImplementationPaths.Add($mapping.Path) -Message "Focused implementation mappings must have unique production paths."
+    Assert-True -Condition ($trackedPaths -ccontains $mapping.Path) -Message "Focused implementation '$($mapping.Path)' must be tracked."
+    $implementationSource = Get-Content -LiteralPath (Join-Path $repoRoot $mapping.Path) -Raw
+    Assert-True -Condition (Test-QualificationFocusedImplementationSource -Content $implementationSource) -Message "Focused implementation '$($mapping.Path)' must remain one top-level internal sealed non-partial type."
+    Assert-True -Condition (@($mapping.Tests).Count -gt 0) -Message "Focused implementation '$($mapping.Path)' must retain at least one public-boundary test."
+
+    foreach ($testMapping in @($mapping.Tests)) {
+        $mappingKey = "$($testMapping.Path)|$($testMapping.Class)"
+        Assert-True -Condition $mappedImplementationTests.Add($mappingKey) -Message "Focused implementation test entries must be unique."
+        Assert-True -Condition ($trackedPaths -ccontains $testMapping.Path) -Message "Focused implementation test '$($testMapping.Path)' must be tracked."
+        $mappedTestProject = Get-QualificationTestProject -Path $testMapping.Path
+        Assert-True -Condition ($null -ne $mappedTestProject -and $script:QualificationTestProjects -ccontains $mappedTestProject) -Message "Focused implementation test '$($testMapping.Path)' must belong to a canonical test project."
+        $mappedTestSource = Get-Content -LiteralPath (Join-Path $repoRoot $testMapping.Path) -Raw
+        $mappedClasses = @(Get-QualificationDirectXunitTestClasses -Path $testMapping.Path -Content $mappedTestSource)
+        Assert-Equal -Actual ($mappedClasses -join "|") -Expected $testMapping.Class -Message "Focused implementation test '$($testMapping.Path)' must retain its exact filename-matching xUnit class."
+        $externalConsumers = @(Get-QualificationExternalTestClassConsumerPaths -RepositoryRoot $repoRoot -Commit $currentCommit -Path $testMapping.Path -TestClass $testMapping.Class)
+        Assert-Equal -Actual $externalConsumers.Count -Expected 0 -Message "Focused implementation test '$($testMapping.Path)' must not be cross-file test infrastructure."
+    }
+}
+
 foreach ($consumerProject in $script:QualificationTestProjects) {
     $consumerProjectPath = Join-Path $repoRoot $consumerProject
     [xml]$consumerProjectXml = Get-Content -LiteralPath $consumerProjectPath -Raw
@@ -535,7 +581,14 @@ Assert-True -Condition ($watchdogScript.IndexOf('Qualification requires exact -B
 Assert-True -Condition ($qualificationScript.IndexOf('git diff --no-renames --name-only --diff-filter=ACMRDTUXB "$mergeBase..$HeadCommit"', [StringComparison]::Ordinal) -ge 0) -Message "Qualification selection must derive both sides of renames from the exact merge-base-to-head diff."
 Assert-True -Condition ($qualificationScript.IndexOf('git cat-file blob $objectName', [StringComparison]::Ordinal) -ge 0) -Message "Test-only qualification must authenticate its class or helper namespace from an exact edge blob, including deleted or renamed sources."
 Assert-True -Condition ($qualificationScript.IndexOf('foreach ($commit in @($HeadCommit, $mergeBase))', [StringComparison]::Ordinal) -ge 0) -Message "Focused-helper consumers must be syntax-checked on both sides of the exact edge."
+Assert-True -Condition ($qualificationScript.IndexOf('Test-QualificationFocusedImplementationSource -Content $implementationContent', [StringComparison]::Ordinal) -ge 0) -Message "Focused implementation selection must authenticate the production type shape on both sides of the exact edge."
+Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationDirectXunitTestClasses -Path $mappedTestPath -Content $mappedTestContent', [StringComparison]::Ordinal) -ge 0) -Message "Focused implementation selection must authenticate its mapped test class from the exact head."
+Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationExternalTestClassConsumerPaths -RepositoryRoot $repoRoot -Commit $HeadCommit -Path $mappedTestPath', [StringComparison]::Ordinal) -ge 0) -Message "Focused implementation selection must reject mapped test classes used as cross-file infrastructure."
 Assert-True -Condition ($qualificationScript.IndexOf('-TestClassesByPath $testClassesByPath -FocusedHelperRelevantPaths @($focusedHelperRelevantPaths) -AvailableTestProjects $availableTestProjects', [StringComparison]::Ordinal) -ge 0) -Message "The exact-edge qualifier must bind class, helper-map, and surviving-project evidence into its plan."
+Assert-True -Condition ($qualificationScript.IndexOf('. (Join-Path $PSScriptRoot "verification-temp.ps1")', [StringComparison]::Ordinal) -ge 0) -Message "Qualification must reuse the canonical bounded lane-temporary-path contract."
+Assert-True -Condition ($qualificationScript.IndexOf('elseif ($runningOnWindows) { [IO.Path]::GetTempPath() } else { "/tmp" }', [StringComparison]::Ordinal) -ge 0) -Message "Local Unix qualification must avoid the platform's long per-user temporary path for named-pipe fixtures."
+Assert-True -Condition ($qualificationScript.IndexOf('Get-VerificationLaneFixturePath -PhysicalTempRoot $qualificationPhysicalTempRoot -RunIdentity $qualificationFixtureRunIdentity -LaneIdentity $projectName', [StringComparison]::Ordinal) -ge 0) -Message "Every selected test project must receive a short collision-resistant lane fixture root."
+Assert-True -Condition ($qualificationScript.IndexOf('Join-Path $fixtureRoot $projectName', [StringComparison]::Ordinal) -lt 0) -Message "Qualification must not append long project names beneath one already-long temporary root."
 Assert-True -Condition ($qualificationScript.IndexOf('Test-QualificationCommitPath -Path $drawioPath -Commit $HeadCommit', [StringComparison]::Ordinal) -ge 0) -Message "Deleted draw.io paths must be skipped from exact-head XML validation."
 Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationBlobContent -Path $drawioPath -Commits @($HeadCommit)', [StringComparison]::Ordinal) -ge 0) -Message "Surviving draw.io XML must be read from the authenticated exact head blob."
 Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationTestFilter -ProjectName $projectName -Namespaces @($testSelection.Namespaces) -Classes @($testSelection.Classes)', [StringComparison]::Ordinal) -ge 0) -Message "Test-only edits must execute their authenticated classes or helper namespaces rather than the entire owning assembly."
