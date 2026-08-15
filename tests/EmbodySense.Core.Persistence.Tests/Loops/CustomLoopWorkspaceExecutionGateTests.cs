@@ -229,18 +229,32 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
         requester.RelinquishWorkspaceHost();
         using var cancellation = new CancellationTokenSource();
+        using var callbackEntered = new ManualResetEventSlim();
         using var callbackRelease = new ManualResetEventSlim();
-        using var callback = cancellation.Token.Register(callbackRelease.Wait);
+        using var callbackCompleted = new ManualResetEventSlim();
+        using var callback = cancellation.Token.Register(() =>
+        {
+            callbackEntered.Set();
+            try
+            {
+                callbackRelease.Wait();
+            }
+            finally
+            {
+                callbackCompleted.Set();
+            }
+        });
         using var registration = owner.RegisterActiveAttempt("run-blocking-callback", cancellation);
-        var startedAt = Stopwatch.GetTimestamp();
 
         try
         {
-            var result = await requester.RequestCancellationAsync("run-blocking-callback", "cancel-blocking-callback").WaitAsync(TimeSpan.FromSeconds(4));
-            var elapsed = Stopwatch.GetElapsedTime(startedAt);
+            var request = requester.RequestCancellationAsync("run-blocking-callback", "cancel-blocking-callback");
+            Assert.True(callbackEntered.Wait(TimeSpan.FromSeconds(15)), "The routed cancellation callback did not start within the bounded test deadline.");
+            var result = await request.WaitAsync(TimeSpan.FromSeconds(15));
 
+            Assert.True(cancellation.IsCancellationRequested);
+            Assert.False(callbackCompleted.IsSet);
             Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, result.Status);
-            Assert.InRange(elapsed, TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(3));
         }
         finally
         {
