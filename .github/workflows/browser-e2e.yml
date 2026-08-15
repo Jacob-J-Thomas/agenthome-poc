@@ -11,8 +11,8 @@ permissions:
 
 jobs:
   browser-e2e:
-    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'browser-e2e-metadata-edit' || 'browser-e2e' }}
-    if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && (github.event.action != 'edited' || github.event.changes.base != null))
+    name: browser-e2e
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     concurrency:
       group: browser-e2e-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true

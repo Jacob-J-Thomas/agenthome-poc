@@ -17,8 +17,7 @@ permissions:
 
 jobs:
   qualification:
-    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'qualification-metadata-edit' || 'qualification' }}
-    if: github.event.action != 'edited' || github.event.changes.base != null
+    name: qualification
     concurrency:
       group: qualification-${{ github.event.pull_request.number }}
       cancel-in-progress: true

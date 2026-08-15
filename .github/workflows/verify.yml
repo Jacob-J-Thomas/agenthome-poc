@@ -12,8 +12,8 @@ permissions:
 
 jobs:
   verify:
-    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'verify-metadata-edit' || 'verify' }}
-    if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && (github.event.action != 'edited' || github.event.changes.base != null))
+    name: verify
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     concurrency:
       group: verify-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true

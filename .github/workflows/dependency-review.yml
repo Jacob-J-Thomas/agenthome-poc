@@ -10,8 +10,7 @@ permissions:
 
 jobs:
   dependency-review:
-    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'dependency-review-metadata-edit' || 'dependency-review' }}
-    if: github.event.action != 'edited' || github.event.changes.base != null
+    name: dependency-review
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

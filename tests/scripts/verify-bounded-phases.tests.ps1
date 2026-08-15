@@ -305,25 +305,25 @@ Assert-Contains -Actual $stressWorkflow -Expected "-VerificationTier Stress" -Me
 Assert-Contains -Actual $stressWorkflow -Expected "if: always()" -Message "Stress diagnostics must be retained on failure."
 Assert-Contains -Actual $verifyWorkflow -Expected "./scripts/verify-with-watchdog.ps1 -Configuration Release" -Message "Standard CI must enter through the external watchdog."
 Assert-Contains -Actual $verifyWorkflow -Expected "github.event.pull_request.draft == false" -Message "Full verification must be a promotion gate for merge candidates and main."
-Assert-Contains -Actual $verifyWorkflow -Expected "github.event.action != 'edited' || github.event.changes.base != null" -Message "Full verification must invalidate exact-base evidence only when an edited event retargets the pull request."
-Assert-Contains -Actual $verifyWorkflow -Expected "name: `${{ github.event.action == 'edited' && github.event.changes.base == null && 'verify-metadata-edit' || 'verify' }}" -Message "An ignored metadata edit must not emit the required verify context."
+Assert-Contains -Actual $verifyWorkflow -Expected "types: [opened, synchronize, reopened, ready_for_review, edited]" -Message "Every non-draft metadata edit must rerun substantive verification under the protected context."
+Assert-Contains -Actual $verifyWorkflow -Expected "name: verify" -Message "Verification must always emit the exact protected context name."
 Assert-Contains -Actual $verifyWorkflow -Expected 'group: verify-${{ github.event.pull_request.number || github.ref }}' -Message "A newer promotion edge must cancel superseded full verification work."
 Assert-Contains -Actual $verifyWorkflow -Expected "cancel-in-progress: true" -Message "Full verification must release its Windows runner when superseded."
 $verifyJobIndex = $verifyWorkflow.IndexOf("  verify:", [StringComparison]::Ordinal)
 $verifyJobConditionIndex = $verifyWorkflow.IndexOf("    if:", $verifyJobIndex, [StringComparison]::Ordinal)
 $verifyJobConcurrencyIndex = $verifyWorkflow.IndexOf("    concurrency:", $verifyJobIndex, [StringComparison]::Ordinal)
-Assert-True -Condition ($verifyJobIndex -ge 0 -and $verifyJobConditionIndex -gt $verifyJobIndex -and $verifyJobConcurrencyIndex -gt $verifyJobConditionIndex) -Message "Full verification cancellation must be job-scoped after eligibility so a skipped metadata edit cannot cancel real promotion."
+Assert-True -Condition ($verifyJobIndex -ge 0 -and $verifyJobConditionIndex -gt $verifyJobIndex -and $verifyJobConcurrencyIndex -gt $verifyJobConditionIndex) -Message "Full verification cancellation must remain job-scoped behind non-draft eligibility."
 Assert-True -Condition ($verifyWorkflow.IndexOf("`nconcurrency:", [StringComparison]::Ordinal) -lt 0) -Message "Full verification must not use workflow-scoped cancellation for ineligible metadata edits."
 Assert-True -Condition ($verifyWorkflow.IndexOf("-SkipCoverage", [StringComparison]::Ordinal) -lt 0) -Message "Promotion verification must retain exact coverage collection and reduction."
 Assert-Contains -Actual $browserWorkflow -Expected "github.event.pull_request.draft == false" -Message "Installed-browser verification must be a promotion gate for merge candidates and main."
-Assert-Contains -Actual $browserWorkflow -Expected "github.event.action != 'edited' || github.event.changes.base != null" -Message "Installed-browser evidence must be regenerated when the pull request base changes."
-Assert-Contains -Actual $browserWorkflow -Expected "name: `${{ github.event.action == 'edited' && github.event.changes.base == null && 'browser-e2e-metadata-edit' || 'browser-e2e' }}" -Message "An ignored metadata edit must not emit the required browser context."
+Assert-Contains -Actual $browserWorkflow -Expected "types: [opened, synchronize, reopened, ready_for_review, edited]" -Message "Every non-draft metadata edit must rerun installed-browser verification under the protected context."
+Assert-Contains -Actual $browserWorkflow -Expected "name: browser-e2e" -Message "Installed-browser verification must always emit the exact protected context name."
 Assert-Contains -Actual $browserWorkflow -Expected 'group: browser-e2e-${{ github.event.pull_request.number || github.ref }}' -Message "A newer promotion edge must cancel superseded installed-browser work."
 Assert-Contains -Actual $browserWorkflow -Expected "cancel-in-progress: true" -Message "Installed-browser verification must release its Windows runner when superseded."
 $browserJobIndex = $browserWorkflow.IndexOf("  browser-e2e:", [StringComparison]::Ordinal)
 $browserJobConditionIndex = $browserWorkflow.IndexOf("    if:", $browserJobIndex, [StringComparison]::Ordinal)
 $browserJobConcurrencyIndex = $browserWorkflow.IndexOf("    concurrency:", $browserJobIndex, [StringComparison]::Ordinal)
-Assert-True -Condition ($browserJobIndex -ge 0 -and $browserJobConditionIndex -gt $browserJobIndex -and $browserJobConcurrencyIndex -gt $browserJobConditionIndex) -Message "Browser cancellation must be job-scoped after eligibility so a skipped metadata edit cannot cancel real promotion."
+Assert-True -Condition ($browserJobIndex -ge 0 -and $browserJobConditionIndex -gt $browserJobIndex -and $browserJobConcurrencyIndex -gt $browserJobConditionIndex) -Message "Browser cancellation must remain job-scoped behind non-draft eligibility."
 Assert-True -Condition ($browserWorkflow.IndexOf("`nconcurrency:", [StringComparison]::Ordinal) -lt 0) -Message "Browser verification must not use workflow-scoped cancellation for ineligible metadata edits."
 Assert-Contains -Actual $promotionCancellationWorkflow -Expected "types: [converted_to_draft]" -Message "Returning a pull request to draft must trigger cancellation of obsolete promotion work."
 Assert-Contains -Actual $promotionCancellationWorkflow -Expected "name: cancel-obsolete-verify" -Message "Draft demotion must emit a distinct non-required verifier cancellation context."
@@ -339,23 +339,22 @@ Assert-Contains -Actual $readme -Expected "GitHub's generated merge ref for the 
 Assert-Contains -Actual $verificationDocumentation -Expected "generated merge-ref checkout" -Message "Verification documentation must distinguish exact-head qualification from merge-ref promotion."
 Assert-Contains -Actual $qualificationWorkflow -Expected "converted_to_draft," -Message "Returning a pull request to draft must retain qualification."
 Assert-Contains -Actual $qualificationWorkflow -Expected "edited," -Message "Every retargeted pull-request edge must receive qualification."
-Assert-Contains -Actual $qualificationWorkflow -Expected "if: github.event.action != 'edited' || github.event.changes.base != null" -Message "Title- or body-only edits must not rerun qualification."
-Assert-Contains -Actual $qualificationWorkflow -Expected "name: `${{ github.event.action == 'edited' && github.event.changes.base == null && 'qualification-metadata-edit' || 'qualification' }}" -Message "An ignored metadata edit must not emit the required qualification context."
+Assert-Contains -Actual $qualificationWorkflow -Expected "name: qualification" -Message "Every metadata edit must rerun qualification under its stable context name."
 Assert-Contains -Actual $qualificationWorkflow -Expected "cancel-in-progress: true" -Message "Superseded qualification runs must not monopolize Windows capacity."
 $qualificationJobIndex = $qualificationWorkflow.IndexOf("  qualification:", [StringComparison]::Ordinal)
-$qualificationJobConditionIndex = $qualificationWorkflow.IndexOf("    if:", $qualificationJobIndex, [StringComparison]::Ordinal)
 $qualificationJobConcurrencyIndex = $qualificationWorkflow.IndexOf("    concurrency:", $qualificationJobIndex, [StringComparison]::Ordinal)
-Assert-True -Condition ($qualificationJobIndex -ge 0 -and $qualificationJobConditionIndex -gt $qualificationJobIndex -and $qualificationJobConcurrencyIndex -gt $qualificationJobConditionIndex) -Message "Qualification cancellation must be job-scoped after eligibility so a skipped metadata edit cannot cancel real qualification."
+Assert-True -Condition ($qualificationJobIndex -ge 0 -and $qualificationJobConcurrencyIndex -gt $qualificationJobIndex) -Message "Qualification cancellation must remain job-scoped for every pull-request edit."
 Assert-True -Condition ($qualificationWorkflow.IndexOf("`nconcurrency:", [StringComparison]::Ordinal) -lt 0) -Message "Qualification must not use workflow-scoped cancellation for ineligible metadata edits."
 Assert-Contains -Actual $qualificationWorkflow -Expected './scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit "${{ github.event.pull_request.base.sha }}" -HeadCommit "${{ github.event.pull_request.head.sha }}" -Configuration Release -DeadlineSeconds 360' -Message "Qualification must bind the exact PR edge under one six-minute watchdog."
 Assert-True -Condition ($qualificationWorkflow.IndexOf("run: ./scripts/verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "Qualification cannot bypass the watchdog."
 Assert-True -Condition ($qualificationWorkflow.IndexOf("coverage.cobertura.xml", [StringComparison]::Ordinal) -lt 0) -Message "Qualification must not claim or upload absent coverage evidence."
 Assert-Contains -Actual $codeqlWorkflow -Expected "types: [opened, synchronize, reopened, edited]" -Message "CodeQL must observe a retargeted pull request edge."
-Assert-Contains -Actual $codeqlWorkflow -Expected "github.event.action != 'edited' || github.event.changes.base != null" -Message "CodeQL must ignore title- or body-only edits while rerunning for a changed base."
-Assert-Contains -Actual $codeqlWorkflow -Expected "name: `${{ github.event.action == 'edited' && github.event.changes.base == null && 'Analyze metadata edit' || format('Analyze {0}', matrix.language) }}" -Message "An ignored metadata edit must not emit a required analysis context."
+Assert-Contains -Actual $codeqlWorkflow -Expected 'name: Analyze ${{ matrix.language }}' -Message "Every metadata edit must rerun CodeQL under its stable analysis names."
 Assert-Contains -Actual $dependencyReviewWorkflow -Expected "types: [opened, synchronize, reopened, edited]" -Message "Dependency review must observe a retargeted pull request edge."
-Assert-Contains -Actual $dependencyReviewWorkflow -Expected "if: github.event.action != 'edited' || github.event.changes.base != null" -Message "Dependency review must ignore title- or body-only edits while rerunning for a changed base."
-Assert-Contains -Actual $dependencyReviewWorkflow -Expected "name: `${{ github.event.action == 'edited' && github.event.changes.base == null && 'dependency-review-metadata-edit' || 'dependency-review' }}" -Message "An ignored metadata edit must not emit the required dependency-review context."
+Assert-Contains -Actual $dependencyReviewWorkflow -Expected "name: dependency-review" -Message "Every metadata edit must rerun dependency review under its protected context name."
+foreach ($workflowText in @($verifyWorkflow, $browserWorkflow, $qualificationWorkflow, $codeqlWorkflow, $dependencyReviewWorkflow)) {
+    Assert-True -Condition ($workflowText.IndexOf("metadata-edit", [StringComparison]::Ordinal) -lt 0) -Message "No workflow may replace a protected context with an unevaluated skipped metadata name."
+}
 Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./scripts/verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "Standard CI cannot bypass the watchdog."
 Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900" -Message "Promotion must have one explicit bounded fifteen-minute certification window."
 Assert-Contains -Actual $verifyWorkflow -Expected "timeout-minutes: 20" -Message "Workflow setup and diagnostic upload must remain bounded outside the measured promotion child."

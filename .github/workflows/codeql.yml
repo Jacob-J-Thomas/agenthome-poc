@@ -15,8 +15,7 @@ permissions:
 
 jobs:
   analyze:
-    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
-    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'Analyze metadata edit' || format('Analyze {0}', matrix.language) }}
+    name: Analyze ${{ matrix.language }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
