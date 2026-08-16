@@ -1,37 +1,62 @@
-name: Qualification
+name: Hosted Qualification Diagnostic
 
 on:
-  pull_request:
-    types:
-      [
-        opened,
-        synchronize,
-        reopened,
-        ready_for_review,
-        converted_to_draft,
-        edited,
-      ]
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Exact lowercase 40-character base commit already present in this repository
+        required: true
+        type: string
+      head_sha:
+        description: Exact lowercase 40-character head commit already present in this repository
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   qualification:
-    name: qualification
+    name: hosted-qualification
+    if: github.repository == 'Jacob-J-Thomas/agenthome-poc' && github.actor == 'Jacob-J-Thomas'
     concurrency:
-      group: qualification-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
+      group: hosted-qualification
+      cancel-in-progress: false
     runs-on: windows-latest
     # Tool setup and diagnostic upload are outside the repository qualification budget.
     # The watchdog owns the exact inclusive 360-second child deadline.
     timeout-minutes: 10
 
     steps:
-      - name: Check out repository
+      - name: Validate immutable inputs
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          if ($env:BASE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'base_sha must be a lowercase 40-character commit SHA.' }
+          if ($env:HEAD_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'head_sha must be a lowercase 40-character commit SHA.' }
+
+      - name: Check out exact head
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+
+      - name: Prove repository ancestry
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          git cat-file -e "$env:BASE_SHA^{commit}"
+          if ($LASTEXITCODE -ne 0) { throw 'base_sha is unavailable as a repository commit.' }
+          git cat-file -e "$env:HEAD_SHA^{commit}"
+          if ($LASTEXITCODE -ne 0) { throw 'head_sha is unavailable as a repository commit.' }
+          if ((git rev-parse HEAD) -cne $env:HEAD_SHA) { throw 'The checkout does not match head_sha.' }
+          git merge-base --is-ancestor $env:BASE_SHA $env:HEAD_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'base_sha must be an ancestor of head_sha.' }
 
       - name: Install pinned .NET SDK
         uses: actions/setup-dotnet@v6
@@ -44,15 +69,15 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
-      - name: Qualify solution
+      - name: Qualify exact edge
         shell: pwsh
-        run: ./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit "${{ github.event.pull_request.base.sha }}" -HeadCommit "${{ github.event.pull_request.head.sha }}" -Configuration Release -DeadlineSeconds 360
+        run: ./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit '${{ inputs.base_sha }}' -HeadCommit '${{ inputs.head_sha }}' -Configuration Release -DeadlineSeconds 360
 
       - name: Upload qualification diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: qualification-diagnostics-${{ github.run_attempt }}
+          name: hosted-qualification-diagnostics-${{ github.run_attempt }}
           path: |
             tests/QualificationResults/**
           if-no-files-found: error
