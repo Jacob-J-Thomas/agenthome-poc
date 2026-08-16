@@ -791,6 +791,7 @@ function Get-QualificationPlan {
         [Collections.IDictionary]$TestNamespacesByPath = @{},
         [Collections.IDictionary]$TestClassesByPath = @{},
         [AllowEmptyCollection()] [string[]]$FocusedHelperRelevantPaths = @(),
+        [AllowEmptyCollection()] [string[]]$FocusedImplementationFallbackPaths = @(),
         [AllowNull()] [AllowEmptyCollection()] [string[]]$AvailableTestProjects = $null
     )
 
@@ -821,6 +822,10 @@ function Get-QualificationPlan {
     $focusedHelperRelevantPathSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($focusedHelperRelevantPath in $FocusedHelperRelevantPaths) {
         [void]$focusedHelperRelevantPathSet.Add((ConvertTo-QualificationPath -Path $focusedHelperRelevantPath))
+    }
+    $focusedImplementationFallbackPathSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($focusedImplementationFallbackPath in $FocusedImplementationFallbackPaths) {
+        [void]$focusedImplementationFallbackPathSet.Add((ConvertTo-QualificationPath -Path $focusedImplementationFallbackPath))
     }
     $testProjects = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $unfilteredTestProjects = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -865,7 +870,7 @@ function Get-QualificationPlan {
         }
 
         $focusedImplementationMapping = Get-QualificationFocusedImplementationMapping -Path $path
-        if ($null -ne $focusedImplementationMapping) {
+        if ($null -ne $focusedImplementationMapping -and -not $focusedImplementationFallbackPathSet.Contains($path)) {
             $requiresBuild = $true
             $requiresArchitecture = $true
             $requiresVerifierContracts = $true
@@ -1072,6 +1077,18 @@ function Get-QualificationPlan {
             throw "Qualification focused helper relevance named an unchanged path '$focusedHelperRelevantPath'."
         }
     }
+    foreach ($focusedImplementationFallbackPath in $focusedImplementationFallbackPathSet) {
+        if (-not $normalizedPaths.Contains($focusedImplementationFallbackPath)) {
+            throw "Qualification focused implementation fallback named an unchanged path '$focusedImplementationFallbackPath'."
+        }
+        $fallbackMapping = Get-QualificationFocusedImplementationMapping -Path $focusedImplementationFallbackPath
+        if ($null -eq $fallbackMapping) {
+            throw "Qualification focused implementation fallback named an unmapped path '$focusedImplementationFallbackPath'."
+        }
+        if ($fallbackMapping.Kind -cne "PrivateMethod") {
+            throw "Qualification focused implementation fallback named non-private-method mapping '$focusedImplementationFallbackPath'."
+        }
+    }
 
     $scheduledTestProjects = @($testProjects | Where-Object { $availableTestProjectSet.Contains($_) } | Sort-Object)
     $testSelections = @(
@@ -1105,6 +1122,7 @@ function Get-QualificationPlan {
     return [pscustomobject]@{
         SchemaVersion = 1
         ChangedPaths = @($normalizedPaths | Sort-Object)
+        FocusedImplementationFallbackPaths = @($focusedImplementationFallbackPathSet | Sort-Object)
         RequiresBuild = $requiresBuild
         RequiresFrontend = $requiresFrontend
         RequiresWorkflowValidation = $requiresWorkflowValidation

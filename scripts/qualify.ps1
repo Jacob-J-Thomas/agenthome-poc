@@ -128,6 +128,7 @@ try {
     $testNamespacesByPath = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $testClassesByPath = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $focusedHelperRelevantPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $focusedImplementationFallbackPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $validatedFocusedImplementationPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($changedPath in $changedPaths) {
         $normalizedPath = ConvertTo-QualificationPath -Path $changedPath
@@ -170,6 +171,7 @@ try {
             }
 
             $mappedImplementationPath = ConvertTo-QualificationPath -Path $focusedImplementationMapping.Path
+            $focusedImplementationEligible = $true
             switch ($focusedImplementationMapping.Kind) {
                 "InternalSealed" {
                     $existingEdgeCount = 0
@@ -190,13 +192,14 @@ try {
                 }
                 "PrivateMethod" {
                     if (-not (Test-QualificationCommitPath -Path $mappedImplementationPath -Commit $HeadCommit) -or -not (Test-QualificationCommitPath -Path $mappedImplementationPath -Commit $mergeBase)) {
-                        throw "Focused private-method mapping '$mappedImplementationPath' requires the source on both sides of the exact edge."
+                        $focusedImplementationEligible = $false
                     }
-
-                    $baseImplementationContent = Get-QualificationBlobContent -Path $mappedImplementationPath -Commits @($mergeBase)
-                    $headImplementationContent = Get-QualificationBlobContent -Path $mappedImplementationPath -Commits @($HeadCommit)
-                    if (-not (Test-QualificationFocusedPrivateMethodEdge -BaseContent $baseImplementationContent -HeadContent $headImplementationContent -TypeName $focusedImplementationMapping.TypeName -MemberName $focusedImplementationMapping.MemberName)) {
-                        throw "Focused private-method mapping '$mappedImplementationPath' permits changes only inside the body of private method '$($focusedImplementationMapping.MemberName)' on one public sealed non-partial type."
+                    else {
+                        $baseImplementationContent = Get-QualificationBlobContent -Path $mappedImplementationPath -Commits @($mergeBase)
+                        $headImplementationContent = Get-QualificationBlobContent -Path $mappedImplementationPath -Commits @($HeadCommit)
+                        if (-not (Test-QualificationFocusedPrivateMethodEdge -BaseContent $baseImplementationContent -HeadContent $headImplementationContent -TypeName $focusedImplementationMapping.TypeName -MemberName $focusedImplementationMapping.MemberName)) {
+                            $focusedImplementationEligible = $false
+                        }
                     }
                 }
                 "PublicConstantContract" {
@@ -235,6 +238,12 @@ try {
                 default {
                     throw "Focused implementation mapping '$mappedImplementationPath' has unsupported kind '$($focusedImplementationMapping.Kind)'."
                 }
+            }
+
+            if (-not $focusedImplementationEligible) {
+                [void]$focusedImplementationFallbackPaths.Add($mappedImplementationPath)
+                Write-Output "QUALIFICATION_FOCUSED_FALLBACK path=$mappedImplementationPath reason=exact-edge-not-eligible"
+                continue
             }
 
             foreach ($testMapping in @($focusedImplementationMapping.Tests)) {
@@ -307,7 +316,7 @@ try {
         }
     }
     $availableTestProjects = @($script:QualificationTestProjects | Where-Object { Test-QualificationCommitPath -Path $_ -Commit $HeadCommit })
-    $plan = Get-QualificationPlan -ChangedPaths $changedPaths -TestNamespacesByPath $testNamespacesByPath -TestClassesByPath $testClassesByPath -FocusedHelperRelevantPaths @($focusedHelperRelevantPaths) -AvailableTestProjects $availableTestProjects
+    $plan = Get-QualificationPlan -ChangedPaths $changedPaths -TestNamespacesByPath $testNamespacesByPath -TestClassesByPath $testClassesByPath -FocusedHelperRelevantPaths @($focusedHelperRelevantPaths) -FocusedImplementationFallbackPaths @($focusedImplementationFallbackPaths) -AvailableTestProjects $availableTestProjects
 
     if (Test-Path -LiteralPath $resultsRoot) {
         Remove-Item -LiteralPath $resultsRoot -Recurse -Force
@@ -320,6 +329,7 @@ try {
         mergeBase = $mergeBase
         configuration = $Configuration
         changedPaths = $plan.ChangedPaths
+        focusedImplementationFallbackPaths = $plan.FocusedImplementationFallbackPaths
         requiresBuild = $plan.RequiresBuild
         requiresFrontend = $plan.RequiresFrontend
         requiresWorkflowValidation = $plan.RequiresWorkflowValidation
