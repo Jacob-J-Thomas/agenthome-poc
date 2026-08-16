@@ -32,6 +32,9 @@ using EmbodySense.Core.Common.Loops.Sequential.Models;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
+/// <summary>
+/// Exercises Wait-specific behavior through the canonical ordered-runner public boundary.
+/// </summary>
 public sealed partial class CustomLoopOrderedRunnerTests
 {
     [Fact]

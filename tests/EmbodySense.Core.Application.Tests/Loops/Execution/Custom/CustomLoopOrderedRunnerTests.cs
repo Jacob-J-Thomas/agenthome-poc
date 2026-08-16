@@ -60,7 +60,7 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
-public sealed class CustomLoopOrderedRunnerTests
+public sealed partial class CustomLoopOrderedRunnerTests
 {
     private static readonly DateTimeOffset _now = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
     private static readonly JsonSerializerOptions _rawTraceSizingJsonOptions = new(JsonSerializerDefaults.Web)
