@@ -32,4 +32,7 @@ public enum ScheduleRunAdmissionStoreStatus
 
     /// <summary>The store cannot safely perform schedule-aware atomic admission.</summary>
     Unavailable = 9,
+
+    /// <summary>The exact occurrence is at or below an authenticated compacted terminal watermark and cannot be dispatched again.</summary>
+    Retired = 10,
 }

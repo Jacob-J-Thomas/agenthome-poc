@@ -44,4 +44,7 @@ public enum GovernedLoopSequentialMaterializationStatus
 
     /// <summary>Another exact DeferOne occurrence already owns the single deferred slot.</summary>
     DeferredOneSuppressed = 13,
+
+    /// <summary>The exact scheduled occurrence was previously terminalized and compacted, so provider dispatch remains forbidden.</summary>
+    Retired = 14,
 }

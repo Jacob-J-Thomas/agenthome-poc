@@ -37,6 +37,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
     private static readonly DateTimeOffset _timestamp = new(2026, 8, 10, 11, 0, 0, TimeSpan.Zero);
 
     [Fact]
@@ -716,9 +717,9 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         Assert.Null(await secondStore.ResolveAsync(loserHash));
     }
 
-    internal static SequentialContext CreateContext()
+    internal static SequentialContext CreateContext(GovernedLoopSequentialTriggerOrigin? triggerOrigin = null, string identity = "sequential", bool scheduleTrigger = false)
     {
-        var graph = LinearGraph();
+        var graph = LinearGraph(scheduleTrigger);
         var revisionArtifact = GovernedLoopRevisionArtifactFactory.Create(
             1,
             graph.RevisionReference,
@@ -737,12 +738,15 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             null,
             _timestamp,
             invocationContext.SourceManifest,
-            string.Empty));
+            string.Empty)
+        {
+            TriggerOrigin = triggerOrigin,
+        });
         var grant = AuthorityGrantTestFixture.Grant();
         var grantReference = new EmbodySense.Core.Common.Authority.Grants.Models.AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);
         var request = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(
             1,
-            "admit-sequential",
+            $"admit-{identity}",
             invocation.ContentHash,
             string.Empty,
             publication,
@@ -761,8 +765,8 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             request.Surface,
             artifact.ArtifactHash,
             artifact.LayoutHash);
-        var execution = GovernedLoopExecutionBinding.Create(1, "run-sequential", graph.RevisionReference, 1);
-        var capabilityAdmission = SequentialCapabilityAdmission(artifact.ArtifactHash);
+        var execution = GovernedLoopExecutionBinding.Create(1, $"run-{identity}", graph.RevisionReference, 1);
+        var capabilityAdmission = SequentialCapabilityAdmission(artifact.ArtifactHash, scheduleTrigger);
         var effectiveAuthority = GovernedLoopAdmissionTestFixture.EffectiveAuthority();
         var admissionEvidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
             1,
@@ -1053,16 +1057,16 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     private static string[] ControlEdges(string? edgeId)
         => edgeId is null ? [] : [edgeId];
 
-    private static GovernedLoopGraphDefinition LinearGraph()
+    internal static GovernedLoopGraphDefinition LinearGraph(bool scheduleTrigger = false)
     {
         var role = new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("sequential-role", 1), Hash('a'));
         var nodes = new[]
         {
             new GovernedLoopNodeDefinition(
                 "trigger",
-                GovernedLoopSequentialNodeDescriptors.ManualTrigger,
+                scheduleTrigger ? GovernedLoopSequentialNodeDescriptors.ScheduleTrigger : GovernedLoopSequentialNodeDescriptors.ManualTrigger,
                 [Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context)],
-                GovernedLoopAuthorityCeiling.Create([]),
+                GovernedLoopAuthorityCeiling.Create(scheduleTrigger ? [ScheduleTriggerCapabilityId] : []),
                 new Dictionary<string, string>()),
             new GovernedLoopNodeDefinition(
                 "step-1",
@@ -1096,7 +1100,9 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             role,
             "trigger",
             ["exit"],
-            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
+            GovernedLoopAuthorityCeiling.Create(scheduleTrigger
+                ? [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId]
+                : [ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
             [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
             nodes,
             edges,
@@ -1108,18 +1114,21 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
                 nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()));
     }
 
-    private static CapabilityAdmissionSnapshot SequentialCapabilityAdmission(string graphArtifactHash)
+    private static CapabilityAdmissionSnapshot SequentialCapabilityAdmission(string graphArtifactHash, bool scheduleTrigger)
     {
         Assert.True(CapabilityId.TryParse("org.embodysense/loop-sequential", out var subject, out _));
         Assert.True(CapabilityId.TryParse(ConversationTurnCapabilityId, out var conversationTurn, out _));
         Assert.True(CapabilityId.TryParse(ModelInferenceCapabilityId, out var modelInference, out _));
+        Assert.True(CapabilityId.TryParse(ScheduleTriggerCapabilityId, out var scheduleTriggerCapability, out _));
         Assert.True(CapabilityVersionRange.TryParse("*", out var versions, out _));
         Assert.True(CapabilityIntegrityDigest.TryParse("sha256:" + graphArtifactHash, out var checksum, out _));
         var requirements = new CapabilityDependencyManifest(
             1,
             CapabilityDependencyManifestKind.LoopPackage,
             subject!,
-            [new CapabilityDependency(conversationTurn!, versions!), new CapabilityDependency(modelInference!, versions!)],
+            scheduleTrigger
+                ? [new CapabilityDependency(conversationTurn!, versions!), new CapabilityDependency(modelInference!, versions!), new CapabilityDependency(scheduleTriggerCapability!, versions!)]
+                : [new CapabilityDependency(conversationTurn!, versions!), new CapabilityDependency(modelInference!, versions!)],
             [],
             new CapabilityDependencyArtifactMetadata(checksum, null));
         return TestCapabilityAdmissionFactory.Create(requirements, _timestamp);

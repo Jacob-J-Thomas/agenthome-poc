@@ -191,6 +191,8 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
                 return Result(GovernedLoopSequentialMaterializationStatus.OverlapSerialized, result.Run, anchor, "Atomic run admission retained the exact Allow occurrence for serialized reselection.");
             case ScheduleRunAdmissionStoreStatus.DeferredOneSuppressed:
                 return Result(GovernedLoopSequentialMaterializationStatus.DeferredOneSuppressed, result.Run, anchor, "Atomic run admission preserved the existing DeferOne occurrence and suppressed this additional exact occurrence.");
+            case ScheduleRunAdmissionStoreStatus.Retired:
+                return Result(GovernedLoopSequentialMaterializationStatus.Retired, null, anchor, "Atomic run admission authenticated a compacted terminal watermark for the exact occurrence; provider dispatch remains forbidden.");
             case ScheduleRunAdmissionStoreStatus.Conflict:
                 return Result(GovernedLoopSequentialMaterializationStatus.Conflict, result.Run, anchor, "Atomic schedule run-admission evidence is bound to different immutable coordinates.");
             case ScheduleRunAdmissionStoreStatus.LimitExceeded:

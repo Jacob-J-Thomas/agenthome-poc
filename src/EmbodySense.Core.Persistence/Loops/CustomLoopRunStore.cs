@@ -47,6 +47,8 @@ public sealed class CustomLoopRunStore :
     private const string MutationLockFileName = ".custom-loop-runs.lock";
     private const string DiscoveryIndexFileName = ".custom-loop-run-index.json";
     private const string DiscoveryIndexPendingFileName = ".custom-loop-run-index.pending";
+    private const string ScheduleAdmissionRetirementFileName = ".schedule-admission-retirements.json";
+    private const int MaximumScheduleAdmissionInterruptedWriteArtifacts = 32;
     private const int MaximumAtomicMoveAttempts = 3;
     private static readonly byte[] _discoveryIndexPendingContent = "pending\n"u8.ToArray();
     private static readonly TimeSpan _atomicMoveRetryDelay = TimeSpan.FromMilliseconds(50);
@@ -66,6 +68,7 @@ public sealed class CustomLoopRunStore :
     private readonly string _runsRoot;
     private readonly string _traceDeletionOperationsRoot;
     private readonly string _scheduleAdmissionsRoot;
+    private readonly string _scheduleAdmissionRetirementPath;
     private readonly string _mutationLockPath;
     private readonly string _discoveryIndexPath;
     private readonly string _discoveryIndexPendingPath;
@@ -116,6 +119,8 @@ public sealed class CustomLoopRunStore :
         EnsureContained(_workspaceRoot, _runsRoot);
         EnsureContained(_workspaceRoot, _traceDeletionOperationsRoot);
         EnsureContained(_workspaceRoot, _scheduleAdmissionsRoot);
+        _scheduleAdmissionRetirementPath = Path.Combine(_scheduleAdmissionsRoot, ScheduleAdmissionRetirementFileName);
+        EnsureContained(_scheduleAdmissionsRoot, _scheduleAdmissionRetirementPath);
         _mutationLockPath = Path.Combine(_runsRoot, MutationLockFileName);
         _discoveryIndexPath = Path.Combine(_runsRoot, DiscoveryIndexFileName);
         _discoveryIndexPendingPath = Path.Combine(_runsRoot, DiscoveryIndexPendingFileName);
@@ -256,6 +261,8 @@ public sealed class CustomLoopRunStore :
         var serialized = SerializeBounded(run);
         await using var mutation = await AcquireMutationLockAsync(cancellationToken);
         var admissions = await ReadAllScheduleAdmissionsAsync(cancellationToken);
+        var retirements = await ReadScheduleAdmissionRetirementsAsync(cancellationToken);
+        (admissions, retirements) = await CompactScheduleAdmissionsAsync(admissions, retirements, cancellationToken);
         var existingEvidence = admissions.SingleOrDefault(item => string.Equals(item.CanonicalEnvelopeHash, canonicalEnvelopeHash, StringComparison.Ordinal));
         var deliveryEvidence = admissions.SingleOrDefault(item =>
             string.Equals(
@@ -267,6 +274,11 @@ public sealed class CustomLoopRunStore :
             && !string.Equals(deliveryEvidence.CanonicalEnvelopeHash, canonicalEnvelopeHash, StringComparison.Ordinal))
         {
             return ScheduleResult(ScheduleRunAdmissionStoreStatus.Conflict, null, deliveryEvidence);
+        }
+
+        if (ConflictsWithScheduleDefinition(admissions, retirements, directive, out var definitionConflict))
+        {
+            return ScheduleResult(ScheduleRunAdmissionStoreStatus.Conflict, null, definitionConflict);
         }
 
         CustomLoopRunRecord? operationMatch = null;
@@ -345,6 +357,11 @@ public sealed class CustomLoopRunStore :
 
         if (exactScheduleRun is not null)
         {
+            if (existingEvidence is null && !HasScheduleAdmissionCapacity(admissions))
+            {
+                return ScheduleResult(ScheduleRunAdmissionStoreStatus.LimitExceeded, exactScheduleRun, null);
+            }
+
             var recovered = await AppendScheduleAdmissionAsync(
                 existingEvidence,
                 canonicalEnvelope!,
@@ -355,7 +372,15 @@ public sealed class CustomLoopRunStore :
                 ScheduleRunAdmissionDisposition.RunCreated,
                 null,
                 cancellationToken);
+            await CompactScheduleAdmissionsAsync(ReplaceScheduleAdmission(admissions, recovered), retirements, cancellationToken);
             return ScheduleResult(ScheduleRunAdmissionStoreStatus.Replayed, exactScheduleRun, recovered);
+        }
+
+        if (existingEvidence is null
+            && retirements.Entries.SingleOrDefault(item => string.Equals(item.ScheduleId, directive.ScheduleId.Value, StringComparison.Ordinal)) is { } retirement
+            && ScheduleRunAdmissionRetirementCodec.Covers(retirement, directive))
+        {
+            return ScheduleResult(ScheduleRunAdmissionStoreStatus.Retired, null, null);
         }
 
         if (deletedOperation || deletedRunId)
@@ -391,6 +416,11 @@ public sealed class CustomLoopRunStore :
                 return ScheduleResult(MapScheduleDisposition(disposition), activeLoopRun, existingEvidence);
             }
 
+            if (existingEvidence is null && !HasScheduleAdmissionCapacity(admissions))
+            {
+                return ScheduleResult(ScheduleRunAdmissionStoreStatus.LimitExceeded, activeLoopRun, null);
+            }
+
             var retained = await AppendScheduleAdmissionAsync(
                 existingEvidence,
                 canonicalEnvelope!,
@@ -401,12 +431,18 @@ public sealed class CustomLoopRunStore :
                 disposition,
                 activeLoopRun.Id,
                 cancellationToken);
+            if (IsRetirableScheduleAdmission(retained))
+            {
+                await CompactScheduleAdmissionsAsync(ReplaceScheduleAdmission(admissions, retained), retirements, cancellationToken);
+            }
+
             return ScheduleResult(MapScheduleDisposition(disposition), activeLoopRun, retained);
         }
 
         if (CalculateRequiredTraceCapacity(run, serialized.LongLength) > CustomLoopLimits.MaxRunTraceUtf8Bytes
             || scan.Quota.RetainedTraceCount >= scan.Quota.MaximumTraceCount
-            || scan.Quota.AccountedTraceUtf8Bytes > scan.Quota.MaximumWorkspaceUtf8Bytes - scan.Quota.MaximumPerTraceUtf8Bytes)
+            || scan.Quota.AccountedTraceUtf8Bytes > scan.Quota.MaximumWorkspaceUtf8Bytes - scan.Quota.MaximumPerTraceUtf8Bytes
+            || existingEvidence is null && !HasScheduleAdmissionCapacity(admissions))
         {
             return ScheduleResult(ScheduleRunAdmissionStoreStatus.LimitExceeded, null, existingEvidence);
         }
@@ -425,6 +461,7 @@ public sealed class CustomLoopRunStore :
             ScheduleRunAdmissionDisposition.RunCreated,
             null,
             cancellationToken);
+        await CompactScheduleAdmissionsAsync(ReplaceScheduleAdmission(admissions, evidence), retirements, cancellationToken);
         return ScheduleResult(ScheduleRunAdmissionStoreStatus.Created, run, evidence);
     }
 
@@ -510,20 +547,32 @@ public sealed class CustomLoopRunStore :
             throw new FormatException("Schedule run-admission evidence storage cannot contain subdirectories.");
         }
 
-        var maximumArtifacts = CustomLoopLimits.MaxRunTracesPerWorkspace + CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace;
+        var maximumArtifacts = MaximumScheduleAdmissionArtifacts;
+        var maximumInventory = maximumArtifacts + 1 + MaximumScheduleAdmissionInterruptedWriteArtifacts;
         var paths = Directory
             .EnumerateFiles(_scheduleAdmissionsRoot, "*", SearchOption.TopDirectoryOnly)
             .OrderBy(path => path, PathComparer)
-            .Take(maximumArtifacts + 1)
+            .Take(maximumInventory + 1)
             .ToArray();
-        if (paths.Length > maximumArtifacts)
+        if (paths.Length > maximumInventory)
         {
-            throw new FormatException("Schedule run-admission storage exceeds its explicit bounded artifact count.");
+            throw new FormatException("Schedule run-admission storage exceeds its bounded evidence, retirement, and interrupted-write inventory.");
         }
 
         var evidence = new List<ScheduleRunAdmissionEvidence>(paths.Length);
         foreach (var path in paths)
         {
+            var fileName = Path.GetFileName(path);
+            if (string.Equals(fileName, ScheduleAdmissionRetirementFileName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (fileName.StartsWith($".{ScheduleAdmissionRetirementFileName}.", StringComparison.Ordinal) && fileName.EndsWith(".tmp", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             if (IsTemporaryArtifactPath(path, TriggerDeliveryLimits.MaxDeliveryIdCharacters))
             {
                 continue;
@@ -552,7 +601,184 @@ public sealed class CustomLoopRunStore :
             evidence.Add(item);
         }
 
+        if (evidence.Count > maximumArtifacts)
+        {
+            throw new FormatException("Schedule run-admission storage exceeds its explicit bounded artifact count.");
+        }
+
         return evidence;
+    }
+
+    private async Task<ScheduleRunAdmissionRetirementLedger> ReadScheduleAdmissionRetirementsAsync(CancellationToken cancellationToken)
+    {
+        if (!File.Exists(_scheduleAdmissionRetirementPath))
+        {
+            return ScheduleRunAdmissionRetirementCodec.Empty();
+        }
+
+        var content = await ReadBoundedJsonArtifactAsync(
+            _scheduleAdmissionsRoot,
+            _scheduleAdmissionRetirementPath,
+            ScheduleRunAdmissionRetirementCodec.MaximumArtifactUtf8Bytes,
+            "Schedule run-admission retirement evidence",
+            cancellationToken);
+        return ScheduleRunAdmissionRetirementCodec.Deserialize(content);
+    }
+
+    private async Task<(IReadOnlyList<ScheduleRunAdmissionEvidence> Admissions, ScheduleRunAdmissionRetirementLedger Retirements)> CompactScheduleAdmissionsAsync(
+        IReadOnlyList<ScheduleRunAdmissionEvidence> admissions,
+        ScheduleRunAdmissionRetirementLedger retirements,
+        CancellationToken cancellationToken)
+    {
+        var retirementBySchedule = retirements.Entries.ToDictionary(item => item.ScheduleId, StringComparer.Ordinal);
+        var removals = new List<ScheduleRunAdmissionEvidence>();
+        var now = _timeProvider.GetUtcNow().ToUniversalTime();
+        foreach (var group in admissions
+            .Where(IsRetirableScheduleAdmission)
+            .Select(item => (Evidence: item, Directive: ScheduleDirective(item)))
+            .GroupBy(item => item.Directive.ScheduleId.Value, StringComparer.Ordinal))
+        {
+            if (group.GroupBy(item => item.Directive.DefinitionRevision).Any(revision => revision.Select(item => item.Directive.DefinitionHash).Distinct(StringComparer.Ordinal).Skip(1).Any()))
+            {
+                throw new FormatException($"Schedule `{group.Key}` has terminal run-admission evidence with a substituted definition hash at one immutable revision.");
+            }
+
+            retirementBySchedule.TryGetValue(group.Key, out var currentRetirement);
+            if (currentRetirement is not null && group.Any(item =>
+                item.Directive.DefinitionRevision == currentRetirement.ScheduleRevision
+                && !string.Equals(item.Directive.DefinitionHash, currentRetirement.DefinitionHash, StringComparison.Ordinal)))
+            {
+                throw new FormatException($"Schedule `{group.Key}` has detailed and compacted evidence bound to different definition hashes at one immutable revision.");
+            }
+
+            var ordered = group
+                .OrderByDescending(item => item.Directive.DefinitionRevision)
+                .ThenByDescending(item => item.Directive.Occurrence.Ordinal)
+                .ThenByDescending(item => TriggerDelivery(item.Evidence.CanonicalEnvelope).Value, StringComparer.Ordinal)
+                .ToArray();
+            var retained = 0;
+            foreach (var item in ordered)
+            {
+                if (currentRetirement is not null && ScheduleRunAdmissionRetirementCodec.Covers(currentRetirement, item.Directive))
+                {
+                    removals.Add(item.Evidence);
+                    continue;
+                }
+
+                if (retained++ < ScheduleRunAdmissionRetirementCodec.RetainedTerminalEvidencePerSchedule)
+                {
+                    continue;
+                }
+
+                if (currentRetirement is null && retirementBySchedule.Count >= ScheduleRunAdmissionRetirementCodec.MaximumSchedules)
+                {
+                    continue;
+                }
+
+                var retiredAtUtc = new[] { now, item.Directive.Occurrence.ScheduledAtUtc, currentRetirement?.RetiredAtUtc ?? DateTimeOffset.MinValue }.Max();
+                var candidate = new ScheduleRunAdmissionRetirement(
+                    ScheduleRunAdmissionRetirementCodec.CurrentSchemaVersion,
+                    group.Key,
+                    item.Directive.DefinitionRevision,
+                    item.Directive.DefinitionHash,
+                    item.Directive.Occurrence.Ordinal,
+                    item.Directive.Occurrence.ScheduledAtUtc,
+                    retiredAtUtc);
+                if (currentRetirement is not null
+                    && currentRetirement.ScheduleRevision == candidate.ScheduleRevision
+                    && !string.Equals(currentRetirement.DefinitionHash, candidate.DefinitionHash, StringComparison.Ordinal))
+                {
+                    throw new FormatException($"Schedule `{group.Key}` retirement evidence is bound to a substituted definition hash at one immutable revision.");
+                }
+
+                if (currentRetirement is null || ScheduleRunAdmissionRetirementCodec.Compare(candidate, currentRetirement) > 0)
+                {
+                    currentRetirement = candidate;
+                    retirementBySchedule[group.Key] = candidate;
+                }
+
+                removals.Add(item.Evidence);
+            }
+        }
+
+        if (removals.Count == 0)
+        {
+            return (admissions, retirements);
+        }
+
+        var replacement = ScheduleRunAdmissionRetirementCodec.Apply(new ScheduleRunAdmissionRetirementLedger(
+            ScheduleRunAdmissionRetirementCodec.CurrentSchemaVersion,
+            retirementBySchedule.Values.ToArray(),
+            string.Empty));
+        await WriteBoundedJsonArtifactAsync(
+            _scheduleAdmissionsRoot,
+            _scheduleAdmissionRetirementPath,
+            ScheduleRunAdmissionRetirementCodec.Serialize(replacement),
+            overwrite: File.Exists(_scheduleAdmissionRetirementPath),
+            cancellationToken);
+
+        var removed = removals.Select(item => item.CanonicalEnvelopeHash).ToHashSet(StringComparer.Ordinal);
+        foreach (var item in removals)
+        {
+            var path = GetScheduleAdmissionPath(TriggerDelivery(item.CanonicalEnvelope));
+            EnsureSafeArtifactPath(_scheduleAdmissionsRoot, path, mustExist: true);
+            File.Delete(path);
+        }
+
+        return (admissions.Where(item => !removed.Contains(item.CanonicalEnvelopeHash)).ToArray(), replacement);
+    }
+
+    private static IReadOnlyList<ScheduleRunAdmissionEvidence> ReplaceScheduleAdmission(
+        IReadOnlyList<ScheduleRunAdmissionEvidence> admissions,
+        ScheduleRunAdmissionEvidence evidence)
+        => [
+            .. admissions.Where(item => !string.Equals(item.CanonicalEnvelopeHash, evidence.CanonicalEnvelopeHash, StringComparison.Ordinal)),
+            evidence,
+        ];
+
+    private static bool HasScheduleAdmissionCapacity(IReadOnlyList<ScheduleRunAdmissionEvidence> admissions)
+        => admissions.Count < MaximumScheduleAdmissionArtifacts;
+
+    private static bool ConflictsWithScheduleDefinition(
+        IReadOnlyList<ScheduleRunAdmissionEvidence> admissions,
+        ScheduleRunAdmissionRetirementLedger retirements,
+        ScheduleExecutionDirective directive,
+        out ScheduleRunAdmissionEvidence? conflict)
+    {
+        conflict = admissions.FirstOrDefault(item =>
+        {
+            var retained = ScheduleDirective(item);
+            return string.Equals(retained.ScheduleId.Value, directive.ScheduleId.Value, StringComparison.Ordinal)
+                && retained.DefinitionRevision == directive.DefinitionRevision
+                && !string.Equals(retained.DefinitionHash, directive.DefinitionHash, StringComparison.Ordinal);
+        });
+        if (conflict is not null)
+        {
+            return true;
+        }
+
+        return retirements.Entries.Any(item =>
+            string.Equals(item.ScheduleId, directive.ScheduleId.Value, StringComparison.Ordinal)
+            && item.ScheduleRevision == directive.DefinitionRevision
+            && !string.Equals(item.DefinitionHash, directive.DefinitionHash, StringComparison.Ordinal));
+    }
+
+    private static int MaximumScheduleAdmissionArtifacts
+        => CustomLoopLimits.MaxRunTracesPerWorkspace + CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace;
+
+    private static bool IsRetirableScheduleAdmission(ScheduleRunAdmissionEvidence evidence)
+        => evidence.Attempts[^1].Disposition is ScheduleRunAdmissionDisposition.OverlapSkipped
+            or ScheduleRunAdmissionDisposition.DeferredOneSuppressed;
+
+    private static ScheduleExecutionDirective ScheduleDirective(ScheduleRunAdmissionEvidence evidence)
+    {
+        if (!TriggerDeliveryJson.TryDeserialize(evidence.CanonicalEnvelope, out var envelope, out _)
+            || envelope?.ScheduleExecutionDirective is not { } directive)
+        {
+            throw new FormatException("Schedule run-admission evidence does not retain a canonical schedule directive.");
+        }
+
+        return directive;
     }
 
     private string GetScheduleAdmissionPath(TriggerDeliveryId deliveryId)
@@ -3062,7 +3288,17 @@ public sealed class CustomLoopRunStore :
 
         foreach (var path in Directory.EnumerateFiles(_scheduleAdmissionsRoot, "*", SearchOption.TopDirectoryOnly))
         {
-            if (IsTemporaryArtifactPath(path, TriggerDeliveryLimits.MaxDeliveryIdCharacters))
+            var fileName = Path.GetFileName(path);
+            if (string.Equals(fileName, ScheduleAdmissionRetirementFileName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (fileName.StartsWith($".{ScheduleAdmissionRetirementFileName}.", StringComparison.Ordinal) && fileName.EndsWith(".tmp", StringComparison.Ordinal))
+            {
+                DeleteOrphanedTemporaryArtifact(_scheduleAdmissionsRoot, path);
+            }
+            else if (IsTemporaryArtifactPath(path, TriggerDeliveryLimits.MaxDeliveryIdCharacters))
             {
                 DeleteOrphanedTemporaryArtifact(_scheduleAdmissionsRoot, path);
             }

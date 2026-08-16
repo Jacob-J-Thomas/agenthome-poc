@@ -75,6 +75,7 @@ public sealed class TriggerGovernedLoopDispatcherTests
     [InlineData("OverlapDeferred")]
     [InlineData("OverlapSerialized")]
     [InlineData("DeferredOneSuppressed")]
+    [InlineData("Retired")]
     public void Atomic_schedule_overlap_dispositions_are_provider_free_and_closed(string disposition)
     {
         var envelope = ScheduledEnvelope();

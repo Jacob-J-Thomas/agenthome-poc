@@ -135,6 +135,7 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
     [InlineData(ScheduleRunAdmissionStoreStatus.OverlapDeferred, GovernedLoopSequentialMaterializationStatus.OverlapDeferred)]
     [InlineData(ScheduleRunAdmissionStoreStatus.OverlapSerialized, GovernedLoopSequentialMaterializationStatus.OverlapSerialized)]
     [InlineData(ScheduleRunAdmissionStoreStatus.DeferredOneSuppressed, GovernedLoopSequentialMaterializationStatus.DeferredOneSuppressed)]
+    [InlineData(ScheduleRunAdmissionStoreStatus.Retired, GovernedLoopSequentialMaterializationStatus.Retired)]
     [InlineData(ScheduleRunAdmissionStoreStatus.Conflict, GovernedLoopSequentialMaterializationStatus.Conflict)]
     [InlineData(ScheduleRunAdmissionStoreStatus.LimitExceeded, GovernedLoopSequentialMaterializationStatus.LimitExceeded)]
     [InlineData(ScheduleRunAdmissionStoreStatus.Unavailable, GovernedLoopSequentialMaterializationStatus.Unavailable)]

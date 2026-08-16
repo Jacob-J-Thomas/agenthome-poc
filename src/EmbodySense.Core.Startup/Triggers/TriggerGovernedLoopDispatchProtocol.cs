@@ -105,7 +105,7 @@ public static class TriggerGovernedLoopDispatchProtocol
             return new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Rejected, Bound(response.Detail, "Canonical governed admission rejected before provider dispatch."));
         }
 
-        if (response.MaterializationStatus is "OverlapSkipped" or "OverlapDeferred" or "OverlapSerialized" or "DeferredOneSuppressed")
+        if (response.MaterializationStatus is "OverlapSkipped" or "OverlapDeferred" or "OverlapSerialized" or "DeferredOneSuppressed" or "Retired")
         {
             if (admission.Disposition != "Admitted"
                 || admission.Status is not ("Admitted" or "Replayed")

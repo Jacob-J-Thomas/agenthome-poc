@@ -50,4 +50,7 @@ public enum GovernedLoopSequentialInvocationStatus
 
     /// <summary>The exact run and admission receipt are durable, but provider execution was intentionally not entered.</summary>
     Prepared = 15,
+
+    /// <summary>The exact scheduled occurrence was terminalized before its detailed admission evidence was compacted.</summary>
+    Retired = 16,
 }

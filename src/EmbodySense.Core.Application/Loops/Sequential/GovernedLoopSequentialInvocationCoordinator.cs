@@ -643,6 +643,7 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
             GovernedLoopSequentialMaterializationStatus.OverlapDeferred => GovernedLoopSequentialInvocationStatus.OverlapDeferred,
             GovernedLoopSequentialMaterializationStatus.OverlapSerialized => GovernedLoopSequentialInvocationStatus.OverlapSerialized,
             GovernedLoopSequentialMaterializationStatus.DeferredOneSuppressed => GovernedLoopSequentialInvocationStatus.DeferredOneSuppressed,
+            GovernedLoopSequentialMaterializationStatus.Retired => GovernedLoopSequentialInvocationStatus.Retired,
             _ => GovernedLoopSequentialInvocationStatus.Invalid,
         };
 
