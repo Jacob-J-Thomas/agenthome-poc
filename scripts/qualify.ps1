@@ -90,7 +90,7 @@ function Add-QualificationPhase {
         [Parameter(Mandatory = $true)] [int]$TimeoutSeconds,
         [Parameter(Mandatory = $true)] [int]$EstimatedDurationSeconds,
         [Parameter(Mandatory = $true)] [int]$Weight,
-        [Parameter(Mandatory = $true)] [ValidateSet("Ordinary", "CpuBound", "ProcessHeavy")] [string]$ResourceClass,
+        [Parameter(Mandatory = $true)] [ValidateSet("Ordinary", "CpuBound", "ProcessHeavy", "ProcessLight")] [string]$ResourceClass,
         [hashtable]$Environment,
         [string]$TrxPath
     )
@@ -104,7 +104,7 @@ function Invoke-QualificationWave {
     }
 
     $workerCount = [Math]::Min($MaximumWorkers, $qualificationResourceCapacity)
-    Invoke-VerificationParallelPhases -MaximumWorkers $workerCount -MaximumResourceCapacity $qualificationResourceCapacity -MaximumProcessHeavyWorkers ([Math]::Min($script:QualificationMaximumProcessHeavyWorkers, $workerCount)) -MaximumCpuBoundWorkers ([Math]::Min(1, $workerCount)) | Out-Null
+    Invoke-VerificationParallelPhases -MaximumWorkers $workerCount -MaximumResourceCapacity $qualificationResourceCapacity -MaximumProcessHeavyWorkers ([Math]::Min(2, $workerCount)) -MaximumCpuBoundWorkers ([Math]::Min(1, $workerCount)) | Out-Null
     Reset-VerificationParallelPhaseState
 }
 
@@ -379,7 +379,7 @@ try {
             $contractArguments = @("-NoProfile")
             if ($runningOnWindows) { $contractArguments += @("-ExecutionPolicy", "Bypass") }
             $contractArguments += @("-File", (Join-Path $repoRoot "tests\scripts\$contractScript"))
-            Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -EstimatedDurationSeconds 30 -Weight $script:QualificationContractWeight -ResourceClass "ProcessHeavy"
+            Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -EstimatedDurationSeconds 30 -Weight $script:QualificationContractWeight -ResourceClass $script:QualificationContractResourceClass
         }
     }
     if ($plan.RequiresWorkflowValidation) {
@@ -419,7 +419,7 @@ try {
             TMPDIR = $projectFixtureRoot
         }
         $testScheduleProfile = Get-QualificationTestScheduleProfile -ProjectName $projectName
-        Add-QualificationPhase -Name "tests-$projectName" -FileName "dotnet" -Arguments @("test", $testProject, "--configuration", $Configuration, "--no-build", "--no-restore", "--settings", "tests/verification-stress.runsettings", "--filter", $testFilter, "--logger", "trx;LogFileName=$projectName.trx", "--results-directory", $projectResultsRoot, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds $testScheduleProfile.TimeoutSeconds -EstimatedDurationSeconds $testScheduleProfile.EstimatedDurationSeconds -Weight $testScheduleProfile.Weight -ResourceClass "ProcessHeavy" -Environment $testEnvironment -TrxPath $trxPath
+        Add-QualificationPhase -Name "tests-$projectName" -FileName "dotnet" -Arguments @("test", $testProject, "--configuration", $Configuration, "--no-build", "--no-restore", "--settings", "tests/verification-stress.runsettings", "--filter", $testFilter, "--logger", "trx;LogFileName=$projectName.trx", "--results-directory", $projectResultsRoot, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds $testScheduleProfile.TimeoutSeconds -EstimatedDurationSeconds $testScheduleProfile.EstimatedDurationSeconds -Weight $testScheduleProfile.Weight -ResourceClass $testScheduleProfile.ResourceClass -Environment $testEnvironment -TrxPath $trxPath
     }
     $integrationSelection = @($plan.TestSelections | Where-Object { $_.Project -ceq "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj" })
     $integrationRunsUnfiltered = $integrationSelection.Count -eq 1 -and @($integrationSelection[0].Namespaces).Count -eq 0 -and @($integrationSelection[0].Classes).Count -eq 0

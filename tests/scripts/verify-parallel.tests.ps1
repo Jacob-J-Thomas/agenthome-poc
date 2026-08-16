@@ -304,6 +304,7 @@ finally {
 
     foreach ($resourceClassScenario in @(
         [pscustomobject]@{ Name = "process-heavy"; ResourceClass = "ProcessHeavy"; Weight = 3; Maximum = 2; Count = 4 },
+        [pscustomobject]@{ Name = "process-light"; ResourceClass = "ProcessLight"; Weight = 1; Maximum = 6; Count = 6 },
         [pscustomobject]@{ Name = "cpu-bound"; ResourceClass = "CpuBound"; Weight = 2; Maximum = 1; Count = 3 }
     )) {
         $resourceClassRoot = Join-Path $scenarioRoot "$($resourceClassScenario.Name)-active"
