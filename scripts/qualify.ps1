@@ -30,6 +30,7 @@ $qualificationProcessHeavyWeight = [Math]::Min(2, $qualificationResourceCapacity
 $qualificationCpuBoundWeight = [Math]::Min(2, $qualificationResourceCapacity)
 
 . (Join-Path $PSScriptRoot "qualification-plan.ps1")
+. (Join-Path $PSScriptRoot "qualification-schedule.ps1")
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 . (Join-Path $PSScriptRoot "verification-parallel.ps1")
 . (Join-Path $PSScriptRoot "verification-temp.ps1")
@@ -360,6 +361,8 @@ try {
         Add-QualificationPhase -Name "frontend" -FileName $powerShellExecutable -Arguments $frontendArguments -TimeoutSeconds 240 -EstimatedDurationSeconds 60 -Weight $qualificationCpuBoundWeight -ResourceClass "CpuBound"
     }
 
+    Invoke-QualificationWave
+
     if ($plan.RequiresVerifierContracts) {
         $contractScripts = @(
             "verify-bounded-phases.tests.ps1",
@@ -379,8 +382,6 @@ try {
             Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -EstimatedDurationSeconds 30 -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy"
         }
     }
-    Invoke-QualificationWave
-
     if ($plan.RequiresWorkflowValidation) {
         Add-QualificationPhase -Name "github-yaml-format" -FileName "npx" -Arguments @("prettier", "--check", "--end-of-line", "auto", ".github/workflows/*.{yml,yaml}", ".github/dependabot.yml") -TimeoutSeconds 60 -EstimatedDurationSeconds 10 -Weight 1 -ResourceClass "Ordinary"
     }
@@ -417,7 +418,8 @@ try {
             TMP = $projectFixtureRoot
             TMPDIR = $projectFixtureRoot
         }
-        Add-QualificationPhase -Name "tests-$projectName" -FileName "dotnet" -Arguments @("test", $testProject, "--configuration", $Configuration, "--no-build", "--no-restore", "--settings", "tests/verification-stress.runsettings", "--filter", $testFilter, "--logger", "trx;LogFileName=$projectName.trx", "--results-directory", $projectResultsRoot, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds 180 -EstimatedDurationSeconds 90 -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy" -Environment $testEnvironment -TrxPath $trxPath
+        $testScheduleProfile = Get-QualificationTestScheduleProfile -ProjectName $projectName
+        Add-QualificationPhase -Name "tests-$projectName" -FileName "dotnet" -Arguments @("test", $testProject, "--configuration", $Configuration, "--no-build", "--no-restore", "--settings", "tests/verification-stress.runsettings", "--filter", $testFilter, "--logger", "trx;LogFileName=$projectName.trx", "--results-directory", $projectResultsRoot, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds $testScheduleProfile.TimeoutSeconds -EstimatedDurationSeconds $testScheduleProfile.EstimatedDurationSeconds -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy" -Environment $testEnvironment -TrxPath $trxPath
     }
     $integrationSelection = @($plan.TestSelections | Where-Object { $_.Project -ceq "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj" })
     $integrationRunsUnfiltered = $integrationSelection.Count -eq 1 -and @($integrationSelection[0].Namespaces).Count -eq 0 -and @($integrationSelection[0].Classes).Count -eq 0

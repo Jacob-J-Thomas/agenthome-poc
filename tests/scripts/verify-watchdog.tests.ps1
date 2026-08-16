@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $deadlineScriptPath = Join-Path $repoRoot "scripts\verification-deadline.ps1"
 $qualificationPlanScriptPath = Join-Path $repoRoot "scripts\qualification-plan.ps1"
+$qualificationScheduleScriptPath = Join-Path $repoRoot "scripts\qualification-schedule.ps1"
 $qualificationScriptPath = Join-Path $repoRoot "scripts\qualify.ps1"
 $watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
 $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
@@ -36,6 +37,32 @@ function Assert-Contains {
 
 . $deadlineScriptPath
 . $qualificationPlanScriptPath
+. $qualificationScheduleScriptPath
+
+$expectedQualificationProjects = @(
+    "EmbodySense.Cli.Command.Tests"
+    "EmbodySense.Core.Application.Tests"
+    "EmbodySense.Core.Clients.Tests"
+    "EmbodySense.Core.Common.Tests"
+    "EmbodySense.Core.Persistence.Tests"
+    "EmbodySense.Core.Startup.Tests"
+    "EmbodySense.E2ETests"
+    "EmbodySense.IntegrationTests"
+    "EmbodySense.Web.Tests"
+)
+Assert-Equal -Actual (@($script:QualificationTestScheduleProfiles.ProjectName | Sort-Object) -join "|") -Expected ($expectedQualificationProjects -join "|") -Message "Qualification scheduling profiles must equal the canonical nine-project inventory."
+$persistenceScheduleProfile = Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Core.Persistence.Tests"
+$startupScheduleProfile = Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Core.Startup.Tests"
+Assert-True -Condition ($persistenceScheduleProfile.EstimatedDurationSeconds -gt $startupScheduleProfile.EstimatedDurationSeconds) -Message "Persistence must be the first scheduled qualification suite."
+Assert-True -Condition ($startupScheduleProfile.EstimatedDurationSeconds -gt (Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Web.Tests").EstimatedDurationSeconds) -Message "Startup must be the second scheduled qualification suite."
+Assert-True -Condition ($persistenceScheduleProfile.TimeoutSeconds -eq 270 -and $startupScheduleProfile.TimeoutSeconds -eq 240) -Message "The two Windows-dominant suites must retain measured bounded child headroom beneath the global watchdog."
+try {
+    Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Unmapped.Tests" | Out-Null
+    throw "Expected an unmapped qualification scheduling failure."
+}
+catch {
+    Assert-True -Condition ($_.Exception.Message.IndexOf("must have exactly one checked-in scheduling profile", [StringComparison]::Ordinal) -ge 0) -Message "A new qualification project without a profile must fail closed."
+}
 
 $docsPlan = Get-QualificationPlan -ChangedPaths @("README.md", "docs/VERIFICATION.md")
 Assert-True -Condition (-not $docsPlan.RequiresBuild -and -not $docsPlan.RequiresFrontend -and $docsPlan.TestProjects.Count -eq 0) -Message "Documentation-only changes must not trigger unrelated compilation or tests."
@@ -691,9 +718,10 @@ $qualificationContractStart = $qualificationScript.IndexOf('if ($plan.RequiresVe
 $qualificationContractEnd = $qualificationScript.IndexOf('if ($plan.RequiresDrawioValidation)', $qualificationContractStart, [StringComparison]::Ordinal)
 Assert-True -Condition ($qualificationContractStart -ge 0 -and $qualificationContractEnd -gt $qualificationContractStart) -Message "Qualification must retain one explicit verifier-contract scheduling block."
 $qualificationContractBlock = $qualificationScript.Substring($qualificationContractStart, $qualificationContractEnd - $qualificationContractStart)
-Assert-Equal -Actual ([regex]::Matches($qualificationContractBlock, 'Invoke-QualificationWave').Count) -Expected 1 -Message "Build, frontend, and every verifier contract must share one bounded dependency-safe scheduler wave."
-Assert-True -Condition ($qualificationContractBlock.IndexOf('Add-QualificationPhase', [StringComparison]::Ordinal) -lt $qualificationContractBlock.IndexOf('Invoke-QualificationWave', [StringComparison]::Ordinal)) -Message "Qualification must enqueue every verifier contract before completing its first bounded wave."
+Assert-Equal -Actual ([regex]::Matches($qualificationContractBlock, 'Invoke-QualificationWave').Count) -Expected 0 -Message "Verifier contracts must share the post-build test wave instead of delaying the longest test projects."
 Assert-Equal -Actual ([regex]::Matches($qualificationScript, 'Invoke-QualificationWave').Count) -Expected 3 -Message "Qualification must define one wave helper and invoke exactly two bounded work waves."
+Assert-True -Condition ($qualificationScript.IndexOf('Invoke-QualificationWave', $qualificationScript.IndexOf('Add-QualificationPhase -Name "frontend"', [StringComparison]::Ordinal), [StringComparison]::Ordinal) -lt $qualificationContractStart) -Message "Build and frontend prerequisites must complete before verifier contracts and tests enter the second wave."
+Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationTestScheduleProfile -ProjectName $projectName', [StringComparison]::Ordinal) -ge 0) -Message "Every selected test project must use its checked-in measured scheduling profile."
 Assert-True -Condition ($qualificationScript.IndexOf('@("format", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006"', [StringComparison]::Ordinal) -ge 0) -Message "Changed-file qualification must check whitespace and IDE1006 in one dotnet format workspace load."
 Assert-True -Condition ($qualificationScript.IndexOf('Add-QualificationPhase -Name "format-changed"', [StringComparison]::Ordinal) -ge 0) -Message "Changed-file formatting must remain an explicit bounded phase."
 Assert-True -Condition ($qualificationScript.IndexOf('Invoke-QualificationWave', $qualificationScript.IndexOf('Add-QualificationPhase -Name "git-diff-check"', [StringComparison]::Ordinal), [StringComparison]::Ordinal) -ge 0) -Message "Tests, workflow validation, changed-file formatting, and diff-check must complete in the second bounded wave."
