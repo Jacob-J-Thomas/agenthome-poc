@@ -347,6 +347,18 @@ $directTestClasses = @(Get-QualificationDirectXunitTestClasses -Path $applicatio
 Assert-Equal -Actual ($directTestClasses -join "|") -Expected "EmbodySense.Core.Application.Tests.Loops.RunnerTests" -Message "A direct xUnit source must produce its exact filename-matching class filter."
 Assert-True -Condition (-not (Test-QualificationContainsIdentifierReference -Content 'private const string Example = "RunnerTests";' -Identifier "RunnerTests")) -Message "Test-class consumer discovery must ignore class-shaped string content."
 
+$partialTestSource = $directTestSource.Replace("public sealed class RunnerTests", "public sealed partial class RunnerTests")
+$partialTestClasses = @(Get-QualificationDirectXunitTestClasses -Path "tests/EmbodySense.Core.Application.Tests/Loops/RunnerTests.Wait.cs" -Content $partialTestSource)
+Assert-Equal -Actual ($partialTestClasses -join "|") -Expected "EmbodySense.Core.Application.Tests.Loops.RunnerTests" -Message "A dotted partial xUnit fragment must select its filename-prefix-matching canonical class."
+$nonPartialFragmentRejected = $false
+try {
+    Get-QualificationDirectXunitTestClasses -Path "tests/EmbodySense.Core.Application.Tests/Loops/RunnerTests.Wait.cs" -Content $directTestSource | Out-Null
+}
+catch {
+    $nonPartialFragmentRejected = $_.Exception.Message.Contains("partial class", [StringComparison]::Ordinal)
+}
+Assert-True -Condition $nonPartialFragmentRejected -Message "A dotted xUnit fragment must fail closed unless its canonical class is partial."
+
 $sharedDirectTestPath = "tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialRunMaterializerTests.cs"
 $sharedDirectTestClass = "EmbodySense.Core.Application.Tests.Loops.Sequential.GovernedLoopSequentialRunMaterializerTests"
 $currentCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
