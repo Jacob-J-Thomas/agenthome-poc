@@ -4,7 +4,7 @@ using EmbodySense.Core.Common.Loops.Custom.Execution;
 namespace EmbodySense.Core.Startup.Loops.Execution.Models;
 
 /// <summary>
-/// Identifies an optimistic, idempotent pause, cancel, or resume request.
+/// Validates and identifies an optimistic, idempotent pause, cancel, or resume request.
 /// </summary>
 public sealed record LoopRunControlInput
 {
