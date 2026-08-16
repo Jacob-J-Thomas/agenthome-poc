@@ -29,9 +29,9 @@ public sealed class RuntimeDiagnosticFormatterTests
         var formatted = RuntimeDiagnosticFormatter.FormatVerboseContext(context);
 
         Assert.Contains("message 3: role=assistant source=restored-conversation-history", formatted, StringComparison.Ordinal);
-        Assert.Contains("Assistant:\nassistant-content", formatted, StringComparison.Ordinal);
+        Assert.Contains($"Assistant:{Environment.NewLine}assistant-content", formatted, StringComparison.Ordinal);
         Assert.Contains("message 4: role=tool source=session-transcript", formatted, StringComparison.Ordinal);
-        Assert.Contains("Tool:\ntool-content", formatted, StringComparison.Ordinal);
+        Assert.Contains($"Tool:{Environment.NewLine}tool-content", formatted, StringComparison.Ordinal);
         Assert.Contains("memory (admission): bounded", formatted, StringComparison.Ordinal);
         Assert.Contains("not private model reasoning, hidden chain-of-thought", formatted, StringComparison.Ordinal);
     }
