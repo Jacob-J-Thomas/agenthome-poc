@@ -2,7 +2,7 @@ using EmbodySense.Core.Common.Triggers.Schedules.Models;
 
 namespace EmbodySense.Core.Common.Triggers.Schedules;
 
-/// <summary>Validates one exact, append-only successor of a durable schedule state.</summary>
+/// <summary>Validates one exact successor of a durable schedule state, including its bounded terminal-evidence rollover.</summary>
 /// <remarks>
 /// Structural state validation is insufficient at a persistence boundary: two individually valid snapshots can still
 /// erase evidence, rewind recurrence, resurrect exhausted work, or replace an uncertain delivery. This validator keeps
@@ -53,7 +53,7 @@ public static class ScheduleStateTransitionValidator
             Add(errors, "disposition_evidence_rewritten", "next.dispositionEvidence");
         }
 
-        if (!TryGetAppendedItems(
+        if (!TryGetAppendedTerminalEvidence(
                 before.TerminalDeliveryEvidence,
                 after.TerminalDeliveryEvidence,
                 out var appendedTerminalEvidence))
@@ -227,9 +227,32 @@ public static class ScheduleStateTransitionValidator
             LastClockObservedAtUtc = finalizedAtUtc,
             PendingDelivery = null,
             DispositionEvidence = current.DispositionEvidence.Concat(plan.DispositionEvidence).ToArray(),
-            TerminalDeliveryEvidence = current.TerminalDeliveryEvidence.Append(expectedTerminal).ToArray(),
+            TerminalDeliveryEvidence = next.TerminalDeliveryEvidence,
         };
-        return SameState(expected, next);
+        if (!SameState(expected, next))
+        {
+            return false;
+        }
+
+        var droppedTerminalCount = current.TerminalDeliveryEvidence.Count + 1 - next.TerminalDeliveryEvidence.Count;
+        if (droppedTerminalCount <= 0)
+        {
+            return true;
+        }
+
+        var lessCompactedTerminal = current.TerminalDeliveryEvidence
+            .Skip(droppedTerminalCount - 1)
+            .Append(expectedTerminal)
+            .ToArray();
+        if (lessCompactedTerminal.Length > ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems)
+        {
+            return true;
+        }
+
+        var lessCompacted = expected with { TerminalDeliveryEvidence = lessCompactedTerminal };
+        return !ScheduleContractHash.TryComputeState(lessCompacted, out _, out var validation)
+            && validation.Errors.Count == 1
+            && validation.Errors[0].Code == "canonical_document_too_large";
     }
 
     private static bool IsClaimDisposition(
@@ -506,6 +529,35 @@ public static class ScheduleStateTransitionValidator
         }
 
         appended = remaining;
+        return true;
+    }
+
+    private static bool TryGetAppendedTerminalEvidence(
+        IReadOnlyList<ScheduleTerminalDeliveryEvidence> current,
+        IReadOnlyList<ScheduleTerminalDeliveryEvidence> next,
+        out IReadOnlyList<ScheduleTerminalDeliveryEvidence> appended)
+    {
+        if (TryGetAppendedItems(current, next, out appended))
+        {
+            return true;
+        }
+
+        appended = [];
+        if (current.Count < ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems
+            || next.Count == 0
+            || next.Count > current.Count)
+        {
+            return false;
+        }
+
+        var droppedCount = current.Count - next.Count + 1;
+        if (droppedCount <= 0
+            || !current.Skip(droppedCount).SequenceEqual(next.Take(next.Count - 1)))
+        {
+            return false;
+        }
+
+        appended = [next[^1]];
         return true;
     }
 

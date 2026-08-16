@@ -1734,6 +1734,63 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
     }
 
     [Fact]
+    public async Task Recurring_finalization_rolls_terminal_evidence_and_remains_dispatchable_after_the_bound()
+    {
+        var definition = ScheduleEvaluatorTestData.Definition();
+        var occurrence = ScheduleEvaluatorTestData.Occurrence(
+            ScheduleContractLimits.MaxTerminalDeliveryEvidenceItems + 1L,
+            ScheduleEvaluatorTestData.FirstLocal.AddDays(ScheduleContractLimits.MaxTerminalDeliveryEvidenceItems),
+            ScheduleEvaluatorTestData.FirstUtc.AddDays(ScheduleContractLimits.MaxTerminalDeliveryEvidenceItems),
+            definition.TimeZone);
+        var seed = Fixture(
+            definition,
+            ScheduleEvaluatorTestData.State(definition, occurrence),
+            occurrence.ScheduledAtUtc);
+        var seeded = await seed.Evaluator.EvaluateAsync(definition.ScheduleId);
+        var terminalTemplate = Assert.Single(seeded.State!.TerminalDeliveryEvidence);
+        var observed = seed.Store.Mutations
+            .Select(mutation => mutation.Replacement)
+            .Single(state => state.PendingDelivery?.Phase == SchedulePendingDeliveryPhase.ResultObserved);
+        var priorTerminal = Enumerable.Range(1, ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems)
+            .Select(index =>
+            {
+                var ordinal = occurrence.Ordinal - ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems + index - 1L;
+                var priorOccurrence = ScheduleEvaluatorTestData.Occurrence(
+                    ordinal,
+                    ScheduleEvaluatorTestData.FirstLocal.AddDays(ordinal - 1),
+                    ScheduleEvaluatorTestData.FirstUtc.AddDays(ordinal - 1),
+                    definition.TimeZone);
+                Assert.True(ScheduleIdentityDerivation.TryDerive(
+                    definition.ScheduleId,
+                    definition.Revision,
+                    observed.DefinitionHash,
+                    priorOccurrence,
+                    out var identity,
+                    out var validation), ScheduleEvaluatorTestData.Errors(validation));
+                return terminalTemplate with
+                {
+                    Occurrence = priorOccurrence,
+                    Identity = identity!,
+                    FinalizedAtUtc = observed.LastClockObservedAtUtc!.Value,
+                };
+            })
+            .ToArray();
+        var restarted = Fixture(
+            definition,
+            observed with { TerminalDeliveryEvidence = priorTerminal },
+            occurrence.ScheduledAtUtc);
+
+        var result = await restarted.Evaluator.EvaluateAsync(definition.ScheduleId);
+
+        Assert.Equal(ScheduleEvaluationStatus.Queued, result.Status);
+        Assert.Null(result.State!.PendingDelivery);
+        Assert.Equal(ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems, result.State.TerminalDeliveryEvidence.Count);
+        Assert.Equal(occurrence.Ordinal - ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems + 1, result.State.TerminalDeliveryEvidence[0].Occurrence.Ordinal);
+        Assert.Equal(occurrence.Ordinal, result.State.TerminalDeliveryEvidence[^1].Occurrence.Ordinal);
+        Assert.Single(restarted.Store.Mutations);
+    }
+
+    [Fact]
     public async Task Revision_exhaustion_after_queue_observation_retains_the_prepared_recovery_checkpoint()
     {
         var seed = Fixture();

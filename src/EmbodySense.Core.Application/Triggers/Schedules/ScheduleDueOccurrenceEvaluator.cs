@@ -701,8 +701,7 @@ public sealed class ScheduleDueOccurrenceEvaluator
         var pending = state.PendingDelivery!;
         var result = pending.Result!;
         var plan = pending.FinalizationPlan!;
-        if (state.TerminalDeliveryEvidence.Count >= ScheduleContractLimits.MaxTerminalDeliveryEvidenceItems
-            || state.DispositionEvidence.Count + plan.DispositionEvidence.Count > ScheduleContractLimits.MaxDispositionEvidenceItems
+        if (state.DispositionEvidence.Count + plan.DispositionEvidence.Count > ScheduleContractLimits.MaxDispositionEvidenceItems
             || !TryNextRevision(state, out var revision))
         {
             return Result(ScheduleEvaluationStatus.BoundExceeded, "schedule-evidence-bound-exceeded", state);
@@ -726,8 +725,22 @@ public sealed class ScheduleDueOccurrenceEvaluator
             LastClockObservedAtUtc = now,
             PendingDelivery = null,
             DispositionEvidence = state.DispositionEvidence.Concat(plan.DispositionEvidence).ToArray(),
-            TerminalDeliveryEvidence = state.TerminalDeliveryEvidence.Append(terminal).ToArray(),
+            TerminalDeliveryEvidence = AppendTerminalEvidence(state.TerminalDeliveryEvidence, terminal),
         };
+        while (!ScheduleContractHash.TryComputeState(replacement, out _, out var validation)
+            && IsCanonicalDocumentTooLarge(validation)
+            && replacement.TerminalDeliveryEvidence.Count > 1)
+        {
+            replacement = replacement with
+            {
+                TerminalDeliveryEvidence = replacement.TerminalDeliveryEvidence.Skip(1).ToArray(),
+            };
+        }
+        if (!ScheduleContractHash.TryComputeState(replacement, out _, out var finalValidation)
+            && IsCanonicalDocumentTooLarge(finalValidation))
+        {
+            return Result(ScheduleEvaluationStatus.BoundExceeded, "schedule-evidence-bound-exceeded", state);
+        }
         var status = result.Kind switch
         {
             ScheduleDeliveryResultKind.Queued => ScheduleEvaluationStatus.Queued,
@@ -743,6 +756,18 @@ public sealed class ScheduleDueOccurrenceEvaluator
             result.ReasonCode,
             cancellationToken).ConfigureAwait(false);
     }
+
+    private static IReadOnlyList<ScheduleTerminalDeliveryEvidence> AppendTerminalEvidence(
+        IReadOnlyList<ScheduleTerminalDeliveryEvidence> current,
+        ScheduleTerminalDeliveryEvidence terminal)
+        => current
+            .Skip(Math.Max(0, current.Count - ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems + 1))
+            .Append(terminal)
+            .ToArray();
+
+    private static bool IsCanonicalDocumentTooLarge(ScheduleContractValidationResult validation)
+        => validation.Errors.Count == 1
+            && validation.Errors[0].Code == "canonical_document_too_large";
 
     private async Task<ScheduleEvaluationResult> RecordAmbiguousAsync(
         ScheduleDefinition definition,

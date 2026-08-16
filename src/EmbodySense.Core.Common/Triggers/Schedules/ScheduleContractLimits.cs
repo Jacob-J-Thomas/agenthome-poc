@@ -39,6 +39,9 @@ public static class ScheduleContractLimits
     /// <summary>Gets the maximum terminal delivery results retained in one state snapshot.</summary>
     public const int MaxTerminalDeliveryEvidenceItems = 256;
 
+    /// <summary>Gets the rolling terminal-result window retained by the evaluator, leaving room for one maximum pending delivery.</summary>
+    public const int RetainedTerminalDeliveryEvidenceItems = 128;
+
     /// <summary>Gets the maximum number of structured validation errors returned at one boundary.</summary>
     public const int MaxValidationErrors = 64;
 

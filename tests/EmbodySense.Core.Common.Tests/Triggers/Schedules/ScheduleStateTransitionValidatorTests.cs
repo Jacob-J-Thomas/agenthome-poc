@@ -83,6 +83,89 @@ public sealed class ScheduleStateTransitionValidatorTests
     }
 
     [Fact]
+    public void Exact_finalization_rolls_only_the_oldest_terminal_evidence_at_the_bound()
+    {
+        var definition = Definition(out var definitionHash);
+        var occurrence = ScheduleContractTestData.OccurrenceAt(ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems + 1L);
+        var successor = ScheduleContractTestData.OccurrenceAt(occurrence.Ordinal + 1);
+        var preparedAtUtc = occurrence.ScheduledAtUtc.AddSeconds(3);
+        var prepared = ScheduleContractTestData.Prepared(
+            occurrence,
+            preparedAtUtc,
+            definitionHash: definitionHash,
+            scheduleId: definition.ScheduleId);
+        var result = ScheduleContractTestData.Result(prepared.CanonicalEnvelopeHash, recordedAtUtc: preparedAtUtc.AddSeconds(1)) with
+        {
+            ReasonCode = "q",
+        };
+        var plan = new ScheduleFinalizationPlan(1, successor, null, null, []);
+        var pending = ScheduleContractTestData.Pending(
+            occurrence,
+            prepared,
+            result,
+            plan,
+            occurrence.ScheduledAtUtc,
+            definitionHash,
+            definition.Revision,
+            definition.ScheduleId);
+        var finalizedAtUtc = result.RecordedAtUtc.AddSeconds(1);
+        var priorTerminal = Enumerable.Range(1, ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems)
+            .Select(index =>
+            {
+                var priorOccurrence = ScheduleContractTestData.OccurrenceAt(index);
+                return new ScheduleTerminalDeliveryEvidence(
+                    ScheduleTerminalDeliveryEvidence.CurrentSchemaVersion,
+                    priorOccurrence,
+                    ScheduleContractTestData.Identity(priorOccurrence, definitionHash, definition.Revision, definition.ScheduleId),
+                    new string('f', ScheduleContractLimits.Sha256HexCharacters),
+                    new string('9', ScheduleContractLimits.Sha256HexCharacters),
+                    new string('8', ScheduleContractLimits.Sha256HexCharacters),
+                    result,
+                    result.RecordedAtUtc);
+            })
+            .ToArray();
+        var current = State(
+            definition,
+            definitionHash,
+            occurrence,
+            pending,
+            revision: 4,
+            clock: result.RecordedAtUtc,
+            terminal: priorTerminal);
+        var appended = Terminal(pending, finalizedAtUtc);
+        var rolled = State(
+            definition,
+            definitionHash,
+            successor,
+            revision: 5,
+            clock: finalizedAtUtc,
+            terminal: priorTerminal.Skip(1).Append(appended).ToArray());
+
+        Assert.Equal(appended, rolled.TerminalDeliveryEvidence[^1]);
+        Assert.True(current.TerminalDeliveryEvidence.Skip(1).SequenceEqual(rolled.TerminalDeliveryEvidence.Take(rolled.TerminalDeliveryEvidence.Count - 1)));
+        var expected = current with
+        {
+            StateRevision = rolled.StateRevision,
+            NextOccurrence = successor,
+            LastClockObservedAtUtc = finalizedAtUtc,
+            PendingDelivery = null,
+            TerminalDeliveryEvidence = current.TerminalDeliveryEvidence.Skip(1).Append(appended).ToArray(),
+        };
+        Assert.True(ScheduleContractHash.TryComputeState(expected, out var expectedHash, out var expectedValidation), ScheduleContractTestData.Errors(expectedValidation));
+        Assert.True(ScheduleContractHash.TryComputeState(rolled, out var rolledHash, out var rolledValidation), ScheduleContractTestData.Errors(rolledValidation));
+        Assert.Equal(expectedHash, rolledHash);
+        AssertLegal(definition, current, rolled);
+        AssertRejected(
+            definition,
+            current,
+            rolled with
+            {
+                TerminalDeliveryEvidence = priorTerminal.Skip(2).Append(priorTerminal[0]).Append(appended).ToArray(),
+            },
+            "terminal_evidence_rewritten");
+    }
+
+    [Fact]
     public void Evidence_removal_and_rewrite_are_rejected_even_when_each_snapshot_is_valid()
     {
         var definition = Definition(out var definitionHash);
