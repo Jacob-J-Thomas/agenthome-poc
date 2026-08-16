@@ -218,6 +218,20 @@ $script:QualificationLinkedTestMappings = @(
             "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj",
             "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
         )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Common.Tests/TriggerDeliveryTestData.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Common.Tests/Triggers/Schedules/ScheduleContractTestData.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
+        )
     }
 )
 $script:QualificationFocusedHelperMappings = @(
