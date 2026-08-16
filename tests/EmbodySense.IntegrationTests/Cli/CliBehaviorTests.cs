@@ -7,6 +7,7 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Common.Memory.Models;
 using EmbodySense.Core.Persistence.Audit;
+using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Common.Workspace;
@@ -63,9 +64,9 @@ public sealed class CliBehaviorTests
         using var workspace = new TestWorkspace();
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("y" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath, "--sandbox", "workspace-write");
+        var result = await RunCliWithInputUsingTrustRootAsync("y" + Environment.NewLine + "/exit" + Environment.NewLine, workspace.ServerStatePath, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath, "--sandbox", "workspace-write");
 
-        Assert.Equal(0, result.ExitCode);
+        Assert.True(result.ExitCode == 0, $"CLI failed with exit code {result.ExitCode}. Output: {result.Output} Error: {result.Error}");
         Assert.Contains("Initialize this workspace now?", result.Output);
         Assert.Contains($"Codex executable: {Path.GetFullPath(codexPath)}", result.Output);
         Assert.Contains("Codex version: codex-cli integration-test", result.Output);
@@ -284,6 +285,16 @@ public sealed class CliBehaviorTests
 
     private static async Task<CliResult> RunCliWithInputAsync(string standardInput, params string[] arguments)
     {
+        return await RunCliWithInputAsync(standardInput, null, arguments);
+    }
+
+    private static async Task<CliResult> RunCliWithInputUsingTrustRootAsync(string standardInput, string capabilityCatalogTrustRoot, params string[] arguments)
+    {
+        return await RunCliWithInputAsync(standardInput, capabilityCatalogTrustRoot, arguments);
+    }
+
+    private static async Task<CliResult> RunCliWithInputAsync(string standardInput, string? capabilityCatalogTrustRoot, string[] arguments)
+    {
         var cliPath = Path.Combine(AppContext.BaseDirectory, "EmbodySense.Cli.dll");
         Assert.True(File.Exists(cliPath), $"Expected CLI assembly at {cliPath}.");
 
@@ -296,6 +307,11 @@ public sealed class CliBehaviorTests
             UseShellExecute = false,
             CreateNoWindow = true
         };
+
+        if (capabilityCatalogTrustRoot is not null)
+        {
+            startInfo.Environment[FileCapabilityCatalogTrustProvider.DefaultRootEnvironmentVariable] = capabilityCatalogTrustRoot;
+        }
 
         startInfo.ArgumentList.Add(cliPath);
         foreach (var argument in arguments)
@@ -321,45 +337,53 @@ public sealed class CliBehaviorTests
 
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace, bool advertiseConfiguredModel = true)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("The controlled Codex process fixture is currently implemented as a Windows command script.");
-        }
-
-        var scriptPath = workspace.File("fake-cli-codex.ps1");
-        var commandPath = workspace.File("fake-cli-codex.cmd");
+        var scriptPath = workspace.File("fake-cli-codex.js");
+        var commandPath = workspace.File(OperatingSystem.IsWindows() ? "fake-cli-codex.cmd" : "fake-cli-codex");
         var advertisedModel = advertiseConfiguredModel ? "gpt-test" : "older-model";
         await File.WriteAllTextAsync(scriptPath, $$"""
-            if ($args -contains "--version") {
-                Write-Output "codex-cli integration-test"
-                exit 0
+            if (process.argv.slice(2).includes("--version")) {
+              process.stdout.write("codex-cli integration-test\n");
+              process.exit(0);
             }
 
-            function Write-ProtocolJson($value) {
-                $value | ConvertTo-Json -Compress -Depth 20
-                [Console]::Out.Flush()
+            const readline = require("node:readline");
+            const advertisedModel = {{JsonSerializer.Serialize(advertisedModel)}};
+            const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+
+            function write(value) {
+              process.stdout.write(`${JSON.stringify(value)}\n`);
             }
 
-            while (($line = [Console]::In.ReadLine()) -ne $null) {
-                $message = $line | ConvertFrom-Json
-                switch ($message.method) {
-                    "initialize" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{} }
-                    }
-
-                    "initialized" {
-                    }
-
-                    "model/list" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "{{advertisedModel}}"; model = "{{advertisedModel}}" }) } }
-                    }
+            input.on("line", (line) => {
+              const message = JSON.parse(line);
+              switch (message.method) {
+                case "initialize":
+                  write({ id: message.id, result: {} });
+                  break;
+                case "model/list":
+                  write({ id: message.id, result: { data: [{ id: advertisedModel, model: advertisedModel }] } });
+                  break;
+                default:
+                  break;
                 }
-            }
+            });
             """);
-        await File.WriteAllTextAsync(commandPath, """
-            @echo off
-            "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-cli-codex.ps1" %*
-            """);
+        if (OperatingSystem.IsWindows())
+        {
+            await File.WriteAllTextAsync(commandPath, """
+                @echo off
+                node "%~dp0fake-cli-codex.js" %*
+                """);
+        }
+        else
+        {
+            await File.WriteAllTextAsync(commandPath, """
+                #!/bin/sh
+                exec node "$(dirname "$0")/fake-cli-codex.js" "$@"
+                """);
+            File.SetUnixFileMode(commandPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
         return commandPath;
     }
 

@@ -21,7 +21,7 @@ public sealed class IsolatedCapabilityExecutableHostTests
     }
 
     [Fact]
-    public async Task Configured_boundary_cannot_claim_available_execution_without_a_host_supported_lease_binding()
+    public async Task Configured_boundary_obeys_the_host_supported_lease_binding_contract()
     {
         using var artifact = PrepareArtifact();
         var boundary = new TestCapabilityProcessIsolationBoundary();
@@ -49,20 +49,18 @@ public sealed class IsolatedCapabilityExecutableHostTests
     public async Task Caller_supplied_artifact_root_is_unavailable_without_a_proved_resolver()
     {
         using var artifact = PrepareArtifact();
-        using var host = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), new TestCapabilityProcessIsolationBoundary());
+        var boundary = new TestCapabilityProcessIsolationBoundary();
+        using var host = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), boundary);
 
         var result = await host.InvokeAsync(new CapabilityExecutableInvocation(CapabilityClientTestData.Manifest(artifact.EntryPoint), artifact.RootPath, "{}", "unproved-root"));
 
         Assert.Equal(CapabilityExecutableInvocationStatus.Unavailable, result.Status);
+        Assert.Equal(0, boundary.Starts);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Resolver_and_lease_failures_remain_structured_without_starting_a_process()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
         using var artifact = PrepareArtifact();
         var boundary = new TestCapabilityProcessIsolationBoundary();
         var resolver = new TestCapabilityExecutableArtifactResolver { Resolution = new(CapabilityExecutableAvailabilityStatus.Available, null, "Lease was omitted.") };
@@ -88,13 +86,9 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.Equal(0, boundary.Starts);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Lifecycle_change_at_final_launch_fence_prevents_process_start()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
         using var artifact = PrepareArtifact();
         var manifest = CapabilityClientTestData.Manifest(artifact.EntryPoint);
         var lease = new TestCapabilityExecutableArtifactLease(artifact.RootPath, Path.Combine(artifact.RootPath, artifact.EntryPoint), manifest.Checksum, 1, launchAllowed: false);
@@ -108,13 +102,9 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.Equal(0, boundary.Starts);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Cancellation_while_acquiring_final_launch_fence_is_reported_as_cancelled()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
         using var artifact = PrepareArtifact();
         var manifest = CapabilityClientTestData.Manifest(artifact.EntryPoint);
         var lease = new TestCapabilityExecutableArtifactLease(artifact.RootPath, Path.Combine(artifact.RootPath, artifact.EntryPoint), manifest.Checksum, 1, waitForLaunchCancellation: true);
@@ -132,13 +122,9 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.Equal(0, boundary.Starts);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Resolver_cancellation_and_boundary_failure_are_safe_terminal_results()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
         using var artifact = PrepareArtifact();
         var manifest = CapabilityClientTestData.Manifest(artifact.EntryPoint);
         using var cancellation = new CancellationTokenSource();
@@ -161,13 +147,9 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.DoesNotContain("private", unavailable.Diagnostic, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Invalid_lease_root_fails_closed_before_process_start()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
         using var artifact = PrepareArtifact();
         var manifest = CapabilityClientTestData.Manifest(artifact.EntryPoint);
         var invalidRootLease = new TestCapabilityExecutableArtifactLease(
@@ -183,7 +165,7 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.Equal(CapabilityExecutableInvocationStatus.Invalid, (await invalidRootHost.InvokeAsync(invalidRootInvocation)).Status);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Stderr_overflow_terminates_the_process_without_returning_its_output()
     {
         using var artifact = PrepareArtifact();
@@ -197,7 +179,7 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.DoesNotContain(new string('x', 64), result.Diagnostic, StringComparison.Ordinal);
     }
 
-    [Theory]
+    [WindowsTheory]
     [InlineData("token=alpha, TOKEN : bravo; token=charlie", "alpha|bravo|charlie", "[redacted]")]
     [InlineData("secret: delta password = echo", "delta|echo", "[redacted]")]
     [InlineData("api_key=foxtrot api-key: golf", "foxtrot|golf", "[redacted]")]
@@ -222,7 +204,7 @@ public sealed class IsolatedCapabilityExecutableHostTests
         }
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Process_output_is_bounded_after_redaction_without_changing_the_execution_outcome()
     {
         using var artifact = PrepareArtifact();
@@ -249,7 +231,7 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.DoesNotContain("private", availability.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Theory]
+    [WindowsTheory]
     [InlineData("echo", CapabilityExecutableInvocationStatus.Succeeded)]
     [InlineData("malformed", CapabilityExecutableInvocationStatus.MalformedResult)]
     [InlineData("crash", CapabilityExecutableInvocationStatus.Crashed)]
@@ -274,7 +256,7 @@ public sealed class IsolatedCapabilityExecutableHostTests
         }
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Hang_times_out_and_process_tree_is_terminated()
     {
         using var artifact = PrepareArtifact();
@@ -287,7 +269,7 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.True(result.Duration < TimeSpan.FromSeconds(10));
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Caller_cancellation_terminates_running_process()
     {
         using var artifact = PrepareArtifact();
@@ -300,7 +282,7 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.Equal(CapabilityExecutableInvocationStatus.Cancelled, result.Status);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Declared_concurrency_bound_admits_only_one_process_at_a_time()
     {
         using var artifact = PrepareArtifact();
@@ -320,7 +302,7 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.Equal(1, boundary.Starts);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Environment_is_cleared_and_working_directory_is_exact_artifact_root()
     {
         using var artifact = PrepareArtifact();
@@ -352,7 +334,7 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.Equal(0, boundary.Starts);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Invalid_unavailable_and_missing_artifacts_fail_while_legacy_caller_root_is_ignored()
     {
         using var artifact = PrepareArtifact();
@@ -368,7 +350,7 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.Equal(1, boundary.Starts);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Platform_isolation_start_failure_is_structured_and_redacted()
     {
         using var artifact = PrepareArtifact();
@@ -381,13 +363,9 @@ public sealed class IsolatedCapabilityExecutableHostTests
         Assert.DoesNotContain("private", result.Diagnostic, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Executable_path_substitution_between_resolution_and_start_is_blocked_by_lease()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
         using var artifact = PrepareArtifact();
         var boundary = new SubstitutingCapabilityProcessIsolationBoundary();
         using var host = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), boundary, new TestCapabilityExecutableArtifactResolver(artifact.RootPath));
