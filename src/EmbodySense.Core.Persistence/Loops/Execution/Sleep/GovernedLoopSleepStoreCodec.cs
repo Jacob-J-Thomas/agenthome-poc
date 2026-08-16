@@ -13,6 +13,7 @@ namespace EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 internal static class GovernedLoopSleepStoreCodec
 {
     internal const int MaximumWakeEvidenceItems = 3;
+    internal const int MaximumGenerationDigits = 19;
     private const int SchemaVersion = 1;
     private const int MaximumDepth = 16;
     private static readonly string[] _catalogProperties = ["entries", "generation", "schemaVersion"];
@@ -62,7 +63,9 @@ internal static class GovernedLoopSleepStoreCodec
             writer.Flush();
         }
 
-        if (buffer.WrittenCount > maximumBytes)
+        var reservedBytes = catalog.Entries.Sum(ReservedWakeUtf8Bytes);
+        var generationReservation = MaximumGenerationDigits - catalog.Generation.ToString(CultureInfo.InvariantCulture).Length;
+        if (checked((long)buffer.WrittenCount + reservedBytes + generationReservation) > maximumBytes)
         {
             throw new GovernedLoopSleepStoreLimitException();
         }
@@ -364,6 +367,74 @@ internal static class GovernedLoopSleepStoreCodec
 
         writer.WriteEndArray();
         writer.WriteEndObject();
+    }
+
+    private static int ReservedWakeUtf8Bytes(GovernedLoopSleepStoreEntry entry)
+    {
+        var actualBytes = SerializedEntryUtf8Bytes(entry);
+        var maximumBytes = SerializedEntryUtf8Bytes(MaximumWakeEntry(entry));
+        return Math.Max(0, maximumBytes - actualBytes);
+    }
+
+    private static int SerializedEntryUtf8Bytes(GovernedLoopSleepStoreEntry entry)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        using var writer = new Utf8JsonWriter(buffer);
+        WriteEntry(writer, entry);
+        writer.Flush();
+        return buffer.WrittenCount;
+    }
+
+    private static GovernedLoopSleepStoreEntry MaximumWakeEntry(GovernedLoopSleepStoreEntry entry)
+    {
+        var maximumIdentifier = new string('z', GovernedLoopSleepContractLimits.MaxIdentifierCharacters);
+        var maximumEvidenceReference = new string('z', GovernedLoopSleepContractLimits.MaxEvidenceReferenceCharacters);
+        var maximumHash = new string('f', GovernedLoopSleepContractLimits.Sha256HexCharacters);
+        var identity = GovernedLoopSleepContractHash.Apply(new GovernedLoopWakeIdentity(
+            SchemaVersion,
+            string.Empty,
+            entry.Checkpoint.CheckpointId,
+            entry.Checkpoint.ContentHash,
+            entry.Checkpoint.WakeMode,
+            entry.Checkpoint.AuthenticatedEventReference,
+            entry.Checkpoint.WakeMode == GovernedLoopWakeMode.AuthenticatedEvent ? maximumHash : null,
+            string.Empty));
+        var recordedAtUtc = DateTimeOffset.MaxValue;
+        var prepared = GovernedLoopSleepContractHash.Apply(new GovernedLoopWakeEvidence(
+            SchemaVersion,
+            1,
+            identity,
+            GovernedLoopWakeDisposition.Prepared,
+            maximumIdentifier,
+            null,
+            null,
+            recordedAtUtc,
+            string.Empty));
+        var ambiguous = GovernedLoopSleepContractHash.Apply(new GovernedLoopWakeEvidence(
+            SchemaVersion,
+            2,
+            identity,
+            GovernedLoopWakeDisposition.AmbiguousAttempt,
+            maximumIdentifier,
+            null,
+            maximumEvidenceReference,
+            recordedAtUtc,
+            string.Empty));
+        var committed = GovernedLoopSleepContractHash.Apply(new GovernedLoopWakeEvidence(
+            SchemaVersion,
+            3,
+            identity,
+            GovernedLoopWakeDisposition.Committed,
+            maximumIdentifier,
+            maximumHash,
+            null,
+            recordedAtUtc,
+            string.Empty));
+        return entry with
+        {
+            WakeClaimPostureHash = maximumHash,
+            WakeEvidence = Array.AsReadOnly([prepared, ambiguous, committed])
+        };
     }
 
     private static void WriteCheckpoint(Utf8JsonWriter writer, GovernedLoopSleepCheckpoint checkpoint)

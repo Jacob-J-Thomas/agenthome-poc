@@ -38,7 +38,8 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
         _guard = new TriggerQueueArtifactGuard(
             paths.RootPath,
             paths.AgentFile(Path.Combine("loops", "execution", "coordinator")),
-            options.MaxDurabilityArtifacts);
+            options.MaxDurabilityArtifacts,
+            recycleAuthenticatedTombstones: true);
     }
 
     /// <inheritdoc />
@@ -106,6 +107,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                     coordinatorId,
                     Array.AsReadOnly([request.ProposedOwnership]),
                     Array.AsReadOnly([request.StartingLifecycle]),
+                    Array.AsReadOnly<GovernedLoopCoordinatorHeartbeatRetirement>([]),
                     Array.AsReadOnly([request.InitialHeartbeat]),
                     Array.AsReadOnly<GovernedLoopCoordinatorFailure>([]));
                 var candidate = new GovernedLoopCoordinatorEvidenceStoreCatalog(
@@ -144,17 +146,19 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Corrupt);
             }
 
-            if (EvidenceCount(entry) > _maximumEvidenceItems - 3)
+            var compacted = CompactHeartbeats(entry, requiredSlots: 3, retireCurrentHead: true);
+            if (compacted is null)
             {
                 return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Conflict, Snapshot(entry));
             }
 
             var replacement = new GovernedLoopCoordinatorEvidenceStoreEntry(
-                entry.CoordinatorId,
-                ReadOnly(entry.Ownerships.Append(request.ProposedOwnership)),
-                ReadOnly(entry.Lifecycles.Append(request.StartingLifecycle)),
-                ReadOnly(entry.Heartbeats.Append(request.InitialHeartbeat)),
-                entry.Failures);
+                compacted.CoordinatorId,
+                ReadOnly(compacted.Ownerships.Append(request.ProposedOwnership)),
+                ReadOnly(compacted.Lifecycles.Append(request.StartingLifecycle)),
+                compacted.HeartbeatRetirements,
+                ReadOnly(compacted.Heartbeats.Append(request.InitialHeartbeat)),
+                compacted.Failures);
             await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
             return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Acquired, Snapshot(replacement));
         }
@@ -227,17 +231,19 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 return HeartbeatResult(GovernedLoopCoordinatorHeartbeatMutationStatus.Corrupt);
             }
 
-            if (EvidenceCount(entry) >= _maximumEvidenceItems)
+            var compacted = CompactHeartbeats(entry, requiredSlots: 1, retireCurrentHead: true);
+            if (compacted is null)
             {
                 return HeartbeatResult(GovernedLoopCoordinatorHeartbeatMutationStatus.Conflict, Snapshot(entry));
             }
 
             var replacement = new GovernedLoopCoordinatorEvidenceStoreEntry(
-                entry.CoordinatorId,
-                entry.Ownerships,
-                entry.Lifecycles,
-                ReadOnly(entry.Heartbeats.Append(request.ProposedHeartbeat)),
-                entry.Failures);
+                compacted.CoordinatorId,
+                compacted.Ownerships,
+                compacted.Lifecycles,
+                compacted.HeartbeatRetirements,
+                ReadOnly(compacted.Heartbeats.Append(request.ProposedHeartbeat)),
+                compacted.Failures);
             await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
             return HeartbeatResult(GovernedLoopCoordinatorHeartbeatMutationStatus.Renewed, Snapshot(replacement));
         }
@@ -292,17 +298,19 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 return LifecycleResult(GovernedLoopCoordinatorLifecycleMutationStatus.Corrupt);
             }
 
-            if (EvidenceCount(entry) >= _maximumEvidenceItems)
+            var compacted = CompactHeartbeats(entry, requiredSlots: 1, retireCurrentHead: false);
+            if (compacted is null)
             {
                 return LifecycleResult(GovernedLoopCoordinatorLifecycleMutationStatus.Conflict, Snapshot(entry));
             }
 
             var replacement = new GovernedLoopCoordinatorEvidenceStoreEntry(
-                entry.CoordinatorId,
-                entry.Ownerships,
-                ReadOnly(entry.Lifecycles.Append(request.ProposedLifecycle)),
-                entry.Heartbeats,
-                entry.Failures);
+                compacted.CoordinatorId,
+                compacted.Ownerships,
+                ReadOnly(compacted.Lifecycles.Append(request.ProposedLifecycle)),
+                compacted.HeartbeatRetirements,
+                compacted.Heartbeats,
+                compacted.Failures);
             await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
             return LifecycleResult(GovernedLoopCoordinatorLifecycleMutationStatus.Appended, Snapshot(replacement));
         }
@@ -365,17 +373,19 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 return FailureResult(GovernedLoopCoordinatorFailureMutationStatus.Corrupt);
             }
 
-            if (EvidenceCount(entry) >= _maximumEvidenceItems)
+            var compacted = CompactHeartbeats(entry, requiredSlots: 1, retireCurrentHead: false);
+            if (compacted is null)
             {
                 return FailureResult(GovernedLoopCoordinatorFailureMutationStatus.Conflict, Snapshot(entry));
             }
 
             var replacement = new GovernedLoopCoordinatorEvidenceStoreEntry(
-                entry.CoordinatorId,
-                entry.Ownerships,
-                entry.Lifecycles,
-                entry.Heartbeats,
-                ReadOnly(entry.Failures.Append(request.ProposedFailure)));
+                compacted.CoordinatorId,
+                compacted.Ownerships,
+                compacted.Lifecycles,
+                compacted.HeartbeatRetirements,
+                compacted.Heartbeats,
+                ReadOnly(compacted.Failures.Append(request.ProposedFailure)));
             await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
             return FailureResult(GovernedLoopCoordinatorFailureMutationStatus.Appended, Snapshot(replacement));
         }
@@ -466,7 +476,8 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
         GovernedLoopCoordinatorAcquisitionRequest request)
         => entry.Ownerships.Any(item => string.Equals(item.ContentHash, request.ProposedOwnership.ContentHash, StringComparison.Ordinal))
             && entry.Lifecycles.Any(item => string.Equals(item.ContentHash, request.StartingLifecycle.ContentHash, StringComparison.Ordinal))
-            && entry.Heartbeats.Any(item => string.Equals(item.ContentHash, request.InitialHeartbeat.ContentHash, StringComparison.Ordinal));
+            && (entry.Heartbeats.Any(item => string.Equals(item.ContentHash, request.InitialHeartbeat.ContentHash, StringComparison.Ordinal))
+                || entry.HeartbeatRetirements.Any(item => string.Equals(item.InitialHeartbeatHash, request.InitialHeartbeat.ContentHash, StringComparison.Ordinal)));
 
     private static bool IsCurrentOwner(GovernedLoopCoordinatorEvidenceStoreEntry entry, string expectedOwnershipHash)
         => string.Equals(entry.Ownerships[^1].ContentHash, expectedOwnershipHash, StringComparison.Ordinal);
@@ -479,7 +490,8 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
     private static GovernedLoopCoordinatorHeartbeat LatestHeartbeat(
         GovernedLoopCoordinatorEvidenceStoreEntry entry,
         GovernedLoopCoordinatorOwnership ownership)
-        => entry.Heartbeats.Last(item => SameOwnership(item.Ownership, ownership));
+        => entry.Heartbeats.LastOrDefault(item => SameOwnership(item.Ownership, ownership))
+            ?? ToHeartbeat(entry.HeartbeatRetirements.Single(item => SameOwnership(item.Ownership, ownership)));
 
     private static GovernedLoopCoordinatorFailure? LatestFailure(
         GovernedLoopCoordinatorEvidenceStoreEntry entry,
@@ -490,7 +502,82 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
         => string.Equals(first.ContentHash, second.ContentHash, StringComparison.Ordinal);
 
     private static int EvidenceCount(GovernedLoopCoordinatorEvidenceStoreEntry entry)
-        => checked(entry.Ownerships.Count + entry.Lifecycles.Count + entry.Heartbeats.Count + entry.Failures.Count);
+        => checked(entry.Ownerships.Count + entry.Lifecycles.Count + entry.HeartbeatRetirements.Count + entry.Heartbeats.Count + entry.Failures.Count);
+
+    private GovernedLoopCoordinatorEvidenceStoreEntry? CompactHeartbeats(
+        GovernedLoopCoordinatorEvidenceStoreEntry entry,
+        int requiredSlots,
+        bool retireCurrentHead)
+    {
+        if (EvidenceCount(entry) <= _maximumEvidenceItems - requiredSlots)
+        {
+            return entry;
+        }
+
+        var heartbeats = entry.Heartbeats.ToList();
+        var retirements = entry.HeartbeatRetirements.ToList();
+        var currentOwnership = entry.Ownerships[^1];
+        foreach (var ownership in entry.Ownerships)
+        {
+            var ownerHeartbeats = heartbeats.Where(item => SameOwnership(item.Ownership, ownership)).ToArray();
+            var retain = SameOwnership(ownership, currentOwnership) && !retireCurrentHead ? 1 : 0;
+            var retireCount = Math.Max(0, ownerHeartbeats.Length - retain);
+            if (retireCount == 0)
+            {
+                continue;
+            }
+
+            var retirement = retirements.SingleOrDefault(item => SameOwnership(item.Ownership, ownership));
+            foreach (var heartbeat in ownerHeartbeats.Take(retireCount))
+            {
+                retirement = RetireHeartbeat(retirement, heartbeat);
+                heartbeats.Remove(heartbeat);
+            }
+
+            retirements.RemoveAll(item => SameOwnership(item.Ownership, ownership));
+            retirements.Add(retirement!);
+            var compacted = new GovernedLoopCoordinatorEvidenceStoreEntry(
+                entry.CoordinatorId,
+                entry.Ownerships,
+                entry.Lifecycles,
+                ReadOnly(retirements.OrderBy(item => item.Ownership.OwnershipEpoch)),
+                ReadOnly(heartbeats),
+                entry.Failures);
+            if (EvidenceCount(compacted) <= _maximumEvidenceItems - requiredSlots)
+            {
+                return compacted;
+            }
+        }
+
+        return null;
+    }
+
+    private static GovernedLoopCoordinatorHeartbeatRetirement RetireHeartbeat(
+        GovernedLoopCoordinatorHeartbeatRetirement? current,
+        GovernedLoopCoordinatorHeartbeat heartbeat)
+    {
+        var retirement = new GovernedLoopCoordinatorHeartbeatRetirement(
+            SchemaVersion,
+            heartbeat.Ownership,
+            checked((current?.RetiredCount ?? 0) + 1),
+            current?.InitialHeartbeatHash ?? heartbeat.ContentHash,
+            heartbeat.HeartbeatSequence,
+            heartbeat.RecordedAtUtc,
+            heartbeat.LeaseExpiresAtUtc,
+            heartbeat.ContentHash,
+            GovernedLoopCoordinatorHeartbeatRetirementHash.Append(current?.ChainHash, heartbeat.ContentHash),
+            string.Empty);
+        return GovernedLoopCoordinatorHeartbeatRetirementHash.Apply(retirement);
+    }
+
+    private static GovernedLoopCoordinatorHeartbeat ToHeartbeat(GovernedLoopCoordinatorHeartbeatRetirement retirement)
+        => new(
+            SchemaVersion,
+            retirement.RetiredThroughSequence,
+            retirement.Ownership,
+            retirement.RetiredThroughRecordedAtUtc,
+            retirement.RetiredThroughLeaseExpiresAtUtc,
+            retirement.RetiredThroughHeartbeatHash);
 
     private static GovernedLoopCoordinatorSnapshot Snapshot(GovernedLoopCoordinatorEvidenceStoreEntry entry)
     {

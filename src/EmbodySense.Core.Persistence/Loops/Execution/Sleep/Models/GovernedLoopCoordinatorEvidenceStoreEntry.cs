@@ -6,5 +6,6 @@ internal sealed record GovernedLoopCoordinatorEvidenceStoreEntry(
     string CoordinatorId,
     IReadOnlyList<GovernedLoopCoordinatorOwnership> Ownerships,
     IReadOnlyList<GovernedLoopCoordinatorLifecycle> Lifecycles,
+    IReadOnlyList<GovernedLoopCoordinatorHeartbeatRetirement> HeartbeatRetirements,
     IReadOnlyList<GovernedLoopCoordinatorHeartbeat> Heartbeats,
     IReadOnlyList<GovernedLoopCoordinatorFailure> Failures);

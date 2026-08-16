@@ -125,6 +125,77 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
             (await store.RenewHeartbeatAsync(conflictingHeartbeat))!.Status);
     }
 
+    [Fact]
+    public async Task Heartbeat_history_rotates_canonically_without_exhausting_renewal_or_handoff_capacity()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var options = new GovernedLoopCoordinatorEvidenceStoreOptions
+        {
+            MaxEvidenceItemsPerCoordinator = 7,
+            MaxDurabilityArtifacts = 1
+        };
+        var store = new GovernedLoopCoordinatorEvidenceStore(paths, options);
+        var acquisition = Acquisition();
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, (await store.TryAcquireAsync(acquisition))!.Status);
+        var latest = acquisition.InitialHeartbeat;
+        for (var sequence = 2; sequence <= 65; sequence++)
+        {
+            var next = GovernedLoopSleepContractTestFixture.Heartbeat(
+                sequence,
+                acquisition.ProposedOwnership,
+                latest.RecordedAtUtc.AddSeconds(1),
+                latest.LeaseExpiresAtUtc.AddSeconds(1));
+            var renewed = await store.RenewHeartbeatAsync(new(
+                acquisition.ProposedOwnership,
+                acquisition.ProposedOwnership.ContentHash,
+                latest.HeartbeatSequence,
+                latest.ContentHash,
+                next));
+            Assert.True(
+                renewed!.Status == GovernedLoopCoordinatorHeartbeatMutationStatus.Renewed,
+                $"Heartbeat sequence {sequence} returned {renewed.Status} instead of Renewed.");
+            latest = next;
+        }
+
+        var restarted = new GovernedLoopCoordinatorEvidenceStore(paths, options);
+        var read = await restarted.ReadAsync(acquisition.ProposedOwnership.CoordinatorId);
+        var duplicate = await restarted.TryAcquireAsync(acquisition);
+        var successorOwnership = GovernedLoopSleepContractTestFixture.Ownership(
+            ownerId: "process-owner-2",
+            ownershipEpoch: 2,
+            acquiredAtUtc: latest.LeaseExpiresAtUtc);
+        var successor = Acquisition(
+            successorOwnership,
+            GovernedLoopCoordinatorPriorEvidenceExpectation.Existing,
+            acquisition.ProposedOwnership.ContentHash,
+            latest.ContentHash);
+        var handoff = await restarted.TryAcquireAsync(successor);
+        var afterHandoff = await new GovernedLoopCoordinatorEvidenceStore(paths, options)
+            .ReadAsync(acquisition.ProposedOwnership.CoordinatorId);
+
+        Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, read!.Status);
+        Assert.Equal(latest, read.Snapshot!.LatestHeartbeat);
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Duplicate, duplicate!.Status);
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, handoff!.Status);
+        Assert.Equal(successorOwnership, afterHandoff!.Snapshot!.Ownership);
+        Assert.Equal(successor.InitialHeartbeat, afterHandoff.Snapshot.LatestHeartbeat);
+
+        var root = JsonNode.Parse(await File.ReadAllBytesAsync(LatestLedger(paths)))!.AsObject();
+        var entry = (JsonObject)((JsonArray)root["entries"]!)[0]!;
+        var retirement = Assert.IsType<JsonObject>(Assert.Single(Assert.IsType<JsonArray>(entry["heartbeatRetirements"])));
+        Assert.Equal(65, retirement["retiredCount"]!.GetValue<long>());
+        Assert.Equal(latest.ContentHash, retirement["retiredThroughHeartbeatHash"]!.GetValue<string>());
+        Assert.Equal(acquisition.InitialHeartbeat.ContentHash, retirement["initialHeartbeatHash"]!.GetValue<string>());
+        Assert.Single(Assert.IsType<JsonArray>(entry["heartbeats"]));
+
+        retirement["chainHash"] = GovernedLoopSleepContractTestFixture.Hash('0');
+        await File.WriteAllBytesAsync(LatestLedger(paths), Encoding.UTF8.GetBytes(root.ToJsonString()));
+        Assert.Equal(
+            GovernedLoopCoordinatorReadStatus.Corrupt,
+            (await new GovernedLoopCoordinatorEvidenceStore(paths, options).ReadAsync(acquisition.ProposedOwnership.CoordinatorId))!.Status);
+    }
+
     [Theory]
     [InlineData(GovernedLoopCoordinatorStatus.Running)]
     [InlineData(GovernedLoopCoordinatorStatus.Stopping)]

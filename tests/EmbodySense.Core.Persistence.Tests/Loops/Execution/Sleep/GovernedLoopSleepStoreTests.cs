@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -663,6 +664,69 @@ public sealed class GovernedLoopSleepStoreTests
         Assert.Equal(
             GovernedLoopSleepStoreReadStatus.Conflict,
             (await new GovernedLoopSleepStore(generationPaths).ReadCheckpointAsync(first.CheckpointId))!.Status);
+    }
+
+    [Fact]
+    public async Task Checkpoint_publication_reserves_the_exact_maximum_wake_chain_before_releasing_execution()
+    {
+        var maximumIdentifier = new string('z', GovernedLoopSleepContractLimits.MaxIdentifierCharacters);
+        var maximumEvidenceReference = new string('z', GovernedLoopSleepContractLimits.MaxEvidenceReferenceCharacters);
+        var checkpoint = GovernedLoopSleepContractTestFixture.EventCheckpoint(maximumEvidenceReference);
+        var postureHash = GovernedLoopSleepContractTestFixture.Hash('9');
+        var identity = GovernedLoopSleepContractTestFixture.WakeIdentity(checkpoint);
+        var prepared = GovernedLoopSleepContractTestFixture.WakeEvidence(
+            identity: identity,
+            continuationOperationId: maximumIdentifier,
+            recordedAtUtc: DateTimeOffset.MaxValue);
+        var ambiguous = GovernedLoopSleepContractTestFixture.WakeEvidence(
+            GovernedLoopWakeDisposition.AmbiguousAttempt,
+            2,
+            identity,
+            maximumIdentifier,
+            dispositionEvidenceReference: maximumEvidenceReference,
+            recordedAtUtc: DateTimeOffset.MaxValue);
+        var committed = GovernedLoopSleepContractTestFixture.WakeEvidence(
+            GovernedLoopWakeDisposition.Committed,
+            3,
+            identity,
+            maximumIdentifier,
+            GovernedLoopSleepContractTestFixture.Hash('e'),
+            recordedAtUtc: DateTimeOffset.MaxValue);
+
+        using var sizingWorkspace = new TestWorkspace();
+        var sizingPaths = new WorkspacePaths(sizingWorkspace.RootPath);
+        var sizingStore = new GovernedLoopSleepStore(sizingPaths);
+        Assert.Equal(GovernedLoopSleepCheckpointMutationStatus.Committed, (await sizingStore.PublishAndReleaseAsync(checkpoint, postureHash))!.Status);
+        Assert.Equal(GovernedLoopWakeEvidenceMutationStatus.Committed, (await sizingStore.CreateWakeAsync(checkpoint, prepared, postureHash))!.Status);
+        Assert.Equal(GovernedLoopWakeEvidenceMutationStatus.Committed, (await sizingStore.AdvanceWakeAsync(prepared, ambiguous))!.Status);
+        Assert.Equal(GovernedLoopWakeEvidenceMutationStatus.Committed, (await sizingStore.AdvanceWakeAsync(ambiguous, committed))!.Status);
+        var generationReservation = long.MaxValue.ToString(CultureInfo.InvariantCulture).Length - 1;
+        var exactMaximumBytes = checked((int)new FileInfo(LatestLedger(sizingPaths)).Length + generationReservation);
+
+        using var admittedWorkspace = new TestWorkspace();
+        var admittedPaths = new WorkspacePaths(admittedWorkspace.RootPath);
+        var admittedStore = new GovernedLoopSleepStore(admittedPaths, new GovernedLoopSleepStoreOptions { MaxCatalogUtf8Bytes = exactMaximumBytes });
+        var published = await admittedStore.PublishAndReleaseAsync(checkpoint, postureHash);
+        var initial = await admittedStore.CreateWakeAsync(checkpoint, prepared, postureHash);
+        var attempted = await admittedStore.AdvanceWakeAsync(prepared, ambiguous);
+        var terminal = await admittedStore.AdvanceWakeAsync(ambiguous, committed);
+        var restarted = await new GovernedLoopSleepStore(admittedPaths, new GovernedLoopSleepStoreOptions { MaxCatalogUtf8Bytes = exactMaximumBytes })
+            .ReadWakeAsync(identity.WakeId);
+
+        Assert.Equal(GovernedLoopSleepCheckpointMutationStatus.Committed, published!.Status);
+        Assert.True(new FileInfo(LatestLedger(admittedPaths)).Length < exactMaximumBytes);
+        Assert.Equal(GovernedLoopWakeEvidenceMutationStatus.Committed, initial!.Status);
+        Assert.Equal(GovernedLoopWakeEvidenceMutationStatus.Committed, attempted!.Status);
+        Assert.Equal(GovernedLoopWakeEvidenceMutationStatus.Committed, terminal!.Status);
+        Assert.Equal(GovernedLoopSleepStoreReadStatus.Found, restarted!.Status);
+        Assert.Equal(committed, restarted.Evidence);
+
+        using var rejectedWorkspace = new TestWorkspace();
+        var rejected = await new GovernedLoopSleepStore(
+            new WorkspacePaths(rejectedWorkspace.RootPath),
+            new GovernedLoopSleepStoreOptions { MaxCatalogUtf8Bytes = exactMaximumBytes - 1 })
+            .PublishAndReleaseAsync(checkpoint, postureHash);
+        Assert.Equal(GovernedLoopSleepCheckpointMutationStatus.Conflict, rejected!.Status);
     }
 
     [Theory]

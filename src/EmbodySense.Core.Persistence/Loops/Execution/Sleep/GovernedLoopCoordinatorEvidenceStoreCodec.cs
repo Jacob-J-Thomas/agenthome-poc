@@ -13,12 +13,13 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
     private const int SchemaVersion = 1;
     private const int MaximumDepth = 12;
     private static readonly string[] _catalogProperties = ["entries", "generation", "schemaVersion"];
-    private static readonly string[] _entryProperties = ["coordinatorId", "failures", "heartbeats", "lifecycles", "ownerships"];
+    private static readonly string[] _entryProperties = ["coordinatorId", "failures", "heartbeatRetirements", "heartbeats", "lifecycles", "ownerships"];
     private static readonly string[] _ownershipProperties = ["acquiredAtUtc", "contentHash", "coordinatorId", "ownerId", "ownershipEpoch", "schemaVersion"];
     private static readonly string[] _lifecycleProperties = ["contentHash", "lifecycleVersion", "ownershipHash", "schemaVersion", "status", "terminalAtUtc", "updatedAtUtc"];
     private static readonly string[] _heartbeatProperties = ["contentHash", "heartbeatSequence", "leaseExpiresAtUtc", "ownershipHash", "recordedAtUtc", "schemaVersion"];
+    private static readonly string[] _heartbeatRetirementProperties = ["chainHash", "contentHash", "initialHeartbeatHash", "ownershipHash", "retiredCount", "retiredThroughHeartbeatHash", "retiredThroughLeaseExpiresAtUtc", "retiredThroughRecordedAtUtc", "retiredThroughSequence", "schemaVersion"];
     private static readonly string[] _failureProperties = ["contentHash", "detailEvidenceReference", "failureSequence", "kind", "occurredAtUtc", "ownershipHash", "schemaVersion"];
-    private static readonly string[] _evidenceArrayProperties = ["ownerships", "lifecycles", "heartbeats", "failures"];
+    private static readonly string[] _evidenceArrayProperties = ["ownerships", "lifecycles", "heartbeatRetirements", "heartbeats", "failures"];
 
     public static byte[] Serialize(
         GovernedLoopCoordinatorEvidenceStoreCatalog catalog,
@@ -156,12 +157,14 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
         var ownerships = ParseArray(element, "ownerships", ParseOwnership);
         var ownershipByHash = ownerships.ToDictionary(item => item.ContentHash, StringComparer.Ordinal);
         var lifecycles = ParseArray(element, "lifecycles", item => ParseLifecycle(item, ownershipByHash));
+        var heartbeatRetirements = ParseArray(element, "heartbeatRetirements", item => ParseHeartbeatRetirement(item, ownershipByHash));
         var heartbeats = ParseArray(element, "heartbeats", item => ParseHeartbeat(item, ownershipByHash));
         var failures = ParseArray(element, "failures", item => ParseFailure(item, ownershipByHash));
         var entry = new GovernedLoopCoordinatorEvidenceStoreEntry(
             coordinatorId!,
             Array.AsReadOnly(ownerships.ToArray()),
             Array.AsReadOnly(lifecycles.ToArray()),
+            Array.AsReadOnly(heartbeatRetirements.ToArray()),
             Array.AsReadOnly(heartbeats.ToArray()),
             Array.AsReadOnly(failures.ToArray()));
         ValidateEntry(entry, maximumEvidenceItems);
@@ -276,6 +279,39 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
             contentHash!);
     }
 
+    private static GovernedLoopCoordinatorHeartbeatRetirement ParseHeartbeatRetirement(
+        JsonElement element,
+        IReadOnlyDictionary<string, GovernedLoopCoordinatorOwnership> ownerships)
+    {
+        if (!IsExactObject(element, _heartbeatRetirementProperties)
+            || !TryInt32(element, "schemaVersion", out var schemaVersion)
+            || !TryString(element, "ownershipHash", out var ownershipHash)
+            || !ownerships.TryGetValue(ownershipHash!, out var ownership)
+            || !TryInt64(element, "retiredCount", out var retiredCount)
+            || !TryString(element, "initialHeartbeatHash", out var initialHeartbeatHash)
+            || !TryInt64(element, "retiredThroughSequence", out var retiredThroughSequence)
+            || !TryUtc(element, "retiredThroughRecordedAtUtc", out var recordedAtUtc)
+            || !TryUtc(element, "retiredThroughLeaseExpiresAtUtc", out var leaseExpiresAtUtc)
+            || !TryString(element, "retiredThroughHeartbeatHash", out var heartbeatHash)
+            || !TryString(element, "chainHash", out var chainHash)
+            || !TryString(element, "contentHash", out var contentHash))
+        {
+            throw Invalid();
+        }
+
+        return new GovernedLoopCoordinatorHeartbeatRetirement(
+            schemaVersion,
+            ownership,
+            retiredCount,
+            initialHeartbeatHash!,
+            retiredThroughSequence,
+            recordedAtUtc,
+            leaseExpiresAtUtc,
+            heartbeatHash!,
+            chainHash!,
+            contentHash!);
+    }
+
     private static GovernedLoopCoordinatorFailure ParseFailure(
         JsonElement element,
         IReadOnlyDictionary<string, GovernedLoopCoordinatorOwnership> ownerships)
@@ -325,9 +361,12 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
             || EvidenceCount(entry) > maximumEvidenceItems
             || entry.Ownerships.Select(item => item.ContentHash).Distinct(StringComparer.Ordinal).Count() != entry.Ownerships.Count
             || entry.Lifecycles.Select(item => item.ContentHash).Distinct(StringComparer.Ordinal).Count() != entry.Lifecycles.Count
+            || entry.HeartbeatRetirements.Select(item => item.ContentHash).Distinct(StringComparer.Ordinal).Count() != entry.HeartbeatRetirements.Count
+            || entry.HeartbeatRetirements.Select(item => item.Ownership.ContentHash).Distinct(StringComparer.Ordinal).Count() != entry.HeartbeatRetirements.Count
             || entry.Heartbeats.Select(item => item.ContentHash).Distinct(StringComparer.Ordinal).Count() != entry.Heartbeats.Count
             || entry.Failures.Select(item => item.ContentHash).Distinct(StringComparer.Ordinal).Count() != entry.Failures.Count
             || !OwnershipOrderIsMonotonic(entry.Lifecycles.Select(item => item.Ownership))
+            || !OwnershipOrderIsMonotonic(entry.HeartbeatRetirements.Select(item => item.Ownership))
             || !OwnershipOrderIsMonotonic(entry.Heartbeats.Select(item => item.Ownership))
             || !OwnershipOrderIsMonotonic(entry.Failures.Select(item => item.Ownership)))
         {
@@ -345,13 +384,18 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
             }
 
             var lifecycles = entry.Lifecycles.Where(item => SameOwner(item.Ownership, ownership)).ToArray();
+            var retirement = entry.HeartbeatRetirements.SingleOrDefault(item => SameOwner(item.Ownership, ownership));
             var heartbeats = entry.Heartbeats.Where(item => SameOwner(item.Ownership, ownership)).ToArray();
             var failures = entry.Failures.Where(item => SameOwner(item.Ownership, ownership)).ToArray();
             if (lifecycles.Length == 0
-                || heartbeats.Length == 0
+                || retirement is null && heartbeats.Length == 0
+                || index == entry.Ownerships.Count - 1 && heartbeats.Length == 0
                 || lifecycles[0].LifecycleVersion != 1
                 || lifecycles[0].Status != GovernedLoopCoordinatorStatus.Starting
-                || heartbeats[0].HeartbeatSequence != 1
+                || retirement is null && heartbeats[0].HeartbeatSequence != 1
+                || retirement is not null && !RetirementIsValid(retirement)
+                || retirement is not null && heartbeats.Length > 0
+                    && !GovernedLoopSleepContractValidator.ValidateTransition(ToHeartbeat(retirement), heartbeats[0]).IsValid
                 || !lifecycles.All(item => GovernedLoopSleepContractValidator.ValidateComposition(ownership, item).IsValid)
                 || !heartbeats.All(item => GovernedLoopSleepContractValidator.ValidateComposition(ownership, item).IsValid)
                 || !failures.All(item => GovernedLoopSleepContractValidator.ValidateComposition(ownership, item).IsValid)
@@ -366,7 +410,8 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
             if (index > 0)
             {
                 var previous = entry.Ownerships[index - 1];
-                var previousHeartbeat = entry.Heartbeats.Last(item => SameOwner(item.Ownership, previous));
+                var previousHeartbeat = entry.Heartbeats.LastOrDefault(item => SameOwner(item.Ownership, previous))
+                    ?? ToHeartbeat(entry.HeartbeatRetirements.Single(item => SameOwner(item.Ownership, previous)));
                 if (!GovernedLoopSleepContractValidator.ValidateHandoff(previous, previousHeartbeat, ownership).IsValid)
                 {
                     throw Invalid();
@@ -375,12 +420,40 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
         }
 
         if (entry.Lifecycles.Any(item => !entry.Ownerships.Any(owner => SameOwner(owner, item.Ownership)))
+            || entry.HeartbeatRetirements.Any(item => !entry.Ownerships.Any(owner => SameOwner(owner, item.Ownership)))
             || entry.Heartbeats.Any(item => !entry.Ownerships.Any(owner => SameOwner(owner, item.Ownership)))
             || entry.Failures.Any(item => !entry.Ownerships.Any(owner => SameOwner(owner, item.Ownership))))
         {
             throw Invalid();
         }
     }
+
+    private static bool RetirementIsValid(GovernedLoopCoordinatorHeartbeatRetirement retirement)
+    {
+        var retiredThrough = ToHeartbeat(retirement);
+        return retirement.SchemaVersion == SchemaVersion
+            && retirement.RetiredCount == retirement.RetiredThroughSequence
+            && retirement.RetiredCount > 0
+            && IsHash(retirement.InitialHeartbeatHash)
+            && IsHash(retirement.RetiredThroughHeartbeatHash)
+            && IsHash(retirement.ChainHash)
+            && GovernedLoopSleepContractValidator.ValidateComposition(retirement.Ownership, retiredThrough).IsValid
+            && GovernedLoopHeartbeatRetirementStartsCorrectly(retirement)
+            && GovernedLoopCoordinatorHeartbeatRetirementHash.Matches(retirement);
+    }
+
+    private static bool GovernedLoopHeartbeatRetirementStartsCorrectly(GovernedLoopCoordinatorHeartbeatRetirement retirement)
+        => retirement.RetiredCount != 1
+            || string.Equals(retirement.InitialHeartbeatHash, retirement.RetiredThroughHeartbeatHash, StringComparison.Ordinal);
+
+    private static GovernedLoopCoordinatorHeartbeat ToHeartbeat(GovernedLoopCoordinatorHeartbeatRetirement retirement)
+        => new(
+            SchemaVersion,
+            retirement.RetiredThroughSequence,
+            retirement.Ownership,
+            retirement.RetiredThroughRecordedAtUtc,
+            retirement.RetiredThroughLeaseExpiresAtUtc,
+            retirement.RetiredThroughHeartbeatHash);
 
     private static bool TransitionsAreValid<T>(
         IReadOnlyList<T> evidence,
@@ -399,6 +472,13 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
         foreach (var failure in entry.Failures)
         {
             WriteFailure(writer, failure);
+        }
+
+        writer.WriteEndArray();
+        writer.WriteStartArray("heartbeatRetirements");
+        foreach (var retirement in entry.HeartbeatRetirements)
+        {
+            WriteHeartbeatRetirement(writer, retirement);
         }
 
         writer.WriteEndArray();
@@ -460,6 +540,22 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
         writer.WriteString("ownershipHash", heartbeat.Ownership.ContentHash);
         WriteUtc(writer, "recordedAtUtc", heartbeat.RecordedAtUtc);
         writer.WriteNumber("schemaVersion", heartbeat.SchemaVersion);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteHeartbeatRetirement(Utf8JsonWriter writer, GovernedLoopCoordinatorHeartbeatRetirement retirement)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("chainHash", retirement.ChainHash);
+        writer.WriteString("contentHash", retirement.ContentHash);
+        writer.WriteString("initialHeartbeatHash", retirement.InitialHeartbeatHash);
+        writer.WriteString("ownershipHash", retirement.Ownership.ContentHash);
+        writer.WriteNumber("retiredCount", retirement.RetiredCount);
+        writer.WriteString("retiredThroughHeartbeatHash", retirement.RetiredThroughHeartbeatHash);
+        WriteUtc(writer, "retiredThroughLeaseExpiresAtUtc", retirement.RetiredThroughLeaseExpiresAtUtc);
+        WriteUtc(writer, "retiredThroughRecordedAtUtc", retirement.RetiredThroughRecordedAtUtc);
+        writer.WriteNumber("retiredThroughSequence", retirement.RetiredThroughSequence);
+        writer.WriteNumber("schemaVersion", retirement.SchemaVersion);
         writer.WriteEndObject();
     }
 
@@ -658,8 +754,12 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
         return true;
     }
 
+    private static bool IsHash(string? value)
+        => value is { Length: GovernedLoopSleepContractLimits.Sha256HexCharacters }
+            && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
     private static int EvidenceCount(GovernedLoopCoordinatorEvidenceStoreEntry entry)
-        => checked(entry.Ownerships.Count + entry.Lifecycles.Count + entry.Heartbeats.Count + entry.Failures.Count);
+        => checked(entry.Ownerships.Count + entry.Lifecycles.Count + entry.HeartbeatRetirements.Count + entry.Heartbeats.Count + entry.Failures.Count);
 
     private static FormatException Invalid(Exception? innerException = null)
         => new("The coordinator ledger is not the exact canonical bounded schema-version-1 document.", innerException);
