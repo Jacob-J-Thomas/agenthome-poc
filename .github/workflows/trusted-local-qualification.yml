@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   qualification:
-    if: github.repository == 'Jacob-J-Thomas/agenthome-poc' && github.actor == 'Jacob-J-Thomas'
+    if: github.repository == 'Jacob-J-Thomas/agenthome-poc' && github.actor == 'Jacob-J-Thomas' && github.triggering_actor == 'Jacob-J-Thomas'
     runs-on: [agenthome-trusted-ephemeral-macos-arm64]
     timeout-minutes: 10
 

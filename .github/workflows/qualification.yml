@@ -18,7 +18,7 @@ permissions:
 jobs:
   qualification:
     name: hosted-qualification
-    if: github.repository == 'Jacob-J-Thomas/agenthome-poc' && github.actor == 'Jacob-J-Thomas'
+    if: github.repository == 'Jacob-J-Thomas/agenthome-poc' && github.actor == 'Jacob-J-Thomas' && github.triggering_actor == 'Jacob-J-Thomas'
     concurrency:
       group: hosted-qualification
       cancel-in-progress: false
