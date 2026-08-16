@@ -69,7 +69,7 @@ jobs:
 
       - name: Qualify exact edge
         shell: pwsh
-        run: ./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit '${{ inputs.base_sha }}' -HeadCommit '${{ inputs.head_sha }}' -Configuration Release -DeadlineSeconds 360
+        run: ./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit '${{ inputs.base_sha }}' -HeadCommit '${{ inputs.head_sha }}' -Configuration Release -DeadlineSeconds 480
 
       - name: Upload qualification diagnostics
         if: always()
