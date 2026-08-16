@@ -237,7 +237,7 @@ public sealed class ScheduleMalformedPortEvidenceTests
         return new FixtureContext(
             definition,
             store,
-            new ScheduleDueOccurrenceEvaluator(store, currentEvidence, overlap, timeZone, queue, clock));
+            new ScheduleDueOccurrenceEvaluator(store, currentEvidence, overlap, timeZone, queue, new TestScheduleAdmissionHistory(), clock));
     }
 
     private sealed record FixtureContext(

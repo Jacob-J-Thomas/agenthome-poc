@@ -240,19 +240,34 @@ public static class ScheduleStateTransitionValidator
             return true;
         }
 
-        var lessCompactedTerminal = current.TerminalDeliveryEvidence
-            .Skip(droppedTerminalCount - 1)
-            .Append(expectedTerminal)
-            .ToArray();
-        if (lessCompactedTerminal.Length > ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems)
+        if (droppedTerminalCount == 1)
         {
             return true;
         }
 
-        var lessCompacted = expected with { TerminalDeliveryEvidence = lessCompactedTerminal };
-        return !ScheduleContractHash.TryComputeState(lessCompacted, out _, out var validation)
-            && validation.Errors.Count == 1
-            && validation.Errors[0].Code == "canonical_document_too_large";
+        var retained = next.TerminalDeliveryEvidence.Take(next.TerminalDeliveryEvidence.Count - 1).ToHashSet();
+        var dropped = current.TerminalDeliveryEvidence.Where(item => !retained.Contains(item)).ToArray();
+        if (dropped.Length != droppedTerminalCount)
+        {
+            return false;
+        }
+
+        foreach (var mandatoryDrop in dropped)
+        {
+            var lessCompactedTerminal = current.TerminalDeliveryEvidence
+                .Where(item => item != mandatoryDrop)
+                .Append(expectedTerminal)
+                .ToArray();
+            var lessCompacted = expected with { TerminalDeliveryEvidence = lessCompactedTerminal };
+            if (ScheduleContractHash.TryComputeState(lessCompacted, out _, out var validation)
+                || validation.Errors.Count != 1
+                || validation.Errors[0].Code != "canonical_document_too_large")
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool IsClaimDisposition(
@@ -550,14 +565,35 @@ public static class ScheduleStateTransitionValidator
             return false;
         }
 
-        var droppedCount = current.Count - next.Count + 1;
-        if (droppedCount <= 0
-            || !current.Skip(droppedCount).SequenceEqual(next.Take(next.Count - 1)))
+        var appendedCandidate = next[^1];
+        if (current.Contains(appendedCandidate)
+            || !IsOrderedSubsequence(current, next.Take(next.Count - 1)))
         {
             return false;
         }
 
-        appended = [next[^1]];
+        appended = [appendedCandidate];
+        return true;
+    }
+
+    private static bool IsOrderedSubsequence<T>(IReadOnlyList<T> source, IEnumerable<T> candidate)
+    {
+        var sourceIndex = 0;
+        foreach (var item in candidate)
+        {
+            while (sourceIndex < source.Count && !EqualityComparer<T>.Default.Equals(source[sourceIndex], item))
+            {
+                sourceIndex++;
+            }
+
+            if (sourceIndex == source.Count)
+            {
+                return false;
+            }
+
+            sourceIndex++;
+        }
+
         return true;
     }
 

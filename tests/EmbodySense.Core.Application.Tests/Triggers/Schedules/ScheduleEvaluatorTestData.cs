@@ -451,7 +451,7 @@ internal sealed class TestScheduleQueue : ITriggerQueueAdmissionPort
 }
 
 internal sealed class TestScheduleAdmissionHistory(
-    TriggerDeliveryAdmissionHistoryEntry? entry = null) : ITriggerDeliveryAdmissionHistoryPort
+    params TriggerDeliveryAdmissionHistoryEntry?[] entries) : ITriggerDeliveryAdmissionHistoryPort
 {
     public Task<TriggerDeliveryAdmissionHistoryLookupResult> FindAsync(
         TriggerDeliveryId deliveryId,
@@ -459,12 +459,8 @@ internal sealed class TestScheduleAdmissionHistory(
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var deliveryMatch = entry is not null && entry.Envelope.DeliveryId.Equals(deliveryId)
-            ? entry
-            : null;
-        var deduplicationMatch = entry is not null && entry.Envelope.DeduplicationId.Equals(deduplicationId)
-            ? entry
-            : null;
+        var deliveryMatch = entries.SingleOrDefault(entry => entry is not null && entry.Envelope.DeliveryId.Equals(deliveryId));
+        var deduplicationMatch = entries.SingleOrDefault(entry => entry is not null && entry.Envelope.DeduplicationId.Equals(deduplicationId));
         return Task.FromResult(new TriggerDeliveryAdmissionHistoryLookupResult(
             TriggerDeliveryAdmissionHistoryLookupStatus.Available,
             deliveryMatch,

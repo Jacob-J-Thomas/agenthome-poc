@@ -110,12 +110,14 @@ public static class ScheduleRuntimeFactory
                 authorityTransaction,
                 clock);
             var overlap = new ScheduleRunOverlapAdapter(new CustomLoopRunStore(paths));
+            var queue = CreateQueue(paths, clock);
             return CreateCore(
                 new ScheduleStore(paths),
                 currentEvidence,
                 overlap,
                 new SystemScheduleTimeZoneAdapter(TimeZoneInfo.GetSystemTimeZones()),
-                CreateQueue(paths, clock),
+                queue.Admission,
+                queue.History,
                 clock,
                 roleStore);
         }
@@ -140,12 +142,14 @@ public static class ScheduleRuntimeFactory
         ArgumentNullException.ThrowIfNull(overlap);
         ArgumentNullException.ThrowIfNull(timeZone);
         var clock = timeProvider ?? TimeProvider.System;
+        var queue = CreateQueue(paths, clock);
         return CreateCore(
             new ScheduleStore(paths),
             currentEvidence,
             overlap,
             timeZone,
-            CreateQueue(paths, clock),
+            queue.Admission,
+            queue.History,
             clock,
             null);
     }
@@ -169,13 +173,14 @@ public static class ScheduleRuntimeFactory
         ArgumentNullException.ThrowIfNull(overlap);
         ArgumentNullException.ThrowIfNull(timeZone);
         var clock = timeProvider ?? TimeProvider.System;
-        return CreateCore(store, currentEvidence, overlap, timeZone, CreateQueue(paths, clock), clock, null);
+        var queue = CreateQueue(paths, clock);
+        return CreateCore(store, currentEvidence, overlap, timeZone, queue.Admission, queue.History, clock, null);
     }
 
-    private static TriggerQueueAdmissionService CreateQueue(WorkspacePaths paths, TimeProvider clock)
+    private static (ITriggerQueueAdmissionPort Admission, ITriggerDeliveryAdmissionHistoryPort History) CreateQueue(WorkspacePaths paths, TimeProvider clock)
     {
         var store = new TriggerQueueStore(paths, timeProvider: clock);
-        return new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store);
+        return (new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store), store);
     }
 
     private static ScheduleRuntimeFacade CreateCore(
@@ -184,7 +189,8 @@ public static class ScheduleRuntimeFactory
         IScheduleOverlapPort overlap,
         IScheduleTimeZonePort timeZone,
         ITriggerQueueAdmissionPort queue,
+        ITriggerDeliveryAdmissionHistoryPort queueHistory,
         TimeProvider clock,
         IDisposable? ownedResource)
-        => new(store, currentEvidence, overlap, timeZone, queue, clock, ownedResource);
+        => new(store, currentEvidence, overlap, timeZone, queue, queueHistory, clock, ownedResource);
 }

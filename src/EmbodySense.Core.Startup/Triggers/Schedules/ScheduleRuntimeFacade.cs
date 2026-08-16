@@ -24,6 +24,7 @@ public sealed class ScheduleRuntimeFacade : IDisposable
         IScheduleOverlapPort overlap,
         IScheduleTimeZonePort timeZone,
         ITriggerQueueAdmissionPort queue,
+        ITriggerDeliveryAdmissionHistoryPort queueHistory,
         TimeProvider timeProvider,
         IDisposable? ownedResource = null)
     {
@@ -35,6 +36,7 @@ public sealed class ScheduleRuntimeFacade : IDisposable
             overlap,
             timeZone,
             queue,
+            queueHistory,
             timeProvider);
         _timeZone = timeZone ?? throw new ArgumentNullException(nameof(timeZone));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));

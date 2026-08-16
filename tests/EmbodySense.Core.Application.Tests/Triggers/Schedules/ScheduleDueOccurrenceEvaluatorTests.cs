@@ -1775,9 +1775,12 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
                 };
             })
             .ToArray();
+        var restartedState = observed with { TerminalDeliveryEvidence = priorTerminal };
+        var composition = ScheduleContractValidator.ValidateDefinitionStateComposition(definition, restartedState);
+        Assert.True(composition.IsValid, ScheduleEvaluatorTestData.Errors(composition));
         var restarted = Fixture(
             definition,
-            observed with { TerminalDeliveryEvidence = priorTerminal },
+            restartedState,
             occurrence.ScheduledAtUtc);
 
         var result = await restarted.Evaluator.EvaluateAsync(definition.ScheduleId);
@@ -1788,6 +1791,77 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
         Assert.Equal(occurrence.Ordinal - ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems + 1, result.State.TerminalDeliveryEvidence[0].Occurrence.Ordinal);
         Assert.Equal(occurrence.Ordinal, result.State.TerminalDeliveryEvidence[^1].Occurrence.Ordinal);
         Assert.Single(restarted.Store.Mutations);
+    }
+
+    [Fact]
+    public async Task Recurring_finalization_preserves_provenance_while_the_queue_retains_the_exact_envelope()
+    {
+        var definition = ScheduleEvaluatorTestData.Definition();
+        var first = Fixture(definition, ScheduleEvaluatorTestData.State(definition), ScheduleEvaluatorTestData.FirstUtc);
+        _ = await first.Evaluator.EvaluateAsync(definition.ScheduleId);
+        var firstPrepared = first.Store.Mutations
+            .Select(mutation => mutation.Replacement.PendingDelivery)
+            .Single(pending => pending?.Phase == SchedulePendingDeliveryPhase.Prepared)!;
+        var firstTerminal = Assert.Single(first.Store.State.TerminalDeliveryEvidence);
+        Assert.True(TriggerDeliveryAdmissionReceiptFactory.TryCreate(
+            firstPrepared.Prepared!.Envelope,
+            TriggerAdmissionStatus.Admitted,
+            TriggerAdmissionReason.EvidenceAccepted,
+            firstTerminal.Result.RecordedAtUtc,
+            out var firstReceipt,
+            out var receiptValidation),
+            string.Join(',', receiptValidation.Errors.Select(error => error.Code)));
+        var retainedHistory = new TriggerDeliveryAdmissionHistoryEntry(firstPrepared.Prepared.Envelope, firstReceipt!);
+
+        var occurrence = ScheduleEvaluatorTestData.Occurrence(
+            ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems + 1L,
+            ScheduleEvaluatorTestData.FirstLocal.AddDays(ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems),
+            ScheduleEvaluatorTestData.FirstUtc.AddDays(ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems),
+            definition.TimeZone);
+        var seed = Fixture(definition, ScheduleEvaluatorTestData.State(definition, occurrence), occurrence.ScheduledAtUtc);
+        _ = await seed.Evaluator.EvaluateAsync(definition.ScheduleId);
+        var observed = seed.Store.Mutations
+            .Select(mutation => mutation.Replacement)
+            .Single(state => state.PendingDelivery?.Phase == SchedulePendingDeliveryPhase.ResultObserved);
+        var priorTerminal = new List<ScheduleTerminalDeliveryEvidence> { firstTerminal };
+        for (var ordinal = 2; ordinal <= ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems; ordinal++)
+        {
+            var priorOccurrence = ScheduleEvaluatorTestData.Occurrence(
+                ordinal,
+                ScheduleEvaluatorTestData.FirstLocal.AddDays(ordinal - 1L),
+                ScheduleEvaluatorTestData.FirstUtc.AddDays(ordinal - 1L),
+                definition.TimeZone);
+            Assert.True(ScheduleIdentityDerivation.TryDerive(
+                definition.ScheduleId,
+                definition.Revision,
+                observed.DefinitionHash,
+                priorOccurrence,
+                out var identity,
+                out var validation), ScheduleEvaluatorTestData.Errors(validation));
+            priorTerminal.Add(firstTerminal with
+            {
+                Occurrence = priorOccurrence,
+                Identity = identity!,
+                Result = firstTerminal.Result with { RecordedAtUtc = observed.LastClockObservedAtUtc!.Value },
+                FinalizedAtUtc = observed.LastClockObservedAtUtc!.Value,
+            });
+        }
+        var restartedState = observed with { TerminalDeliveryEvidence = priorTerminal };
+        var restartedComposition = ScheduleContractValidator.ValidateDefinitionStateComposition(definition, restartedState);
+        Assert.True(restartedComposition.IsValid, ScheduleEvaluatorTestData.Errors(restartedComposition));
+        var restarted = Fixture(
+            definition,
+            restartedState,
+            occurrence.ScheduledAtUtc,
+            new TestScheduleAdmissionHistory(retainedHistory));
+
+        var result = await restarted.Evaluator.EvaluateAsync(definition.ScheduleId);
+
+        Assert.Equal((ScheduleEvaluationStatus.Queued, "queue-enqueued"), (result.Status, result.ReasonCode));
+        Assert.Equal(ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems, result.State!.TerminalDeliveryEvidence.Count);
+        Assert.Contains(result.State.TerminalDeliveryEvidence, evidence => evidence.Occurrence.Ordinal == 1);
+        Assert.DoesNotContain(result.State.TerminalDeliveryEvidence, evidence => evidence.Occurrence.Ordinal == 2);
+        Assert.Equal(occurrence.Ordinal, result.State.TerminalDeliveryEvidence[^1].Occurrence.Ordinal);
     }
 
     [Fact]
@@ -2569,7 +2643,8 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
     private static EvaluatorFixture Fixture(
         ScheduleDefinition? definition = null,
         ScheduleState? state = null,
-        DateTimeOffset? now = null)
+        DateTimeOffset? now = null,
+        ITriggerDeliveryAdmissionHistoryPort? history = null)
     {
         definition ??= ScheduleEvaluatorTestData.Definition();
         state ??= ScheduleEvaluatorTestData.State(definition);
@@ -2578,6 +2653,7 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
         var overlap = new TestScheduleOverlap();
         var timeZone = new TestScheduleTimeZone();
         var queue = new TestScheduleQueue();
+        history ??= new TestScheduleAdmissionHistory();
         var timeProvider = new TestScheduleTimeProvider(now ?? ScheduleEvaluatorTestData.Now);
         return new EvaluatorFixture(
             definition,
@@ -2587,7 +2663,7 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
             timeZone,
             queue,
             timeProvider,
-            new ScheduleDueOccurrenceEvaluator(store, evidence, overlap, timeZone, queue, timeProvider));
+            new ScheduleDueOccurrenceEvaluator(store, evidence, overlap, timeZone, queue, history, timeProvider));
     }
 
     private static RealQueueEvaluatorFixture RealQueueFixture(
@@ -2601,8 +2677,9 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
         var overlap = new TestScheduleOverlap();
         var timeZone = new TestScheduleTimeZone();
         var queueMutation = new TestScheduleQueueMutation();
+        var historySource = new TestScheduleAdmissionHistory(history);
         var queue = new TriggerQueueAdmissionService(
-            new TriggerDeliveryAdmissionService(new TestScheduleAdmissionHistory(history)),
+            new TriggerDeliveryAdmissionService(historySource),
             queueMutation);
         var timeProvider = new TestScheduleTimeProvider(now);
         return new RealQueueEvaluatorFixture(
@@ -2615,6 +2692,7 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
                 overlap,
                 timeZone,
                 queue,
+                historySource,
                 timeProvider));
     }
 

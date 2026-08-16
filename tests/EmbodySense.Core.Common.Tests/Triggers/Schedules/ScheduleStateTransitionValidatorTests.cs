@@ -83,7 +83,7 @@ public sealed class ScheduleStateTransitionValidatorTests
     }
 
     [Fact]
-    public void Exact_finalization_rolls_only_the_oldest_terminal_evidence_at_the_bound()
+    public void Exact_finalization_may_remove_one_ordered_terminal_evidence_at_the_bound()
     {
         var definition = Definition(out var definitionHash);
         var occurrence = ScheduleContractTestData.OccurrenceAt(ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems + 1L);
@@ -139,17 +139,18 @@ public sealed class ScheduleStateTransitionValidatorTests
             successor,
             revision: 5,
             clock: finalizedAtUtc,
-            terminal: priorTerminal.Skip(1).Append(appended).ToArray());
+            terminal: priorTerminal.Where((_, index) => index != 1).Append(appended).ToArray());
 
         Assert.Equal(appended, rolled.TerminalDeliveryEvidence[^1]);
-        Assert.True(current.TerminalDeliveryEvidence.Skip(1).SequenceEqual(rolled.TerminalDeliveryEvidence.Take(rolled.TerminalDeliveryEvidence.Count - 1)));
+        Assert.Equal(priorTerminal[0], rolled.TerminalDeliveryEvidence[0]);
+        Assert.DoesNotContain(priorTerminal[1], rolled.TerminalDeliveryEvidence);
         var expected = current with
         {
             StateRevision = rolled.StateRevision,
             NextOccurrence = successor,
             LastClockObservedAtUtc = finalizedAtUtc,
             PendingDelivery = null,
-            TerminalDeliveryEvidence = current.TerminalDeliveryEvidence.Skip(1).Append(appended).ToArray(),
+            TerminalDeliveryEvidence = current.TerminalDeliveryEvidence.Where((_, index) => index != 1).Append(appended).ToArray(),
         };
         Assert.True(ScheduleContractHash.TryComputeState(expected, out var expectedHash, out var expectedValidation), ScheduleContractTestData.Errors(expectedValidation));
         Assert.True(ScheduleContractHash.TryComputeState(rolled, out var rolledHash, out var rolledValidation), ScheduleContractTestData.Errors(rolledValidation));
@@ -160,7 +161,13 @@ public sealed class ScheduleStateTransitionValidatorTests
             current,
             rolled with
             {
-                TerminalDeliveryEvidence = priorTerminal.Skip(2).Append(priorTerminal[0]).Append(appended).ToArray(),
+                TerminalDeliveryEvidence = priorTerminal
+                    .Where((_, index) => index != 1)
+                    .Select(item => item == priorTerminal[2]
+                        ? item with { Result = item.Result with { ReasonCode = "rewritten-result" } }
+                        : item)
+                    .Append(appended)
+                    .ToArray(),
             },
             "terminal_evidence_rewritten");
     }

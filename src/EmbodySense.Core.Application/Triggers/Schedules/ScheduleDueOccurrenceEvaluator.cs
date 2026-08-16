@@ -17,6 +17,7 @@ public sealed class ScheduleDueOccurrenceEvaluator
     private readonly IScheduleOverlapPort _overlap;
     private readonly IScheduleTimeZonePort _timeZone;
     private readonly ITriggerQueueAdmissionPort _queue;
+    private readonly ITriggerDeliveryAdmissionHistoryPort _queueHistory;
     private readonly TimeProvider _timeProvider;
 
     /// <summary>Initializes the one-shot evaluator over composition-owned ports.</summary>
@@ -26,6 +27,7 @@ public sealed class ScheduleDueOccurrenceEvaluator
         IScheduleOverlapPort overlap,
         IScheduleTimeZonePort timeZone,
         ITriggerQueueAdmissionPort queue,
+        ITriggerDeliveryAdmissionHistoryPort queueHistory,
         TimeProvider? timeProvider = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -33,6 +35,7 @@ public sealed class ScheduleDueOccurrenceEvaluator
         _overlap = overlap ?? throw new ArgumentNullException(nameof(overlap));
         _timeZone = timeZone ?? throw new ArgumentNullException(nameof(timeZone));
         _queue = queue ?? throw new ArgumentNullException(nameof(queue));
+        _queueHistory = queueHistory ?? throw new ArgumentNullException(nameof(queueHistory));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -716,6 +719,11 @@ public sealed class ScheduleDueOccurrenceEvaluator
             pending.OverlapEvidenceHash!,
             result,
             now);
+        var compacted = await AppendTerminalEvidenceAsync(state.TerminalDeliveryEvidence, terminal, cancellationToken).ConfigureAwait(false);
+        if (compacted.Status is { } compactionFailure)
+        {
+            return Result(compactionFailure, compacted.ReasonCode!, state);
+        }
         var replacement = state with
         {
             StateRevision = revision,
@@ -725,15 +733,20 @@ public sealed class ScheduleDueOccurrenceEvaluator
             LastClockObservedAtUtc = now,
             PendingDelivery = null,
             DispositionEvidence = state.DispositionEvidence.Concat(plan.DispositionEvidence).ToArray(),
-            TerminalDeliveryEvidence = AppendTerminalEvidence(state.TerminalDeliveryEvidence, terminal),
+            TerminalDeliveryEvidence = compacted.Evidence!,
         };
         while (!ScheduleContractHash.TryComputeState(replacement, out _, out var validation)
             && IsCanonicalDocumentTooLarge(validation)
             && replacement.TerminalDeliveryEvidence.Count > 1)
         {
+            var byteCompaction = await RemoveOneRetirableTerminalEvidenceAsync(replacement.TerminalDeliveryEvidence, cancellationToken).ConfigureAwait(false);
+            if (byteCompaction.Status is { } byteCompactionFailure)
+            {
+                return Result(byteCompactionFailure, byteCompaction.ReasonCode!, state);
+            }
             replacement = replacement with
             {
-                TerminalDeliveryEvidence = replacement.TerminalDeliveryEvidence.Skip(1).ToArray(),
+                TerminalDeliveryEvidence = byteCompaction.Evidence!,
             };
         }
         if (!ScheduleContractHash.TryComputeState(replacement, out _, out var finalValidation)
@@ -757,13 +770,103 @@ public sealed class ScheduleDueOccurrenceEvaluator
             cancellationToken).ConfigureAwait(false);
     }
 
-    private static IReadOnlyList<ScheduleTerminalDeliveryEvidence> AppendTerminalEvidence(
+    private async Task<(IReadOnlyList<ScheduleTerminalDeliveryEvidence>? Evidence, ScheduleEvaluationStatus? Status, string? ReasonCode)> AppendTerminalEvidenceAsync(
         IReadOnlyList<ScheduleTerminalDeliveryEvidence> current,
-        ScheduleTerminalDeliveryEvidence terminal)
-        => current
-            .Skip(Math.Max(0, current.Count - ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems + 1))
-            .Append(terminal)
-            .ToArray();
+        ScheduleTerminalDeliveryEvidence terminal,
+        CancellationToken cancellationToken)
+    {
+        var retained = current.Append(terminal).ToList();
+        while (retained.Count > ScheduleContractLimits.RetainedTerminalDeliveryEvidenceItems)
+        {
+            var reduced = await RemoveOneRetirableTerminalEvidenceAsync(retained, cancellationToken).ConfigureAwait(false);
+            if (reduced.Status is { } failure)
+            {
+                return (null, failure, reduced.ReasonCode);
+            }
+            retained = reduced.Evidence!.ToList();
+        }
+
+        return (retained.ToArray(), null, null);
+    }
+
+    private async Task<(IReadOnlyList<ScheduleTerminalDeliveryEvidence>? Evidence, ScheduleEvaluationStatus? Status, string? ReasonCode)> RemoveOneRetirableTerminalEvidenceAsync(
+        IReadOnlyList<ScheduleTerminalDeliveryEvidence> retained,
+        CancellationToken cancellationToken)
+    {
+        for (var index = 0; index < retained.Count - 1; index++)
+        {
+            var candidate = retained[index];
+            if (candidate.Result.Kind == ScheduleDeliveryResultKind.Rejected)
+            {
+                return (retained.Where((_, candidateIndex) => candidateIndex != index).ToArray(), null, null);
+            }
+
+            TriggerDeliveryAdmissionHistoryLookupResult? lookup;
+            try
+            {
+                lookup = await _queueHistory.FindAsync(candidate.Identity.DeliveryId, candidate.Identity.DeduplicationId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                return (null, ScheduleEvaluationStatus.Unavailable, "queue-history-unavailable");
+            }
+
+            if (lookup is null || !Enum.IsDefined(lookup.Status) || lookup.Status != TriggerDeliveryAdmissionHistoryLookupStatus.Available)
+            {
+                return (null, ScheduleEvaluationStatus.Unavailable, "queue-history-unavailable");
+            }
+            if (!TryClassifyRetainedHistory(candidate, lookup, out var isRetained))
+            {
+                return (null, ScheduleEvaluationStatus.Corrupt, "queue-history-invalid");
+            }
+            if (!isRetained)
+            {
+                return (retained.Where((_, candidateIndex) => candidateIndex != index).ToArray(), null, null);
+            }
+        }
+
+        return (null, ScheduleEvaluationStatus.BoundExceeded, "schedule-provenance-bound-exceeded");
+    }
+
+    private static bool TryClassifyRetainedHistory(
+        ScheduleTerminalDeliveryEvidence candidate,
+        TriggerDeliveryAdmissionHistoryLookupResult lookup,
+        out bool isRetained)
+    {
+        isRetained = false;
+        var delivery = lookup.DeliveryMatch;
+        var deduplication = lookup.DeduplicationMatch;
+        if (delivery is null && deduplication is null)
+        {
+            return true;
+        }
+        if (delivery is null
+            || deduplication is null
+            || !IsExactHistoryMatch(delivery, candidate)
+            || !IsExactHistoryMatch(deduplication, candidate)
+            || delivery.Receipt != deduplication.Receipt)
+        {
+            return false;
+        }
+
+        isRetained = true;
+        return true;
+    }
+
+    private static bool IsExactHistoryMatch(
+        TriggerDeliveryAdmissionHistoryEntry entry,
+        ScheduleTerminalDeliveryEvidence candidate)
+        => entry.Envelope is not null
+            && entry.Receipt is not null
+            && TriggerDeliveryAdmissionReceiptFactory.Validate(entry.Receipt, entry.Envelope).IsValid
+            && entry.Envelope.DeliveryId.Equals(candidate.Identity.DeliveryId)
+            && entry.Envelope.DeduplicationId.Equals(candidate.Identity.DeduplicationId)
+            && entry.Receipt.Status is TriggerAdmissionStatus.Admitted or TriggerAdmissionStatus.Replayed
+            && string.Equals(entry.Receipt.CanonicalEnvelopeHash, candidate.Result.CanonicalEnvelopeHash, StringComparison.Ordinal);
 
     private static bool IsCanonicalDocumentTooLarge(ScheduleContractValidationResult validation)
         => validation.Errors.Count == 1
