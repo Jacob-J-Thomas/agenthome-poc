@@ -363,6 +363,7 @@ try {
 
     Invoke-QualificationWave
 
+    $exclusiveQualificationContracts = [Collections.Generic.List[object]]::new()
     if ($plan.RequiresVerifierContracts) {
         $contractScripts = @(
             "verify-bounded-phases.tests.ps1",
@@ -380,6 +381,10 @@ try {
             if ($runningOnWindows) { $contractArguments += @("-ExecutionPolicy", "Bypass") }
             $contractArguments += @("-File", (Join-Path $repoRoot "tests\scripts\$contractScript"))
             $contractScheduleProfile = Get-QualificationContractScheduleProfile -ScriptName $contractScript
+            if ($contractScheduleProfile.Isolation -ceq "Exclusive") {
+                $exclusiveQualificationContracts.Add([pscustomobject]@{ ScriptName = $contractScript; Arguments = $contractArguments; Profile = $contractScheduleProfile })
+                continue
+            }
             Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds $contractScheduleProfile.TimeoutSeconds -EstimatedDurationSeconds $contractScheduleProfile.EstimatedDurationSeconds -Weight $contractScheduleProfile.Weight -ResourceClass $contractScheduleProfile.ResourceClass
         }
     }
@@ -438,6 +443,11 @@ try {
     }
 
     Add-QualificationPhase -Name "git-diff-check" -FileName "git" -Arguments @("diff", "--check", "$mergeBase..$HeadCommit") -TimeoutSeconds 30 -EstimatedDurationSeconds 5 -Weight 1 -ResourceClass "Ordinary"
+    Invoke-QualificationWave
+    foreach ($exclusiveContract in $exclusiveQualificationContracts) {
+        $profile = $exclusiveContract.Profile
+        Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($exclusiveContract.ScriptName))" -FileName $powerShellExecutable -Arguments $exclusiveContract.Arguments -TimeoutSeconds $profile.TimeoutSeconds -EstimatedDurationSeconds $profile.EstimatedDurationSeconds -Weight $profile.Weight -ResourceClass $profile.ResourceClass
+    }
     Invoke-QualificationWave
 }
 finally {
