@@ -33,4 +33,6 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
+  <Import Project="..\EmbodySense.CancellationHost\CancellationHostTestFixture.targets" />
+
 </Project>

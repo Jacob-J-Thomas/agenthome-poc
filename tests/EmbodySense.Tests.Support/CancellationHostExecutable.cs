@@ -1,5 +1,3 @@
-using System.Runtime.CompilerServices;
-
 namespace EmbodySense.Tests.Support;
 
 public static class CancellationHostExecutable
@@ -21,20 +19,19 @@ public static class CancellationHostExecutable
         Directory.CreateDirectory(directory);
         var configurationPath = Path.Combine(directory, configurationFileName);
         var commandPath = Path.Combine(directory, OperatingSystem.IsWindows() ? $"{executableFileName}.cmd" : executableFileName);
-        var hostAssembly = FindAssembly();
-        var dotnetHostPath = FindDotnetHost();
+        var hostExecutablePath = FindHostExecutable();
         if (OperatingSystem.IsWindows())
         {
             await File.WriteAllTextAsync(commandPath, $$"""
                 @echo off
-                "{{dotnetHostPath}}" "{{hostAssembly}}" {{mode}} "%~dp0{{configurationFileName}}" %*
+                "{{hostExecutablePath}}" {{mode}} "%~dp0{{configurationFileName}}" %*
                 """);
         }
         else
         {
             await File.WriteAllTextAsync(commandPath, $$"""
                 #!/bin/sh
-                exec '{{ShellQuote(dotnetHostPath)}}' '{{ShellQuote(hostAssembly)}}' {{ShellQuote(mode)}} '{{ShellQuote(configurationPath)}}' "$@"
+                exec '{{ShellQuote(hostExecutablePath)}}' {{ShellQuote(mode)}} '{{ShellQuote(configurationPath)}}' "$@"
                 """);
             File.SetUnixFileMode(commandPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
@@ -42,23 +39,27 @@ public static class CancellationHostExecutable
         return commandPath;
     }
 
-    private static string FindDotnetHost()
+    private static string FindHostExecutable()
     {
-        var path = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
-        if (string.IsNullOrWhiteSpace(path))
+        var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "CancellationHost");
+        var executableName = OperatingSystem.IsWindows() ? "EmbodySense.CancellationHost.exe" : "EmbodySense.CancellationHost";
+        var executablePath = Path.Combine(fixtureDirectory, executableName);
+        foreach (var requiredFileName in new[]
         {
-            path = Environment.ProcessPath;
+            executableName,
+            "EmbodySense.CancellationHost.dll",
+            "EmbodySense.CancellationHost.deps.json",
+            "EmbodySense.CancellationHost.runtimeconfig.json"
+        })
+        {
+            var requiredPath = Path.Combine(fixtureDirectory, requiredFileName);
+            if (!File.Exists(requiredPath))
+            {
+                throw new FileNotFoundException("The authenticated cancellation-host fixture bundle is incomplete.", requiredPath);
+            }
         }
 
-        if (string.IsNullOrWhiteSpace(path)
-            || !Path.IsPathFullyQualified(path)
-            || !File.Exists(path)
-            || Path.GetFileNameWithoutExtension(path) is not "dotnet")
-        {
-            throw new FileNotFoundException("The exact .NET host for the compiled cancellation fixture was not available.", path);
-        }
-
-        return path;
+        return executablePath;
     }
 
     private static string RequireSafeRelativeDirectory(string value, string parameterName)
@@ -95,32 +96,5 @@ public static class CancellationHostExecutable
         }
 
         return value;
-    }
-
-    private static string FindAssembly()
-    {
-        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
-        var redirectedOutput = Path.Combine(outputDirectory.Parent!.Parent!.FullName, "EmbodySense.CancellationHost", outputDirectory.Name);
-        var redirectedAssembly = Path.Combine(redirectedOutput, "EmbodySense.CancellationHost.dll");
-        if (File.Exists(redirectedAssembly))
-        {
-            return redirectedAssembly;
-        }
-
-        var configuration = outputDirectory.Parent.Name;
-        var targetFramework = outputDirectory.Name;
-        var assemblyPath = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", configuration, targetFramework, "EmbodySense.CancellationHost.dll");
-        return File.Exists(assemblyPath) ? assemblyPath : throw new FileNotFoundException("The compiled cancellation host was not built.", assemblyPath);
-    }
-
-    private static string FindRepositoryRoot([CallerFilePath] string sourceFile = "")
-    {
-        DirectoryInfo? directory = new(Path.GetDirectoryName(sourceFile)!);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "EmbodySense.sln")))
-        {
-            directory = directory.Parent;
-        }
-
-        return directory?.FullName ?? throw new DirectoryNotFoundException("Repository root was not found.");
     }
 }
