@@ -7,7 +7,7 @@ public static class FakeCodexExecutable
         ArgumentNullException.ThrowIfNull(workspace);
         var directory = workspace.File("fake-codex");
         Directory.CreateDirectory(directory);
-        var commandPath = Path.Combine(directory, "codex.cmd");
+        var commandPath = Path.Combine(directory, OperatingSystem.IsWindows() ? "codex.cmd" : "codex");
         var scriptPath = Path.Combine(directory, "codex.js");
         var modelsJson = System.Text.Json.JsonSerializer.Serialize(advertisedModels);
         await File.WriteAllTextAsync(scriptPath, $$"""
@@ -132,10 +132,22 @@ public static class FakeCodexExecutable
                 }
             });
             """);
-        await File.WriteAllTextAsync(commandPath, """
-            @echo off
-            node "%~dp0codex.js" %*
-            """);
+        if (OperatingSystem.IsWindows())
+        {
+            await File.WriteAllTextAsync(commandPath, """
+                @echo off
+                node "%~dp0codex.js" %*
+                """);
+        }
+        else
+        {
+            await File.WriteAllTextAsync(commandPath, """
+                #!/bin/sh
+                exec node "$(dirname "$0")/codex.js" "$@"
+                """);
+            File.SetUnixFileMode(commandPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
         return commandPath;
     }
 }
