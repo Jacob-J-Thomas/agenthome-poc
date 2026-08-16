@@ -25,9 +25,10 @@ $testResultsRoot = Join-Path $resultsRoot "Tests"
 $planPath = Join-Path $resultsRoot "qualification-plan.json"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
-$qualificationResourceCapacity = [Math]::Min(4, [Math]::Max(1, [Environment]::ProcessorCount))
-$qualificationProcessHeavyWeight = [Math]::Min(2, $qualificationResourceCapacity)
-$qualificationCpuBoundWeight = [Math]::Min(2, $qualificationResourceCapacity)
+$qualificationWorkerCount = [Math]::Min($MaximumWorkers, [Math]::Min(4, [Math]::Max(1, [Environment]::ProcessorCount)))
+$qualificationResourceCapacity = [Math]::Max(3, 2 * $qualificationWorkerCount)
+$qualificationProcessHeavyWeight = 3
+$qualificationCpuBoundWeight = 3
 
 . (Join-Path $PSScriptRoot "qualification-plan.ps1")
 . (Join-Path $PSScriptRoot "qualification-schedule.ps1")
@@ -103,8 +104,7 @@ function Invoke-QualificationWave {
         return
     }
 
-    $workerCount = [Math]::Min($MaximumWorkers, $qualificationResourceCapacity)
-    Invoke-VerificationParallelPhases -MaximumWorkers $workerCount -MaximumResourceCapacity $qualificationResourceCapacity -MaximumProcessHeavyWorkers ([Math]::Min(2, $workerCount)) -MaximumCpuBoundWorkers ([Math]::Min(1, $workerCount)) | Out-Null
+    Invoke-VerificationParallelPhases -MaximumWorkers $qualificationWorkerCount -MaximumResourceCapacity $qualificationResourceCapacity -MaximumProcessHeavyWorkers ([Math]::Min(2, $qualificationWorkerCount)) -MaximumCpuBoundWorkers ([Math]::Min(1, $qualificationWorkerCount)) | Out-Null
     Reset-VerificationParallelPhaseState
 }
 

@@ -294,6 +294,20 @@ finally {
     $physicalHeavyResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
     Assert-True -Condition ($physicalHeavyResults.Count -eq 2) -Message "Two evidence-weighted process-heavy phases must overlap within eight logical units and the four-process ceiling."
 
+    $qualificationBackfillRoot = Join-Path $scenarioRoot "qualification-backfill-active"
+    New-Item -ItemType Directory -Path $qualificationBackfillRoot | Out-Null
+    Reset-VerificationParallelPhaseState
+    foreach ($phase in @(
+        [pscustomobject]@{ Name = "heavy-first"; Weight = 3; ResourceClass = "ProcessHeavy" },
+        [pscustomobject]@{ Name = "heavy-second"; Weight = 3; ResourceClass = "ProcessHeavy" },
+        [pscustomobject]@{ Name = "light-first"; Weight = 1; ResourceClass = "ProcessLight" },
+        [pscustomobject]@{ Name = "light-second"; Weight = 1; ResourceClass = "ProcessLight" }
+    )) {
+        Add-VerificationParallelPhase -Name $phase.Name -FileName $powerShellExecutable -Arguments ($weightedArguments + @($phase.Name, $qualificationBackfillRoot, "4", "4")) -TimeoutSeconds $processProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "qualification-$($phase.Name).log") -Weight $phase.Weight -ResourceClass $phase.ResourceClass
+    }
+    $qualificationBackfillResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
+    Assert-True -Condition ($qualificationBackfillResults.Count -eq 4) -Message "Two process-heavy and two checked process-light phases must backfill the four-process qualification ceiling without admitting a third heavy phase."
+
     $exclusiveRoot = Join-Path $scenarioRoot "full-capacity-active"
     New-Item -ItemType Directory -Path $exclusiveRoot | Out-Null
     Reset-VerificationParallelPhaseState
