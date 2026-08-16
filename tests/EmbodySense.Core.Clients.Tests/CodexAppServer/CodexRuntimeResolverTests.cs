@@ -220,11 +220,6 @@ public sealed class CodexRuntimeResolverTests
     [Fact]
     public async Task Explicit_command_name_resolves_from_path()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         using var workspace = new TestWorkspace();
         var executable = await CreateFakeExecutableAsync(workspace, "path", "codex-cli path-test", advertisedModels: ["gpt-test"]);
         var originalPath = Environment.GetEnvironmentVariable("PATH");
@@ -232,7 +227,8 @@ public sealed class CodexRuntimeResolverTests
         {
             Environment.SetEnvironmentVariable("PATH", Path.GetDirectoryName(executable));
 
-            var result = await new CodexRuntimeResolver().ResolveAsync("codex.cmd", "gpt-test");
+            var commandName = OperatingSystem.IsWindows() ? "codex.cmd" : "codex";
+            var result = await new CodexRuntimeResolver().ResolveAsync(commandName, "gpt-test");
 
             Assert.Equal(CodexRuntimeResolutionStatus.Compatible, result.Status);
             Assert.Equal(Path.GetFullPath(executable), result.ExecutablePath);

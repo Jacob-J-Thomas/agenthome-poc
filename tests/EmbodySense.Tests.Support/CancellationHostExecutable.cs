@@ -19,25 +19,46 @@ public static class CancellationHostExecutable
 
         var directory = workspace.File(relativeDirectory);
         Directory.CreateDirectory(directory);
+        var configurationPath = Path.Combine(directory, configurationFileName);
         var commandPath = Path.Combine(directory, OperatingSystem.IsWindows() ? $"{executableFileName}.cmd" : executableFileName);
         var hostAssembly = FindAssembly();
+        var dotnetHostPath = FindDotnetHost();
         if (OperatingSystem.IsWindows())
         {
             await File.WriteAllTextAsync(commandPath, $$"""
                 @echo off
-                dotnet "{{hostAssembly}}" {{mode}} "%~dp0{{configurationFileName}}" %*
+                "{{dotnetHostPath}}" "{{hostAssembly}}" {{mode}} "%~dp0{{configurationFileName}}" %*
                 """);
         }
         else
         {
             await File.WriteAllTextAsync(commandPath, $$"""
                 #!/bin/sh
-                exec dotnet '{{ShellQuote(hostAssembly)}}' {{ShellQuote(mode)}} "$(dirname "$0")/{{configurationFileName}}" "$@"
+                exec '{{ShellQuote(dotnetHostPath)}}' '{{ShellQuote(hostAssembly)}}' {{ShellQuote(mode)}} '{{ShellQuote(configurationPath)}}' "$@"
                 """);
             File.SetUnixFileMode(commandPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
 
         return commandPath;
+    }
+
+    private static string FindDotnetHost()
+    {
+        var path = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            path = Environment.ProcessPath;
+        }
+
+        if (string.IsNullOrWhiteSpace(path)
+            || !Path.IsPathFullyQualified(path)
+            || !File.Exists(path)
+            || Path.GetFileNameWithoutExtension(path) is not "dotnet")
+        {
+            throw new FileNotFoundException("The exact .NET host for the compiled cancellation fixture was not available.", path);
+        }
+
+        return path;
     }
 
     private static string RequireSafeRelativeDirectory(string value, string parameterName)
