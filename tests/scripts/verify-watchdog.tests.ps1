@@ -58,7 +58,18 @@ Assert-True -Condition ($startupScheduleProfile.EstimatedDurationSeconds -gt (Ge
 Assert-True -Condition ($persistenceScheduleProfile.TimeoutSeconds -eq 270 -and $startupScheduleProfile.TimeoutSeconds -eq 240) -Message "The two Windows-dominant suites must retain measured bounded child headroom beneath the global watchdog."
 Assert-True -Condition ($persistenceScheduleProfile.Weight -eq 2 -and $startupScheduleProfile.Weight -eq 2 -and $persistenceScheduleProfile.ResourceClass -ceq "ProcessHeavy" -and $startupScheduleProfile.ResourceClass -ceq "ProcessHeavy") -Message "The two Windows-dominant suites must retain two-unit process-heavy posture."
 Assert-True -Condition (@($script:QualificationTestScheduleProfiles | Where-Object { $_.EstimatedDurationSeconds -le 20 -and ($_.Weight -ne 1 -or $_.ResourceClass -cne "ProcessLight") }).Count -eq 0) -Message "Short qualification suites must retain one-unit process-light backfill posture."
-Assert-True -Condition ($script:QualificationContractWeight -eq 1 -and $script:QualificationContractResourceClass -ceq "ProcessLight") -Message "Qualification verifier contracts must retain one-unit process-light backfill posture."
+$expectedQualificationContracts = @("verify-bounded-phases.tests.ps1", "verify-coverage.tests.ps1", "verify-parallel.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-sdk-diagnostics.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1")
+Assert-Equal -Actual (@($script:QualificationContractScheduleProfiles.ScriptName | Sort-Object) -join "|") -Expected ($expectedQualificationContracts -join "|") -Message "Qualification contract scheduling profiles must equal the canonical Windows contract inventory."
+$preflightScheduleProfile = Get-QualificationContractScheduleProfile -ScriptName "verify-preflight-overlap.tests.ps1"
+Assert-True -Condition ($preflightScheduleProfile.Weight -eq 3 -and $preflightScheduleProfile.ResourceClass -ceq "ProcessHeavy") -Message "The descendant-heavy preflight contract must retain protected process posture."
+Assert-True -Condition (@($script:QualificationContractScheduleProfiles | Where-Object { $_.ScriptName -cne "verify-preflight-overlap.tests.ps1" -and ($_.Weight -ne 1 -or $_.ResourceClass -cne "ProcessLight") }).Count -eq 0) -Message "Measured non-preflight verifier contracts must retain one-unit process-light posture."
+try {
+    Get-QualificationContractScheduleProfile -ScriptName "verify-unmapped.tests.ps1" | Out-Null
+    throw "Expected an unmapped qualification contract scheduling failure."
+}
+catch {
+    Assert-True -Condition ($_.Exception.Message.IndexOf("must have exactly one checked-in scheduling profile", [StringComparison]::Ordinal) -ge 0) -Message "A new qualification contract without a profile must fail closed."
+}
 try {
     Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Unmapped.Tests" | Out-Null
     throw "Expected an unmapped qualification scheduling failure."
@@ -726,7 +737,8 @@ Assert-Equal -Actual ([regex]::Matches($qualificationScript, 'Invoke-Qualificati
 Assert-True -Condition ($qualificationScript.IndexOf('Invoke-QualificationWave', $qualificationScript.IndexOf('Add-QualificationPhase -Name "frontend"', [StringComparison]::Ordinal), [StringComparison]::Ordinal) -lt $qualificationContractStart) -Message "Build and frontend prerequisites must complete before verifier contracts and tests enter the second wave."
 Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationTestScheduleProfile -ProjectName $projectName', [StringComparison]::Ordinal) -ge 0) -Message "Every selected test project must use its checked-in measured scheduling profile."
 Assert-True -Condition ($qualificationScript.IndexOf('-Weight $testScheduleProfile.Weight -ResourceClass $testScheduleProfile.ResourceClass', [StringComparison]::Ordinal) -ge 0) -Message "Every selected test project must use its measured resource posture."
-Assert-True -Condition ($qualificationScript.IndexOf('-Weight $script:QualificationContractWeight -ResourceClass $script:QualificationContractResourceClass', [StringComparison]::Ordinal) -ge 0) -Message "Verifier contracts must use their checked one-unit backfill posture."
+Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationContractScheduleProfile -ScriptName $contractScript', [StringComparison]::Ordinal) -ge 0) -Message "Every verifier contract must use its checked scheduling profile."
+Assert-True -Condition ($qualificationScript.IndexOf('-Weight $contractScheduleProfile.Weight -ResourceClass $contractScheduleProfile.ResourceClass', [StringComparison]::Ordinal) -ge 0) -Message "Verifier contracts must use their measured resource posture."
 Assert-True -Condition ($qualificationScript.IndexOf('@("format", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006"', [StringComparison]::Ordinal) -ge 0) -Message "Changed-file qualification must check whitespace and IDE1006 in one dotnet format workspace load."
 Assert-True -Condition ($qualificationScript.IndexOf('Add-QualificationPhase -Name "format-changed"', [StringComparison]::Ordinal) -ge 0) -Message "Changed-file formatting must remain an explicit bounded phase."
 Assert-True -Condition ($qualificationScript.IndexOf('Invoke-QualificationWave', $qualificationScript.IndexOf('Add-QualificationPhase -Name "git-diff-check"', [StringComparison]::Ordinal), [StringComparison]::Ordinal) -ge 0) -Message "Tests, workflow validation, changed-file formatting, and diff-check must complete in the second bounded wave."

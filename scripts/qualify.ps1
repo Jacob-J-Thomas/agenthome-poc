@@ -379,7 +379,8 @@ try {
             $contractArguments = @("-NoProfile")
             if ($runningOnWindows) { $contractArguments += @("-ExecutionPolicy", "Bypass") }
             $contractArguments += @("-File", (Join-Path $repoRoot "tests\scripts\$contractScript"))
-            Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -EstimatedDurationSeconds 30 -Weight $script:QualificationContractWeight -ResourceClass $script:QualificationContractResourceClass
+            $contractScheduleProfile = Get-QualificationContractScheduleProfile -ScriptName $contractScript
+            Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds $contractScheduleProfile.TimeoutSeconds -EstimatedDurationSeconds $contractScheduleProfile.EstimatedDurationSeconds -Weight $contractScheduleProfile.Weight -ResourceClass $contractScheduleProfile.ResourceClass
         }
     }
     if ($plan.RequiresWorkflowValidation) {

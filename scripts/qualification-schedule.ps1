@@ -1,7 +1,14 @@
 Set-StrictMode -Version Latest
 
-$script:QualificationContractWeight = 1
-$script:QualificationContractResourceClass = "ProcessLight"
+$script:QualificationContractScheduleProfiles = @(
+    [pscustomobject]@{ ScriptName = "verify-bounded-phases.tests.ps1"; EstimatedDurationSeconds = 30; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight" }
+    [pscustomobject]@{ ScriptName = "verify-coverage.tests.ps1"; EstimatedDurationSeconds = 30; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight" }
+    [pscustomobject]@{ ScriptName = "verify-parallel.tests.ps1"; EstimatedDurationSeconds = 40; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight" }
+    [pscustomobject]@{ ScriptName = "verify-preflight-overlap.tests.ps1"; EstimatedDurationSeconds = 60; TimeoutSeconds = 90; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ ScriptName = "verify-sdk-diagnostics.tests.ps1"; EstimatedDurationSeconds = 30; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight" }
+    [pscustomobject]@{ ScriptName = "verify-test-inventory.tests.ps1"; EstimatedDurationSeconds = 30; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight" }
+    [pscustomobject]@{ ScriptName = "verify-watchdog.tests.ps1"; EstimatedDurationSeconds = 40; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight" }
+)
 $script:QualificationTestScheduleProfiles = @(
     [pscustomobject]@{ ProjectName = "EmbodySense.Core.Persistence.Tests"; EstimatedDurationSeconds = 220; TimeoutSeconds = 270; Weight = 2; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ ProjectName = "EmbodySense.Core.Startup.Tests"; EstimatedDurationSeconds = 180; TimeoutSeconds = 240; Weight = 2; ResourceClass = "ProcessHeavy" }
@@ -20,6 +27,17 @@ function Get-QualificationTestScheduleProfile {
     $profiles = @($script:QualificationTestScheduleProfiles | Where-Object { $_.ProjectName -ceq $ProjectName })
     if ($profiles.Count -ne 1) {
         throw "Qualification test project '$ProjectName' must have exactly one checked-in scheduling profile. Found $($profiles.Count)."
+    }
+
+    return $profiles[0]
+}
+
+function Get-QualificationContractScheduleProfile {
+    param([Parameter(Mandatory = $true)] [string]$ScriptName)
+
+    $profiles = @($script:QualificationContractScheduleProfiles | Where-Object { $_.ScriptName -ceq $ScriptName })
+    if ($profiles.Count -ne 1) {
+        throw "Qualification contract '$ScriptName' must have exactly one checked-in scheduling profile. Found $($profiles.Count)."
     }
 
     return $profiles[0]
