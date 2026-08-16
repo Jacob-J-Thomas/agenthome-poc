@@ -4,16 +4,22 @@ namespace EmbodySense.Tests.Support;
 
 public static class CancellationHostExecutable
 {
-    public static async Task<string> CreateAsync(TestWorkspace workspace, string relativeDirectory, string mode, string configurationFileName)
+    public static async Task<string> CreateAsync(
+        TestWorkspace workspace,
+        string relativeDirectory,
+        string mode,
+        string configurationFileName,
+        string executableFileName = "cancellation-host")
     {
         ArgumentNullException.ThrowIfNull(workspace);
-        relativeDirectory = RequireSafeSegment(relativeDirectory, nameof(relativeDirectory));
+        relativeDirectory = RequireSafeRelativeDirectory(relativeDirectory, nameof(relativeDirectory));
         mode = RequireSafeSegment(mode, nameof(mode));
         configurationFileName = RequireSafeSegment(configurationFileName, nameof(configurationFileName));
+        executableFileName = RequireSafeSegment(executableFileName, nameof(executableFileName));
 
         var directory = workspace.File(relativeDirectory);
         Directory.CreateDirectory(directory);
-        var commandPath = Path.Combine(directory, OperatingSystem.IsWindows() ? "cancellation-host.cmd" : "cancellation-host");
+        var commandPath = Path.Combine(directory, OperatingSystem.IsWindows() ? $"{executableFileName}.cmd" : executableFileName);
         var hostAssembly = FindAssembly();
         if (OperatingSystem.IsWindows())
         {
@@ -32,6 +38,23 @@ public static class CancellationHostExecutable
         }
 
         return commandPath;
+    }
+
+    private static string RequireSafeRelativeDirectory(string value, string parameterName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(value, parameterName);
+        if (value.Length > 512 || Path.IsPathFullyQualified(value) || Path.IsPathRooted(value))
+        {
+            throw new ArgumentException("Cancellation-host executable directories must be bounded relative paths.", parameterName);
+        }
+
+        var segments = value.Replace('\\', '/').Split('/');
+        if (segments.Any(string.IsNullOrEmpty))
+        {
+            throw new ArgumentException("Cancellation-host executable directories must not contain empty path segments.", parameterName);
+        }
+
+        return Path.Combine(segments.Select(segment => RequireSafeSegment(segment, parameterName)).ToArray());
     }
 
     private static string ShellQuote(string value)

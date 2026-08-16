@@ -394,6 +394,6 @@ public sealed class CodexRuntimeResolverTests
             modelPageSize
         };
         await File.WriteAllTextAsync(configurationPath, JsonSerializer.Serialize(configuration, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
-        return await CancellationHostExecutable.CreateAsync(workspace, relativeDirectory, "codex-runtime-probe", "probe-config.json");
+        return await CancellationHostExecutable.CreateAsync(workspace, relativeDirectory, "codex-runtime-probe", "probe-config.json", "codex");
     }
 }
