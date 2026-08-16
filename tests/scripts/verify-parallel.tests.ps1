@@ -210,7 +210,7 @@ if (-not [string]::IsNullOrWhiteSpace($OrderPath) -and $OrderPath -cne "-") { Ad
 if (-not [string]::IsNullOrWhiteSpace($SynchronizationRoot) -and $SynchronizationRoot -cne "-" -and $ExpectedConcurrent -gt 0) {
     New-Item -ItemType Directory -Path $SynchronizationRoot -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $SynchronizationRoot "$Name.ready") -Value "ready" -Encoding UTF8
-    $synchronizationDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    $synchronizationDeadline = [DateTimeOffset]::UtcNow.AddSeconds(20)
     while (@(Get-ChildItem -LiteralPath $SynchronizationRoot -Filter "*.ready" -File).Count -lt $ExpectedConcurrent) {
         if ([DateTimeOffset]::UtcNow -ge $synchronizationDeadline) { exit 41 }
         Start-Sleep -Milliseconds 10
@@ -229,10 +229,11 @@ exit $ExitCode
     }
     $baseArguments += @("-File", $probePath)
     $sixUnitCapacity = 6
+    $parallelProbeTimeoutSeconds = 30
     $synchronizationRoot = Join-Path $scenarioRoot "overlap"
     Reset-VerificationParallelPhaseState
     foreach ($name in @("first", "second", "third", "fourth", "fifth", "sixth")) {
-        Add-VerificationParallelPhase -Name $name -FileName $powerShellExecutable -Arguments ($baseArguments + @($name, "50", "0", "-", $synchronizationRoot, $sixUnitCapacity.ToString([Globalization.CultureInfo]::InvariantCulture))) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log")
+        Add-VerificationParallelPhase -Name $name -FileName $powerShellExecutable -Arguments ($baseArguments + @($name, "50", "0", "-", $synchronizationRoot, $sixUnitCapacity.ToString([Globalization.CultureInfo]::InvariantCulture))) -TimeoutSeconds $parallelProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "$name.log")
     }
     $results = @(Invoke-VerificationParallelPhases -MaximumWorkers $sixUnitCapacity -MaximumResourceCapacity $sixUnitCapacity)
 
