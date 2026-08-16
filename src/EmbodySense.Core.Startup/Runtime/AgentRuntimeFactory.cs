@@ -68,6 +68,7 @@ public sealed class AgentRuntimeFactory
     private readonly IAgentRuntimeConversationPublicationObserver? _conversationPublicationObserver;
     private readonly CodexRuntimeStatus? _codexRuntimeStatus;
     private readonly ICapabilityCatalogTrustProvider _capabilityTrustProvider;
+    private readonly IAgentRuntimeAuthenticatedWakeVerifier? _authenticatedWakeVerifier;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="AgentRuntimeFactory"/> type.
@@ -123,11 +124,26 @@ public sealed class AgentRuntimeFactory
         return new AgentRuntimeFactory(new ToolApprovalPromptAdapter(approvalPrompt), conversationPublicationObserver, codexRuntimeStatus, new FileCapabilityCatalogTrustProvider(trustRootPath));
     }
 
+    /// <summary>Returns an equivalent factory that composes one explicit surface-owned authenticated-event verifier.</summary>
+    /// <param name="verifier">The authoritative verifier used only for exact authenticated-event Wait wakes.</param>
+    /// <returns>A factory preserving this instance's approval, runtime, observer, and trust-root configuration.</returns>
+    public AgentRuntimeFactory WithAuthenticatedWakeVerifier(IAgentRuntimeAuthenticatedWakeVerifier verifier)
+    {
+        ArgumentNullException.ThrowIfNull(verifier);
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            verifier);
+    }
+
     internal AgentRuntimeFactory(
         IToolApprovalPrompt approvalPrompt,
         IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver = null,
         CodexRuntimeStatus? codexRuntimeStatus = null,
-        ICapabilityCatalogTrustProvider? capabilityTrustProvider = null)
+        ICapabilityCatalogTrustProvider? capabilityTrustProvider = null,
+        IAgentRuntimeAuthenticatedWakeVerifier? authenticatedWakeVerifier = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         if (codexRuntimeStatus is not null && codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
@@ -144,6 +160,7 @@ public sealed class AgentRuntimeFactory
         _conversationPublicationObserver = conversationPublicationObserver;
         _codexRuntimeStatus = codexRuntimeStatus;
         _capabilityTrustProvider = capabilityTrustProvider ?? FileCapabilityCatalogTrustProvider.CreateDefault();
+        _authenticatedWakeVerifier = authenticatedWakeVerifier;
     }
 
     /// <summary>
@@ -398,11 +415,14 @@ public sealed class AgentRuntimeFactory
                 customRunStore,
                 governedGrantResolver);
             var governedSleepStore = new GovernedLoopSleepStore(paths);
+            IGovernedLoopAuthenticatedWakeVerificationPort authenticatedWakeVerification = _authenticatedWakeVerifier is null
+                ? new GovernedLoopUnavailableAuthenticatedWakeVerificationPort()
+                : new AgentRuntimeAuthenticatedWakeVerificationAdapter(_authenticatedWakeVerifier);
             var governedSleep = new GovernedLoopSleepService(
                 governedSleepStore,
                 governedWaitPosture,
                 governedWaitContinuationRelay,
-                new GovernedLoopUnavailableAuthenticatedWakeVerificationPort());
+                authenticatedWakeVerification);
             var governedRunner = new CustomLoopOrderedRunner(
                 customRunStore,
                 new CustomLoopContextResolver(),

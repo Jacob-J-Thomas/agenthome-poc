@@ -25,7 +25,7 @@ namespace EmbodySense.Core.Application.Loops.Wait;
 /// The canonical run remains the only lifecycle, frontier, and Wait-evidence truth. Park, checkpoint attachment,
 /// continuation, and ordered completion are separate optimistic phases so every crash boundary can be reconciled.
 /// </remarks>
-public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExecutor, IGovernedLoopWakeContinuationPort
+public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExecutor, IGovernedLoopWakeContinuationPort, IGovernedLoopWaitRecoveryPort
 {
     private readonly ICustomLoopRunStore _runStore;
     private readonly GovernedLoopSleepService _sleepService;

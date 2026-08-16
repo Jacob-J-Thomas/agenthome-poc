@@ -51,9 +51,13 @@ internal sealed class GovernedLoopWaitRuntimeHost : ICustomLoopExecutionActivati
                 1,
                 CandidateReadLimit),
             _timeProvider);
+        var recoveringWork = new GovernedLoopRecoveringWaitWorkRunner(
+            new GovernedLoopWaitOnlyWorkRunner(canonicalWork),
+            wait,
+            CandidateReadLimit);
         _coordinator = new GovernedLoopLocalCoordinator(
             new GovernedLoopCoordinatorEvidenceStore(paths),
-            new GovernedLoopWaitOnlyWorkRunner(canonicalWork),
+            recoveringWork,
             new GovernedLoopLocalCoordinatorOptions(
                 CoordinatorId,
                 "agent-runtime-" + instanceId,

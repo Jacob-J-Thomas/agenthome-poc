@@ -308,7 +308,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
         var harness = await CreateWaitRuntimeAsync();
         harness.SleepStore.ThrowBeforePublish = true;
         var parked = await harness.RunToParkAsync();
-        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, parked.Status);
+        Assert.Contains("not yet durable", parked.Detail, StringComparison.Ordinal);
         Assert.Null(Assert.Single(harness.Store.Current.WaitEvidence).ParkEvidence);
 
         var operationStore = new FakeControlOperationStore();
@@ -384,7 +385,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
         var parked = await harness.RunToParkAsync();
 
-        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, parked.Status);
+        Assert.Contains("not yet durable", parked.Detail, StringComparison.Ordinal);
         Assert.Null(Assert.Single(harness.Store.Current.WaitEvidence).ParkEvidence);
         Assert.Equal(0, harness.SleepStore.CheckpointCount);
 

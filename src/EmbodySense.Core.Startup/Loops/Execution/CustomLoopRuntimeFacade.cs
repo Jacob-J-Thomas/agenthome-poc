@@ -121,6 +121,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
 
     internal bool CustomRecoveryRequired => Volatile.Read(ref _customRecoveryRequired);
 
+    internal bool CustomExecutionReacquisitionAllowed => Volatile.Read(ref _customExecutionReacquisitionAllowed);
+
     internal Task<CustomExecutionAvailability> EnsureCustomExecutionAvailableAsync(
         CancellationToken cancellationToken)
         => EnsureCustomExecutionAvailableAsync(_actor, cancellationToken);

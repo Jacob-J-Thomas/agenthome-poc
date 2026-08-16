@@ -1621,6 +1621,15 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "Wait parking did not retain the exact activation as Waiting."));
         }
 
+        var durableWait = durable.WaitEvidence.SingleOrDefault(item => item.ActivationOrdinal == activation.ActivationOrdinal);
+        if (durableWait?.ParkEvidence is null)
+        {
+            return new RunAdvance(null, Result(
+                CustomLoopOrderedRunStatus.Failed,
+                durable,
+                $"The Wait activation is retained, but checkpoint publication is not yet durable; the active host will retry bounded recovery without reporting the run as parked. Cause: {parked.Detail ?? "unknown-publication-outcome"}"));
+        }
+
         return durable.Status == CustomLoopRunStatus.Waiting
             ? new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, durable, parked.Detail ?? "The canonical Wait checkpoint is durably parked."))
             : durable.Status == CustomLoopRunStatus.Running && durable.Frontier.Payload.Status == GovernedLoopFrontierStatus.Active

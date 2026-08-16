@@ -524,14 +524,29 @@ public sealed class AgentRuntimeFactoryTests
 
         var preserved = await conversationMemory.LoadCurrentConversationAsync();
         var turn = await runtime.RunTurnAsync("hello");
+        var activation = await runtime.StartGovernedWaitBackgroundAsync();
         File.Delete(Path.Combine(runDirectory, "run-one.json"));
         var customLoop = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-after-recovery-failure", "prompt"));
 
         Assert.Collection(preserved, message => Assert.Equal("preserved recovery-failure transcript", message.Content));
         Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, turn.Status);
+        Assert.False(activation.Available);
+        Assert.False(activation.RetryAllowed);
         Assert.Equal("Failed", customLoop.AdmissionStatus);
         Assert.Contains("custom_loop_recovery_failed", customLoop.Detail, StringComparison.Ordinal);
         Assert.False(customLoop.WasDispatched);
+    }
+
+    [Fact]
+    public void Authenticated_event_wait_verifier_is_an_explicit_immutable_factory_configuration()
+    {
+        var factory = new AgentRuntimeFactory(new RejectingApprovalPrompt());
+        var verifier = new RecordingAuthenticatedWakeVerifier();
+
+        var configured = factory.WithAuthenticatedWakeVerifier(verifier);
+
+        Assert.NotSame(factory, configured);
+        Assert.Throws<ArgumentNullException>(() => factory.WithAuthenticatedWakeVerifier(null!));
     }
 
     [Fact]
@@ -1230,6 +1245,19 @@ public sealed class AgentRuntimeFactoryTests
         public Task<(bool Approved, string DecisionBy, string Detail)> RequestApprovalAsync(AgentToolApprovalRequest request, CancellationToken cancellationToken = default)
         {
             return Task.FromResult((false, "test", "No approval needed during runtime construction."));
+        }
+    }
+
+    private sealed class RecordingAuthenticatedWakeVerifier : IAgentRuntimeAuthenticatedWakeVerifier
+    {
+        public Task<AgentRuntimeAuthenticatedWakeVerificationResult?> VerifyAsync(
+            AgentRuntimeAuthenticatedWakeVerificationRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult<AgentRuntimeAuthenticatedWakeVerificationResult?>(
+                new AgentRuntimeAuthenticatedWakeVerificationResult(
+                    AgentRuntimeAuthenticatedWakeVerificationStatus.NotFound));
         }
     }
 

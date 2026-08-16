@@ -428,7 +428,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         {
             return new CustomLoopExecutionActivationResult(
                 false,
-                true,
+                _customLoops.CustomExecutionReacquisitionAllowed,
                 availability.Status,
                 availability.Detail);
         }
