@@ -220,7 +220,7 @@ $expectedCoverageChildProcessProjects = @(
 )
 $coverageChildProjectDeclaration = [regex]::Match($verifyScript, '(?ms)^\$coverageChildProcessTestProjects = @\(\r?\n(?<body>.*?)^\)')
 Assert-True -Condition $coverageChildProjectDeclaration.Success -Message "The external-child coverage project inventory must remain statically inspectable."
-$declaredCoverageChildProjects = @([regex]::Matches($coverageChildProjectDeclaration.Groups["body"].Value, '^\s+"(?<name>[^"]+)",?$', [Text.RegularExpressions.RegexOptions]::Multiline))
+$declaredCoverageChildProjects = @([regex]::Matches($coverageChildProjectDeclaration.Groups["body"].Value, '^\s+"(?<name>[^"]+)",?\r?$', [Text.RegularExpressions.RegexOptions]::Multiline))
 Assert-True -Condition ($declaredCoverageChildProjects.Count -eq $expectedCoverageChildProcessProjects.Count) -Message "External-child coverage must retain exactly the Persistence and Startup test projects."
 for ($index = 0; $index -lt $expectedCoverageChildProcessProjects.Count; $index++) {
     Assert-True -Condition ($declaredCoverageChildProjects[$index].Groups["name"].Value -ceq $expectedCoverageChildProcessProjects[$index]) -Message "External-child coverage project order and names must remain deterministic."
