@@ -159,7 +159,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 compacted.HeartbeatRetirements,
                 ReadOnly(compacted.Heartbeats.Append(request.InitialHeartbeat)),
                 compacted.Failures);
-            await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
+            replacement = await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
             return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Acquired, Snapshot(replacement));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -244,7 +244,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 compacted.HeartbeatRetirements,
                 ReadOnly(compacted.Heartbeats.Append(request.ProposedHeartbeat)),
                 compacted.Failures);
-            await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
+            replacement = await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
             return HeartbeatResult(GovernedLoopCoordinatorHeartbeatMutationStatus.Renewed, Snapshot(replacement));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -311,7 +311,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 compacted.HeartbeatRetirements,
                 compacted.Heartbeats,
                 compacted.Failures);
-            await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
+            replacement = await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
             return LifecycleResult(GovernedLoopCoordinatorLifecycleMutationStatus.Appended, Snapshot(replacement));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -386,7 +386,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 compacted.HeartbeatRetirements,
                 compacted.Heartbeats,
                 ReadOnly(compacted.Failures.Append(request.ProposedFailure)));
-            await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
+            replacement = await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
             return FailureResult(GovernedLoopCoordinatorFailureMutationStatus.Appended, Snapshot(replacement));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -426,7 +426,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
         return (catalog, identity);
     }
 
-    private async Task WriteReplacementAsync(
+    private async Task<GovernedLoopCoordinatorEvidenceStoreEntry> WriteReplacementAsync(
         GovernedLoopCoordinatorEvidenceStoreCatalog catalog,
         GovernedLoopCoordinatorEvidenceStoreEntry current,
         GovernedLoopCoordinatorEvidenceStoreEntry replacement,
@@ -434,11 +434,38 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
         TriggerQueueMutationLease mutationLock,
         CancellationToken cancellationToken)
     {
+        replacement = CompactHeartbeats(
+            replacement,
+            requiredSlots: 0,
+            retireCurrentHead: false,
+            candidate => CatalogFits(catalog, current, candidate))
+            ?? throw new GovernedLoopSleepStoreLimitException();
         var candidate = new GovernedLoopCoordinatorEvidenceStoreCatalog(
             SchemaVersion,
             checked(catalog.Generation + 1),
             Ordered(catalog.Entries.Select(entry => ReferenceEquals(entry, current) ? replacement : entry)));
         await WriteAsync(candidate, identity, mutationLock, cancellationToken).ConfigureAwait(false);
+        return replacement;
+    }
+
+    private bool CatalogFits(
+        GovernedLoopCoordinatorEvidenceStoreCatalog catalog,
+        GovernedLoopCoordinatorEvidenceStoreEntry current,
+        GovernedLoopCoordinatorEvidenceStoreEntry replacement)
+    {
+        var candidate = new GovernedLoopCoordinatorEvidenceStoreCatalog(
+            SchemaVersion,
+            checked(catalog.Generation + 1),
+            Ordered(catalog.Entries.Select(entry => ReferenceEquals(entry, current) ? replacement : entry)));
+        try
+        {
+            _ = GovernedLoopCoordinatorEvidenceStoreCodec.Serialize(candidate, _maximumEvidenceItems, _maximumCatalogBytes);
+            return true;
+        }
+        catch (GovernedLoopSleepStoreLimitException)
+        {
+            return false;
+        }
     }
 
     private async Task WriteAsync(
@@ -507,9 +534,10 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
     private GovernedLoopCoordinatorEvidenceStoreEntry? CompactHeartbeats(
         GovernedLoopCoordinatorEvidenceStoreEntry entry,
         int requiredSlots,
-        bool retireCurrentHead)
+        bool retireCurrentHead,
+        Func<GovernedLoopCoordinatorEvidenceStoreEntry, bool>? fits = null)
     {
-        if (EvidenceCount(entry) <= _maximumEvidenceItems - requiredSlots)
+        if (EvidenceCount(entry) <= _maximumEvidenceItems - requiredSlots && (fits is null || fits(entry)))
         {
             return entry;
         }
@@ -543,7 +571,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 ReadOnly(retirements.OrderBy(item => item.Ownership.OwnershipEpoch)),
                 ReadOnly(heartbeats),
                 entry.Failures);
-            if (EvidenceCount(compacted) <= _maximumEvidenceItems - requiredSlots)
+            if (EvidenceCount(compacted) <= _maximumEvidenceItems - requiredSlots && (fits is null || fits(compacted)))
             {
                 return compacted;
             }
@@ -640,7 +668,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
             throw new ArgumentOutOfRangeException(nameof(options), "The coordinator count bound is outside the supported range.");
         }
 
-        if (options.MaxEvidenceItemsPerCoordinator is < 3 or > MaximumConfiguredEvidenceItems)
+        if (options.MaxEvidenceItemsPerCoordinator is < 6 or > MaximumConfiguredEvidenceItems)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "The coordinator evidence bound is outside the supported range.");
         }
