@@ -27,6 +27,7 @@ $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
 $qualificationResourceCapacity = [Math]::Min(4, [Math]::Max(1, [Environment]::ProcessorCount))
 $qualificationProcessHeavyWeight = [Math]::Min(2, $qualificationResourceCapacity)
+$qualificationContractWeight = 1
 $qualificationCpuBoundWeight = [Math]::Min(2, $qualificationResourceCapacity)
 
 . (Join-Path $PSScriptRoot "qualification-plan.ps1")
@@ -103,7 +104,7 @@ function Invoke-QualificationWave {
     }
 
     $workerCount = [Math]::Min($MaximumWorkers, $qualificationResourceCapacity)
-    Invoke-VerificationParallelPhases -MaximumWorkers $workerCount -MaximumResourceCapacity $qualificationResourceCapacity -MaximumProcessHeavyWorkers ([Math]::Min(2, $workerCount)) -MaximumCpuBoundWorkers ([Math]::Min(1, $workerCount)) | Out-Null
+    Invoke-VerificationParallelPhases -MaximumWorkers $workerCount -MaximumResourceCapacity $qualificationResourceCapacity -MaximumProcessHeavyWorkers ([Math]::Min(3, $workerCount)) -MaximumCpuBoundWorkers ([Math]::Min(1, $workerCount)) | Out-Null
     Reset-VerificationParallelPhaseState
 }
 
@@ -376,7 +377,7 @@ try {
             $contractArguments = @("-NoProfile")
             if ($runningOnWindows) { $contractArguments += @("-ExecutionPolicy", "Bypass") }
             $contractArguments += @("-File", (Join-Path $repoRoot "tests\scripts\$contractScript"))
-            Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -EstimatedDurationSeconds 30 -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy"
+            Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -EstimatedDurationSeconds 30 -Weight $qualificationContractWeight -ResourceClass "ProcessHeavy"
         }
     }
     Invoke-QualificationWave
