@@ -38,13 +38,8 @@ public sealed class ConsoleAgentRuntimeHostTests
 
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("The fake Codex app-server executable is currently implemented as a Windows command script.");
-        }
-
         var scriptPath = workspace.File("fake-codex.js");
-        var commandPath = workspace.File("fake-codex.cmd");
+        var commandPath = workspace.File(OperatingSystem.IsWindows() ? "fake-codex.cmd" : "fake-codex");
         await File.WriteAllTextAsync(scriptPath, """
             if (process.argv.slice(2).includes("--version")) {
               process.stdout.write("codex-cli 999.0.0-test\n");
@@ -92,14 +87,25 @@ public sealed class ConsoleAgentRuntimeHostTests
               }
             });
             """);
-        await File.WriteAllTextAsync(commandPath, """
-            @echo off
-            if "%~1"=="--version" (
-                echo codex-cli 999.0.0-test
-                exit /b 0
-            )
-            node "%~dp0fake-codex.js" %*
-            """);
+        if (OperatingSystem.IsWindows())
+        {
+            await File.WriteAllTextAsync(commandPath, """
+                @echo off
+                if "%~1"=="--version" (
+                    echo codex-cli 999.0.0-test
+                    exit /b 0
+                )
+                node "%~dp0fake-codex.js" %*
+                """);
+        }
+        else
+        {
+            await File.WriteAllTextAsync(commandPath, """
+                #!/bin/sh
+                exec node "$(dirname "$0")/fake-codex.js" "$@"
+                """);
+            File.SetUnixFileMode(commandPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
 
         return commandPath;
     }

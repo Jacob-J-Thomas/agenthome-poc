@@ -11,13 +11,36 @@ namespace EmbodySense.Core.Clients.CodexAppServer;
 /// </summary>
 /// <remarks>
 /// An explicit path is authoritative. Otherwise, Windows desktop installations are considered before <c>PATH</c> entries.
-/// Each candidate is bounded by a shared fifteen-second probe deadline, and diagnostics are truncated before being returned.
+/// Each candidate is bounded by a shared fifteen-second probe deadline by default; callers may choose only a shorter positive deadline.
+/// Diagnostics are truncated before being returned.
 /// Resolution reports incompatibility as data; caller cancellation still propagates.
 /// </remarks>
 public sealed class CodexRuntimeResolver
 {
     private const int MaxDiagnosticCharacters = 2_000;
-    private static readonly TimeSpan _probeTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan _defaultProbeTimeout = TimeSpan.FromSeconds(15);
+    private readonly TimeSpan _probeTimeout;
+
+    /// <summary>Creates a resolver with the fixed production probe deadline.</summary>
+    public CodexRuntimeResolver() : this(_defaultProbeTimeout)
+    {
+    }
+
+    /// <summary>Creates a resolver with a positive probe deadline no greater than the production default.</summary>
+    /// <param name="probeTimeout">The shared deadline across version and app-server probe stages.</param>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when the deadline is nonpositive or exceeds <see cref="DefaultProbeTimeout"/>.</exception>
+    public CodexRuntimeResolver(TimeSpan probeTimeout)
+    {
+        if (probeTimeout <= TimeSpan.Zero || probeTimeout > _defaultProbeTimeout)
+        {
+            throw new ArgumentOutOfRangeException(nameof(probeTimeout));
+        }
+
+        _probeTimeout = probeTimeout;
+    }
+
+    /// <summary>Gets the maximum and default shared runtime-probe deadline.</summary>
+    public static TimeSpan DefaultProbeTimeout => _defaultProbeTimeout;
 
     /// <summary>
     /// Resolves the first executable that starts app-server and, when configured, advertises the requested model.
@@ -201,7 +224,7 @@ public sealed class CodexRuntimeResolver
         return explicitExecutablePath;
     }
 
-    private static async Task<CodexRuntimeProbeResult> ProbeAsync(string executablePath, string? configuredModel, CancellationToken cancellationToken)
+    private async Task<CodexRuntimeProbeResult> ProbeAsync(string executablePath, string? configuredModel, CancellationToken cancellationToken)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(_probeTimeout);
@@ -213,7 +236,7 @@ public sealed class CodexRuntimeResolver
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return new CodexRuntimeProbeResult(false, null, $"Version probe timed out after {_probeTimeout.TotalSeconds:0} seconds.");
+            return new CodexRuntimeProbeResult(false, null, $"Version probe timed out after {FormatProbeTimeout()} seconds.");
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -237,13 +260,16 @@ public sealed class CodexRuntimeResolver
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return new CodexRuntimeProbeResult(false, version, $"App-server compatibility probe timed out after {_probeTimeout.TotalSeconds:0} seconds.");
+            return new CodexRuntimeProbeResult(false, version, $"App-server compatibility probe timed out after {FormatProbeTimeout()} seconds.");
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             return new CodexRuntimeProbeResult(false, version, LimitDiagnostic($"App-server compatibility probe failed: {exception.Message}"));
         }
     }
+
+    private string FormatProbeTimeout()
+        => _probeTimeout.TotalSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
 
     private static async Task<string?> ReadVersionAsync(string executablePath, CancellationToken cancellationToken)
     {

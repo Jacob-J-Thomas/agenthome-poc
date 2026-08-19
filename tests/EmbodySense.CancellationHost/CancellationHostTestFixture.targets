@@ -1,0 +1,19 @@
+<Project>
+
+  <PropertyGroup>
+    <CancellationHostFixtureSource>$(MSBuildThisFileDirectory)bin/$(Configuration)/$(TargetFramework)</CancellationHostFixtureSource>
+    <CancellationHostFixtureDestination>$(MSBuildProjectDirectory)/bin/$(Configuration)/$(TargetFramework)/CancellationHost</CancellationHostFixtureDestination>
+  </PropertyGroup>
+
+  <Target Name="CopyCancellationHostTestFixture" AfterTargets="Build">
+    <ItemGroup>
+      <CancellationHostFixtureArtifact Include="$(CancellationHostFixtureSource)/*" />
+    </ItemGroup>
+
+    <Error Condition="'@(CancellationHostFixtureArtifact)' == ''" Text="The compiled cancellation-host fixture bundle is missing from '$(CancellationHostFixtureSource)'." />
+    <RemoveDir Directories="$(CancellationHostFixtureDestination)" />
+    <MakeDir Directories="$(CancellationHostFixtureDestination)" />
+    <Copy SourceFiles="@(CancellationHostFixtureArtifact)" DestinationFiles="@(CancellationHostFixtureArtifact->'$(CancellationHostFixtureDestination)/%(Filename)%(Extension)')" />
+  </Target>
+
+</Project>

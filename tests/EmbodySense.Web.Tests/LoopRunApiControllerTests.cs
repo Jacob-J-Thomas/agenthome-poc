@@ -665,51 +665,23 @@ public sealed class LoopRunApiControllerTests
 
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace)
     {
-        if (!OperatingSystem.IsWindows())
+        const string RelativeDirectory = "fake-loop-run-api-codex";
+        var directory = workspace.File(RelativeDirectory);
+        Directory.CreateDirectory(directory);
+        var configurationPath = Path.Combine(directory, "conversation-config.json");
+        var configuration = new
         {
-            throw new PlatformNotSupportedException("The fake Codex app-server executable is currently implemented as a Windows command script.");
-        }
-
-        var scriptPath = workspace.File("fake-loop-run-api-codex.ps1");
-        var commandPath = workspace.File("fake-loop-run-api-codex.cmd");
-        await File.WriteAllTextAsync(scriptPath, """
-            if ($args -contains "--version") {
-                Write-Output "codex-cli 999.0.0-test"
-                exit 0
-            }
-
-            $threadId = "thread-test"
-
-            function Write-ProtocolJson($value) {
-                $value | ConvertTo-Json -Compress -Depth 20
-                [Console]::Out.Flush()
-            }
-
-            while (($line = [Console]::In.ReadLine()) -ne $null) {
-                $message = $line | ConvertFrom-Json
-                switch ($message.method) {
-                    "initialize" { Write-ProtocolJson @{ id = $message.id; result = @{} } }
-                    "initialized" { }
-                    "model/list" { Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } } }
-                    "thread/start" { Write-ProtocolJson @{ id = $message.id; result = @{ thread = @{ id = $threadId } } } }
-                    "turn/start" {
-                        $turnId = "turn-test"
-                        $userText = [string]$message.params.input[0].text
-                        $currentUserMarker = "Current user message:"
-                        $currentUserIndex = $userText.IndexOf($currentUserMarker)
-                        if ($currentUserIndex -ge 0) { $userText = $userText.Substring($currentUserIndex + $currentUserMarker.Length).Trim() }
-                        $text = "web loop response: $userText"
-                        Write-ProtocolJson @{ id = $message.id; result = @{ turn = @{ id = $turnId } } }
-                        Write-ProtocolJson @{ method = "item/agentMessage/delta"; params = @{ threadId = $threadId; turnId = $turnId; delta = $text } }
-                        Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = $turnId; turn = @{ id = $turnId; status = "completed"; items = @(@{ type = "agentMessage"; phase = "final_answer"; text = $text }) } } }
-                    }
-                }
-            }
-            """);
-        await File.WriteAllTextAsync(commandPath, """
-            @echo off
-            powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-loop-run-api-codex.ps1" %*
-            """);
-        return commandPath;
+            version = "codex-cli 999.0.0-test",
+            advertisedModels = new[] { "test-model", "gpt-test" },
+            responsePrefix = "web loop response: ",
+            turnFailureMessage = (string?)null,
+            waitForTurnRelease = false,
+            requestGovernedTool = false,
+            turnReadyMarkerPath = (string?)null,
+            turnReleaseMarkerPath = (string?)null,
+            toolResponsePath = (string?)null
+        };
+        await File.WriteAllTextAsync(configurationPath, JsonSerializer.Serialize(configuration, _jsonOptions));
+        return await CancellationHostExecutable.CreateAsync(workspace, RelativeDirectory, "codex-conversation-probe", "conversation-config.json");
     }
 }
