@@ -660,8 +660,8 @@ $qualificationPlanScript = Get-Content -LiteralPath $qualificationPlanScriptPath
 $qualificationScript = Get-Content -LiteralPath $qualificationScriptPath -Raw
 $verifyScript = Get-Content -LiteralPath $verifyScriptPath -Raw
 $workflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
-$qualificationWorkflow = Get-Content -LiteralPath $qualificationWorkflowPath -Raw
-$trustedLocalQualificationWorkflow = Get-Content -LiteralPath $trustedLocalQualificationWorkflowPath -Raw
+$qualificationWorkflow = (Get-Content -LiteralPath $qualificationWorkflowPath -Raw).Replace("`r`n", "`n")
+$trustedLocalQualificationWorkflow = (Get-Content -LiteralPath $trustedLocalQualificationWorkflowPath -Raw).Replace("`r`n", "`n")
 Assert-True -Condition ($watchdogScript.IndexOf('[int]$DeadlineSeconds = 600', [StringComparison]::Ordinal) -ge 0) -Message "The external watchdog must default to exactly 600 seconds."
 Assert-True -Condition ($watchdogScript.IndexOf('[ValidateRange(1, 900)]', [StringComparison]::Ordinal) -ge 0) -Message "No accepted watchdog override may exceed the bounded 900-second promotion window."
 Assert-True -Condition ($watchdogScript.IndexOf('[switch]$Qualification', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must expose the bounded qualification child explicitly."
