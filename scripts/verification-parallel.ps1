@@ -41,7 +41,7 @@ function Add-VerificationParallelPhase {
         [ValidateRange(1, 32)]
         [int]$Weight = 1,
 
-        [ValidateSet("Ordinary", "CpuBound", "ProcessHeavy")]
+        [ValidateSet("Ordinary", "CpuBound", "ProcessHeavy", "ProcessLight")]
         [string]$ResourceClass = "Ordinary"
     )
 
@@ -122,6 +122,7 @@ function Select-VerificationParallelPhase {
             Ordinary = [int]::MaxValue
             CpuBound = [int]::MaxValue
             ProcessHeavy = [int]::MaxValue
+            ProcessLight = [int]::MaxValue
         }
     )
 
@@ -197,6 +198,7 @@ function Invoke-VerificationParallelPhases {
             "Ordinary" { 1; break }
             "CpuBound" { [Math]::Min(2, [Math]::Max(1, [int][Math]::Ceiling($MaximumResourceCapacity / 3.0))); break }
             "ProcessHeavy" { [Math]::Min(3, [Math]::Max(1, [int][Math]::Ceiling($MaximumResourceCapacity / 2.0))); break }
+            "ProcessLight" { 1; break }
         }
         $_.Weight -lt $minimumWeight
     } | Sort-Object Name)
@@ -220,6 +222,7 @@ function Invoke-VerificationParallelPhases {
         Ordinary = 0
         CpuBound = 0
         ProcessHeavy = 0
+        ProcessLight = 0
     }
     try {
         while ($pending.Count -gt 0 -or $running.Count -gt 0) {
@@ -229,6 +232,7 @@ function Invoke-VerificationParallelPhases {
                     Ordinary = $MaximumWorkers
                     CpuBound = $MaximumCpuBoundWorkers - $activeResourceClassCounts.CpuBound
                     ProcessHeavy = $MaximumProcessHeavyWorkers - $activeResourceClassCounts.ProcessHeavy
+                    ProcessLight = $MaximumWorkers - $activeResourceClassCounts.ProcessLight
                 }
                 $phase = Select-VerificationParallelPhase -Pending $pending -AvailableCapacity $availableCapacity -AvailableResourceClassSlots $availableResourceClassSlots
                 if ($null -eq $phase) {
@@ -249,7 +253,7 @@ function Invoke-VerificationParallelPhases {
                 $process.StartInfo = $startInfo
                 $startedAtUtc = [DateTimeOffset]::UtcNow
                 $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-                Write-Host "VERIFY_PARALLEL_PHASE_START name=$($phase.Name) duration_estimate_seconds=$($phase.EstimatedDurationSeconds) scheduling_priority_seconds=$($phase.SchedulingPrioritySeconds) resource_class=$($phase.ResourceClass) declared_weight=$($phase.Weight) effective_weight=$($phase.EffectiveWeight) started_at_utc=$($startedAtUtc.ToString("O")) timeout_seconds=$($phase.TimeoutSeconds) active_workers=$($running.Count + 1) maximum_workers=$MaximumWorkers active_capacity=$($activeResourceCapacity + $phase.EffectiveWeight) maximum_capacity=$MaximumResourceCapacity active_process_heavy=$($activeResourceClassCounts.ProcessHeavy + [int]($phase.ResourceClass -ceq "ProcessHeavy")) maximum_process_heavy=$MaximumProcessHeavyWorkers active_cpu_bound=$($activeResourceClassCounts.CpuBound + [int]($phase.ResourceClass -ceq "CpuBound")) maximum_cpu_bound=$MaximumCpuBoundWorkers"
+                Write-Host "VERIFY_PARALLEL_PHASE_START name=$($phase.Name) duration_estimate_seconds=$($phase.EstimatedDurationSeconds) scheduling_priority_seconds=$($phase.SchedulingPrioritySeconds) resource_class=$($phase.ResourceClass) declared_weight=$($phase.Weight) effective_weight=$($phase.EffectiveWeight) started_at_utc=$($startedAtUtc.ToString("O")) timeout_seconds=$($phase.TimeoutSeconds) active_workers=$($running.Count + 1) maximum_workers=$MaximumWorkers active_capacity=$($activeResourceCapacity + $phase.EffectiveWeight) maximum_capacity=$MaximumResourceCapacity active_process_heavy=$($activeResourceClassCounts.ProcessHeavy + [int]($phase.ResourceClass -ceq "ProcessHeavy")) maximum_process_heavy=$MaximumProcessHeavyWorkers active_process_light=$($activeResourceClassCounts.ProcessLight + [int]($phase.ResourceClass -ceq "ProcessLight")) maximum_process_light=$MaximumWorkers active_cpu_bound=$($activeResourceClassCounts.CpuBound + [int]($phase.ResourceClass -ceq "CpuBound")) maximum_cpu_bound=$MaximumCpuBoundWorkers"
                 try {
                     if (-not $process.Start()) {
                         throw "The process API returned false."

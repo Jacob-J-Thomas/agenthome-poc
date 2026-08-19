@@ -25,11 +25,13 @@ $testResultsRoot = Join-Path $resultsRoot "Tests"
 $planPath = Join-Path $resultsRoot "qualification-plan.json"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
-$qualificationResourceCapacity = [Math]::Min(4, [Math]::Max(1, [Environment]::ProcessorCount))
-$qualificationProcessHeavyWeight = [Math]::Min(2, $qualificationResourceCapacity)
-$qualificationCpuBoundWeight = [Math]::Min(2, $qualificationResourceCapacity)
+$qualificationWorkerCount = [Math]::Min($MaximumWorkers, [Math]::Min(4, [Math]::Max(1, [Environment]::ProcessorCount)))
+$qualificationResourceCapacity = [Math]::Max(3, 2 * $qualificationWorkerCount)
+$qualificationProcessHeavyWeight = 3
+$qualificationCpuBoundWeight = 3
 
 . (Join-Path $PSScriptRoot "qualification-plan.ps1")
+. (Join-Path $PSScriptRoot "qualification-schedule.ps1")
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 . (Join-Path $PSScriptRoot "verification-parallel.ps1")
 . (Join-Path $PSScriptRoot "verification-temp.ps1")
@@ -89,7 +91,7 @@ function Add-QualificationPhase {
         [Parameter(Mandatory = $true)] [int]$TimeoutSeconds,
         [Parameter(Mandatory = $true)] [int]$EstimatedDurationSeconds,
         [Parameter(Mandatory = $true)] [int]$Weight,
-        [Parameter(Mandatory = $true)] [ValidateSet("Ordinary", "CpuBound", "ProcessHeavy")] [string]$ResourceClass,
+        [Parameter(Mandatory = $true)] [ValidateSet("Ordinary", "CpuBound", "ProcessHeavy", "ProcessLight")] [string]$ResourceClass,
         [hashtable]$Environment,
         [string]$TrxPath
     )
@@ -102,8 +104,7 @@ function Invoke-QualificationWave {
         return
     }
 
-    $workerCount = [Math]::Min($MaximumWorkers, $qualificationResourceCapacity)
-    Invoke-VerificationParallelPhases -MaximumWorkers $workerCount -MaximumResourceCapacity $qualificationResourceCapacity -MaximumProcessHeavyWorkers ([Math]::Min(2, $workerCount)) -MaximumCpuBoundWorkers ([Math]::Min(1, $workerCount)) | Out-Null
+    Invoke-VerificationParallelPhases -MaximumWorkers $qualificationWorkerCount -MaximumResourceCapacity $qualificationResourceCapacity -MaximumProcessHeavyWorkers ([Math]::Min(2, $qualificationWorkerCount)) -MaximumCpuBoundWorkers ([Math]::Min(1, $qualificationWorkerCount)) | Out-Null
     Reset-VerificationParallelPhaseState
 }
 
@@ -360,6 +361,9 @@ try {
         Add-QualificationPhase -Name "frontend" -FileName $powerShellExecutable -Arguments $frontendArguments -TimeoutSeconds 240 -EstimatedDurationSeconds 60 -Weight $qualificationCpuBoundWeight -ResourceClass "CpuBound"
     }
 
+    Invoke-QualificationWave
+
+    $exclusiveQualificationContracts = [Collections.Generic.List[object]]::new()
     if ($plan.RequiresVerifierContracts) {
         $contractScripts = @(
             "verify-bounded-phases.tests.ps1",
@@ -376,11 +380,14 @@ try {
             $contractArguments = @("-NoProfile")
             if ($runningOnWindows) { $contractArguments += @("-ExecutionPolicy", "Bypass") }
             $contractArguments += @("-File", (Join-Path $repoRoot "tests\scripts\$contractScript"))
-            Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -EstimatedDurationSeconds 30 -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy"
+            $contractScheduleProfile = Get-QualificationContractScheduleProfile -ScriptName $contractScript
+            if ($contractScheduleProfile.Isolation -ceq "Exclusive") {
+                $exclusiveQualificationContracts.Add([pscustomobject]@{ ScriptName = $contractScript; Arguments = $contractArguments; Profile = $contractScheduleProfile })
+                continue
+            }
+            Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds $contractScheduleProfile.TimeoutSeconds -EstimatedDurationSeconds $contractScheduleProfile.EstimatedDurationSeconds -Weight $contractScheduleProfile.Weight -ResourceClass $contractScheduleProfile.ResourceClass
         }
     }
-    Invoke-QualificationWave
-
     if ($plan.RequiresWorkflowValidation) {
         Add-QualificationPhase -Name "github-yaml-format" -FileName "npx" -Arguments @("prettier", "--check", "--end-of-line", "auto", ".github/workflows/*.{yml,yaml}", ".github/dependabot.yml") -TimeoutSeconds 60 -EstimatedDurationSeconds 10 -Weight 1 -ResourceClass "Ordinary"
     }
@@ -417,7 +424,8 @@ try {
             TMP = $projectFixtureRoot
             TMPDIR = $projectFixtureRoot
         }
-        Add-QualificationPhase -Name "tests-$projectName" -FileName "dotnet" -Arguments @("test", $testProject, "--configuration", $Configuration, "--no-build", "--no-restore", "--settings", "tests/verification-stress.runsettings", "--filter", $testFilter, "--logger", "trx;LogFileName=$projectName.trx", "--results-directory", $projectResultsRoot, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds 180 -EstimatedDurationSeconds 90 -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy" -Environment $testEnvironment -TrxPath $trxPath
+        $testScheduleProfile = Get-QualificationTestScheduleProfile -ProjectName $projectName
+        Add-QualificationPhase -Name "tests-$projectName" -FileName "dotnet" -Arguments @("test", $testProject, "--configuration", $Configuration, "--no-build", "--no-restore", "--settings", "tests/verification-stress.runsettings", "--filter", $testFilter, "--logger", "trx;LogFileName=$projectName.trx", "--results-directory", $projectResultsRoot, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds $testScheduleProfile.TimeoutSeconds -EstimatedDurationSeconds $testScheduleProfile.EstimatedDurationSeconds -Weight $testScheduleProfile.Weight -ResourceClass $testScheduleProfile.ResourceClass -Environment $testEnvironment -TrxPath $trxPath
     }
     $integrationSelection = @($plan.TestSelections | Where-Object { $_.Project -ceq "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj" })
     $integrationRunsUnfiltered = $integrationSelection.Count -eq 1 -and @($integrationSelection[0].Namespaces).Count -eq 0 -and @($integrationSelection[0].Classes).Count -eq 0
@@ -435,6 +443,11 @@ try {
     }
 
     Add-QualificationPhase -Name "git-diff-check" -FileName "git" -Arguments @("diff", "--check", "$mergeBase..$HeadCommit") -TimeoutSeconds 30 -EstimatedDurationSeconds 5 -Weight 1 -ResourceClass "Ordinary"
+    Invoke-QualificationWave
+    foreach ($exclusiveContract in $exclusiveQualificationContracts) {
+        $profile = $exclusiveContract.Profile
+        Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($exclusiveContract.ScriptName))" -FileName $powerShellExecutable -Arguments $exclusiveContract.Arguments -TimeoutSeconds $profile.TimeoutSeconds -EstimatedDurationSeconds $profile.EstimatedDurationSeconds -Weight $profile.Weight -ResourceClass $profile.ResourceClass
+    }
     Invoke-QualificationWave
 }
 finally {

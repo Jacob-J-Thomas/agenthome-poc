@@ -401,10 +401,12 @@ exit 97
     $normalizedTestFailure = Normalize-ConsoleDiagnostic $testFailure.Output
     Assert-Contains -Actual $normalizedTestFailure -Expected "VERIFY_PARALLEL_PHASE_COMPLETE name=frontend-tests status=failed exit_code=13" -Message "Frontend failure identity, terminal status, and exit code must remain explicit. Actual: $normalizedTestFailure"
 
-    $installTimeout = Invoke-FrontendFixture -Name "install-timeout" -FixtureRoot $frontendFixtureRoot -FakeBinPath $fakeBinPath -InstallDelayMilliseconds 2500 -InstallTimeoutSeconds 1
-    Assert-True -Condition ($installTimeout.ExitCode -ne 0 -and $installTimeout.ElapsedSeconds -lt 5) -Message "A stalled npm install must fail inside its bounded timeout."
+    $installTimeout = Invoke-FrontendFixture -Name "install-timeout" -FixtureRoot $frontendFixtureRoot -FakeBinPath $fakeBinPath -InstallDelayMilliseconds 10000 -InstallTimeoutSeconds 5
+    Assert-True -Condition ($installTimeout.ExitCode -ne 0 -and $installTimeout.ElapsedSeconds -lt 10) -Message "A stalled npm install must fail inside its bounded timeout."
     Assert-Contains -Actual $installTimeout.Output -Expected "VERIFY_CHILD_TIMEOUT name=npm-ci" -Message "Install timeout evidence must retain its exact phase identity."
+    Assert-True -Condition (Test-Path -LiteralPath $installTimeout.OrderPath -PathType Leaf) -Message "The timed-out npm fixture must publish its operation before the bounded stall."
     Assert-True -Condition ((@(Get-Content -LiteralPath $installTimeout.OrderPath) -join ",") -ceq "ci") -Message "A timed-out install must prevent frontend test admission."
+    Assert-True -Condition (Test-Path -LiteralPath $installTimeout.PidPath -PathType Leaf) -Message "The timed-out npm fixture must publish its child identity before the bounded stall."
     $timedOutPid = [int](Get-Content -LiteralPath $installTimeout.PidPath -Raw)
     Start-Sleep -Milliseconds 100
     Assert-True -Condition ($null -eq (Get-Process -Id $timedOutPid -ErrorAction SilentlyContinue)) -Message "Timeout must terminate the fake npm process tree."
