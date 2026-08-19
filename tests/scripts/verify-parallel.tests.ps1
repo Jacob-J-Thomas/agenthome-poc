@@ -308,6 +308,21 @@ finally {
     $qualificationBackfillResults = @(Invoke-VerificationParallelPhases -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1)
     Assert-True -Condition ($qualificationBackfillResults.Count -eq 4) -Message "Two process-heavy and two checked process-light phases must backfill the four-process qualification ceiling without admitting a third heavy phase."
 
+    $blockedHeavyBackfillPending = [Collections.Generic.List[object]]::new()
+    foreach ($phase in @(
+        [pscustomobject]@{ Name = "blocked-heavy"; EffectiveWeight = 3; ResourceClass = "ProcessHeavy"; SchedulingDeferrals = 0 },
+        [pscustomobject]@{ Name = "first-light"; EffectiveWeight = 1; ResourceClass = "ProcessLight"; SchedulingDeferrals = 0 },
+        [pscustomobject]@{ Name = "second-light"; EffectiveWeight = 1; ResourceClass = "ProcessLight"; SchedulingDeferrals = 0 }
+    )) {
+        $blockedHeavyBackfillPending.Add($phase)
+    }
+    $blockedHeavyBackfillSlots = @{ Ordinary = 4; CpuBound = 1; ProcessHeavy = 0; ProcessLight = 4 }
+    $firstBlockedHeavyBackfill = Select-VerificationParallelPhase -Pending $blockedHeavyBackfillPending -AvailableCapacity 2 -AvailableResourceClassSlots $blockedHeavyBackfillSlots
+    $secondBlockedHeavyBackfill = Select-VerificationParallelPhase -Pending $blockedHeavyBackfillPending -AvailableCapacity 1 -AvailableResourceClassSlots $blockedHeavyBackfillSlots
+    Assert-True -Condition ($firstBlockedHeavyBackfill.Name -ceq "first-light") -Message "A heavy phase blocked by its class ceiling must not consume the first process-light backfill slot."
+    Assert-True -Condition ($secondBlockedHeavyBackfill.Name -ceq "second-light") -Message "A heavy phase blocked by its class ceiling must not block the second process-light backfill slot."
+    Assert-True -Condition ($blockedHeavyBackfillPending[0].SchedulingDeferrals -eq 0) -Message "A phase blocked only by its exhausted class ceiling must not accumulate a fairness deferral."
+
     $exclusiveRoot = Join-Path $scenarioRoot "full-capacity-active"
     New-Item -ItemType Directory -Path $exclusiveRoot | Out-Null
     Reset-VerificationParallelPhaseState
