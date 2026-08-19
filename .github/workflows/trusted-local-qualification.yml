@@ -1,4 +1,4 @@
-name: Hosted Qualification Diagnostic
+name: Trusted Local Qualification
 
 on:
   workflow_dispatch:
@@ -15,16 +15,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: trusted-local-qualification
+  cancel-in-progress: false
+
 jobs:
   qualification:
-    name: hosted-qualification
     if: github.repository == 'Jacob-J-Thomas/agenthome-poc' && github.actor == 'Jacob-J-Thomas' && github.triggering_actor == 'Jacob-J-Thomas'
-    concurrency:
-      group: hosted-qualification
-      cancel-in-progress: false
-    runs-on: windows-latest
-    # Tool setup and diagnostic upload are outside the repository qualification budget.
-    # The watchdog owns the exact inclusive 360-second child deadline.
+    runs-on: [agenthome-trusted-ephemeral-macos-arm64]
     timeout-minutes: 10
 
     steps:
@@ -77,8 +75,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: hosted-qualification-diagnostics-${{ github.run_attempt }}
-          path: |
-            tests/QualificationResults/**
+          name: trusted-local-qualification-${{ github.run_attempt }}
+          path: tests/QualificationResults/**
           if-no-files-found: error
           retention-days: 14

@@ -9,6 +9,7 @@ $watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
 $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
 $verifyWorkflowPath = Join-Path $repoRoot ".github\workflows\verify.yml"
 $qualificationWorkflowPath = Join-Path $repoRoot ".github\workflows\qualification.yml"
+$trustedLocalQualificationWorkflowPath = Join-Path $repoRoot ".github\workflows\trusted-local-qualification.yml"
 $assertionCount = 0
 
 function Assert-True {
@@ -25,6 +26,12 @@ function Assert-Equal {
     param($Actual, $Expected, [string]$Message)
 
     Assert-True -Condition ($Actual -ceq $Expected) -Message "$Message Expected '$Expected'. Actual '$Actual'."
+}
+
+function Assert-Contains {
+    param([string]$Actual, [string]$Expected, [string]$Message)
+
+    Assert-True -Condition ($Actual.IndexOf($Expected, [StringComparison]::Ordinal) -ge 0) -Message "$Message Expected '$Expected'."
 }
 
 . $deadlineScriptPath
@@ -653,7 +660,8 @@ $qualificationPlanScript = Get-Content -LiteralPath $qualificationPlanScriptPath
 $qualificationScript = Get-Content -LiteralPath $qualificationScriptPath -Raw
 $verifyScript = Get-Content -LiteralPath $verifyScriptPath -Raw
 $workflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
-$qualificationWorkflow = Get-Content -LiteralPath $qualificationWorkflowPath -Raw
+$qualificationWorkflow = (Get-Content -LiteralPath $qualificationWorkflowPath -Raw).Replace("`r`n", "`n")
+$trustedLocalQualificationWorkflow = (Get-Content -LiteralPath $trustedLocalQualificationWorkflowPath -Raw).Replace("`r`n", "`n")
 Assert-True -Condition ($watchdogScript.IndexOf('[int]$DeadlineSeconds = 600', [StringComparison]::Ordinal) -ge 0) -Message "The external watchdog must default to exactly 600 seconds."
 Assert-True -Condition ($watchdogScript.IndexOf('[ValidateRange(1, 900)]', [StringComparison]::Ordinal) -ge 0) -Message "No accepted watchdog override may exceed the bounded 900-second promotion window."
 Assert-True -Condition ($watchdogScript.IndexOf('[switch]$Qualification', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must expose the bounded qualification child explicitly."
@@ -700,12 +708,26 @@ Assert-True -Condition ($workflow.IndexOf('-SkipCoverage', [StringComparison]::O
 Assert-True -Condition ($workflow.IndexOf("github.event.pull_request.draft == false", [StringComparison]::Ordinal) -ge 0) -Message "Promotion verification must run only for a merge-candidate pull request or main."
 Assert-True -Condition ($workflow.IndexOf('types: [opened, synchronize, reopened, ready_for_review, edited]', [StringComparison]::Ordinal) -ge 0) -Message "Every non-draft metadata edit must rerun substantive promotion verification."
 Assert-True -Condition ($workflow.IndexOf('name: verify', [StringComparison]::Ordinal) -ge 0) -Message "Promotion verification must always report the exact protected context name."
-Assert-True -Condition ($qualificationWorkflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit "${{ github.event.pull_request.base.sha }}" -HeadCommit "${{ github.event.pull_request.head.sha }}" -Configuration Release -DeadlineSeconds 360', [StringComparison]::Ordinal) -ge 0) -Message "Draft qualification must bind the exact PR edge under a six-minute watchdog."
-Assert-True -Condition ($qualificationWorkflow.IndexOf('ref: ${{ github.event.pull_request.head.sha }}', [StringComparison]::Ordinal) -ge 0) -Message "Qualification must execute the exact pull-request head rather than a synthetic merge checkout."
-Assert-True -Condition ($qualificationWorkflow.IndexOf('edited,', [StringComparison]::Ordinal) -ge 0) -Message "Retargeting a pull request must create a new exact-edge qualification event."
-Assert-True -Condition ($qualificationWorkflow.IndexOf('name: qualification', [StringComparison]::Ordinal) -ge 0) -Message "Every pull-request metadata edit must rerun qualification under its stable context name."
-Assert-True -Condition ($qualificationWorkflow.IndexOf('cancel-in-progress: true', [StringComparison]::Ordinal) -ge 0) -Message "A superseded draft qualification must release its runner promptly."
+Assert-Contains -Actual $qualificationWorkflow -Expected "workflow_dispatch:" -Message "Hosted qualification must require an explicit owner dispatch."
+Assert-True -Condition ($qualificationWorkflow.IndexOf("pull_request:", [StringComparison]::Ordinal) -lt 0 -and $qualificationWorkflow.IndexOf("push:", [StringComparison]::Ordinal) -lt 0) -Message "Draft pushes must not spend hosted qualification minutes automatically."
+Assert-Contains -Actual $qualificationWorkflow -Expected "github.actor == 'Jacob-J-Thomas'" -Message "Only the repository owner may dispatch hosted qualification."
+Assert-Contains -Actual $qualificationWorkflow -Expected "github.triggering_actor == 'Jacob-J-Thomas'" -Message "Only the repository owner may rerun hosted qualification."
+Assert-Contains -Actual $qualificationWorkflow -Expected "name: hosted-qualification" -Message "Manual hosted diagnostics must not publish the former automatic qualification context."
+Assert-Contains -Actual $qualificationWorkflow -Expected "persist-credentials: false" -Message "Hosted exact-head checkout must not persist a GitHub credential."
+Assert-Contains -Actual $qualificationWorkflow -Expected "git merge-base --is-ancestor `$env:BASE_SHA `$env:HEAD_SHA" -Message "Hosted qualification must prove the dispatched exact edge."
+Assert-Contains -Actual $qualificationWorkflow -Expected '-Qualification -BaseCommit ''${{ inputs.base_sha }}'' -HeadCommit ''${{ inputs.head_sha }}'' -Configuration Release -DeadlineSeconds 360' -Message "Hosted diagnostics must use the same bounded qualification child."
 Assert-True -Condition ($qualificationWorkflow.IndexOf('coverage.cobertura.xml', [StringComparison]::Ordinal) -lt 0) -Message "Qualification diagnostics must not imply that coverage was collected."
+Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "workflow_dispatch:" -Message "Trusted local qualification must require an explicit dispatch."
+Assert-True -Condition ($trustedLocalQualificationWorkflow.IndexOf("pull_request:", [StringComparison]::Ordinal) -lt 0 -and $trustedLocalQualificationWorkflow.IndexOf("push:", [StringComparison]::Ordinal) -lt 0) -Message "The ephemeral local runner must never accept automatic pull-request or push work."
+Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "github.actor == 'Jacob-J-Thomas'" -Message "Only the repository owner may dispatch the trusted local lane."
+Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "github.triggering_actor == 'Jacob-J-Thomas'" -Message "Only the repository owner may rerun the trusted local lane."
+Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "runs-on: [agenthome-trusted-ephemeral-macos-arm64]" -Message "The local lane must require its no-default-label ephemeral runner."
+Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "permissions:`n  contents: read" -Message "The local lane must retain read-only repository permission."
+Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "persist-credentials: false" -Message "The exact checkout must not persist a GitHub credential on the host."
+Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "git merge-base --is-ancestor `$env:BASE_SHA `$env:HEAD_SHA" -Message "The local lane must prove the dispatched exact edge."
+Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected '-Qualification -BaseCommit ''${{ inputs.base_sha }}'' -HeadCommit ''${{ inputs.head_sha }}'' -Configuration Release -DeadlineSeconds 360' -Message "The local lane must use the same bounded qualification child."
+Assert-True -Condition ($trustedLocalQualificationWorkflow.IndexOf("verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "The local development lane must not impersonate exhaustive promotion."
+Assert-True -Condition ($trustedLocalQualificationWorkflow.IndexOf("name: verify", [StringComparison]::Ordinal) -lt 0 -and $trustedLocalQualificationWorkflow.IndexOf("name: browser-e2e", [StringComparison]::Ordinal) -lt 0) -Message "The local lane must not publish protected promotion context names."
 Assert-True -Condition ($workflow.IndexOf('run: ./scripts/verify.ps1 -Configuration Release', [StringComparison]::Ordinal) -lt 0) -Message "Standard CI must not bypass the external watchdog."
 
 Write-Output "Verification watchdog contract tests passed ($assertionCount assertions)."
