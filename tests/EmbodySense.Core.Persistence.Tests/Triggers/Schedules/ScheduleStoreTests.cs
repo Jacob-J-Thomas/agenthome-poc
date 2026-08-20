@@ -47,35 +47,17 @@ public sealed class ScheduleStoreTests
         Assert.Equal(ScheduleDeliveryResultKind.Queued, found.Evidence.Result.Kind);
 
         var changedPayload = TriggerDeliveryTestData.InlinePayload([9, 9, 9]);
-        var conflicting = TriggerDeliveryTestData.Envelope(
-            envelope.DeliveryId.Value,
-            envelope.DeduplicationId.Value,
-            TriggerKind.Time,
-            envelope.Adapter,
-            envelope.Loop,
-            envelope.ActorContext,
-            envelope.Authority,
-            envelope.Temporal,
-            changedPayload,
-            envelope.Redelivery);
+        var conflicting = ScheduledEnvelope(envelope, changedPayload);
         Assert.Equal(
             ScheduleDeliveryProvenanceStatus.Conflict,
             (await new ScheduleStore(paths).ResolveAsync(conflicting)).Status);
 
-        Assert.True(TriggerDeliveryId.TryParse("schedule-delivery-" + new string('a', 64), out var forgedDelivery));
-        Assert.True(TriggerDeduplicationId.TryParse("schedule-deduplication-" + new string('b', 64), out var forgedDeduplication));
-        Assert.True(TriggerDeliveryFactory.TryCreateRedeliveryEvidence(1, 1, forgedDelivery, out var forgedRedelivery, out _));
-        var forged = TriggerDeliveryTestData.Envelope(
-            forgedDelivery!.Value,
-            forgedDeduplication!.Value,
-            TriggerKind.Time,
-            envelope.Adapter,
-            envelope.Loop,
-            envelope.ActorContext,
-            envelope.Authority,
-            envelope.Temporal,
-            envelope.Payload,
-            forgedRedelivery);
+        Assert.True(ScheduleId.TryParse("forged-schedule", out var forgedScheduleId));
+        var forgedDirective = TriggerDeliveryTestData.ScheduleDirective(
+            envelope.ScheduleExecutionDirective!.Occurrence,
+            forgedScheduleId,
+            target: envelope.Loop);
+        var forged = ScheduledEnvelope(envelope, envelope.Payload, forgedDirective);
         Assert.Equal(
             ScheduleDeliveryProvenanceStatus.NotFound,
             (await new ScheduleStore(paths).ResolveAsync(forged)).Status);
@@ -108,17 +90,7 @@ public sealed class ScheduleStoreTests
         var store = new ScheduleStore(paths);
         var resolved = await store.ResolveAsync(pendingEnvelope);
         var conflictingPayload = TriggerDeliveryTestData.InlinePayload([9, 9, 9]);
-        var conflicting = TriggerDeliveryTestData.Envelope(
-            pendingEnvelope.DeliveryId.Value,
-            pendingEnvelope.DeduplicationId.Value,
-            TriggerKind.Time,
-            pendingEnvelope.Adapter,
-            pendingEnvelope.Loop,
-            pendingEnvelope.ActorContext,
-            pendingEnvelope.Authority,
-            pendingEnvelope.Temporal,
-            conflictingPayload,
-            pendingEnvelope.Redelivery);
+        var conflicting = ScheduledEnvelope(pendingEnvelope, conflictingPayload);
 
         Assert.Equal(ScheduleDeliveryProvenanceStatus.PendingFinalization, resolved.Status);
         Assert.Null(resolved.Evidence);
@@ -1133,6 +1105,40 @@ public sealed class ScheduleStoreTests
         Assert.Equal(ScheduleStoreMutationStatus.Corrupt, swapResult.Status);
         Assert.Equal("untouched", await File.ReadAllTextAsync(Path.Combine(swapRoot, "sentinel")));
         Assert.Empty(Directory.EnumerateFiles(movedRoot, "ledger-*.json"));
+    }
+
+    private static TriggerDeliveryEnvelope ScheduledEnvelope(
+        TriggerDeliveryEnvelope source,
+        TriggerPayloadEvidence payload,
+        ScheduleExecutionDirective? directive = null)
+    {
+        directive ??= source.ScheduleExecutionDirective!;
+        Assert.True(TriggerDeliveryFactory.TryCreateRedeliveryEvidence(
+            source.Redelivery.Attempt,
+            source.Redelivery.Count,
+            directive.Identity.DeliveryId,
+            out var redelivery,
+            out _));
+        Assert.True(TriggerDeliveryFactory.TryCreateScheduledEnvelope(
+            source.SchemaVersion,
+            directive.Identity.DeliveryId,
+            directive.Identity.DeduplicationId,
+            source.Adapter,
+            source.Loop,
+            source.ActorContext,
+            source.Authority,
+            source.Temporal,
+            payload,
+            redelivery,
+            directive,
+            source.PublicationRequested,
+            source.InvokingConversation,
+            source.VisibleStatus,
+            source.VisibleReason,
+            out var envelope,
+            out var validation),
+            string.Join(',', validation.Errors.Select(error => $"{error.Field}:{error.Code}")));
+        return envelope!;
     }
 
     private static async Task AssertCorruptMutationAsync(Func<byte[], byte[]> mutation)

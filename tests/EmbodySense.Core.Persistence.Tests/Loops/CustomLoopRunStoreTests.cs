@@ -13,6 +13,15 @@ using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Revisions;
+using EmbodySense.Core.Common.Loops.Sequential;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Tests.Authority.Grants;
+using EmbodySense.Core.Common.Tests;
+using EmbodySense.Core.Common.Tests.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers;
+using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Tests.Support;
@@ -29,6 +38,99 @@ public sealed class CustomLoopRunStoreTests
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
     };
+
+    [Fact]
+    public async Task Run_created_schedule_proof_remains_durable_while_provider_dispatch_can_still_resume()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        var scheduled = Enumerable.Range(1, 4)
+            .Select(ordinal => CreateScheduledRun(ordinal, ScheduleOverlapPolicy.Skip))
+            .ToArray();
+
+        var created = await store.CreateScheduledAsync(scheduled[0].Run, scheduled[0].Envelope);
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.Created, created.Status);
+        foreach (var item in scheduled.Skip(1))
+        {
+            Assert.Equal(ScheduleRunAdmissionStoreStatus.OverlapSkipped, (await store.CreateScheduledAsync(item.Run, item.Envelope)).Status);
+        }
+
+        var retained = await store.GetScheduleAdmissionAsync(scheduled[0].Envelope.DeliveryId);
+        Assert.NotNull(retained);
+        Assert.Equal(ScheduleRunAdmissionDisposition.RunCreated, retained.Attempts[^1].Disposition);
+        var replay = await new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)).CreateScheduledAsync(scheduled[0].Run, scheduled[0].Envelope);
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.Replayed, replay.Status);
+        Assert.Equal(created.Run!.Id, replay.Run!.Id);
+        Assert.Equal(created.Run.SequentialAdapterBinding!.ContentHash, replay.Run.SequentialAdapterBinding!.ContentHash);
+        Assert.NotNull(replay.Evidence);
+    }
+
+    [Fact]
+    public async Task Terminal_schedule_admissions_compact_to_authenticated_watermarks_and_old_redelivery_cannot_redispatch()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(CreateRun("sequential-loop", "run-active", "invoke-active"))).Status);
+        var scheduled = Enumerable.Range(1, 4)
+            .Select(ordinal => CreateScheduledRun(ordinal, ScheduleOverlapPolicy.Skip))
+            .ToArray();
+
+        byte[]? interruptedDeletionContent = null;
+        for (var index = 0; index < 3; index++)
+        {
+            var item = scheduled[index];
+            Assert.Equal(ScheduleRunAdmissionStoreStatus.OverlapSkipped, (await store.CreateScheduledAsync(item.Run, item.Envelope)).Status);
+            if (index == 0)
+            {
+                interruptedDeletionContent = await File.ReadAllBytesAsync(ordinalArtifact(item.Envelope.DeliveryId));
+                Assert.NotEmpty(interruptedDeletionContent);
+            }
+        }
+
+        Assert.Null(await store.GetScheduleAdmissionAsync(scheduled[0].Envelope.DeliveryId));
+        Assert.NotNull(await store.GetScheduleAdmissionAsync(scheduled[1].Envelope.DeliveryId));
+        Assert.NotNull(await store.GetScheduleAdmissionAsync(scheduled[2].Envelope.DeliveryId));
+        var retirementPath = Path.Combine(paths.CustomLoopScheduleAdmissionsPath, ".schedule-admission-retirements.json");
+        var retirement = JsonNode.Parse(await File.ReadAllTextAsync(retirementPath))!.AsObject();
+        var retirementEntries = retirement["entries"]!.AsArray();
+        Assert.Single(retirementEntries);
+        Assert.Equal(1, retirementEntries[0]!["retiredThroughOccurrenceOrdinal"]!.GetValue<long>());
+        Assert.Equal(64, retirement["contentHash"]!.GetValue<string>().Length);
+
+        var interruptedArtifact = ordinalArtifact(scheduled[0].Envelope.DeliveryId);
+        await File.WriteAllBytesAsync(interruptedArtifact, interruptedDeletionContent!);
+
+        var restarted = new CustomLoopRunStore(paths);
+        var retired = await restarted.CreateScheduledAsync(scheduled[0].Run, scheduled[0].Envelope);
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.Retired, retired.Status);
+        Assert.Null(retired.Run);
+        Assert.Null(retired.Evidence);
+        Assert.False(File.Exists(interruptedArtifact));
+
+        var substituted = CreateScheduledRun(1, ScheduleOverlapPolicy.Skip, "payload/substituted");
+        var substitutedResult = await restarted.CreateScheduledAsync(substituted.Run, substituted.Envelope);
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.Conflict, substitutedResult.Status);
+        Assert.Null(await restarted.GetScheduleAdmissionAsync(substituted.Envelope.DeliveryId));
+
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.OverlapSkipped, (await restarted.CreateScheduledAsync(scheduled[3].Run, scheduled[3].Envelope)).Status);
+        Assert.Null(await restarted.GetScheduleAdmissionAsync(scheduled[1].Envelope.DeliveryId));
+        Assert.NotNull(await restarted.GetScheduleAdmissionAsync(scheduled[2].Envelope.DeliveryId));
+        Assert.NotNull(await restarted.GetScheduleAdmissionAsync(scheduled[3].Envelope.DeliveryId));
+        Assert.Equal(2, Directory.EnumerateFiles(paths.CustomLoopScheduleAdmissionsPath, "*.json").Count(path => !Path.GetFileName(path).StartsWith(".", StringComparison.Ordinal)));
+
+        var canonicalRetirement = await File.ReadAllTextAsync(retirementPath);
+        var corruptedRetirement = canonicalRetirement.Replace(
+            JsonNode.Parse(canonicalRetirement)!["contentHash"]!.GetValue<string>(),
+            new string('0', 64),
+            StringComparison.Ordinal);
+        Assert.NotEqual(canonicalRetirement, corruptedRetirement);
+        await File.WriteAllTextAsync(retirementPath, corruptedRetirement);
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).CreateScheduledAsync(scheduled[0].Run, scheduled[0].Envelope));
+
+        string ordinalArtifact(TriggerDeliveryId deliveryId)
+            => Path.Combine(paths.CustomLoopScheduleAdmissionsPath, $"{deliveryId.Value}.json");
+    }
 
     [Fact]
     public async Task Create_round_trips_from_the_custom_run_directory_after_restart()
@@ -1480,6 +1582,65 @@ public sealed class CustomLoopRunStoreTests
         var admitted = Event(1, "event-1", CustomLoopRunEventKind.Admitted, _timestamp);
         var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, runId, loopId, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), operationId, "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null) { CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp) };
         return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static (CustomLoopRunRecord Run, EmbodySense.Core.Common.Triggers.Models.TriggerDeliveryEnvelope Envelope) CreateScheduledRun(
+        long ordinal,
+        ScheduleOverlapPolicy overlap,
+        string payloadReference = "payload/daily-reflection")
+    {
+        const string Prompt = "Execute the exact admitted request.";
+        var graph = CustomLoopSequentialEvidenceStoreTests.LinearGraph(scheduleTrigger: true);
+        var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, graph.RevisionReference, "publish-sequential", new string('7', 64));
+        var grant = AuthorityGrantTestFixture.Grant();
+        var grantReference = new EmbodySense.Core.Common.Authority.Grants.Models.AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);
+        Assert.True(EmbodySense.Core.Common.Triggers.TriggerDeliveryFactory.TryCreateGovernedLoopReference(publication, grantReference, out var target, out _));
+        var actor = AuthorityGrantTestFixture.Actor("user-owner");
+        var workspaceId = new string('1', 64);
+        Assert.True(EmbodySense.Core.Common.Triggers.TriggerDeliveryFactory.TryCreateActorContext(actor, "web", workspaceId, graph.OwningRole.Identity.RoleId, out var actorContext, out _));
+        var payload = TriggerDeliveryTestData.InlinePayload(System.Text.Encoding.UTF8.GetBytes(Prompt));
+        var firstAtUtc = _timestamp.AddMinutes(-10);
+        var timeZone = ScheduleContractTestData.TimeZone("Etc/UTC", new string('f', 64));
+        var definition = ScheduleContractTestData.Definition() with
+        {
+            Overlap = overlap,
+            Target = target!,
+            ActorId = actor,
+            SurfaceId = "web",
+            WorkspaceId = workspaceId,
+            RoleId = graph.OwningRole.Identity.RoleId,
+            Payload = new SchedulePayloadReference(payloadReference, payload.ContentHash),
+            Recurrence = new ScheduleRecurrenceRule(ScheduleRecurrenceKind.FixedInterval, DateTime.SpecifyKind(firstAtUtc.UtcDateTime, DateTimeKind.Unspecified), 1),
+            TimeZone = timeZone,
+        };
+        Assert.True(ScheduleContractHash.TryComputeDefinition(definition, out var definitionHash, out var definitionValidation), ScheduleContractTestData.Errors(definitionValidation));
+        var scheduledAtUtc = firstAtUtc.AddSeconds(ordinal - 1);
+        var occurrence = ScheduleContractTestData.Occurrence(
+            ordinal,
+            DateTime.SpecifyKind(scheduledAtUtc.UtcDateTime, DateTimeKind.Unspecified),
+            scheduledAtUtc,
+            timeZone);
+        var prepared = ScheduleContractTestData.Prepared(
+            occurrence,
+            definitionHash: definitionHash!,
+            definitionRevision: definition.Revision,
+            scheduleId: definition.ScheduleId,
+            target: definition.Target,
+            adapter: definition.TimeAdapter,
+            actorContext: actorContext,
+            payload: payload,
+            overlap: overlap);
+        var identity = ScheduleContractTestData.Identity(occurrence, definitionHash!, definition.Revision, definition.ScheduleId);
+        var provenance = new ScheduleDeliveryProvenanceEvidence(
+            ScheduleDeliveryProvenanceEvidence.CurrentSchemaVersion,
+            definition,
+            definitionHash!,
+            occurrence,
+            identity,
+            ScheduleContractTestData.Result(prepared.CanonicalEnvelopeHash, ScheduleDeliveryResultKind.Queued, prepared.PreparedAtUtc.AddSeconds(1)));
+        Assert.True(GovernedLoopSequentialTriggerOriginFactory.TryCreateSchedule(prepared.Envelope, provenance, out var origin));
+        var context = CustomLoopSequentialEvidenceStoreTests.CreateContext(origin, $"schedule-{ordinal}", scheduleTrigger: true);
+        return (context.Run, prepared.Envelope);
     }
 
     private static CustomLoopRunRecord At(CustomLoopRunRecord run, int minutes)

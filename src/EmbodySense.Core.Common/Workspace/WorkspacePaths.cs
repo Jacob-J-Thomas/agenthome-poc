@@ -227,6 +227,9 @@ public sealed class WorkspacePaths
     /// <value>The custom loop runs path.</value>
     public string CustomLoopRunsPath => Path.Combine(LoopRunsPath, "custom");
 
+    /// <summary>Gets the atomic schedule-to-run admission evidence path.</summary>
+    public string CustomLoopScheduleAdmissionsPath => Path.Combine(LoopRunsPath, "custom-schedule-admissions");
+
     /// <summary>
     /// Gets the custom loop control operations path.
     /// </summary>

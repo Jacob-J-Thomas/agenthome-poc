@@ -13,6 +13,8 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Triggers.Models;
+using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 
 namespace EmbodySense.Core.Common.Triggers;
 
@@ -21,7 +23,7 @@ namespace EmbodySense.Core.Common.Triggers;
 /// </summary>
 public static class TriggerDeliveryJson
 {
-    private static readonly string[] _rootProperties = ["actorContext", "adapter", "authority", "deduplicationId", "deliveryId", "invokingConversation", "kind", "loop", "payload", "publicationRequested", "redelivery", "schemaVersion", "temporal", "visibleReason", "visibleStatus"];
+    private static readonly string[] _rootProperties = ["actorContext", "adapter", "authority", "deduplicationId", "deliveryId", "invokingConversation", "kind", "loop", "payload", "publicationRequested", "redelivery", "scheduleExecutionDirective", "schemaVersion", "temporal", "visibleReason", "visibleStatus"];
     private static readonly string[] _actorProperties = ["actorId", "roleId", "surfaceId", "workspaceId"];
     private static readonly string[] _adapterProperties = ["capability", "implementation"];
     private static readonly string[] _capabilityProperties = ["hash", "id", "version"];
@@ -38,6 +40,10 @@ public static class TriggerDeliveryJson
     private static readonly string[] _payloadProperties = ["contentHash", "governedReference", "inlineBase64"];
     private static readonly string[] _redeliveryProperties = ["attempt", "count", "originalDeliveryId"];
     private static readonly string[] _temporalProperties = ["admittedAtUtc", "createdAtUtc", "deadlineUtc", "expiresAtUtc", "notBeforeUtc", "observedAtUtc", "receivedAtUtc"];
+    private static readonly string[] _scheduleDirectiveProperties = ["definitionHash", "definitionRevision", "identity", "occurrence", "overlap", "preQueueOverlapEvidenceHash", "scheduleId", "schemaVersion", "target"];
+    private static readonly string[] _scheduleOccurrenceProperties = ["ordinal", "scheduledAtUtc", "scheduledLocal", "schemaVersion", "timeZone"];
+    private static readonly string[] _scheduleIdentityProperties = ["deduplicationId", "deliveryId", "occurrenceId"];
+    private static readonly string[] _scheduleTimeZoneProperties = ["rulesFingerprint", "timeZoneId"];
 
     /// <summary>
     /// Serializes a valid envelope into bounded deterministic UTF-8 JSON.
@@ -99,6 +105,7 @@ public static class TriggerDeliveryJson
                 || !TryTemporal(root.GetProperty("temporal"), out var temporal)
                 || !TryPayload(root.GetProperty("payload"), out var payload)
                 || !TryRedelivery(root.GetProperty("redelivery"), out var redelivery)
+                || !TryScheduleExecutionDirective(root.GetProperty("scheduleExecutionDirective"), out var scheduleExecutionDirective)
                 || !TryBoolean(root, "publicationRequested", out var publicationRequested)
                 || !TryConversation(root.GetProperty("invokingConversation"), out var conversation)
                 || !TryString(root, "visibleStatus", out var statusText)
@@ -110,7 +117,58 @@ public static class TriggerDeliveryJson
                 return false;
             }
 
-            if (!TriggerDeliveryFactory.TryCreateEnvelope(schemaVersion, deliveryId, deduplicationId, kind, adapter, loop, actorContext, authority, temporal, payload, redelivery, publicationRequested, conversation, visibleStatus, visibleReason, out envelope, out validation))
+            bool created;
+            if (kind == TriggerKind.Time)
+            {
+                created = TriggerDeliveryFactory.TryCreateScheduledEnvelope(
+                    schemaVersion,
+                    deliveryId,
+                    deduplicationId,
+                    adapter,
+                    loop,
+                    actorContext,
+                    authority,
+                    temporal,
+                    payload,
+                    redelivery,
+                    scheduleExecutionDirective,
+                    publicationRequested,
+                    conversation,
+                    visibleStatus,
+                    visibleReason,
+                    out envelope,
+                    out validation);
+            }
+            else if (scheduleExecutionDirective is not null)
+            {
+                created = false;
+                validation = Failure(
+                    "schedule_execution_directive_forbidden",
+                    "scheduleExecutionDirective");
+            }
+            else
+            {
+                created = TriggerDeliveryFactory.TryCreateEnvelope(
+                    schemaVersion,
+                    deliveryId,
+                    deduplicationId,
+                    kind,
+                    adapter,
+                    loop,
+                    actorContext,
+                    authority,
+                    temporal,
+                    payload,
+                    redelivery,
+                    publicationRequested,
+                    conversation,
+                    visibleStatus,
+                    visibleReason,
+                    out envelope,
+                    out validation);
+            }
+
+            if (!created)
             {
                 return false;
             }
@@ -186,6 +244,7 @@ public static class TriggerDeliveryJson
         WritePayload(writer, envelope.Payload);
         writer.WriteBoolean("publicationRequested", envelope.PublicationRequested);
         WriteRedelivery(writer, envelope.Redelivery);
+        WriteScheduleExecutionDirective(writer, envelope.ScheduleExecutionDirective);
         writer.WriteNumber("schemaVersion", envelope.SchemaVersion);
         WriteTemporal(writer, envelope.Temporal);
         writer.WriteString("visibleReason", TriggerVocabulary.ToCanonical(envelope.VisibleReason));
@@ -382,6 +441,51 @@ public static class TriggerDeliveryJson
         writer.WriteNumber("attempt", redelivery.Attempt);
         writer.WriteNumber("count", redelivery.Count);
         writer.WriteString("originalDeliveryId", redelivery.OriginalDeliveryId.Value);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteScheduleExecutionDirective(
+        Utf8JsonWriter writer,
+        ScheduleExecutionDirective? directive)
+    {
+        writer.WritePropertyName("scheduleExecutionDirective");
+        if (directive is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        WriteScheduleExecutionDirectiveValue(writer, directive);
+    }
+
+    internal static void WriteScheduleExecutionDirectiveValue(
+        Utf8JsonWriter writer,
+        ScheduleExecutionDirective directive)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("definitionHash", directive.DefinitionHash);
+        writer.WriteNumber("definitionRevision", directive.DefinitionRevision);
+        writer.WriteStartObject("identity");
+        writer.WriteString("deduplicationId", directive.Identity.DeduplicationId.Value);
+        writer.WriteString("deliveryId", directive.Identity.DeliveryId.Value);
+        writer.WriteString("occurrenceId", directive.Identity.OccurrenceId.Value);
+        writer.WriteEndObject();
+        writer.WriteStartObject("occurrence");
+        writer.WriteNumber("ordinal", directive.Occurrence.Ordinal);
+        writer.WriteString("scheduledAtUtc", ScheduleIdentityDerivation.Utc(directive.Occurrence.ScheduledAtUtc));
+        writer.WriteString("scheduledLocal", ScheduleIdentityDerivation.Local(directive.Occurrence.ScheduledLocal));
+        writer.WriteNumber("schemaVersion", directive.Occurrence.SchemaVersion);
+        writer.WriteStartObject("timeZone");
+        writer.WriteString("rulesFingerprint", directive.Occurrence.TimeZone.RulesFingerprint);
+        writer.WriteString("timeZoneId", directive.Occurrence.TimeZone.TimeZoneId);
+        writer.WriteEndObject();
+        writer.WriteEndObject();
+        writer.WriteString("overlap", ToCanonical(directive.Overlap));
+        writer.WriteString("preQueueOverlapEvidenceHash", directive.PreQueueOverlapEvidenceHash);
+        writer.WriteString("scheduleId", directive.ScheduleId.Value);
+        writer.WriteNumber("schemaVersion", directive.SchemaVersion);
+        writer.WritePropertyName("target");
+        WriteLoopValue(writer, directive.Target);
         writer.WriteEndObject();
     }
 
@@ -659,6 +763,103 @@ public static class TriggerDeliveryJson
             && TriggerDeliveryFactory.TryCreateRedeliveryEvidence(attempt, count, original, out redelivery, out _);
     }
 
+    private static bool TryScheduleExecutionDirective(
+        JsonElement element,
+        out ScheduleExecutionDirective? directive)
+    {
+        directive = null;
+        if (element.ValueKind == JsonValueKind.Null)
+        {
+            return true;
+        }
+
+        if (!IsExactObject(element, _scheduleDirectiveProperties)
+            || !TryInteger(element, "schemaVersion", out var schemaVersion)
+            || !TryString(element, "scheduleId", out var scheduleIdText)
+            || !ScheduleId.TryParse(scheduleIdText, out var scheduleId)
+            || !TryLongInteger(element, "definitionRevision", out var definitionRevision)
+            || !TryString(element, "definitionHash", out var definitionHash)
+            || !TryScheduleOccurrence(element.GetProperty("occurrence"), out var occurrence)
+            || !TryScheduleIdentity(element.GetProperty("identity"), out var identity)
+            || !TryLoop(element.GetProperty("target"), out var target)
+            || !TryString(element, "overlap", out var overlapText)
+            || !TryScheduleOverlap(overlapText, out var overlap)
+            || !TryString(element, "preQueueOverlapEvidenceHash", out var overlapEvidenceHash))
+        {
+            return false;
+        }
+
+        directive = new ScheduleExecutionDirective(
+            schemaVersion,
+            scheduleId!,
+            definitionRevision,
+            definitionHash!,
+            occurrence!,
+            identity!,
+            target!,
+            overlap,
+            overlapEvidenceHash!);
+        return true;
+    }
+
+    private static bool TryScheduleOccurrence(JsonElement element, out ScheduleOccurrence? occurrence)
+    {
+        occurrence = null;
+        if (!IsExactObject(element, _scheduleOccurrenceProperties)
+            || !TryInteger(element, "schemaVersion", out var schemaVersion)
+            || !TryLongInteger(element, "ordinal", out var ordinal)
+            || !TryScheduleLocalTimestamp(element, "scheduledLocal", out var scheduledLocal)
+            || !TryScheduleUtcTimestamp(element, "scheduledAtUtc", out var scheduledAtUtc)
+            || !TryScheduleTimeZone(element.GetProperty("timeZone"), out var timeZone))
+        {
+            return false;
+        }
+
+        occurrence = new ScheduleOccurrence(
+            schemaVersion,
+            ordinal,
+            scheduledLocal,
+            scheduledAtUtc,
+            timeZone!);
+        return true;
+    }
+
+    private static bool TryScheduleIdentity(
+        JsonElement element,
+        out ScheduleOccurrenceIdentity? identity)
+    {
+        identity = null;
+        if (!IsExactObject(element, _scheduleIdentityProperties)
+            || !TryString(element, "occurrenceId", out var occurrenceIdText)
+            || !ScheduleOccurrenceId.TryParse(occurrenceIdText, out var occurrenceId)
+            || !TryString(element, "deliveryId", out var deliveryIdText)
+            || !TriggerDeliveryId.TryParse(deliveryIdText, out var deliveryId)
+            || !TryString(element, "deduplicationId", out var deduplicationIdText)
+            || !TriggerDeduplicationId.TryParse(deduplicationIdText, out var deduplicationId))
+        {
+            return false;
+        }
+
+        identity = new ScheduleOccurrenceIdentity(occurrenceId!, deliveryId!, deduplicationId!);
+        return true;
+    }
+
+    private static bool TryScheduleTimeZone(
+        JsonElement element,
+        out ScheduleTimeZoneReference? timeZone)
+    {
+        timeZone = null;
+        if (!IsExactObject(element, _scheduleTimeZoneProperties)
+            || !TryString(element, "timeZoneId", out var timeZoneId)
+            || !TryString(element, "rulesFingerprint", out var rulesFingerprint))
+        {
+            return false;
+        }
+
+        timeZone = new ScheduleTimeZoneReference(timeZoneId!, rulesFingerprint!);
+        return true;
+    }
+
     private static bool TryConversation(JsonElement element, out CustomLoopConversationReference? conversation)
     {
         conversation = null;
@@ -704,6 +905,18 @@ public static class TriggerDeliveryJson
         return element.ValueKind == JsonValueKind.Number && element.TryGetInt32(out value) && string.Equals(element.GetRawText(), value.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
     }
 
+    private static bool TryLongInteger(JsonElement parent, string name, out long value)
+    {
+        var element = parent.GetProperty(name);
+        value = default;
+        return element.ValueKind == JsonValueKind.Number
+            && element.TryGetInt64(out value)
+            && string.Equals(
+                element.GetRawText(),
+                value.ToString(CultureInfo.InvariantCulture),
+                StringComparison.Ordinal);
+    }
+
     private static bool TryBoolean(JsonElement parent, string name, out bool value)
     {
         var element = parent.GetProperty(name);
@@ -739,6 +952,46 @@ public static class TriggerDeliveryJson
         return false;
     }
 
+    private static bool TryScheduleLocalTimestamp(JsonElement parent, string name, out DateTime value)
+    {
+        value = default;
+        return TryString(parent, name, out var text)
+            && DateTime.TryParseExact(
+                text,
+                "yyyy-MM-dd'T'HH:mm:ss.fffffff",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out value)
+            && value.Kind == DateTimeKind.Unspecified
+            && string.Equals(text, ScheduleIdentityDerivation.Local(value), StringComparison.Ordinal);
+    }
+
+    private static bool TryScheduleUtcTimestamp(JsonElement parent, string name, out DateTimeOffset value)
+    {
+        value = default;
+        return TryString(parent, name, out var text)
+            && DateTimeOffset.TryParseExact(
+                text,
+                "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out value)
+            && value.Offset == TimeSpan.Zero
+            && string.Equals(text, ScheduleIdentityDerivation.Utc(value), StringComparison.Ordinal);
+    }
+
+    private static bool TryScheduleOverlap(string? value, out ScheduleOverlapPolicy overlap)
+    {
+        overlap = value switch
+        {
+            "allow" => ScheduleOverlapPolicy.Allow,
+            "skip" => ScheduleOverlapPolicy.Skip,
+            "defer-one" => ScheduleOverlapPolicy.DeferOne,
+            _ => ScheduleOverlapPolicy.Unknown,
+        };
+        return overlap != ScheduleOverlapPolicy.Unknown;
+    }
+
     private static void WriteTimestamp(Utf8JsonWriter writer, string name, DateTimeOffset value) => writer.WriteString(name, ToCanonicalUtc(value));
 
     private static void WriteNullableTimestamp(Utf8JsonWriter writer, string name, DateTimeOffset? value)
@@ -754,6 +1007,14 @@ public static class TriggerDeliveryJson
     }
 
     private static string ToCanonicalUtc(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
+    private static string ToCanonical(ScheduleOverlapPolicy value) => value switch
+    {
+        ScheduleOverlapPolicy.Allow => "allow",
+        ScheduleOverlapPolicy.Skip => "skip",
+        ScheduleOverlapPolicy.DeferOne => "defer-one",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
 
     private static TriggerContractValidationResult Failure(string code, string field) => new([new TriggerContractError(code, field)]);
 }

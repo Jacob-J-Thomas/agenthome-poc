@@ -19,6 +19,10 @@ using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Triggers;
+using EmbodySense.Core.Common.Triggers.Models;
+using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 using EmbodySense.Tests.Support;
 using System.Text.Json;
 
@@ -124,6 +128,50 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         Assert.Equal(1, store.UpdateCallCount);
         Assert.Single(audit.Events);
         Assert.Equal(2, identities.CallCount);
+    }
+
+    [Theory]
+    [InlineData(ScheduleRunAdmissionStoreStatus.OverlapSkipped, GovernedLoopSequentialMaterializationStatus.OverlapSkipped)]
+    [InlineData(ScheduleRunAdmissionStoreStatus.OverlapDeferred, GovernedLoopSequentialMaterializationStatus.OverlapDeferred)]
+    [InlineData(ScheduleRunAdmissionStoreStatus.OverlapSerialized, GovernedLoopSequentialMaterializationStatus.OverlapSerialized)]
+    [InlineData(ScheduleRunAdmissionStoreStatus.DeferredOneSuppressed, GovernedLoopSequentialMaterializationStatus.DeferredOneSuppressed)]
+    [InlineData(ScheduleRunAdmissionStoreStatus.Retired, GovernedLoopSequentialMaterializationStatus.Retired)]
+    [InlineData(ScheduleRunAdmissionStoreStatus.Conflict, GovernedLoopSequentialMaterializationStatus.Conflict)]
+    [InlineData(ScheduleRunAdmissionStoreStatus.LimitExceeded, GovernedLoopSequentialMaterializationStatus.LimitExceeded)]
+    [InlineData(ScheduleRunAdmissionStoreStatus.Unavailable, GovernedLoopSequentialMaterializationStatus.Unavailable)]
+    public async Task Schedule_specific_store_outcomes_are_distinct_and_never_fall_back_to_ordinary_creation(
+        ScheduleRunAdmissionStoreStatus storeStatus,
+        GovernedLoopSequentialMaterializationStatus expectedStatus)
+    {
+        var context = await ContextAsync(scheduleTrigger: true);
+        var store = new RecordingRunStore { ForcedScheduledCreateStatus = storeStatus };
+        var audit = new RecordingAuditRecorder();
+
+        var result = await CreateMaterializer(store, audit).MaterializeAsync(context.Request);
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.False(result.IsReady());
+        Assert.Equal(1, store.ScheduledCreateCallCount);
+        Assert.Equal(0, store.CreateCallCount);
+        Assert.Equal(0, store.UpdateCallCount);
+        Assert.Empty(audit.Events);
+    }
+
+    [Fact]
+    public async Task Scheduled_create_response_loss_replays_the_exact_atomic_result_without_duplicate_creation()
+    {
+        var context = await ContextAsync(scheduleTrigger: true);
+        var store = new RecordingRunStore { ThrowAfterFirstScheduledCreate = true };
+        var audit = new RecordingAuditRecorder();
+
+        var result = await CreateMaterializer(store, audit).MaterializeAsync(context.Request);
+
+        Assert.Equal(GovernedLoopSequentialMaterializationStatus.Replayed, result.Status);
+        Assert.True(result.IsReady());
+        Assert.Equal(2, store.ScheduledCreateCallCount);
+        Assert.Equal(0, store.CreateCallCount);
+        Assert.Equal(1, store.UpdateCallCount);
+        Assert.Single(audit.Events);
     }
 
     [Fact]
@@ -373,7 +421,8 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         bool allowWorkspaceTools = false,
         int inferenceCount = 1,
         IReadOnlyList<string>? inferenceIds = null,
-        Func<ContextualRoleRevisionPin, GovernedLoopGraphRevisionArtifact>? artifactFactory = null)
+        Func<ContextualRoleRevisionPin, GovernedLoopGraphRevisionArtifact>? artifactFactory = null,
+        bool scheduleTrigger = false)
     {
         var seedHarness = GovernedLoopAdmissionTestHarness.Create();
         var seedOutcome = Assert.IsType<GovernedLoopAdmissionTerminalOutcome>((await seedHarness.CreateService().AdmitAsync(seedHarness.Request)).Outcome);
@@ -383,18 +432,28 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
                 inferenceCount,
                 inferenceIds,
                 owningRole: seedReceipt.Intent.Role,
-                allowWorkspaceTools: allowWorkspaceTools);
+                allowWorkspaceTools: allowWorkspaceTools,
+                scheduleTrigger: scheduleTrigger);
         var publication = GovernedLoopRevisionPublicationPinFactory.Create(
             1,
             artifact.RevisionArtifact.Revision,
             "publish-sequential",
             Hash('7'));
         var contextSnapshot = CustomLoopContextSnapshot.CreateEmpty(GovernedLoopSequentialApplicationTestFixture.Now);
+        const string Prompt = "Execute the exact admitted request.";
+        var triggerOrigin = scheduleTrigger
+            ? GovernedLoopSequentialRunAnchorAndDispatcherTests.ScheduleOrigin(
+                publication,
+                seedReceipt,
+                artifact,
+                Prompt,
+                contextSnapshot.CapturedAtUtc)
+            : null;
         var invocation = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
             GovernedLoopSequentialInvocationSnapshot.CurrentSchemaVersion,
-            "Execute the exact admitted request.",
+            Prompt,
             new CustomLoopModelSnapshot("provider", "model"),
-            includeConversation
+            includeConversation && !scheduleTrigger
                 ? new CustomLoopConversationReference(
                     Hash('8'),
                     "version-1",
@@ -402,7 +461,10 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
                 : null,
             contextSnapshot.CapturedAtUtc,
             contextSnapshot.SourceManifest,
-            string.Empty));
+            string.Empty)
+        {
+            TriggerOrigin = triggerOrigin,
+        });
         var admissionRequest = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(
             GovernedLoopAdmissionRequest.CurrentSchemaVersion,
             "admit-sequential",
@@ -529,6 +591,11 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
 
     internal sealed class RecordingEventIdentityGenerator : IGovernedLoopSequentialEventIdentityGenerator
     {
+        public RecordingEventIdentityGenerator(int initialCount = 0)
+        {
+            CallCount = initialCount;
+        }
+
         public int CallCount { get; private set; }
 
         public string NewEventId() => $"event-sequential-{++CallCount}";
@@ -584,8 +651,11 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
     internal sealed class RecordingRunStore : ICustomLoopRunStore
     {
         private CustomLoopRunRecord? _run;
+        private ScheduleRunAdmissionEvidence? _scheduleAdmission;
 
         public bool ThrowAfterFirstCreate { get; init; }
+
+        public bool ThrowAfterFirstScheduledCreate { get; init; }
 
         public bool ThrowBeforeFirstUpdate { get; init; }
 
@@ -599,15 +669,75 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
 
         public CustomLoopRunStoreStatus? ForcedCreateStatus { get; init; }
 
+        public ScheduleRunAdmissionStoreStatus? ForcedScheduledCreateStatus { get; init; }
+
         public CustomLoopRunRecord? RunReadOverride { get; set; }
 
         public int ReadCallCount { get; private set; }
 
         public int CreateCallCount { get; private set; }
 
+        public int ScheduledCreateCallCount { get; private set; }
+
         public int UpdateCallCount { get; private set; }
 
         public List<CustomLoopRunRecord> CreatedCandidates { get; } = [];
+
+        public ScheduleRunAdmissionEvidence? ScheduleAdmission => _scheduleAdmission;
+
+        public void PreseedScheduledRunWithoutAdmissionEvidence(CustomLoopRunRecord run)
+        {
+            _run = run;
+            _scheduleAdmission = null;
+        }
+
+        public Task<ScheduleRunAdmissionStoreResult> CreateScheduledAsync(
+            CustomLoopRunRecord run,
+            TriggerDeliveryEnvelope envelope,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ScheduledCreateCallCount++;
+            CreatedCandidates.Add(run);
+            if (ForcedScheduledCreateStatus is { } status)
+            {
+                return Task.FromResult(new ScheduleRunAdmissionStoreResult(
+                    status,
+                    status is ScheduleRunAdmissionStoreStatus.OverlapSkipped
+                        or ScheduleRunAdmissionStoreStatus.OverlapDeferred
+                        or ScheduleRunAdmissionStoreStatus.OverlapSerialized
+                        or ScheduleRunAdmissionStoreStatus.DeferredOneSuppressed
+                        ? run
+                        : null,
+                    null));
+            }
+
+            if (_run is not null)
+            {
+                RecordRunCreatedScheduleAdmission(_run);
+                return Task.FromResult(new ScheduleRunAdmissionStoreResult(
+                    ScheduleRunAdmissionStoreStatus.Replayed,
+                    _run,
+                    _scheduleAdmission));
+            }
+
+            _run = run;
+            RecordRunCreatedScheduleAdmission(run);
+            return ThrowAfterFirstScheduledCreate && ScheduledCreateCallCount == 1
+                ? Task.FromException<ScheduleRunAdmissionStoreResult>(new IOException("scheduled create response lost"))
+                : Task.FromResult(new ScheduleRunAdmissionStoreResult(
+                    ScheduleRunAdmissionStoreStatus.Created,
+                    run,
+                    _scheduleAdmission));
+        }
+
+        public Task<ScheduleRunAdmissionEvidence?> GetScheduleAdmissionAsync(
+            TriggerDeliveryId deliveryId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(_scheduleAdmission);
+        }
 
         public Task<CustomLoopRunStoreResult> CreateAsync(
             CustomLoopRunRecord run,
@@ -690,6 +820,31 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
 
         public Task<IReadOnlyList<CustomLoopRunRecord>> ListNonterminalAsync(CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
+
+        private void RecordRunCreatedScheduleAdmission(CustomLoopRunRecord run)
+        {
+            if (_scheduleAdmission is not null)
+            {
+                return;
+            }
+
+            var origin = Assert.IsType<GovernedLoopSequentialTriggerOrigin>(run.SequentialInvocationSnapshot?.TriggerOrigin);
+            var attempt = new ScheduleRunAdmissionAttempt(
+                ScheduleRunAdmissionAttempt.CurrentSchemaVersion,
+                1,
+                ScheduleRunAdmissionDisposition.RunCreated,
+                run.AdmissionOperationId,
+                run.Id,
+                null,
+                run.CreatedAtUtc);
+            _scheduleAdmission = ScheduleRunAdmissionEvidenceHash.Apply(new ScheduleRunAdmissionEvidence(
+                ScheduleRunAdmissionEvidence.CurrentSchemaVersion,
+                origin.CanonicalEnvelope,
+                origin.CanonicalEnvelopeHash,
+                run.LoopId,
+                [attempt],
+                string.Empty));
+        }
 
         private void Read(CancellationToken cancellationToken)
         {

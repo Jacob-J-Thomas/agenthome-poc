@@ -71,6 +71,63 @@ public sealed class TriggerGovernedLoopDispatcherTests
     }
 
     [Theory]
+    [InlineData("OverlapSkipped")]
+    [InlineData("OverlapDeferred")]
+    [InlineData("OverlapSerialized")]
+    [InlineData("DeferredOneSuppressed")]
+    [InlineData("Retired")]
+    public void Atomic_schedule_overlap_dispositions_are_provider_free_and_closed(string disposition)
+    {
+        var envelope = ScheduledEnvelope();
+        var intent = Intent(envelope, Lease());
+        var response = CanonicalResponse(envelope, intent) with
+        {
+            Status = disposition,
+            MaterializationStatus = disposition,
+            ExecutionStatus = null,
+            WasDispatched = false,
+            Run = null,
+        };
+
+        var result = TriggerGovernedLoopDispatchProtocol.Map(envelope, intent, response);
+
+        Assert.Equal(TriggerDispatchOutcome.Rejected, result.Outcome);
+        Assert.Contains(disposition, result.Detail, StringComparison.Ordinal);
+        Assert.Null(result.GovernedInvocation);
+    }
+
+    [Theory]
+    [InlineData("status")]
+    [InlineData("execution")]
+    [InlineData("dispatch")]
+    [InlineData("failure")]
+    public void Contradictory_schedule_overlap_projection_requires_review(string mismatch)
+    {
+        var envelope = ScheduledEnvelope();
+        var intent = Intent(envelope, Lease());
+        var response = CanonicalResponse(envelope, intent) with
+        {
+            Status = "OverlapSkipped",
+            MaterializationStatus = "OverlapSkipped",
+            ExecutionStatus = null,
+            WasDispatched = false,
+            Run = null,
+        };
+        response = mismatch switch
+        {
+            "status" => response with { Status = "Executed" },
+            "execution" => response with { ExecutionStatus = "Completed" },
+            "dispatch" => response with { WasDispatched = true },
+            _ => response with { AdmissionFailureCode = "SubstitutedFailure" },
+        };
+
+        var result = TriggerGovernedLoopDispatchProtocol.Map(envelope, intent, response);
+
+        Assert.Equal(TriggerDispatchOutcome.NeedsReview, result.Outcome);
+        Assert.Null(result.GovernedInvocation);
+    }
+
+    [Theory]
     [InlineData("missing")]
     [InlineData("malformed")]
     [InlineData("publication")]
@@ -186,6 +243,13 @@ public sealed class TriggerGovernedLoopDispatcherTests
     }
 
     private static TriggerWorkerLease Lease() => new("worker-1", 1, _workerAtUtc, _workerAtUtc.AddSeconds(30), 0);
+
+    private static TriggerDeliveryEnvelope ScheduledEnvelope()
+    {
+        var loop = TriggerWorkerTestData.GovernedLoop();
+        var actor = TriggerWorkerTestData.Envelope(loop: loop).ActorContext;
+        return TriggerWorkerTestData.ScheduleEnvelope(loop, actor);
+    }
 
     private static TriggerDispatchEvidence Intent(TriggerDeliveryEnvelope envelope, TriggerWorkerLease lease)
     {

@@ -22,6 +22,8 @@ using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
@@ -82,6 +84,79 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
         Assert.Equal(context.Artifact.ArtifactHash, runtimeRequest.Anchor.AdapterBinding.GraphArtifactHash);
         Assert.Equal(context.Artifact.LayoutHash, runtimeRequest.Anchor.AdapterBinding.GraphLayoutHash);
         Assert.Equal(context.Invocation.ContentHash, runtimeRequest.Anchor.AdapterBinding.InvocationPayloadHash);
+    }
+
+    [Fact]
+    public async Task Faithfully_preseeded_scheduled_run_without_admission_evidence_repairs_run_created_before_provider_dispatch()
+    {
+        var context = await ContextAsync(scheduleTrigger: true);
+        var seedStore = new GovernedLoopSequentialRunMaterializerTests.RecordingRunStore();
+        var seedMaterializer = new GovernedLoopSequentialRunMaterializer(
+            seedStore,
+            new GovernedLoopSequentialRunMaterializerTests.RecordingAuditRecorder(),
+            new GovernedLoopSequentialRunMaterializerTests.RecordingEventIdentityGenerator(),
+            new GovernedLoopSequentialRunMaterializerTests.FixedTimeProvider(_coordinatedAtUtc));
+        Assert.True((await seedMaterializer.MaterializeAsync(context.MaterializationRequest)).IsReady());
+        var preseededRun = Assert.Single(seedStore.CreatedCandidates);
+
+        var restartedStore = new GovernedLoopSequentialRunMaterializerTests.RecordingRunStore();
+        restartedStore.PreseedScheduledRunWithoutAdmissionEvidence(preseededRun);
+        var materializer = new GovernedLoopSequentialRunMaterializer(
+            restartedStore,
+            new GovernedLoopSequentialRunMaterializerTests.RecordingAuditRecorder(),
+            new GovernedLoopSequentialRunMaterializerTests.RecordingEventIdentityGenerator(initialCount: 1),
+            new GovernedLoopSequentialRunMaterializerTests.FixedTimeProvider(_coordinatedAtUtc));
+        var operations = new RecordingOperationStore(context.Operation);
+        var runtime = new RecordingOrderedRuntime
+        {
+            BeforeRun = () => Assert.Equal(
+                ScheduleRunAdmissionDisposition.RunCreated,
+                Assert.IsType<ScheduleRunAdmissionEvidence>(restartedStore.ScheduleAdmission).Attempts[^1].Disposition),
+        };
+        var coordinator = Coordinator(
+            operations,
+            new RecordingAdmissionService(context.AdmissionResult),
+            materializer,
+            runtime);
+
+        var result = await coordinator.InvokeAsync(context.Request);
+
+        Assert.True(
+            result.Status == GovernedLoopSequentialInvocationStatus.Executed,
+            $"Status={result.Status}; Detail={result.Detail}; Materialization={result.Materialization?.Status}: {result.Materialization?.Detail}");
+        Assert.True(result.ProviderWasInvoked());
+        Assert.Equal(1, restartedStore.ScheduledCreateCallCount);
+        Assert.Equal(1, runtime.RunCallCount);
+        Assert.Equal(
+            ScheduleRunAdmissionDisposition.RunCreated,
+            Assert.IsType<ScheduleRunAdmissionEvidence>(restartedStore.ScheduleAdmission).Attempts[^1].Disposition);
+    }
+
+    [Fact]
+    public async Task Prepare_commits_exact_admission_and_run_without_provider_then_invoke_executes_the_same_run()
+    {
+        var context = await ContextAsync();
+        var operations = new RecordingOperationStore(context.Operation);
+        var admission = new RecordingAdmissionService(context.AdmissionResult);
+        var materializer = new RecordingMaterializer { Result = await MaterializedAsync(context) };
+        var runtime = new RecordingOrderedRuntime();
+        var coordinator = Coordinator(operations, admission, materializer, runtime);
+
+        var prepared = await coordinator.PrepareAsync(context.Request);
+
+        Assert.Equal(GovernedLoopSequentialInvocationStatus.Prepared, prepared.Status);
+        Assert.False(prepared.ProviderWasInvoked());
+        Assert.NotNull(prepared.Run);
+        Assert.Equal(CustomLoopRunStatus.Admitted, prepared.Run!.Status);
+        Assert.Equal(CustomLoopInvocationOperationState.Complete, operations.Operation!.State);
+        Assert.Equal(0, runtime.RunCallCount);
+
+        var executed = await coordinator.InvokeAsync(context.Request);
+
+        Assert.Equal(GovernedLoopSequentialInvocationStatus.Executed, executed.Status);
+        Assert.True(executed.ProviderWasInvoked());
+        Assert.Equal(prepared.Run.Id, executed.Run?.Id);
+        Assert.Equal(1, runtime.RunCallCount);
     }
 
     [Fact]
@@ -683,11 +758,13 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
 
     private static async Task<TestContext> ContextAsync(
         bool includeConversation = true,
-        bool allowWorkspaceTools = false)
+        bool allowWorkspaceTools = false,
+        bool scheduleTrigger = false)
     {
         var materialization = await GovernedLoopSequentialRunMaterializerTests.ContextAsync(
             includeConversation,
-            allowWorkspaceTools: allowWorkspaceTools);
+            allowWorkspaceTools: allowWorkspaceTools,
+            scheduleTrigger: scheduleTrigger);
         var projection = GovernedLoopSequentialLegacyDefinitionProjector.ProjectPrepared(
             materialization.AdmissionRequest.OperationId,
             materialization.Invocation,

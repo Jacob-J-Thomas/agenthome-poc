@@ -105,6 +105,24 @@ public static class TriggerGovernedLoopDispatchProtocol
             return new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Rejected, Bound(response.Detail, "Canonical governed admission rejected before provider dispatch."));
         }
 
+        if (response.MaterializationStatus is "OverlapSkipped" or "OverlapDeferred" or "OverlapSerialized" or "DeferredOneSuppressed" or "Retired")
+        {
+            if (admission.Disposition != "Admitted"
+                || admission.Status is not ("Admitted" or "Replayed")
+                || admission.FailureCode is not null
+                || response.AdmissionFailureCode is not null
+                || !string.Equals(response.Status, response.MaterializationStatus, StringComparison.Ordinal)
+                || response.ExecutionStatus is not null
+                || response.WasDispatched)
+            {
+                return NeedsReview(response, "The atomic schedule-overlap disposition contradicted canonical admission or dispatch posture.");
+            }
+
+            return new TriggerWorkerDispatchResult(
+                TriggerDispatchOutcome.Rejected,
+                Bound(response.Detail, $"Atomic schedule run admission returned {response.MaterializationStatus} before provider dispatch."));
+        }
+
         if (!string.Equals(admission.Disposition, "Admitted", StringComparison.Ordinal)
             || admission.Status is not ("Admitted" or "Replayed")
             || admission.FailureCode is not null

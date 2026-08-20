@@ -447,15 +447,9 @@ public sealed class ScheduleDueOccurrenceEvaluator
                     decisionEvidenceHash: overlap.EvidenceHash).ConfigureAwait(false);
             }
 
-            if (definition.Overlap == ScheduleOverlapPolicy.DeferOne)
-            {
-                return await DeferClaimAsync(
-                    definition,
-                    state,
-                    now,
-                    overlap.EvidenceHash!,
-                    cancellationToken).ConfigureAwait(false);
-            }
+            // DeferOne must reach the atomic run-admission fence. Retaining it here would
+            // create one independent deferral per schedule, allowing multiple schedules
+            // targeting the same loop to each believe they own the single deferred slot.
         }
         else if (overlap.Status != ScheduleOverlapStatus.Clear)
         {
@@ -2056,6 +2050,16 @@ public sealed class ScheduleDueOccurrenceEvaluator
         out SchedulePendingDelivery? preparedPending)
     {
         preparedPending = null;
+        var directive = new ScheduleExecutionDirective(
+            ScheduleExecutionDirective.CurrentSchemaVersion,
+            definition.ScheduleId,
+            definition.Revision,
+            state.DefinitionHash,
+            pending.Occurrence,
+            pending.Identity,
+            current.Target,
+            definition.Overlap,
+            overlapEvidenceHash);
         if (!TriggerDeliveryFactory.TryCreateInlinePayload(current.GetResolvedPayload(), out var payload, out _)
             || !TriggerDeliveryFactory.TryCreateTemporalEvidence(
                 now,
@@ -2073,11 +2077,10 @@ public sealed class ScheduleDueOccurrenceEvaluator
                 pending.Identity.DeliveryId,
                 out var redelivery,
                 out _)
-            || !TriggerDeliveryFactory.TryCreateEnvelope(
+            || !TriggerDeliveryFactory.TryCreateScheduledEnvelope(
                 1,
                 pending.Identity.DeliveryId,
                 pending.Identity.DeduplicationId,
-                TriggerKind.Time,
                 current.Adapter,
                 current.Target,
                 current.ActorContext,
@@ -2085,6 +2088,7 @@ public sealed class ScheduleDueOccurrenceEvaluator
                 temporal,
                 payload,
                 redelivery,
+                directive,
                 false,
                 null,
                 TriggerAdmissionStatus.Unknown,
@@ -2313,6 +2317,11 @@ public sealed class ScheduleDueOccurrenceEvaluator
             && QueueStatusReasonMatches(result.Status, result.Reason)
             && AdmissionEvidenceMatches(result.AdmissionStatus, result.AdmissionReason)
             && QueueAdmissionCoheres(result)
+            // An exact identity replay is usable only while the original delivery can still
+            // reach dispatch. A terminal worker result in the Prepared crash window must be
+            // reconciled as ambiguous instead of being reclassified as successful delivery.
+            && (result.Status != TriggerQueueAdmissionStatus.Replayed
+                || result.Entry?.State is TriggerQueueEntryState.Queued or TriggerQueueEntryState.WorkerOwned or TriggerQueueEntryState.Dispatching or TriggerQueueEntryState.Dispatched)
             && Equals(result.DeliveryId, pending.Identity.DeliveryId)
             && Equals(result.DeduplicationId, pending.Identity.DeduplicationId)
             && string.Equals(result.CanonicalEnvelopeHash, prepared.CanonicalEnvelopeHash, StringComparison.Ordinal)

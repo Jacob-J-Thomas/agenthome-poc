@@ -63,6 +63,19 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
     public async Task<GovernedLoopSequentialInvocationResult> InvokeAsync(
         GovernedLoopSequentialInvocationRequest? request,
         CancellationToken cancellationToken = default)
+        => await InvokeCoreAsync(request, dispatchExecution: true, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Durably admits and materializes one exact invocation without crossing the provider boundary.</summary>
+    /// <remarks>This seam lets a caller order atomic run admission before acquiring a broader execution lease.</remarks>
+    public async Task<GovernedLoopSequentialInvocationResult> PrepareAsync(
+        GovernedLoopSequentialInvocationRequest? request,
+        CancellationToken cancellationToken = default)
+        => await InvokeCoreAsync(request, dispatchExecution: false, cancellationToken).ConfigureAwait(false);
+
+    private async Task<GovernedLoopSequentialInvocationResult> InvokeCoreAsync(
+        GovernedLoopSequentialInvocationRequest? request,
+        bool dispatchExecution,
+        CancellationToken cancellationToken)
     {
         if (request is null
             || request.SchemaVersion != GovernedLoopSequentialInvocationRequest.CurrentSchemaVersion
@@ -256,6 +269,16 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
                 materialization,
                 run: run,
                 detail: $"The exact canonical run is `{run.Status}` and requires recovery or an explicit lifecycle transition; first dispatch was not repeated.");
+        }
+
+        if (!dispatchExecution)
+        {
+            return Result(
+                GovernedLoopSequentialInvocationStatus.Prepared,
+                admission,
+                materialization,
+                run: run,
+                detail: "The exact canonical admission, run, and audit boundary are durable; provider execution was not entered.");
         }
 
         try
@@ -616,6 +639,11 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
             GovernedLoopSequentialMaterializationStatus.LimitExceeded => GovernedLoopSequentialInvocationStatus.LimitExceeded,
             GovernedLoopSequentialMaterializationStatus.AuditUnavailable => GovernedLoopSequentialInvocationStatus.AuditUnavailable,
             GovernedLoopSequentialMaterializationStatus.AuditConflict => GovernedLoopSequentialInvocationStatus.Conflict,
+            GovernedLoopSequentialMaterializationStatus.OverlapSkipped => GovernedLoopSequentialInvocationStatus.OverlapSkipped,
+            GovernedLoopSequentialMaterializationStatus.OverlapDeferred => GovernedLoopSequentialInvocationStatus.OverlapDeferred,
+            GovernedLoopSequentialMaterializationStatus.OverlapSerialized => GovernedLoopSequentialInvocationStatus.OverlapSerialized,
+            GovernedLoopSequentialMaterializationStatus.DeferredOneSuppressed => GovernedLoopSequentialInvocationStatus.DeferredOneSuppressed,
+            GovernedLoopSequentialMaterializationStatus.Retired => GovernedLoopSequentialInvocationStatus.Retired,
             _ => GovernedLoopSequentialInvocationStatus.Invalid,
         };
 

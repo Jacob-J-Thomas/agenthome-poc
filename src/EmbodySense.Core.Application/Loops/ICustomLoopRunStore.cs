@@ -3,6 +3,10 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Application.Loops.TraceRetention;
+using EmbodySense.Core.Common.Triggers;
+using EmbodySense.Core.Common.Triggers.Models;
+using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 
 namespace EmbodySense.Core.Application.Loops;
 
@@ -22,6 +26,33 @@ public interface ICustomLoopRunStore
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>The created run or an identifier/admission conflict.</returns>
     Task<CustomLoopRunStoreResult> CreateAsync(CustomLoopRunRecord run, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Creates one authenticated schedule-derived run under the same mutation ownership that enforces one nonterminal run per loop.
+    /// </summary>
+    /// <remarks>
+    /// The conservative compatibility implementation reports unavailable. Schedule execution must never fall back to ordinary
+    /// creation because doing so would discard the directive's overlap policy at the atomic boundary.
+    /// </remarks>
+    /// <param name="run">The complete admitted run with lifecycle version one.</param>
+    /// <param name="envelope">The exact authenticated canonical schedule delivery retained by the invocation snapshot.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The created/replayed run or one durable policy-specific overlap disposition.</returns>
+    Task<ScheduleRunAdmissionStoreResult> CreateScheduledAsync(CustomLoopRunRecord run, TriggerDeliveryEnvelope envelope, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new ScheduleRunAdmissionStoreResult(ScheduleRunAdmissionStoreStatus.Unavailable, null, null));
+    }
+
+    /// <summary>Loads the durable atomic admission evidence for one exact schedule delivery.</summary>
+    /// <param name="deliveryId">The deterministic schedule delivery identity.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The exact evidence, or null when the occurrence has not reached atomic run admission.</returns>
+    Task<ScheduleRunAdmissionEvidence?> GetScheduleAdmissionAsync(TriggerDeliveryId deliveryId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult<ScheduleRunAdmissionEvidence?>(null);
+    }
 
     /// <summary>
     /// Loads the full durable run record.

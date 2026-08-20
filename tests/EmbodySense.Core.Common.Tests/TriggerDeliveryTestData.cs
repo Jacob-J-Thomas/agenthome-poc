@@ -9,6 +9,8 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
+using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 
 namespace EmbodySense.Core.Common.Tests;
 
@@ -32,21 +34,84 @@ internal static class TriggerDeliveryTestData
         TriggerAdmissionStatus visibleStatus = TriggerAdmissionStatus.Unknown,
         TriggerAdmissionReason visibleReason = TriggerAdmissionReason.Unknown)
     {
-        Assert.True(TriggerDeliveryId.TryParse(deliveryId, out var delivery));
-        Assert.True(TriggerDeduplicationId.TryParse(deduplicationId, out var deduplication));
         adapter ??= Adapter();
-        loop ??= Loop();
         actorContext ??= ActorContext();
         authority ??= Authority();
         temporal ??= Temporal(admittedAtUtc: visibleStatus is TriggerAdmissionStatus.Admitted or TriggerAdmissionStatus.Replayed ? CreatedAtUtc.AddSeconds(3) : null);
         payload ??= InlinePayload();
+        ScheduleExecutionDirective? scheduleExecutionDirective = null;
+        TriggerDeliveryId? delivery;
+        TriggerDeduplicationId? deduplication;
+        if (kind == TriggerKind.Time)
+        {
+            loop ??= GovernedLoop();
+            var occurrence = new ScheduleOccurrence(
+                ScheduleOccurrence.CurrentSchemaVersion,
+                1,
+                DateTime.SpecifyKind(temporal.CreatedAtUtc.UtcDateTime, DateTimeKind.Unspecified),
+                temporal.CreatedAtUtc,
+                new ScheduleTimeZoneReference("Etc/UTC", new string('e', 64)));
+            scheduleExecutionDirective = ScheduleDirective(occurrence: occurrence, target: loop);
+            delivery = scheduleExecutionDirective.Identity.DeliveryId;
+            deduplication = scheduleExecutionDirective.Identity.DeduplicationId;
+        }
+        else
+        {
+            loop ??= Loop();
+            Assert.True(TriggerDeliveryId.TryParse(deliveryId, out delivery));
+            Assert.True(TriggerDeduplicationId.TryParse(deduplicationId, out deduplication));
+        }
+
         if (redelivery is null)
         {
             Assert.True(TriggerDeliveryFactory.TryCreateRedeliveryEvidence(1, 1, delivery, out redelivery, out _));
         }
 
-        Assert.True(TriggerDeliveryFactory.TryCreateEnvelope(1, delivery, deduplication, kind, adapter, loop, actorContext, authority, temporal, payload, redelivery, publicationRequested, conversation, visibleStatus, visibleReason, out var envelope, out var validation), string.Join(',', validation.Errors.Select(error => error.Code)));
+        var created = kind == TriggerKind.Time
+            ? TriggerDeliveryFactory.TryCreateScheduledEnvelope(1, delivery, deduplication, adapter, loop, actorContext, authority, temporal, payload, redelivery, scheduleExecutionDirective, publicationRequested, conversation, visibleStatus, visibleReason, out var envelope, out var validation)
+            : TriggerDeliveryFactory.TryCreateEnvelope(1, delivery, deduplication, kind, adapter, loop, actorContext, authority, temporal, payload, redelivery, publicationRequested, conversation, visibleStatus, visibleReason, out envelope, out validation);
+        Assert.True(created, string.Join(',', validation.Errors.Select(error => error.Code)));
         return envelope!;
+    }
+
+    internal static ScheduleExecutionDirective ScheduleDirective(
+        ScheduleOccurrence? occurrence = null,
+        ScheduleId? scheduleId = null,
+        long definitionRevision = 1,
+        string? definitionHash = null,
+        TriggerLoopReference? target = null,
+        ScheduleOverlapPolicy overlap = ScheduleOverlapPolicy.DeferOne,
+        string? preQueueOverlapEvidenceHash = null)
+    {
+        occurrence ??= new ScheduleOccurrence(
+            ScheduleOccurrence.CurrentSchemaVersion,
+            1,
+            DateTime.SpecifyKind(CreatedAtUtc.UtcDateTime, DateTimeKind.Unspecified),
+            CreatedAtUtc,
+            new ScheduleTimeZoneReference("Etc/UTC", new string('e', 64)));
+        if (scheduleId is null)
+        {
+            Assert.True(ScheduleId.TryParse("test-schedule", out scheduleId));
+        }
+
+        definitionHash ??= new string('d', 64);
+        Assert.True(ScheduleIdentityDerivation.TryDerive(
+            scheduleId,
+            definitionRevision,
+            definitionHash,
+            occurrence,
+            out var identity,
+            out _));
+        return new ScheduleExecutionDirective(
+            ScheduleExecutionDirective.CurrentSchemaVersion,
+            scheduleId!,
+            definitionRevision,
+            definitionHash,
+            occurrence,
+            identity!,
+            target ?? GovernedLoop(),
+            overlap,
+            preQueueOverlapEvidenceHash ?? new string('f', 64));
     }
 
     internal static TriggerAdapterReference Adapter(string id = "org.embodysense/triggers/webhook", string version = "1.0.0", string hashCharacter = "a", string implementation = "triggers/webhook", string provider = "org.embodysense")

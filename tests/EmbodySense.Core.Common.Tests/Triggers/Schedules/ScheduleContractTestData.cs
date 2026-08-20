@@ -90,7 +90,8 @@ internal static class ScheduleContractTestData
         DateTimeOffset? claimedAtUtc = null,
         string definitionHash = DefinitionHash,
         long definitionRevision = 1,
-        ScheduleId? scheduleId = null)
+        ScheduleId? scheduleId = null,
+        string? overlapEvidenceHash = null)
     {
         occurrence ??= Occurrence();
         Assert.True(ScheduleClaimId.TryParse("claim-daily-reflection-1", out var claimId));
@@ -114,7 +115,7 @@ internal static class ScheduleContractTestData
             claimedAtUtc ?? occurrence.ScheduledAtUtc,
             prepared is null ? null : new string('f', ScheduleContractLimits.Sha256HexCharacters),
             prepared is null ? null : new string('9', ScheduleContractLimits.Sha256HexCharacters),
-            prepared is null ? null : new string('8', ScheduleContractLimits.Sha256HexCharacters),
+            prepared is null ? null : overlapEvidenceHash ?? new string('8', ScheduleContractLimits.Sha256HexCharacters),
             finalizationPlan,
             prepared,
             result);
@@ -151,6 +152,8 @@ internal static class ScheduleContractTestData
         TriggerPayloadEvidence? payload = null,
         TriggerTemporalEvidence? temporal = null,
         TriggerRedeliveryEvidence? redelivery = null,
+        ScheduleOverlapPolicy overlap = ScheduleOverlapPolicy.DeferOne,
+        string? overlapEvidenceHash = null,
         bool publicationRequested = false,
         CustomLoopConversationReference? conversation = null,
         Func<TriggerDeliveryEnvelope, TriggerDeliveryEnvelope>? transform = null)
@@ -161,27 +164,86 @@ internal static class ScheduleContractTestData
             definitionRevision: definitionRevision,
             scheduleId: scheduleId);
         var created = pending.Occurrence.ScheduledAtUtc;
-        var envelope = TriggerDeliveryTestData.Envelope(
-            pending.Identity.DeliveryId.Value,
-            pending.Identity.DeduplicationId.Value,
-            kind,
-            adapter: adapter ?? TriggerDeliveryTestData.Adapter("org.embodysense/triggers/time", implementation: "triggers/time"),
-            loop: target ?? Target(),
-            actorContext: actorContext ?? TriggerDeliveryTestData.ActorContext(surface: "scheduler"),
-            authority: authority ?? TriggerDeliveryTestData.Authority(evaluatedAtUtc: created.AddSeconds(2)),
-            temporal: temporal ?? TriggerDeliveryTestData.Temporal(
+        var validTarget = target ?? Target();
+        var validAdapter = adapter ?? TriggerDeliveryTestData.Adapter("org.embodysense/triggers/time", implementation: "triggers/time");
+        var validActor = actorContext ?? TriggerDeliveryTestData.ActorContext(surface: "scheduler");
+        var validAuthority = authority ?? TriggerDeliveryTestData.Authority(evaluatedAtUtc: created.AddSeconds(2));
+        var validTemporal = temporal ?? TriggerDeliveryTestData.Temporal(
                 createdAtUtc: created,
                 observedAtUtc: created.AddSeconds(1),
                 receivedAtUtc: created.AddSeconds(2),
-                admittedAtUtc: admitted ? created.AddSeconds(3) : null),
-            payload: payload ?? (referencedPayload
+                admittedAtUtc: admitted ? created.AddSeconds(3) : null);
+        var validPayload = payload ?? (referencedPayload
                 ? TriggerDeliveryTestData.ReferencedPayload("payload/daily-reflection", [1, 2, 3, 4])
-                : TriggerDeliveryTestData.InlinePayload([1, 2, 3, 4])),
-            redelivery: redelivery,
-            publicationRequested: publicationRequested,
-            conversation: conversation,
-            visibleStatus: admitted ? TriggerAdmissionStatus.Admitted : TriggerAdmissionStatus.Unknown,
-            visibleReason: admitted ? TriggerAdmissionReason.EvidenceAccepted : TriggerAdmissionReason.Unknown);
+                : TriggerDeliveryTestData.InlinePayload([1, 2, 3, 4]));
+        if (redelivery is null)
+        {
+            Assert.True(TriggerDeliveryFactory.TryCreateRedeliveryEvidence(
+                1,
+                1,
+                pending.Identity.DeliveryId,
+                out redelivery,
+                out _));
+        }
+
+        TriggerDeliveryEnvelope envelope;
+        if (kind == TriggerKind.Time)
+        {
+            var directive = new ScheduleExecutionDirective(
+                ScheduleExecutionDirective.CurrentSchemaVersion,
+                scheduleId ?? ScheduleIdFromDefault(),
+                definitionRevision,
+                definitionHash,
+                pending.Occurrence,
+                pending.Identity,
+                validTarget,
+                overlap,
+                overlapEvidenceHash ?? new string('8', ScheduleContractLimits.Sha256HexCharacters));
+            Assert.True(TriggerDeliveryFactory.TryCreateScheduledEnvelope(
+                TriggerDeliveryEnvelope.CurrentSchemaVersion,
+                pending.Identity.DeliveryId,
+                pending.Identity.DeduplicationId,
+                validAdapter,
+                validTarget,
+                validActor,
+                validAuthority,
+                validTemporal,
+                validPayload,
+                redelivery,
+                directive,
+                publicationRequested,
+                conversation,
+                admitted ? TriggerAdmissionStatus.Admitted : TriggerAdmissionStatus.Unknown,
+                admitted ? TriggerAdmissionReason.EvidenceAccepted : TriggerAdmissionReason.Unknown,
+                out var scheduledEnvelope,
+                out var scheduledValidation),
+                string.Join(',', scheduledValidation.Errors.Select(error => $"{error.Field}:{error.Code}")));
+            envelope = scheduledEnvelope!;
+        }
+        else
+        {
+            Assert.True(TriggerDeliveryFactory.TryCreateEnvelope(
+                TriggerDeliveryEnvelope.CurrentSchemaVersion,
+                pending.Identity.DeliveryId,
+                pending.Identity.DeduplicationId,
+                kind,
+                validAdapter,
+                validTarget,
+                validActor,
+                validAuthority,
+                validTemporal,
+                validPayload,
+                redelivery,
+                publicationRequested,
+                conversation,
+                admitted ? TriggerAdmissionStatus.Admitted : TriggerAdmissionStatus.Unknown,
+                admitted ? TriggerAdmissionReason.EvidenceAccepted : TriggerAdmissionReason.Unknown,
+                out var nonscheduledEnvelope,
+                out var nonscheduledValidation),
+                string.Join(',', nonscheduledValidation.Errors.Select(error => error.Code)));
+            envelope = nonscheduledEnvelope!;
+        }
+
         envelope = transform?.Invoke(envelope) ?? envelope;
         Assert.True(TriggerDeliveryHash.TryCompute(envelope, out var hash, out var validation), string.Join(',', validation.Errors.Select(error => error.Code)));
         return new SchedulePreparedDelivery(
@@ -189,6 +251,12 @@ internal static class ScheduleContractTestData
             envelope,
             hash!,
             preparedAtUtc ?? created.AddSeconds(3));
+    }
+
+    private static ScheduleId ScheduleIdFromDefault()
+    {
+        Assert.True(ScheduleId.TryParse("daily-reflection", out var scheduleId));
+        return scheduleId!;
     }
 
     internal static ScheduleDeliveryResultEvidence Result(

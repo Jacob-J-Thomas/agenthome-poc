@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Triggers;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 
 namespace EmbodySense.Core.Common.Triggers.Models;
 
@@ -12,7 +13,7 @@ public sealed record TriggerDeliveryEnvelope
     /// <summary>Gets the only supported experimental envelope schema version.</summary>
     public const int CurrentSchemaVersion = 1;
 
-    internal TriggerDeliveryEnvelope(int schemaVersion, TriggerDeliveryId deliveryId, TriggerDeduplicationId deduplicationId, TriggerKind kind, TriggerAdapterReference adapter, TriggerLoopReference loop, TriggerActorContext actorContext, TriggerAuthorityEvidence authority, TriggerTemporalEvidence temporal, TriggerPayloadEvidence payload, TriggerRedeliveryEvidence redelivery, bool publicationRequested, CustomLoopConversationReference? invokingConversation, TriggerAdmissionStatus visibleStatus, TriggerAdmissionReason visibleReason)
+    internal TriggerDeliveryEnvelope(int schemaVersion, TriggerDeliveryId deliveryId, TriggerDeduplicationId deduplicationId, TriggerKind kind, TriggerAdapterReference adapter, TriggerLoopReference loop, TriggerActorContext actorContext, TriggerAuthorityEvidence authority, TriggerTemporalEvidence temporal, TriggerPayloadEvidence payload, TriggerRedeliveryEvidence redelivery, ScheduleExecutionDirective? scheduleExecutionDirective, bool publicationRequested, CustomLoopConversationReference? invokingConversation, TriggerAdmissionStatus visibleStatus, TriggerAdmissionReason visibleReason)
     {
         SchemaVersion = schemaVersion;
         DeliveryId = deliveryId;
@@ -25,6 +26,7 @@ public sealed record TriggerDeliveryEnvelope
         Temporal = temporal;
         Payload = payload;
         Redelivery = redelivery;
+        ScheduleExecutionDirective = scheduleExecutionDirective;
         PublicationRequested = publicationRequested;
         InvokingConversation = invokingConversation;
         VisibleStatus = visibleStatus;
@@ -63,6 +65,9 @@ public sealed record TriggerDeliveryEnvelope
 
     /// <summary>Gets the redelivery evidence.</summary>
     public TriggerRedeliveryEvidence Redelivery { get; }
+
+    /// <summary>Gets the exact schedule execution coordinates required for time-trigger deliveries.</summary>
+    public ScheduleExecutionDirective? ScheduleExecutionDirective { get; }
 
     /// <summary>Gets a value indicating whether later execution requests conversation publication.</summary>
     public bool PublicationRequested { get; }

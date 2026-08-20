@@ -8,6 +8,25 @@ namespace EmbodySense.Core.Common.Triggers.Schedules;
 /// <summary>Computes stable lowercase SHA-256 identities from canonical schema-1 schedule contracts.</summary>
 public static class ScheduleContractHash
 {
+    /// <summary>Validates and hashes one complete immutable schedule execution directive.</summary>
+    public static bool TryComputeExecutionDirective(
+        ScheduleExecutionDirective? directive,
+        out string? hash,
+        out ScheduleContractValidationResult validation)
+    {
+        validation = ScheduleContractValidator.ValidateExecutionDirective(directive);
+        if (!validation.IsValid)
+        {
+            hash = null;
+            return false;
+        }
+
+        return TryHash(
+            writer => TriggerDeliveryJson.WriteScheduleExecutionDirectiveValue(writer, directive!),
+            out hash,
+            out validation);
+    }
+
     /// <summary>Validates and hashes the complete immutable schedule definition.</summary>
     public static bool TryComputeDefinition(
         ScheduleDefinition? definition,

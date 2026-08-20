@@ -403,7 +403,7 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
         return new TestContext(artifact, request, receipt, invocation, adapterBinding, anchorResult, plan);
     }
 
-    private static GovernedLoopSequentialTriggerOrigin ScheduleOrigin(
+    internal static GovernedLoopSequentialTriggerOrigin ScheduleOrigin(
         GovernedLoopRevisionPublicationPin publication,
         GovernedLoopAdmissionReceipt seedReceipt,
         GovernedLoopGraphRevisionArtifact artifact,
@@ -480,11 +480,20 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             null,
             out var temporal,
             out _));
-        Assert.True(TriggerDeliveryFactory.TryCreateEnvelope(
+        var directive = new ScheduleExecutionDirective(
+            ScheduleExecutionDirective.CurrentSchemaVersion,
+            definition.ScheduleId,
+            definition.Revision,
+            definitionHash!,
+            occurrence,
+            identity,
+            definition.Target,
+            definition.Overlap,
+            Hash('5'));
+        Assert.True(TriggerDeliveryFactory.TryCreateScheduledEnvelope(
             TriggerDeliveryEnvelope.CurrentSchemaVersion,
             identity.DeliveryId,
             identity.DeduplicationId,
-            TriggerKind.Time,
             adapter,
             loop,
             actorContext,
@@ -492,6 +501,7 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             temporal,
             payload,
             redelivery,
+            directive,
             false,
             null,
             TriggerAdmissionStatus.Unknown,

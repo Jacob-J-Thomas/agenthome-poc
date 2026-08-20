@@ -8,6 +8,8 @@ using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Sequential;
+using EmbodySense.Core.Common.Triggers;
+using EmbodySense.Core.Common.Triggers.Models;
 
 namespace EmbodySense.Core.Application.Loops.Sequential;
 
@@ -88,11 +90,46 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
         CustomLoopRunStoreResult created;
         try
         {
-            created = await _runStore.CreateAsync(candidate, cancellationToken).ConfigureAwait(false);
+            if (request.InvocationSnapshot.TriggerOrigin is not null)
+            {
+                var scheduled = await CreateScheduledAsync(request, candidate, cancellationToken).ConfigureAwait(false);
+                var scheduledResult = await ResolveScheduledResultAsync(request, projection.Definition, anchorResult.Anchor, scheduled).ConfigureAwait(false);
+                if (scheduledResult is not null)
+                {
+                    return scheduledResult;
+                }
+
+                created = CustomLoopRunStoreResult.Created(scheduled.Run!);
+            }
+            else
+            {
+                created = await _runStore.CreateAsync(candidate, cancellationToken).ConfigureAwait(false);
+            }
         }
         catch (Exception exception)
         {
-            return await ReconcileAfterPossibleCreateAsync(request, projection.Definition, anchorResult.Anchor, exception).ConfigureAwait(false);
+            if (request.InvocationSnapshot.TriggerOrigin is not null)
+            {
+                try
+                {
+                    var scheduled = await CreateScheduledAsync(request, candidate, CancellationToken.None).ConfigureAwait(false);
+                    var scheduledResult = await ResolveScheduledResultAsync(request, projection.Definition, anchorResult.Anchor, scheduled).ConfigureAwait(false);
+                    if (scheduledResult is not null)
+                    {
+                        return scheduledResult;
+                    }
+
+                    created = CustomLoopRunStoreResult.Created(scheduled.Run!);
+                }
+                catch
+                {
+                    return await ReconcileAfterPossibleCreateAsync(request, projection.Definition, anchorResult.Anchor, exception).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                return await ReconcileAfterPossibleCreateAsync(request, projection.Definition, anchorResult.Anchor, exception).ConfigureAwait(false);
+            }
         }
 
         var durable = created.Run;
@@ -118,6 +155,51 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
         }
 
         return await CompleteAuditBoundaryAsync(request, projection.Definition, anchorResult.Anchor, durable, replay: false).ConfigureAwait(false);
+    }
+
+    private async Task<ScheduleRunAdmissionStoreResult> CreateScheduledAsync(
+        GovernedLoopSequentialMaterializationRequest request,
+        CustomLoopRunRecord candidate,
+        CancellationToken cancellationToken)
+    {
+        var canonical = request.InvocationSnapshot.TriggerOrigin!.CanonicalEnvelope;
+        if (!TriggerDeliveryJson.TryDeserialize(canonical, out var envelope, out _) || envelope is null)
+        {
+            return new ScheduleRunAdmissionStoreResult(ScheduleRunAdmissionStoreStatus.Conflict, null, null);
+        }
+
+        return await _runStore.CreateScheduledAsync(candidate, envelope, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<GovernedLoopSequentialMaterializationResult?> ResolveScheduledResultAsync(
+        GovernedLoopSequentialMaterializationRequest request,
+        CustomLoopDefinition definition,
+        GovernedLoopSequentialRunAnchor anchor,
+        ScheduleRunAdmissionStoreResult result)
+    {
+        switch (result.Status)
+        {
+            case ScheduleRunAdmissionStoreStatus.Created when result.Run is not null:
+                return null;
+            case ScheduleRunAdmissionStoreStatus.Replayed when result.Run is not null:
+                return await ReconcileMaterializedRunAsync(request, definition, anchor, result.Run, CancellationToken.None).ConfigureAwait(false);
+            case ScheduleRunAdmissionStoreStatus.OverlapSkipped:
+                return Result(GovernedLoopSequentialMaterializationStatus.OverlapSkipped, result.Run, anchor, "Atomic run admission durably skipped the exact occurrence behind the current nonterminal run.");
+            case ScheduleRunAdmissionStoreStatus.OverlapDeferred:
+                return Result(GovernedLoopSequentialMaterializationStatus.OverlapDeferred, result.Run, anchor, "Atomic run admission retained the exact DeferOne occurrence for bounded reselection.");
+            case ScheduleRunAdmissionStoreStatus.OverlapSerialized:
+                return Result(GovernedLoopSequentialMaterializationStatus.OverlapSerialized, result.Run, anchor, "Atomic run admission retained the exact Allow occurrence for serialized reselection.");
+            case ScheduleRunAdmissionStoreStatus.DeferredOneSuppressed:
+                return Result(GovernedLoopSequentialMaterializationStatus.DeferredOneSuppressed, result.Run, anchor, "Atomic run admission preserved the existing DeferOne occurrence and suppressed this additional exact occurrence.");
+            case ScheduleRunAdmissionStoreStatus.Retired:
+                return Result(GovernedLoopSequentialMaterializationStatus.Retired, null, anchor, "Atomic run admission authenticated a compacted terminal watermark for the exact occurrence; provider dispatch remains forbidden.");
+            case ScheduleRunAdmissionStoreStatus.Conflict:
+                return Result(GovernedLoopSequentialMaterializationStatus.Conflict, result.Run, anchor, "Atomic schedule run-admission evidence is bound to different immutable coordinates.");
+            case ScheduleRunAdmissionStoreStatus.LimitExceeded:
+                return Result(GovernedLoopSequentialMaterializationStatus.LimitExceeded, null, anchor, "A bounded run or schedule-admission evidence limit rejected materialization.");
+            default:
+                return Result(GovernedLoopSequentialMaterializationStatus.Unavailable, result.Run, anchor, $"Atomic schedule run admission returned unsupported status `{result.Status}`.");
+        }
     }
 
     private async Task<GovernedLoopSequentialMaterializationResult> ReconcileAfterPossibleCreateAsync(
@@ -151,6 +233,45 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
     }
 
     private async Task<GovernedLoopSequentialMaterializationResult> ReconcileExistingAsync(
+        GovernedLoopSequentialMaterializationRequest request,
+        CustomLoopDefinition definition,
+        GovernedLoopSequentialRunAnchor anchor,
+        CustomLoopRunRecord run,
+        CancellationToken cancellationToken)
+    {
+        if (request.InvocationSnapshot.TriggerOrigin is not null)
+        {
+            ScheduleRunAdmissionStoreResult scheduled;
+            try
+            {
+                scheduled = await CreateScheduledAsync(request, CreateRun(request, definition), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                return Result(
+                    GovernedLoopSequentialMaterializationStatus.Unavailable,
+                    run,
+                    anchor,
+                    $"Atomic schedule run-admission evidence could not be reconciled before audit: {exception.GetType().Name}.");
+            }
+
+            var scheduledResult = await ResolveScheduledResultAsync(request, definition, anchor, scheduled).ConfigureAwait(false);
+            if (scheduledResult is not null)
+            {
+                return scheduledResult;
+            }
+
+            run = scheduled.Run!;
+        }
+
+        return await ReconcileMaterializedRunAsync(request, definition, anchor, run, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<GovernedLoopSequentialMaterializationResult> ReconcileMaterializedRunAsync(
         GovernedLoopSequentialMaterializationRequest request,
         CustomLoopDefinition definition,
         GovernedLoopSequentialRunAnchor anchor,

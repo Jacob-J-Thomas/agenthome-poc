@@ -27,6 +27,15 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
         Assert.Equal(2, result.State.NextOccurrence!.Ordinal);
         var terminal = Assert.Single(result.State.TerminalDeliveryEvidence);
         var prepared = fixture.Store.Mutations[1].Replacement.PendingDelivery!;
+        var directive = Assert.IsType<ScheduleExecutionDirective>(prepared.Prepared!.Envelope.ScheduleExecutionDirective);
+        Assert.Equal(fixture.Definition.ScheduleId, directive.ScheduleId);
+        Assert.Equal(fixture.Definition.Revision, directive.DefinitionRevision);
+        Assert.Equal(fixture.Store.Mutations[0].Replacement.DefinitionHash, directive.DefinitionHash);
+        Assert.Equal(prepared.Occurrence, directive.Occurrence);
+        Assert.Equal(prepared.Identity, directive.Identity);
+        Assert.Equal(fixture.Definition.Target, directive.Target);
+        Assert.Equal(fixture.Definition.Overlap, directive.Overlap);
+        Assert.Equal(new string('a', 64), directive.PreQueueOverlapEvidenceHash);
         Assert.Equal(ScheduleDeliveryResultKind.Queued, terminal.Result.Kind);
         Assert.Equal(prepared.CurrentEvidenceHash, terminal.CurrentEvidenceHash);
         Assert.Equal(prepared.RecurrenceProofHash, terminal.RecurrenceProofHash);
@@ -155,47 +164,70 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
     }
 
     [Fact]
-    public async Task Overlap_defer_retains_exact_identity_without_current_evidence_or_queue()
+    public async Task Active_defer_one_queues_the_exact_identity_for_atomic_run_admission()
     {
         var fixture = Fixture();
         fixture.Overlap.Status = ScheduleOverlapStatus.Active;
 
         var result = await fixture.Evaluator.EvaluateAsync(fixture.Definition.ScheduleId);
 
-        Assert.Equal(ScheduleEvaluationStatus.Deferred, result.Status);
+        Assert.Equal(ScheduleEvaluationStatus.Queued, result.Status);
         Assert.Null(result.State!.PendingDelivery);
-        Assert.Equal(1, result.State.NextOccurrence!.Ordinal);
-        Assert.NotNull(result.State.DeferredOccurrence);
-        Assert.Equal(result.State.NextOccurrence, result.State.DeferredOccurrence!.Occurrence);
-        var disposition = Assert.Single(result.State.DispositionEvidence);
-        Assert.Equal(ScheduleOccurrenceDisposition.OverlapDeferred, disposition.Disposition);
-        Assert.Equal(new string('a', 64), disposition.DecisionEvidenceHash);
-        Assert.Equal(0, fixture.CurrentEvidence.Calls);
-        Assert.Equal(0, fixture.Queue.Calls);
+        Assert.Equal(2, result.State.NextOccurrence!.Ordinal);
+        Assert.Null(result.State.DeferredOccurrence);
+        Assert.Empty(result.State.DispositionEvidence);
+        Assert.Equal(new string('a', 64), Assert.Single(result.State.TerminalDeliveryEvidence).OverlapEvidenceHash);
+        Assert.Equal(2, fixture.CurrentEvidence.Calls);
+        Assert.Equal(1, fixture.Queue.Calls);
+        AssertLegalTransitions(fixture.Definition, fixture.Store.Mutations);
     }
 
     [Fact]
-    public async Task Deferred_occurrence_can_later_be_finally_skipped_without_rewriting_deferral_evidence()
+    public async Task Persisted_local_deferral_converges_onto_atomic_admission_without_rewriting_prior_evidence()
     {
-        var fixture = Fixture();
+        var definition = ScheduleEvaluatorTestData.Definition();
+        var occurrence = ScheduleEvaluatorTestData.Occurrence(timeZone: definition.TimeZone);
+        Assert.True(ScheduleContractHash.TryComputeDefinition(definition, out var definitionHash, out _));
+        Assert.True(ScheduleIdentityDerivation.TryDerive(
+            definition.ScheduleId,
+            definition.Revision,
+            definitionHash!,
+            occurrence,
+            out var identity,
+            out _));
+        var retainedDeferral = new ScheduleOccurrenceDispositionEvidence(
+            ScheduleOccurrenceDispositionEvidence.CurrentSchemaVersion,
+            occurrence.Ordinal,
+            occurrence.Ordinal,
+            1,
+            occurrence.ScheduledLocal,
+            occurrence.ScheduledLocal,
+            occurrence.ScheduledAtUtc,
+            occurrence.ScheduledAtUtc,
+            definition.TimeZone,
+            ScheduleOccurrenceDisposition.OverlapDeferred,
+            new string('a', 64),
+            "overlap-policy-defer",
+            ScheduleEvaluatorTestData.Now.AddMinutes(-1));
+        var state = ScheduleEvaluatorTestData.State(
+            definition,
+            occurrence,
+            lastClock: ScheduleEvaluatorTestData.Now.AddMinutes(-1),
+            deferred: new ScheduleDeferredOccurrence(
+                ScheduleDeferredOccurrence.CurrentSchemaVersion,
+                occurrence,
+                identity!,
+                ScheduleEvaluatorTestData.Now.AddMinutes(-1)),
+            dispositions: [retainedDeferral]);
+        var fixture = Fixture(definition, state);
         fixture.Overlap.Status = ScheduleOverlapStatus.Active;
-        var deferred = await fixture.Evaluator.EvaluateAsync(fixture.Definition.ScheduleId);
-        var retainedDeferral = Assert.Single(deferred.State!.DispositionEvidence);
-        Assert.Equal(ScheduleOccurrenceDisposition.OverlapDeferred, retainedDeferral.Disposition);
 
-        fixture.Overlap.Status = ScheduleOverlapStatus.Clear;
-        fixture.TimeProvider.Now = ScheduleEvaluatorTestData.FirstUtc.AddDays(31);
-        var skipped = await fixture.Evaluator.EvaluateAsync(fixture.Definition.ScheduleId);
+        var result = await fixture.Evaluator.EvaluateAsync(fixture.Definition.ScheduleId);
 
-        Assert.Equal(ScheduleEvaluationStatus.Skipped, skipped.Status);
-        Assert.Null(skipped.State!.DeferredOccurrence);
-        Assert.Contains(retainedDeferral, skipped.State.DispositionEvidence);
-        Assert.Contains(
-            skipped.State.DispositionEvidence,
-            evidence => evidence.Disposition == ScheduleOccurrenceDisposition.MisfireSkipped
-                && evidence.FirstOrdinal == retainedDeferral.FirstOrdinal);
-        Assert.Equal(2, skipped.State.DispositionEvidence.Count);
-        Assert.Equal(0, fixture.Queue.Calls);
+        Assert.Equal(ScheduleEvaluationStatus.Queued, result.Status);
+        Assert.Null(result.State!.DeferredOccurrence);
+        Assert.Equal([retainedDeferral], result.State.DispositionEvidence);
+        Assert.Equal(1, fixture.Queue.Calls);
         AssertLegalTransitions(fixture.Definition, fixture.Store.Mutations);
     }
 
@@ -525,6 +557,39 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
         Assert.NotEqual(prepared.CurrentEvidenceHash, terminal.CurrentEvidenceHash);
         Assert.Equal(prepared.Prepared.CanonicalEnvelopeHash, terminal.Result.CanonicalEnvelopeHash);
         Assert.Equal(restartedAt, restarted.Store.Mutations[0].Replacement.LastClockObservedAtUtc);
+    }
+
+    [Theory]
+    [InlineData(SchedulePendingDeliveryPhase.Prepared)]
+    [InlineData(SchedulePendingDeliveryPhase.ResultObserved)]
+    public async Task Loaded_pending_directive_policy_mismatch_fails_before_queue(SchedulePendingDeliveryPhase phase)
+    {
+        var initial = Fixture();
+        _ = await initial.Evaluator.EvaluateAsync(initial.Definition.ScheduleId);
+        var preparedState = initial.Store.Mutations
+            .Select(mutation => mutation.Replacement)
+            .Single(state => state.PendingDelivery?.Phase == SchedulePendingDeliveryPhase.Prepared);
+        var mismatchedState = WithDirectiveOverlap(preparedState, ScheduleOverlapPolicy.Allow, phase);
+        var stateValidation = ScheduleContractValidator.ValidateState(mismatchedState);
+        Assert.True(
+            stateValidation.IsValid,
+            ScheduleEvaluatorTestData.Errors(stateValidation));
+        var definitionValidation = ScheduleContractValidator.ValidateDefinitionStateComposition(
+            initial.Definition,
+            mismatchedState);
+        Assert.Contains(
+            definitionValidation.Errors,
+            error => error.Path == "state.pendingDelivery.prepared.envelope.scheduleExecutionDirective"
+                && error.Code == "schedule_execution_directive_mismatch");
+        var restarted = Fixture(initial.Definition, mismatchedState, mismatchedState.LastClockObservedAtUtc);
+
+        var result = await restarted.Evaluator.EvaluateAsync(initial.Definition.ScheduleId);
+
+        Assert.Equal(ScheduleEvaluationStatus.Corrupt, result.Status);
+        Assert.Equal("definition-state-invalid", result.ReasonCode);
+        Assert.Equal(0, restarted.Queue.Calls);
+        Assert.Equal(0, restarted.CurrentEvidence.Calls);
+        Assert.Empty(restarted.Store.Mutations);
     }
 
     [Fact]
@@ -1406,19 +1471,20 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
     }
 
     [Fact]
-    public async Task Existing_deferral_is_idempotently_retained_while_overlap_remains_active()
+    public async Task Active_defer_one_is_queued_once_and_does_not_create_a_local_deferral_on_recheck()
     {
         var fixture = Fixture();
         fixture.Overlap.Status = ScheduleOverlapStatus.Active;
         var first = await fixture.Evaluator.EvaluateAsync(fixture.Definition.ScheduleId);
-        var retained = Assert.Single(first.State!.DispositionEvidence);
 
         var second = await fixture.Evaluator.EvaluateAsync(fixture.Definition.ScheduleId);
 
-        Assert.Equal(ScheduleEvaluationStatus.Deferred, second.Status);
-        Assert.Equal(first.State.DeferredOccurrence, second.State!.DeferredOccurrence);
-        Assert.Equal([retained], second.State.DispositionEvidence);
-        Assert.Equal(0, fixture.Queue.Calls);
+        Assert.Equal(ScheduleEvaluationStatus.Queued, first.Status);
+        Assert.Equal(ScheduleEvaluationStatus.NotDue, second.Status);
+        Assert.Null(first.State!.DeferredOccurrence);
+        Assert.Null(second.State!.DeferredOccurrence);
+        Assert.Empty(second.State.DispositionEvidence);
+        Assert.Equal(1, fixture.Queue.Calls);
     }
 
     [Fact]
@@ -1680,7 +1746,7 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
     }
 
     [Fact]
-    public async Task Revision_exhaustion_blocks_ambiguous_record_finalization_skip_and_deferral()
+    public async Task Revision_exhaustion_blocks_ambiguous_record_finalization_skip_and_preparation()
     {
         var seed = Fixture();
         _ = await seed.Evaluator.EvaluateAsync(seed.Definition.ScheduleId);
@@ -2675,6 +2741,56 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
             ScheduleInstantResolutionStatus.Resolved,
             timeZone.RulesFingerprint,
             DateTime.SpecifyKind(utc.UtcDateTime.AddHours(-5), DateTimeKind.Unspecified));
+
+    private static ScheduleState WithDirectiveOverlap(ScheduleState state, ScheduleOverlapPolicy overlap, SchedulePendingDeliveryPhase phase)
+    {
+        var pending = state.PendingDelivery!;
+        var prepared = pending.Prepared!;
+        var envelope = prepared.Envelope;
+        var directive = envelope.ScheduleExecutionDirective! with { Overlap = overlap };
+        Assert.True(TriggerDeliveryFactory.TryCreateScheduledEnvelope(
+            envelope.SchemaVersion,
+            envelope.DeliveryId,
+            envelope.DeduplicationId,
+            envelope.Adapter,
+            envelope.Loop,
+            envelope.ActorContext,
+            envelope.Authority,
+            envelope.Temporal,
+            envelope.Payload,
+            envelope.Redelivery,
+            directive,
+            envelope.PublicationRequested,
+            envelope.InvokingConversation,
+            envelope.VisibleStatus,
+            envelope.VisibleReason,
+            out var changedEnvelope,
+            out var validation),
+            string.Join(',', validation.Errors.Select(error => $"{error.Field}:{error.Code}")));
+        Assert.True(TriggerDeliveryHash.TryCompute(changedEnvelope, out var changedHash, out _));
+        var changedPrepared = prepared with
+        {
+            Envelope = changedEnvelope!,
+            CanonicalEnvelopeHash = changedHash!,
+        };
+        var result = phase == SchedulePendingDeliveryPhase.ResultObserved
+            ? new ScheduleDeliveryResultEvidence(
+                ScheduleDeliveryResultEvidence.CurrentSchemaVersion,
+                ScheduleDeliveryResultKind.Backpressured,
+                "queue-backpressured",
+                changedHash!,
+                prepared.PreparedAtUtc)
+            : null;
+        return state with
+        {
+            PendingDelivery = pending with
+            {
+                Phase = phase,
+                Prepared = changedPrepared,
+                Result = result,
+            },
+        };
+    }
 
     private static void AssertSameState(ScheduleState? actual, ScheduleState expected)
     {

@@ -35,4 +35,22 @@ public enum GovernedLoopSequentialInvocationStatus
 
     /// <summary>A nonterminal run exists but requires recovery or an explicit lifecycle transition instead of first dispatch.</summary>
     RecoveryRequired = 10,
+
+    /// <summary>The authenticated Skip policy durably closed the occurrence before provider dispatch.</summary>
+    OverlapSkipped = 11,
+
+    /// <summary>The authenticated DeferOne policy durably retained the occurrence for later reselection.</summary>
+    OverlapDeferred = 12,
+
+    /// <summary>The authenticated Allow policy durably retained the occurrence for serialized reselection.</summary>
+    OverlapSerialized = 13,
+
+    /// <summary>An existing exact DeferOne occurrence retained the single deferred slot.</summary>
+    DeferredOneSuppressed = 14,
+
+    /// <summary>The exact run and admission receipt are durable, but provider execution was intentionally not entered.</summary>
+    Prepared = 15,
+
+    /// <summary>The exact scheduled occurrence was terminalized before its detailed admission evidence was compacted.</summary>
+    Retired = 16,
 }

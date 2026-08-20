@@ -131,6 +131,22 @@ public sealed class ScheduleDurabilityRegressionTests
             "state.pendingDelivery.prepared.envelope.payload",
             "payload_mismatch");
 
+        var policyMismatch = PreparedState(
+            definition,
+            definitionHash,
+            occurrence,
+            directiveOverlap: ScheduleOverlapPolicy.Allow);
+        AssertDefinitionStateInvalid(
+            definition,
+            policyMismatch,
+            "state.pendingDelivery.prepared.envelope.scheduleExecutionDirective",
+            "schedule_execution_directive_mismatch");
+        AssertCompositionInvalid(
+            definition,
+            policyMismatch,
+            "state.pendingDelivery.prepared.envelope.scheduleExecutionDirective",
+            "schedule_execution_directive_mismatch");
+
         var wrongHash = new string('1', ScheduleContractLimits.Sha256HexCharacters);
         var wrongHashPrepared = ScheduleContractTestData.Prepared(occurrence, definitionHash: wrongHash);
         var wrongHashPending = ScheduleContractTestData.Pending(occurrence, wrongHashPrepared, definitionHash: wrongHash);
@@ -919,6 +935,7 @@ public sealed class ScheduleDurabilityRegressionTests
         TriggerPayloadEvidence? payload = null,
         TriggerTemporalEvidence? temporal = null,
         TriggerRedeliveryEvidence? redelivery = null,
+        ScheduleOverlapPolicy? directiveOverlap = null,
         bool publicationRequested = false,
         CustomLoopConversationReference? conversation = null)
     {
@@ -934,6 +951,7 @@ public sealed class ScheduleDurabilityRegressionTests
             payload: payload,
             temporal: temporal,
             redelivery: redelivery,
+            overlap: directiveOverlap ?? definition.Overlap,
             publicationRequested: publicationRequested,
             conversation: conversation);
         var pending = ScheduleContractTestData.Pending(
