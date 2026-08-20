@@ -181,7 +181,7 @@ internal static class GovernedLoopRuntimeTests
         await QueueScheduleAsync(fixture.Paths, third, workerNow.AddTicks(2));
 
         var dispatchNow = workerNow.AddSeconds(1);
-        var queue = new TriggerQueueStore(fixture.Paths, timeProvider: new FixedTriggerTimeProvider(dispatchNow));
+        var queue = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime, timeProvider: new FixedTriggerTimeProvider(dispatchNow));
         Assert.Equal(3, (await queue.GetSnapshotAsync(dispatchNow)).QueuedEntries);
         await using var runtime = await fixture.CreateRuntimeAsync();
         var generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
@@ -263,7 +263,7 @@ internal static class GovernedLoopRuntimeTests
 
         await QueueScheduleAsync(fixture.Paths, blocker, workerNow);
         var workerClock = new MonotonicTriggerTimeProvider(dispatchNow);
-        var queue = new TriggerQueueStore(fixture.Paths, timeProvider: workerClock);
+        var queue = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime, timeProvider: workerClock);
         await using (var runtime = await fixture.CreateRuntimeAsync())
         {
             var generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
@@ -475,7 +475,7 @@ internal static class GovernedLoopRuntimeTests
             Assert.Equal(SchedulePendingDeliveryPhase.Prepared, interrupted.State!.PendingDelivery!.Phase);
         }
 
-        var queue = new TriggerQueueStore(fixture.Paths, timeProvider: new FixedTriggerTimeProvider(workerNow.AddSeconds(1)));
+        var queue = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime, timeProvider: new FixedTriggerTimeProvider(workerNow.AddSeconds(1)));
         var queued = Assert.Single((await queue.GetSnapshotAsync(workerNow.AddSeconds(1))).Entries);
         Assert.Equal(TriggerQueueEntryState.Queued, queued.State);
         await using (var runtime = await fixture.CreateRuntimeAsync())
@@ -519,7 +519,7 @@ internal static class GovernedLoopRuntimeTests
             Assert.Empty(replay.State!.TerminalDeliveryEvidence);
         }
 
-        var restartedEntry = Assert.Single((await new TriggerQueueStore(fixture.Paths).GetSnapshotAsync(workerNow.AddSeconds(3))).Entries);
+        var restartedEntry = Assert.Single((await new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime).GetSnapshotAsync(workerNow.AddSeconds(3))).Entries);
         Assert.Equal(TriggerQueueEntryState.NeedsReview, restartedEntry.State);
         Assert.Null(await new CustomLoopRunStore(fixture.Paths).GetScheduleAdmissionAsync(scenario.CreateEnvelope().DeliveryId));
         Assert.Empty(await new CustomLoopRunStore(fixture.Paths).ListRecentAsync(10));
