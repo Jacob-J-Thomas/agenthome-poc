@@ -99,7 +99,7 @@ public sealed class GovernedLoopLocalCanonicalCompositionTests
             ScheduleContractTestData.FirstUtc.AddSeconds(5),
             out var delivery,
             out _));
-        var queue = new TriggerQueueStore(paths, timeProvider: clock);
+        var queue = new TriggerQueueStore(paths, TriggerQueueQuota.Runtime, timeProvider: clock);
         var admission = await new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(queue), queue)
             .AdmitAsync(TriggerQueueAdmissionRequestFactory.Create(delivery!, TriggerQueueAdmissionMode.Queued, TriggerQueuePriority.Normal));
         var authorizer = new CountingTriggerAuthorizer();

@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Triggers;
+using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Application.Triggers.Schedules;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
@@ -59,7 +60,7 @@ public static class GovernedLoopLocalBackgroundRuntimeFactory
         try
         {
             runStore = new CustomLoopRunStore(paths, clock);
-            var triggerStore = new TriggerQueueStore(paths, timeProvider: clock);
+            var triggerStore = new TriggerQueueStore(paths, TriggerQueueQuota.Runtime, timeProvider: clock);
             var triggerWorker = new TriggerWorkerService(
                 triggerStore,
                 triggerAuthorizer,
