@@ -17,4 +17,7 @@ public enum CustomLoopSequentialNodeEvidenceKind
 
     /// <summary>Ambiguous outcome evidence requiring durable attention is retained.</summary>
     AmbiguityAttention,
+
+    /// <summary>An undispatched Ready activation was durably pruned by an earlier authenticated control decision.</summary>
+    TopologySkipped,
 }

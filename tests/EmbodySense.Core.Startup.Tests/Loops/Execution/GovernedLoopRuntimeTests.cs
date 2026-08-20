@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text.Json;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.ContextualRoles.Models;
@@ -424,6 +425,108 @@ internal static class GovernedLoopRuntimeTests
         await AssertNoToolExecutionAsync(fixture.Paths);
     }
 
+    internal static void Public_frontier_node_contract_preserves_legacy_json_and_round_trips_topology_evidence()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        const string LegacyJson = """
+            {
+              "schemaVersion": 1,
+              "planOrdinal": 3,
+              "nodeId": "condition",
+              "kind": "Condition",
+              "typeId": "exact-text-condition",
+              "descriptorVersion": 1,
+              "incomingControlEdgeIds": ["infer-to-condition"],
+              "outgoingControlEdgeIds": ["condition-false", "condition-true"],
+              "status": "Completed",
+              "attempt": 1,
+              "attemptOperationId": "attempt-condition-2",
+              "outcomeEvidenceId": "event-condition-2",
+              "outcomeEvidenceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+            """;
+
+        var legacy = Assert.IsType<LoopRunFrontierNodeSnapshot>(
+            JsonSerializer.Deserialize<LoopRunFrontierNodeSnapshot>(LegacyJson, options));
+
+        Assert.Equal(0, legacy.ActivationOrdinal);
+        Assert.Equal(0, legacy.VisitOrdinal);
+        Assert.Null(legacy.CycleId);
+        Assert.Null(legacy.CycleIteration);
+        Assert.Null(legacy.ControlOutcome);
+        Assert.Empty(legacy.SelectedControlEdgeIds);
+        Assert.Empty(legacy.SkippedControlEdgeIds);
+        Assert.Empty(legacy.JoinArrivals);
+
+        var topology = legacy with
+        {
+            ActivationOrdinal = 6,
+            VisitOrdinal = 2,
+            CycleId = "cycle-condition",
+            CycleIteration = 2,
+            ControlOutcome = GovernedLoopControlCondition.True.ToString(),
+            SelectedControlEdgeIds = Array.AsReadOnly(new[] { "condition-true" }),
+            SkippedControlEdgeIds = Array.AsReadOnly(new[] { "condition-false" }),
+        };
+        var json = JsonSerializer.Serialize(topology, options);
+        var roundTrip = Assert.IsType<LoopRunFrontierNodeSnapshot>(
+            JsonSerializer.Deserialize<LoopRunFrontierNodeSnapshot>(json, options));
+
+        Assert.Equal(topology.ActivationOrdinal, roundTrip.ActivationOrdinal);
+        Assert.Equal(topology.VisitOrdinal, roundTrip.VisitOrdinal);
+        Assert.Equal(topology.CycleId, roundTrip.CycleId);
+        Assert.Equal(topology.CycleIteration, roundTrip.CycleIteration);
+        Assert.Equal(topology.ControlOutcome, roundTrip.ControlOutcome);
+        Assert.Equal(topology.SelectedControlEdgeIds, roundTrip.SelectedControlEdgeIds);
+        Assert.Equal(topology.SkippedControlEdgeIds, roundTrip.SkippedControlEdgeIds);
+        Assert.Empty(roundTrip.JoinArrivals);
+        var (schemaVersion, planOrdinal, nodeId, kind, typeId, descriptorVersion, incomingEdges, outgoingEdges, status, attempt, attemptOperationId, outcomeEvidenceId, outcomeEvidenceHash) = topology;
+        Assert.Equal(1, schemaVersion);
+        Assert.Equal(3, planOrdinal);
+        Assert.Equal("condition", nodeId);
+        Assert.Equal("Condition", kind);
+        Assert.Equal("exact-text-condition", typeId);
+        Assert.Equal(1, descriptorVersion);
+        Assert.Equal(topology.IncomingControlEdgeIds, incomingEdges);
+        Assert.Equal(topology.OutgoingControlEdgeIds, outgoingEdges);
+        Assert.Equal("Completed", status);
+        Assert.Equal(1, attempt);
+        Assert.Equal("attempt-condition-2", attemptOperationId);
+        Assert.Equal("event-condition-2", outcomeEvidenceId);
+        Assert.Equal(new string('a', 64), outcomeEvidenceHash);
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)topology.SelectedControlEdgeIds).Add("replacement"));
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)topology.SkippedControlEdgeIds).Add("replacement"));
+
+        var join = new LoopRunFrontierNodeSnapshot(
+            1,
+            4,
+            "join",
+            "Join",
+            "selected-join",
+            1,
+            Array.AsReadOnly(new[] { "branch-a-to-join", "branch-b-to-join" }),
+            Array.AsReadOnly(new[] { "join-to-exit" }),
+            "Ready",
+            null,
+            null,
+            null,
+            null)
+        {
+            ActivationOrdinal = 7,
+            VisitOrdinal = 1,
+            JoinArrivals = Array.AsReadOnly(new[]
+            {
+                new LoopRunFrontierJoinArrivalSnapshot(1, "branch-a-to-join", 5),
+                new LoopRunFrontierJoinArrivalSnapshot(1, "branch-b-to-join", 6),
+            }),
+        };
+        var joinRoundTrip = Assert.IsType<LoopRunFrontierNodeSnapshot>(
+            JsonSerializer.Deserialize<LoopRunFrontierNodeSnapshot>(JsonSerializer.Serialize(join, options), options));
+        Assert.Equal(join.JoinArrivals, joinRoundTrip.JoinArrivals);
+        Assert.Throws<NotSupportedException>(() => ((IList<LoopRunFrontierJoinArrivalSnapshot>)join.JoinArrivals).Add(
+            new LoopRunFrontierJoinArrivalSnapshot(1, "replacement", 0)));
+    }
+
     private static async Task<CustomLoopRunRecord> WaitForRunAsync(
         CustomLoopRunStore store,
         CustomLoopRunStatus status)
@@ -473,19 +576,43 @@ internal static class GovernedLoopRuntimeTests
         foreach (var (expected, actual) in frontier.Payload.Nodes.Zip(snapshot.Nodes))
         {
             Assert.Equal(expected.SchemaVersion, actual.SchemaVersion);
+            Assert.Equal(expected.ActivationOrdinal, actual.ActivationOrdinal);
             Assert.Equal(expected.PlanOrdinal, actual.PlanOrdinal);
+            Assert.Equal(expected.VisitOrdinal, actual.VisitOrdinal);
             Assert.Equal(expected.NodeId, actual.NodeId);
             Assert.Equal(expected.Descriptor.Kind.ToString(), actual.Kind);
             Assert.Equal(expected.Descriptor.TypeId, actual.TypeId);
             Assert.Equal(expected.Descriptor.Version, actual.DescriptorVersion);
             Assert.Equal(expected.IncomingControlEdgeIds, actual.IncomingControlEdgeIds);
             Assert.Equal(expected.OutgoingControlEdgeIds, actual.OutgoingControlEdgeIds);
+            Assert.Equal(expected.CycleId, actual.CycleId);
+            Assert.Equal(expected.CycleIteration, actual.CycleIteration);
+            Assert.Equal(expected.ControlOutcome?.ToString(), actual.ControlOutcome);
+            Assert.Equal(expected.SelectedControlEdgeIds, actual.SelectedControlEdgeIds);
+            Assert.Equal(expected.SkippedControlEdgeIds, actual.SkippedControlEdgeIds);
+            Assert.Equal(expected.JoinArrivals.Count, actual.JoinArrivals.Count);
+            foreach (var (expectedArrival, actualArrival) in expected.JoinArrivals.Zip(actual.JoinArrivals))
+            {
+                Assert.Equal(expectedArrival.SchemaVersion, actualArrival.SchemaVersion);
+                Assert.Equal(expectedArrival.ControlEdgeId, actualArrival.ControlEdgeId);
+                Assert.Equal(expectedArrival.SourceActivationOrdinal, actualArrival.SourceActivationOrdinal);
+            }
+
             Assert.Equal(expected.Status.ToString(), actual.Status);
             Assert.Equal(expected.Attempt, actual.Attempt);
             Assert.Equal(expected.AttemptOperationId, actual.AttemptOperationId);
             Assert.Equal(expected.OutcomeEvidenceId, actual.OutcomeEvidenceId);
             Assert.Equal(expected.OutcomeEvidenceHash, actual.OutcomeEvidenceHash);
+
+            Assert.Throws<NotSupportedException>(() => ((IList<string>)actual.IncomingControlEdgeIds).Add("substituted-incoming"));
+            Assert.Throws<NotSupportedException>(() => ((IList<string>)actual.OutgoingControlEdgeIds).Add("substituted-outgoing"));
+            Assert.Throws<NotSupportedException>(() => ((IList<string>)actual.SelectedControlEdgeIds).Add("substituted-selected"));
+            Assert.Throws<NotSupportedException>(() => ((IList<string>)actual.SkippedControlEdgeIds).Add("substituted-skipped"));
+            Assert.Throws<NotSupportedException>(() => ((IList<LoopRunFrontierJoinArrivalSnapshot>)actual.JoinArrivals).Add(
+                new LoopRunFrontierJoinArrivalSnapshot(1, "substituted-arrival", 0)));
         }
+
+        Assert.Throws<NotSupportedException>(() => ((IList<LoopRunFrontierNodeSnapshot>)snapshot.Nodes).Add(snapshot.Nodes[0]));
     }
 
     private static string Hash64(char value) => new(value, 64);

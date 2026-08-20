@@ -9,7 +9,7 @@ public enum GovernedLoopFrontierStatus
     Active,
     /// <summary>The frontier is durably waiting.</summary>
     Waiting,
-    /// <summary>The frontier is blocked on explicit review or reconciliation.</summary>
+    /// <summary>The frontier is blocked on explicit review or reconciliation, either at one claimed node or over unchanged undispatched Ready work.</summary>
     ReviewBlocked,
     /// <summary>The frontier reached a successful terminal.</summary>
     Completed,

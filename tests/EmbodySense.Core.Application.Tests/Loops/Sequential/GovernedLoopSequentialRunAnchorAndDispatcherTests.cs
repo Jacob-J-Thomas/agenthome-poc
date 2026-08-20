@@ -32,8 +32,17 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             receipt.RunId,
             receipt.Revision,
             receipt.ExecutionGeneration,
+            receipt.ActivationOrdinal,
+            receipt.VisitOrdinal,
             receipt.NodeId,
             receipt.Attempt,
+            receipt.CycleId,
+            receipt.CycleIteration,
+            receipt.ControlOutcome,
+            receipt.SelectedControlEdgeIds,
+            receipt.SkippedControlEdgeIds,
+            null,
+            null,
             CustomLoopSequentialNodeDisposition.Completed,
             receipt.OutcomeArtifactHash,
             string.Empty));
@@ -362,7 +371,36 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             Assert.IsType<GovernedLoopSequentialRunAnchor>(context.AnchorResult.Anchor),
             context.Plan,
             node,
+            RunningActivation(context, context.Plan.Nodes[node.Ordinal]),
             1);
+
+    private static GovernedLoopNodeExecutionEvidence RunningActivation(
+        TestContext context,
+        GovernedLoopSequentialPlanNode node)
+    {
+        var initialized = GovernedLoopSequentialFrontierMachine.Initialize(
+            context.AdapterBinding,
+            context.Plan,
+            "trigger-attempt",
+            "trigger-outcome",
+            Hash('0'),
+            GovernedLoopSequentialApplicationTestFixture.Now);
+        var ready = Assert.IsType<GovernedLoopFrontierPosture>(initialized.Frontier);
+        var selection = GovernedLoopSequentialFrontierMachine.Select(ready, context.AdapterBinding, context.Plan);
+        Assert.Same(node, selection.Node);
+        var started = GovernedLoopSequentialFrontierMachine.Start(
+            ready,
+            context.AdapterBinding,
+            context.Plan,
+            node,
+            Assert.IsType<GovernedLoopNodeExecutionEvidence>(selection.Activation),
+            1,
+            $"attempt-{node.NodeId}",
+            GovernedLoopSequentialApplicationTestFixture.Now.AddSeconds(1));
+        var running = Assert.IsType<GovernedLoopFrontierPosture>(started.Frontier);
+        return Assert.IsType<GovernedLoopNodeExecutionEvidence>(
+            GovernedLoopSequentialFrontierMachine.Select(running, context.AdapterBinding, context.Plan).Activation);
+    }
 
     private static GovernedLoopSequentialAdapterBinding Rehash(GovernedLoopSequentialAdapterBinding binding)
         => GovernedLoopSequentialContractHash.Apply(binding with { ContentHash = string.Empty });
@@ -389,6 +427,19 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
         GovernedLoopSequentialNodeHandlerResultStatus disposition)
     {
         var binding = context.AdapterBinding;
+        var activation = RunningActivation(context, node);
+        var controlOutcome = disposition switch
+        {
+            GovernedLoopSequentialNodeHandlerResultStatus.Completed => GovernedLoopControlCondition.Success,
+            GovernedLoopSequentialNodeHandlerResultStatus.Rejected => GovernedLoopControlCondition.Failure,
+            _ => (GovernedLoopControlCondition?)null,
+        };
+        var selected = controlOutcome is null
+            ? []
+            : node.OutgoingControlEdgeIds.Where(edgeId => context.Plan.ControlEdges.Single(edge => edge.Id == edgeId).Condition == controlOutcome).ToArray();
+        var skipped = controlOutcome is null
+            ? []
+            : node.OutgoingControlEdgeIds.Except(selected, StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         return GovernedLoopSequentialNodeEvidenceHash.Apply(new GovernedLoopSequentialNodeEvidenceReceipt(
             1,
             EvidenceKind(disposition),
@@ -396,8 +447,15 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             binding.ExecutionBinding.RunId,
             binding.ExecutionBinding.Revision,
             binding.ExecutionBinding.ExecutionGeneration,
+            activation.ActivationOrdinal,
+            activation.VisitOrdinal,
             node.NodeId,
             1,
+            activation.CycleId,
+            activation.CycleIteration,
+            controlOutcome,
+            selected,
+            skipped,
             disposition,
             Hash('f'),
             string.Empty));

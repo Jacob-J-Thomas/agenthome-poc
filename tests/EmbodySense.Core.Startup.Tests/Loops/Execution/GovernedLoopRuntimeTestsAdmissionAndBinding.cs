@@ -4,6 +4,9 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 public sealed class GovernedLoopRuntimeTestsAdmissionAndBinding
 {
     [Fact]
+    public void Public_frontier_node_contract_preserves_legacy_json_and_round_trips_topology_evidence() => GovernedLoopRuntimeTests.Public_frontier_node_contract_preserves_legacy_json_and_round_trips_topology_evidence();
+
+    [Fact]
     public Task Public_runtime_executes_exact_canonical_inputs_and_terminal_replay_precedes_workspace_busy_and_restart() => GovernedLoopRuntimeTests.Public_runtime_executes_exact_canonical_inputs_and_terminal_replay_precedes_workspace_busy_and_restart();
 
     [Fact]

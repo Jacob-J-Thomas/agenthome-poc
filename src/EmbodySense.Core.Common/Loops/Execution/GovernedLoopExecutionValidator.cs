@@ -177,7 +177,7 @@ public static class GovernedLoopExecutionValidator
     /// <param name="current">The currently retained canonical execution evidence.</param>
     /// <param name="next">The proposed canonical successor evidence.</param>
     /// <returns>A bounded value-free validation result.</returns>
-    /// <remarks>Exact unchanged planes are accepted so later evidence may compose with immutable terminal lifecycle and frontier snapshots. Every changed retained effect or projection must make one legal item transition, while new canonical identities may be appended.</remarks>
+    /// <remarks>Exact unchanged planes are accepted so later evidence may compose with immutable terminal lifecycle and frontier snapshots. Every changed retained item must make one legal transition. New node activations must first be exposed as Ready or durably pruned as Skipped; other new canonical identities may be appended in their valid evidence posture.</remarks>
     public static GovernedLoopExecutionValidationResult ValidateTransition(GovernedLoopExecutionEvidenceSet? current, GovernedLoopExecutionEvidenceSet? next)
     {
         var errors = new List<GovernedLoopExecutionValidationError>();
@@ -439,14 +439,26 @@ public static class GovernedLoopExecutionValidator
 
     private static void ValidateNodeHistory(IReadOnlyList<GovernedLoopNodeExecutionEvidence> current, IReadOnlyList<GovernedLoopNodeExecutionEvidence> next, List<GovernedLoopExecutionValidationError> errors)
     {
-        var successors = next.ToDictionary(node => node.NodeId, StringComparer.Ordinal);
+        var successors = next.ToDictionary(node => node.ActivationOrdinal);
         for (var index = 0; index < current.Count; index++)
         {
-            if (!successors.TryGetValue(current[index].NodeId, out var successor))
+            if (!successors.TryGetValue(current[index].ActivationOrdinal, out var successor))
+            {
+                Add(errors, GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged, $"$frontier.payload.nodes[{index}]");
+            }
+            else if (!SameNodeActivationIdentity(current[index], successor))
             {
                 Add(errors, GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged, $"$frontier.payload.nodes[{index}]");
             }
             else if (!GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(current[index], successor))
+            {
+                Add(errors, GovernedLoopExecutionValidationErrorCode.IllegalTransition, $"$frontier.payload.nodes[{index}].status");
+            }
+        }
+
+        for (var index = current.Count; index < next.Count; index++)
+        {
+            if (next[index].Status is not (GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Skipped))
             {
                 Add(errors, GovernedLoopExecutionValidationErrorCode.IllegalTransition, $"$frontier.payload.nodes[{index}].status");
             }
@@ -518,15 +530,44 @@ public static class GovernedLoopExecutionValidator
     private static bool SameNodeEvidence(GovernedLoopNodeExecutionEvidence current, GovernedLoopNodeExecutionEvidence next)
     {
         return string.Equals(current.NodeId, next.NodeId, StringComparison.Ordinal)
+            && current.ActivationOrdinal == next.ActivationOrdinal
             && current.PlanOrdinal == next.PlanOrdinal
+            && current.VisitOrdinal == next.VisitOrdinal
             && current.Descriptor == next.Descriptor
             && current.IncomingControlEdgeIds.SequenceEqual(next.IncomingControlEdgeIds, StringComparer.Ordinal)
             && current.OutgoingControlEdgeIds.SequenceEqual(next.OutgoingControlEdgeIds, StringComparer.Ordinal)
+            && string.Equals(current.CycleId, next.CycleId, StringComparison.Ordinal)
+            && current.CycleIteration == next.CycleIteration
+            && current.ControlOutcome == next.ControlOutcome
+            && current.SelectedControlEdgeIds.SequenceEqual(next.SelectedControlEdgeIds, StringComparer.Ordinal)
+            && current.SkippedControlEdgeIds.SequenceEqual(next.SkippedControlEdgeIds, StringComparer.Ordinal)
+            && current.JoinArrivals.Count == next.JoinArrivals.Count
+            && current.JoinArrivals.Zip(next.JoinArrivals).All(pair => pair.First.SchemaVersion == pair.Second.SchemaVersion
+                && pair.First.SourceActivationOrdinal == pair.Second.SourceActivationOrdinal
+                && string.Equals(pair.First.ControlEdgeId, pair.Second.ControlEdgeId, StringComparison.Ordinal))
             && current.Attempt == next.Attempt
             && string.Equals(current.AttemptOperationId, next.AttemptOperationId, StringComparison.Ordinal)
             && current.Status == next.Status
             && string.Equals(current.OutcomeEvidenceId, next.OutcomeEvidenceId, StringComparison.Ordinal)
             && string.Equals(current.OutcomeEvidenceHash, next.OutcomeEvidenceHash, StringComparison.Ordinal);
+    }
+
+    private static bool SameNodeActivationIdentity(GovernedLoopNodeExecutionEvidence current, GovernedLoopNodeExecutionEvidence next)
+    {
+        return current.SchemaVersion == next.SchemaVersion
+            && current.ActivationOrdinal == next.ActivationOrdinal
+            && current.PlanOrdinal == next.PlanOrdinal
+            && current.VisitOrdinal == next.VisitOrdinal
+            && string.Equals(current.NodeId, next.NodeId, StringComparison.Ordinal)
+            && current.Descriptor == next.Descriptor
+            && current.IncomingControlEdgeIds.SequenceEqual(next.IncomingControlEdgeIds, StringComparer.Ordinal)
+            && current.OutgoingControlEdgeIds.SequenceEqual(next.OutgoingControlEdgeIds, StringComparer.Ordinal)
+            && string.Equals(current.CycleId, next.CycleId, StringComparison.Ordinal)
+            && current.CycleIteration == next.CycleIteration
+            && current.JoinArrivals.Count == next.JoinArrivals.Count
+            && current.JoinArrivals.Zip(next.JoinArrivals).All(pair => pair.First.SchemaVersion == pair.Second.SchemaVersion
+                && pair.First.SourceActivationOrdinal == pair.Second.SourceActivationOrdinal
+                && string.Equals(pair.First.ControlEdgeId, pair.Second.ControlEdgeId, StringComparison.Ordinal));
     }
 
     private static void ValidateEvidenceTimes(
@@ -557,7 +598,9 @@ public static class GovernedLoopExecutionValidator
 
     private static void ValidateEffectOrigins(GovernedLoopFrontierPayload frontier, IReadOnlyList<GovernedLoopEffectPosture> effects, List<GovernedLoopExecutionValidationError> errors)
     {
-        var nodesById = frontier.Nodes.ToDictionary(node => node.NodeId, StringComparer.Ordinal);
+        var nodesById = frontier.Nodes
+            .GroupBy(node => node.NodeId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
         for (var index = 0; index < effects.Count; index++)
         {
             var effect = effects[index]?.Payload;
@@ -566,13 +609,13 @@ public static class GovernedLoopExecutionValidator
                 continue;
             }
 
-            if (!nodesById.TryGetValue(nodeId, out var node))
+            if (!nodesById.TryGetValue(nodeId, out var nodes))
             {
                 Add(errors, GovernedLoopExecutionValidationErrorCode.EffectOriginNodeMissing, $"$.effects[{index}].payload.originNodeId");
                 continue;
             }
 
-            if (node.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Skipped)
+            if (nodes.All(node => node.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Skipped))
             {
                 Add(errors, GovernedLoopExecutionValidationErrorCode.EffectOriginNodeNotExecutable, $"$.effects[{index}].payload.originNodeId");
             }

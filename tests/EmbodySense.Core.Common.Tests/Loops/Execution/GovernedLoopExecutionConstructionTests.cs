@@ -101,7 +101,7 @@ public sealed class GovernedLoopExecutionConstructionTests
     }
 
     [Fact]
-    public void Frontier_factory_rejects_duplicate_node_identity_and_schema_one_concurrency_overflow()
+    public void Frontier_factory_rejects_implicit_duplicate_visits_but_allows_multiple_ready_activations()
     {
         var completed = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Completed, "same");
         var duplicate = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "same", planOrdinal: 1);
@@ -109,7 +109,8 @@ public sealed class GovernedLoopExecutionConstructionTests
         var readyB = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "b", planOrdinal: 1);
 
         Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPayload.Create(1, 1, 1, GovernedLoopFrontierStatus.Active, [completed, duplicate], GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty));
-        Assert.Throws<ArgumentException>(() => GovernedLoopFrontierPayload.Create(1, 1, 1, GovernedLoopFrontierStatus.Active, [readyA, readyB], GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty));
+        var multipleReady = GovernedLoopFrontierPayload.Create(1, 1, 1, GovernedLoopFrontierStatus.Active, [readyA, readyB], GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty);
+        Assert.Equal(2, multipleReady.Nodes.Count(node => node.Status == GovernedLoopNodeExecutionStatus.Ready));
         Assert.Throws<ArgumentOutOfRangeException>(() => GovernedLoopFrontierPayload.Create(1, 1, 2, GovernedLoopFrontierStatus.Active, [readyA], GovernedLoopExecutionTestFixture.UpdatedAtUtc, string.Empty));
     }
 

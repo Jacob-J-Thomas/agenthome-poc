@@ -575,42 +575,39 @@ public static class CustomLoopRunValidator
                 .Take(2)
                 .ToArray();
             var evidence = matchingEvents.Length == 1 ? matchingEvents[0].SequentialNodeEvidence : null;
+            var nodeSelectedControlEdgeIds = node.SelectedControlEdgeIds;
+            var nodeSkippedControlEdgeIds = node.SkippedControlEdgeIds;
+            var evidenceSelectedControlEdgeIds = evidence?.SelectedControlEdgeIds;
+            var evidenceSkippedControlEdgeIds = evidence?.SkippedControlEdgeIds;
             var compatible = evidence is not null
+                && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
                 && CustomLoopSequentialOutcomeArtifactHash.Matches(matchingEvents[0])
                 && string.Equals(evidence.OutcomeArtifactHash, node.OutcomeEvidenceHash, StringComparison.Ordinal)
+                && evidence.ActivationOrdinal == node.ActivationOrdinal
+                && evidence.VisitOrdinal == node.VisitOrdinal
+                && string.Equals(evidence.NodeId, node.NodeId, StringComparison.Ordinal)
+                && string.Equals(evidence.CycleId, node.CycleId, StringComparison.Ordinal)
+                && evidence.CycleIteration == node.CycleIteration
                 && (node.Status == GovernedLoopNodeExecutionStatus.Skipped
-                    ? IsSkippedFrontierEvidenceCompatible(frontier, node, matchingEvents[0], evidence)
-                    : string.Equals(evidence.NodeId, node.NodeId, StringComparison.Ordinal)
-                        && node.Attempt == evidence.Attempt
+                    ? evidence.Kind == CustomLoopSequentialNodeEvidenceKind.TopologySkipped
+                        && evidence.Attempt is null
+                        && evidence.Disposition == CustomLoopSequentialNodeDisposition.Completed
+                        && matchingEvents[0].Kind == CustomLoopRunEventKind.TopologyNodeSkipped
+                        && HasExactGoverningSkipActivation(frontier.Payload.Nodes, node, evidence)
+                    : node.Attempt == evidence.Attempt
+                        && node.ControlOutcome == evidence.ControlOutcome
+                        && nodeSelectedControlEdgeIds is not null
+                        && nodeSkippedControlEdgeIds is not null
+                        && evidenceSelectedControlEdgeIds is not null
+                        && evidenceSkippedControlEdgeIds is not null
+                        && nodeSelectedControlEdgeIds.SequenceEqual(evidenceSelectedControlEdgeIds, StringComparer.Ordinal)
+                        && nodeSkippedControlEdgeIds.SequenceEqual(evidenceSkippedControlEdgeIds, StringComparer.Ordinal)
                         && IsFrontierOutcomeDispositionCompatible(node.Status, evidence.Kind, evidence.Disposition));
             if (!compatible)
             {
                 Add(errors, "execution_frontier_outcome_evidence_mismatch", $"frontier.payload.nodes[{nodeIndex}].outcomeEvidenceId", "Committed frontier outcome evidence must identify one exact retained run event for the same node, attempt, artifact hash, and disposition.");
             }
         }
-    }
-
-    private static bool IsSkippedFrontierEvidenceCompatible(
-        GovernedLoopFrontierPosture frontier,
-        GovernedLoopNodeExecutionEvidence skipped,
-        CustomLoopRunEvent governingEvent,
-        CustomLoopSequentialNodeEvidence governingEvidence)
-    {
-        var governingNode = frontier.Payload.Nodes.FirstOrDefault(candidate =>
-            string.Equals(candidate.NodeId, governingEvidence.NodeId, StringComparison.Ordinal));
-        return governingEvidence.Kind == CustomLoopSequentialNodeEvidenceKind.CompletedOutcome
-            && governingEvidence.Disposition == CustomLoopSequentialNodeDisposition.Completed
-            && governingNode is
-            {
-                Status: GovernedLoopNodeExecutionStatus.Completed,
-                OutcomeEvidenceId: not null,
-                OutcomeEvidenceHash: not null,
-            }
-            && governingNode.Attempt == governingEvidence.Attempt
-            && governingNode.PlanOrdinal < skipped.PlanOrdinal
-            && string.Equals(governingNode.OutcomeEvidenceId, governingEvent.EventId, StringComparison.Ordinal)
-            && string.Equals(governingNode.OutcomeEvidenceHash, governingEvidence.OutcomeArtifactHash, StringComparison.Ordinal)
-            && governingNode.OutgoingControlEdgeIds.Intersect(skipped.IncomingControlEdgeIds, StringComparer.Ordinal).Any();
     }
 
     private static bool IsFrontierOutcomeDispositionCompatible(
@@ -1108,9 +1105,9 @@ public static class CustomLoopRunValidator
 
         var eventIds = new HashSet<string>(StringComparer.Ordinal);
         var controlExpectedLifecycleVersions = new HashSet<int>();
-        var sequentialStarts = new HashSet<(string NodeId, int Attempt)>();
-        var sequentialTerminals = new HashSet<(string NodeId, int Attempt)>();
-        var latestSequentialAttempts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var sequentialStarts = new HashSet<(int ActivationOrdinal, int Attempt)>();
+        var sequentialTerminals = new HashSet<(int ActivationOrdinal, int Attempt)>();
+        var latestSequentialVisits = new Dictionary<string, int>(StringComparer.Ordinal);
         DateTimeOffset? previousTimestamp = null;
         for (var index = 0; index < run.Events.Length; index++)
         {
@@ -1176,7 +1173,7 @@ public static class CustomLoopRunValidator
             ValidateToolAuthority(item.ToolAuthority, $"{field}.toolAuthority", run, errors);
             ValidateToolEvidence(item.ToolEvidence, $"{field}.toolEvidence", run, errors);
             ValidatePureNodeOutcome(item, field, run, errors);
-            ValidateSequentialNodeEvidence(item, index, field, run, sequentialStarts, sequentialTerminals, latestSequentialAttempts, errors);
+            ValidateSequentialNodeEvidence(item, index, field, run, sequentialStarts, sequentialTerminals, latestSequentialVisits, errors);
             ValidateTraceReservation(item, field, run, errors);
             var isToolEvent = item.Kind is CustomLoopRunEventKind.ToolRequestReserved or CustomLoopRunEventKind.ToolGovernanceDecided or CustomLoopRunEventKind.ToolOutcomeObserved or CustomLoopRunEventKind.ToolIntegrityFailed;
             if (isToolEvent && (item.ToolAuthority is null || item.ToolEvidence is null || !ToolAuthoritiesEqual(item.ToolAuthority, item.ToolEvidence.Authority)))
@@ -1318,9 +1315,9 @@ public static class CustomLoopRunValidator
         int eventIndex,
         string field,
         CustomLoopRunRecord run,
-        HashSet<(string NodeId, int Attempt)> starts,
-        HashSet<(string NodeId, int Attempt)> terminals,
-        Dictionary<string, int> latestAttempts,
+        HashSet<(int ActivationOrdinal, int Attempt)> starts,
+        HashSet<(int ActivationOrdinal, int Attempt)> terminals,
+        Dictionary<string, int> latestVisits,
         List<CustomLoopValidationError> errors)
     {
         if (item.SequentialNodeEvidence is not { } evidence)
@@ -1342,13 +1339,20 @@ public static class CustomLoopRunValidator
                 CustomLoopSequentialNodeEvidenceKind.CompletedOutcome => CustomLoopSequentialNodeDisposition.Completed,
                 CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection => CustomLoopSequentialNodeDisposition.Rejected,
                 CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention => CustomLoopSequentialNodeDisposition.NeedsReview,
+                CustomLoopSequentialNodeEvidenceKind.TopologySkipped => CustomLoopSequentialNodeDisposition.Completed,
                 _ => (CustomLoopSequentialNodeDisposition)(-1),
             });
         if (evidence.SchemaVersion != CustomLoopSequentialNodeEvidence.CurrentSchemaVersion
             || !validKind
             || !validDisposition
+            || evidence.ActivationOrdinal is < 0 or >= EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxFrontierNodes
+            || evidence.VisitOrdinal is < 1 or > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxNodeVisits
             || !CustomLoopArtifactIdentifier.IsValid(evidence.NodeId)
-            || evidence.Attempt is < 1 or > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxNodeAttempt
+            || evidence.Attempt is not null and (< 1 or > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxNodeAttempt)
+            || (evidence.CycleId is null) != (evidence.CycleIteration is null)
+            || evidence.CycleId is not null && !CustomLoopArtifactIdentifier.IsValid(evidence.CycleId)
+            || evidence.CycleIteration is not null and (< 1 or > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxCycleIterations)
+            || !HasValidSequentialRouteShape(evidence)
             || !CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
             || !CustomLoopSequentialOutcomeArtifactHash.Matches(item))
         {
@@ -1367,8 +1371,8 @@ public static class CustomLoopRunValidator
         }
 
         ValidateSequentialNodeCoordinates(item, eventIndex, evidence, field, run, errors);
+        ValidateSequentialEvidenceFrontierCoordinates(item, evidence, field, run, errors);
 
-        var key = (evidence.NodeId, evidence.Attempt);
         if (evidence.Kind == CustomLoopSequentialNodeEvidenceKind.DispatchStarted)
         {
             if (item.Kind is not (CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted))
@@ -1376,18 +1380,37 @@ public static class CustomLoopRunValidator
                 Add(errors, "invalid_sequential_dispatch_marker", $"{field}.kind", "A sequential dispatch-start marker belongs only to a durable provider-attempt start event.");
             }
 
-            var expectedAttempt = latestAttempts.GetValueOrDefault(evidence.NodeId) + 1;
-            if (!starts.Add(key) || evidence.Attempt != expectedAttempt)
+            if (evidence.Attempt is not { } attempt
+                || attempt != 1
+                || !starts.Add((evidence.ActivationOrdinal, attempt)))
             {
-                Add(errors, "non_monotonic_sequential_node_attempt", $"{field}.sequentialNodeEvidence.attempt", "Sequential node attempts must be unique and increase contiguously for each canonical node.");
-            }
-            else
-            {
-                latestAttempts[evidence.NodeId] = evidence.Attempt;
+                Add(errors, "invalid_sequential_node_attempt", $"{field}.sequentialNodeEvidence.attempt", "A dispatched activation must retain exactly one attempt-one start marker until governed retry policy is introduced.");
             }
 
+            RegisterSequentialVisit(evidence, field, latestVisits, errors);
             return;
         }
+
+        if (evidence.Kind == CustomLoopSequentialNodeEvidenceKind.TopologySkipped)
+        {
+            if (item.Kind != CustomLoopRunEventKind.TopologyNodeSkipped
+                || item.Attempt is not null
+                || evidence.Attempt is not null)
+            {
+                Add(errors, "invalid_sequential_skip_marker", $"{field}.sequentialNodeEvidence", "Topology-pruning evidence belongs only to one undispatched skip event without attempt coordinates.");
+            }
+
+            RegisterSequentialVisit(evidence, field, latestVisits, errors);
+            return;
+        }
+
+        if (evidence.Attempt is not { } terminalAttempt)
+        {
+            Add(errors, "sequential_terminal_attempt_required", $"{field}.sequentialNodeEvidence.attempt", "A dispatched terminal outcome requires its exact positive retry attempt.");
+            return;
+        }
+
+        var key = (evidence.ActivationOrdinal, terminalAttempt);
 
         var compatibleTerminalEvent = evidence.Kind switch
         {
@@ -1408,19 +1431,134 @@ public static class CustomLoopRunValidator
 
         if (item.Kind == CustomLoopRunEventKind.Admitted)
         {
-            if (evidence.Kind != CustomLoopSequentialNodeEvidenceKind.CompletedOutcome || evidence.Attempt != 1 || latestAttempts.ContainsKey(evidence.NodeId))
+            if (evidence.Kind != CustomLoopSequentialNodeEvidenceKind.CompletedOutcome
+                || evidence.ActivationOrdinal != 0
+                || evidence.VisitOrdinal != 1
+                || terminalAttempt != 1
+                || latestVisits.ContainsKey(evidence.NodeId))
             {
                 Add(errors, "invalid_sequential_trigger_outcome", $"{field}.sequentialNodeEvidence", "The admission event may retain only the first completed Manual Trigger outcome.");
             }
             else
             {
-                latestAttempts[evidence.NodeId] = evidence.Attempt;
+                latestVisits[evidence.NodeId] = evidence.VisitOrdinal;
             }
         }
         else if (!starts.Contains(key))
         {
             Add(errors, "sequential_dispatch_marker_required", $"{field}.sequentialNodeEvidence", "Terminal provider-node evidence requires an earlier exact dispatch-start marker for the same canonical attempt.");
         }
+    }
+
+    private static bool HasValidSequentialRouteShape(CustomLoopSequentialNodeEvidence evidence)
+    {
+        var selected = evidence.SelectedControlEdgeIds;
+        var skipped = evidence.SkippedControlEdgeIds;
+        if (selected is null
+            || skipped is null
+            || selected.Count > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxOutgoingEdges
+            || skipped.Count > EmbodySense.Core.Common.Loops.Execution.GovernedLoopExecutionLimits.MaxOutgoingEdges
+            || !IsSortedUniqueIdentifiers(selected)
+            || !IsSortedUniqueIdentifiers(skipped)
+            || selected.Intersect(skipped, StringComparer.Ordinal).Any())
+        {
+            return false;
+        }
+
+        if (evidence.Kind == CustomLoopSequentialNodeEvidenceKind.TopologySkipped)
+        {
+            return evidence.ControlOutcome is null
+                && selected.Count == 0
+                && skipped.Count == 0
+                && evidence.GoverningActivationOrdinal is >= 0
+                && evidence.GoverningActivationOrdinal < evidence.ActivationOrdinal
+                && CustomLoopArtifactIdentifier.IsValid(evidence.GoverningControlEdgeId);
+        }
+
+        if (evidence.GoverningActivationOrdinal is not null || evidence.GoverningControlEdgeId is not null)
+        {
+            return false;
+        }
+
+        if (evidence.Kind is CustomLoopSequentialNodeEvidenceKind.DispatchStarted or CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention)
+        {
+            return evidence.ControlOutcome is null && selected.Count == 0 && skipped.Count == 0;
+        }
+
+        return evidence.ControlOutcome is { } outcome
+            && outcome != GovernedLoopControlCondition.Unknown
+            && Enum.IsDefined(outcome);
+    }
+
+    private static bool IsSortedUniqueIdentifiers(IReadOnlyList<string> values)
+        => values.All(value => CustomLoopArtifactIdentifier.IsValid(value))
+            && values.SequenceEqual(values.Order(StringComparer.Ordinal).Distinct(StringComparer.Ordinal), StringComparer.Ordinal);
+
+    private static void RegisterSequentialVisit(
+        CustomLoopSequentialNodeEvidence evidence,
+        string field,
+        Dictionary<string, int> latestVisits,
+        List<CustomLoopValidationError> errors)
+    {
+        var expectedVisit = latestVisits.GetValueOrDefault(evidence.NodeId) + 1;
+        if (evidence.VisitOrdinal != expectedVisit)
+        {
+            Add(errors, "non_monotonic_sequential_node_visit", $"{field}.sequentialNodeEvidence.visitOrdinal", "Sequential node visits must be unique and increase contiguously for each canonical node identity.");
+            return;
+        }
+
+        latestVisits[evidence.NodeId] = evidence.VisitOrdinal;
+    }
+
+    private static void ValidateSequentialEvidenceFrontierCoordinates(
+        CustomLoopRunEvent item,
+        CustomLoopSequentialNodeEvidence evidence,
+        string field,
+        CustomLoopRunRecord run,
+        List<CustomLoopValidationError> errors)
+    {
+        if (run.Frontier?.Payload.Nodes.ElementAtOrDefault(evidence.ActivationOrdinal) is not { } activation
+            || activation.ActivationOrdinal != evidence.ActivationOrdinal
+            || activation.VisitOrdinal != evidence.VisitOrdinal
+            || !string.Equals(activation.NodeId, evidence.NodeId, StringComparison.Ordinal)
+            || !string.Equals(activation.CycleId, evidence.CycleId, StringComparison.Ordinal)
+            || activation.CycleIteration != evidence.CycleIteration
+            || activation.Attempt != evidence.Attempt
+            || evidence.Kind == CustomLoopSequentialNodeEvidenceKind.TopologySkipped && activation.Status != GovernedLoopNodeExecutionStatus.Skipped
+            || evidence.Kind == CustomLoopSequentialNodeEvidenceKind.TopologySkipped
+                && !HasExactGoverningSkipActivation(run.Frontier.Payload.Nodes, activation, evidence)
+            || evidence.ControlOutcome is not null
+                && !evidence.SelectedControlEdgeIds.Concat(evidence.SkippedControlEdgeIds).Order(StringComparer.Ordinal)
+                    .SequenceEqual(activation.OutgoingControlEdgeIds, StringComparer.Ordinal)
+            || evidence.ControlOutcome is { } controlOutcome && (activation.Status is not (GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running)
+                && (activation.ControlOutcome != controlOutcome
+                    || !activation.SelectedControlEdgeIds.SequenceEqual(evidence.SelectedControlEdgeIds, StringComparer.Ordinal)
+                    || !activation.SkippedControlEdgeIds.SequenceEqual(evidence.SkippedControlEdgeIds, StringComparer.Ordinal)))
+            || activation.Status == GovernedLoopNodeExecutionStatus.Skipped
+                && (!string.Equals(activation.OutcomeEvidenceId, item.EventId, StringComparison.Ordinal)
+                    || !string.Equals(activation.OutcomeEvidenceHash, evidence.OutcomeArtifactHash, StringComparison.Ordinal)))
+        {
+            Add(errors, "sequential_node_activation_mismatch", $"{field}.sequentialNodeEvidence.activationOrdinal", "Sequential evidence must identify the exact durable frontier activation, visit, cycle, attempt, and committed route coordinates.");
+        }
+    }
+
+    private static bool HasExactGoverningSkipActivation(
+        IReadOnlyList<GovernedLoopNodeExecutionEvidence> activations,
+        GovernedLoopNodeExecutionEvidence skipped,
+        CustomLoopSequentialNodeEvidence evidence)
+    {
+        if (evidence.GoverningActivationOrdinal is not { } governingOrdinal
+            || evidence.GoverningControlEdgeId is not { } governingEdgeId
+            || activations.ElementAtOrDefault(governingOrdinal) is not { } governing)
+        {
+            return false;
+        }
+
+        return governing.ActivationOrdinal == governingOrdinal
+            && governing.Status == GovernedLoopNodeExecutionStatus.Completed
+            && governing.SkippedControlEdgeIds.Contains(governingEdgeId, StringComparer.Ordinal)
+            && governing.OutgoingControlEdgeIds.Contains(governingEdgeId, StringComparer.Ordinal)
+            && skipped.IncomingControlEdgeIds.Contains(governingEdgeId, StringComparer.Ordinal);
     }
 
     private static void ValidateSequentialNodeCoordinates(
@@ -1431,6 +1569,18 @@ public static class CustomLoopRunValidator
         CustomLoopRunRecord run,
         List<CustomLoopValidationError> errors)
     {
+        if (item.Kind == CustomLoopRunEventKind.TopologyNodeSkipped)
+        {
+            if (!string.Equals(item.StepId, evidence.NodeId, StringComparison.Ordinal)
+                || item.Attempt is not null
+                || item.Iteration != evidence.CycleIteration)
+            {
+                Add(errors, "sequential_skip_coordinates_mismatch", field, "A topology-pruning event must identify the exact skipped activation node and cycle iteration without dispatch-attempt coordinates.");
+            }
+
+            return;
+        }
+
         var isExitFailure = item.Kind == CustomLoopRunEventKind.NodeAttemptFailed
             && HasPriorSequentialDispatch(run.Events, eventIndex, evidence, CustomLoopRunEventKind.ExitDecisionStarted);
         if (isExitFailure)
@@ -1443,6 +1593,7 @@ public static class CustomLoopRunValidator
         else if (item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed)
         {
             var isPureNode = IsPureNodeEvent(run, item);
+            var isTopologyNode = IsTopologyNodeEvent(run, item);
             var hasValidPureEventShape = item.Kind switch
             {
                 CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
@@ -1455,6 +1606,25 @@ public static class CustomLoopRunValidator
                 if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal) || !hasValidPureEventShape)
                 {
                     Add(errors, "sequential_pure_node_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential Transform or Validate evidence must identify its exact pinned frontier node and use the pure-node start, completion, or failure envelope.");
+                }
+
+                return;
+            }
+
+            if (isTopologyNode)
+            {
+                var hasValidTopologyShape = item.Kind switch
+                {
+                    CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
+                    CustomLoopRunEventKind.NodeAttemptCompleted => item.PureNodeOutcomeJson is null,
+                    CustomLoopRunEventKind.NodeAttemptFailed => HasPriorSequentialDispatch(run.Events, eventIndex, evidence, CustomLoopRunEventKind.NodeAttemptStarted),
+                    _ => false,
+                };
+                if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal)
+                    || item.Iteration != (evidence.CycleIteration ?? 1)
+                    || !hasValidTopologyShape)
+                {
+                    Add(errors, "sequential_topology_node_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential Condition or Join evidence must identify its exact activation, cycle iteration, and deterministic start, completion, or failure envelope.");
                 }
 
                 return;
@@ -1490,8 +1660,12 @@ public static class CustomLoopRunValidator
         return terminalIndex > 0 && events.Take(terminalIndex).Any(candidate => candidate is { Kind: var kind }
             && kind == expectedStartKind
             && candidate.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted } start
+            && start.ActivationOrdinal == evidence.ActivationOrdinal
+            && start.VisitOrdinal == evidence.VisitOrdinal
             && string.Equals(start.NodeId, evidence.NodeId, StringComparison.Ordinal)
-            && start.Attempt == evidence.Attempt);
+            && start.Attempt == evidence.Attempt
+            && string.Equals(start.CycleId, evidence.CycleId, StringComparison.Ordinal)
+            && start.CycleIteration == evidence.CycleIteration);
     }
 
     private static bool HasPriorPureDispatch(
@@ -1505,8 +1679,12 @@ public static class CustomLoopRunValidator
             TraceReservationUtf8Bytes: CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
             SequentialNodeEvidence: { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted } start,
         }
+            && start.ActivationOrdinal == evidence.ActivationOrdinal
+            && start.VisitOrdinal == evidence.VisitOrdinal
             && string.Equals(start.NodeId, evidence.NodeId, StringComparison.Ordinal)
-            && start.Attempt == evidence.Attempt);
+            && start.Attempt == evidence.Attempt
+            && string.Equals(start.CycleId, evidence.CycleId, StringComparison.Ordinal)
+            && start.CycleIteration == evidence.CycleIteration);
     }
 
     private static void ValidateIntegrityReservationScope(IReadOnlyList<CustomLoopRunEvent> events, List<CustomLoopValidationError> errors)
@@ -1540,7 +1718,7 @@ public static class CustomLoopRunValidator
     private static void ValidateTraceReservation(CustomLoopRunEvent item, string field, CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
     {
         var startsAttempt = item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted;
-        var expectedReservation = IsPureNodeEvent(run, item)
+        var expectedReservation = IsPureNodeEvent(run, item) || IsTopologyNodeEvent(run, item)
             ? CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes
             : CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes;
         if (startsAttempt && item.TraceReservationUtf8Bytes != expectedReservation)
@@ -1555,13 +1733,24 @@ public static class CustomLoopRunValidator
 
     private static bool IsPureNodeEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
     {
-        if (item.SequentialNodeEvidence is not { NodeId: var nodeId })
+        if (item.SequentialNodeEvidence is not { ActivationOrdinal: var activationOrdinal })
         {
             return false;
         }
 
-        var node = run.Frontier?.Payload.Nodes.FirstOrDefault(candidate => string.Equals(candidate.NodeId, nodeId, StringComparison.Ordinal));
+        var node = run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal);
         return node?.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate;
+    }
+
+    private static bool IsTopologyNodeEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        if (item.SequentialNodeEvidence is not { ActivationOrdinal: var activationOrdinal })
+        {
+            return false;
+        }
+
+        var node = run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal);
+        return node?.Descriptor.Kind is GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Join;
     }
 
     private static bool ToolPhaseMatchesEventKind(CustomLoopToolEvidencePhase phase, CustomLoopRunEventKind kind)
@@ -1966,9 +2155,7 @@ public static class CustomLoopRunValidator
 
     private static bool HasCompletedPureNodeOutcome(CustomLoopRunRecord run, string stepId)
     {
-        if (run.SequentialAdapterBinding is null
-            || run.Frontier?.Payload.Nodes.FirstOrDefault(node => string.Equals(node.NodeId, stepId, StringComparison.Ordinal))?.Descriptor.Kind
-                is not (GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate))
+        if (run.SequentialAdapterBinding is null || run.Frontier is null)
         {
             return false;
         }
@@ -1985,6 +2172,10 @@ public static class CustomLoopRunValidator
         }
             && string.Equals(item.StepId, stepId, StringComparison.Ordinal)
             && string.Equals(evidence.NodeId, stepId, StringComparison.Ordinal)
+            && run.Frontier.Payload.Nodes.ElementAtOrDefault(evidence.ActivationOrdinal) is { } activation
+            && activation.ActivationOrdinal == evidence.ActivationOrdinal
+            && activation.VisitOrdinal == evidence.VisitOrdinal
+            && activation.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate
             && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
             && CustomLoopSequentialOutcomeArtifactHash.Matches(item)) == true;
     }

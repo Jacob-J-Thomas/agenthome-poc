@@ -130,6 +130,7 @@ public sealed class GovernedLoopExecutionStateMatrixTests
         Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Waiting, [waiting]));
         Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.ReviewBlocked, [review]));
         Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.ReviewBlocked, [ready]));
+        Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.ReviewBlocked, [review, ready]));
         Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Completed, [completed, skipped]));
         Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Failed, [failed, ready]));
         Assert.True(GovernedLoopExecutionStateMatrix.IsFrontierShapeValid(GovernedLoopFrontierStatus.Cancelled, [running]));
@@ -158,7 +159,7 @@ public sealed class GovernedLoopExecutionStateMatrixTests
         AssertAllowedTargets(GovernedLoopRunStatus.NeedsReview, [], GovernedLoopExecutionStateMatrix.IsRunTransitionAllowed);
 
         AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Unknown, [], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
-        AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Ready, [GovernedLoopNodeExecutionStatus.Ready, GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Skipped, GovernedLoopNodeExecutionStatus.Failed], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
+        AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Ready, [GovernedLoopNodeExecutionStatus.Ready, GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Skipped, GovernedLoopNodeExecutionStatus.Failed, GovernedLoopNodeExecutionStatus.ReviewBlocked], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
         AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Running, [GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Completed, GovernedLoopNodeExecutionStatus.Waiting, GovernedLoopNodeExecutionStatus.Failed, GovernedLoopNodeExecutionStatus.ReviewBlocked], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
         AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Completed, [GovernedLoopNodeExecutionStatus.Completed], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
         AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Skipped, [GovernedLoopNodeExecutionStatus.Skipped], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
@@ -201,12 +202,16 @@ public sealed class GovernedLoopExecutionStateMatrixTests
         var running = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Running);
         var failed = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Failed);
         var skipped = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Skipped);
+        var atomicReview = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.ReviewBlocked, outcomeEvidenceId: "condition-attention");
+        var unprovedReview = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.ReviewBlocked);
         var changedNode = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Running, "other");
         var changedEdges = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Running, incomingEdgeIds: ["other-edge"]);
 
         Assert.True(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(ready, running));
         Assert.True(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(ready, skipped));
         Assert.True(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(ready, failed));
+        Assert.True(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(ready, atomicReview));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(ready, unprovedReview));
         Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(failed, running));
         Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(null, running));
         Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(running, changedNode));

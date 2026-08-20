@@ -28,8 +28,8 @@ public sealed class GovernedLoopSequentialBindingResolverTests
 
         Assert.False(result.IsResolved);
         Assert.Empty(result.Inputs);
-        Assert.Equal("pure-node.context-invalid", result.FailureCode);
-        Assert.Equal("$", result.FailurePath);
+        Assert.Equal("canonical-binding.activation-invalid", result.FailureCode);
+        Assert.Equal("$.frontier", result.FailurePath);
     }
 
     [Fact]
@@ -37,10 +37,16 @@ public sealed class GovernedLoopSequentialBindingResolverTests
     {
         var context = await ContextAsync();
         var identity = Node(context, "identity");
+        var triggerEvent = context.Run.Events[0];
+        Assert.True(CustomLoopSequentialOutcomeArtifactHash.Matches(triggerEvent));
+        Assert.True(CustomLoopSequentialNodeEvidenceHash.Matches(triggerEvent.SequentialNodeEvidence));
+        var triggerActivation = Assert.IsType<GovernedLoopFrontierPosture>(context.Run.Frontier).Payload.Nodes[0];
+        Assert.Equal(triggerEvent.EventId, triggerActivation.OutcomeEvidenceId);
+        Assert.Equal(triggerEvent.SequentialNodeEvidence!.OutcomeArtifactHash, triggerActivation.OutcomeEvidenceHash);
 
         var identityResolution = GovernedLoopSequentialBindingResolver.Resolve(context.Artifact, context.Plan, identity, context.Run);
 
-        Assert.True(identityResolution.IsResolved);
+        Assert.True(identityResolution.IsResolved, $"{identityResolution.FailureCode} at {identityResolution.FailurePath}");
         var identityInput = Assert.Single(identityResolution.Inputs);
         Assert.Equal("request-to-identity", identityInput.BindingId);
         Assert.Equal(GovernedLoopValueKind.Text, identityInput.Value.Kind);
@@ -88,8 +94,8 @@ public sealed class GovernedLoopSequentialBindingResolverTests
 
         Assert.False(result.IsResolved);
         Assert.Empty(result.Inputs);
-        Assert.Equal("pure-node.source-evidence-invalid", result.FailureCode);
-        Assert.Equal("$.bindings[result-to-validation]", result.FailurePath);
+        Assert.Equal("canonical-binding.activation-invalid", result.FailureCode);
+        Assert.Equal("$.frontier", result.FailurePath);
     }
 
     [Theory]
@@ -121,7 +127,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
 
         Assert.False(result.IsResolved);
         Assert.Empty(result.Inputs);
-        Assert.Equal("pure-node.source-evidence-invalid", result.FailureCode);
+        Assert.Equal("canonical-binding.source-evidence-invalid", result.FailureCode);
         Assert.Equal("$.bindings[validation-to-equality-left]", result.FailurePath);
     }
 
@@ -162,7 +168,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
 
         Assert.False(rejected.IsResolved);
         Assert.Empty(rejected.Inputs);
-        Assert.Equal("pure-node.context-invalid", rejected.FailureCode);
+        Assert.Equal("canonical-binding.context-invalid", rejected.FailureCode);
         Assert.Equal("$", rejected.FailurePath);
     }
 
@@ -368,6 +374,8 @@ public sealed class GovernedLoopSequentialBindingResolverTests
         var startedAtUtc = run.UpdatedAtUtc.AddMilliseconds(1);
         var completedAtUtc = startedAtUtc.AddMilliseconds(1);
         var attemptOperationId = $"start-{node.NodeId}";
+        var readyActivation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(
+            GovernedLoopSequentialFrontierMachine.Select(run.Frontier, context.AdapterBinding, context.Plan).Activation);
         var start = WithSequentialEvidence(
             new CustomLoopRunEvent(
                 run.Events.Length + 1,
@@ -396,6 +404,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
                     : CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes),
             context.AdapterBinding,
             node,
+            readyActivation,
             CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
             CustomLoopSequentialNodeDisposition.Unknown);
         var running = Frontier(GovernedLoopSequentialFrontierMachine.Start(
@@ -403,6 +412,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
             context.AdapterBinding,
             context.Plan,
             node,
+            readyActivation,
             1,
             attemptOperationId,
             startedAtUtc));
@@ -432,17 +442,24 @@ public sealed class GovernedLoopSequentialBindingResolverTests
             },
             context.AdapterBinding,
             node,
+            Assert.IsType<GovernedLoopNodeExecutionEvidence>(
+                GovernedLoopSequentialFrontierMachine.Select(running, context.AdapterBinding, context.Plan).Activation),
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed);
+        var runningActivation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(
+            GovernedLoopSequentialFrontierMachine.Select(running, context.AdapterBinding, context.Plan).Activation);
         var advanced = Frontier(GovernedLoopSequentialFrontierMachine.CompleteRunning(
             running,
             context.AdapterBinding,
             context.Plan,
             node,
+            runningActivation,
             1,
             attemptOperationId,
             completed.EventId,
             completed.SequentialNodeEvidence!.OutcomeArtifactHash,
+            GovernedLoopControlCondition.Success,
+            [],
             completedAtUtc));
         var successor = run with
         {
@@ -473,8 +490,10 @@ public sealed class GovernedLoopSequentialBindingResolverTests
         var replacement = draft with { SequentialNodeEvidence = evidence };
         var frontier = Assert.IsType<GovernedLoopFrontierPosture>(run.Frontier);
         var nodes = frontier.Payload.Nodes.Select(node => string.Equals(node.NodeId, sourceNodeId, StringComparison.Ordinal)
-            ? GovernedLoopNodeExecutionEvidence.Create(
+            ? GovernedLoopNodeExecutionEvidence.CreateActivation(
+                node.ActivationOrdinal,
                 node.PlanOrdinal,
+                node.VisitOrdinal,
                 node.NodeId,
                 node.Descriptor,
                 node.IncomingControlEdgeIds,
@@ -483,7 +502,13 @@ public sealed class GovernedLoopSequentialBindingResolverTests
                 node.Attempt,
                 node.AttemptOperationId,
                 node.OutcomeEvidenceId,
-                evidence.OutcomeArtifactHash)
+                evidence.OutcomeArtifactHash,
+                node.CycleId,
+                node.CycleIteration,
+                node.ControlOutcome,
+                node.SelectedControlEdgeIds,
+                node.SkippedControlEdgeIds,
+                node.JoinArrivals)
             : node).ToArray();
         var reboundFrontier = GovernedLoopFrontierPosture.Create(
             frontier.Binding,
@@ -508,9 +533,11 @@ public sealed class GovernedLoopSequentialBindingResolverTests
         CustomLoopRunEvent runEvent,
         GovernedLoopSequentialAdapterBinding binding,
         GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
         CustomLoopSequentialNodeEvidenceKind kind,
         CustomLoopSequentialNodeDisposition disposition)
     {
+        var isTerminal = kind == CustomLoopSequentialNodeEvidenceKind.CompletedOutcome;
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
             kind,
@@ -518,8 +545,17 @@ public sealed class GovernedLoopSequentialBindingResolverTests
             binding.ExecutionBinding.RunId,
             binding.ExecutionBinding.Revision,
             binding.ExecutionBinding.ExecutionGeneration,
+            activation.ActivationOrdinal,
+            activation.VisitOrdinal,
             node.NodeId,
             1,
+            activation.CycleId,
+            activation.CycleIteration,
+            isTerminal ? GovernedLoopControlCondition.Success : null,
+            isTerminal ? node.OutgoingControlEdgeIds.ToArray() : [],
+            [],
+            null,
+            null,
             disposition,
             CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
             string.Empty));

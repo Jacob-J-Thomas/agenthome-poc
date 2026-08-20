@@ -77,7 +77,7 @@ public static class GovernedLoopExecutionStateMatrix
     /// <summary>Determines whether bounded node evidence matches an aggregate frontier posture.</summary>
     /// <param name="status">The aggregate frontier posture.</param>
     /// <param name="nodes">The retained node evidence.</param>
-    /// <returns><see langword="true"/> when the aggregate posture honestly describes the nodes. Aggregate review may retain unchanged Ready work only when no node is Running.</returns>
+    /// <returns><see langword="true"/> when the aggregate posture honestly describes the nodes. Aggregate review may retain unchanged Ready work only when no activation is Running.</returns>
     public static bool IsFrontierShapeValid(GovernedLoopFrontierStatus status, IReadOnlyList<GovernedLoopNodeExecutionEvidence>? nodes)
     {
         if (!IsSupported(status)
@@ -224,7 +224,7 @@ public static class GovernedLoopExecutionStateMatrix
 
         return current switch
         {
-            GovernedLoopNodeExecutionStatus.Ready => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Skipped or GovernedLoopNodeExecutionStatus.Failed,
+            GovernedLoopNodeExecutionStatus.Ready => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Skipped or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
             GovernedLoopNodeExecutionStatus.Running => next is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Waiting or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
             GovernedLoopNodeExecutionStatus.Waiting => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
             GovernedLoopNodeExecutionStatus.ReviewBlocked => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Failed,
@@ -241,11 +241,16 @@ public static class GovernedLoopExecutionStateMatrix
     {
         if (current is null || next is null
             || current.SchemaVersion != next.SchemaVersion
+            || current.ActivationOrdinal != next.ActivationOrdinal
             || current.PlanOrdinal != next.PlanOrdinal
+            || current.VisitOrdinal != next.VisitOrdinal
             || !string.Equals(current.NodeId, next.NodeId, StringComparison.Ordinal)
             || current.Descriptor != next.Descriptor
             || !current.IncomingControlEdgeIds.SequenceEqual(next.IncomingControlEdgeIds, StringComparer.Ordinal)
             || !current.OutgoingControlEdgeIds.SequenceEqual(next.OutgoingControlEdgeIds, StringComparer.Ordinal)
+            || !string.Equals(current.CycleId, next.CycleId, StringComparison.Ordinal)
+            || current.CycleIteration != next.CycleIteration
+            || !SameJoinArrivals(current.JoinArrivals, next.JoinArrivals)
             || !IsNodeTransitionAllowed(current.Status, next.Status))
         {
             return false;
@@ -256,16 +261,23 @@ public static class GovernedLoopExecutionStateMatrix
             return current.Attempt == next.Attempt
                 && string.Equals(current.AttemptOperationId, next.AttemptOperationId, StringComparison.Ordinal)
                 && string.Equals(current.OutcomeEvidenceId, next.OutcomeEvidenceId, StringComparison.Ordinal)
-                && string.Equals(current.OutcomeEvidenceHash, next.OutcomeEvidenceHash, StringComparison.Ordinal);
+                && string.Equals(current.OutcomeEvidenceHash, next.OutcomeEvidenceHash, StringComparison.Ordinal)
+                && SameRoutingEvidence(current, next);
         }
 
         if (current.Status == GovernedLoopNodeExecutionStatus.Ready)
         {
             return next.Status switch
             {
-                GovernedLoopNodeExecutionStatus.Skipped => next.Attempt is null,
+                GovernedLoopNodeExecutionStatus.Skipped => next.Attempt is null
+                    && next.ControlOutcome is null
+                    && next.SelectedControlEdgeIds.Count == 0
+                    && next.SkippedControlEdgeIds.Count == 0,
                 GovernedLoopNodeExecutionStatus.Running => next.Attempt == 1 && next.AttemptOperationId is not null,
                 GovernedLoopNodeExecutionStatus.Failed => next.Attempt == 1 && next.OutcomeEvidenceId is not null,
+                GovernedLoopNodeExecutionStatus.ReviewBlocked => next.Attempt == 1
+                    && next.AttemptOperationId is not null
+                    && next.OutcomeEvidenceId is not null,
                 _ => false
             };
         }
@@ -273,7 +285,25 @@ public static class GovernedLoopExecutionStateMatrix
         return current.Attempt == next.Attempt
             && string.Equals(current.AttemptOperationId, next.AttemptOperationId, StringComparison.Ordinal)
             && current.OutcomeEvidenceId is null
+            && current.ControlOutcome is null
+            && current.SelectedControlEdgeIds.Count == 0
+            && current.SkippedControlEdgeIds.Count == 0
             && (next.Status is not (GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed) || next.OutcomeEvidenceId is not null);
+    }
+
+    private static bool SameRoutingEvidence(GovernedLoopNodeExecutionEvidence current, GovernedLoopNodeExecutionEvidence next)
+    {
+        return current.ControlOutcome == next.ControlOutcome
+            && current.SelectedControlEdgeIds.SequenceEqual(next.SelectedControlEdgeIds, StringComparer.Ordinal)
+            && current.SkippedControlEdgeIds.SequenceEqual(next.SkippedControlEdgeIds, StringComparer.Ordinal);
+    }
+
+    private static bool SameJoinArrivals(IReadOnlyList<GovernedLoopJoinArrivalEvidence> current, IReadOnlyList<GovernedLoopJoinArrivalEvidence> next)
+    {
+        return current.Count == next.Count
+            && current.Zip(next).All(pair => pair.First.SchemaVersion == pair.Second.SchemaVersion
+                && pair.First.SourceActivationOrdinal == pair.Second.SourceActivationOrdinal
+                && string.Equals(pair.First.ControlEdgeId, pair.Second.ControlEdgeId, StringComparison.Ordinal));
     }
 
     /// <summary>Determines whether an aggregate frontier may transition directly to a successor posture.</summary>

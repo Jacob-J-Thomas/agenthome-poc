@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 
 namespace EmbodySense.Core.Common.Loops.Execution;
 
@@ -79,6 +80,36 @@ internal static class GovernedLoopExecutionContractGuard
         return value;
     }
 
+    internal static int RequireActivationOrdinal(int value, string parameterName)
+    {
+        if (value is < 0 or >= GovernedLoopExecutionLimits.MaxFrontierNodes)
+        {
+            throw new ArgumentOutOfRangeException(parameterName, $"Governed-loop activation ordinals must be between 0 and {GovernedLoopExecutionLimits.MaxFrontierNodes - 1}.");
+        }
+
+        return value;
+    }
+
+    internal static int RequireVisitOrdinal(int value, string parameterName)
+    {
+        if (value is < 1 or > GovernedLoopExecutionLimits.MaxNodeVisits)
+        {
+            throw new ArgumentOutOfRangeException(parameterName, $"Governed-loop node visits must be positive and no greater than {GovernedLoopExecutionLimits.MaxNodeVisits}.");
+        }
+
+        return value;
+    }
+
+    internal static int? RequireOptionalCycleIteration(int? value, string parameterName)
+    {
+        if (value is < 1 or > GovernedLoopExecutionLimits.MaxCycleIterations)
+        {
+            throw new ArgumentOutOfRangeException(parameterName, $"Governed-loop cycle iterations must be positive and no greater than {GovernedLoopExecutionLimits.MaxCycleIterations}.");
+        }
+
+        return value;
+    }
+
     internal static GovernedLoopNodeDescriptor RequireNodeDescriptor(GovernedLoopNodeDescriptor? descriptor, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(descriptor, parameterName);
@@ -92,16 +123,114 @@ internal static class GovernedLoopExecutionContractGuard
         return descriptor;
     }
 
-    internal static void RequireContiguousPlanPrefix(IReadOnlyList<GovernedLoopNodeExecutionEvidence> nodes, string parameterName)
+    internal static void RequireCanonicalActivationHistory(IReadOnlyList<GovernedLoopNodeExecutionEvidence> nodes, string parameterName)
     {
-        var nodeIds = new HashSet<string>(StringComparer.Ordinal);
+        var planNodes = new Dictionary<int, GovernedLoopNodeExecutionEvidence>();
+        var nodePlans = new Dictionary<string, GovernedLoopNodeExecutionEvidence>(StringComparer.Ordinal);
+        var visits = new Dictionary<string, int>(StringComparer.Ordinal);
+        var lastCycleIterations = new Dictionary<string, int>(StringComparer.Ordinal);
+        var lastNodeCycleIterations = new Dictionary<string, int>(StringComparer.Ordinal);
         for (var index = 0; index < nodes.Count; index++)
         {
-            if (nodes[index].PlanOrdinal != index || !nodeIds.Add(nodes[index].NodeId))
+            var node = nodes[index];
+            if (node.ActivationOrdinal != index)
             {
-                throw new ArgumentException("Governed-loop frontier nodes must form a contiguous zero-based plan-ordinal prefix with unique node identities.", parameterName);
+                throw new ArgumentException("Governed-loop frontier activations must form a contiguous zero-based activation history.", parameterName);
+            }
+
+            var expectedVisit = visits.TryGetValue(node.NodeId, out var priorVisits) ? priorVisits + 1 : 1;
+            if (node.VisitOrdinal != expectedVisit)
+            {
+                throw new ArgumentException("Governed-loop activation visit ordinals must be contiguous for each exact node identity.", parameterName);
+            }
+
+            visits[node.NodeId] = expectedVisit;
+            if (nodePlans.TryGetValue(node.NodeId, out var priorNode)
+                && (priorNode.PlanOrdinal != node.PlanOrdinal
+                    || priorNode.Descriptor != node.Descriptor
+                    || !priorNode.IncomingControlEdgeIds.SequenceEqual(node.IncomingControlEdgeIds, StringComparer.Ordinal)
+                    || !priorNode.OutgoingControlEdgeIds.SequenceEqual(node.OutgoingControlEdgeIds, StringComparer.Ordinal)
+                    || priorNode.CycleId is null
+                    || node.CycleId is null
+                    || !string.Equals(priorNode.CycleId, node.CycleId, StringComparison.Ordinal)))
+            {
+                throw new ArgumentException("Repeated governed-loop activations must retain one immutable admitted plan identity and topology.", parameterName);
+            }
+
+            if (planNodes.TryGetValue(node.PlanOrdinal, out var planned))
+            {
+                if (!string.Equals(planned.NodeId, node.NodeId, StringComparison.Ordinal)
+                    || planned.Descriptor != node.Descriptor
+                    || !planned.IncomingControlEdgeIds.SequenceEqual(node.IncomingControlEdgeIds, StringComparer.Ordinal)
+                    || !planned.OutgoingControlEdgeIds.SequenceEqual(node.OutgoingControlEdgeIds, StringComparer.Ordinal))
+                {
+                    throw new ArgumentException("Repeated governed-loop activations must retain one immutable admitted plan identity and topology.", parameterName);
+                }
+
+                if (node.CycleId is null)
+                {
+                    throw new ArgumentException("A repeated governed-loop node activation requires explicit cycle identity and iteration evidence.", parameterName);
+                }
+            }
+            else
+            {
+                planNodes.Add(node.PlanOrdinal, node);
+                nodePlans.Add(node.NodeId, node);
+            }
+
+            if (node.CycleId is { } cycleId && node.CycleIteration is { } cycleIteration)
+            {
+                if (lastNodeCycleIterations.TryGetValue(node.NodeId, out var lastNodeCycleIteration) && cycleIteration <= lastNodeCycleIteration)
+                {
+                    throw new ArgumentException("Cycle iteration evidence must strictly advance for each repeated exact node identity.", parameterName);
+                }
+
+                if (lastCycleIterations.TryGetValue(cycleId, out var lastCycleIteration) && cycleIteration < lastCycleIteration)
+                {
+                    throw new ArgumentException("Cycle iteration evidence cannot move backward within one exact cycle identity.", parameterName);
+                }
+
+                lastNodeCycleIterations[node.NodeId] = cycleIteration;
+                lastCycleIterations[cycleId] = cycleIteration;
+            }
+
+            foreach (var arrival in node.JoinArrivals)
+            {
+                if (arrival.SourceActivationOrdinal >= node.ActivationOrdinal)
+                {
+                    throw new ArgumentException("Join arrivals must identify an earlier exact source activation.", parameterName);
+                }
+
+                var source = nodes[arrival.SourceActivationOrdinal];
+                if (source.Status != GovernedLoopNodeExecutionStatus.Completed
+                    || !source.SelectedControlEdgeIds.Contains(arrival.ControlEdgeId, StringComparer.Ordinal))
+                {
+                    throw new ArgumentException("Join arrivals must identify a control edge selected by an exact completed source activation.", parameterName);
+                }
             }
         }
+    }
+
+    internal static IReadOnlyList<GovernedLoopJoinArrivalEvidence> SnapshotJoinArrivals(IEnumerable<GovernedLoopJoinArrivalEvidence>? values, string parameterName)
+    {
+        var snapshot = SnapshotBounded(values, parameterName, GovernedLoopExecutionLimits.MaxJoinArrivals);
+        string? previousEdgeId = null;
+        foreach (var value in snapshot)
+        {
+            if (value.SchemaVersion != GovernedLoopExecutionLimits.CurrentSchemaVersion)
+            {
+                throw new ArgumentException("Governed-loop join arrivals must use schema version 1.", parameterName);
+            }
+
+            if (previousEdgeId is not null && string.CompareOrdinal(previousEdgeId, value.ControlEdgeId) >= 0)
+            {
+                throw new ArgumentException("Governed-loop join arrivals must be sorted and unique by control-edge identity.", parameterName);
+            }
+
+            previousEdgeId = value.ControlEdgeId;
+        }
+
+        return Array.AsReadOnly(snapshot.Select(value => GovernedLoopJoinArrivalEvidence.Create(value.SchemaVersion, value.ControlEdgeId, value.SourceActivationOrdinal)).ToArray());
     }
 
     internal static DateTimeOffset RequireUtc(DateTimeOffset value, string parameterName)

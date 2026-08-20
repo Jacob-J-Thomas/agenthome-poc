@@ -35,13 +35,28 @@ public static class GovernedLoopFrontierContractHash
         foreach (var node in frontier.Payload.Nodes)
         {
             Append(canonical, node.SchemaVersion);
+            Append(canonical, node.ActivationOrdinal);
             Append(canonical, node.PlanOrdinal);
+            Append(canonical, node.VisitOrdinal);
             Append(canonical, node.NodeId);
             Append(canonical, (int)node.Descriptor.Kind);
             Append(canonical, node.Descriptor.TypeId);
             Append(canonical, node.Descriptor.Version);
             AppendCollection(canonical, node.IncomingControlEdgeIds);
             AppendCollection(canonical, node.OutgoingControlEdgeIds);
+            Append(canonical, node.CycleId);
+            AppendNullable(canonical, node.CycleIteration);
+            AppendNullable(canonical, node.ControlOutcome is { } controlOutcome ? (int)controlOutcome : null);
+            AppendCollection(canonical, node.SelectedControlEdgeIds);
+            AppendCollection(canonical, node.SkippedControlEdgeIds);
+            Append(canonical, node.JoinArrivals.Count);
+            foreach (var arrival in node.JoinArrivals)
+            {
+                Append(canonical, arrival.SchemaVersion);
+                Append(canonical, arrival.ControlEdgeId);
+                Append(canonical, arrival.SourceActivationOrdinal);
+            }
+
             Append(canonical, (int)node.Status);
             AppendNullable(canonical, node.Attempt);
             Append(canonical, node.AttemptOperationId);

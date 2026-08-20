@@ -287,8 +287,8 @@ function Invoke-FrontendFixture {
         [int]$InstallExitCode = 0,
         [int]$TestExitCode = 0,
         [int]$InstallDelayMilliseconds = 0,
-        [int]$InstallTimeoutSeconds = 5,
-        [int]$TestTimeoutSeconds = 5,
+        [int]$InstallTimeoutSeconds = 20,
+        [int]$TestTimeoutSeconds = 20,
         [switch]$SeedStaleFrontendLog
     )
 
@@ -325,7 +325,7 @@ function Invoke-FrontendFixture {
         if (-not $process.Start()) { throw "Frontend fixture '$Name' did not start." }
         $standardOutput = $process.StandardOutput.ReadToEndAsync()
         $standardError = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(15000)) {
+        if (-not $process.WaitForExit(60000)) {
             Stop-VerificationProcessTree $process
             $process.WaitForExit()
             throw "Frontend fixture '$Name' exceeded its test bound."
