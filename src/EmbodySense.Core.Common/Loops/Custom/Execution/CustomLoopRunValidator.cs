@@ -35,6 +35,19 @@ public static class CustomLoopRunValidator
         "org.embodysense/model-inference",
         "org.embodysense/workspace-command",
     ];
+    private static readonly string[] _sequentialScheduledToolFreeCapabilityRootIds =
+    [
+        "org.embodysense/conversation-turn",
+        "org.embodysense/model-inference",
+        "org.embodysense/triggers/time",
+    ];
+    private static readonly string[] _sequentialScheduledToolEnabledCapabilityRootIds =
+    [
+        "org.embodysense/conversation-turn",
+        "org.embodysense/model-inference",
+        "org.embodysense/triggers/time",
+        "org.embodysense/workspace-command",
+    ];
     private static readonly CustomLoopToolAssignment[] _sequentialToolEnabledAssignments =
     [
         CustomLoopToolAssignment.List,
@@ -480,6 +493,18 @@ public static class CustomLoopRunValidator
             return;
         }
 
+        var triggerDescriptor = run.Frontier?.Payload.Nodes.FirstOrDefault()?.Descriptor;
+        var expectedTriggerTypeId = snapshot.TriggerOrigin is null ? "manual-trigger" : "schedule-trigger";
+        if (triggerDescriptor is not
+            {
+                Kind: GovernedLoopNodeKind.Trigger,
+                Version: 1,
+            }
+            || !string.Equals(triggerDescriptor.TypeId, expectedTriggerTypeId, StringComparison.Ordinal))
+        {
+            Add(errors, "sequential_trigger_origin_mismatch", "sequentialInvocationSnapshot.triggerOrigin", "The immutable trigger origin must exactly match the admitted frontier entry descriptor.");
+        }
+
         if (!string.Equals(binding.InvocationPayloadHash, snapshot.ContentHash, StringComparison.Ordinal)
             || !string.Equals(binding.ExecutionBinding.RunId, run.Id, StringComparison.Ordinal)
             || !string.Equals(binding.AdmissionOperationId, run.AdmissionOperationId, StringComparison.Ordinal))
@@ -806,13 +831,18 @@ public static class CustomLoopRunValidator
         var capabilityAdmission = run.CapabilityAdmission;
         var toolAssignments = run.AdmittedDefinition?.ToolAssignments;
         string[] expectedRootIdentities;
+        var scheduled = run.SequentialInvocationSnapshot?.TriggerOrigin is not null;
         if (toolAssignments is { Length: 0 })
         {
-            expectedRootIdentities = _sequentialToolFreeCapabilityRootIds;
+            expectedRootIdentities = scheduled
+                ? _sequentialScheduledToolFreeCapabilityRootIds
+                : _sequentialToolFreeCapabilityRootIds;
         }
         else if (toolAssignments is not null && toolAssignments.SequenceEqual(_sequentialToolEnabledAssignments))
         {
-            expectedRootIdentities = _sequentialToolEnabledCapabilityRootIds;
+            expectedRootIdentities = scheduled
+                ? _sequentialScheduledToolEnabledCapabilityRootIds
+                : _sequentialToolEnabledCapabilityRootIds;
         }
         else
         {
@@ -834,7 +864,7 @@ public static class CustomLoopRunValidator
             .ToArray();
         if (!selectedRootIdentities.SequenceEqual(expectedRootIdentities, StringComparer.Ordinal))
         {
-            Add(errors, "sequential_capability_identity_mismatch", "capabilityAdmission.evidence", "Canonical sequential execution requires exactly the sorted roots derived from its closed tool-free or List/Read/Search assignment shape.");
+            Add(errors, "sequential_capability_identity_mismatch", "capabilityAdmission.evidence", "Canonical sequential execution requires exactly the sorted roots derived from its trigger origin and closed tool-free or List/Read/Search assignment shape.");
         }
     }
 
@@ -1066,7 +1096,7 @@ public static class CustomLoopRunValidator
             && run.SequentialAdapterBinding is not null
             && run.Events[0]?.SequentialNodeEvidence is null)
         {
-            Add(errors, "sequential_trigger_evidence_required", "events[0].sequentialNodeEvidence", "Canonical sequential materialization requires the initial admitted event to retain its exact completed Manual Trigger evidence.");
+            Add(errors, "sequential_trigger_evidence_required", "events[0].sequentialNodeEvidence", "Canonical sequential materialization requires the initial admitted event to retain its exact completed Trigger evidence.");
         }
 
         if (run.Events.Length > CustomLoopLimits.MaxTraceEventsPerRun)

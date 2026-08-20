@@ -15,7 +15,7 @@ internal static class TriggerQueueLedgerCodec
 {
     private static readonly string[] _rootProperties = ["entries", "generation", "lastWorkerObservedAtUtc", "previousGenerationHash", "quota", "schemaVersion"];
     private static readonly string[] _quotaProperties = ["maxDurabilityTombstones", "maxEntryBytes", "maxQueuedBytes", "maxQueuedEntries", "maxQueuedEntriesPerLoop", "maxRetainedBytes", "maxRetainedEntries"];
-    private static readonly string[] _entryProperties = ["admissionReason", "admissionStatus", "canonicalEnvelope", "canonicalEnvelopeHash", "dispatchAuthorityEvidenceHash", "dispatchDetail", "dispatchIntentRecordedAtUtc", "dispatchOperationId", "dispatchOutcome", "dispatchOutcomeRecordedAtUtc", "dispatchRequestHash", "governedAdmissionRequestHash", "governedDefinitionHash", "governedDefinitionVersion", "governedLoopId", "governedOperationId", "governedRunId", "leaseAcquiredAtUtc", "leaseExpiresAtUtc", "leaseGeneration", "leaseReleasedAtUtc", "leaseRenewalCount", "leaseWorkerId", "priority", "receiptRecordedAtUtc", "receiptReplayBindingHash", "receiptSchemaVersion", "recordedAtUtc", "revision", "state", "terminalAtUtc", "terminalReason"];
+    private static readonly string[] _entryProperties = ["admissionReason", "admissionStatus", "canonicalEnvelope", "canonicalEnvelopeHash", "dispatchAuthorityEvidenceHash", "dispatchDetail", "dispatchIntentRecordedAtUtc", "dispatchOperationId", "dispatchOutcome", "dispatchOutcomeRecordedAtUtc", "dispatchRequestHash", "governedAdmissionRequestHash", "governedLoopId", "governedLoopReferenceHash", "governedOperationId", "governedRunId", "leaseAcquiredAtUtc", "leaseExpiresAtUtc", "leaseGeneration", "leaseReleasedAtUtc", "leaseRenewalCount", "leaseWorkerId", "priority", "receiptRecordedAtUtc", "receiptReplayBindingHash", "receiptSchemaVersion", "recordedAtUtc", "revision", "state", "terminalAtUtc", "terminalReason"];
     private static readonly UTF8Encoding _strictUtf8 = new(false, true);
 
     /// <summary>Serializes one already validated ledger.</summary>
@@ -224,19 +224,17 @@ internal static class TriggerQueueLedgerCodec
             var governedRunId = element.GetProperty("governedRunId");
             var governedAdmissionRequestHash = element.GetProperty("governedAdmissionRequestHash");
             var governedLoopId = element.GetProperty("governedLoopId");
-            var governedDefinitionVersion = element.GetProperty("governedDefinitionVersion");
-            var governedDefinitionHash = element.GetProperty("governedDefinitionHash");
-            if (governedOperationId.ValueKind == JsonValueKind.Null && governedRunId.ValueKind == JsonValueKind.Null && governedAdmissionRequestHash.ValueKind == JsonValueKind.Null && governedLoopId.ValueKind == JsonValueKind.Null && governedDefinitionVersion.ValueKind == JsonValueKind.Null && governedDefinitionHash.ValueKind == JsonValueKind.Null)
+            var governedLoopReferenceHash = element.GetProperty("governedLoopReferenceHash");
+            if (governedOperationId.ValueKind == JsonValueKind.Null && governedRunId.ValueKind == JsonValueKind.Null && governedAdmissionRequestHash.ValueKind == JsonValueKind.Null && governedLoopId.ValueKind == JsonValueKind.Null && governedLoopReferenceHash.ValueKind == JsonValueKind.Null)
             {
             }
             else if (governedOperationId.ValueKind == JsonValueKind.String
                 && governedRunId.ValueKind == JsonValueKind.String
                 && governedAdmissionRequestHash.ValueKind == JsonValueKind.String
                 && governedLoopId.ValueKind == JsonValueKind.String
-                && governedDefinitionVersion.TryGetInt32(out var parsedDefinitionVersion)
-                && governedDefinitionHash.ValueKind == JsonValueKind.String)
+                && governedLoopReferenceHash.ValueKind == JsonValueKind.String)
             {
-                governedInvocation = new TriggerGovernedInvocationEvidence(governedOperationId.GetString()!, governedRunId.GetString()!, governedAdmissionRequestHash.GetString()!, governedLoopId.GetString()!, parsedDefinitionVersion, governedDefinitionHash.GetString()!);
+                governedInvocation = new TriggerGovernedInvocationEvidence(governedOperationId.GetString()!, governedRunId.GetString()!, governedAdmissionRequestHash.GetString()!, governedLoopId.GetString()!, governedLoopReferenceHash.GetString()!);
             }
             else
             {
@@ -276,17 +274,8 @@ internal static class TriggerQueueLedgerCodec
         WriteTimestamp(writer, "dispatchOutcomeRecordedAtUtc", entry.Dispatch?.OutcomeRecordedAtUtc);
         WriteNullableString(writer, "dispatchRequestHash", entry.Dispatch?.RequestHash);
         WriteNullableString(writer, "governedAdmissionRequestHash", entry.Dispatch?.GovernedInvocation?.AdmissionRequestHash);
-        WriteNullableString(writer, "governedDefinitionHash", entry.Dispatch?.GovernedInvocation?.DefinitionHash);
-        if (entry.Dispatch?.GovernedInvocation is null)
-        {
-            writer.WriteNull("governedDefinitionVersion");
-        }
-        else
-        {
-            writer.WriteNumber("governedDefinitionVersion", entry.Dispatch.GovernedInvocation.DefinitionVersion);
-        }
-
         WriteNullableString(writer, "governedLoopId", entry.Dispatch?.GovernedInvocation?.LoopId);
+        WriteNullableString(writer, "governedLoopReferenceHash", entry.Dispatch?.GovernedInvocation?.LoopReferenceHash);
         WriteNullableString(writer, "governedOperationId", entry.Dispatch?.GovernedInvocation?.OperationId);
         WriteNullableString(writer, "governedRunId", entry.Dispatch?.GovernedInvocation?.RunId);
         WriteTimestamp(writer, "leaseAcquiredAtUtc", entry.WorkerLease?.AcquiredAtUtc);

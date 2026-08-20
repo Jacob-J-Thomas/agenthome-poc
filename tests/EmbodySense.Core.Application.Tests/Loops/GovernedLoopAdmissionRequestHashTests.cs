@@ -37,6 +37,38 @@ public sealed class GovernedLoopAdmissionRequestHashTests
         Assert.False(GovernedLoopAdmissionRequestHash.Matches(request with { RequestHash = string.Empty }));
         Assert.False(GovernedLoopAdmissionRequestHash.Matches(request with { RequestHash = request.RequestHash.ToUpperInvariant() }));
         Assert.False(GovernedLoopAdmissionRequestHash.Matches(request with { Surface = "bad\ud800" }));
+        Assert.False(GovernedLoopAdmissionRequestHash.Matches(request with { Surface = "bad\udc00" }));
+    }
+
+    [Fact]
+    public void Compute_is_deterministic_for_explicitly_absent_coordinates_and_well_formed_surrogates()
+    {
+        var request = Request() with
+        {
+            Publication = null!,
+            AuthorityGrant = null!,
+            ActorId = null!,
+            Surface = "chat-\U0001f680",
+        };
+
+        var first = GovernedLoopAdmissionRequestHash.Compute(request);
+        var second = GovernedLoopAdmissionRequestHash.Compute(request);
+
+        Assert.Equal(64, first.Length);
+        Assert.Equal(first, second);
+        Assert.All(first, character => Assert.True(char.IsAsciiHexDigitLower(character) || char.IsAsciiDigit(character)));
+    }
+
+    [Fact]
+    public void Compute_distinguishes_an_absent_revision_from_an_absent_publication()
+    {
+        var request = Request();
+        var withoutRevision = request with { Publication = request.Publication with { Revision = null! } };
+        var withoutPublication = request with { Publication = null! };
+
+        Assert.NotEqual(
+            GovernedLoopAdmissionRequestHash.Compute(withoutRevision),
+            GovernedLoopAdmissionRequestHash.Compute(withoutPublication));
     }
 
     private static GovernedLoopAdmissionRequest Request()

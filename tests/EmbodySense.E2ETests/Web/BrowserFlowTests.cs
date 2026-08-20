@@ -61,10 +61,11 @@ public sealed class BrowserFlowTests
             browser.BeginExpectedServerRestart();
             await app.DisposeAsync();
             app = null;
-            await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent.includes('reconnecting')");
+            await browser.WaitForExpressionAsync("/reconnect|retry/i.test(document.getElementById('clientStatus').textContent)");
             Assert.True(await browser.EvaluateBooleanAsync("document.getElementById('sendButton').disabled"));
             await Task.Delay(TimeSpan.FromMilliseconds(1250));
 
+            browser.MarkExpectedReplacementServerStarting();
             app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
             await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
@@ -160,6 +161,7 @@ public sealed class BrowserFlowTests
         var port = GetFreePort();
         ExternalWebApplicationProcess? app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
         HeadlessBrowserSession? browser = null;
+        string? retiredServerOutput = null;
         const string LoopName = "Browser governed loop";
 
         try
@@ -220,8 +222,10 @@ public sealed class BrowserFlowTests
 
             browser.BeginExpectedServerRestart();
             await app.DisposeAsync();
+            retiredServerOutput = app.FormatOutput();
             app = null;
-            await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent.includes('reconnecting')");
+            await browser.WaitForExpressionAsync("/reconnect|retry/i.test(document.getElementById('clientStatus').textContent)");
+            browser.MarkExpectedReplacementServerStarting();
             app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
             await browser.ReloadAsync(acceptBeforeUnload: true);
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
@@ -297,7 +301,7 @@ public sealed class BrowserFlowTests
         }
         catch
         {
-            await WriteFailureDiagnosticsAsync(nameof(Browser_authors_runs_inspects_and_deletes_a_governed_custom_loop), browser, app);
+            await WriteFailureDiagnosticsAsync(nameof(Browser_authors_runs_inspects_and_deletes_a_governed_custom_loop), browser, app, retiredServerOutput);
             throw;
         }
         finally
@@ -643,7 +647,7 @@ public sealed class BrowserFlowTests
         return string.Join(Environment.NewLine, snapshot.Transcripts.SelectMany(transcript => transcript.Lines));
     }
 
-    private static async Task WriteFailureDiagnosticsAsync(string scenario, HeadlessBrowserSession? browser, ExternalWebApplicationProcess? app)
+    private static async Task WriteFailureDiagnosticsAsync(string scenario, HeadlessBrowserSession? browser, ExternalWebApplicationProcess? app, string? retiredServerOutput = null)
     {
         var configuredRoot = Environment.GetEnvironmentVariable("EMBODYSENSE_BROWSER_E2E_ARTIFACTS");
         var root = string.IsNullOrWhiteSpace(configuredRoot)
@@ -659,6 +663,11 @@ public sealed class BrowserFlowTests
         if (app is not null)
         {
             await app.WriteDiagnosticsAsync(directory);
+        }
+
+        if (!string.IsNullOrWhiteSpace(retiredServerOutput))
+        {
+            await File.WriteAllTextAsync(Path.Combine(directory, "retired-server-output.txt"), retiredServerOutput);
         }
     }
 
@@ -692,6 +701,7 @@ public sealed class BrowserFlowTests
         private readonly BoundedProcessOutput _error;
         private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> _pendingCommands = new();
         private readonly ConcurrentDictionary<int, Task> _pendingSends = new();
+        private readonly ConcurrentDictionary<string, byte> _expectedServerRestartRequests = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, string> _requestUrls = new(StringComparer.Ordinal);
         private readonly SemaphoreSlim _sendGate = new(1, 1);
         private readonly object _diagnosticsGate = new();
@@ -891,7 +901,13 @@ public sealed class BrowserFlowTests
 
         public void BeginExpectedServerRestart()
         {
+            _expectedServerRestartRequests.Clear();
             Interlocked.Exchange(ref _expectedServerRestart, 1);
+        }
+
+        public void MarkExpectedReplacementServerStarting()
+        {
+            Interlocked.CompareExchange(ref _expectedServerRestart, 2, 1);
         }
 
         public void EndExpectedServerRestart()
@@ -997,7 +1013,15 @@ public sealed class BrowserFlowTests
                 throw new InvalidOperationException("Browser evaluation failed: " + exceptionDetails.GetRawText());
             }
 
-            var remoteObject = response.GetProperty("result").GetProperty("result");
+            if (!response.TryGetProperty("result", out var commandResult)
+                || !commandResult.TryGetProperty("result", out var remoteObject))
+            {
+                var detail = response.TryGetProperty("error", out var error)
+                    ? error.GetRawText()
+                    : response.GetRawText();
+                throw new InvalidOperationException("Browser evaluation command failed: " + detail);
+            }
+
             return remoteObject.TryGetProperty("value", out var value) ? value.Clone() : default;
         }
 
@@ -1244,7 +1268,9 @@ public sealed class BrowserFlowTests
                 && request.TryGetProperty("url", out var requestUrl)
                 && requestUrl.ValueKind == JsonValueKind.String)
             {
-                _requestUrls[requestId] = requestUrl.GetString()!;
+                var url = requestUrl.GetString()!;
+                _requestUrls[requestId] = url;
+                CaptureExpectedServerRestartRequest(requestId, url);
                 return;
             }
 
@@ -1252,19 +1278,26 @@ public sealed class BrowserFlowTests
                 && parameters.TryGetProperty("url", out var websocketUrl)
                 && websocketUrl.ValueKind == JsonValueKind.String)
             {
-                _requestUrls[requestId] = websocketUrl.GetString()!;
+                var url = websocketUrl.GetString()!;
+                _requestUrls[requestId] = url;
+                CaptureExpectedServerRestartRequest(requestId, url);
                 return;
             }
 
             if (method is "Network.loadingFinished" or "Network.webSocketClosed")
             {
                 _requestUrls.TryRemove(requestId, out _);
+                _expectedServerRestartRequests.TryRemove(requestId, out _);
             }
         }
 
         private bool IsExpectedServerRestartLogEntry(JsonElement entry)
         {
-            if (Volatile.Read(ref _expectedServerRestart) == 0)
+            var requestId = entry.TryGetProperty("networkRequestId", out var requestIdValue) && requestIdValue.ValueKind == JsonValueKind.String
+                ? requestIdValue.GetString()
+                : null;
+            var beganDuringOutage = requestId is not null && _expectedServerRestartRequests.ContainsKey(requestId);
+            if (Volatile.Read(ref _expectedServerRestart) == 0 && !beganDuringOutage)
             {
                 return false;
             }
@@ -1277,17 +1310,22 @@ public sealed class BrowserFlowTests
                 return false;
             }
 
-            return text?.Contains("401 (Unauthorized)", StringComparison.OrdinalIgnoreCase) == true
+            var expected = text?.Contains("401 (Unauthorized)", StringComparison.OrdinalIgnoreCase) == true
                 || (text?.Contains("WebSocket", StringComparison.OrdinalIgnoreCase) == true
-                    || url?.StartsWith("ws", StringComparison.OrdinalIgnoreCase) == true
-                    || IsSessionBootstrapUrl(url))
+                    || IsExpectedServerRestartUrl(url))
                 && (text?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true || text?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true);
+            if (expected && requestId is not null)
+            {
+                _expectedServerRestartRequests.TryRemove(requestId, out _);
+            }
+
+            return expected;
         }
 
         private bool IsExpectedServerRestartHttpResponse(JsonElement response, double statusCode)
         {
-            return Volatile.Read(ref _expectedServerRestart) != 0
-                && statusCode == 401
+            return statusCode == 401
+                && Volatile.Read(ref _expectedServerRestart) != 0
                 && response.TryGetProperty("url", out var url)
                 && url.ValueKind == JsonValueKind.String
                 && ContainsTargetAuthority(url.GetString());
@@ -1302,17 +1340,32 @@ public sealed class BrowserFlowTests
                 return false;
             }
 
-            if (Volatile.Read(ref _expectedServerRestart) == 0
+            var beganDuringOutage = _expectedServerRestartRequests.ContainsKey(requestIdValue.GetString()!);
+            if (Volatile.Read(ref _expectedServerRestart) == 0 && !beganDuringOutage
                 || !Uri.TryCreate(requestUrl, UriKind.Absolute, out var uri)
                 || !string.Equals(uri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase)
-                || !IsExpectedRecoveryScheme(uri))
+                || !IsExpectedServerRestartScheme(uri))
             {
                 return false;
             }
 
             var errorText = parameters.TryGetProperty("errorText", out var errorTextValue) ? errorTextValue.GetString() : null;
-            return errorText?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true
+            var expected = errorText?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true
                 || errorText?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true;
+            if (expected)
+            {
+                _expectedServerRestartRequests.TryRemove(requestIdValue.GetString()!, out _);
+            }
+
+            return expected;
+        }
+
+        private void CaptureExpectedServerRestartRequest(string requestId, string url)
+        {
+            if (Volatile.Read(ref _expectedServerRestart) == 1 && IsExpectedServerRestartUrl(url))
+            {
+                _expectedServerRestartRequests.TryAdd(requestId, 0);
+            }
         }
 
         private bool ContainsTargetAuthority(string? value)
@@ -1320,20 +1373,19 @@ public sealed class BrowserFlowTests
             return value?.Contains(_targetAuthority, StringComparison.OrdinalIgnoreCase) == true;
         }
 
-        private bool IsSessionBootstrapUrl(string? value)
+        private bool IsExpectedServerRestartUrl(string? value)
         {
             return Uri.TryCreate(value, UriKind.Absolute, out var uri)
                 && string.Equals(uri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(uri.AbsolutePath, "/api/session", StringComparison.OrdinalIgnoreCase);
+                && IsExpectedServerRestartScheme(uri);
         }
 
-        private static bool IsExpectedRecoveryScheme(Uri uri)
+        private static bool IsExpectedServerRestartScheme(Uri uri)
         {
             return string.Equals(uri.Scheme, "ws", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(uri.Scheme, "wss", StringComparison.OrdinalIgnoreCase)
-                || (string.Equals(uri.AbsolutePath, "/api/session", StringComparison.OrdinalIgnoreCase)
-                    && (string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)));
+                || string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase);
         }
 
         private async Task AcceptJavaScriptDialogAsync()
@@ -1437,7 +1489,12 @@ public sealed class BrowserFlowTests
                 @"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
                 @"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
                 @"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                @"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+                @"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/usr/bin/microsoft-edge",
+                "/usr/bin/google-chrome",
+                "/usr/bin/chromium"
             })
             {
                 if (File.Exists(candidate))

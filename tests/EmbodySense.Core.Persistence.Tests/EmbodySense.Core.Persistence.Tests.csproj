@@ -25,6 +25,8 @@
     <Compile Include="..\EmbodySense.Core.Common.Tests\Authority\Grants\AuthorityGrantTestFixture.cs" Link="Support\AuthorityGrantTestFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\Loops\Admission\GovernedLoopAdmissionTestFixture.cs" Link="Support\GovernedLoopAdmissionTestFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\Loops\Execution\Authority\GovernedLoopEffectAuthorityTestFixture.cs" Link="Support\GovernedLoopEffectAuthorityTestFixture.cs" />
+    <Compile Include="..\EmbodySense.Core.Common.Tests\TriggerDeliveryTestData.cs" Link="Support\TriggerDeliveryTestData.cs" />
+    <Compile Include="..\EmbodySense.Core.Common.Tests\Triggers\Schedules\ScheduleContractTestData.cs" Link="Support\ScheduleContractTestData.cs" />
   </ItemGroup>
 
   <PropertyGroup>

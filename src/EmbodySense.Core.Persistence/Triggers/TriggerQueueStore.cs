@@ -704,8 +704,7 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
                 || !IsHash(governed.AdmissionRequestHash)
                 || string.IsNullOrWhiteSpace(governed.LoopId)
                 || governed.LoopId.Length > TriggerDeliveryLimits.MaxLoopIdCharacters
-                || governed.DefinitionVersion is < 1 or > TriggerDeliveryLimits.MaxLoopDefinitionVersion
-                || !IsHash(governed.DefinitionHash)))
+                || !IsHash(governed.LoopReferenceHash)))
         {
             throw new ArgumentException("The trigger dispatch evidence is malformed.", nameof(evidence));
         }
@@ -726,11 +725,11 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
             return evidence.GovernedInvocation is null;
         }
 
-        return evidence.GovernedInvocation is { } governed
+        return TriggerLoopReferenceHash.TryCompute(entry.Envelope.Loop, out var loopReferenceHash, out _)
+            && evidence.GovernedInvocation is { } governed
             && string.Equals(governed.OperationId, evidence.OperationId, StringComparison.Ordinal)
             && string.Equals(governed.LoopId, entry.Envelope.Loop.LoopId, StringComparison.Ordinal)
-            && governed.DefinitionVersion == entry.Envelope.Loop.DefinitionVersion
-            && string.Equals(governed.DefinitionHash, entry.Envelope.Loop.ContentHash, StringComparison.Ordinal);
+            && string.Equals(governed.LoopReferenceHash, loopReferenceHash, StringComparison.Ordinal);
     }
 
     private static bool IsWorkerId(string value) => !string.IsNullOrWhiteSpace(value) && value.Length <= TriggerWorkerLimits.MaxWorkerIdCharacters && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.');
@@ -771,7 +770,7 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        await _guard.WriteAsync(content, artifacts, identity.TombstoneCount, identity.Precursors, next.Generation, _observer, mutationLease).ConfigureAwait(false);
+        await _guard.WriteAsync(content, artifacts, identity.Tombstones, identity.Precursors, next.Generation, _observer, mutationLease).ConfigureAwait(false);
     }
 
     private async Task PersistSweepIfNeededAsync(TriggerQueueLedger ledger, TriggerQueueReadResult identity, bool changed, TriggerQueueMutationLease mutationLease, CancellationToken cancellationToken)
@@ -1070,14 +1069,14 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
             entries.Length,
             entries.Sum(entry => (long)entry.SerializedEntryBytes),
             entries.Sum(entry => (long)entry.RetainedReservationBytes),
-            identity.TombstoneCount,
+            identity.Tombstones.Count,
             !CanPersist(identity),
             entries);
     }
 
     private bool CanPersist(TriggerQueueReadResult identity)
     {
-        var reservedArtifacts = identity.Precursors.Count + (OperatingSystem.IsWindows() ? 0 : identity.TombstoneCount + Math.Max(1, identity.Artifacts.Count));
+        var reservedArtifacts = identity.Precursors.Count + (OperatingSystem.IsWindows() ? 0 : identity.Tombstones.Count + Math.Max(1, identity.Artifacts.Count));
         return reservedArtifacts <= _quota.MaxDurabilityTombstones;
     }
 
@@ -1162,7 +1161,12 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
 
     private static TriggerGovernedInvocationEvidence RepresentativeGovernedInvocation(TriggerQueueLedgerEntry entry, TriggerWorkerLease lease)
     {
-        return new TriggerGovernedInvocationEvidence(TriggerWorkerRequestHash.ComputeOperationId(entry.Envelope.DeliveryId, lease.Generation), new string('r', TriggerWorkerLimits.MaxGovernedRunIdCharacters), new string('a', 64), entry.Envelope.Loop.LoopId, entry.Envelope.Loop.DefinitionVersion, entry.Envelope.Loop.ContentHash);
+        if (!TriggerLoopReferenceHash.TryCompute(entry.Envelope.Loop, out var loopReferenceHash, out _))
+        {
+            throw new InvalidOperationException("A validated queue entry could not reserve its exact governed target receipt representation.");
+        }
+
+        return new TriggerGovernedInvocationEvidence(TriggerWorkerRequestHash.ComputeOperationId(entry.Envelope.DeliveryId, lease.Generation), new string('r', TriggerWorkerLimits.MaxGovernedRunIdCharacters), new string('a', 64), entry.Envelope.Loop.LoopId, loopReferenceHash!);
     }
 
     private static bool IsNonterminal(TriggerQueueLedgerEntry entry) => IsNonterminal(entry.State);

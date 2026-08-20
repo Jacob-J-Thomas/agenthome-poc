@@ -9,6 +9,8 @@ using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Triggers;
+using EmbodySense.Core.Common.Triggers.Models;
 
 namespace EmbodySense.Core.Application.Loops.Sequential;
 
@@ -53,6 +55,12 @@ public static class GovernedLoopSequentialRunAnchorGuard
         var receipt = admissionReceipt!;
         var invocation = invocationSnapshot!;
         var artifact = graphArtifact!;
+        var planResult = GovernedLoopSequentialPlanBuilder.Build(artifact);
+        if (planResult.Status != GovernedLoopSequentialPlanBuildStatus.Ready || planResult.Plan is null)
+        {
+            return Failure(GovernedLoopSequentialRunAnchorStatus.InvalidGraphArtifact);
+        }
+
         if (invocation.ContextCapturedAtUtc > receipt.Evidence.EvaluatedAtUtc
             || invocation.ContextCapturedAtUtc > receipt.RecordedAtUtc)
         {
@@ -83,6 +91,11 @@ public static class GovernedLoopSequentialRunAnchorGuard
 
         if (!string.Equals(binding.InvocationPayloadHash, invocation.ContentHash, StringComparison.Ordinal)
             || !string.Equals(request.InvocationPayloadHash, invocation.ContentHash, StringComparison.Ordinal))
+        {
+            return Failure(GovernedLoopSequentialRunAnchorStatus.InvocationMismatch);
+        }
+
+        if (!InvocationOriginMatchesEntry(invocation, request, receipt, artifact, planResult.Plan))
         {
             return Failure(GovernedLoopSequentialRunAnchorStatus.InvocationMismatch);
         }
@@ -123,6 +136,38 @@ public static class GovernedLoopSequentialRunAnchorGuard
         return new GovernedLoopSequentialRunAnchorResult(
             GovernedLoopSequentialRunAnchorStatus.Ready,
             new GovernedLoopSequentialRunAnchor(binding, invocation));
+    }
+
+    private static bool InvocationOriginMatchesEntry(
+        GovernedLoopSequentialInvocationSnapshot invocation,
+        GovernedLoopAdmissionRequest request,
+        GovernedLoopAdmissionReceipt receipt,
+        GovernedLoopGraphRevisionArtifact artifact,
+        GovernedLoopSequentialPlan plan)
+    {
+        var expectedDescriptor = invocation.TriggerOrigin is null
+            ? GovernedLoopSequentialNodeDescriptors.ManualTrigger
+            : GovernedLoopSequentialNodeDescriptors.ScheduleTrigger;
+        var entryNode = plan.Nodes.SingleOrDefault(node => string.Equals(node.NodeId, artifact.Graph.EntryNodeId, StringComparison.Ordinal));
+        if (entryNode is null || !Equals(entryNode.Descriptor, expectedDescriptor))
+        {
+            return false;
+        }
+
+        if (invocation.TriggerOrigin is null)
+        {
+            return true;
+        }
+
+        return TriggerDeliveryJson.TryDeserialize(invocation.TriggerOrigin.CanonicalEnvelope, out var envelope, out _)
+            && envelope is not null
+            && GovernedLoopSequentialTriggerOriginFactory.MatchesPersistedOrigin(envelope, invocation.TriggerOrigin)
+            && Equals(envelope.Loop.GovernedPublication, request.Publication)
+            && Equals(envelope.Loop.AuthorityGrant, request.AuthorityGrant)
+            && Equals(envelope.ActorContext.ActorId, request.ActorId)
+            && string.Equals(envelope.ActorContext.SurfaceId, request.Surface, StringComparison.Ordinal)
+            && string.Equals(receipt.Intent.WorkspaceId, "workspace-sha256:" + envelope.ActorContext.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(envelope.ActorContext.RoleId, artifact.Graph.OwningRole.Identity.RoleId, StringComparison.Ordinal);
     }
 
     private static bool IsValidRequest(GovernedLoopAdmissionRequest? request)

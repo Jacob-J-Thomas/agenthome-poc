@@ -1,3 +1,4 @@
+using System.Text;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
@@ -9,6 +10,11 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Revisions;
+using EmbodySense.Core.Common.Triggers;
+using EmbodySense.Core.Common.Triggers.Models;
+using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
+using EmbodySense.Core.Common.Tests.Triggers.Schedules;
 using EmbodySense.Core.Common.Tests.Loops.Admission;
 
 namespace EmbodySense.Core.Common.Tests.Loops.Sequential;
@@ -28,6 +34,139 @@ public sealed class GovernedLoopSequentialContractTests
         Assert.False(GovernedLoopSequentialContractHash.Matches(CopySnapshot(snapshot, model: new CustomLoopModelSnapshot("provider", "other-model"))));
         Assert.False(GovernedLoopSequentialContractHash.Matches(CopySnapshot(snapshot, conversation: snapshot.InvokingConversation! with { CapturedVersion = "version-2" })));
         Assert.False(GovernedLoopSequentialContractHash.Matches(snapshot with { ContextCapturedAtUtc = snapshot.ContextCapturedAtUtc.AddSeconds(1) }));
+    }
+
+    [Fact]
+    public void Schedule_origin_retains_the_full_canonical_delivery_and_is_hash_bound()
+    {
+        var prompt = "Run the scheduled reflection.";
+        var (prepared, evidence) = ScheduleOriginEvidence(prompt);
+        Assert.True(GovernedLoopSequentialTriggerOriginFactory.TryCreateSchedule(prepared.Envelope, evidence, out var origin));
+        Assert.NotNull(origin);
+        var capturedAtUtc = prepared.Envelope.Temporal.ReceivedAtUtc.AddSeconds(1);
+        var context = CustomLoopContextSnapshot.CreateEmpty(capturedAtUtc);
+        var snapshot = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
+            GovernedLoopSequentialInvocationSnapshot.CurrentSchemaVersion,
+            prompt,
+            new CustomLoopModelSnapshot("provider", "model"),
+            null,
+            capturedAtUtc,
+            context.SourceManifest,
+            string.Empty)
+        {
+            TriggerOrigin = origin,
+        });
+
+        Assert.True(GovernedLoopSequentialContractValidator.Validate(snapshot).IsValid);
+        Assert.Equal(prepared.CanonicalEnvelopeHash, snapshot.TriggerOrigin!.CanonicalEnvelopeHash);
+        Assert.True(TriggerDeliveryJson.TrySerialize(prepared.Envelope, out var canonicalEnvelope, out _));
+        Assert.Equal(canonicalEnvelope, snapshot.TriggerOrigin.CanonicalEnvelope);
+        Assert.False(GovernedLoopSequentialContractHash.Matches(snapshot with
+        {
+            TriggerOrigin = origin! with { CanonicalEnvelopeHash = Hash('e') },
+        }));
+    }
+
+    [Fact]
+    public void Schedule_origin_rejects_trigger_confusion_substitution_and_manual_context()
+    {
+        var prompt = "Run the scheduled reflection.";
+        var payload = TriggerDeliveryTestData.InlinePayload(Encoding.UTF8.GetBytes(prompt));
+        var (prepared, evidence) = ScheduleOriginEvidence(prompt);
+        var wrongKind = ScheduleContractTestData.Prepared(
+            kind: TriggerKind.Webhook,
+            payload: payload,
+            definitionHash: evidence.DefinitionHash);
+        var wrongAdapter = ScheduleContractTestData.Prepared(
+            adapter: TriggerDeliveryTestData.Adapter(),
+            payload: payload,
+            definitionHash: evidence.DefinitionHash);
+        Assert.True(GovernedLoopSequentialTriggerOriginFactory.TryCreateSchedule(prepared.Envelope, evidence, out var origin));
+        Assert.False(GovernedLoopSequentialTriggerOriginFactory.TryCreateSchedule(wrongKind.Envelope, evidence, out _));
+        Assert.False(GovernedLoopSequentialTriggerOriginFactory.TryCreateSchedule(wrongAdapter.Envelope, evidence, out _));
+
+        var capturedAtUtc = prepared.Envelope.Temporal.ReceivedAtUtc.AddSeconds(1);
+        var context = CustomLoopContextSnapshot.CreateEmpty(capturedAtUtc);
+        var snapshot = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
+            1,
+            prompt,
+            new CustomLoopModelSnapshot("provider", "model"),
+            null,
+            capturedAtUtc,
+            context.SourceManifest,
+            string.Empty)
+        {
+            TriggerOrigin = origin,
+        });
+        var substitutedPrompt = snapshot with { TriggerPrompt = "Different prompt." };
+        var manualContext = new GovernedLoopSequentialInvocationSnapshot(
+            snapshot.SchemaVersion,
+            snapshot.TriggerPrompt,
+            snapshot.ModelSnapshot,
+            new CustomLoopConversationReference("conversation-1", "version-1", capturedAtUtc),
+            snapshot.ContextCapturedAtUtc,
+            snapshot.ContextManifest,
+            snapshot.ContentHash)
+        {
+            TriggerOrigin = snapshot.TriggerOrigin,
+        };
+        var noncanonicalEnvelope = snapshot with
+        {
+            TriggerOrigin = origin! with { CanonicalEnvelope = origin.CanonicalEnvelope + " " },
+        };
+
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(substitutedPrompt).Errors, error => error.Path == "$.triggerOrigin");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(manualContext).Errors, error => error.Path == "$.triggerOrigin");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(noncanonicalEnvelope).Errors, error => error.Path == "$.triggerOrigin.canonicalEnvelope");
+    }
+
+    [Fact]
+    public void Schedule_origin_rejects_swapped_schedule_occurrence_payload_and_target_evidence()
+    {
+        const string Prompt = "Run the scheduled reflection.";
+        var (prepared, evidence) = ScheduleOriginEvidence(Prompt);
+        Assert.True(ScheduleId.TryParse("other-schedule", out var otherScheduleId));
+        var otherDefinition = evidence.Definition with { ScheduleId = otherScheduleId! };
+        Assert.True(ScheduleContractHash.TryComputeDefinition(otherDefinition, out var otherDefinitionHash, out _));
+        Assert.True(ScheduleIdentityDerivation.TryDerive(
+            otherDefinition.ScheduleId,
+            otherDefinition.Revision,
+            otherDefinitionHash!,
+            evidence.Occurrence,
+            out var otherIdentity,
+            out _));
+        var swappedSchedule = evidence with
+        {
+            Definition = otherDefinition,
+            DefinitionHash = otherDefinitionHash!,
+            Identity = otherIdentity!,
+        };
+        var swappedOccurrence = evidence with
+        {
+            Occurrence = evidence.Occurrence with
+            {
+                Ordinal = evidence.Occurrence.Ordinal + 1,
+                ScheduledLocal = evidence.Occurrence.ScheduledLocal.AddDays(1),
+                ScheduledAtUtc = evidence.Occurrence.ScheduledAtUtc.AddDays(1),
+            },
+        };
+        var wrongPayload = ScheduleContractTestData.Prepared(
+            evidence.Occurrence,
+            payload: TriggerDeliveryTestData.InlinePayload([9, 9, 9]),
+            definitionHash: evidence.DefinitionHash,
+            definitionRevision: evidence.Definition.Revision,
+            scheduleId: evidence.Definition.ScheduleId);
+        var wrongTarget = ScheduleContractTestData.Prepared(
+            evidence.Occurrence,
+            target: TriggerDeliveryTestData.GovernedLoop(graphId: "other-graph"),
+            definitionHash: evidence.DefinitionHash,
+            definitionRevision: evidence.Definition.Revision,
+            scheduleId: evidence.Definition.ScheduleId);
+
+        Assert.False(GovernedLoopSequentialTriggerOriginFactory.TryCreateSchedule(prepared.Envelope, swappedSchedule, out _));
+        Assert.False(GovernedLoopSequentialTriggerOriginFactory.TryCreateSchedule(prepared.Envelope, swappedOccurrence, out _));
+        Assert.False(GovernedLoopSequentialTriggerOriginFactory.TryCreateSchedule(wrongPayload.Envelope, evidence, out _));
+        Assert.False(GovernedLoopSequentialTriggerOriginFactory.TryCreateSchedule(wrongTarget.Envelope, evidence, out _));
     }
 
     [Fact]
@@ -360,6 +499,38 @@ public sealed class GovernedLoopSequentialContractTests
         Assert.Equal("Required at $", first.ToString());
     }
 
+    private static (SchedulePreparedDelivery Prepared, ScheduleDeliveryProvenanceEvidence Evidence) ScheduleOriginEvidence(string prompt)
+    {
+        var payload = TriggerDeliveryTestData.InlinePayload(Encoding.UTF8.GetBytes(prompt));
+        var definition = ScheduleContractTestData.Definition() with
+        {
+            Payload = new SchedulePayloadReference("payload/daily-reflection", payload.ContentHash),
+        };
+        Assert.True(ScheduleContractHash.TryComputeDefinition(definition, out var definitionHash, out var hashValidation), ScheduleContractTestData.Errors(hashValidation));
+        var occurrence = ScheduleContractTestData.Occurrence();
+        var prepared = ScheduleContractTestData.Prepared(
+            occurrence,
+            payload: payload,
+            definitionHash: definitionHash!,
+            definitionRevision: definition.Revision,
+            scheduleId: definition.ScheduleId);
+        var identity = ScheduleContractTestData.Identity(
+            occurrence,
+            definitionHash!,
+            definition.Revision,
+            definition.ScheduleId);
+        var result = ScheduleContractTestData.Result(prepared.CanonicalEnvelopeHash);
+        return (
+            prepared,
+            new ScheduleDeliveryProvenanceEvidence(
+                ScheduleDeliveryProvenanceEvidence.CurrentSchemaVersion,
+                definition,
+                definitionHash!,
+                occurrence,
+                identity,
+                result));
+    }
+
     private static GovernedLoopSequentialInvocationSnapshot Snapshot()
     {
         var context = CustomLoopContextSnapshot.CreateEmpty(_capturedAtUtc);
@@ -415,7 +586,10 @@ public sealed class GovernedLoopSequentialContractTests
             conversation ?? source.InvokingConversation,
             source.ContextCapturedAtUtc,
             contextManifest ?? source.ContextManifest,
-            source.ContentHash);
+            source.ContentHash)
+        {
+            TriggerOrigin = source.TriggerOrigin,
+        };
 
     private static GovernedLoopSequentialAdapterBinding CopyBinding(
         GovernedLoopSequentialAdapterBinding source,

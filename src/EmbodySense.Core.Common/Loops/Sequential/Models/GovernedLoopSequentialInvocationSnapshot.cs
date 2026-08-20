@@ -1,11 +1,12 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using System.Text.Json.Serialization;
 
 namespace EmbodySense.Core.Common.Loops.Sequential.Models;
 
 /// <summary>Captures the exact bounded non-secret invocation payload admitted to one sequential governed-loop run.</summary>
 /// <param name="SchemaVersion">The snapshot schema version, which must be 1.</param>
-/// <param name="TriggerPrompt">The exact normalized manual-trigger prompt.</param>
+/// <param name="TriggerPrompt">The exact normalized entry-trigger prompt.</param>
 /// <param name="ModelSnapshot">The exact provider and optional model selection.</param>
 /// <param name="InvokingConversation">The optional exact invoking-conversation version.</param>
 /// <param name="ContextCapturedAtUtc">The trusted UTC time at which the context manifest was frozen.</param>
@@ -32,4 +33,9 @@ public sealed record GovernedLoopSequentialInvocationSnapshot(
 
     /// <summary>Gets a defensively copied bounded read-only context manifest.</summary>
     public IReadOnlyList<CustomLoopContextManifestSource> ContextManifest { get; } = GovernedLoopSequentialContractCopy.Copy(ContextManifest);
+
+    /// <summary>Gets the full canonical schedule-delivery origin, or <see langword="null"/> for a manual invocation.</summary>
+    /// <remarks>The JSON member is required even when null; earlier experimental artifacts require explicit re-creation.</remarks>
+    [JsonRequired]
+    public GovernedLoopSequentialTriggerOrigin? TriggerOrigin { get; init; }
 }

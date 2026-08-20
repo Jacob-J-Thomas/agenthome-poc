@@ -59,7 +59,7 @@ public sealed class LoopReceiptRetentionFacadeTests
     public async Task Posture_projects_all_classes_workspace_accounting_and_server_owned_bounded_cleanup()
     {
         using var workspace = new TestWorkspace();
-        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        await InitializeAsync(workspace);
         var facade = new LoopReceiptRetentionFacade(workspace.RootPath);
 
         var posture = await facade.GetPostureAsync();
@@ -92,7 +92,7 @@ public sealed class LoopReceiptRetentionFacadeTests
     public async Task Cleanup_projects_a_bounded_interface_detail_without_persistence_paths_or_operation_identities()
     {
         using var workspace = new TestWorkspace();
-        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        await InitializeAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
         var requestedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1);
         const string OperationId = "retention-safe-detail";
@@ -138,7 +138,7 @@ public sealed class LoopReceiptRetentionFacadeTests
     public async Task Posture_exposes_only_the_safe_retry_deadline_for_an_active_cleanup_journal()
     {
         using var workspace = new TestWorkspace();
-        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        await InitializeAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
         var ownershipAcquiredAtUtc = DateTimeOffset.UtcNow.AddSeconds(-5);
         var request = new CustomLoopReceiptCleanupRequest(
@@ -244,4 +244,7 @@ public sealed class LoopReceiptRetentionFacadeTests
             [],
             "Test posture.");
     }
+
+    private static Task InitializeAsync(TestWorkspace workspace)
+        => WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
 }

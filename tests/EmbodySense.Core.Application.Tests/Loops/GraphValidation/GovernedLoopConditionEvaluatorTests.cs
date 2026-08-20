@@ -140,6 +140,16 @@ public sealed class GovernedLoopConditionEvaluatorTests
         Assert.Equal(GovernedLoopControlCondition.Unknown, result.SelectedOutcome);
     }
 
+    [Fact]
+    public void Malformed_utf16_parameter_fails_closed_at_the_public_contract_boundary()
+    {
+        var result = GovernedLoopConditionEvaluator.Evaluate(ExactTextCondition("bad\ud800"), Text("bad"));
+
+        Assert.Equal(GovernedLoopConditionEvaluationStatus.InvalidContract, result.Status);
+        Assert.Equal(GovernedLoopControlCondition.Unknown, result.SelectedOutcome);
+        Assert.Equal("condition.contract.invalid", result.ErrorCode);
+    }
+
     private static GovernedLoopNodeDefinition BooleanCondition()
         => Condition(
             GovernedLoopSequentialNodeDescriptors.BooleanCondition,

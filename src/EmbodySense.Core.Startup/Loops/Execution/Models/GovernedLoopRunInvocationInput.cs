@@ -7,7 +7,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution.Models;
 /// <param name="OperationId">The workspace-global idempotency identity.</param>
 /// <param name="Publication">The exact immutable published revision pin.</param>
 /// <param name="AuthorityGrant">The exact immutable authority-grant revision.</param>
-/// <param name="InvocationPrompt">The bounded manual-trigger prompt.</param>
+/// <param name="InvocationPrompt">The bounded entry-trigger prompt.</param>
 /// <remarks>
 /// Workspace, actor, surface, role, graph payload, model, context, run, and execution-generation values are
 /// server-owned and intentionally absent. Supplying a pin identifies immutable evidence but grants no authority.

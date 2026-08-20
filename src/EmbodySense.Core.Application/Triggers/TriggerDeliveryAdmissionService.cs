@@ -62,7 +62,7 @@ public sealed class TriggerDeliveryAdmissionService : ITriggerDeliveryAdmissionP
             if (exactEnvelope || permittedRedelivery && stableSemantics)
             {
                 if (history.Receipt.Status is TriggerAdmissionStatus.Admitted or TriggerAdmissionStatus.Replayed
-                    && ValidateCurrentEvidence(request, envelopeHash!) is { } currentFailure)
+                    && ValidateCurrentEvidence(request, envelopeHash!, allowHistoricalAuthorityReceipt: true) is { } currentFailure)
                 {
                     return currentFailure;
                 }
@@ -78,10 +78,10 @@ public sealed class TriggerDeliveryAdmissionService : ITriggerDeliveryAdmissionP
             return Result(TriggerAdmissionStatus.Invalid, TriggerAdmissionReason.InvalidEnvelope, envelopeHash);
         }
 
-        return ValidateCurrentEvidence(request, envelopeHash!) ?? Result(TriggerAdmissionStatus.Admitted, TriggerAdmissionReason.EvidenceAccepted, envelopeHash);
+        return ValidateCurrentEvidence(request, envelopeHash!, allowHistoricalAuthorityReceipt: false) ?? Result(TriggerAdmissionStatus.Admitted, TriggerAdmissionReason.EvidenceAccepted, envelopeHash);
     }
 
-    private static TriggerDeliveryAdmissionResult? ValidateCurrentEvidence(TriggerDeliveryAdmissionRequest request, string envelopeHash)
+    private static TriggerDeliveryAdmissionResult? ValidateCurrentEvidence(TriggerDeliveryAdmissionRequest request, string envelopeHash, bool allowHistoricalAuthorityReceipt)
     {
         var temporalState = TriggerTemporalEvaluator.Evaluate(request.Envelope.Temporal, request.EvaluatedAtUtc);
         if (temporalState == TriggerTemporalState.Expired)
@@ -99,7 +99,14 @@ public sealed class TriggerDeliveryAdmissionService : ITriggerDeliveryAdmissionP
             return Result(TriggerAdmissionStatus.Invalid, TriggerAdmissionReason.InvalidEnvelope, envelopeHash);
         }
 
-        if (request.EvaluatedAtUtc < request.Envelope.Temporal.ReceivedAtUtc || request.EvaluatedAtUtc - request.Envelope.Temporal.ReceivedAtUtc > TriggerDeliveryLimits.MaxAdmissionAge)
+        var preparedScheduleRecovery = request.PermitsPreparedScheduleRecovery
+            && request.Envelope.Kind == TriggerKind.Time;
+
+        // A durably prepared schedule may recover after the ordinary ingress-age window. Its explicit
+        // deadline and expiry remain authoritative above, and all current evidence is still checked below.
+        if (request.EvaluatedAtUtc < request.Envelope.Temporal.ReceivedAtUtc
+            || !preparedScheduleRecovery
+                && request.EvaluatedAtUtc - request.Envelope.Temporal.ReceivedAtUtc > TriggerDeliveryLimits.MaxAdmissionAge)
         {
             return Result(TriggerAdmissionStatus.Unauthorized, TriggerAdmissionReason.StaleDelivery, envelopeHash);
         }
@@ -125,7 +132,13 @@ public sealed class TriggerDeliveryAdmissionService : ITriggerDeliveryAdmissionP
             return Result(TriggerAdmissionStatus.Unauthorized, mismatch.Value, envelopeHash);
         }
 
-        if (!TriggerAuthorityEvidenceEquality.Equals(request.Envelope.Authority, request.CurrentAuthority))
+        // Authenticated admitted history and internal prepared-schedule recovery freeze the envelope receipt.
+        // They may refresh only its current-time proof; the exact selected profile and every other target,
+        // adapter, and actor binding remain unchanged above. The schedule exception is closed to Time envelopes.
+        var exactAuthority = allowHistoricalAuthorityReceipt || preparedScheduleRecovery
+            ? request.Envelope.Authority.Profile == request.CurrentAuthority.Profile
+            : TriggerAuthorityEvidenceEquality.Equals(request.Envelope.Authority, request.CurrentAuthority);
+        if (!exactAuthority)
         {
             return Result(TriggerAdmissionStatus.Unauthorized, TriggerAdmissionReason.AuthorityMismatch, envelopeHash);
         }

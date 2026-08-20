@@ -22,6 +22,7 @@ internal static class GovernedLoopSequentialApplicationTestFixture
 {
     internal const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     internal const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    internal const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
     internal const string WorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
 
     internal static readonly DateTimeOffset Now = new(2026, 8, 10, 22, 0, 0, TimeSpan.Zero);
@@ -31,7 +32,8 @@ internal static class GovernedLoopSequentialApplicationTestFixture
         IReadOnlyList<string>? inferenceIds = null,
         Func<int, GovernedLoopNodeDescriptor>? inferenceDescriptor = null,
         ContextualRoleRevisionPin? owningRole = null,
-        bool allowWorkspaceTools = false)
+        bool allowWorkspaceTools = false,
+        bool scheduleTrigger = false)
     {
         inferenceIds ??= Enumerable.Range(1, inferenceCount).Select(index => $"infer-{index:D2}").ToArray();
         if (inferenceIds.Count != inferenceCount)
@@ -41,7 +43,7 @@ internal static class GovernedLoopSequentialApplicationTestFixture
 
         var nodes = new List<GovernedLoopNodeDefinition>
         {
-            Trigger("trigger"),
+            Trigger("trigger", scheduleTrigger),
         };
         nodes.AddRange(inferenceIds.Select((id, index) => inferenceDescriptor is null
             ? Inference(id, $"Execute bounded inference step {index + 1}.", allowWorkspaceTools)
@@ -73,9 +75,13 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             owningRole,
             bindings,
             authorityCeiling: GovernedLoopAuthorityCeiling.Create(
-                allowWorkspaceTools
-                    ? [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]
-                    : [ConversationTurnCapabilityId, ModelInferenceCapabilityId]));
+                (allowWorkspaceTools, scheduleTrigger) switch
+                {
+                    (true, true) => [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId, WorkspaceCommandCapabilityId],
+                    (true, false) => [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId],
+                    (false, true) => [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId],
+                    _ => [ConversationTurnCapabilityId, ModelInferenceCapabilityId],
+                }));
     }
 
     internal static GovernedLoopGraphRevisionArtifact MixedPureArtifact(ContextualRoleRevisionPin? owningRole = null)
@@ -220,15 +226,17 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             GovernedLoopAuthorityCeiling.Create([]),
             new Dictionary<string, string>());
 
-    internal static GovernedLoopNodeDefinition Trigger(string id)
+    internal static GovernedLoopNodeDefinition Trigger(string id, bool scheduled = false)
         => new(
             id,
-            GovernedLoopSequentialNodeDescriptors.ManualTrigger,
+            scheduled
+                ? GovernedLoopSequentialNodeDescriptors.ScheduleTrigger
+                : GovernedLoopSequentialNodeDescriptors.ManualTrigger,
             [
                 Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
                 Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context),
             ],
-            GovernedLoopAuthorityCeiling.Create([]),
+            GovernedLoopAuthorityCeiling.Create(scheduled ? [ScheduleTriggerCapabilityId] : []),
             new Dictionary<string, string>());
 
     internal static GovernedLoopNodeDefinition Inference(string id, string instruction = "Answer safely.", bool allowWorkspaceTools = false)

@@ -193,8 +193,8 @@ public sealed partial class CustomLoopDefinitionStore
         await _mutationGate.WaitAsync(cancellationToken);
         try
         {
-            using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
-            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
+            using var workspaceLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.LoopDefinitionsPath, cancellationToken);
+            using var retentionLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.CustomLoopReceiptRetentionPath, cancellationToken);
             return await InspectReceiptRetentionUnderLockAsync(artifactClass, cancellationToken);
         }
         finally
@@ -219,8 +219,8 @@ public sealed partial class CustomLoopDefinitionStore
         await _mutationGate.WaitAsync(cancellationToken);
         try
         {
-            using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
-            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
+            using var workspaceLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.LoopDefinitionsPath, cancellationToken);
+            using var retentionLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.CustomLoopReceiptRetentionPath, cancellationToken);
             var journal = await ReadCleanupJournalAsync(artifactClass, cancellationToken);
             return journal is null
                 ? new CustomLoopReceiptActiveCleanupJournalPosture(0, null, null, null)
@@ -246,8 +246,8 @@ public sealed partial class CustomLoopDefinitionStore
         await _mutationGate.WaitAsync(cancellationToken);
         try
         {
-            using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
-            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
+            using var workspaceLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.LoopDefinitionsPath, cancellationToken);
+            using var retentionLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.CustomLoopReceiptRetentionPath, cancellationToken);
             var operationPath = GetOperationPath(safeOperationId);
             if (File.Exists(operationPath))
             {

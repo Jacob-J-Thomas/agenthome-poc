@@ -204,6 +204,94 @@ public sealed class TriggerDeliveryAdmissionServiceTests
     }
 
     [Fact]
+    public async Task Exact_admitted_replay_accepts_a_fresh_direct_receipt_after_the_immutable_envelope_receipt_expires()
+    {
+        var envelope = TriggerAdmissionTestData.Envelope();
+        var replayedAtUtc = TriggerAdmissionTestData.CreatedAtUtc.AddMinutes(10);
+        var freshCurrentAuthority = TriggerAdmissionTestData.Authority(evaluatedAtUtc: replayedAtUtc);
+        var result = await Port(envelope, TriggerAdmissionTestData.Receipt(envelope)).AdmitAsync(
+            TriggerAdmissionTestData.Request(envelope: envelope, currentAuthority: freshCurrentAuthority, evaluatedAtUtc: replayedAtUtc));
+
+        Assert.True(replayedAtUtc - envelope.Authority.BoundaryReceipt.EvaluatedAtUtc > TriggerDeliveryLimits.MaxAuthorityEvidenceAge);
+        Assert.Equal(envelope.Authority.Profile, freshCurrentAuthority.Profile);
+        Assert.NotEqual(envelope.Authority.BoundaryReceipt, freshCurrentAuthority.BoundaryReceipt);
+        AssertReplay(result, TriggerAdmissionStatus.Admitted, TriggerAdmissionReason.EvidenceAccepted, admitted: true);
+    }
+
+    [Fact]
+    public async Task Fresh_receipt_replay_still_rejects_changed_profile_target_adapter_and_actor_bindings()
+    {
+        var envelope = TriggerAdmissionTestData.Envelope();
+        var replayedAtUtc = TriggerAdmissionTestData.CreatedAtUtc.AddMinutes(10);
+        var freshCurrentAuthority = TriggerAdmissionTestData.Authority(evaluatedAtUtc: replayedAtUtc);
+        var port = Port(envelope, TriggerAdmissionTestData.Receipt(envelope));
+        var cases = new[]
+        {
+            (TriggerAdmissionTestData.Request(envelope: envelope, currentAuthority: TriggerAdmissionTestData.Authority(evaluatedAtUtc: replayedAtUtc, profileIdText: "other-profile"), evaluatedAtUtc: replayedAtUtc), TriggerAdmissionReason.AuthorityMismatch),
+            (TriggerAdmissionTestData.Request(envelope: envelope, currentLoop: TriggerAdmissionTestData.Loop(version: 4), currentAuthority: freshCurrentAuthority, evaluatedAtUtc: replayedAtUtc), TriggerAdmissionReason.StaleLoop),
+            (TriggerAdmissionTestData.Request(envelope: envelope, currentAdapter: TriggerAdmissionTestData.Adapter(version: "1.0.1"), currentAuthority: freshCurrentAuthority, evaluatedAtUtc: replayedAtUtc), TriggerAdmissionReason.StaleAdapter),
+            (TriggerAdmissionTestData.Request(envelope: envelope, currentActorContext: TriggerAdmissionTestData.ActorContext(actor: "other"), currentAuthority: freshCurrentAuthority, evaluatedAtUtc: replayedAtUtc), TriggerAdmissionReason.ActorMismatch)
+        };
+
+        foreach (var (request, reason) in cases)
+        {
+            var result = await port.AdmitAsync(request);
+            AssertOutcome(result, TriggerAdmissionStatus.Unauthorized, reason);
+            Assert.False(result.IsReplay);
+        }
+    }
+
+    [Fact]
+    public async Task Admitted_replay_age_and_boundary_checks_apply_to_the_current_receipt()
+    {
+        var envelope = TriggerAdmissionTestData.Envelope();
+        var replayedAtUtc = TriggerAdmissionTestData.CreatedAtUtc.AddMinutes(10);
+        var port = Port(envelope, TriggerAdmissionTestData.Receipt(envelope));
+        var staleCurrent = TriggerAdmissionTestData.Authority(evaluatedAtUtc: replayedAtUtc - TriggerDeliveryLimits.MaxAuthorityEvidenceAge - TimeSpan.FromTicks(1));
+        var reviewCurrent = TriggerAdmissionTestData.Authority(evaluatedAtUtc: replayedAtUtc, decision: AuthorityBoundaryDecision.Review);
+
+        var stale = await port.AdmitAsync(TriggerAdmissionTestData.Request(envelope: envelope, currentAuthority: staleCurrent, evaluatedAtUtc: replayedAtUtc));
+        var review = await port.AdmitAsync(TriggerAdmissionTestData.Request(envelope: envelope, currentAuthority: reviewCurrent, evaluatedAtUtc: replayedAtUtc));
+
+        AssertOutcome(stale, TriggerAdmissionStatus.Unauthorized, TriggerAdmissionReason.StaleAuthority);
+        AssertOutcome(review, TriggerAdmissionStatus.Unauthorized, TriggerAdmissionReason.AuthorityBoundary);
+    }
+
+    [Fact]
+    public async Task History_free_first_admission_cannot_replace_the_envelope_receipt_with_fresh_current_evidence()
+    {
+        var envelope = TriggerAdmissionTestData.Envelope();
+        var evaluatedAtUtc = TriggerAdmissionTestData.CreatedAtUtc.AddMinutes(10);
+        var freshCurrent = TriggerAdmissionTestData.Authority(evaluatedAtUtc: evaluatedAtUtc);
+
+        var replaced = await _port.AdmitAsync(TriggerAdmissionTestData.Request(envelope: envelope, currentAuthority: freshCurrent, evaluatedAtUtc: evaluatedAtUtc));
+        var staleExact = await _port.AdmitAsync(TriggerAdmissionTestData.Request(envelope: envelope, currentAuthority: envelope.Authority, evaluatedAtUtc: evaluatedAtUtc));
+
+        AssertOutcome(replaced, TriggerAdmissionStatus.Unauthorized, TriggerAdmissionReason.AuthorityMismatch);
+        AssertOutcome(staleExact, TriggerAdmissionStatus.Unauthorized, TriggerAdmissionReason.StaleAuthority);
+    }
+
+    [Fact]
+    public async Task Permitted_redelivery_semantics_do_not_ignore_authority_receipt_changes()
+    {
+        var original = TriggerAdmissionTestData.Envelope();
+        var replayedAtUtc = TriggerAdmissionTestData.CreatedAtUtc.AddMinutes(10);
+        var freshCurrent = TriggerAdmissionTestData.Authority(evaluatedAtUtc: replayedAtUtc);
+        var changedEnvelope = TriggerAdmissionTestData.Envelope(
+            deliveryId: "delivery-2",
+            authority: freshCurrent,
+            temporal: TriggerAdmissionTestData.Temporal(receivedAtUtc: TriggerAdmissionTestData.CreatedAtUtc.AddSeconds(3)),
+            redeliveryAttempt: 2,
+            redeliveryCount: 2,
+            originalDeliveryId: "delivery-1");
+
+        var result = await Port(original, TriggerAdmissionTestData.Receipt(original)).AdmitAsync(
+            TriggerAdmissionTestData.Request(envelope: changedEnvelope, currentAuthority: freshCurrent, evaluatedAtUtc: replayedAtUtc));
+
+        AssertOutcome(result, TriggerAdmissionStatus.Conflicting, TriggerAdmissionReason.IdentityConflict);
+    }
+
+    [Fact]
     public async Task Temporal_endpoints_are_exact_and_do_not_read_wall_clock()
     {
         var created = TriggerAdmissionTestData.CreatedAtUtc;
@@ -277,6 +365,24 @@ public sealed class TriggerDeliveryAdmissionServiceTests
     }
 
     [Fact]
+    public async Task Public_non_time_admission_cannot_bypass_the_received_age_bound()
+    {
+        var envelope = TriggerAdmissionTestData.Envelope();
+        var evaluatedAtUtc = envelope.Temporal.ReceivedAtUtc
+            + TriggerDeliveryLimits.MaxAdmissionAge
+            + TimeSpan.FromTicks(1);
+        var currentAuthority = TriggerAdmissionTestData.Authority(evaluatedAtUtc: evaluatedAtUtc);
+
+        var result = await _port.AdmitAsync(TriggerAdmissionTestData.Request(
+            envelope: envelope,
+            currentAuthority: currentAuthority,
+            evaluatedAtUtc: evaluatedAtUtc));
+
+        Assert.Equal(TriggerKind.Webhook, envelope.Kind);
+        AssertOutcome(result, TriggerAdmissionStatus.Unauthorized, TriggerAdmissionReason.StaleDelivery);
+    }
+
+    [Fact]
     public void Request_factory_rejects_forged_malformed_or_non_utc_current_evidence()
     {
         var envelope = TriggerAdmissionTestData.Envelope();
@@ -299,6 +405,13 @@ public sealed class TriggerDeliveryAdmissionServiceTests
 
         Assert.False(TriggerDeliveryAdmissionRequestFactory.TryCreate(envelope, envelope.Loop, envelope.Adapter, true, envelope.ActorContext, envelope.Authority, TriggerAdmissionTestData.CreatedAtUtc.ToOffset(TimeSpan.FromHours(1)), out _, out var timeValidation));
         Assert.Contains(timeValidation.Errors, error => error.Code == "utc_required");
+
+        var governedEnvelope = TriggerAdmissionTestData.Envelope(loop: TriggerAdmissionTestData.GovernedLoop());
+        Assert.Null(governedEnvelope.Loop.DefinitionVersion);
+        Assert.Null(governedEnvelope.Loop.ContentHash);
+        Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(governedEnvelope, governedEnvelope.Loop, governedEnvelope.Adapter, true, governedEnvelope.ActorContext, governedEnvelope.Authority, TriggerAdmissionTestData.CreatedAtUtc.AddSeconds(3), out var governedRequest, out var governedValidation));
+        Assert.True(governedValidation.IsValid);
+        Assert.Equal(TriggerLoopTargetKind.GovernedPublication, governedRequest!.CurrentLoop.Kind);
     }
 
     [Fact]
@@ -328,6 +441,16 @@ public sealed class TriggerDeliveryAdmissionServiceTests
         var received = envelope.Temporal.ReceivedAtUtc;
         Assert.True(TriggerDeliveryAdmissionReceiptFactory.TryCreate(envelope, TriggerAdmissionStatus.Admitted, TriggerAdmissionReason.EvidenceAccepted, received, out var exactReceipt, out _));
         Assert.Equal(received, exactReceipt!.RecordedAtUtc);
+        Assert.True(TriggerDeliveryAdmissionReceiptFactory.TryCreate(
+            envelope,
+            TriggerAdmissionStatus.Conflicting,
+            TriggerAdmissionReason.IdentityConflict,
+            received,
+            out var conflictingReceipt,
+            out var conflictingValidation));
+        Assert.True(conflictingValidation.IsValid);
+        Assert.Equal((TriggerAdmissionStatus.Conflicting, TriggerAdmissionReason.IdentityConflict),
+            (conflictingReceipt!.Status, conflictingReceipt.Reason));
 
         Assert.False(TriggerDeliveryAdmissionReceiptFactory.TryCreate(envelope, TriggerAdmissionStatus.Unknown, TriggerAdmissionReason.Unknown, received, out _, out var outcomeValidation));
         Assert.Contains(outcomeValidation.Errors, error => error.Code == "invalid_terminal_outcome");

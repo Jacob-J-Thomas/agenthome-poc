@@ -357,6 +357,8 @@ internal static class CustomLoopRunArtifactCodec
                 Content(source.TruncationReason);
                 Content(source.OmissionReason);
             }
+
+            Content(sequentialInvocation.TriggerOrigin?.CanonicalEnvelope);
         }
 
         if (nextContent != contentEntries.Count)
@@ -692,7 +694,16 @@ internal static class CustomLoopRunArtifactCodec
                 TruncationReason = ReferenceIdentifier(source.TruncationReason, contents),
                 OmissionReason = ReferenceIdentifier(source.OmissionReason, contents),
             }).ToArray(),
-            snapshot.ContentHash);
+            snapshot.ContentHash)
+        {
+            TriggerOrigin = snapshot.TriggerOrigin is null
+                ? null
+                : snapshot.TriggerOrigin with
+                {
+                    Occurrence = EmbodySense.Core.Common.Triggers.Schedules.ScheduleContractCopy.Copy(snapshot.TriggerOrigin.Occurrence)!,
+                    CanonicalEnvelope = contents.Reference(snapshot.TriggerOrigin.CanonicalEnvelope),
+                },
+        };
     }
 
     private static CustomLoopRetainedOutput? PrepareRetainedOutput(CustomLoopRetainedOutput? output, ContentRegistry contents)
@@ -790,6 +801,11 @@ internal static class CustomLoopRunArtifactCodec
     private static void ProjectPreparedSequentialInvocation(JsonObject snapshot)
     {
         ReferenceIdentifierProperty(snapshot, "triggerPrompt");
+        if (snapshot["triggerOrigin"] is JsonObject triggerOrigin)
+        {
+            ReferenceIdentifierProperty(triggerOrigin, "canonicalEnvelope");
+        }
+
         foreach (var item in RequireArray(snapshot, "contextManifest"))
         {
             var source = item?.AsObject() ?? throw new FormatException("Sequential context-manifest projection entries must be objects.");

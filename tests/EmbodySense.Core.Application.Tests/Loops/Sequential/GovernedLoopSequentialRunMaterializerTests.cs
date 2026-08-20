@@ -127,6 +127,23 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
     }
 
     [Fact]
+    public async Task Concurrent_exact_create_is_reconciled_from_the_store_result_before_execution()
+    {
+        var context = await ContextAsync();
+        var store = new RecordingRunStore { ForcedCreateStatus = CustomLoopRunStoreStatus.AlreadyCreated };
+        var audit = new RecordingAuditRecorder();
+
+        var result = await CreateMaterializer(store, audit).MaterializeAsync(context.Request);
+
+        Assert.Equal(GovernedLoopSequentialMaterializationStatus.Replayed, result.Status);
+        Assert.True(result.IsReady());
+        Assert.Equal(1, store.CreateCallCount);
+        Assert.Equal(1, store.UpdateCallCount);
+        Assert.Single(audit.Events);
+        Assert.True(CustomLoopRunValidator.HasCompleteAdmissionAudit(result.Run));
+    }
+
+    [Fact]
     public async Task Create_response_failure_after_commit_reconciles_exact_run_before_audit_and_marker()
     {
         var context = await ContextAsync();
@@ -601,9 +618,14 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
             CreatedCandidates.Add(run);
             if (ForcedCreateStatus is { } status)
             {
+                if (status == CustomLoopRunStoreStatus.AlreadyCreated)
+                {
+                    _run = run;
+                }
+
                 return Task.FromResult(new CustomLoopRunStoreResult(
                     status,
-                    status == CustomLoopRunStoreStatus.NonterminalRunExists ? run : null,
+                    status is CustomLoopRunStoreStatus.NonterminalRunExists or CustomLoopRunStoreStatus.AlreadyCreated ? run : null,
                     null));
             }
 

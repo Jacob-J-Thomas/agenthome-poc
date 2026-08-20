@@ -405,7 +405,15 @@ public sealed class CustomLoopRunStore :
             snapshot.InvokingConversation,
             snapshot.ContextCapturedAtUtc,
             snapshot.ContextManifest,
-            snapshot.ContentHash);
+            snapshot.ContentHash)
+        {
+            TriggerOrigin = snapshot.TriggerOrigin is null
+                ? null
+                : snapshot.TriggerOrigin with
+                {
+                    Occurrence = EmbodySense.Core.Common.Triggers.Schedules.ScheduleContractCopy.Copy(snapshot.TriggerOrigin.Occurrence)!,
+                },
+        };
         if (!EmbodySense.Core.Common.Loops.Sequential.GovernedLoopSequentialContractValidator.Validate(bindingCopy).IsValid
             || !EmbodySense.Core.Common.Loops.Sequential.GovernedLoopSequentialContractValidator.Validate(snapshotCopy).IsValid
             || !string.Equals(bindingCopy.ExecutionBinding.RunId, safeRunId, StringComparison.Ordinal)

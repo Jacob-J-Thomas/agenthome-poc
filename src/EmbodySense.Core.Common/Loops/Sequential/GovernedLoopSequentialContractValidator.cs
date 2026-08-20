@@ -6,12 +6,16 @@ using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Admission;
+using EmbodySense.Core.Common.Triggers;
+using EmbodySense.Core.Common.Triggers.Models;
 
 namespace EmbodySense.Core.Common.Loops.Sequential;
 
 /// <summary>Validates bounded schema-1 sequential invocation and adapter-binding contracts.</summary>
 public static class GovernedLoopSequentialContractValidator
 {
+    private static readonly UTF8Encoding _strictUtf8 = new(false, true);
+
     /// <summary>Validates one exact immutable sequential invocation snapshot.</summary>
     public static GovernedLoopSequentialValidationResult Validate(GovernedLoopSequentialInvocationSnapshot? snapshot)
     {
@@ -55,6 +59,7 @@ public static class GovernedLoopSequentialContractValidator
 
         ValidateSchema(snapshot.SchemaVersion, "$.schemaVersion", errors);
         ValidateText(snapshot.TriggerPrompt, "$.triggerPrompt", GovernedLoopSequentialContractLimits.MaxTriggerPromptCharacters, required: true, errors);
+        ValidateTriggerOrigin(snapshot, errors);
         ValidateModel(snapshot.ModelSnapshot, errors);
         ValidateConversation(snapshot.InvokingConversation, snapshot.ContextCapturedAtUtc, errors);
         ValidateUtc(snapshot.ContextCapturedAtUtc, "$.contextCapturedAtUtc", errors);
@@ -65,6 +70,53 @@ public static class GovernedLoopSequentialContractValidator
         }
 
         return errors;
+    }
+
+    private static void ValidateTriggerOrigin(
+        GovernedLoopSequentialInvocationSnapshot snapshot,
+        List<GovernedLoopSequentialValidationError> errors)
+    {
+        var origin = snapshot.TriggerOrigin;
+        if (origin is null)
+        {
+            return;
+        }
+
+        ValidateSchema(origin.SchemaVersion, "$.triggerOrigin.schemaVersion", errors);
+        ValidateHash(origin.CanonicalEnvelopeHash, "$.triggerOrigin.canonicalEnvelopeHash", errors);
+        if (origin.CanonicalEnvelope is null
+            || Encoding.UTF8.GetByteCount(origin.CanonicalEnvelope) > TriggerDeliveryLimits.MaxCanonicalDocumentUtf8Bytes
+            || !TriggerDeliveryJson.TryDeserialize(origin.CanonicalEnvelope, out var envelope, out _)
+            || envelope is null)
+        {
+            Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.triggerOrigin.canonicalEnvelope");
+            return;
+        }
+
+        if (!GovernedLoopSequentialTriggerOriginFactory.MatchesPersistedOrigin(envelope, origin))
+        {
+            Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.triggerOrigin");
+            return;
+        }
+
+        var payload = envelope.Payload.GetInlinePayload();
+        string? prompt = null;
+        try
+        {
+            prompt = payload is null ? null : _strictUtf8.GetString(payload);
+        }
+        catch (DecoderFallbackException)
+        {
+            // The complete origin-shape rejection below owns malformed payload evidence.
+        }
+
+        if (prompt is null
+            || !string.Equals(prompt, snapshot.TriggerPrompt, StringComparison.Ordinal)
+            || snapshot.InvokingConversation is not null
+            || envelope.Temporal.ReceivedAtUtc > snapshot.ContextCapturedAtUtc)
+        {
+            Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.triggerOrigin");
+        }
     }
 
     private static List<GovernedLoopSequentialValidationError> ValidateBindingStructure(

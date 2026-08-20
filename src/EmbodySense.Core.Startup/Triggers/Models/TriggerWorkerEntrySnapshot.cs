@@ -14,6 +14,5 @@ namespace EmbodySense.Core.Startup.Triggers.Models;
 /// <param name="DispatchDetail">The bounded outcome detail.</param>
 /// <param name="GovernedRunId">The exact governed run identity for a proved accepted or terminal outcome.</param>
 /// <param name="GovernedAdmissionRequestHash">The exact governed admission request hash.</param>
-/// <param name="GovernedDefinitionVersion">The exact governed definition version.</param>
-/// <param name="GovernedDefinitionHash">The exact governed definition content hash.</param>
-public sealed record TriggerWorkerEntrySnapshot(string DeliveryId, string LoopId, string State, long Revision, string? WorkerId, long? LeaseGeneration, DateTimeOffset? LeaseExpiresAtUtc, DateTimeOffset? LeaseReleasedAtUtc, string? DispatchOutcome, string? DispatchOperationId, string? DispatchDetail, string? GovernedRunId, string? GovernedAdmissionRequestHash, int? GovernedDefinitionVersion, string? GovernedDefinitionHash);
+/// <param name="GovernedLoopReferenceHash">The exact domain-separated closed target-reference hash.</param>
+public sealed record TriggerWorkerEntrySnapshot(string DeliveryId, string LoopId, string State, long Revision, string? WorkerId, long? LeaseGeneration, DateTimeOffset? LeaseExpiresAtUtc, DateTimeOffset? LeaseReleasedAtUtc, string? DispatchOutcome, string? DispatchOperationId, string? DispatchDetail, string? GovernedRunId, string? GovernedAdmissionRequestHash, string? GovernedLoopReferenceHash);

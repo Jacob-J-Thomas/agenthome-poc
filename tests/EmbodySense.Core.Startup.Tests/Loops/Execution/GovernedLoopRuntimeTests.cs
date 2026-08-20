@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.ContextualRoles;
@@ -14,6 +15,10 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
+using EmbodySense.Core.Application.Triggers;
+using EmbodySense.Core.Application.Triggers.Models;
+using EmbodySense.Core.Application.Triggers.Schedules;
+using EmbodySense.Core.Application.Triggers.Schedules.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
@@ -33,6 +38,11 @@ using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Triggers;
+using EmbodySense.Core.Common.Triggers.Models;
+using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Authority;
 using EmbodySense.Core.Persistence.Audit;
@@ -42,13 +52,20 @@ using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
 using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Core.Persistence.Memory;
+using EmbodySense.Core.Persistence.Triggers;
+using EmbodySense.Core.Persistence.Triggers.Schedules;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
+using EmbodySense.Core.Startup.Triggers;
+using EmbodySense.Core.Startup.Triggers.Models;
+using EmbodySense.Core.Startup.Triggers.Schedules;
+using EmbodySense.Core.Startup.Triggers.Schedules.Models;
 using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Core.Startup.Tests.Triggers;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
@@ -59,6 +76,340 @@ internal static class GovernedLoopRuntimeTests
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
+
+    internal static async Task Public_schedule_queues_and_executes_the_exact_canonical_graph_once_across_restart()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true);
+        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        const string Prompt = "Run the exact scheduled governed reflection.";
+        var scenario = ScheduleScenario.Create(fixture, scheduledAtUtc, Prompt);
+        var workerNow = scheduledAtUtc.AddMinutes(2);
+        using (var schedule = ScheduleRuntimeFactory.Create(
+                   fixture.Paths,
+                   scenario,
+                   scenario,
+                   scenario,
+                   new FixedTriggerTimeProvider(workerNow)))
+        {
+            Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await schedule.CreateAsync(scenario.Definition)).Status);
+            var evaluated = await schedule.EvaluateOnceAsync(scenario.Definition.ScheduleId);
+            Assert.True(evaluated.Status == ScheduleEvaluationStatus.Queued, $"Status={evaluated.Status}; Reason={evaluated.ReasonCode}");
+        }
+
+        var store = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime, timeProvider: new FixedTriggerTimeProvider(workerNow));
+        var queued = Assert.Single((await store.GetSnapshotAsync(workerNow)).Entries);
+        var generation = (await store.GetSnapshotAsync(workerNow)).Generation;
+        var authorizer = new ExactTriggerAuthorizer();
+        string runId;
+        await using (var runtime = await fixture.CreateRuntimeAsync())
+        {
+            var worker = runtime.CreateTriggerWorkerRuntime(authorizer, new FixedTriggerTimeProvider(workerNow));
+            var result = await worker.RunOnceAsync(new TriggerWorkerSelectionInput("worker-1", generation, workerNow, TimeSpan.FromSeconds(30), [], 2));
+            var entry = Assert.IsType<TriggerWorkerEntrySnapshot>(result.Entry);
+            Assert.True(entry.GovernedRunId is not null, $"State={entry.State}; Outcome={entry.DispatchOutcome}; Detail={entry.DispatchDetail}");
+            runId = Assert.IsType<string>(entry.GovernedRunId);
+            var run = Assert.IsType<LoopRunSnapshot>(await runtime.GetCustomLoopRunAsync(runId));
+
+            Assert.Equal("Acquired", result.SelectionStatus);
+            Assert.Equal("Dispatched", entry.State);
+            Assert.Equal("Terminal", entry.DispatchOutcome);
+            Assert.Equal(CustomLoopRunStatus.Completed.ToString(), run.Status);
+            Assert.Equal("scheduled-owner", run.AdmissionActor);
+            Assert.Equal("schedule", run.Surface);
+            Assert.Equal("governed-helper", run.AdmittedDefinition.RoleId);
+            Assert.Null(run.InvokingConversation);
+            Assert.Equal("schedule-trigger", run.Frontier!.Nodes[0].TypeId);
+            Assert.Equal(run.GovernedAdmissionRequestHash, entry.GovernedAdmissionRequestHash);
+            Assert.Equal(1, fixture.ProviderAttempts);
+            Assert.Equal(1, authorizer.Reads);
+        }
+
+        var durable = Assert.IsType<CustomLoopRunRecord>(await new CustomLoopRunStore(fixture.Paths).GetAsync(runId));
+        var origin = Assert.IsType<GovernedLoopSequentialTriggerOrigin>(durable.SequentialInvocationSnapshot?.TriggerOrigin);
+        Assert.True(TriggerDeliveryJson.TryDeserialize(origin.CanonicalEnvelope, out var envelope, out _));
+        Assert.Equal(TriggerKind.Time, envelope!.Kind);
+        Assert.Equal(queued.DeliveryId.Value, envelope.DeliveryId.Value);
+        Assert.Equal(Prompt, Encoding.UTF8.GetString(envelope.Payload.GetInlinePayload()!));
+        Assert.Equal(fixture.Publication, envelope.Loop.GovernedPublication);
+        Assert.Equal(fixture.Grant, envelope.Loop.AuthorityGrant);
+        Assert.Equal(scenario.Definition.ScheduleId.Value, origin.ScheduleId);
+        Assert.Equal(scenario.Definition.Revision, origin.DefinitionRevision);
+        Assert.True(ScheduleContractHash.TryComputeDefinition(scenario.Definition, out var definitionHash, out _));
+        Assert.Equal(definitionHash, origin.DefinitionHash);
+        Assert.Equal(scheduledAtUtc, origin.Occurrence.ScheduledAtUtc);
+
+        using (var restartedSchedule = ScheduleRuntimeFactory.Create(
+                   fixture.Paths,
+                   scenario,
+                   scenario,
+                   scenario,
+                   new FixedTriggerTimeProvider(workerNow.AddMinutes(1))))
+        {
+            Assert.Equal(ScheduleEvaluationStatus.Exhausted, (await restartedSchedule.EvaluateOnceAsync(scenario.Definition.ScheduleId)).Status);
+        }
+
+        await using (var restartedRuntime = await fixture.CreateRuntimeAsync())
+        {
+            var replay = Assert.IsType<LoopRunSnapshot>(await restartedRuntime.GetCustomLoopRunAsync(runId));
+            var emptyGeneration = (await store.GetSnapshotAsync(workerNow.AddMinutes(1))).Generation;
+            var emptyWorker = restartedRuntime.CreateTriggerWorkerRuntime(authorizer, new FixedTriggerTimeProvider(workerNow.AddMinutes(1)));
+            var empty = await emptyWorker.RunOnceAsync(new TriggerWorkerSelectionInput("worker-2", emptyGeneration, workerNow.AddMinutes(1), TimeSpan.FromSeconds(30), [], 2));
+
+            Assert.Equal(CustomLoopRunStatus.Completed.ToString(), replay.Status);
+            Assert.Equal("Empty", empty.SelectionStatus);
+            Assert.Null(empty.Entry);
+            Assert.Equal(1, fixture.ProviderAttempts);
+        }
+    }
+
+    internal static async Task Worker_defers_pending_schedule_finalization_then_restart_dispatches_and_replays_exactly_once()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true);
+        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var workerNow = scheduledAtUtc.AddMinutes(2);
+        var scenario = ScheduleScenario.Create(fixture, scheduledAtUtc, "recover the exact pending scheduled delivery");
+        var durableStore = new ScheduleStore(fixture.Paths);
+        var conflictOnce = new FinalizationConflictOnceScheduleStore(durableStore);
+        using (var schedule = ScheduleRuntimeFactory.Create(
+                   fixture.Paths,
+                   conflictOnce,
+                   scenario,
+                   scenario,
+                   scenario,
+                   new FixedTriggerTimeProvider(workerNow)))
+        {
+            Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await schedule.CreateAsync(scenario.Definition)).Status);
+            var interrupted = await schedule.EvaluateOnceAsync(scenario.Definition.ScheduleId);
+            Assert.Equal(ScheduleEvaluationStatus.Conflict, interrupted.Status);
+            Assert.Equal(SchedulePendingDeliveryPhase.ResultObserved, interrupted.State!.PendingDelivery!.Phase);
+            Assert.Contains(
+                interrupted.State.PendingDelivery.Result!.Kind,
+                new[] { ScheduleDeliveryResultKind.Queued, ScheduleDeliveryResultKind.Replayed });
+        }
+
+        var queue = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime, timeProvider: new FixedTriggerTimeProvider(workerNow.AddSeconds(1)));
+        var queued = Assert.Single((await queue.GetSnapshotAsync(workerNow.AddSeconds(1))).Entries);
+        Assert.Equal(TriggerQueueEntryState.Queued, queued.State);
+        var firstGeneration = (await queue.GetSnapshotAsync(workerNow.AddSeconds(1))).Generation;
+        var firstAuthorizer = new ExactTriggerAuthorizer();
+        await using (var firstRuntime = await fixture.CreateRuntimeAsync())
+        {
+            var firstWorker = firstRuntime.CreateTriggerWorkerRuntime(firstAuthorizer, new FixedTriggerTimeProvider(workerNow.AddSeconds(1)));
+            var deferred = await firstWorker.RunOnceAsync(new TriggerWorkerSelectionInput(
+                "worker-before-finalization",
+                firstGeneration,
+                workerNow.AddSeconds(1),
+                TimeSpan.FromSeconds(30),
+                [],
+                2));
+
+            Assert.Equal("Acquired", deferred.SelectionStatus);
+            Assert.Equal("Committed", deferred.MutationStatus);
+            Assert.Equal("Queued", deferred.Entry!.State);
+            Assert.Null(deferred.Entry.DispatchOperationId);
+            Assert.Null(deferred.Entry.GovernedRunId);
+            Assert.Equal(0, firstAuthorizer.Reads);
+            Assert.Equal(0, fixture.ProviderAttempts);
+        }
+
+        using (var recovery = ScheduleRuntimeFactory.Create(
+                   fixture.Paths,
+                   scenario,
+                   scenario,
+                   scenario,
+                   new FixedTriggerTimeProvider(workerNow.AddSeconds(2))))
+        {
+            var finalized = await recovery.EvaluateOnceAsync(scenario.Definition.ScheduleId);
+            Assert.Equal(ScheduleEvaluationStatus.Queued, finalized.Status);
+            Assert.Null(finalized.State!.PendingDelivery);
+            Assert.Equal(ScheduleDeliveryResultKind.Queued, Assert.Single(finalized.State.TerminalDeliveryEvidence).Result.Kind);
+        }
+
+        string runId;
+        var secondAuthorizer = new ExactTriggerAuthorizer();
+        await using (var restartedRuntime = await fixture.CreateRuntimeAsync())
+        {
+            var generation = (await queue.GetSnapshotAsync(workerNow.AddSeconds(3))).Generation;
+            var worker = restartedRuntime.CreateTriggerWorkerRuntime(secondAuthorizer, new FixedTriggerTimeProvider(workerNow.AddSeconds(3)));
+            var dispatched = await worker.RunOnceAsync(new TriggerWorkerSelectionInput(
+                "worker-after-finalization",
+                generation,
+                workerNow.AddSeconds(3),
+                TimeSpan.FromSeconds(30),
+                [],
+                2));
+
+            Assert.Equal("Acquired", dispatched.SelectionStatus);
+            Assert.Equal("Dispatched", dispatched.Entry!.State);
+            Assert.Equal("Terminal", dispatched.Entry.DispatchOutcome);
+            runId = Assert.IsType<string>(dispatched.Entry.GovernedRunId);
+            Assert.Equal(1, secondAuthorizer.Reads);
+            Assert.Equal(1, fixture.ProviderAttempts);
+        }
+
+        await using (var replayRuntime = await fixture.CreateRuntimeAsync())
+        {
+            var replay = Assert.IsType<LoopRunSnapshot>(await replayRuntime.GetCustomLoopRunAsync(runId));
+            var generation = (await queue.GetSnapshotAsync(workerNow.AddSeconds(4))).Generation;
+            var empty = await replayRuntime
+                .CreateTriggerWorkerRuntime(secondAuthorizer, new FixedTriggerTimeProvider(workerNow.AddSeconds(4)))
+                .RunOnceAsync(new TriggerWorkerSelectionInput(
+                    "worker-exact-replay",
+                    generation,
+                    workerNow.AddSeconds(4),
+                    TimeSpan.FromSeconds(30),
+                    [],
+                    2));
+
+            Assert.Equal(CustomLoopRunStatus.Completed.ToString(), replay.Status);
+            Assert.Equal("Empty", empty.SelectionStatus);
+            Assert.Equal(1, fixture.ProviderAttempts);
+        }
+    }
+
+    internal static async Task Substituted_trigger_context_fails_before_canonical_provider_dispatch(string mismatch)
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true);
+        await using var runtime = await fixture.CreateRuntimeAsync();
+        Assert.True(TriggerDeliveryFactory.TryCreateGovernedLoopReference(fixture.Publication, fixture.Grant, out var target, out _));
+        Assert.True(AuthorityActorId.TryParse("scheduled-owner", out var actor, out _));
+        var workspace = mismatch == "workspace" ? new string('f', 64) : TriggerWorkspaceId(fixture.Paths);
+        var role = mismatch == "role" ? "other-role" : "governed-helper";
+        Assert.True(TriggerDeliveryFactory.TryCreateActorContext(actor, "schedule", workspace, role, out var actorContext, out _));
+        var envelope = TriggerWorkerTestData.ScheduleEnvelope(target!, actorContext!);
+        var store = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime);
+        Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(envelope, envelope.Loop, envelope.Adapter, true, envelope.ActorContext, envelope.Authority, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(3), out var delivery, out _));
+        await new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store).AdmitAsync(TriggerQueueAdmissionRequestFactory.Create(delivery!, TriggerQueueAdmissionMode.Queued, TriggerQueuePriority.Normal));
+        var generation = (await store.GetSnapshotAsync(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4))).Generation;
+        var worker = runtime.CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4)));
+
+        var result = await worker.RunOnceAsync(new TriggerWorkerSelectionInput("worker-1", generation, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(30), [], 2));
+
+        Assert.Equal("NeedsReview", result.Entry!.State);
+        Assert.Equal("NeedsReview", result.Entry.DispatchOutcome);
+        Assert.Null(result.Entry.GovernedRunId);
+        Assert.NotNull(result.Entry.DispatchOperationId);
+        Assert.Null(await new CustomLoopInvocationOperationStore(fixture.Paths).GetAsync(result.Entry.DispatchOperationId!));
+        Assert.Equal(0, fixture.ProviderAttempts);
+    }
+
+    internal static async Task Forged_or_swapped_schedule_provenance_fails_before_admission_across_replay_and_restart(string mismatch)
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(includeRestrictedGrant: true, scheduleTrigger: true);
+        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var workerNow = scheduledAtUtc.AddMinutes(2);
+        var scenario = ScheduleScenario.Create(fixture, scheduledAtUtc, "authenticated schedule payload");
+        var canonical = scenario.CreateEnvelope();
+        await SeedAcceptedScheduleEvidenceAsync(fixture.Paths, scenario.Definition, canonical, scheduledAtUtc);
+        var substituted = SubstitutedScheduleEnvelope(fixture, scenario, canonical, mismatch);
+        var queue = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime, timeProvider: new FixedTriggerTimeProvider(workerNow));
+        Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(
+            substituted,
+            substituted.Loop,
+            substituted.Adapter,
+            true,
+            substituted.ActorContext,
+            substituted.Authority,
+            workerNow.AddSeconds(1),
+            out var delivery,
+            out _));
+        var admission = new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(queue), queue);
+        var request = TriggerQueueAdmissionRequestFactory.Create(delivery!, TriggerQueueAdmissionMode.Queued, TriggerQueuePriority.Normal);
+        Assert.Equal(TriggerQueueAdmissionStatus.Queued, (await admission.AdmitAsync(request)).Status);
+        Assert.Equal(TriggerQueueAdmissionStatus.Replayed, (await admission.AdmitAsync(request)).Status);
+        var generation = (await queue.GetSnapshotAsync(workerNow.AddSeconds(2))).Generation;
+
+        await using var restartedRuntime = await fixture.CreateRuntimeAsync();
+        var worker = restartedRuntime.CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(workerNow.AddSeconds(2)));
+        var result = await worker.RunOnceAsync(new TriggerWorkerSelectionInput(
+            $"worker-{mismatch}",
+            generation,
+            workerNow.AddSeconds(2),
+            TimeSpan.FromSeconds(30),
+            [],
+            2));
+
+        var entry = Assert.IsType<TriggerWorkerEntrySnapshot>(result.Entry);
+        Assert.Equal("NeedsReview", entry.State);
+        Assert.Equal("NeedsReview", entry.DispatchOutcome);
+        Assert.Null(entry.GovernedRunId);
+        Assert.Null(entry.GovernedAdmissionRequestHash);
+        Assert.NotNull(entry.DispatchOperationId);
+        Assert.Null(await new CustomLoopInvocationOperationStore(fixture.Paths).GetAsync(entry.DispatchOperationId!));
+        Assert.Equal(0, fixture.ProviderAttempts);
+    }
+
+    internal static async Task Manual_governed_invocation_rejects_the_reserved_trigger_namespace_before_admission()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync();
+        await using var runtime = await fixture.CreateRuntimeAsync();
+        Assert.True(TriggerDeliveryId.TryParse("delivery-manual-governed-trigger-namespace", out var deliveryId));
+        var operationId = TriggerWorkerRequestHash.ComputeOperationId(deliveryId!, 1);
+
+        var response = await runtime.InvokeGovernedLoopAsync(fixture.Input(operationId, "must not admit manually"));
+
+        Assert.Equal("Invalid", response.Status);
+        Assert.Null(response.AdmissionOutcome);
+        Assert.False(response.WasDispatched);
+        Assert.Null(response.Run);
+        Assert.Contains("reserved", response.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, fixture.ProviderAttempts);
+    }
+
+    internal static async Task Manual_invocation_of_a_schedule_trigger_graph_fails_before_admission()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true);
+        await using var runtime = await fixture.CreateRuntimeAsync();
+
+        var response = await runtime.InvokeGovernedLoopAsync(fixture.Input("invoke-schedule-manually", "must not admit"));
+
+        Assert.Equal("Invalid", response.Status);
+        Assert.Null(response.AdmissionOutcome);
+        Assert.False(response.WasDispatched);
+        Assert.Null(response.Run);
+        Assert.Contains("schedule-derived", response.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, fixture.ProviderAttempts);
+    }
+
+    internal static async Task Schedule_delivery_to_a_manual_trigger_graph_fails_before_admission()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync();
+        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var workerNow = scheduledAtUtc.AddMinutes(2);
+        var scenario = ScheduleScenario.Create(fixture, scheduledAtUtc, "must not admit to a manual graph");
+        using (var schedule = ScheduleRuntimeFactory.Create(
+                   fixture.Paths,
+                   scenario,
+                   scenario,
+                   scenario,
+                   new FixedTriggerTimeProvider(workerNow)))
+        {
+            Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await schedule.CreateAsync(scenario.Definition)).Status);
+            Assert.Equal(ScheduleEvaluationStatus.Queued, (await schedule.EvaluateOnceAsync(scenario.Definition.ScheduleId)).Status);
+        }
+
+        await using var runtime = await fixture.CreateRuntimeAsync();
+        var store = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime, timeProvider: new FixedTriggerTimeProvider(workerNow));
+        var generation = (await store.GetSnapshotAsync(workerNow)).Generation;
+        var worker = runtime.CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(workerNow));
+
+        var result = await worker.RunOnceAsync(new TriggerWorkerSelectionInput(
+            "worker-manual-confusion",
+            generation,
+            workerNow,
+            TimeSpan.FromSeconds(30),
+            [],
+            2));
+
+        Assert.Equal("NeedsReview", result.Entry!.State);
+        Assert.Equal("NeedsReview", result.Entry.DispatchOutcome);
+        Assert.Contains("manual-trigger", result.Entry.DispatchDetail, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(result.Entry.GovernedRunId);
+        Assert.NotNull(result.Entry.DispatchOperationId);
+        Assert.Null(await new CustomLoopInvocationOperationStore(fixture.Paths).GetAsync(result.Entry.DispatchOperationId!));
+        Assert.Equal(0, fixture.ProviderAttempts);
+    }
 
     internal static async Task Public_runtime_executes_exact_canonical_inputs_and_terminal_replay_precedes_workspace_busy_and_restart()
     {
@@ -615,7 +966,388 @@ internal static class GovernedLoopRuntimeTests
         Assert.Throws<NotSupportedException>(() => ((IList<LoopRunFrontierNodeSnapshot>)snapshot.Nodes).Add(snapshot.Nodes[0]));
     }
 
+    private static async Task SeedAcceptedScheduleEvidenceAsync(
+        WorkspacePaths paths,
+        ScheduleDefinition definition,
+        TriggerDeliveryEnvelope envelope,
+        DateTimeOffset scheduledAtUtc)
+    {
+        Assert.True(ScheduleContractHash.TryComputeDefinition(definition, out var definitionHash, out _));
+        var occurrence = new ScheduleOccurrence(
+            ScheduleOccurrence.CurrentSchemaVersion,
+            1,
+            definition.Recurrence.FirstLocalOccurrence,
+            scheduledAtUtc,
+            definition.TimeZone);
+        Assert.True(ScheduleIdentityDerivation.TryDerive(
+            definition.ScheduleId,
+            definition.Revision,
+            definitionHash!,
+            occurrence,
+            out var identity,
+            out _));
+        Assert.Equal(identity!.DeliveryId, envelope.DeliveryId);
+        Assert.Equal(identity.DeduplicationId, envelope.DeduplicationId);
+        Assert.True(TriggerDeliveryHash.TryCompute(envelope, out var envelopeHash, out _));
+        var result = new ScheduleDeliveryResultEvidence(
+            ScheduleDeliveryResultEvidence.CurrentSchemaVersion,
+            ScheduleDeliveryResultKind.Queued,
+            "queue-enqueued",
+            envelopeHash!,
+            envelope.Temporal.ReceivedAtUtc.AddSeconds(1));
+        var terminal = new ScheduleTerminalDeliveryEvidence(
+            ScheduleTerminalDeliveryEvidence.CurrentSchemaVersion,
+            occurrence,
+            identity,
+            Hash64('9'),
+            Hash64('8'),
+            Hash64('7'),
+            result,
+            result.RecordedAtUtc.AddSeconds(1));
+        var state = new ScheduleState(
+            ScheduleState.CurrentSchemaVersion,
+            definition.ScheduleId,
+            definition.Revision,
+            definitionHash!,
+            1,
+            true,
+            null,
+            null,
+            null,
+            terminal.FinalizedAtUtc,
+            null,
+            [],
+            [terminal]);
+        var composition = ScheduleContractValidator.ValidateDefinitionStateComposition(definition, state);
+        Assert.True(composition.IsValid, string.Join(',', composition.Errors.Select(error => $"{error.Path}:{error.Code}")));
+        var created = await new ScheduleStore(paths).CreateAsync(new ScheduleStoreCreateRequest(definition, state, definitionHash!));
+        Assert.Equal(ScheduleStoreMutationStatus.Applied, created.Status);
+    }
+
+    private static TriggerDeliveryEnvelope SubstitutedScheduleEnvelope(
+        GovernedRuntimeFixture fixture,
+        ScheduleScenario scenario,
+        TriggerDeliveryEnvelope canonical,
+        string mismatch)
+    {
+        TriggerDeliveryId deliveryId = canonical.DeliveryId;
+        TriggerDeduplicationId deduplicationId = canonical.DeduplicationId;
+        TriggerTemporalEvidence temporal = canonical.Temporal;
+        TriggerPayloadEvidence payload = canonical.Payload;
+        TriggerLoopReference target = canonical.Loop;
+        if (mismatch == "forged-identity")
+        {
+            Assert.True(TriggerDeliveryId.TryParse("schedule-delivery-" + Hash64('a'), out var forgedDeliveryId));
+            Assert.True(TriggerDeduplicationId.TryParse("schedule-deduplication-" + Hash64('b'), out var forgedDeduplicationId));
+            deliveryId = forgedDeliveryId!;
+            deduplicationId = forgedDeduplicationId!;
+        }
+        else if (mismatch is "schedule" or "occurrence")
+        {
+            var definition = scenario.Definition;
+            var occurrence = scenario.Occurrence;
+            if (mismatch == "schedule")
+            {
+                Assert.True(ScheduleId.TryParse("swapped-schedule", out var swappedScheduleId));
+                definition = definition with { ScheduleId = swappedScheduleId! };
+            }
+            else
+            {
+                occurrence = occurrence with
+                {
+                    Ordinal = occurrence.Ordinal + 1,
+                    ScheduledLocal = occurrence.ScheduledLocal.AddDays(-1),
+                    ScheduledAtUtc = occurrence.ScheduledAtUtc.AddDays(-1),
+                };
+                Assert.True(TriggerDeliveryFactory.TryCreateTemporalEvidence(
+                    canonical.Temporal.ObservedAtUtc,
+                    canonical.Temporal.ReceivedAtUtc,
+                    occurrence.ScheduledAtUtc,
+                    null,
+                    null,
+                    null,
+                    null,
+                    out var swappedTemporal,
+                    out _));
+                temporal = swappedTemporal!;
+            }
+
+            Assert.True(ScheduleContractHash.TryComputeDefinition(definition, out var definitionHash, out _));
+            Assert.True(ScheduleIdentityDerivation.TryDerive(
+                definition.ScheduleId,
+                definition.Revision,
+                definitionHash!,
+                occurrence,
+                out var identity,
+                out _));
+            deliveryId = identity!.DeliveryId;
+            deduplicationId = identity.DeduplicationId;
+        }
+        else if (mismatch == "payload")
+        {
+            payload = TriggerWorkerTestData.InlinePayload("swapped payload"u8.ToArray());
+        }
+        else if (mismatch == "target")
+        {
+            Assert.True(TriggerDeliveryFactory.TryCreateGovernedLoopReference(
+                fixture.Publication,
+                Assert.IsType<AuthorityGrantReference>(fixture.RestrictedGrant),
+                out var swappedTarget,
+                out _));
+            target = swappedTarget!;
+        }
+        else
+        {
+            throw new ArgumentOutOfRangeException(nameof(mismatch));
+        }
+
+        Assert.True(TriggerDeliveryFactory.TryCreateRedeliveryEvidence(1, 1, deliveryId, out var redelivery, out _));
+        Assert.True(TriggerDeliveryFactory.TryCreateEnvelope(
+            TriggerDeliveryEnvelope.CurrentSchemaVersion,
+            deliveryId,
+            deduplicationId,
+            TriggerKind.Time,
+            canonical.Adapter,
+            target,
+            canonical.ActorContext,
+            canonical.Authority,
+            temporal,
+            payload,
+            redelivery,
+            false,
+            null,
+            TriggerAdmissionStatus.Unknown,
+            TriggerAdmissionReason.Unknown,
+            out var substituted,
+            out _));
+        return substituted!;
+    }
+
     private static string Hash64(char value) => new(value, 64);
+
+    private static string TriggerWorkspaceId(WorkspacePaths paths) => CapabilityWorkspaceScopeId.Create(paths.RootPath)["workspace-sha256:".Length..];
+
+    private sealed class ExactTriggerAuthorizer : ITriggerWorkerCurrentEvidenceAuthorizer
+    {
+        internal TriggerWorkerCurrentEvidenceInput? LastInput { get; private set; }
+
+        internal int Reads { get; private set; }
+
+        public Task<TriggerWorkerAuthorizationResponse> AuthorizeAsync(TriggerWorkerCurrentEvidenceInput input, DateTimeOffset evaluatedAtUtc, CancellationToken cancellationToken = default)
+        {
+            Reads++;
+            LastInput = input;
+            return Task.FromResult(new TriggerWorkerAuthorizationResponse("Authorized", Hash64('a'), "exact current trigger evidence"));
+        }
+    }
+
+    private sealed class FinalizationConflictOnceScheduleStore(IScheduleStorePort inner) : IScheduleStorePort
+    {
+        private int _conflicted;
+
+        public Task<ScheduleStoreReadResult> ReadAsync(
+            ScheduleId scheduleId,
+            CancellationToken cancellationToken = default)
+            => inner.ReadAsync(scheduleId, cancellationToken);
+
+        public Task<ScheduleStoreMutationResult> CreateAsync(
+            ScheduleStoreCreateRequest request,
+            CancellationToken cancellationToken = default)
+            => inner.CreateAsync(request, cancellationToken);
+
+        public Task<ScheduleStoreMutationResult> CompareExchangeAsync(
+            ScheduleStateCompareExchange request,
+            CancellationToken cancellationToken = default)
+        {
+            if (request.Expected.PendingDelivery?.Phase == SchedulePendingDeliveryPhase.ResultObserved
+                && request.Replacement.PendingDelivery is null
+                && Interlocked.CompareExchange(ref _conflicted, 1, 0) == 0)
+            {
+                return Task.FromResult(new ScheduleStoreMutationResult(
+                    ScheduleStoreMutationStatus.Conflict,
+                    ScheduleContractCopy.Copy(request.Expected)));
+            }
+
+            return inner.CompareExchangeAsync(request, cancellationToken);
+        }
+    }
+
+    private sealed class FixedTriggerTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private sealed class ScheduleScenario : IScheduleCurrentEvidencePort, IScheduleOverlapPort, IScheduleTimeZonePort
+    {
+        private ScheduleScenario(
+            ScheduleDefinition definition,
+            ScheduleCurrentEvidence evidence,
+            DateTime scheduledLocal,
+            DateTimeOffset scheduledAtUtc)
+        {
+            Definition = definition;
+            Evidence = evidence;
+            ScheduledLocal = scheduledLocal;
+            Occurrence = new ScheduleOccurrence(
+                ScheduleOccurrence.CurrentSchemaVersion,
+                1,
+                scheduledLocal,
+                scheduledAtUtc,
+                definition.TimeZone);
+        }
+
+        internal ScheduleDefinition Definition { get; }
+
+        internal ScheduleOccurrence Occurrence { get; }
+
+        private ScheduleCurrentEvidence Evidence { get; }
+
+        private DateTime ScheduledLocal { get; }
+
+        internal static ScheduleScenario Create(GovernedRuntimeFixture fixture, DateTimeOffset scheduledAtUtc, string prompt)
+        {
+            Assert.True(ScheduleId.TryParse("governed-runtime-once", out var scheduleId));
+            Assert.True(AuthorityActorId.TryParse("scheduled-owner", out var actor, out _));
+            Assert.True(AuthorityProfileId.TryParse("governed-loop-profile", out var profileId, out _));
+            Assert.True(AuthorityProfileRevision.TryParse("1", out var profileRevision, out _));
+            Assert.True(TriggerDeliveryFactory.TryCreateGovernedLoopReference(fixture.Publication, fixture.Grant, out var target, out _));
+            Assert.True(TriggerDeliveryFactory.TryCreateActorContext(actor, "schedule", TriggerWorkspaceId(fixture.Paths), "governed-helper", out var actorContext, out _));
+            var descriptor = Assert.Single(BuiltInCapabilityCatalog.Descriptors, item => item.Id.Value == ScheduleTriggerCapabilityId);
+            Assert.True(CapabilityDescriptorIdentity.TryCreate(descriptor, out var descriptorIdentity, out _));
+            var adapter = new TriggerAdapterReference(descriptorIdentity!, descriptor.Implementation);
+            Assert.True(AuthorityBoundaryReceiptFactory.TryCreate(
+                1,
+                AuthorityBoundaryDecision.Direct,
+                [new AuthorityBoundaryCondition(AuthorityBoundaryDecision.Direct, AuthorityBoundaryReason.NoBoundary)],
+                [new AuthorityProfileReference(profileId!, profileRevision!)],
+                scheduledAtUtc.AddSeconds(1),
+                out var boundaryReceipt,
+                out _));
+            var authority = new TriggerAuthorityEvidence(new AuthorityProfileReference(profileId!, profileRevision!), boundaryReceipt!);
+            var payload = Encoding.UTF8.GetBytes(prompt);
+            var payloadHash = CapabilityIntegrityDigest.Compute(payload);
+            var scheduledLocal = DateTime.SpecifyKind(scheduledAtUtc.UtcDateTime, DateTimeKind.Unspecified);
+            var timeZone = new ScheduleTimeZoneReference("Etc/UTC", Hash64('f'));
+            var definition = new ScheduleDefinition(
+                ScheduleDefinition.CurrentSchemaVersion,
+                scheduleId!,
+                1,
+                target!,
+                adapter,
+                actor!,
+                "schedule",
+                TriggerWorkspaceId(fixture.Paths),
+                "governed-helper",
+                new AuthorityProfileReference(profileId!, profileRevision!),
+                new SchedulePayloadReference("payload/governed-runtime-once", payloadHash),
+                SchedulePriority.Normal,
+                new ScheduleRecurrenceRule(ScheduleRecurrenceKind.Once, scheduledLocal, null),
+                timeZone,
+                new ScheduleDaylightSavingPolicy(ScheduleInvalidLocalTimePolicy.ShiftForward, ScheduleAmbiguousLocalTimePolicy.EarlierUtc),
+                new ScheduleMisfirePolicy(ScheduleMisfirePolicyKind.FireLatestOnce, 0),
+                ScheduleOverlapPolicy.DeferOne,
+                true);
+            var evidence = new ScheduleCurrentEvidence(
+                Hash64('9'),
+                scheduledAtUtc.AddMinutes(2),
+                target!,
+                adapter,
+                actorContext!,
+                authority,
+                recurrencePermitted: true,
+                payload);
+            return new ScheduleScenario(definition, evidence, scheduledLocal, scheduledAtUtc);
+        }
+
+        internal TriggerDeliveryEnvelope CreateEnvelope()
+        {
+            Assert.True(ScheduleContractHash.TryComputeDefinition(Definition, out var definitionHash, out _));
+            Assert.True(ScheduleIdentityDerivation.TryDerive(
+                Definition.ScheduleId,
+                Definition.Revision,
+                definitionHash!,
+                Occurrence,
+                out var identity,
+                out _));
+            Assert.True(TriggerDeliveryFactory.TryCreateTemporalEvidence(
+                Evidence.ObservedAtUtc,
+                Evidence.ObservedAtUtc,
+                Occurrence.ScheduledAtUtc,
+                null,
+                null,
+                null,
+                null,
+                out var temporal,
+                out _));
+            Assert.True(TriggerDeliveryFactory.TryCreateInlinePayload(Evidence.GetResolvedPayload(), out var payload, out _));
+            Assert.True(TriggerDeliveryFactory.TryCreateRedeliveryEvidence(1, 1, identity!.DeliveryId, out var redelivery, out _));
+            Assert.True(TriggerDeliveryFactory.TryCreateEnvelope(
+                TriggerDeliveryEnvelope.CurrentSchemaVersion,
+                identity.DeliveryId,
+                identity.DeduplicationId,
+                TriggerKind.Time,
+                Evidence.Adapter,
+                Evidence.Target,
+                Evidence.ActorContext,
+                Evidence.Authority,
+                temporal,
+                payload,
+                redelivery,
+                false,
+                null,
+                TriggerAdmissionStatus.Unknown,
+                TriggerAdmissionReason.Unknown,
+                out var envelope,
+                out _));
+            return envelope!;
+        }
+
+        public Task<ScheduleCurrentEvidenceResult> ResolveAsync(
+            ScheduleDefinition definition,
+            ScheduleOccurrence occurrence,
+            DateTimeOffset observedAtUtc,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new ScheduleCurrentEvidenceResult(ScheduleCurrentEvidenceStatus.Available, Evidence));
+        }
+
+        public Task<ScheduleOverlapResult> GetStatusAsync(
+            TriggerLoopReference target,
+            ScheduleOccurrenceIdentity occurrenceIdentity,
+            DateTimeOffset observedAtUtc,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new ScheduleOverlapResult(ScheduleOverlapStatus.Clear, Hash64('8')));
+        }
+
+        public Task<ScheduleTimeZoneResolution> ResolveLocalAsync(
+            ScheduleTimeZoneReference timeZone,
+            DateTime scheduledLocal,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new ScheduleTimeZoneResolution(
+                ScheduleTimeZoneResolutionStatus.Unique,
+                timeZone.RulesFingerprint,
+                scheduledLocal,
+                new DateTimeOffset(scheduledLocal, TimeSpan.Zero),
+                null));
+        }
+
+        public Task<ScheduleInstantResolution> ResolveInstantAsync(
+            ScheduleTimeZoneReference timeZone,
+            DateTimeOffset scheduledAtUtc,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new ScheduleInstantResolution(
+                ScheduleInstantResolutionStatus.Resolved,
+                timeZone.RulesFingerprint,
+                ScheduledLocal));
+        }
+    }
 
     private sealed class GovernedRuntimeFixture : IDisposable
     {
@@ -664,7 +1396,8 @@ internal static class GovernedLoopRuntimeTests
             int inferenceSteps = 1,
             TimeSpan? grantLifetime = null,
             AuthorityGrantCompletionConstraintKind completionConstraint = AuthorityGrantCompletionConstraintKind.None,
-            int failFirstAttempts = 0)
+            int failFirstAttempts = 0,
+            bool scheduleTrigger = false)
         {
             Assert.InRange(inferenceSteps, 1, 2);
             Assert.InRange(failFirstAttempts, 0, 2);
@@ -673,15 +1406,16 @@ internal static class GovernedLoopRuntimeTests
             {
                 await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
                 var paths = new WorkspacePaths(workspace.RootPath);
-                var role = await CreateRoleAsync(paths);
-                var publication = await CreatePublishedGraphAsync(workspace, paths, role, inferenceSteps);
+                var role = await CreateRoleAsync(paths, scheduleTrigger);
+                var publication = await CreatePublishedGraphAsync(workspace, paths, role, inferenceSteps, scheduleTrigger);
                 var grant = await CreateGrantAsync(
                     workspace,
                     paths,
                     role,
                     publication,
                     "governed-full-grant",
-                    FullCeiling(),
+                    FullCeiling(scheduleTrigger),
+                    scheduleTrigger,
                     grantLifetime,
                     completionConstraint);
                 var restricted = includeRestrictedGrant
@@ -692,6 +1426,7 @@ internal static class GovernedLoopRuntimeTests
                         publication,
                         "governed-empty-grant",
                         EmptyCeiling(),
+                        scheduleTrigger,
                         null,
                         AuthorityGrantCompletionConstraintKind.None)
                     : null;
@@ -823,7 +1558,7 @@ internal static class GovernedLoopRuntimeTests
                 "controlled test",
                 "The exact fake app-server and provider path remains exercised; redundant compatibility probes are covered separately.");
 
-        private static async Task<ContextualRoleRevision> CreateRoleAsync(WorkspacePaths paths)
+        private static async Task<ContextualRoleRevision> CreateRoleAsync(WorkspacePaths paths, bool scheduleTrigger)
         {
             var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
             var revision = ContextualRoleRevisionContentHash.Apply(new ContextualRoleRevision(
@@ -840,7 +1575,9 @@ internal static class GovernedLoopRuntimeTests
                     "role",
                     ContextualRoleInstructionClassification.RoleInstruction),
                 new ContextualRolePolicyMaxima(
-                    ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId))));
+                    scheduleTrigger
+                        ? ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId)
+                        : ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId))));
             var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(
                 "create-governed-helper-role",
                 string.Empty,
@@ -860,9 +1597,10 @@ internal static class GovernedLoopRuntimeTests
             TestWorkspace workspace,
             WorkspacePaths paths,
             ContextualRoleRevision role,
-            int inferenceSteps)
+            int inferenceSteps,
+            bool scheduleTrigger)
         {
-            var candidate = Candidate(new ContextualRoleRevisionPin(role.Identity, role.ContentHash), inferenceSteps);
+            var candidate = Candidate(new ContextualRoleRevisionPin(role.Identity, role.ContentHash), inferenceSteps, scheduleTrigger);
             var normalized = GovernedLoopGraphNormalizer.Normalize(candidate);
             Assert.True(normalized.IsValid);
             var revision = normalized.Graph!.RevisionReference;
@@ -940,6 +1678,7 @@ internal static class GovernedLoopRuntimeTests
             GovernedLoopRevisionPublicationPin publication,
             string grantId,
             AuthorityCeiling requestedCeiling,
+            bool scheduleTrigger,
             TimeSpan? grantLifetime,
             AuthorityGrantCompletionConstraintKind completionConstraint)
         {
@@ -959,7 +1698,7 @@ internal static class GovernedLoopRuntimeTests
                     new AuthorityProvenance(Actor(), AuthorityProvenanceKind.UserDeclaration),
                     _now.AddMinutes(-5),
                     _now.AddDays(1),
-                    FullCeiling(),
+                    FullCeiling(scheduleTrigger),
                     []);
                 var created = await store.MutateAsync(new AuthorityProfileMutation(
                     AuthorityProfileMutationKind.Create,
@@ -1077,15 +1816,15 @@ internal static class GovernedLoopRuntimeTests
             Assert.Equal(AuthorityGrantResolutionStatus.Active, grantResult.Status);
         }
 
-        private static GovernedLoopGraphCandidate Candidate(ContextualRoleRevisionPin role, int inferenceSteps)
+        private static GovernedLoopGraphCandidate Candidate(ContextualRoleRevisionPin role, int inferenceSteps, bool scheduleTrigger)
         {
             var nodes = new List<GovernedLoopNodeDefinition>
             {
                 new(
                     "trigger",
-                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Trigger, "manual-trigger", 1),
+                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Trigger, scheduleTrigger ? "schedule-trigger" : "manual-trigger", 1),
                     [Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context)],
-                    GovernedLoopAuthorityCeiling.Create([]),
+                    GovernedLoopAuthorityCeiling.Create(scheduleTrigger ? [ScheduleTriggerCapabilityId] : []),
                     new Dictionary<string, string>()),
             };
             var controlEdges = new List<GovernedLoopControlEdgeDefinition>();
@@ -1135,7 +1874,10 @@ internal static class GovernedLoopRuntimeTests
                 role,
                 "trigger",
                 ["exit"],
-                GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
+                GovernedLoopAuthorityCeiling.Create(
+                    scheduleTrigger
+                        ? [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId]
+                        : [ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
                 [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
                 nodes,
                 controlEdges,
@@ -1198,17 +1940,18 @@ internal static class GovernedLoopRuntimeTests
             return new GovernedLoopNodeCatalogSnapshot(true, "governed-runtime-catalog", descriptors);
         }
 
-        private static AuthorityCeiling FullCeiling()
+        private static AuthorityCeiling FullCeiling(bool scheduleTrigger = false)
             => new(
                 BuiltInCapabilityCatalog.Descriptors
-                    .Where(item => item.Id.Value is ConversationTurnCapabilityId or ModelInferenceCapabilityId)
+                    .Where(item => item.Id.Value is ConversationTurnCapabilityId or ModelInferenceCapabilityId
+                        || scheduleTrigger && item.Id.Value == ScheduleTriggerCapabilityId)
                     .Select(CreateCapabilityIdentity)
                     .OrderBy(item => item.Id.Value, StringComparer.Ordinal)
                     .ToArray(),
                 [],
                 1,
                 CapabilitySideEffectClass.None,
-                false,
+                scheduleTrigger,
                 true,
                 false);
 

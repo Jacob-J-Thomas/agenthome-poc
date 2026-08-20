@@ -4,7 +4,7 @@ namespace EmbodySense.E2ETests.Web;
 
 internal sealed class ProcessOutputBuffer
 {
-    private const int MaxCharacters = 64_000;
+    private const int MaxCharacters = 256_000;
     private readonly StringBuilder _builder = new();
 
     public string Text

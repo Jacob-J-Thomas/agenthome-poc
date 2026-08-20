@@ -1,9 +1,14 @@
+using System.Text;
 using EmbodySense.Core.Application.Loops.Admission;
 using EmbodySense.Core.Application.Loops.Admission.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Tests.Loops.Admission;
+using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.Authority.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
@@ -14,6 +19,10 @@ using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Triggers;
+using EmbodySense.Core.Common.Triggers.Models;
+using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 
@@ -118,6 +127,21 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
         Assert.True(GovernedLoopSequentialContractValidator.Validate(context.Invocation).IsValid);
         Assert.True(GovernedLoopAdmissionValidator.Validate(context.Receipt).IsValid);
         Assert.Equal(GovernedLoopSequentialRunAnchorStatus.AdmissionCausalityMismatch, context.AnchorResult.Status);
+        Assert.Null(context.AnchorResult.Anchor);
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task Guard_rejects_manual_and_schedule_entry_origin_confusion(
+        bool scheduleEntry,
+        bool scheduleOrigin)
+    {
+        var context = await ContextAsync(scheduleTrigger: scheduleEntry, scheduleOrigin: scheduleOrigin);
+
+        Assert.True(GovernedLoopSequentialContractValidator.Validate(context.Invocation).IsValid);
+        Assert.True(GovernedLoopAdmissionValidator.Validate(context.Receipt).IsValid);
+        Assert.Equal(GovernedLoopSequentialRunAnchorStatus.InvocationMismatch, context.AnchorResult.Status);
         Assert.Null(context.AnchorResult.Anchor);
     }
 
@@ -287,23 +311,37 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
         Assert.Equal(0, handler.CallCount);
     }
 
-    private static async Task<TestContext> ContextAsync(DateTimeOffset? invocationCapturedAtUtc = null)
+    private static async Task<TestContext> ContextAsync(
+        DateTimeOffset? invocationCapturedAtUtc = null,
+        bool scheduleTrigger = false,
+        bool scheduleOrigin = false)
     {
         var seedHarness = GovernedLoopAdmissionTestHarness.Create();
         var seedOutcome = Assert.IsType<GovernedLoopAdmissionTerminalOutcome>((await seedHarness.CreateService().AdmitAsync(seedHarness.Request)).Outcome);
         var seedReceipt = Assert.IsType<GovernedLoopAdmissionReceipt>(seedOutcome.Receipt);
-        var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(owningRole: seedReceipt.Intent.Role);
+        var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(
+            owningRole: seedReceipt.Intent.Role,
+            scheduleTrigger: scheduleTrigger);
         var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, artifact.RevisionArtifact.Revision, "publish-sequential", Hash('7'));
         var contextCapturedAtUtc = invocationCapturedAtUtc ?? GovernedLoopSequentialApplicationTestFixture.Now;
         var invocationContext = CustomLoopContextSnapshot.CreateEmpty(contextCapturedAtUtc);
+        const string Prompt = "Execute the exact admitted request.";
+        var triggerOrigin = scheduleOrigin
+            ? ScheduleOrigin(publication, seedReceipt, artifact, Prompt, contextCapturedAtUtc)
+            : null;
         var invocation = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
             1,
-            "Execute the exact admitted request.",
+            Prompt,
             new CustomLoopModelSnapshot("provider", "model"),
-            new CustomLoopConversationReference("conversation-1", "version-1", GovernedLoopSequentialApplicationTestFixture.Now.AddMinutes(-1)),
+            scheduleOrigin
+                ? null
+                : new CustomLoopConversationReference("conversation-1", "version-1", GovernedLoopSequentialApplicationTestFixture.Now.AddMinutes(-1)),
             contextCapturedAtUtc,
             invocationContext.SourceManifest,
-            string.Empty));
+            string.Empty)
+        {
+            TriggerOrigin = triggerOrigin,
+        });
         var request = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(
             1,
             "admit-sequential",
@@ -363,6 +401,118 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
         var anchorResult = GovernedLoopSequentialRunAnchorGuard.Create(adapterBinding, request, receipt, invocation, artifact);
         var plan = Assert.IsType<GovernedLoopSequentialPlan>(GovernedLoopSequentialPlanBuilder.Build(artifact).Plan);
         return new TestContext(artifact, request, receipt, invocation, adapterBinding, anchorResult, plan);
+    }
+
+    private static GovernedLoopSequentialTriggerOrigin ScheduleOrigin(
+        GovernedLoopRevisionPublicationPin publication,
+        GovernedLoopAdmissionReceipt seedReceipt,
+        GovernedLoopGraphRevisionArtifact artifact,
+        string prompt,
+        DateTimeOffset capturedAtUtc)
+    {
+        Assert.True(ScheduleId.TryParse("sequential-schedule", out var scheduleId));
+        var scheduledAtUtc = capturedAtUtc.AddMinutes(-3);
+        var timeZone = new ScheduleTimeZoneReference("Etc/UTC", Hash('5'));
+        var occurrence = new ScheduleOccurrence(
+            ScheduleOccurrence.CurrentSchemaVersion,
+            1,
+            DateTime.SpecifyKind(scheduledAtUtc.UtcDateTime, DateTimeKind.Unspecified),
+            scheduledAtUtc,
+            timeZone);
+
+        Assert.True(CapabilityId.TryParse(GovernedLoopSequentialApplicationTestFixture.ScheduleTriggerCapabilityId, out var capabilityId, out _));
+        Assert.True(CapabilityVersion.TryParse("1.0.0", out var capabilityVersion, out _));
+        Assert.True(CapabilityDescriptorHash.TryParse("sha256:" + Hash('4'), out var descriptorHash, out _));
+        Assert.True(CapabilityProviderId.TryParse("org.embodysense", out var providerId, out _));
+        var adapter = new TriggerAdapterReference(
+            new CapabilityDescriptorIdentity(capabilityId!, capabilityVersion!, descriptorHash!),
+            new CapabilityImplementationIdentity(providerId!, "triggers/time"));
+
+        Assert.True(TriggerDeliveryFactory.TryCreateGovernedLoopReference(publication, seedReceipt.Intent.AuthorityGrant, out var loop, out _));
+        var workspaceId = seedReceipt.Intent.WorkspaceId["workspace-sha256:".Length..];
+        Assert.True(TriggerDeliveryFactory.TryCreateActorContext(
+            seedReceipt.Intent.ActorId,
+            seedReceipt.Intent.Surface,
+            workspaceId,
+            artifact.Graph.OwningRole.Identity.RoleId,
+            out var actorContext,
+            out _));
+        var profile = seedReceipt.Evidence.GrantProfile.Reference;
+        Assert.True(AuthorityBoundaryReceiptFactory.TryCreate(
+            AuthorityBoundaryReceipt.CurrentSchemaVersion,
+            AuthorityBoundaryDecision.Direct,
+            [new AuthorityBoundaryCondition(AuthorityBoundaryDecision.Direct, AuthorityBoundaryReason.NoBoundary)],
+            [profile],
+            capturedAtUtc.AddMinutes(-1),
+            out var boundaryReceipt,
+            out _));
+        var authority = new TriggerAuthorityEvidence(profile, boundaryReceipt!);
+        Assert.True(TriggerDeliveryFactory.TryCreateInlinePayload(Encoding.UTF8.GetBytes(prompt), out var payload, out _));
+        var definition = new ScheduleDefinition(
+            ScheduleDefinition.CurrentSchemaVersion,
+            scheduleId!,
+            1,
+            loop!,
+            adapter,
+            seedReceipt.Intent.ActorId,
+            seedReceipt.Intent.Surface,
+            workspaceId,
+            artifact.Graph.OwningRole.Identity.RoleId,
+            profile,
+            new SchedulePayloadReference("payload/sequential-schedule", payload!.ContentHash),
+            SchedulePriority.Normal,
+            new ScheduleRecurrenceRule(ScheduleRecurrenceKind.Once, occurrence.ScheduledLocal, null),
+            timeZone,
+            new ScheduleDaylightSavingPolicy(ScheduleInvalidLocalTimePolicy.ShiftForward, ScheduleAmbiguousLocalTimePolicy.EarlierUtc),
+            new ScheduleMisfirePolicy(ScheduleMisfirePolicyKind.FireLatestOnce, 0),
+            ScheduleOverlapPolicy.DeferOne,
+            true);
+        Assert.True(ScheduleContractHash.TryComputeDefinition(definition, out var definitionHash, out _));
+        Assert.True(ScheduleIdentityDerivation.TryDerive(scheduleId, 1, definitionHash!, occurrence, out var identity, out _));
+        Assert.True(TriggerDeliveryFactory.TryCreateRedeliveryEvidence(1, 1, identity!.DeliveryId, out var redelivery, out _));
+        Assert.True(TriggerDeliveryFactory.TryCreateTemporalEvidence(
+            scheduledAtUtc,
+            capturedAtUtc.AddMinutes(-1),
+            scheduledAtUtc,
+            null,
+            null,
+            null,
+            null,
+            out var temporal,
+            out _));
+        Assert.True(TriggerDeliveryFactory.TryCreateEnvelope(
+            TriggerDeliveryEnvelope.CurrentSchemaVersion,
+            identity.DeliveryId,
+            identity.DeduplicationId,
+            TriggerKind.Time,
+            adapter,
+            loop,
+            actorContext,
+            authority,
+            temporal,
+            payload,
+            redelivery,
+            false,
+            null,
+            TriggerAdmissionStatus.Unknown,
+            TriggerAdmissionReason.Unknown,
+            out var envelope,
+            out _));
+        Assert.True(TriggerDeliveryHash.TryCompute(envelope, out var envelopeHash, out _));
+        var evidence = new ScheduleDeliveryProvenanceEvidence(
+            ScheduleDeliveryProvenanceEvidence.CurrentSchemaVersion,
+            definition,
+            definitionHash!,
+            occurrence,
+            identity,
+            new ScheduleDeliveryResultEvidence(
+                ScheduleDeliveryResultEvidence.CurrentSchemaVersion,
+                ScheduleDeliveryResultKind.Queued,
+                "queue-enqueued",
+                envelopeHash!,
+                capturedAtUtc));
+        Assert.True(GovernedLoopSequentialTriggerOriginFactory.TryCreateSchedule(envelope, evidence, out var origin));
+        return origin!;
     }
 
     private static GovernedLoopSequentialNodeDispatchRequest DispatchRequest(TestContext context, GovernedLoopSequentialPlanNode node)

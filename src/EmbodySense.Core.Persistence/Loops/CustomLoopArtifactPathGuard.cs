@@ -12,6 +12,8 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// </remarks>
 internal sealed class CustomLoopArtifactPathGuard
 {
+    private const int ReadLockMaximumAttempts = 9;
+    private static readonly TimeSpan _readLockRetryDelay = TimeSpan.FromMilliseconds(25);
     private readonly string _workspaceRoot;
     private readonly StringComparison _pathComparison;
 
@@ -76,6 +78,48 @@ internal sealed class CustomLoopArtifactPathGuard
     /// <returns>The ownership stream; disposal releases the lease.</returns>
     public FileStream AcquireExclusiveMutationLock(string root)
     {
+        try
+        {
+            return AcquireExclusiveLock(root);
+        }
+        catch (IOException exception)
+        {
+            throw new InvalidOperationException("Custom-loop persistence is locked by another process; the mutation failed closed.", exception);
+        }
+    }
+
+    /// <summary>
+    /// Acquires the exclusive cross-process lease for a consistent read, tolerating only a bounded short-lived mutation.
+    /// </summary>
+    /// <param name="root">The artifact root.</param>
+    /// <param name="cancellationToken">The token used to cancel bounded contention waiting.</param>
+    /// <returns>The ownership stream; disposal releases the lease.</returns>
+    public async Task<FileStream> AcquireExclusiveReadLockAsync(string root, CancellationToken cancellationToken)
+    {
+        IOException? lastContention = null;
+        for (var attempt = 1; attempt <= ReadLockMaximumAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return AcquireExclusiveLock(root);
+            }
+            catch (IOException exception)
+            {
+                lastContention = exception;
+                if (attempt < ReadLockMaximumAttempts)
+                {
+                    await Task.Delay(_readLockRetryDelay, cancellationToken);
+                }
+            }
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        throw new InvalidOperationException("Custom-loop persistence remained locked by another process after bounded read retries; the read failed closed.", lastContention);
+    }
+
+    private FileStream AcquireExclusiveLock(string root)
+    {
         PrepareRoot(root);
         var lockPath = GetFilePath(root, ".custom-loop-mutations.lock");
         FileStream? stream = null;
@@ -84,11 +128,6 @@ internal sealed class CustomLoopArtifactPathGuard
             stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, bufferSize: 1, FileOptions.WriteThrough);
             EnsureNoReparsePoints(lockPath);
             return stream;
-        }
-        catch (IOException exception)
-        {
-            stream?.Dispose();
-            throw new InvalidOperationException("Custom-loop persistence is locked by another process; the mutation failed closed.", exception);
         }
         catch
         {

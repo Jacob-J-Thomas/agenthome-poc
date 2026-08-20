@@ -85,28 +85,35 @@ public sealed class ConversationPublicationCommitProtocolTests
     public async Task Returning_before_callback_completion_cancels_the_append_lifetime_and_fails_closed()
     {
         var callbackEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var callbackCancellation = new TaskCompletionSource<string>();
+        var cancellationObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? callback = null;
         var appendCount = 0;
 
         var result = await ConversationPublicationCommitProtocol.ExecuteAsync(
             async (commitAppend, cancellationToken) =>
             {
-                _ = commitAppend(cancellationToken);
+                callback = commitAppend(cancellationToken);
                 await callbackEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             },
             async cancellationToken =>
             {
-                using var registration = cancellationToken.Register(() => callbackCancellation.TrySetException(new OperationCanceledException(cancellationToken)));
+                using var registration = cancellationToken.Register(cancellationObserved.SetResult);
                 callbackEntered.TrySetResult();
-                await callbackCancellation.Task;
+                await releaseCallback.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                cancellationToken.ThrowIfCancellationRequested();
                 appendCount++;
                 return "unexpected";
             });
 
+        await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(ConversationPublicationCommitProtocolStatus.CallbackIncomplete, result.Status);
         Assert.Null(result.Value);
         Assert.Equal(1, result.CallbackInvocationCount);
         Assert.Equal(0, appendCount);
+
+        releaseCallback.SetResult();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => callback!);
     }
 
     [Fact]

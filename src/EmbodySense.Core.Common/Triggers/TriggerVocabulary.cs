@@ -4,6 +4,24 @@ namespace EmbodySense.Core.Common.Triggers;
 
 internal static class TriggerVocabulary
 {
+    internal static string ToCanonical(TriggerLoopTargetKind value) => value switch
+    {
+        TriggerLoopTargetKind.LegacyDefinition => "legacy-definition",
+        TriggerLoopTargetKind.GovernedPublication => "governed-publication",
+        _ => throw new ArgumentOutOfRangeException(nameof(value))
+    };
+
+    internal static bool TryParseLoopTargetKind(string? value, out TriggerLoopTargetKind kind)
+    {
+        kind = value switch
+        {
+            "legacy-definition" => TriggerLoopTargetKind.LegacyDefinition,
+            "governed-publication" => TriggerLoopTargetKind.GovernedPublication,
+            _ => TriggerLoopTargetKind.Unknown
+        };
+        return kind != TriggerLoopTargetKind.Unknown;
+    }
+
     internal static string ToCanonical(TriggerKind value) => value switch
     {
         TriggerKind.Human => "human",

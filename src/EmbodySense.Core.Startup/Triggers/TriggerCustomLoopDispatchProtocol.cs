@@ -29,6 +29,15 @@ public static class TriggerCustomLoopDispatchProtocol
             return new TriggerCustomLoopDispatchPreparation(null, null, new TriggerWorkerDispatchResult(TriggerDispatchOutcome.NeedsReview, "The durable trigger dispatch intent has a malformed operation identity and cannot be invoked."));
         }
 
+        if (envelope.Loop.Kind != TriggerLoopTargetKind.LegacyDefinition
+            || envelope.Loop.LegacyDefinition is null
+            || envelope.Loop.GovernedPublication is not null
+            || envelope.Loop.AuthorityGrant is not null
+            || !TriggerDeliveryValidator.ValidateLoopReference(envelope.Loop).IsValid)
+        {
+            return new TriggerCustomLoopDispatchPreparation(null, null, new TriggerWorkerDispatchResult(TriggerDispatchOutcome.NeedsReview, "The selected trigger target is not one exact legacy definition."));
+        }
+
         var payload = envelope.Payload.GetInlinePayload();
         if (payload is null)
         {
@@ -45,7 +54,8 @@ public static class TriggerCustomLoopDispatchProtocol
             return new TriggerCustomLoopDispatchPreparation(null, null, new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Rejected, "The inline trigger payload is not strict UTF-8 text."));
         }
 
-        var input = new LoopRunInvocationInput(envelope.Loop.LoopId, envelope.Loop.DefinitionVersion, envelope.Loop.ContentHash, intent.OperationId, prompt);
+        var legacy = envelope.Loop.LegacyDefinition;
+        var input = new LoopRunInvocationInput(legacy.LoopId, legacy.DefinitionVersion, legacy.ContentHash, intent.OperationId, prompt);
         return new TriggerCustomLoopDispatchPreparation(input, envelope.ActorContext, null);
     }
 
@@ -80,16 +90,18 @@ public static class TriggerCustomLoopDispatchProtocol
 
     private static TriggerWorkerDispatchResult MapAdmitted(TriggerDeliveryEnvelope envelope, TriggerDispatchEvidence intent, LoopRunInvocationResponse response)
     {
+        var legacy = envelope.Loop.LegacyDefinition;
         var run = response.Run;
-        if (run is null
+        if (legacy is null
+            || run is null
             || !CustomLoopArtifactIdentifier.IsValid(run.Id)
             || !string.Equals(run.AdmissionOperationId, intent.OperationId, StringComparison.Ordinal)
             || !IsHash(run.AdmissionRequestHash)
             || !string.Equals(run.LoopId, envelope.Loop.LoopId, StringComparison.Ordinal)
             || run.AdmittedDefinition is null
-            || !string.Equals(run.AdmittedDefinition.Id, envelope.Loop.LoopId, StringComparison.Ordinal)
-            || run.AdmittedDefinition.DefinitionVersion != envelope.Loop.DefinitionVersion
-            || !string.Equals(run.AdmittedDefinition.ContentHash, envelope.Loop.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(run.AdmittedDefinition.Id, legacy.LoopId, StringComparison.Ordinal)
+            || run.AdmittedDefinition.DefinitionVersion != legacy.DefinitionVersion
+            || !string.Equals(run.AdmittedDefinition.ContentHash, legacy.ContentHash, StringComparison.Ordinal)
             || !Enum.TryParse<CustomLoopRunStatus>(run.Status, ignoreCase: false, out var runStatus)
             || runStatus == CustomLoopRunStatus.Unknown
             || !string.Equals(response.ExecutionStatus, run.Status, StringComparison.Ordinal))
@@ -102,7 +114,12 @@ public static class TriggerCustomLoopDispatchProtocol
             return NeedsReview(response, "The exact governed run itself requires operator review.");
         }
 
-        var governed = new TriggerGovernedInvocationEvidence(run.AdmissionOperationId, run.Id, run.AdmissionRequestHash, run.LoopId, run.AdmittedDefinition.DefinitionVersion, run.AdmittedDefinition.ContentHash);
+        if (!TriggerLoopReferenceHash.TryCompute(envelope.Loop, out var loopReferenceHash, out _))
+        {
+            return NeedsReview(response, "The exact legacy target could not be hashed after admission verification.");
+        }
+
+        var governed = new TriggerGovernedInvocationEvidence(run.AdmissionOperationId, run.Id, run.AdmissionRequestHash, run.LoopId, loopReferenceHash!);
         var outcome = runStatus is CustomLoopRunStatus.Completed or CustomLoopRunStatus.Failed or CustomLoopRunStatus.Cancelled ? TriggerDispatchOutcome.Terminal : TriggerDispatchOutcome.Accepted;
         var detail = $"Admission={response.AdmissionStatus}; Execution={response.ExecutionStatus}; Run={run.Id}; ProviderDispatched={response.WasDispatched}; {response.Detail}";
         return new TriggerWorkerDispatchResult(outcome, detail, governed);

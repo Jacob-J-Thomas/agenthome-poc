@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Triggers.Models;
+using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
 
 namespace EmbodySense.Core.Application.Triggers;
@@ -16,14 +17,26 @@ public sealed class TriggerWorkerService
     private readonly ITriggerWorkerStatePort _state;
     private readonly ITriggerDispatchAuthorizer _authorizer;
     private readonly ITriggerWorkerDispatcher _dispatcher;
+    private readonly ITriggerWorkerDispatchReadinessPort _readiness;
     private readonly TimeProvider _timeProvider;
 
     /// <summary>Initializes a one-shot worker over composition-owned state, authority, and dispatch ports.</summary>
-    public TriggerWorkerService(ITriggerWorkerStatePort state, ITriggerDispatchAuthorizer authorizer, ITriggerWorkerDispatcher dispatcher, TimeProvider? timeProvider = null)
+    /// <param name="state">The crash-safe queue ownership and dispatch-state port.</param>
+    /// <param name="authorizer">The trusted current-evidence authorizer.</param>
+    /// <param name="dispatcher">The governed dispatcher used only after durable intent.</param>
+    /// <param name="readiness">The trusted pre-intent readiness boundary.</param>
+    /// <param name="timeProvider">The optional composition-owned UTC clock.</param>
+    public TriggerWorkerService(
+        ITriggerWorkerStatePort state,
+        ITriggerDispatchAuthorizer authorizer,
+        ITriggerWorkerDispatcher dispatcher,
+        ITriggerWorkerDispatchReadinessPort readiness,
+        TimeProvider? timeProvider = null)
     {
         _state = state ?? throw new ArgumentNullException(nameof(state));
         _authorizer = authorizer ?? throw new ArgumentNullException(nameof(authorizer));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
+        _readiness = readiness ?? throw new ArgumentNullException(nameof(readiness));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -40,6 +53,31 @@ public sealed class TriggerWorkerService
         {
             return new TriggerWorkerRunResult(selected.Status, null, selected.Entry);
         }
+
+        var readinessRequiresAttention = false;
+        TriggerWorkerDispatchReadinessResult? readiness;
+        try
+        {
+            readiness = await _readiness.CheckAsync(selected.Envelope, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var released = await _state.ReleaseAsync(selected.Entry.DeliveryId, lease.WorkerId, lease.Generation, selected.Entry.Revision, UtcNow(), CancellationToken.None).ConfigureAwait(false);
+            return new TriggerWorkerRunResult(selected.Status, released.Status, released.Entry);
+        }
+        catch
+        {
+            readiness = null;
+            readinessRequiresAttention = true;
+        }
+
+        if (readiness?.Status == TriggerWorkerDispatchReadinessStatus.RetryAfterScheduleFinalization)
+        {
+            var released = await _state.ReleaseAsync(selected.Entry.DeliveryId, lease.WorkerId, lease.Generation, selected.Entry.Revision, UtcNow(), CancellationToken.None).ConfigureAwait(false);
+            return new TriggerWorkerRunResult(selected.Status, released.Status, released.Entry);
+        }
+
+        readinessRequiresAttention |= readiness?.Status != TriggerWorkerDispatchReadinessStatus.Ready;
 
         TriggerDispatchAuthorization authorization;
         try
@@ -101,7 +139,11 @@ public sealed class TriggerWorkerService
         }
 
         var dispatchTask = renewal?.FailureStatus is null
-            ? DispatchAsync(selected.Envelope, intent, dispatchCancellation.Token)
+            ? readinessRequiresAttention
+                ? Task.FromResult(new TriggerWorkerDispatchResult(
+                    TriggerDispatchOutcome.NeedsReview,
+                    "Dispatch readiness could not be proved before intent; no governed provider was invoked."))
+                : DispatchAsync(selected.Envelope, intent, dispatchCancellation.Token)
             : Task.FromResult(new TriggerWorkerDispatchResult(TriggerDispatchOutcome.NeedsReview, Bound(renewal.Value.Detail)));
         if (renewal is null && await Task.WhenAny(dispatchTask, renewalTask).ConfigureAwait(false) == renewalTask)
         {
@@ -368,15 +410,17 @@ public sealed class TriggerWorkerService
     {
         ArgumentNullException.ThrowIfNull(dispatch);
         var requiresReceipt = dispatch.Outcome is TriggerDispatchOutcome.Accepted or TriggerDispatchOutcome.Terminal;
+        var hasExactLoopReferenceHash = TriggerLoopReferenceHash.TryCompute(envelope.Loop, out var loopReferenceHash, out _);
         if (dispatch.Outcome is not (TriggerDispatchOutcome.Accepted or TriggerDispatchOutcome.Terminal or TriggerDispatchOutcome.Rejected or TriggerDispatchOutcome.NeedsReview)
             || string.IsNullOrWhiteSpace(dispatch.Detail)
             || requiresReceipt != (dispatch.GovernedInvocation is not null)
+            || requiresReceipt && !hasExactLoopReferenceHash
             || dispatch.GovernedInvocation is { } governed && (!string.Equals(governed.OperationId, intent.OperationId, StringComparison.Ordinal)
                 || !IsArtifactId(governed.RunId, TriggerWorkerLimits.MaxGovernedRunIdCharacters)
                 || !IsHash(governed.AdmissionRequestHash)
                 || !string.Equals(governed.LoopId, envelope.Loop.LoopId, StringComparison.Ordinal)
-                || governed.DefinitionVersion != envelope.Loop.DefinitionVersion
-                || !string.Equals(governed.DefinitionHash, envelope.Loop.ContentHash, StringComparison.Ordinal)))
+                || !IsHash(governed.LoopReferenceHash)
+                || !string.Equals(governed.LoopReferenceHash, loopReferenceHash, StringComparison.Ordinal)))
         {
             throw new InvalidOperationException("The governed dispatcher returned an unsupported outcome.");
         }

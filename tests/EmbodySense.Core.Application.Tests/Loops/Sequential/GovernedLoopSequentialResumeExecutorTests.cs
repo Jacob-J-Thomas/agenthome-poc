@@ -136,7 +136,179 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
         Assert.Equal(1, runStore.GetCount);
     }
 
-    private static async Task<TestContext> ContextAsync()
+    [Fact]
+    public async Task Missing_run_returns_not_found_without_reading_canonical_evidence_or_dispatching()
+    {
+        var evidence = new TestRunEvidenceSource(null);
+        var admission = GovernedLoopAdmissionTestHarness.Create();
+        var runtime = new RecordingOrderedRuntime();
+        var legacy = new RecordingLegacyExecutor();
+        var service = new GovernedLoopSequentialResumeExecutor(new TestRunStore(null), evidence, admission, admission, runtime, legacy);
+
+        var result = await service.ResumeAsync(new CustomLoopResumeExecutionRequest("missing-run", 1, "resume-missing", AuditSchema.Actors.Web, false));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NotFound, result.Status);
+        Assert.Equal(0, evidence.CallCount);
+        Assert.Empty(runtime.ResumeRequests);
+        Assert.Empty(legacy.Requests);
+    }
+
+    [Fact]
+    public async Task Canonical_evidence_read_preserves_caller_cancellation_and_contains_adapter_failures()
+    {
+        var cancelledContext = await ContextAsync();
+        var cancelledRun = Run(cancelledContext.Binding.ExecutionBinding.RunId, cancelledContext.Binding, cancelledContext.Invocation, cancelledContext.Plan);
+        using var cancellation = new CancellationTokenSource();
+        var cancellingEvidence = new TestRunEvidenceSource(null) { BeforeResolve = cancellation.Cancel };
+        var cancelledRuntime = new RecordingOrderedRuntime();
+        var cancelledService = new GovernedLoopSequentialResumeExecutor(
+            new TestRunStore(cancelledRun),
+            cancellingEvidence,
+            cancelledContext.Store,
+            cancelledContext.Store,
+            cancelledRuntime,
+            new RecordingLegacyExecutor());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelledService.ResumeAsync(
+            new CustomLoopResumeExecutionRequest(cancelledRun.Id, 2, "resume-cancel-evidence", AuditSchema.Actors.Web, false),
+            cancellation.Token));
+        Assert.Empty(cancelledRuntime.ResumeRequests);
+
+        var failedContext = await ContextAsync();
+        var failedRun = Run(failedContext.Binding.ExecutionBinding.RunId, failedContext.Binding, failedContext.Invocation, failedContext.Plan);
+        var failedEvidence = new TestRunEvidenceSource(null) { Exception = new IOException("evidence unavailable") };
+        var failedRuntime = new RecordingOrderedRuntime();
+        var failedService = new GovernedLoopSequentialResumeExecutor(
+            new TestRunStore(failedRun),
+            failedEvidence,
+            failedContext.Store,
+            failedContext.Store,
+            failedRuntime,
+            new RecordingLegacyExecutor());
+
+        var failed = await failedService.ResumeAsync(new CustomLoopResumeExecutionRequest(failedRun.Id, 2, "resume-failed-evidence", AuditSchema.Actors.Web, false));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, failed.Status);
+        Assert.Contains(nameof(IOException), failed.Detail, StringComparison.Ordinal);
+        Assert.Empty(failedRuntime.ResumeRequests);
+    }
+
+    [Fact]
+    public async Task Canonical_resume_rejects_missing_evidence_admission_and_request_identity_without_dispatch()
+    {
+        var missingEvidenceContext = await ContextAsync();
+        var exactRun = Run(missingEvidenceContext.Binding.ExecutionBinding.RunId, missingEvidenceContext.Binding, missingEvidenceContext.Invocation, missingEvidenceContext.Plan);
+        var runtime = new RecordingOrderedRuntime();
+        var missingEvidenceService = new GovernedLoopSequentialResumeExecutor(
+            new TestRunStore(exactRun),
+            new TestRunEvidenceSource(null),
+            missingEvidenceContext.Store,
+            missingEvidenceContext.Store,
+            runtime,
+            new RecordingLegacyExecutor());
+
+        var missingEvidence = await missingEvidenceService.ResumeAsync(new CustomLoopResumeExecutionRequest(exactRun.Id, 2, "resume-missing-evidence", AuditSchema.Actors.Web, false));
+        Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, missingEvidence.Status);
+
+        var missingAdmissionContext = await ContextAsync();
+        missingAdmissionContext.Store.StoreReadResult = new GovernedLoopAdmissionStoreReadResult(GovernedLoopAdmissionStoreReadStatus.NotFound, 3, null);
+        var missingAdmissionRun = Run(missingAdmissionContext.Binding.ExecutionBinding.RunId, missingAdmissionContext.Binding, missingAdmissionContext.Invocation, missingAdmissionContext.Plan);
+        var missingAdmissionService = new GovernedLoopSequentialResumeExecutor(
+            new TestRunStore(missingAdmissionRun),
+            new TestRunEvidenceSource(new GovernedLoopSequentialRunEvidence(missingAdmissionContext.Binding, missingAdmissionContext.Invocation)),
+            missingAdmissionContext.Store,
+            missingAdmissionContext.Store,
+            runtime,
+            new RecordingLegacyExecutor());
+
+        var missingAdmission = await missingAdmissionService.ResumeAsync(new CustomLoopResumeExecutionRequest(missingAdmissionRun.Id, 2, "resume-missing-admission", AuditSchema.Actors.Web, false));
+        Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, missingAdmission.Status);
+
+        var mismatchContext = await ContextAsync();
+        var substitutedAdmissionContext = await ContextAsync("run-substituted-admission");
+        mismatchContext.Store.StoreReadResult = substitutedAdmissionContext.Store.StoreReadResult;
+        var mismatchRun = Run(mismatchContext.Binding.ExecutionBinding.RunId, mismatchContext.Binding, mismatchContext.Invocation, mismatchContext.Plan);
+        var mismatchService = new GovernedLoopSequentialResumeExecutor(
+            new TestRunStore(mismatchRun),
+            new TestRunEvidenceSource(new GovernedLoopSequentialRunEvidence(mismatchContext.Binding, mismatchContext.Invocation)),
+            mismatchContext.Store,
+            mismatchContext.Store,
+            runtime,
+            new RecordingLegacyExecutor());
+
+        var mismatch = await mismatchService.ResumeAsync(new CustomLoopResumeExecutionRequest(mismatchRun.Id, 2, "resume-request-mismatch", AuditSchema.Actors.Web, false));
+        Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, mismatch.Status);
+        Assert.Empty(runtime.ResumeRequests);
+    }
+
+    [Fact]
+    public async Task Canonical_graph_read_preserves_cancellation_contains_failures_and_requires_a_frontier()
+    {
+        var cancelledContext = await ContextAsync();
+        var cancelledRun = Run(cancelledContext.Binding.ExecutionBinding.RunId, cancelledContext.Binding, cancelledContext.Invocation, cancelledContext.Plan);
+        using var cancellation = new CancellationTokenSource();
+        cancelledContext.Store.AfterMutableRead = phase =>
+        {
+            if (phase == "graph")
+            {
+                cancellation.Cancel();
+                throw new OperationCanceledException(cancellation.Token);
+            }
+        };
+        var cancelledRuntime = new RecordingOrderedRuntime();
+        var cancelledService = new GovernedLoopSequentialResumeExecutor(
+            new TestRunStore(cancelledRun),
+            new TestRunEvidenceSource(new GovernedLoopSequentialRunEvidence(cancelledContext.Binding, cancelledContext.Invocation)),
+            cancelledContext.Store,
+            cancelledContext.Store,
+            cancelledRuntime,
+            new RecordingLegacyExecutor());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelledService.ResumeAsync(
+            new CustomLoopResumeExecutionRequest(cancelledRun.Id, 2, "resume-cancel-graph", AuditSchema.Actors.Web, false),
+            cancellation.Token));
+        Assert.Empty(cancelledRuntime.ResumeRequests);
+
+        var failedContext = await ContextAsync();
+        var failedRun = Run(failedContext.Binding.ExecutionBinding.RunId, failedContext.Binding, failedContext.Invocation, failedContext.Plan);
+        failedContext.Store.AfterMutableRead = phase =>
+        {
+            if (phase == "graph")
+            {
+                throw new IOException("graph unavailable");
+            }
+        };
+        var failedRuntime = new RecordingOrderedRuntime();
+        var failedService = new GovernedLoopSequentialResumeExecutor(
+            new TestRunStore(failedRun),
+            new TestRunEvidenceSource(new GovernedLoopSequentialRunEvidence(failedContext.Binding, failedContext.Invocation)),
+            failedContext.Store,
+            failedContext.Store,
+            failedRuntime,
+            new RecordingLegacyExecutor());
+
+        var failed = await failedService.ResumeAsync(new CustomLoopResumeExecutionRequest(failedRun.Id, 2, "resume-failed-graph", AuditSchema.Actors.Web, false));
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, failed.Status);
+        Assert.Contains(nameof(IOException), failed.Detail, StringComparison.Ordinal);
+        Assert.Empty(failedRuntime.ResumeRequests);
+
+        var noFrontierContext = await ContextAsync();
+        var noFrontierRun = Run(noFrontierContext.Binding.ExecutionBinding.RunId, noFrontierContext.Binding, noFrontierContext.Invocation);
+        var noFrontierRuntime = new RecordingOrderedRuntime();
+        var noFrontierService = new GovernedLoopSequentialResumeExecutor(
+            new TestRunStore(noFrontierRun),
+            new TestRunEvidenceSource(new GovernedLoopSequentialRunEvidence(noFrontierContext.Binding, noFrontierContext.Invocation)),
+            noFrontierContext.Store,
+            noFrontierContext.Store,
+            noFrontierRuntime,
+            new RecordingLegacyExecutor());
+
+        var noFrontier = await noFrontierService.ResumeAsync(new CustomLoopResumeExecutionRequest(noFrontierRun.Id, 2, "resume-no-frontier", AuditSchema.Actors.Web, false));
+        Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, noFrontier.Status);
+        Assert.Empty(noFrontierRuntime.ResumeRequests);
+    }
+
+    private static async Task<TestContext> ContextAsync(string runId = "run-sequential-resume")
     {
         var store = GovernedLoopAdmissionTestHarness.Create();
         var seedOutcome = Assert.IsType<GovernedLoopAdmissionTerminalOutcome>((await store.CreateService().AdmitAsync(store.Request)).Outcome);
@@ -172,7 +344,7 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
             request.Surface,
             artifact.ArtifactHash,
             artifact.LayoutHash);
-        var execution = GovernedLoopExecutionBinding.Create(1, "run-sequential-resume", publication.Revision, 1);
+        var execution = GovernedLoopExecutionBinding.Create(1, runId, publication.Revision, 1);
         var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
             1,
             GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
@@ -295,11 +467,21 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
 
     private sealed class TestRunEvidenceSource(GovernedLoopSequentialRunEvidence? evidence) : IGovernedLoopSequentialRunEvidenceSource
     {
+        public Action? BeforeResolve { get; init; }
+
+        public Exception? Exception { get; init; }
+
         public int CallCount { get; private set; }
 
         public Task<GovernedLoopSequentialRunEvidence?> ResolveAsync(string runId, CancellationToken cancellationToken = default)
         {
+            BeforeResolve?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
+            if (Exception is not null)
+            {
+                throw Exception;
+            }
+
             CallCount++;
             return Task.FromResult(evidence);
         }

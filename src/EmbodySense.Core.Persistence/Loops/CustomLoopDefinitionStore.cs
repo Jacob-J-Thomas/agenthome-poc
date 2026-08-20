@@ -269,8 +269,8 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         await _mutationGate.WaitAsync(cancellationToken);
         try
         {
-            using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
-            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
+            using var workspaceLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.LoopDefinitionsPath, cancellationToken);
+            using var retentionLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.CustomLoopReceiptRetentionPath, cancellationToken);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var operation = state.Operations.SingleOrDefault(candidate => string.Equals(candidate.OperationId, safeOperationId, StringComparison.Ordinal));
             if (operation is null || operation.Kind != CustomLoopDefinitionMutationKind.Create)
@@ -308,8 +308,8 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         await _mutationGate.WaitAsync(cancellationToken);
         try
         {
-            using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
-            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
+            using var workspaceLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.LoopDefinitionsPath, cancellationToken);
+            using var retentionLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.CustomLoopReceiptRetentionPath, cancellationToken);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var operation = state.Operations.SingleOrDefault(candidate => string.Equals(candidate.OperationId, safeOperationId, StringComparison.Ordinal));
             if (operation is null)
@@ -355,8 +355,8 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         await _mutationGate.WaitAsync(cancellationToken);
         try
         {
-            using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
-            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
+            using var workspaceLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.LoopDefinitionsPath, cancellationToken);
+            using var retentionLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.CustomLoopReceiptRetentionPath, cancellationToken);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             ValidateWorkspaceState(state);
             return state.Definitions.SingleOrDefault(definition => string.Equals(definition.Id, safeLoopId, StringComparison.Ordinal));
@@ -377,8 +377,8 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         await _mutationGate.WaitAsync(cancellationToken);
         try
         {
-            using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
-            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
+            using var workspaceLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.LoopDefinitionsPath, cancellationToken);
+            using var retentionLock = await _pathGuard.AcquireExclusiveReadLockAsync(_paths.CustomLoopReceiptRetentionPath, cancellationToken);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             ValidateWorkspaceState(state);
             return state.Definitions.OrderBy(definition => definition.Id, StringComparer.Ordinal).ToArray();
