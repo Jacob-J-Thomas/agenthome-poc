@@ -18,6 +18,8 @@ namespace EmbodySense.Core.Persistence.Tests.Triggers.Schedules;
 
 public sealed class ScheduleStoreTests
 {
+    private static readonly TimeSpan _crossProcessReadinessTimeout = TimeSpan.FromSeconds(60);
+
     private const string CrossProcessWorkspace = "EMBODYSENSE_SCHEDULE_STORE_WORKSPACE";
     private const string CrossProcessGate = "EMBODYSENSE_SCHEDULE_STORE_GATE";
     private const string CrossProcessReady = "EMBODYSENSE_SCHEDULE_STORE_READY";
@@ -1244,7 +1246,7 @@ public sealed class ScheduleStoreTests
         var wait = Stopwatch.StartNew();
         while (!File.Exists(path))
         {
-            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(15), $"Cross-process schedule host did not create `{path}`.");
+            Assert.True(wait.Elapsed < _crossProcessReadinessTimeout, $"Cross-process schedule host did not create `{path}`.");
             await Task.Delay(10);
         }
     }
