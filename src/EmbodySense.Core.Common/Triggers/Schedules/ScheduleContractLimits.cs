@@ -33,6 +33,9 @@ public static class ScheduleContractLimits
     /// <summary>Gets the maximum skipped/deferred evidence items retained in one state.</summary>
     public const int MaxDispositionEvidenceItems = 256;
 
+    /// <summary>Gets the rolling disposition-evidence window retained after the state bound is reached.</summary>
+    public const int RetainedDispositionEvidenceItems = 128;
+
     /// <summary>Gets the maximum skipped/deferred items retained in one immutable finalization plan.</summary>
     public const int MaxFinalizationEvidenceItems = 256;
 

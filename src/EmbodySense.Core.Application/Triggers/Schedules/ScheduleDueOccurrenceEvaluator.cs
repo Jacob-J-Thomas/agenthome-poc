@@ -704,8 +704,8 @@ public sealed class ScheduleDueOccurrenceEvaluator
         var pending = state.PendingDelivery!;
         var result = pending.Result!;
         var plan = pending.FinalizationPlan!;
-        if (state.DispositionEvidence.Count + plan.DispositionEvidence.Count > ScheduleContractLimits.MaxDispositionEvidenceItems
-            || !TryNextRevision(state, out var revision))
+        var dispositionEvidence = AppendDispositionEvidence(state, plan.DispositionEvidence);
+        if (dispositionEvidence is null || !TryNextRevision(state, out var revision))
         {
             return Result(ScheduleEvaluationStatus.BoundExceeded, "schedule-evidence-bound-exceeded", state);
         }
@@ -732,7 +732,7 @@ public sealed class ScheduleDueOccurrenceEvaluator
             DeferredOccurrence = plan.DeferredOccurrence,
             LastClockObservedAtUtc = now,
             PendingDelivery = null,
-            DispositionEvidence = state.DispositionEvidence.Concat(plan.DispositionEvidence).ToArray(),
+            DispositionEvidence = dispositionEvidence,
             TerminalDeliveryEvidence = compacted.Evidence!,
         };
         while (!ScheduleContractHash.TryComputeState(replacement, out _, out var validation)
@@ -931,10 +931,11 @@ public sealed class ScheduleDueOccurrenceEvaluator
             now,
             decisionEvidenceHash);
         var planned = plan.DispositionEvidence;
-        if (state.DispositionEvidence.Count + planned.Count + 1 > ScheduleContractLimits.MaxDispositionEvidenceItems
-            || !TryNextRevision(expectedState ?? state, out var revision))
+        var baseState = expectedState ?? state;
+        var dispositionEvidence = AppendDispositionEvidence(baseState, new[] { evidence }.Concat(planned).ToArray());
+        if (dispositionEvidence is null || !TryNextRevision(baseState, out var revision))
         {
-            return Result(ScheduleEvaluationStatus.BoundExceeded, "schedule-evidence-bound-exceeded", expectedState ?? state);
+            return Result(ScheduleEvaluationStatus.BoundExceeded, "schedule-evidence-bound-exceeded", baseState);
         }
 
         var replacement = state with
@@ -945,14 +946,11 @@ public sealed class ScheduleDueOccurrenceEvaluator
             DeferredOccurrence = plan.DeferredOccurrence,
             LastClockObservedAtUtc = now,
             PendingDelivery = null,
-            DispositionEvidence = state.DispositionEvidence
-                .Append(evidence)
-                .Concat(planned)
-                .ToArray(),
+            DispositionEvidence = dispositionEvidence,
         };
         return await PersistAsync(
             definition,
-            expectedState ?? state,
+            baseState,
             replacement,
             status,
             reasonCode,
@@ -981,24 +979,24 @@ public sealed class ScheduleDueOccurrenceEvaluator
         }
         else
         {
-            if (state.DispositionEvidence.Count >= ScheduleContractLimits.MaxDispositionEvidenceItems)
-            {
-                return Result(ScheduleEvaluationStatus.BoundExceeded, "schedule-evidence-bound-exceeded", state);
-            }
-
             deferred = new ScheduleDeferredOccurrence(
                 ScheduleDeferredOccurrence.CurrentSchemaVersion,
                 pending.Occurrence,
                 pending.Identity,
                 now);
-            evidence = state.DispositionEvidence
-                .Append(Disposition(
+            var appended = Disposition(
                     pending.Occurrence,
                     ScheduleOccurrenceDisposition.OverlapDeferred,
                     "overlap-policy-defer",
                     now,
-                    overlapEvidenceHash))
-                .ToArray();
+                    overlapEvidenceHash);
+            var retained = AppendDispositionEvidence(state, [appended]);
+            if (retained is null)
+            {
+                return Result(ScheduleEvaluationStatus.BoundExceeded, "schedule-evidence-bound-exceeded", state);
+            }
+
+            evidence = retained;
         }
 
         var replacement = state with
@@ -1016,6 +1014,39 @@ public sealed class ScheduleDueOccurrenceEvaluator
             ScheduleEvaluationStatus.Deferred,
             "overlap-policy-defer",
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private static IReadOnlyList<ScheduleOccurrenceDispositionEvidence>? AppendDispositionEvidence(
+        ScheduleState state,
+        IReadOnlyList<ScheduleOccurrenceDispositionEvidence> additions)
+    {
+        var combined = state.DispositionEvidence.Concat(additions).ToArray();
+        if (combined.Length <= ScheduleContractLimits.MaxDispositionEvidenceItems)
+        {
+            return combined;
+        }
+
+        var retained = combined
+            .TakeLast(ScheduleContractLimits.RetainedDispositionEvidenceItems)
+            .ToList();
+        if (state.DeferredOccurrence is { } deferred)
+        {
+            var activeDeferral = combined.FirstOrDefault(evidence =>
+                evidence.Disposition == ScheduleOccurrenceDisposition.OverlapDeferred
+                && evidence.FirstOrdinal <= deferred.Occurrence.Ordinal
+                && evidence.LastOrdinal >= deferred.Occurrence.Ordinal);
+            if (activeDeferral is not null && !retained.Contains(activeDeferral))
+            {
+                retained.Insert(0, activeDeferral);
+            }
+        }
+
+        if (retained.Count > ScheduleContractLimits.MaxDispositionEvidenceItems)
+        {
+            return null;
+        }
+
+        return retained;
     }
 
     private async Task<PlanBuild> BuildInitialCatchUpPlanAsync(

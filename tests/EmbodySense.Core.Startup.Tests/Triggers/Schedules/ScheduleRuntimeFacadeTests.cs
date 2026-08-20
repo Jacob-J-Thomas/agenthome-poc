@@ -29,7 +29,7 @@ public sealed class ScheduleRuntimeFacadeTests
 
         var created = await runtime.CreateAsync(context.Definition);
         var persisted = await runtime.ReadAsync(context.Definition.ScheduleId);
-        var queue = await new TriggerQueueStore(new WorkspacePaths(workspace.RootPath)).GetSnapshotAsync(_now);
+        var queue = await new TriggerQueueStore(new WorkspacePaths(workspace.RootPath), TriggerQueueQuota.Runtime).GetSnapshotAsync(_now);
 
         Assert.Equal(ScheduleRuntimeCreateStatus.Created, created.Status);
         Assert.NotNull(created.CurrentState);
@@ -103,7 +103,7 @@ public sealed class ScheduleRuntimeFacadeTests
         var disabled = await runtime.SetEnabledAsync(created.CurrentState!, false);
         var stale = await runtime.SetEnabledAsync(created.CurrentState!, true);
         var evaluated = await runtime.EvaluateOnceAsync(context.Definition.ScheduleId);
-        var queue = await new TriggerQueueStore(new WorkspacePaths(workspace.RootPath)).GetSnapshotAsync(_now);
+        var queue = await new TriggerQueueStore(new WorkspacePaths(workspace.RootPath), TriggerQueueQuota.Runtime).GetSnapshotAsync(_now);
 
         Assert.Equal(ScheduleStoreMutationStatus.AlreadyExists, unchanged.Status);
         Assert.Equal(created.CurrentState, unchanged.CurrentState);
@@ -612,7 +612,7 @@ public sealed class ScheduleRuntimeFacadeTests
         Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await runtime.CreateAsync(context.Definition)).Status);
 
         var evaluated = await runtime.EvaluateOnceAsync(context.Definition.ScheduleId);
-        var store = new TriggerQueueStore(paths, timeProvider: new FixedTimeProvider(_now));
+        var store = new TriggerQueueStore(paths, TriggerQueueQuota.Runtime, timeProvider: new FixedTimeProvider(_now));
         var entry = Assert.Single((await store.GetSnapshotAsync(_now)).Entries);
         var history = await store.FindAsync(entry.DeliveryId, entry.DeduplicationId);
 
@@ -623,6 +623,22 @@ public sealed class ScheduleRuntimeFacadeTests
         Assert.Equal(context.Definition.TimeAdapter, history.DeliveryMatch.Envelope.Adapter);
         Assert.Equal(2, context.PayloadReadCount);
         Assert.Null(entry.Dispatch);
+    }
+
+    [Fact]
+    public async Task Schedule_runtime_queue_budget_outlives_the_rolling_schedule_evidence_window()
+    {
+        using var workspace = new TestWorkspace();
+        var context = ScheduleCurrentEvidenceTestContext.Create();
+        using var runtime = CreateRuntime(workspace, context, new RuntimeTimeZone());
+
+        Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await runtime.CreateAsync(context.Definition)).Status);
+        Assert.Equal(ScheduleEvaluationStatus.Queued, (await runtime.EvaluateOnceAsync(context.Definition.ScheduleId)).Status);
+
+        var snapshot = await new TriggerQueueStore(new WorkspacePaths(workspace.RootPath), TriggerQueueQuota.Runtime).GetSnapshotAsync(_now);
+
+        Assert.True(snapshot.Quota.MaxRetainedEntries > ScheduleContractLimits.MaxTerminalDeliveryEvidenceItems);
+        Assert.Equal(TriggerQueueQuota.Runtime.MaxRetainedEntries, snapshot.Quota.MaxRetainedEntries);
     }
 
     private static ScheduleRuntimeFacade CreateRuntime(

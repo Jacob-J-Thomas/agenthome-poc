@@ -89,7 +89,7 @@ public sealed class AgentRuntimeFactoryTests
         var authorizer = new FileCurrentTriggerEvidenceAuthorizer(evidencePath);
         var worker = runtime.CreateTriggerWorkerRuntime(authorizer, new FixedTriggerTimeProvider(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4)));
         var envelope = TriggerWorkerTestData.Envelope();
-        var store = new TriggerQueueStore(paths);
+        var store = new TriggerQueueStore(paths, TriggerQueueQuota.Runtime);
         Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(envelope, envelope.Loop, envelope.Adapter, true, envelope.ActorContext, envelope.Authority, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(3), out var delivery, out _));
         var admission = await new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store).AdmitAsync(TriggerQueueAdmissionRequestFactory.Create(delivery!, TriggerQueueAdmissionMode.Queued, TriggerQueuePriority.Normal));
         var generation = (await store.GetSnapshotAsync(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4))).Generation;
@@ -118,7 +118,7 @@ public sealed class AgentRuntimeFactoryTests
         var authorizer = new FileCurrentTriggerEvidenceAuthorizer(evidencePath);
         var worker = runtime.CreateTriggerWorkerRuntime(authorizer, new FixedTriggerTimeProvider(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4)));
         var envelope = TriggerWorkerTestData.Envelope();
-        var store = new TriggerQueueStore(paths);
+        var store = new TriggerQueueStore(paths, TriggerQueueQuota.Runtime);
         Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(envelope, envelope.Loop, envelope.Adapter, true, envelope.ActorContext, envelope.Authority, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(3), out var delivery, out _));
         await new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store).AdmitAsync(TriggerQueueAdmissionRequestFactory.Create(delivery!, TriggerQueueAdmissionMode.Queued, TriggerQueuePriority.Normal));
         var generation = (await store.GetSnapshotAsync(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4))).Generation;
@@ -154,7 +154,7 @@ public sealed class AgentRuntimeFactoryTests
         Assert.True(TriggerDeliveryFactory.TryCreateActorContext(triggerActor, "webhook", "workspace-1", definition.RoleId, out var triggerActorContext, out _));
         var exactTriggerActorContext = triggerActorContext!;
         var envelope = TriggerWorkerTestData.Envelope(loop: loop, actorContext: exactTriggerActorContext);
-        var store = new TriggerQueueStore(paths);
+        var store = new TriggerQueueStore(paths, TriggerQueueQuota.Runtime);
         Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(envelope, envelope.Loop, envelope.Adapter, true, envelope.ActorContext, envelope.Authority, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(3), out var delivery, out _));
         var admission = await new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store).AdmitAsync(TriggerQueueAdmissionRequestFactory.Create(delivery!, TriggerQueueAdmissionMode.Queued, TriggerQueuePriority.Normal));
         var generation = (await store.GetSnapshotAsync(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4))).Generation;

@@ -13,4 +13,13 @@ public sealed record TriggerQueueQuota(int MaxQueuedEntries, int MaxRetainedEntr
     /// <summary>Gets conservative defaults for the first experimental schema.</summary>
     public static TriggerQueueQuota Default { get; } = new(32, 128, 128 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024, 4, 120);
 
+    /// <summary>
+    /// Gets the bounded queue budget used by the canonical runtime, including schedule-trigger delivery.
+    /// </summary>
+    /// <remarks>
+    /// The runtime retains enough terminal queue provenance to outlive the schedule evaluator's rolling 128-result
+    /// window and its one maximum pending delivery. The generic default remains smaller for isolated queue callers.
+    /// </remarks>
+    public static TriggerQueueQuota Runtime { get; } = new(32, 512, 128 * 1024, 4 * 1024 * 1024, 64 * 1024 * 1024, 4, 120);
+
 }

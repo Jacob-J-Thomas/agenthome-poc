@@ -2,6 +2,7 @@ using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Triggers;
+using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Application.Triggers.Schedules;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Workspace;
@@ -179,7 +180,7 @@ public static class ScheduleRuntimeFactory
 
     private static (ITriggerQueueAdmissionPort Admission, ITriggerDeliveryAdmissionHistoryPort History) CreateQueue(WorkspacePaths paths, TimeProvider clock)
     {
-        var store = new TriggerQueueStore(paths, timeProvider: clock);
+        var store = new TriggerQueueStore(paths, TriggerQueueQuota.Runtime, timeProvider: clock);
         return (new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store), store);
     }
 

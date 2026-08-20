@@ -14,6 +14,7 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Application.Triggers;
+using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Application.Triggers.Schedules;
 using EmbodySense.Core.Persistence.Triggers;
 using EmbodySense.Core.Startup.Triggers;
@@ -274,7 +275,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(authorizer);
         var clock = timeProvider ?? TimeProvider.System;
-        var store = new TriggerQueueStore(Paths, timeProvider: clock);
+        var store = new TriggerQueueStore(Paths, TriggerQueueQuota.Runtime, timeProvider: clock);
         var service = new TriggerWorkerService(
             store,
             new TriggerWorkerCurrentEvidenceAuthorizerAdapter(authorizer),

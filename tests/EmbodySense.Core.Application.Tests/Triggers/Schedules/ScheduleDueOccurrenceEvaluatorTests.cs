@@ -2104,6 +2104,52 @@ public sealed class ScheduleDueOccurrenceEvaluatorTests
     }
 
     [Fact]
+    public async Task Recurring_skip_disposition_rolls_oldest_evidence_without_stalling()
+    {
+        var firstLocal = new DateTime(2026, 1, 1, 9, 0, 0, DateTimeKind.Unspecified);
+        var firstUtc = new DateTimeOffset(2026, 1, 1, 14, 0, 0, TimeSpan.Zero);
+        var definition = ScheduleEvaluatorTestData.Definition(
+            firstLocal: firstLocal,
+            misfire: ScheduleMisfirePolicyKind.Skip,
+            catchUpLimit: 1);
+        var dispositions = Enumerable.Range(1, ScheduleContractLimits.MaxDispositionEvidenceItems)
+            .Select(ordinal => new ScheduleOccurrenceDispositionEvidence(
+                ScheduleOccurrenceDispositionEvidence.CurrentSchemaVersion,
+                ordinal,
+                ordinal,
+                1,
+                firstLocal.AddDays(ordinal - 1),
+                firstLocal.AddDays(ordinal - 1),
+                firstUtc.AddDays(ordinal - 1),
+                firstUtc.AddDays(ordinal - 1),
+                definition.TimeZone,
+                ScheduleOccurrenceDisposition.MisfireSkipped,
+                null,
+                "misfire-policy-skip",
+                firstUtc.AddDays(ordinal - 1).AddSeconds(1)))
+            .ToArray();
+        var next = ScheduleEvaluatorTestData.Occurrence(
+            ordinal: ScheduleContractLimits.MaxDispositionEvidenceItems + 1,
+            local: firstLocal.AddDays(ScheduleContractLimits.MaxDispositionEvidenceItems),
+            utc: firstUtc.AddDays(ScheduleContractLimits.MaxDispositionEvidenceItems),
+            timeZone: definition.TimeZone);
+        var fixture = Fixture(
+            definition,
+            ScheduleEvaluatorTestData.State(definition, next: next, lastClock: next.ScheduledAtUtc, dispositions: dispositions),
+            next.ScheduledAtUtc.AddHours(1));
+
+        var result = await fixture.Evaluator.EvaluateAsync(definition.ScheduleId);
+
+        Assert.Equal(ScheduleEvaluationStatus.Skipped, result.Status);
+        Assert.Equal(next.Ordinal + 1, result.State!.NextOccurrence!.Ordinal);
+        Assert.Equal(ScheduleContractLimits.RetainedDispositionEvidenceItems, result.State.DispositionEvidence.Count);
+        Assert.Equal(130, result.State.DispositionEvidence[0].FirstOrdinal);
+        Assert.Equal(next.Ordinal, result.State.DispositionEvidence[^1].LastOrdinal);
+        Assert.Equal(0, fixture.Queue.Calls);
+        AssertLegalTransitions(definition, fixture.Store.Mutations);
+    }
+
+    [Fact]
     public async Task Malformed_available_current_evidence_fields_fail_closed_before_queueing()
     {
         var mutations = new Func<ScheduleCurrentEvidence, ScheduleCurrentEvidence>[]

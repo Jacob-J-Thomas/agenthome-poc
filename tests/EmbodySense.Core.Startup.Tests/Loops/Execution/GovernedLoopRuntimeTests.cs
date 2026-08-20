@@ -97,7 +97,7 @@ internal static class GovernedLoopRuntimeTests
             Assert.True(evaluated.Status == ScheduleEvaluationStatus.Queued, $"Status={evaluated.Status}; Reason={evaluated.ReasonCode}");
         }
 
-        var store = new TriggerQueueStore(fixture.Paths, timeProvider: new FixedTriggerTimeProvider(workerNow));
+        var store = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime, timeProvider: new FixedTriggerTimeProvider(workerNow));
         var queued = Assert.Single((await store.GetSnapshotAsync(workerNow)).Entries);
         var generation = (await store.GetSnapshotAsync(workerNow)).Generation;
         var authorizer = new ExactTriggerAuthorizer();
@@ -188,7 +188,7 @@ internal static class GovernedLoopRuntimeTests
                 new[] { ScheduleDeliveryResultKind.Queued, ScheduleDeliveryResultKind.Replayed });
         }
 
-        var queue = new TriggerQueueStore(fixture.Paths, timeProvider: new FixedTriggerTimeProvider(workerNow.AddSeconds(1)));
+        var queue = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime, timeProvider: new FixedTriggerTimeProvider(workerNow.AddSeconds(1)));
         var queued = Assert.Single((await queue.GetSnapshotAsync(workerNow.AddSeconds(1))).Entries);
         Assert.Equal(TriggerQueueEntryState.Queued, queued.State);
         var firstGeneration = (await queue.GetSnapshotAsync(workerNow.AddSeconds(1))).Generation;
@@ -278,7 +278,7 @@ internal static class GovernedLoopRuntimeTests
         var role = mismatch == "role" ? "other-role" : "governed-helper";
         Assert.True(TriggerDeliveryFactory.TryCreateActorContext(actor, "schedule", workspace, role, out var actorContext, out _));
         var envelope = TriggerWorkerTestData.ScheduleEnvelope(target!, actorContext!);
-        var store = new TriggerQueueStore(fixture.Paths);
+        var store = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime);
         Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(envelope, envelope.Loop, envelope.Adapter, true, envelope.ActorContext, envelope.Authority, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(3), out var delivery, out _));
         await new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store).AdmitAsync(TriggerQueueAdmissionRequestFactory.Create(delivery!, TriggerQueueAdmissionMode.Queued, TriggerQueuePriority.Normal));
         var generation = (await store.GetSnapshotAsync(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4))).Generation;
@@ -303,7 +303,7 @@ internal static class GovernedLoopRuntimeTests
         var canonical = scenario.CreateEnvelope();
         await SeedAcceptedScheduleEvidenceAsync(fixture.Paths, scenario.Definition, canonical, scheduledAtUtc);
         var substituted = SubstitutedScheduleEnvelope(fixture, scenario, canonical, mismatch);
-        var queue = new TriggerQueueStore(fixture.Paths, timeProvider: new FixedTriggerTimeProvider(workerNow));
+        var queue = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime, timeProvider: new FixedTriggerTimeProvider(workerNow));
         Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(
             substituted,
             substituted.Loop,
@@ -390,7 +390,7 @@ internal static class GovernedLoopRuntimeTests
         }
 
         await using var runtime = await fixture.CreateRuntimeAsync();
-        var store = new TriggerQueueStore(fixture.Paths, timeProvider: new FixedTriggerTimeProvider(workerNow));
+        var store = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime, timeProvider: new FixedTriggerTimeProvider(workerNow));
         var generation = (await store.GetSnapshotAsync(workerNow)).Generation;
         var worker = runtime.CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(workerNow));
 

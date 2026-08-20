@@ -45,9 +45,10 @@ public static class ScheduleStateTransitionValidator
             Add(errors, "clock_regressed", "next.lastClockObservedAtUtc");
         }
 
-        if (!TryGetAppendedItems(
+        if (!TryGetAppendedDispositionEvidence(
                 before.DispositionEvidence,
                 after.DispositionEvidence,
+                before.DeferredOccurrence,
                 out var appendedDispositionEvidence))
         {
             Add(errors, "disposition_evidence_rewritten", "next.dispositionEvidence");
@@ -226,7 +227,7 @@ public static class ScheduleStateTransitionValidator
             DeferredOccurrence = plan.DeferredOccurrence,
             LastClockObservedAtUtc = finalizedAtUtc,
             PendingDelivery = null,
-            DispositionEvidence = current.DispositionEvidence.Concat(plan.DispositionEvidence).ToArray(),
+            DispositionEvidence = next.DispositionEvidence,
             TerminalDeliveryEvidence = next.TerminalDeliveryEvidence,
         };
         if (!SameState(expected, next))
@@ -545,6 +546,57 @@ public static class ScheduleStateTransitionValidator
 
         appended = remaining;
         return true;
+    }
+
+    private static bool TryGetAppendedDispositionEvidence(
+        IReadOnlyList<ScheduleOccurrenceDispositionEvidence> current,
+        IReadOnlyList<ScheduleOccurrenceDispositionEvidence> next,
+        ScheduleDeferredOccurrence? deferredOccurrence,
+        out IReadOnlyList<ScheduleOccurrenceDispositionEvidence> appended)
+    {
+        if (TryGetAppendedItems(current, next, out appended))
+        {
+            return true;
+        }
+
+        appended = [];
+        if (current.Count < ScheduleContractLimits.RetainedDispositionEvidenceItems
+            || next.Count == 0
+            || next.Count > ScheduleContractLimits.MaxDispositionEvidenceItems)
+        {
+            return false;
+        }
+
+        for (var droppedCount = 1; droppedCount <= current.Count; droppedCount++)
+        {
+            var retainedCount = current.Count - droppedCount;
+            if (retainedCount > next.Count
+                || next.Count < ScheduleContractLimits.RetainedDispositionEvidenceItems
+                || !current.Skip(droppedCount).SequenceEqual(next.Take(retainedCount)))
+            {
+                continue;
+            }
+
+            var dropped = current.Take(droppedCount).ToArray();
+            if (deferredOccurrence is not null
+                && dropped.Any(item => item.Disposition == ScheduleOccurrenceDisposition.OverlapDeferred
+                    && item.FirstOrdinal <= deferredOccurrence.Occurrence.Ordinal
+                    && item.LastOrdinal >= deferredOccurrence.Occurrence.Ordinal))
+            {
+                return false;
+            }
+
+            var candidate = next.Skip(retainedCount).ToArray();
+            if (candidate.Length == 0 || candidate.Any(current.Contains))
+            {
+                continue;
+            }
+
+            appended = candidate;
+            return true;
+        }
+
+        return false;
     }
 
     private static bool TryGetAppendedTerminalEvidence(
