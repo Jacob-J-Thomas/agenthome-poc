@@ -146,7 +146,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Corrupt);
             }
 
-            var compacted = CompactHeartbeats(entry, requiredSlots: 3, retireCurrentHead: true);
+            var compacted = CompactHeartbeats(entry, requiredSlots: 4, retireCurrentHead: true);
             if (compacted is null)
             {
                 return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Conflict, Snapshot(entry));
@@ -668,7 +668,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
             throw new ArgumentOutOfRangeException(nameof(options), "The coordinator count bound is outside the supported range.");
         }
 
-        if (options.MaxEvidenceItemsPerCoordinator is < 6 or > MaximumConfiguredEvidenceItems)
+        if (options.MaxEvidenceItemsPerCoordinator is < 8 or > MaximumConfiguredEvidenceItems)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "The coordinator evidence bound is outside the supported range.");
         }
