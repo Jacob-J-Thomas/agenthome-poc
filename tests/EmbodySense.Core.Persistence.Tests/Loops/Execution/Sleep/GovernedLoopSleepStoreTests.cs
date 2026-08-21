@@ -1261,10 +1261,15 @@ public sealed class GovernedLoopSleepStoreTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(GovernedLoopSleepStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.Loops.Execution.Sleep.GovernedLoopSleepStoreTests.Cross_process_sleep_store_host");
+        const string CrossProcessHostTestName = "EmbodySense.Core.Persistence.Tests.Loops.Execution.Sleep.GovernedLoopSleepStoreTests.Cross_process_sleep_store_host";
+        if (crashBoundary is not null)
+        {
+            Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(startInfo, typeof(GovernedLoopSleepStoreTests).Assembly.Location, CrossProcessHostTestName);
+        }
+        else
+        {
+            Verification.CoverageChildProcessAssembly.AddVstestArguments(startInfo, typeof(GovernedLoopSleepStoreTests).Assembly.Location, CrossProcessHostTestName);
+        }
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         startInfo.Environment[CrossProcessWorkspace] = workspace;
         startInfo.Environment[CrossProcessGate] = gate;
