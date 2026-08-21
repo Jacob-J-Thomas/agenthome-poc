@@ -226,6 +226,7 @@ public sealed class CodexRuntimeResolver
 
     private async Task<CodexRuntimeProbeResult> ProbeAsync(string executablePath, string? configuredModel, CancellationToken cancellationToken)
     {
+        // Follow-up: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/469 tracks an elapsed-time fence so a late successful response cannot win a delayed cancellation timer.
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(_probeTimeout);
         var probeCancellationToken = deadline.Token;
