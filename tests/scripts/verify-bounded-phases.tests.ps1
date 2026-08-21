@@ -303,10 +303,19 @@ Assert-Contains -Actual $verifyScript -Expected 'Write-Output "VERIFY_COMPLETE s
 Assert-Contains -Actual $verifyScript -Expected '$excludedRequiredGateNames = if ($VerificationComponent -eq "Solution") { @("git-diff-check", "format-whitespace", "format-naming-style") } else { @() }' -Message "Only Solution may exclude the three static required-gate profiles; Full and StaticContracts must pass no exclusions."
 Assert-Contains -Actual $verifyScript -Expected '$excludedRequiredGateNames = if ($VerificationComponent -eq "Solution")' -Message "The solution component must explicitly exclude only static required-gate profiles."
 Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases) -ExcludedNames $excludedRequiredGateNames' -Message "Solution scheduling must be validated against the reduced but exact required-gate profile set."
+Assert-True -Condition ($phaseScript.IndexOf('$process.WaitForExit()', [StringComparison]::Ordinal) -lt 0) -Message "Sequential phase execution must not reintroduce an unbounded process wait after timeout or normal exit."
+Assert-Contains -Actual $phaseScript -Expected '$processExitedAfterStop = $process.HasExited -or $process.WaitForExit(5000)' -Message "Timeout cleanup must confirm process exit only through a bounded post-kill wait."
+Assert-Contains -Actual $phaseScript -Expected '[Threading.Tasks.Task]::WaitAll($captureTasks, $TimeoutMilliseconds)' -Message "Redirected output drain must remain bounded even when descendants retain inherited pipe handles."
 
 $phaseBehaviorRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-phase-output-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $phaseBehaviorRoot | Out-Null
 try {
+    $blockedOutput = [Threading.Tasks.TaskCompletionSource[string]]::new()
+    $blockedError = [Threading.Tasks.TaskCompletionSource[string]]::new()
+    $blockedCaptureLog = Join-Path $phaseBehaviorRoot "blocked-capture.log"
+    Assert-True -Condition (-not (Write-VerificationPhaseCapturedOutput -OutputPath $blockedCaptureLog -StandardOutputTask $blockedOutput.Task -StandardErrorTask $blockedError.Task -TimeoutMilliseconds 50)) -Message "Sequential phase output capture must return within its bounded drain window when inherited pipe handles remain open."
+    Assert-Contains -Actual (Get-Content -LiteralPath $blockedCaptureLog -Raw) -Expected "did not close within 50 milliseconds" -Message "A bounded output-drain failure must retain actionable diagnostics."
+
     $outputScript = Join-Path $phaseBehaviorRoot "output.ps1"
     [IO.File]::WriteAllText($outputScript, "Write-Output 'stdout-evidence'; [Console]::Error.WriteLine('stderr-evidence')", [Text.UTF8Encoding]::new($false))
     $outputLog = Join-Path $phaseBehaviorRoot "output.log"
