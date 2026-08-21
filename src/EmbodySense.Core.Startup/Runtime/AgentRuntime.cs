@@ -5,6 +5,7 @@ using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Sleep;
+using EmbodySense.Core.Application.Loops.Sleep.Models;
 using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Runtime.Commands;
@@ -45,6 +46,8 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly GovernedLoopRuntimeFacade _governedLoops;
     private readonly IScheduleDeliveryProvenancePort _scheduleDeliveryProvenance;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
+    private readonly GovernedLoopWaitRuntimeHost? _governedWaitRuntimeHost;
+    private readonly GovernedLoopSleepService? _governedSleep;
 
     internal AgentRuntime(
         WorkspacePaths paths,
@@ -58,7 +61,9 @@ public sealed class AgentRuntime : IAsyncDisposable
         GovernedLoopRuntimeFacade governedLoops,
         IScheduleDeliveryProvenancePort scheduleDeliveryProvenance,
         DefaultConversationTurnReviewService defaultConversationReviews,
-        CodexRuntimeStatus codexRuntimeStatus)
+        CodexRuntimeStatus codexRuntimeStatus,
+        GovernedLoopWaitRuntimeHost? governedWaitRuntimeHost = null,
+        GovernedLoopSleepService? governedSleep = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(surface);
@@ -83,6 +88,8 @@ public sealed class AgentRuntime : IAsyncDisposable
         _governedLoops = governedLoops;
         _scheduleDeliveryProvenance = scheduleDeliveryProvenance ?? throw new ArgumentNullException(nameof(scheduleDeliveryProvenance));
         _defaultConversationReviews = defaultConversationReviews;
+        _governedWaitRuntimeHost = governedWaitRuntimeHost;
+        _governedSleep = governedSleep;
         _commandService = new RuntimeCommandService(conversationMemory, startupContext);
         CodexRuntimeStatus = codexRuntimeStatus;
     }
@@ -266,6 +273,52 @@ public sealed class AgentRuntime : IAsyncDisposable
         return _governedLoops.InvokeAsync(input, cancellationToken);
     }
 
+    /// <summary>Delivers one already-authenticated event to an exact governed Wait checkpoint.</summary>
+    /// <param name="input">The exact checkpoint identity and hash plus the surface-owned authentication evidence hash.</param>
+    /// <param name="cancellationToken">The token used until durable continuation intent exists.</param>
+    /// <returns>The bounded durable wake outcome without exposing Application-layer contracts.</returns>
+    /// <exception cref="OperationCanceledException">Thrown when cancellation is requested before durable prepared wake intent exists.</exception>
+    public async Task<AgentRuntimeAuthenticatedWakeDeliveryResult> DeliverAuthenticatedWakeAsync(
+        AgentRuntimeAuthenticatedWakeDeliveryInput input,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        if (_governedSleep is null)
+        {
+            return new AgentRuntimeAuthenticatedWakeDeliveryResult(AgentRuntimeAuthenticatedWakeDeliveryStatus.Unavailable);
+        }
+
+        var result = await _governedSleep.WakeAsync(
+            new GovernedLoopWakeRequest(input.CheckpointId, input.CheckpointHash, input.AuthenticationEvidenceHash),
+            cancellationToken);
+        return new AgentRuntimeAuthenticatedWakeDeliveryResult(
+            MapAuthenticatedWakeDeliveryStatus(result.Status),
+            result.Evidence?.Identity.WakeId,
+            result.Evidence?.ContentHash,
+            result.ContinuationInvoked);
+    }
+
+    private static AgentRuntimeAuthenticatedWakeDeliveryStatus MapAuthenticatedWakeDeliveryStatus(GovernedLoopWakeResultStatus status)
+        => status switch
+        {
+            GovernedLoopWakeResultStatus.Committed => AgentRuntimeAuthenticatedWakeDeliveryStatus.Committed,
+            GovernedLoopWakeResultStatus.Duplicate => AgentRuntimeAuthenticatedWakeDeliveryStatus.Duplicate,
+            GovernedLoopWakeResultStatus.NotEligible => AgentRuntimeAuthenticatedWakeDeliveryStatus.NotEligible,
+            GovernedLoopWakeResultStatus.Late => AgentRuntimeAuthenticatedWakeDeliveryStatus.Late,
+            GovernedLoopWakeResultStatus.Stale => AgentRuntimeAuthenticatedWakeDeliveryStatus.Stale,
+            GovernedLoopWakeResultStatus.Conflict => AgentRuntimeAuthenticatedWakeDeliveryStatus.Conflict,
+            GovernedLoopWakeResultStatus.Cancelled => AgentRuntimeAuthenticatedWakeDeliveryStatus.Cancelled,
+            GovernedLoopWakeResultStatus.Expired => AgentRuntimeAuthenticatedWakeDeliveryStatus.Expired,
+            GovernedLoopWakeResultStatus.Paused => AgentRuntimeAuthenticatedWakeDeliveryStatus.Paused,
+            GovernedLoopWakeResultStatus.ReviewBlocked => AgentRuntimeAuthenticatedWakeDeliveryStatus.ReviewBlocked,
+            GovernedLoopWakeResultStatus.AmbiguousAttempt => AgentRuntimeAuthenticatedWakeDeliveryStatus.AmbiguousAttempt,
+            GovernedLoopWakeResultStatus.Failed => AgentRuntimeAuthenticatedWakeDeliveryStatus.Failed,
+            GovernedLoopWakeResultStatus.Invalid => AgentRuntimeAuthenticatedWakeDeliveryStatus.Invalid,
+            GovernedLoopWakeResultStatus.NotFound => AgentRuntimeAuthenticatedWakeDeliveryStatus.NotFound,
+            GovernedLoopWakeResultStatus.Unavailable => AgentRuntimeAuthenticatedWakeDeliveryStatus.Unavailable,
+            _ => AgentRuntimeAuthenticatedWakeDeliveryStatus.Invalid,
+        };
+
     /// <summary>Creates an explicit one-shot trigger worker bound to this runtime's governed custom-loop execution gate.</summary>
     /// <remarks>
     /// The supplied authorizer is retained as a composition-owned trusted current-state source; it is not accepted per dispatch.
@@ -399,6 +452,41 @@ public sealed class AgentRuntime : IAsyncDisposable
     }
 
     /// <summary>
+    /// Explicitly activates this process as the browser-independent local host for canonical governed Wait recovery and wake delivery.
+    /// </summary>
+    /// <remarks>
+    /// Normal Web, CLI, and request runtimes are inert until their process-level host calls this member. The returned activation
+    /// outcome never changes whether ordinary custom-loop invocation is available when another live coordinator owns delivery.
+    /// </remarks>
+    /// <param name="cancellationToken">The token used to cancel recovery and coordinator acquisition.</param>
+    /// <returns>The coordinator activation outcome projected through the shared Startup boundary.</returns>
+    public async Task<CustomLoopExecutionActivationResult> StartGovernedWaitBackgroundAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (_governedWaitRuntimeHost is null)
+        {
+            return new CustomLoopExecutionActivationResult(
+                false,
+                false,
+                "Failed",
+                "governed_wait_background_unavailable: this runtime was not composed with canonical Wait background support.");
+        }
+
+        _governedWaitRuntimeHost.RequestActivation();
+        var availability = await _customLoops.EnsureCustomExecutionAvailableAsync(cancellationToken);
+        if (!availability.Available)
+        {
+            return new CustomLoopExecutionActivationResult(
+                false,
+                _customLoops.CustomExecutionReacquisitionAllowed,
+                availability.Status,
+                availability.Detail);
+        }
+
+        return await _governedWaitRuntimeHost.ActivateAsync(cancellationToken);
+    }
+
+    /// <summary>
     /// Attempts to handle a runtime command that does not require an initialized runtime instance.
     /// </summary>
     /// <param name="input">The candidate command text.</param>
@@ -417,9 +505,19 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// <returns>A task that represents the asynchronous operation.</returns>
     public async ValueTask DisposeAsync()
     {
-        _governedLoops.Dispose();
-        await _customLoops.DisposeAsync();
-        await _inferenceClient.DisposeAsync();
+        try
+        {
+            if (_governedWaitRuntimeHost is not null)
+            {
+                await _governedWaitRuntimeHost.DisposeAsync();
+            }
+        }
+        finally
+        {
+            _governedLoops.Dispose();
+            await _customLoops.DisposeAsync();
+            await _inferenceClient.DisposeAsync();
+        }
     }
 
     private async Task<AgentRuntimeTurnResult> RunModelTurnAsync(

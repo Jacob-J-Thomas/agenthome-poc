@@ -36,9 +36,10 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         var descriptors = BaselineDescriptors()
             .Concat(GovernedLoopPureNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopTopologyNodeCatalogContract.Descriptors)
+            .Concat(GovernedLoopWaitNodeCatalogContract.Descriptors)
             .OrderBy(DescriptorKey, StringComparer.Ordinal)
             .ToArray();
-        if (descriptors.Length != 19
+        if (descriptors.Length != 21
             || descriptors.Select(item => item.Descriptor).Distinct().Count() != descriptors.Length
             || descriptors.Any(item => !GovernedLoopSequentialNodeDescriptors.IsSupported(item.Descriptor)))
         {

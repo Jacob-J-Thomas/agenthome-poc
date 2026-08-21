@@ -44,5 +44,9 @@ public enum CustomLoopRunStatus
     /// <summary>
     /// Identifies the needs review custom loop run status.
     /// </summary>
-    NeedsReview = 9
+    NeedsReview = 9,
+    /// <summary>
+    /// Identifies a run durably waiting for one admitted wake condition.
+    /// </summary>
+    Waiting = 10
 }

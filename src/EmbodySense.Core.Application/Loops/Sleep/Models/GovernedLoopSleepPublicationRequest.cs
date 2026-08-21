@@ -7,8 +7,10 @@ namespace EmbodySense.Core.Application.Loops.Sleep.Models;
 /// <param name="WakeMode">The admitted wake mode.</param>
 /// <param name="WakeDeadlineUtc">The exact timestamp eligibility boundary for a timestamp wake.</param>
 /// <param name="AuthenticatedEventReference">The already-admitted event subscription reference for an event wake.</param>
+/// <param name="CheckpointPreparedAtUtc">The stable UTC checkpoint-preparation instant retained by the parking transaction.</param>
 public sealed record GovernedLoopSleepPublicationRequest(
     GovernedLoopSleepBinding Binding,
     GovernedLoopWakeMode WakeMode,
     DateTimeOffset? WakeDeadlineUtc,
-    string? AuthenticatedEventReference);
+    string? AuthenticatedEventReference,
+    DateTimeOffset? CheckpointPreparedAtUtc = null);

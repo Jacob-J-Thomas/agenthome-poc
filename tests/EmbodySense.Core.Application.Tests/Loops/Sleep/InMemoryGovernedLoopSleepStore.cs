@@ -9,6 +9,7 @@ internal sealed class InMemoryGovernedLoopSleepStore : IGovernedLoopSleepStore
     private readonly object _sync = new();
     private readonly Dictionary<string, GovernedLoopSleepCheckpoint> _checkpoints = new(StringComparer.Ordinal);
     private readonly Dictionary<string, GovernedLoopWakeEvidence> _wakes = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, GovernedLoopWakeEvidence> _preparedWakes = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _checkpointClaims = new(StringComparer.Ordinal);
 
     internal GovernedLoopSleepCheckpointMutationResult? PublishOverride { get; set; }
@@ -49,6 +50,8 @@ internal sealed class InMemoryGovernedLoopSleepStore : IGovernedLoopSleepStore
 
     internal Action<GovernedLoopWakeEvidence, CancellationToken>? OnCreate { get; set; }
 
+    internal Barrier? PublishBarrier { get; set; }
+
     internal IReadOnlyList<GovernedLoopWakeDisposition> WrittenDispositions
     {
         get
@@ -67,6 +70,17 @@ internal sealed class InMemoryGovernedLoopSleepStore : IGovernedLoopSleepStore
             lock (_sync)
             {
                 return _checkpoints.Count;
+            }
+        }
+    }
+
+    internal GovernedLoopSleepCheckpoint? SingleCheckpoint
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _checkpoints.Count == 1 ? _checkpoints.Values.Single() : null;
             }
         }
     }
@@ -116,6 +130,15 @@ internal sealed class InMemoryGovernedLoopSleepStore : IGovernedLoopSleepStore
             }
 
             _checkpoints.Add(checkpoint.CheckpointId, checkpoint);
+            if (PublishBarrier is { } publishBarrier)
+            {
+                if (!publishBarrier.SignalAndWait(TimeSpan.FromSeconds(10), cancellationToken)
+                    || !publishBarrier.SignalAndWait(TimeSpan.FromSeconds(10), cancellationToken))
+                {
+                    throw new InvalidOperationException("simulated checkpoint-publication barrier timed out");
+                }
+            }
+
             if (ThrowAfterPublishCommit)
             {
                 throw new InvalidOperationException("simulated crash after checkpoint commit");
@@ -179,7 +202,10 @@ internal sealed class InMemoryGovernedLoopSleepStore : IGovernedLoopSleepStore
 
             return Task.FromResult<GovernedLoopWakeEvidenceReadResult?>(
                 _wakes.TryGetValue(wakeId, out var evidence)
-                    ? new GovernedLoopWakeEvidenceReadResult(GovernedLoopSleepStoreReadStatus.Found, evidence)
+                    ? new GovernedLoopWakeEvidenceReadResult(
+                        GovernedLoopSleepStoreReadStatus.Found,
+                        evidence,
+                        _preparedWakes.GetValueOrDefault(wakeId))
                     : new GovernedLoopWakeEvidenceReadResult(GovernedLoopSleepStoreReadStatus.NotFound));
         }
     }
@@ -224,6 +250,10 @@ internal sealed class InMemoryGovernedLoopSleepStore : IGovernedLoopSleepStore
             }
 
             _wakes.Add(evidence.Identity.WakeId, evidence);
+            if (evidence.Disposition == GovernedLoopWakeDisposition.Prepared)
+            {
+                _preparedWakes.Add(evidence.Identity.WakeId, evidence);
+            }
             _checkpointClaims.Add(checkpoint.CheckpointId, evidence.Identity.WakeId);
             if (ThrowAfterCreateCommit)
             {
@@ -289,6 +319,10 @@ internal sealed class InMemoryGovernedLoopSleepStore : IGovernedLoopSleepStore
         lock (_sync)
         {
             _wakes[evidence.Identity.WakeId] = evidence;
+            if (evidence.Disposition == GovernedLoopWakeDisposition.Prepared)
+            {
+                _preparedWakes[evidence.Identity.WakeId] = evidence;
+            }
             _checkpointClaims[evidence.Identity.CheckpointId] = evidence.Identity.WakeId;
         }
     }
@@ -298,6 +332,14 @@ internal sealed class InMemoryGovernedLoopSleepStore : IGovernedLoopSleepStore
         lock (_sync)
         {
             return _wakes[wakeId];
+        }
+    }
+
+    internal GovernedLoopWakeEvidence GetPreparedWake(string wakeId)
+    {
+        lock (_sync)
+        {
+            return _preparedWakes[wakeId];
         }
     }
 }

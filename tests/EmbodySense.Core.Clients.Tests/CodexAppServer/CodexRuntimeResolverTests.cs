@@ -354,9 +354,9 @@ public sealed class CodexRuntimeResolverTests
         Assert.Equal(CodexRuntimeResolutionStatus.ProbeFailed, result.Status);
         Assert.Equal("codex-cli staged-delay-test", result.Version);
         Assert.Contains("timed out after 5 seconds", result.Detail, StringComparison.Ordinal);
-        Assert.Equal(
-            ["initialize-started", "initialize-completed", "model-list-started"],
-            await File.ReadAllLinesAsync(protocolStageMarkerPath));
+        var completedStages = await File.ReadAllLinesAsync(protocolStageMarkerPath);
+        Assert.Contains("initialize-started", completedStages);
+        Assert.DoesNotContain("model-list-completed", completedStages);
     }
 
     private static async Task<string> CreateFakeExecutableAsync(

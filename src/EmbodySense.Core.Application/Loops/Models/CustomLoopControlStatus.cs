@@ -68,5 +68,9 @@ public enum CustomLoopControlStatus
     /// <summary>
     /// Identifies the workspace host unavailable custom loop control status.
     /// </summary>
-    WorkspaceHostUnavailable = 16
+    WorkspaceHostUnavailable = 16,
+    /// <summary>
+    /// Identifies a resumed run that durably parked in Waiting under the canonical sleep/wake plane.
+    /// </summary>
+    Waiting = 17
 }

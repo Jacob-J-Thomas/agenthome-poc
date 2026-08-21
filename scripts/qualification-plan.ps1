@@ -516,6 +516,24 @@ function Get-QualificationDirectXunitTestClasses {
     }
 
     $expectedTypeName = [IO.Path]::GetFileNameWithoutExtension($Path)
+    $fragmentSeparatorIndex = $expectedTypeName.IndexOf('.')
+    if ($fragmentSeparatorIndex -gt 0) {
+        $expectedTypeName = $expectedTypeName.Substring(0, $fragmentSeparatorIndex)
+        Initialize-QualificationCSharpParser
+        $root = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Content).GetCompilationUnitRoot()
+        $matchingPartialTypes = @(
+            $root.DescendantNodes() |
+                Where-Object {
+                    $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.ClassDeclarationSyntax] -and
+                    $_.Parent -is [Microsoft.CodeAnalysis.CSharp.Syntax.BaseNamespaceDeclarationSyntax] -and
+                    $_.Identifier.ValueText -ceq $expectedTypeName -and
+                    @($_.Modifiers | ForEach-Object { $_.ValueText }) -ccontains "partial"
+                }
+        )
+        if ($matchingPartialTypes.Count -ne 1) {
+            throw "Qualification requires dotted xUnit test fragments to contain exactly one filename-prefix-matching partial class in '$Path'."
+        }
+    }
     if ($typeNames.Count -ne 1 -or $typeNames[0] -cne $expectedTypeName) {
         throw "Qualification requires exactly one filename-matching top-level direct xUnit test class in '$Path'. Found: $($typeNames -join ', ')."
     }

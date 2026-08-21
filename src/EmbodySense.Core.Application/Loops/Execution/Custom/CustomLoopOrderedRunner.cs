@@ -20,12 +20,16 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Application.Loops.Wait;
+using EmbodySense.Core.Application.Loops.Wait.Models;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Execution.Authority;
 using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Wait;
+using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -84,6 +88,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly ICapabilityAdmissionService? _capabilityAdmissionService;
     private readonly IGovernedLoopConversationPublicationAuthorityBoundaryProvider? _conversationPublicationAuthorityBoundaryProvider;
     private readonly GovernedLoopFirstBoundRunCompletionBoundary? _firstBoundRunCompletionBoundary;
+    private readonly IGovernedLoopWaitNodeExecutor? _waitNodeExecutor;
     private readonly TimeProvider _timeProvider;
     private readonly ConcurrentDictionary<string, byte> _activeRuns = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeAttemptCancellations = new(StringComparer.Ordinal);
@@ -102,6 +107,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     /// <param name="capabilityAdmissionService">The current exact capability and narrower-authority revalidator.</param>
     /// <param name="conversationPublicationAuthorityBoundaryProvider">The canonical success-Exit publication authority-boundary provider. A missing provider leaves legacy execution unchanged but stops canonical publication.</param>
     /// <param name="firstBoundRunCompletionBoundary">The canonical success-Exit completion boundary. A missing boundary leaves legacy execution unchanged but stops canonical successful completion.</param>
+    /// <param name="waitNodeExecutor">The canonical durable Wait executor. A missing executor rejects Wait dispatch without changing legacy execution.</param>
     public CustomLoopOrderedRunner(
         ICustomLoopRunStore runStore,
         CustomLoopContextResolver contextResolver,
@@ -113,7 +119,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         ICustomLoopAttemptCancellationBroker? attemptCancellationBroker = null,
         ICapabilityAdmissionService? capabilityAdmissionService = null,
         IGovernedLoopConversationPublicationAuthorityBoundaryProvider? conversationPublicationAuthorityBoundaryProvider = null,
-        GovernedLoopFirstBoundRunCompletionBoundary? firstBoundRunCompletionBoundary = null)
+        GovernedLoopFirstBoundRunCompletionBoundary? firstBoundRunCompletionBoundary = null,
+        IGovernedLoopWaitNodeExecutor? waitNodeExecutor = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _contextResolver = contextResolver ?? throw new ArgumentNullException(nameof(contextResolver));
@@ -126,6 +133,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         _capabilityAdmissionService = capabilityAdmissionService;
         _conversationPublicationAuthorityBoundaryProvider = conversationPublicationAuthorityBoundaryProvider;
         _firstBoundRunCompletionBoundary = firstBoundRunCompletionBoundary;
+        _waitNodeExecutor = waitNodeExecutor;
     }
 
     /// <summary>
@@ -305,6 +313,127 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             request.Actor,
             request.ActiveRunAlreadyRegistered);
         return ResumeCoreAsync(resume, context, cancellationToken);
+    }
+
+    internal async Task<CustomLoopOrderedRunResult> ResumeWaitSequentialAsync(
+        GovernedLoopSequentialOrderedWaitResumeRequest request,
+        IGovernedLoopSequentialOrderedNodeEvidenceRecorder nodeEvidenceRecorder,
+        IGovernedLoopSequentialAuditRecorder auditRecorder,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(nodeEvidenceRecorder);
+        ArgumentNullException.ThrowIfNull(auditRecorder);
+        var context = CreateSequentialContext(
+            request.SchemaVersion,
+            request.Anchor,
+            request.Plan,
+            request.Artifact,
+            nodeEvidenceRecorder,
+            auditRecorder);
+        if (context is null
+            || request.ActivationOrdinal < 0
+            || !IsHash(request.ContinuationEvidenceHash)
+            || string.IsNullOrWhiteSpace(request.Actor))
+        {
+            return Result(CustomLoopOrderedRunStatus.InvalidState, null, "The canonical Wait resume hand-off is invalid and no ordered runtime work was dispatched.");
+        }
+
+        CustomLoopRunRecord? run;
+        try
+        {
+            run = await _runStore.GetAsync(context.Anchor.AdapterBinding.ExecutionBinding.RunId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return Result(CustomLoopOrderedRunStatus.Failed, null, $"The resumed Wait run trace could not be loaded safely: {SafeExceptionClass(exception)}.");
+        }
+
+        if (run is null)
+        {
+            return Result(CustomLoopOrderedRunStatus.NotFound, null, "The custom-loop run does not exist.");
+        }
+
+        if (!SequentialRunMatches(run, context)
+            || !CustomLoopRunValidator.ValidateForDispatch(run).IsValid
+            || run.Frontier?.Payload.Nodes.ElementAtOrDefault(request.ActivationOrdinal) is not { } activation
+            || activation.Descriptor.Kind != GovernedLoopNodeKind.Wait
+            || run.WaitEvidence.SingleOrDefault(item => item.ActivationOrdinal == request.ActivationOrdinal) is not { ContinuationEvidence: { } continuation }
+            || !string.Equals(continuation.ContentHash, request.ContinuationEvidenceHash, StringComparison.Ordinal))
+        {
+            return Result(CustomLoopOrderedRunStatus.InvalidState, run, "The durable Wait continuation no longer matches the exact immutable graph, activation, and evidence chain.");
+        }
+
+        if (activation.Status == GovernedLoopNodeExecutionStatus.Completed)
+        {
+            var node = context.Plan.Nodes.SingleOrDefault(candidate =>
+                candidate.Ordinal == activation.PlanOrdinal
+                && string.Equals(candidate.NodeId, activation.NodeId, StringComparison.Ordinal));
+            var terminal = node is null || activation.Attempt is not { } completedAttempt
+                ? null
+                : FindSequentialNodeEvidence(run, node, activation, completedAttempt);
+            if (terminal is null
+                || !string.Equals(terminal.WaitContinuationEvidenceHash, continuation.ContentHash, StringComparison.Ordinal))
+            {
+                return Result(CustomLoopOrderedRunStatus.InvalidState, run, "The durable Wait completion has no exact authenticated terminal evidence for audit reconciliation.");
+            }
+
+            var outcomeAuditFailure = await AppendOutcomeAuditAsync(
+                run,
+                terminal,
+                CreateWaitNodeAudit(run, request.Actor, terminal, AuditSchema.Outcomes.Succeeded),
+                context.AuditRecorder,
+                IntegrityToken()).ConfigureAwait(false);
+            if (outcomeAuditFailure is not null)
+            {
+                var invalid = await TerminateAsync(
+                    run,
+                    request.Actor,
+                    CustomLoopRunStatus.NeedsReview,
+                    outcomeAuditFailure.FailureCode,
+                    outcomeAuditFailure.Detail,
+                    terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+                return invalid.Status == CustomLoopOrderedRunStatus.NeedsReview
+                    ? invalid
+                    : Result(CustomLoopOrderedRunStatus.NeedsReview, invalid.Run ?? run, outcomeAuditFailure.Detail);
+            }
+
+            return run.Status switch
+            {
+                CustomLoopRunStatus.Waiting => Result(CustomLoopOrderedRunStatus.Waiting, run, "The exact Wait completion is durable and another activation remains parked."),
+                CustomLoopRunStatus.Completed => await CompleteCanonicalAsync(run, context, "The exact durable canonical completion was replayed after Wait continuation.", run.FinalOutput ?? string.Empty),
+                CustomLoopRunStatus.Running => await ContinueOwnedWaitAsync(run, request.Actor, context, cancellationToken).ConfigureAwait(false),
+                _ => Result(CustomLoopOrderedRunStatus.InvalidState, run, "The exact Wait completion is durable under an incompatible aggregate lifecycle state."),
+            };
+        }
+
+        if (run.Status != CustomLoopRunStatus.Running
+            || activation.Status != GovernedLoopNodeExecutionStatus.Running
+            || activation.Attempt is null
+            || activation.AttemptOperationId is null
+            || run.Frontier.Payload.FrontierVersion != continuation.ResumedFrontierVersion
+            || !string.Equals(run.Frontier.Payload.ContentHash, continuation.ResumedFrontierHash, StringComparison.Ordinal))
+        {
+            return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Ordered Wait re-entry requires the exact durable Running continuation frontier.");
+        }
+
+        return await ContinueOwnedWaitAsync(run, request.Actor, context, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<CustomLoopOrderedRunResult> ContinueOwnedWaitAsync(
+        CustomLoopRunRecord run,
+        string actor,
+        SequentialExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        using var ownership = TryRegisterActiveRun(run.Id);
+        return ownership is null
+            ? Result(CustomLoopOrderedRunStatus.Failed, run, "This runtime is already coordinating ordered execution for the resumed Wait run.")
+            : await ContinueRegisteredAsync(run, actor, cancellationToken, context).ConfigureAwait(false);
     }
 
     private async Task<CustomLoopOrderedRunResult> ResumeCoreAsync(
@@ -573,6 +702,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return Result(CustomLoopOrderedRunStatus.NeedsReview, run, selected.Detail);
             }
 
+            if (selected.Status == GovernedLoopSequentialFrontierSelectionStatus.Waiting)
+            {
+                return Result(CustomLoopOrderedRunStatus.Waiting, run, selected.Detail);
+            }
+
             if (selected.Status == GovernedLoopSequentialFrontierSelectionStatus.Terminal)
             {
                 return await CompleteOrProjectSequentialTerminalAsync(run, actor, context);
@@ -667,6 +801,26 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             var deadlineReached = GetAccumulatedRunningMilliseconds(run, Now(run)) >= CustomLoopLimits.MaxRunExecutionMilliseconds;
             if (selected.Status == GovernedLoopSequentialFrontierSelectionStatus.Running)
             {
+                if (GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor))
+                {
+                    var resumedWait = await DispatchSelectedSequentialNodeAsync(
+                        context,
+                        run,
+                        node,
+                        selected.Attempt!.Value,
+                        selected.AttemptOperationId!,
+                        actor,
+                        dispatchState,
+                        cancellationToken);
+                    if (resumedWait.Terminal is not null)
+                    {
+                        return resumedWait.Terminal;
+                    }
+
+                    run = resumedWait.Run!;
+                    continue;
+                }
+
                 var retained = FindSequentialNodeEvidence(run, node, selected.Activation!, selected.Attempt!.Value);
                 var isPure = GovernedLoopSequentialNodeDescriptors.IsPure(node.Descriptor);
                 if (retained is null && !isPure)
@@ -738,6 +892,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 var isPure = GovernedLoopSequentialNodeDescriptors.IsPure(node.Descriptor);
                 var deadlineClaim = isPure
                     ? await ClaimSequentialPureNodeAsync(run, context, node, deadlineOperationId, actor, cancellationToken)
+                    : GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor)
+                        ? await ClaimSequentialWaitNodeAsync(run, context, node, deadlineOperationId, actor, cancellationToken)
                     : await ClaimSequentialNodeAsync(run, context, node, deadlineOperationId, actor, cancellationToken);
                 if (deadlineClaim.Terminal is not null)
                 {
@@ -745,6 +901,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 }
 
                 var isExit = Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit);
+                var isWait = GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor);
                 var rejected = await DispatchSequentialNodeAsync(
                     context,
                     deadlineClaim.Run!,
@@ -765,7 +922,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                             isExit ? "exit" : node.NodeId,
                             isExit,
                             "run_deadline_exceeded",
-                            CanonicalDeadlineRejectionDetail),
+                            CanonicalDeadlineRejectionDetail,
+                            dispatchStartAlreadyRetained: isWait),
                     cancellationToken);
                 return rejected.Terminal
                     ?? Result(CustomLoopOrderedRunStatus.NeedsReview, rejected.Run, "Canonical deadline rejection did not produce one closed terminal disposition.");
@@ -774,6 +932,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             var operationId = NewCorrelationId("frontier-attempt");
             var claimed = GovernedLoopSequentialNodeDescriptors.IsPure(node.Descriptor)
                 ? await ClaimSequentialPureNodeAsync(run, context, node, operationId, actor, cancellationToken)
+                : GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor)
+                    ? await ClaimSequentialWaitNodeAsync(run, context, node, operationId, actor, cancellationToken)
                 : GovernedLoopSequentialNodeDescriptors.IsTopology(node.Descriptor)
                     ? await ClaimSequentialTopologyNodeAsync(run, context, node, operationId, actor, cancellationToken)
                 : await ClaimSequentialNodeAsync(run, context, node, operationId, actor, cancellationToken);
@@ -932,6 +1092,76 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
             var terminal = await CancelBeforeDispatchAsync(run, actor);
             return new RunAdvance(terminal.Run, terminal);
+        }
+    }
+
+    private async Task<RunAdvance> ClaimSequentialWaitNodeAsync(
+        CustomLoopRunRecord run,
+        SequentialExecutionContext context,
+        GovernedLoopSequentialPlanNode node,
+        string attemptOperationId,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        if (!GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor))
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, run, "Only an admitted Wait may use the atomic Wait claim."));
+        }
+
+        var now = Now(run);
+        var selection = GovernedLoopSequentialFrontierMachine.Select(run.Frontier, context.Anchor.AdapterBinding, context.Plan);
+        var transition = GovernedLoopSequentialFrontierMachine.Start(
+            run.Frontier,
+            context.Anchor.AdapterBinding,
+            context.Plan,
+            node,
+            selection.Activation,
+            1,
+            attemptOperationId,
+            now);
+        if (transition.Status != GovernedLoopSequentialFrontierTransitionStatus.Applied || transition.Frontier is null)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, run, transition.Detail));
+        }
+
+        var activation = transition.Frontier.Payload.Nodes[selection.Activation!.ActivationOrdinal];
+        var sequentialNode = new SequentialNodeExecutionContext(
+            context.Anchor.AdapterBinding,
+            context.Artifact,
+            context.Plan,
+            node,
+            activation,
+            1,
+            attemptOperationId,
+            context.AllowedCapabilityIds,
+            context.AuditRecorder);
+        var start = Event(
+            run,
+            now,
+            CustomLoopRunEventKind.NodeAttemptStarted,
+            "Wait dispatch was retained before the activation released ordered execution ownership.",
+            activation.CycleIteration ?? run.Checkpoint.Iteration,
+            node.NodeId,
+            1,
+            traceReservationUtf8Bytes: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes,
+            eventId: attemptOperationId);
+        start = WithSequentialEvidence(start, sequentialNode, CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+        var candidate = Append(run, now, [start]) with { Frontier = transition.Frontier };
+        var capacityBoundary = await RejectUnavailableTraceCapacityAsync(run, candidate, actor, "wait-node", cancellationToken);
+        if (capacityBoundary is not null)
+        {
+            return capacityBoundary;
+        }
+
+        try
+        {
+            return await PersistAsync(run, candidate, cancellationToken, outcomeMayExist: false, propagateCancellation: true);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var latest = await _runStore.GetAsync(run.Id, IntegrityToken()).ConfigureAwait(false);
+            var cancelled = await CancelBeforeDispatchAsync(latest ?? run, actor, context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(cancelled.Run, cancelled);
         }
     }
 
@@ -1269,7 +1499,299 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 cancellationToken);
         }
 
+        if (GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor))
+        {
+            return await DispatchAndAdvanceSequentialWaitNodeAsync(
+                context,
+                run,
+                node,
+                attempt,
+                attemptOperationId,
+                actor,
+                cancellationToken).ConfigureAwait(false);
+        }
+
         return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, run, "The schema-1 sequential frontier selected an unsupported canonical node family."));
+    }
+
+    private async Task<RunAdvance> DispatchAndAdvanceSequentialWaitNodeAsync(
+        SequentialExecutionContext context,
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode node,
+        int attempt,
+        string attemptOperationId,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var activation = RequireRunningSequentialActivation(run, node, attempt, attemptOperationId);
+        var startAuditFailure = await ReconcileWaitNodeStartAuditAsync(
+            run,
+            node,
+            activation,
+            attempt,
+            attemptOperationId,
+            actor,
+            context.AuditRecorder).ConfigureAwait(false);
+        if (startAuditFailure is not null)
+        {
+            var invalid = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                startAuditFailure.FailureCode,
+                startAuditFailure.Detail,
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(invalid.Run, invalid);
+        }
+
+        var waitEvidence = run.WaitEvidence.SingleOrDefault(item => item.ActivationOrdinal == activation.ActivationOrdinal);
+        if (waitEvidence?.ContinuationEvidence is not null)
+        {
+            return await CompleteSequentialWaitNodeAsync(
+                context,
+                run,
+                node,
+                activation,
+                attempt,
+                attemptOperationId,
+                actor).ConfigureAwait(false);
+        }
+
+        if (_waitNodeExecutor is null)
+        {
+            var invalid = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "canonical_wait_executor_unavailable",
+                "The canonical Wait executor is not composed; no sleeping checkpoint was published.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(invalid.Run, invalid);
+        }
+
+        GovernedLoopWaitParkResult parked;
+        try
+        {
+            parked = await _waitNodeExecutor.ParkAsync(
+                new GovernedLoopSequentialNodeDispatchRequest(
+                    GovernedLoopSequentialNodeDispatchRequest.CurrentSchemaVersion,
+                    context.Anchor,
+                    context.Plan,
+                    node,
+                    activation,
+                    attempt),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Failed, run, $"Wait parking failed before a conclusive result: {SafeExceptionClass(exception)}."));
+        }
+
+        if (parked.Run is not { } durable)
+        {
+            return new RunAdvance(null, Result(
+                parked.Status is GovernedLoopWaitParkResultStatus.Conflict or GovernedLoopWaitParkResultStatus.Invalid
+                    ? CustomLoopOrderedRunStatus.InvalidState
+                    : CustomLoopOrderedRunStatus.Failed,
+                run,
+                parked.Detail ?? $"Wait parking returned {parked.Status} without a canonical durable run."));
+        }
+
+        if (durable.Status == CustomLoopRunStatus.Cancelled)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Cancelled, durable, parked.Detail ?? "The canonical Wait was cancelled before checkpoint publication."));
+        }
+
+        if (durable.Status == CustomLoopRunStatus.Failed)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Failed, durable, parked.Detail ?? "The canonical Wait failed before checkpoint publication."));
+        }
+
+        if (durable.Status == CustomLoopRunStatus.NeedsReview)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, durable, parked.Detail ?? "The canonical Wait requires review before checkpoint publication."));
+        }
+
+        if (durable.Frontier?.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal)?.Status != GovernedLoopNodeExecutionStatus.Waiting)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "Wait parking did not retain the exact activation as Waiting."));
+        }
+
+        var durableWait = durable.WaitEvidence.SingleOrDefault(item => item.ActivationOrdinal == activation.ActivationOrdinal);
+        if (durableWait?.ParkEvidence is null)
+        {
+            return new RunAdvance(null, Result(
+                CustomLoopOrderedRunStatus.Failed,
+                durable,
+                $"The Wait activation is retained, but checkpoint publication is not yet durable; the active host will retry bounded recovery without reporting the run as parked. Cause: {parked.Detail ?? "unknown-publication-outcome"}"));
+        }
+
+        return durable.Status == CustomLoopRunStatus.Waiting
+            ? new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, durable, parked.Detail ?? "The canonical Wait checkpoint is durably parked."))
+            : durable.Status == CustomLoopRunStatus.Running && durable.Frontier.Payload.Status == GovernedLoopFrontierStatus.Active
+                ? new RunAdvance(durable, null)
+                : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "The parked Wait does not compose with the aggregate run lifecycle."));
+    }
+
+    private async Task<RunAdvance> CompleteSequentialWaitNodeAsync(
+        SequentialExecutionContext context,
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        int attempt,
+        string attemptOperationId,
+        string actor)
+    {
+        var retainedWait = run.WaitEvidence.SingleOrDefault(item => item.ActivationOrdinal == activation.ActivationOrdinal);
+        if (retainedWait?.ContinuationEvidence is not { } continuation
+            || retainedWait.ParkEvidence is null
+            || !GovernedLoopWaitContractValidator.ValidateComposition(retainedWait.ParkEvidence, continuation).IsValid)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, run, "The Running Wait has no exact retained park and continuation evidence chain."));
+        }
+
+        var terminal = FindSequentialNodeEvidence(run, node, activation, attempt);
+        var now = Now(run);
+        var events = new List<CustomLoopRunEvent>();
+        CustomLoopRunRecord outcomeOwner;
+        if (terminal is null)
+        {
+            var sequentialNode = new SequentialNodeExecutionContext(
+                context.Anchor.AdapterBinding,
+                context.Artifact,
+                context.Plan,
+                node,
+                activation,
+                attempt,
+                attemptOperationId,
+                context.AllowedCapabilityIds,
+                context.AuditRecorder);
+            terminal = Event(
+                run,
+                now,
+                CustomLoopRunEventKind.NodeAttemptCompleted,
+                "The exact prepared wake continuation completed the canonical Wait activation.",
+                activation.CycleIteration ?? run.Checkpoint.Iteration,
+                node.NodeId,
+                attempt) with
+            {
+                WaitContinuationEvidenceHash = continuation.ContentHash,
+            };
+            terminal = WithSequentialEvidence(
+                terminal,
+                sequentialNode,
+                CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                CustomLoopSequentialNodeDisposition.Completed,
+                GovernedLoopControlCondition.Success);
+            events.Add(terminal);
+            outcomeOwner = run with { Events = [.. run.Events, terminal] };
+        }
+        else
+        {
+            if (terminal is not
+                {
+                    Kind: CustomLoopRunEventKind.NodeAttemptCompleted,
+                    SequentialNodeEvidence:
+                    {
+                        Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                        Disposition: CustomLoopSequentialNodeDisposition.Completed,
+                        ControlOutcome: GovernedLoopControlCondition.Success,
+                    },
+                }
+                || !string.Equals(terminal.WaitContinuationEvidenceHash, continuation.ContentHash, StringComparison.Ordinal))
+            {
+                return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, run, "The retained Wait terminal event is absent or bound to different continuation evidence."));
+            }
+
+            outcomeOwner = run;
+        }
+
+        var completed = CompleteSequentialFrontier(outcomeOwner, context, node, attempt, attemptOperationId, now);
+        if (completed is null)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, run, "The exact Wait completion could not advance its canonical frontier."));
+        }
+
+        events.AddRange(completed.SkipEvents);
+        var waiting = completed.Frontier.Payload.Status == GovernedLoopFrontierStatus.Waiting;
+        if (completed.Frontier.Payload.Status is not (GovernedLoopFrontierStatus.Active or GovernedLoopFrontierStatus.Waiting))
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, run, "Wait completion produced an unsupported aggregate frontier posture."));
+        }
+
+        if (waiting && run.Status != CustomLoopRunStatus.Waiting)
+        {
+            var lifecycleOwner = run with { Events = [.. run.Events, .. events] };
+            events.Add(Event(lifecycleOwner, now, CustomLoopRunEventKind.LifecycleChanged, "Ordered execution is parked because another canonical Wait remains pending."));
+        }
+
+        var candidate = Append(run, now, events) with
+        {
+            Status = waiting ? CustomLoopRunStatus.Waiting : CustomLoopRunStatus.Running,
+            ExecutionClock = AdvanceClock(run.ExecutionClock, now, terminal: waiting),
+            Frontier = completed.Frontier,
+        };
+        var persisted = await PersistAsync(run, candidate, IntegrityToken(), outcomeMayExist: false).ConfigureAwait(false);
+        if (persisted.Terminal is not null)
+        {
+            CustomLoopRunRecord? latest;
+            try
+            {
+                latest = await _runStore.GetAsync(run.Id, IntegrityToken()).ConfigureAwait(false);
+            }
+            catch
+            {
+                return persisted;
+            }
+
+            if (latest?.Frontier?.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is not
+                {
+                    Status: GovernedLoopNodeExecutionStatus.Completed,
+                    OutcomeEvidenceId: { } outcomeId,
+                    OutcomeEvidenceHash: { } outcomeHash,
+                }
+                || !string.Equals(outcomeId, terminal.EventId, StringComparison.Ordinal)
+                || !string.Equals(outcomeHash, terminal.SequentialNodeEvidence!.OutcomeArtifactHash, StringComparison.Ordinal))
+            {
+                return persisted;
+            }
+
+            persisted = new RunAdvance(latest, null);
+        }
+
+        var durable = persisted.Run!;
+        var durableTerminal = FindSequentialNodeEvidence(durable, node, activation, attempt);
+        if (durableTerminal is null
+            || !string.Equals(durableTerminal.WaitContinuationEvidenceHash, continuation.ContentHash, StringComparison.Ordinal))
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "The Wait completion CAS returned without its exact canonical terminal evidence."));
+        }
+
+        var outcomeAuditFailure = await AppendOutcomeAuditAsync(
+            durable,
+            durableTerminal,
+            CreateWaitNodeAudit(durable, actor, durableTerminal, AuditSchema.Outcomes.Succeeded),
+            context.AuditRecorder,
+            IntegrityToken()).ConfigureAwait(false);
+        if (outcomeAuditFailure is not null)
+        {
+            var invalid = await TerminateAsync(
+                durable,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                outcomeAuditFailure.FailureCode,
+                outcomeAuditFailure.Detail,
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(invalid.Run, invalid);
+        }
+
+        return durable.Status == CustomLoopRunStatus.Waiting
+            ? new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, durable, "The resumed Wait completed once; another canonical Wait remains parked."))
+            : new RunAdvance(durable, null);
     }
 
     private async Task<RunAdvance> DispatchAndAdvanceSequentialTopologyNodeAsync(
@@ -1459,7 +1981,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         SequentialExecutionContext context,
         GovernedLoopSequentialPlanNode node,
         int attempt,
-        string attemptOperationId)
+        string attemptOperationId,
+        DateTimeOffset? completedAtUtc = null)
     {
         var activation = RequireRunningSequentialActivation(run, node, attempt, attemptOperationId);
         var evidence = FindSequentialNodeEvidence(run, node, activation, attempt);
@@ -1484,7 +2007,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return null;
         }
 
-        var now = Now(run);
+        var now = completedAtUtc ?? Now(run);
         var skipEvents = new List<CustomLoopRunEvent>();
         var skipReferences = new List<GovernedLoopSequentialSkipEvidenceReference>();
         foreach (var pruned in pruning.Activations)
@@ -3577,6 +4100,15 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return advance;
         }
 
+        if (handler.WasInvoked
+            && GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor)
+            && advance?.Terminal is not null
+            && stoppedPureRun is { Status: CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview }
+            && FindSequentialNodeEvidence(stoppedPureRun, node, activation, attempt) is null)
+        {
+            return advance;
+        }
+
         var current = advance?.Run ?? advance?.Terminal?.Run;
         if (current is null)
         {
@@ -5287,7 +5819,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         bool isExit,
         string? failureCode,
         string detail,
-        CustomLoopRunStatus terminalStatus = CustomLoopRunStatus.Failed)
+        CustomLoopRunStatus terminalStatus = CustomLoopRunStatus.Failed,
+        bool dispatchStartAlreadyRetained = false)
     {
         var attempt = sequentialNode.Attempt;
         var iteration = sequentialNode.Activation.CycleIteration ?? run.Checkpoint.Iteration;
@@ -5297,27 +5830,46 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var correlation = NewCorrelationId(isExit ? "exit-rejection" : "attempt-rejection");
         var now = Now(run);
         var events = new List<CustomLoopRunEvent>();
-        if (!isExit && run.Checkpoint.NextStepIndex == 0)
+        if (dispatchStartAlreadyRetained)
+        {
+            var startAuditFailure = await ReconcileWaitNodeStartAuditAsync(
+                run,
+                sequentialNode.Node,
+                sequentialNode.Activation,
+                attempt,
+                sequentialNode.AttemptOperationId,
+                actor,
+                sequentialNode.AuditRecorder);
+            if (startAuditFailure is not null)
+            {
+                var review = await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, startAuditFailure.FailureCode, startAuditFailure.Detail);
+                return new RunAdvance(review.Run, review);
+            }
+        }
+        else if (!isExit && run.Checkpoint.NextStepIndex == 0)
         {
             events.Add(Event(run, now, CustomLoopRunEventKind.IterationStarted, $"Iteration {iteration} started in persisted step order.", iteration));
         }
 
-        var startOwner = events.Count == 0 ? run : run with { Events = [.. run.Events, .. events] };
-        var started = Event(
-            startOwner,
-            now,
-            isExit ? CustomLoopRunEventKind.ExitDecisionStarted : CustomLoopRunEventKind.NodeAttemptStarted,
-            CanonicalPreProviderRejectionStartDetail,
-            iteration,
-            stepId,
-            attempt,
-            provider: run.ModelSnapshot.Provider,
-            model: run.ModelSnapshot.Model,
-            providerResponseId: correlation,
-            traceReservationUtf8Bytes: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes,
-            eventId: sequentialNode.AttemptOperationId);
-        started = WithSequentialEvidence(started, sequentialNode, CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
-        events.Add(started);
+        if (!dispatchStartAlreadyRetained)
+        {
+            var startOwner = events.Count == 0 ? run : run with { Events = [.. run.Events, .. events] };
+            var started = Event(
+                startOwner,
+                now,
+                isExit ? CustomLoopRunEventKind.ExitDecisionStarted : CustomLoopRunEventKind.NodeAttemptStarted,
+                CanonicalPreProviderRejectionStartDetail,
+                iteration,
+                stepId,
+                attempt,
+                provider: run.ModelSnapshot.Provider,
+                model: run.ModelSnapshot.Model,
+                providerResponseId: correlation,
+                traceReservationUtf8Bytes: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes,
+                eventId: sequentialNode.AttemptOperationId);
+            started = WithSequentialEvidence(started, sequentialNode, CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown);
+            events.Add(started);
+        }
 
         var failureOwner = run with { Events = [.. run.Events, .. events] };
         var failed = Event(
@@ -7528,6 +8080,34 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             metadata);
     }
 
+    private static AuditEvent CreateWaitNodeAudit(
+        CustomLoopRunRecord run,
+        string actor,
+        CustomLoopRunEvent runEvent,
+        string outcome)
+    {
+        var evidence = runEvent.SequentialNodeEvidence
+            ?? throw new InvalidOperationException("Wait-node audit requires exact sequential evidence.");
+        var metadata = RunMetadata(run);
+        metadata["iteration"] = runEvent.Iteration;
+        metadata["stepId"] = runEvent.StepId;
+        metadata["attempt"] = runEvent.Attempt;
+        metadata["canonicalNodeId"] = evidence.NodeId;
+        metadata["sequentialEvidenceHash"] = evidence.EvidenceHash;
+        metadata["modelDispatched"] = false;
+        metadata["continuationEvidenceHash"] = runEvent.WaitContinuationEvidenceHash;
+        return new AuditEvent(
+            runEvent.TimestampUtc.ToUniversalTime(),
+            actor,
+            AuditSchema.Actions.LoopNodeAttempt,
+            run.Id,
+            outcome,
+            outcome == AuditSchema.Outcomes.Started
+                ? "Canonical Wait dispatch evidence is durable before sleeping ownership is released."
+                : "Canonical Wait continuation evidence is durable and completed exactly once.",
+            metadata);
+    }
+
     private async Task<SequentialAuditBoundaryFailure?> AppendOutcomeAuditAsync(
         CustomLoopRunRecord run,
         CustomLoopRunEvent terminalEvent,
@@ -7625,6 +8205,28 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 run,
                 start,
                 CreateTopologyNodeAudit(run, actor, start, AuditSchema.Outcomes.Started),
+                auditRecorder,
+                IntegrityToken());
+    }
+
+    private static Task<SequentialAuditBoundaryFailure?> ReconcileWaitNodeStartAuditAsync(
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        int attempt,
+        string attemptOperationId,
+        string actor,
+        IGovernedLoopSequentialAuditRecorder auditRecorder)
+    {
+        var start = FindSequentialDispatchStart(run, node, activation, attempt, attemptOperationId);
+        return start is null
+            ? Task.FromResult<SequentialAuditBoundaryFailure?>(new SequentialAuditBoundaryFailure(
+                "canonical_start_audit_conflict",
+                "The Wait attempt has no exact authenticated start marker for append-once audit reconciliation."))
+            : AppendDeterministicNodeStartAuditAsync(
+                run,
+                start,
+                CreateWaitNodeAudit(run, actor, start, AuditSchema.Outcomes.Started),
                 auditRecorder,
                 IntegrityToken());
     }
@@ -8552,6 +9154,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Validate
                 or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Condition
                 or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Join
+                or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Wait
                 => runEvent.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
             EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Exit
                 => runEvent.Kind is CustomLoopRunEventKind.ExitDecisionCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed,
@@ -8562,6 +9165,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     {
         return new CustomLoopOrderedRunResult(status, run, detail);
     }
+
+    private static bool IsHash(string? value)
+        => value?.Length == GovernedLoopExecutionLimits.Sha256HexCharacters
+            && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private async Task<string?> GetCapabilityFailureAsync(
         CustomLoopRunRecord run,

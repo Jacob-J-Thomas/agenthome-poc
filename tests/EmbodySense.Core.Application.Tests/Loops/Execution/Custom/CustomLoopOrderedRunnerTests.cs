@@ -26,6 +26,7 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Application.Loops.Wait;
 using EmbodySense.Core.Application.Tests.Loops.Admission;
 using EmbodySense.Core.Application.Tests.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Tests.Loops.Sequential;
@@ -59,7 +60,7 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
-public sealed class CustomLoopOrderedRunnerTests
+public sealed partial class CustomLoopOrderedRunnerTests
 {
     private static readonly DateTimeOffset _now = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
     private static readonly JsonSerializerOptions _rawTraceSizingJsonOptions = new(JsonSerializerDefaults.Web)
@@ -6359,7 +6360,8 @@ public sealed class CustomLoopOrderedRunnerTests
         ICapabilityAdmissionService? capabilityAdmissionService = null,
         IGovernedLoopConversationPublicationAuthorityBoundaryProvider? conversationPublicationAuthorityBoundaryProvider = null,
         GovernedLoopFirstBoundRunCompletionBoundary? firstBoundRunCompletionBoundary = null,
-        bool composeFirstBoundRunCompletionBoundary = true)
+        bool composeFirstBoundRunCompletionBoundary = true,
+        IGovernedLoopWaitNodeExecutor? waitNodeExecutor = null)
     {
         return new CustomLoopOrderedRunner(
             store,
@@ -6376,7 +6378,8 @@ public sealed class CustomLoopOrderedRunnerTests
                     new RecordingEffectAuthorityUsageStore(),
                     new RecordingEffectAuthorityTransaction(),
                     timeProvider ?? new FixedTimeProvider(_now))
-                : null);
+                : null,
+            waitNodeExecutor: waitNodeExecutor);
     }
 
     private static async Task<(
@@ -7123,6 +7126,9 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Func<GovernedLoopSequentialOrderedNodeEvidenceRequest, Task>? AfterRetain { get; set; }
 
+        public int DurableAuditCount(string operationId)
+            => _auditLedger.Records.ContainsKey(operationId) ? 1 : 0;
+
         public Task<GovernedLoopSequentialRunEvidence?> ResolveAsync(string runId, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -7160,6 +7166,7 @@ public sealed class CustomLoopOrderedRunnerTests
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Inference => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Transform or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Validate => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Condition or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Join => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
+                EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Wait => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Exit => orderedEvent?.Kind is CustomLoopRunEventKind.ExitDecisionCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
                 _ => false,
             };
@@ -7329,6 +7336,12 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public bool ApplyRawTraceCapacityLimit { get; init; }
 
+        public Exception? ListNonterminalException { get; set; }
+
+        public bool ReturnNullNonterminalList { get; set; }
+
+        public bool ReturnDuplicateNonterminalList { get; set; }
+
         public List<CustomLoopRunRecord> Writes { get; } = [];
 
         public List<CustomLoopValidationError> ValidationFailures { get; } = [];
@@ -7376,8 +7389,34 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Task<IReadOnlyList<CustomLoopRunRecord>> ListNonterminalAsync(CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (ListNonterminalException is not null)
+            {
+                throw ListNonterminalException;
+            }
+
+            if (ReturnNullNonterminalList)
+            {
+                return Task.FromResult<IReadOnlyList<CustomLoopRunRecord>>(null!);
+            }
+
+            if (ReturnDuplicateNonterminalList)
+            {
+                return Task.FromResult<IReadOnlyList<CustomLoopRunRecord>>([Current, Current]);
+            }
+
             IReadOnlyList<CustomLoopRunRecord> runs = Current.IsTerminal ? [] : [Current];
             return Task.FromResult(runs);
+        }
+
+        public void ReplaceCurrent(CustomLoopRunRecord replacement, bool validate = true)
+        {
+            if (validate)
+            {
+                Assert.True(CustomLoopRunValidator.Validate(replacement).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(replacement).Errors));
+            }
+
+            Current = replacement;
         }
 
         public Task<bool> HasSufficientTraceCapacityForDispatchAsync(CustomLoopRunRecord candidate, int expectedLifecycleVersion, CancellationToken cancellationToken = default)

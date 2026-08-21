@@ -72,6 +72,35 @@ public sealed class GovernedLoopSleepPublicationServiceTests
     }
 
     [Fact]
+    public async Task Publish_reuses_the_retained_checkpoint_preparation_instant_and_rejects_future_or_non_utc_values()
+    {
+        var harness = new GovernedLoopSleepApplicationHarness();
+        var preparedAtUtc = GovernedLoopSleepApplicationTestFixture.Now.AddMinutes(-1);
+        var stable = harness.PublicationRequest with { CheckpointPreparedAtUtc = preparedAtUtc };
+
+        var published = await harness.Service.PublishAsync(stable);
+
+        Assert.Equal(GovernedLoopSleepPublicationStatus.Published, published.Status);
+        Assert.Equal(preparedAtUtc, published.Checkpoint?.PublishedAtUtc);
+
+        var future = new GovernedLoopSleepApplicationHarness();
+        var futureRequest = future.PublicationRequest with
+        {
+            CheckpointPreparedAtUtc = GovernedLoopSleepApplicationTestFixture.Now.AddSeconds(1),
+        };
+        var nonUtc = new GovernedLoopSleepApplicationHarness();
+        var nonUtcRequest = nonUtc.PublicationRequest with
+        {
+            CheckpointPreparedAtUtc = GovernedLoopSleepApplicationTestFixture.Now.ToOffset(TimeSpan.FromHours(1)),
+        };
+
+        Assert.Equal(GovernedLoopSleepPublicationStatus.Invalid, (await future.Service.PublishAsync(futureRequest)).Status);
+        Assert.Equal(GovernedLoopSleepPublicationStatus.Invalid, (await nonUtc.Service.PublishAsync(nonUtcRequest)).Status);
+        Assert.Equal(0, future.Store.CheckpointCount);
+        Assert.Equal(0, nonUtc.Store.CheckpointCount);
+    }
+
+    [Fact]
     public async Task Publish_fails_closed_when_posture_or_clock_is_unavailable()
     {
         var postureFailure = new GovernedLoopSleepApplicationHarness();

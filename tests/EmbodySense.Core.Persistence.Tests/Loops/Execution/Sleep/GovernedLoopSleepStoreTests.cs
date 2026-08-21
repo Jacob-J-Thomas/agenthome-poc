@@ -175,8 +175,11 @@ public sealed class GovernedLoopSleepStoreTests
         Assert.Equal(GovernedLoopWakeEvidenceMutationStatus.Committed, committed!.Status);
         Assert.Equal(GovernedLoopSleepStoreReadStatus.Found, read!.Status);
         Assert.Equal(prepared, read.Evidence);
+        Assert.Equal(prepared, read.PreparedEvidence);
         Assert.NotSame(prepared, read.Evidence);
+        Assert.NotSame(prepared, read.PreparedEvidence);
         Assert.NotSame(prepared.Identity, read.Evidence!.Identity);
+        Assert.NotSame(prepared.Identity, read.PreparedEvidence!.Identity);
         Assert.Equal(GovernedLoopWakeEvidenceMutationStatus.Replayed, replay!.Status);
         Assert.Equal(GovernedLoopWakeEvidenceMutationStatus.Conflict, substitutedReplay!.Status);
         Assert.Equal(GovernedLoopWakeEvidenceMutationStatus.Conflict, wrongFence!.Status);
@@ -275,6 +278,7 @@ public sealed class GovernedLoopSleepStoreTests
         Assert.Equal(GovernedLoopWakeEvidenceMutationStatus.Replayed, initialRetryAfterAdvance!.Status);
         Assert.Equal(committed, initialRetryAfterAdvance.Evidence);
         Assert.Equal(committed, read!.Evidence);
+        Assert.Equal(prepared, read.PreparedEvidence);
     }
 
     [Fact]
@@ -324,6 +328,7 @@ public sealed class GovernedLoopSleepStoreTests
         var nonExactReplay = await restarted.AdvanceWakeAsync(differentPrepared, ambiguous);
 
         Assert.Equal(committed, read!.Evidence);
+        Assert.Equal(prepared, read.PreparedEvidence);
         Assert.Single(pending!.WakeReconciliationCandidates);
         Assert.Empty(terminal!.WakeReconciliationCandidates);
         Assert.Equal(3, wakeEvidence.Count);

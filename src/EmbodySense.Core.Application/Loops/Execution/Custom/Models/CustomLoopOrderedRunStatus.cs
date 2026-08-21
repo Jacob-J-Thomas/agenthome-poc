@@ -36,5 +36,9 @@ public enum CustomLoopOrderedRunStatus
     /// <summary>
     /// Identifies the paused custom loop ordered run status.
     /// </summary>
-    Paused = 8
+    Paused = 8,
+    /// <summary>
+    /// Identifies a durably parked canonical Wait whose continuation is owned by the sleep/wake plane.
+    /// </summary>
+    Waiting = 9
 }

@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
+using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 
 namespace EmbodySense.Core.Application.Loops.Sequential;
@@ -18,6 +19,12 @@ public static class GovernedLoopSequentialNodeDescriptors
 
     /// <summary>Gets the exact supported successful-exit descriptor.</summary>
     public static GovernedLoopNodeDescriptor SuccessExit { get; } = new(GovernedLoopNodeKind.Exit, "success-exit", 1);
+
+    /// <summary>Gets the exact supported UTC timestamp Wait descriptor.</summary>
+    public static GovernedLoopNodeDescriptor TimestampWait { get; } = Wait(GovernedLoopWaitVocabulary.Timestamp);
+
+    /// <summary>Gets the exact supported authenticated-event Wait descriptor.</summary>
+    public static GovernedLoopNodeDescriptor AuthenticatedEventWait { get; } = Wait(GovernedLoopWaitVocabulary.AuthenticatedEvent);
 
     /// <summary>Gets the exact supported Boolean Condition descriptor.</summary>
     public static GovernedLoopNodeDescriptor BooleanCondition { get; } = Topology(GovernedLoopNodeKind.Condition, GovernedLoopTopologyNodeVocabulary.BooleanCondition);
@@ -71,12 +78,20 @@ public static class GovernedLoopSequentialNodeDescriptors
                 || Equals(descriptor, ScheduleTrigger)
                 || Equals(descriptor, ProviderInference)
                 || Equals(descriptor, SuccessExit)
+                || IsWait(descriptor)
                 || IsTopology(descriptor)
                 || IsPure(descriptor));
 
     /// <summary>Gets whether a descriptor is one exact supported invocation-entry Trigger.</summary>
     public static bool IsEntryTrigger(GovernedLoopNodeDescriptor? descriptor)
         => Equals(descriptor, ManualTrigger) || Equals(descriptor, ScheduleTrigger);
+
+    /// <summary>Gets whether a descriptor exactly names one supported durable Wait.</summary>
+    public static bool IsWait(GovernedLoopNodeDescriptor? descriptor)
+        => descriptor is not null
+            && descriptor.Kind == GovernedLoopNodeKind.Wait
+            && descriptor.Version == GovernedLoopWaitVocabulary.DescriptorVersion
+            && GovernedLoopWaitVocabulary.IsSupported(descriptor.TypeId);
 
     /// <summary>Gets whether a descriptor exactly names one supported deterministic Condition or Join.</summary>
     public static bool IsTopology(GovernedLoopNodeDescriptor? descriptor)
@@ -112,4 +127,7 @@ public static class GovernedLoopSequentialNodeDescriptors
 
     private static GovernedLoopNodeDescriptor Topology(GovernedLoopNodeKind kind, string typeId)
         => new(kind, typeId, GovernedLoopTopologyNodeVocabulary.DescriptorVersion);
+
+    private static GovernedLoopNodeDescriptor Wait(string typeId)
+        => new(GovernedLoopNodeKind.Wait, typeId, GovernedLoopWaitVocabulary.DescriptorVersion);
 }

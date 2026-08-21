@@ -16,6 +16,8 @@ using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.Sleep;
+using EmbodySense.Core.Application.Loops.Wait;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Application.Runtime.State;
@@ -34,6 +36,7 @@ using EmbodySense.Core.Persistence.Loops.Admission;
 using EmbodySense.Core.Persistence.Loops.Execution.Authority;
 using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
 using EmbodySense.Core.Persistence.Loops.Revisions;
+using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Persistence.ToolResults;
@@ -44,6 +47,8 @@ using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Inference;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Loops.Execution.Sleep;
+using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 
@@ -63,6 +68,7 @@ public sealed class AgentRuntimeFactory
     private readonly IAgentRuntimeConversationPublicationObserver? _conversationPublicationObserver;
     private readonly CodexRuntimeStatus? _codexRuntimeStatus;
     private readonly ICapabilityCatalogTrustProvider _capabilityTrustProvider;
+    private readonly IAgentRuntimeAuthenticatedWakeVerifier? _authenticatedWakeVerifier;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="AgentRuntimeFactory"/> type.
@@ -118,11 +124,26 @@ public sealed class AgentRuntimeFactory
         return new AgentRuntimeFactory(new ToolApprovalPromptAdapter(approvalPrompt), conversationPublicationObserver, codexRuntimeStatus, new FileCapabilityCatalogTrustProvider(trustRootPath));
     }
 
+    /// <summary>Returns an equivalent factory that composes one explicit surface-owned authenticated-event verifier.</summary>
+    /// <param name="verifier">The authoritative verifier used only for exact authenticated-event Wait wakes.</param>
+    /// <returns>A factory preserving this instance's approval, runtime, observer, and trust-root configuration.</returns>
+    public AgentRuntimeFactory WithAuthenticatedWakeVerifier(IAgentRuntimeAuthenticatedWakeVerifier verifier)
+    {
+        ArgumentNullException.ThrowIfNull(verifier);
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            verifier);
+    }
+
     internal AgentRuntimeFactory(
         IToolApprovalPrompt approvalPrompt,
         IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver = null,
         CodexRuntimeStatus? codexRuntimeStatus = null,
-        ICapabilityCatalogTrustProvider? capabilityTrustProvider = null)
+        ICapabilityCatalogTrustProvider? capabilityTrustProvider = null,
+        IAgentRuntimeAuthenticatedWakeVerifier? authenticatedWakeVerifier = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         if (codexRuntimeStatus is not null && codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
@@ -139,6 +160,7 @@ public sealed class AgentRuntimeFactory
         _conversationPublicationObserver = conversationPublicationObserver;
         _codexRuntimeStatus = codexRuntimeStatus;
         _capabilityTrustProvider = capabilityTrustProvider ?? FileCapabilityCatalogTrustProvider.CreateDefault();
+        _authenticatedWakeVerifier = authenticatedWakeVerifier;
     }
 
     /// <summary>
@@ -226,6 +248,8 @@ public sealed class AgentRuntimeFactory
         var effectiveOptions = options with { WorkingDirectory = workingDirectory, CodexExecutablePath = codexRuntimeStatus.ResolvedExecutablePath };
         var paths = new WorkspacePaths(workingDirectory);
         var customExecutionGate = new CustomLoopWorkspaceExecutionGate(paths);
+        GovernedLoopWaitRuntimeHost? governedWaitRuntimeHost = null;
+        GovernedLoopSleepService? governedSleep = null;
         try
         {
             var permissionPolicy = new PermissionPolicyStore().Load(paths);
@@ -246,27 +270,29 @@ public sealed class AgentRuntimeFactory
             var customExecutionReacquisitionAllowed = recoveryOwnership.Status is CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable;
             var customRecoveryRequired = false;
             preserveCurrentConversation |= !customExecutionAvailable;
-            using var recoveryLease = recoveryOwnership.Lease;
-            if (recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired)
+            using (recoveryOwnership.Lease)
             {
-                try
+                if (recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired)
                 {
-                    recoveryResults = await recovery.RecoverAsync(actor, cancellationToken);
-                    var recoveryFailed = recoveryResults.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed);
-                    customExecutionAvailable &= !recoveryFailed;
-                    preserveCurrentConversation |= recoveryFailed;
-                }
-                catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
-                {
-                    customExecutionAvailable = false;
-                    customExecutionReacquisitionAllowed = true;
-                    customRecoveryRequired = true;
-                    preserveCurrentConversation = true;
-                }
-                catch (Exception exception) when (exception is not OperationCanceledException)
-                {
-                    customExecutionAvailable = false;
-                    preserveCurrentConversation = true;
+                    try
+                    {
+                        recoveryResults = await recovery.RecoverAsync(actor, cancellationToken);
+                        var recoveryFailed = recoveryResults.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed);
+                        customExecutionAvailable &= !recoveryFailed;
+                        preserveCurrentConversation |= recoveryFailed;
+                    }
+                    catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+                    {
+                        customExecutionAvailable = false;
+                        customExecutionReacquisitionAllowed = true;
+                        customRecoveryRequired = true;
+                        preserveCurrentConversation = true;
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        customExecutionAvailable = false;
+                        preserveCurrentConversation = true;
+                    }
                 }
             }
 
@@ -384,6 +410,20 @@ public sealed class AgentRuntimeFactory
                 capabilityAdmission,
                 capabilityAuthorityTransaction: capabilityAuthority,
                 effectAuthorityBoundary: governedEffectAuthority);
+            var governedWaitNodeRelay = new GovernedLoopWaitNodeExecutionRelay();
+            var governedWaitContinuationRelay = new GovernedLoopWaitContinuationRelay();
+            var governedWaitPosture = new GovernedLoopCanonicalWaitCurrentPostureAdapter(
+                customRunStore,
+                governedGrantResolver);
+            var governedSleepStore = new GovernedLoopSleepStore(paths);
+            IGovernedLoopAuthenticatedWakeVerificationPort authenticatedWakeVerification = _authenticatedWakeVerifier is null
+                ? new GovernedLoopUnavailableAuthenticatedWakeVerificationPort()
+                : new AgentRuntimeAuthenticatedWakeVerificationAdapter(_authenticatedWakeVerifier);
+            governedSleep = new GovernedLoopSleepService(
+                governedSleepStore,
+                governedWaitPosture,
+                governedWaitContinuationRelay,
+                authenticatedWakeVerification);
             var governedRunner = new CustomLoopOrderedRunner(
                 customRunStore,
                 new CustomLoopContextResolver(),
@@ -394,7 +434,8 @@ public sealed class AgentRuntimeFactory
                 attemptCancellationBroker: customExecutionGate,
                 capabilityAdmissionService: capabilityAdmission,
                 conversationPublicationAuthorityBoundaryProvider: governedPublicationAuthority,
-                firstBoundRunCompletionBoundary: governedRunCompletion);
+                firstBoundRunCompletionBoundary: governedRunCompletion,
+                waitNodeExecutor: governedWaitNodeRelay);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,
@@ -411,6 +452,25 @@ public sealed class AgentRuntimeFactory
                 customRunStore,
                 customRunStore,
                 auditLog);
+            var governedWaitResume = new GovernedLoopSequentialWaitResumeExecutor(
+                customRunStore,
+                governedAdmissionStore,
+                governedGraphStore,
+                governedOrderedRuntime);
+            var governedWait = new GovernedLoopWaitExecutionService(
+                customRunStore,
+                governedSleep,
+                governedWaitPosture,
+                capabilityAuthority,
+                customExecutionGate,
+                governedWaitResume);
+            governedWaitNodeRelay.Bind(governedWait);
+            governedWaitContinuationRelay.Bind(governedWait);
+            governedWaitRuntimeHost = new GovernedLoopWaitRuntimeHost(
+                paths,
+                governedSleepStore,
+                governedSleep,
+                governedWait);
             var governedMaterializer = new GovernedLoopSequentialRunMaterializer(
                 customRunStore,
                 auditLog,
@@ -450,6 +510,7 @@ public sealed class AgentRuntimeFactory
                 legacyRunner,
                 governedRunner,
                 customRuntimeContext,
+                governedWaitRuntimeHost,
                 customExecutionAvailable,
                 customExecutionReacquisitionAllowed,
                 customRecoveryRequired,
@@ -473,7 +534,6 @@ public sealed class AgentRuntimeFactory
                 workspaceId,
                 customModelSnapshot,
                 governedRoleStore);
-
             return new AgentRuntime(
                 paths,
                 runtimeSurface,
@@ -486,11 +546,24 @@ public sealed class AgentRuntimeFactory
                 governedLoops,
                 scheduleDeliveryProvenance,
                 defaultConversationReviews,
-                codexRuntimeStatus);
+                codexRuntimeStatus,
+                governedWaitRuntimeHost,
+                governedSleep);
         }
         catch
         {
-            await customExecutionGate.DisposeAsync();
+            try
+            {
+                if (governedWaitRuntimeHost is not null)
+                {
+                    await governedWaitRuntimeHost.DisposeAsync();
+                }
+            }
+            finally
+            {
+                await customExecutionGate.DisposeAsync();
+            }
+
             throw;
         }
     }

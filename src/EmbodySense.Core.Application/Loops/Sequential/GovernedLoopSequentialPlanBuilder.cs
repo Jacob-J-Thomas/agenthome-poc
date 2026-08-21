@@ -6,6 +6,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Revisions;
@@ -63,7 +64,8 @@ public static class GovernedLoopSequentialPlanBuilder
 
         var planNodes = BuildPlanNodes(graph, topology);
         var inferenceCount = planNodes.Count(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference));
-        if (inferenceCount is < CustomLoopLimits.MinInferenceSteps or > CustomLoopLimits.MaxInferenceSteps)
+        if (inferenceCount > CustomLoopLimits.MaxInferenceSteps
+            || inferenceCount < CustomLoopLimits.MinInferenceSteps && !planNodes.Any(node => GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor)))
         {
             return Failure(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, "$.graph.nodes");
         }
@@ -294,6 +296,8 @@ public static class GovernedLoopSequentialPlanBuilder
                     traversalOrdinal,
                     Array.AsReadOnly(incomingEdgeIds),
                     Array.AsReadOnly(outgoingEdgeIds),
+                    new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(
+                        new Dictionary<string, string>(node.Parameters, StringComparer.Ordinal)),
                     incomingEdgeIds.Length == 1 ? incomingEdgeIds[0] : null,
                     outgoingEdgeIds.Length == 1 ? outgoingEdgeIds[0] : null));
             }
@@ -538,15 +542,23 @@ public static class GovernedLoopSequentialPlanBuilder
         }
 
         var scheduleEntry = Equals(planNodes[0].Descriptor, GovernedLoopSequentialNodeDescriptors.ScheduleTrigger);
-        var toolFreeCapabilities = scheduleEntry
+        var hasInference = planNodes.Any(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference));
+        var inferenceCapabilities = scheduleEntry
             ? new[] { ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId }
             : [ConversationTurnCapabilityId, ModelInferenceCapabilityId];
         var toolEnabledCapabilities = scheduleEntry
             ? new[] { ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId, WorkspaceCommandCapabilityId }
             : [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId];
-        var allowsWorkspaceTools = graph.AuthorityCeiling.CapabilityIds.SequenceEqual(toolEnabledCapabilities, StringComparer.Ordinal);
-        if (!allowsWorkspaceTools
-            && !graph.AuthorityCeiling.CapabilityIds.SequenceEqual(toolFreeCapabilities, StringComparer.Ordinal))
+        var noInferenceCapabilities = scheduleEntry
+            ? new[] { ConversationTurnCapabilityId, ScheduleTriggerCapabilityId }
+            : [ConversationTurnCapabilityId];
+        var allowsWorkspaceTools = hasInference
+            && graph.AuthorityCeiling.CapabilityIds.SequenceEqual(toolEnabledCapabilities, StringComparer.Ordinal);
+        if ((!hasInference
+                && !graph.AuthorityCeiling.CapabilityIds.SequenceEqual(noInferenceCapabilities, StringComparer.Ordinal))
+            || (hasInference
+                && !allowsWorkspaceTools
+                && !graph.AuthorityCeiling.CapabilityIds.SequenceEqual(inferenceCapabilities, StringComparer.Ordinal)))
         {
             return "$.graph.authorityCeiling";
         }
@@ -562,6 +574,7 @@ public static class GovernedLoopSequentialPlanBuilder
                 GovernedLoopNodeKind.Inference => IsExactInference(node, schemaById, allowsWorkspaceTools, topology.ComponentByNodeId[node.Id].IsCyclic),
                 GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate => IsExactPureNode(node, schemaById),
                 GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Join => IsExactTopologyNode(node, schemaById),
+                GovernedLoopNodeKind.Wait => IsExactWaitNode(node),
                 GovernedLoopNodeKind.Exit => IsExactExit(node, schemaById),
                 _ => false,
             };
@@ -696,6 +709,26 @@ public static class GovernedLoopSequentialPlanBuilder
         }
 
         return GovernedLoopTopologyNodeCatalogContract.HasExactSchemaSemantics(node, schemas);
+    }
+
+    private static bool IsExactWaitNode(GovernedLoopNodeDefinition node)
+    {
+        if (node.AuthorityCeiling.CapabilityIds.Count != 0
+            || node.Ports.Count != 0
+            || !GovernedLoopWaitNodeCatalogContract.TryResolve(node.Descriptor, out var contract)
+            || contract is null
+            || !HasExactCatalogParameters(node, contract))
+        {
+            return false;
+        }
+
+        var parameterId = node.Descriptor.TypeId == GovernedLoopWaitVocabulary.Timestamp
+            ? GovernedLoopWaitVocabulary.DeadlineUtcParameter
+            : GovernedLoopWaitVocabulary.EventReferenceParameter;
+        return node.Parameters.TryGetValue(parameterId, out var value)
+            && GovernedLoopWaitContractValidator.ValidateDescriptor(
+                node.Descriptor,
+                new Dictionary<string, string>(StringComparer.Ordinal) { [parameterId] = value }).IsValid;
     }
 
     private static bool HasExactPurePorts(

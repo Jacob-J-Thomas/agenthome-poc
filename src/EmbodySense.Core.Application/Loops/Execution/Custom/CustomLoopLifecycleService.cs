@@ -263,8 +263,8 @@ public sealed class CustomLoopLifecycleService
     {
         return kind switch
         {
-            CustomLoopControlKind.Pause => run.Status == CustomLoopRunStatus.Running,
-            CustomLoopControlKind.Cancel => run.Status is CustomLoopRunStatus.Admitted or CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.Paused or CustomLoopRunStatus.CancelRequested,
+            CustomLoopControlKind.Pause => run.Status is CustomLoopRunStatus.Running or CustomLoopRunStatus.Waiting,
+            CustomLoopControlKind.Cancel => run.Status is CustomLoopRunStatus.Admitted or CustomLoopRunStatus.Running or CustomLoopRunStatus.Waiting or CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.Paused or CustomLoopRunStatus.CancelRequested,
             CustomLoopControlKind.Resume => run.Status == CustomLoopRunStatus.Paused,
             _ => false
         };
@@ -282,9 +282,16 @@ public sealed class CustomLoopLifecycleService
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.PauseRequested, run, "A pause is already requested; the runner will stop only after a proved checkpoint boundary.");
         }
 
+        if (run.Status == CustomLoopRunStatus.Waiting)
+        {
+            var paused = await PersistTransitionAsync(run, CustomLoopRunStatus.Paused, operation.Actor, operation.OperationId, "The durably sleeping run was paused without publishing, consuming, or replacing its canonical checkpoint.");
+            var waitingOutcome = paused.Run is null ? paused.Status : paused.AuditRecorded ? CustomLoopControlStatus.Paused : CustomLoopControlStatus.AuditWarning;
+            return await CompleteAsync(operation, waitingOutcome, paused.Run ?? paused.CurrentRun, paused.AuditRecorded, paused.Detail);
+        }
+
         if (run.Status != CustomLoopRunStatus.Running)
         {
-            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, $"Pause is allowed only from Running or as an idempotent request against PauseRequested or Paused, not {run.Status}.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, $"Pause is allowed only from Running or Waiting, or as an idempotent request against PauseRequested or Paused, not {run.Status}.");
         }
 
         var transition = await PersistTransitionAsync(run, CustomLoopRunStatus.PauseRequested, operation.Actor, operation.OperationId, "Pause was requested; an open attempt may finish, but no later attempt may start.");
@@ -342,6 +349,13 @@ public sealed class CustomLoopLifecycleService
             return await CompleteAsync(operation, outcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
         }
 
+        if (run.Status == CustomLoopRunStatus.Waiting)
+        {
+            var cancelled = await PersistTransitionAsync(run, CustomLoopRunStatus.Cancelled, operation.Actor, operation.OperationId, "The durably sleeping run was cancelled atomically without provider dispatch or wake continuation.");
+            var outcome = cancelled.Run is null ? cancelled.Status : cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning;
+            return await CompleteAsync(operation, outcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
+        }
+
         if (run.Status == CustomLoopRunStatus.Paused)
         {
             if (CustomLoopRecoveryService.HasRestartSafeDeterministicAttemptSinceCheckpoint(run))
@@ -392,6 +406,47 @@ public sealed class CustomLoopLifecycleService
             var quarantinedRun = quarantined.Run ?? quarantined.CurrentRun ?? run;
             var status = quarantined.Run is null ? quarantined.Status : CustomLoopControlStatus.NeedsReview;
             return await CompleteAsync(operation, status, quarantinedRun, quarantined.AuditRecorded, quarantined.Detail);
+        }
+
+        if (IsDurablyWaitingCanonicalWait(run))
+        {
+            var waitGate = _executionGate.TryAcquire(operation.OperationId, operation.RequestHash);
+            if (waitGate.Status == CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
+            {
+                return Result(CustomLoopControlStatus.WorkspaceHostUnavailable, run, operation.OperationId, "workspace_host_unavailable: another process owns custom-loop hosting; the Resume receipt remains pending and can be retried after hosting becomes available.");
+            }
+
+            if (waitGate.Status == CustomLoopExecutionLeaseStatus.WorkspaceBusy)
+            {
+                return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.WorkspaceExecutionBusy, run, "workspace_execution_busy: another custom-loop run is actively executing; the Paused Wait and its durable checkpoint were not changed.");
+            }
+
+            if (waitGate.Status == CustomLoopExecutionLeaseStatus.OperationInProgress)
+            {
+                return Result(CustomLoopControlStatus.OperationInProgress, run, operation.OperationId, "The same Resume operation is already rearming this durable Wait; no second lifecycle mutation was attempted.");
+            }
+
+            if (waitGate.Status == CustomLoopExecutionLeaseStatus.OperationConflict || waitGate.Lease is null)
+            {
+                return Result(CustomLoopControlStatus.Conflict, run, operation.OperationId, "The Resume operation could not acquire canonical workspace execution ownership for the durable Wait.");
+            }
+
+            using (waitGate.Lease)
+            {
+                var rearmed = await PersistTransitionAsync(
+                    run,
+                    CustomLoopRunStatus.Waiting,
+                    operation.Actor,
+                    operation.OperationId,
+                    "Explicit Resume rearmed the exact durable Wait checkpoint without changing its frontier or dispatching ordered execution.");
+                if (rearmed.Run is null)
+                {
+                    return await CompleteAuditedOutcomeAsync(operation, rearmed.Status, rearmed.CurrentRun, rearmed.Detail);
+                }
+
+                var outcome = rearmed.AuditRecorded ? CustomLoopControlStatus.Waiting : CustomLoopControlStatus.AuditWarning;
+                return await CompleteAsync(operation, outcome, rearmed.Run, rearmed.AuditRecorded, rearmed.Detail);
+            }
         }
 
         bool modelAvailable;
@@ -489,6 +544,7 @@ public sealed class CustomLoopLifecycleService
                 CustomLoopOrderedRunStatus.Completed => Result(CustomLoopControlStatus.Completed, execution.Run, operation.OperationId, execution.Detail),
                 CustomLoopOrderedRunStatus.Cancelled => Result(CustomLoopControlStatus.Cancelled, execution.Run, operation.OperationId, execution.Detail),
                 CustomLoopOrderedRunStatus.Paused => Result(CustomLoopControlStatus.Paused, execution.Run, operation.OperationId, execution.Detail),
+                CustomLoopOrderedRunStatus.Waiting => Result(CustomLoopControlStatus.Waiting, execution.Run, operation.OperationId, execution.Detail),
                 CustomLoopOrderedRunStatus.NeedsReview => Result(CustomLoopControlStatus.NeedsReview, execution.Run, operation.OperationId, execution.Detail),
                 CustomLoopOrderedRunStatus.Conflict => Result(CustomLoopControlStatus.Conflict, execution.Run, operation.OperationId, execution.Detail),
                 CustomLoopOrderedRunStatus.NotFound => Result(CustomLoopControlStatus.NotFound, execution.Run, operation.OperationId, execution.Detail),
@@ -534,6 +590,23 @@ public sealed class CustomLoopLifecycleService
         var auditRecorded = await TryAuditAsync(operation.Actor, run, operation.Kind, run.Status, detail, recoveredReceipt: true);
         var completionStatus = auditRecorded ? status : CustomLoopControlStatus.AuditWarning;
         return await CompleteAsync(operation, completionStatus, run, auditRecorded, detail);
+    }
+
+    private static bool IsDurablyWaitingCanonicalWait(CustomLoopRunRecord run)
+    {
+        if (run.SequentialAdapterBinding is null
+            || run.Frontier?.Payload.Status != GovernedLoopFrontierStatus.Waiting)
+        {
+            return false;
+        }
+
+        var waiting = run.Frontier.Payload.Nodes
+            .Where(node => node.Status == GovernedLoopNodeExecutionStatus.Waiting)
+            .ToArray();
+        return waiting.Length > 0
+            && waiting.All(node => run.WaitEvidence.Any(wait =>
+                wait.ActivationOrdinal == node.ActivationOrdinal
+                && wait.ContinuationEvidence is null));
     }
 
     private async Task<CustomLoopControlResult> HandleResumeExecutorFailureAsync(CustomLoopControlOperation operation, CustomLoopRunRecord resumedRun, Exception exception)
@@ -919,6 +992,7 @@ public sealed class CustomLoopLifecycleService
         {
             CustomLoopRunStatus.PauseRequested => CustomLoopControlStatus.PauseRequested,
             CustomLoopRunStatus.Paused => CustomLoopControlStatus.Paused,
+            CustomLoopRunStatus.Waiting => CustomLoopControlStatus.Waiting,
             CustomLoopRunStatus.CancelRequested => CustomLoopControlStatus.CancelRequested,
             CustomLoopRunStatus.Cancelled => CustomLoopControlStatus.Cancelled,
             CustomLoopRunStatus.Completed => CustomLoopControlStatus.Completed,

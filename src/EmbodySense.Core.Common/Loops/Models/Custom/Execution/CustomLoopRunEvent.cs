@@ -61,4 +61,9 @@ public sealed record CustomLoopRunEvent(
     /// <remarks>The Application boundary verifies this retained text against the event's exact immutable graph revision before execution can resume.</remarks>
     [JsonRequired]
     public string? PureNodeOutcomeJson { get; init; }
+
+    /// <summary>Gets the exact resumed Wait continuation hash consumed by this completion event, or null for every other event.</summary>
+    /// <remarks>The JSON property is required even when null so schema-1 run artifacts cannot silently omit this evidence plane.</remarks>
+    [JsonRequired]
+    public string? WaitContinuationEvidenceHash { get; init; }
 }

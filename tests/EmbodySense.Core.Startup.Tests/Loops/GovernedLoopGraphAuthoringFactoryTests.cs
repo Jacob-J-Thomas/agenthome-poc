@@ -14,6 +14,7 @@ using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
@@ -162,6 +163,25 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
     }
 
     [Fact]
+    public async Task Built_in_catalog_advertises_and_admits_each_application_owned_wait_descriptor()
+    {
+        Assert.Equal(2, GovernedLoopWaitNodeCatalogContract.Descriptors.Count);
+
+        foreach (var descriptor in GovernedLoopWaitNodeCatalogContract.Descriptors)
+        {
+            var candidate = RuntimeExecutable(WaitCandidate(descriptor));
+            var result = await AuthorWithBuiltInCatalogAsync(candidate);
+
+            Assert.True(
+                result.Status == GovernedLoopGraphAuthoringStatus.Committed,
+                $"The built-in catalog rejected `{descriptor.Descriptor.TypeId}`:{Environment.NewLine}{string.Join(Environment.NewLine, result.GraphValidationErrors.Select(error => $"{error.Code}: {error.Element.Path}"))}");
+            Assert.Equal(
+                GovernedLoopSequentialPlanBuildStatus.Ready,
+                GovernedLoopSequentialPlanBuilder.Build(Artifact(candidate)).Status);
+        }
+    }
+
+    [Fact]
     public async Task Built_in_catalog_snapshot_has_one_deterministic_full_contract_hash()
     {
         var first = await AuthorWithBuiltInCatalogAsync(Candidate());
@@ -169,7 +189,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
 
         Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, first.Status);
         Assert.Equal(first.GraphValidationEvidenceHash, second.GraphValidationEvidenceHash);
-        Assert.Equal("ee78f7d2d2a9478adff45d1c60c7e07d0d913bda4fb3b3c86270d3e1325bb69e", first.GraphValidationEvidenceHash);
+        Assert.Equal("b6f244ddc946b7de712d0420b6f7598d6410763a3fccc0eb6f58ff6e553e134f", first.GraphValidationEvidenceHash);
     }
 
     [Fact]
@@ -543,6 +563,35 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
                 new("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
                 new("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
                 new("result-to-condition", GovernedLoopBindingKind.Data, "infer", "result", "condition", GovernedLoopTopologyNodeVocabulary.ValuePort),
+                new("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ],
+            [new("text", GovernedLoopValueKind.Text, false)]);
+    }
+
+    private static GovernedLoopGraphCandidate WaitCandidate(GovernedLoopNodeCatalogDescriptor descriptor)
+    {
+        var baseline = Nodes();
+        var parameter = Assert.Single(descriptor.Parameters);
+        var parameterValue = descriptor.Descriptor.TypeId == GovernedLoopWaitVocabulary.Timestamp
+            ? _now.AddMinutes(5).ToString(GovernedLoopWaitVocabulary.CanonicalUtcTimestampFormat, System.Globalization.CultureInfo.InvariantCulture)
+            : "authenticated-event-1";
+        var wait = new GovernedLoopNodeDefinition(
+            "wait",
+            descriptor.Descriptor,
+            [],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>(StringComparer.Ordinal) { [parameter.Id] = parameterValue });
+        return GraphCandidate(
+            $"{descriptor.Descriptor.TypeId}-loop",
+            [baseline[0], wait, baseline[1], baseline[2]],
+            [
+                new("trigger-to-wait", "trigger", "wait", GovernedLoopControlCondition.Always),
+                new("wait-to-infer", "wait", "infer", GovernedLoopControlCondition.Success),
+                new("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success),
+            ],
+            [
+                new("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
                 new("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
             ],
             [new("text", GovernedLoopValueKind.Text, false)]);

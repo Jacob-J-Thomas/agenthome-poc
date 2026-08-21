@@ -4,6 +4,8 @@ using System.Text.Json.Serialization;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Wait;
+using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 
@@ -58,6 +60,8 @@ public sealed record CustomLoopRunRecord(
     string? FailureCode,
     string? FailureDetail)
 {
+    private IReadOnlyList<GovernedLoopWaitExecutionEvidence>? _waitEvidence = Array.AsReadOnly(Array.Empty<GovernedLoopWaitExecutionEvidence>());
+
     /// <summary>
     /// Schema version required by the current custom-loop run contract.
     /// </summary>
@@ -78,6 +82,17 @@ public sealed record CustomLoopRunRecord(
     /// <remarks>The JSON property is required even when its value is null; schema-1 artifacts that omit it are unsupported.</remarks>
     [JsonRequired]
     public GovernedLoopFrontierPosture? Frontier { get; init; }
+
+    /// <summary>Gets the bounded activation-ordered Wait evidence retained atomically with the canonical frontier and run events.</summary>
+    /// <remarks>The JSON property is required even when empty; schema-1 artifacts that omit it are unsupported.</remarks>
+    [JsonRequired]
+    public IReadOnlyList<GovernedLoopWaitExecutionEvidence> WaitEvidence
+    {
+        get => _waitEvidence!;
+        init => _waitEvidence = value is null
+            ? null
+            : Array.AsReadOnly(value.Select(GovernedLoopWaitContractCopy.Copy).ToArray());
+    }
 
     /// <summary>
     /// Gets a value indicating whether the lifecycle has reached a terminal status.
