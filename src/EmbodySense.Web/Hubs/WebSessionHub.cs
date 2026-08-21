@@ -90,11 +90,19 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     /// </summary>
     /// <returns>
     /// The current transcript, an empty list for an initialized workspace with no messages, or
-    /// <see langword="null"/> when the workspace is not initialized or no transcript is available.
+    /// <see langword="null"/> when the workspace is not initialized, no transcript is available, or the
+    /// exact calling connection disconnects while the serialized read is waiting.
     /// </returns>
     public async Task<IReadOnlyList<WebTranscriptMessage>?> GetCurrentTranscript()
     {
-        return await _host.GetCurrentTranscriptAsync(Context.ConnectionAborted);
+        try
+        {
+            return await _host.GetCurrentTranscriptAsync(Context.ConnectionAborted);
+        }
+        catch (OperationCanceledException) when (Context.ConnectionAborted.IsCancellationRequested)
+        {
+            return null;
+        }
     }
 
     /// <summary>

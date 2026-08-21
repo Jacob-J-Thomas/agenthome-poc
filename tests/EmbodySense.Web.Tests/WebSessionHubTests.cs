@@ -60,6 +60,59 @@ public sealed class WebSessionHubTests
     }
 
     [Fact]
+    public async Task Transcript_read_cancelled_by_its_exact_disconnected_connection_ends_without_losing_the_active_turn()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var approvals = new WebApprovalCoordinator();
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
+        await using var host = new WebAgentRuntimeHost(options, approvals);
+        _ = await host.InitializeWorkspaceAsync();
+        var deltaObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseDelta = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var send = host.SendMessageAsync("disconnect transcript read", async (streamEvent, cancellationToken) =>
+        {
+            if (streamEvent.Type == "assistant_delta")
+            {
+                deltaObserved.TrySetResult();
+                await releaseDelta.Task.WaitAsync(cancellationToken);
+            }
+        });
+
+        try
+        {
+            var firstCompletion = await Task.WhenAny(deltaObserved.Task, send).WaitAsync(TimeSpan.FromSeconds(10));
+            if (ReferenceEquals(firstCompletion, send))
+            {
+                var earlyResult = await send;
+                Assert.Fail($"The controlled turn ended before its assistant delta: {earlyResult.Status}: {earlyResult.Output}");
+            }
+
+            using var connectionAborted = new CancellationTokenSource();
+            var disconnectedHub = CreateHub(
+                host,
+                approvals,
+                new RecordingHubClients(),
+                context: new TestHubCallerContext("connection-disconnected", connectionAborted.Token));
+            var obsoleteRead = disconnectedHub.GetCurrentTranscript();
+            await Task.Delay(100);
+            Assert.False(obsoleteRead.IsCompleted);
+
+            connectionAborted.Cancel();
+            Assert.Null(await obsoleteRead.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally
+        {
+            releaseDelta.TrySetResult();
+        }
+
+        await send.WaitAsync(TimeSpan.FromSeconds(10));
+        var liveHub = CreateHub(host, approvals, new RecordingHubClients());
+        var transcript = Assert.IsAssignableFrom<IReadOnlyList<WebTranscriptMessage>>(await liveHub.GetCurrentTranscript());
+        Assert.Equal(["disconnect transcript read", "browser response: disconnect transcript read"], transcript.Select(message => message.Content));
+    }
+
+    [Fact]
     public async Task SendMessage_streams_error_when_message_is_blank()
     {
         using var workspace = new TestWorkspace();
