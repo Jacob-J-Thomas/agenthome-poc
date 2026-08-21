@@ -193,7 +193,7 @@ public sealed class BrowserFlowTests
     {
         using var workspace = new TestWorkspace();
         await File.WriteAllTextAsync(workspace.File("approval-note.txt"), "approved browser evidence");
-        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var codexExecutable = await FakeCodexExecutable.CreateBrowserApprovalAsync(workspace);
         var port = GetFreePort();
         ExternalWebApplicationProcess? app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
         HeadlessBrowserSession? browser = null;
@@ -292,10 +292,18 @@ public sealed class BrowserFlowTests
             Assert.Equal("Description survives validation correction and reload.", await browser.EvaluateStringAsync("document.getElementById('loopDescription').value"));
             Assert.Equal(1, await GetCustomDefinitionCountAsync(browser));
 
-            await InvokeLoopAsync(browser, "browser-approval-approve");
+            var providerInstancesBeforeCustomRuns = await ReadFakeCodexProcessInstancesAsync(workspace);
+            const string ApprovePrompt = "browser-approval-approve";
+            const string RejectPrompt = "browser-approval-reject";
+
+            await InvokeLoopAsync(browser, ApprovePrompt);
+            var approveProviderInstance = await WaitForFakeCodexEventAsync(workspace, ApprovePrompt, "tool-call", providerInstancesBeforeCustomRuns);
             await browser.WaitForExpressionAsync("!document.getElementById('loopApprovalPanel').hidden && [...document.querySelectorAll('#loopApprovals button')].some((button) => button.textContent.includes('Approve'))");
             await ClickButtonByTextAsync(browser, "#loopApprovals button", "Approve");
+            await WaitForFakeCodexEventAsync(workspace, ApprovePrompt, "tool-response", providerInstancesBeforeCustomRuns, approveProviderInstance, approved: true);
+            await WaitForFakeCodexEventAsync(workspace, ApprovePrompt, "turn-completed", providerInstancesBeforeCustomRuns, approveProviderInstance, approved: true);
             await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '1' && document.getElementById('runSubtitle').textContent.includes('· Completed') && document.getElementById('runTimeline').textContent.includes('approved browser evidence')");
+            await AssertOnlyExpectedFreshFakeCodexAttemptAsync(workspace, providerInstancesBeforeCustomRuns, approveProviderInstance);
             Assert.Contains("browser governed tool approved", await browser.EvaluateStringAsync("document.getElementById('runTimeline').textContent"), StringComparison.OrdinalIgnoreCase);
             var publicationInspector = await browser.EvaluateStringAsync("document.getElementById('inspectorContent').textContent");
             Assert.Contains("Published", publicationInspector, StringComparison.Ordinal);
@@ -312,14 +320,23 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('inspectorContent').textContent.includes('Published') && !document.getElementById('inspectorContent').textContent.toLowerCase().includes('not published')");
 
             await ClickAsync(browser, "#builderTab");
-            await InvokeLoopAsync(browser, "browser-approval-reject");
+            var providerInstancesBeforeReject = await ReadFakeCodexProcessInstancesAsync(workspace);
+            await InvokeLoopAsync(browser, RejectPrompt);
+            var rejectProviderInstance = await WaitForFakeCodexEventAsync(workspace, RejectPrompt, "tool-call", providerInstancesBeforeReject);
+            Assert.NotEqual(approveProviderInstance, rejectProviderInstance);
             await browser.WaitForExpressionAsync("!document.getElementById('loopApprovalPanel').hidden && [...document.querySelectorAll('#loopApprovals button')].some((button) => button.textContent.includes('Reject'))");
             await ClickButtonByTextAsync(browser, "#loopApprovals button", "Reject");
+            await WaitForFakeCodexEventAsync(workspace, RejectPrompt, "tool-response", providerInstancesBeforeReject, rejectProviderInstance, approved: false);
+            await WaitForFakeCodexEventAsync(workspace, RejectPrompt, "turn-completed", providerInstancesBeforeReject, rejectProviderInstance, approved: false);
             await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '2' && document.getElementById('runSubtitle').textContent.includes('· Completed') && document.getElementById('runTimeline').textContent.toLowerCase().includes('rejected')");
+            await AssertOnlyExpectedFreshFakeCodexAttemptAsync(workspace, providerInstancesBeforeReject, rejectProviderInstance);
 
             await ClickAsync(browser, "#builderTab");
+            var providerInstancesBeforeFailure = await ReadFakeCodexProcessInstancesAsync(workspace);
             await InvokeLoopAsync(browser, "browser-provider-failure");
+            var failureProviderInstance = await WaitForFakeCodexEventAsync(workspace, "browser-provider-failure", "turn-failed", providerInstancesBeforeFailure);
             await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '3' && document.getElementById('runSubtitle').textContent.includes('· Failed') && document.getElementById('runTimeline').textContent.includes('Provider attempt failed without an automatic retry')");
+            await AssertOnlyExpectedFreshFakeCodexAttemptAsync(workspace, providerInstancesBeforeFailure, failureProviderInstance);
             Assert.False(await browser.EvaluateBooleanAsync("[...document.querySelectorAll('#runActions button')].some((button) => /resume|cancel/i.test(button.textContent))"));
 
             await ClickAsync(browser, "#builderTab");
@@ -734,6 +751,301 @@ public sealed class BrowserFlowTests
         await browser.WaitForExpressionAsync("document.getElementById('invokeModal').classList.contains('open')");
         await SetValueAsync(browser, "#invocationPrompt", prompt);
         await ClickAsync(browser, "#startRunButton");
+    }
+
+    private static async Task<string> WaitForFakeCodexEventAsync(
+        TestWorkspace workspace,
+        string prompt,
+        string stage,
+        IReadOnlySet<string> priorProviderInstances,
+        string? processInstanceId = null,
+        bool? approved = null)
+    {
+        ArgumentNullException.ThrowIfNull(workspace);
+        ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stage);
+        ArgumentNullException.ThrowIfNull(priorProviderInstances);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        while (!timeout.IsCancellationRequested)
+        {
+            var events = await ReadFakeCodexTraceAsync(workspace);
+            var candidate = processInstanceId ?? SelectFreshFakeCodexAttemptInstance(events, prompt, priorProviderInstances);
+            if (!string.IsNullOrWhiteSpace(candidate))
+            {
+                var candidateEvents = events.Where(item => string.Equals(TraceString(item, "instanceId"), candidate, StringComparison.Ordinal)).ToArray();
+                var requiredStages = RequiredFakeCodexStages(stage);
+                var matchedEvents = new List<JsonElement>(requiredStages.Length);
+                var nextEventIndex = 0;
+                string? missingStage = null;
+                foreach (var requiredStage in requiredStages)
+                {
+                    var eventIndex = FindFakeCodexStageIndex(candidateEvents, requiredStage, prompt, requiredStage == stage ? approved : null, nextEventIndex);
+                    if (eventIndex < 0)
+                    {
+                        missingStage = requiredStage;
+                        break;
+                    }
+
+                    matchedEvents.Add(candidateEvents[eventIndex]);
+                    nextEventIndex = eventIndex + 1;
+                }
+
+                if (missingStage is null)
+                {
+                    ValidateFakeCodexAttemptTrace(matchedEvents, prompt, approved);
+                    return candidate;
+                }
+
+                if (candidateEvents.Any(item => string.Equals(TraceString(item, "stage"), "process-error", StringComparison.Ordinal)
+                    || string.Equals(TraceString(item, "stage"), "process-exit", StringComparison.Ordinal)))
+                {
+                    throw new InvalidOperationException($"Fake Codex provider fixture terminated before stage {missingStage} for prompt {prompt}.{Environment.NewLine}{await ReadFakeCodexTraceTextAsync(workspace)}");
+                }
+            }
+
+            try
+            {
+                await Task.Delay(100, timeout.Token);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+
+        throw new TimeoutException($"Fake Codex provider fixture did not emit stage {stage} for prompt {prompt}.{Environment.NewLine}{await ReadFakeCodexTraceTextAsync(workspace)}");
+    }
+
+    private static string[] RequiredFakeCodexStages(string stage)
+    {
+        var requiredStages = new List<string> { "process-start", "initialize", "thread-start", "turn-start" };
+        if (string.Equals(stage, "tool-call", StringComparison.Ordinal)
+            || string.Equals(stage, "tool-response", StringComparison.Ordinal)
+            || string.Equals(stage, "turn-completed", StringComparison.Ordinal))
+        {
+            requiredStages.Add("tool-call");
+        }
+
+        if (string.Equals(stage, "tool-response", StringComparison.Ordinal)
+            || string.Equals(stage, "turn-completed", StringComparison.Ordinal))
+        {
+            requiredStages.Add("tool-response");
+        }
+
+        requiredStages.Add(stage);
+        return requiredStages.Distinct(StringComparer.Ordinal).ToArray();
+    }
+
+    private static string? SelectFreshFakeCodexAttemptInstance(JsonElement[] events, string prompt, IReadOnlySet<string> priorProviderInstances)
+    {
+        var candidates = events
+            .Where(item => string.Equals(TraceString(item, "stage"), "process-start", StringComparison.Ordinal))
+            .Select(item => TraceString(item, "instanceId"))
+            .Where(instanceId => !string.IsNullOrWhiteSpace(instanceId) && !priorProviderInstances.Contains(instanceId!))
+            .Select(instanceId => instanceId!)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var promptCandidates = candidates.Where(instanceId => HasFakeCodexPromptStage(events, instanceId, "turn-start", prompt)).ToArray();
+        if (promptCandidates.Length > 1)
+        {
+            throw new InvalidOperationException($"Multiple fresh Fake Codex provider instances handled the exact prompt `{prompt}`: {string.Join(", ", promptCandidates)}.");
+        }
+
+        if (promptCandidates.Length == 1)
+        {
+            return promptCandidates[0];
+        }
+
+        var liveAttemptCandidates = candidates
+            .Where(instanceId => !HasFakeCodexTerminalStage(events, instanceId)
+                && (HasFakeCodexStage(events, instanceId, "thread-start")
+                    || (HasFakeCodexStage(events, instanceId, "initialize")
+                        && !HasFakeCodexStage(events, instanceId, "model-list"))))
+            .ToArray();
+        return liveAttemptCandidates.Length == 1 ? liveAttemptCandidates[0] : null;
+    }
+
+    private static bool HasFakeCodexPromptStage(JsonElement[] events, string instanceId, string stage, string prompt)
+        => events.Any(item => string.Equals(TraceString(item, "instanceId"), instanceId, StringComparison.Ordinal)
+            && string.Equals(TraceString(item, "stage"), stage, StringComparison.Ordinal)
+            && string.Equals(TraceString(item, "prompt"), prompt, StringComparison.Ordinal));
+
+    private static bool HasFakeCodexStage(JsonElement[] events, string instanceId, string stage)
+        => events.Any(item => string.Equals(TraceString(item, "instanceId"), instanceId, StringComparison.Ordinal)
+            && string.Equals(TraceString(item, "stage"), stage, StringComparison.Ordinal));
+
+    private static bool HasFakeCodexTerminalStage(JsonElement[] events, string instanceId)
+        => events.Any(item => string.Equals(TraceString(item, "instanceId"), instanceId, StringComparison.Ordinal)
+            && (string.Equals(TraceString(item, "stage"), "process-error", StringComparison.Ordinal)
+                || string.Equals(TraceString(item, "stage"), "process-exit", StringComparison.Ordinal)));
+
+    private static void ValidateFakeCodexAttemptTrace(IReadOnlyList<JsonElement> events, string prompt, bool? approved)
+    {
+        var turnStart = events.Single(item => string.Equals(TraceString(item, "stage"), "turn-start", StringComparison.Ordinal));
+        var threadId = TraceString(turnStart, "threadId");
+        var turnId = TraceString(turnStart, "turnId");
+        Assert.False(string.IsNullOrWhiteSpace(threadId));
+        Assert.False(string.IsNullOrWhiteSpace(turnId));
+        Assert.Equal(prompt, TraceString(turnStart, "prompt"));
+
+        var toolCall = events.SingleOrDefault(item => string.Equals(TraceString(item, "stage"), "tool-call", StringComparison.Ordinal));
+        if (toolCall.ValueKind != JsonValueKind.Undefined)
+        {
+            Assert.Equal(threadId, TraceString(toolCall, "threadId"));
+            Assert.Equal(turnId, TraceString(toolCall, "turnId"));
+            Assert.Equal(prompt, TraceString(toolCall, "prompt"));
+            Assert.Equal("embodysense", TraceString(toolCall, "namespace"));
+            Assert.Equal("command", TraceString(toolCall, "tool"));
+            Assert.Equal("approval-note.txt", TraceString(toolCall, "path"));
+            Assert.False(string.IsNullOrWhiteSpace(TraceString(toolCall, "callId")));
+        }
+
+        var toolResponse = events.SingleOrDefault(item => string.Equals(TraceString(item, "stage"), "tool-response", StringComparison.Ordinal));
+        if (toolResponse.ValueKind != JsonValueKind.Undefined)
+        {
+            Assert.NotEqual(JsonValueKind.Undefined, toolCall.ValueKind);
+            Assert.Equal(threadId, TraceString(toolResponse, "threadId"));
+            Assert.Equal(turnId, TraceString(toolResponse, "turnId"));
+            Assert.Equal(TraceString(toolCall, "callId"), TraceString(toolResponse, "callId"));
+            Assert.Equal(prompt, TraceString(toolResponse, "prompt"));
+            Assert.Equal(approved, TraceBoolean(toolResponse, "approved"));
+            Assert.Equal(approved, TraceBoolean(toolResponse, "success"));
+            Assert.Equal(approved == true ? "succeeded" : "approvalrejected", TraceString(toolResponse, "brokerOutcome"));
+        }
+
+        var turnCompleted = events.SingleOrDefault(item => string.Equals(TraceString(item, "stage"), "turn-completed", StringComparison.Ordinal));
+        if (turnCompleted.ValueKind != JsonValueKind.Undefined)
+        {
+            Assert.Equal(threadId, TraceString(turnCompleted, "threadId"));
+            Assert.Equal(turnId, TraceString(turnCompleted, "turnId"));
+            Assert.Equal(prompt, TraceString(turnCompleted, "prompt"));
+            Assert.Equal(approved == true ? "approved" : "rejected", TraceString(turnCompleted, "outcome"));
+        }
+
+        var turnFailed = events.SingleOrDefault(item => string.Equals(TraceString(item, "stage"), "turn-failed", StringComparison.Ordinal));
+        if (turnFailed.ValueKind != JsonValueKind.Undefined)
+        {
+            Assert.Equal(threadId, TraceString(turnFailed, "threadId"));
+            Assert.Equal(turnId, TraceString(turnFailed, "turnId"));
+            Assert.Equal(prompt, TraceString(turnFailed, "prompt"));
+            Assert.Equal("controlled browser provider failure", TraceString(turnFailed, "detail"));
+        }
+    }
+
+    private static int FindFakeCodexStageIndex(JsonElement[] events, string stage, string prompt, bool? approved, int startIndex)
+    {
+        for (var index = startIndex; index < events.Length; index++)
+        {
+            var item = events[index];
+            if (!string.Equals(TraceString(item, "stage"), stage, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!string.Equals(stage, "process-start", StringComparison.Ordinal)
+                && !string.Equals(stage, "initialize", StringComparison.Ordinal)
+                && !string.Equals(stage, "thread-start", StringComparison.Ordinal)
+                && !string.Equals(TraceString(item, "prompt"), prompt, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (approved.HasValue && TraceBoolean(item, "approved") != approved.Value)
+            {
+                continue;
+            }
+
+            return index;
+        }
+
+        return -1;
+    }
+
+    private static async Task<HashSet<string>> ReadFakeCodexProcessInstancesAsync(TestWorkspace workspace)
+    {
+        var events = await ReadFakeCodexTraceAsync(workspace);
+        return events
+            .Select(item => TraceString(item, "instanceId"))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!)
+            .ToHashSet(StringComparer.Ordinal);
+    }
+
+    private static async Task AssertOnlyExpectedFreshFakeCodexAttemptAsync(TestWorkspace workspace, IReadOnlySet<string> priorProviderInstances, string expectedProviderInstance)
+    {
+        var events = await ReadFakeCodexTraceAsync(workspace);
+        var freshAttemptInstances = events
+            .Where(item => string.Equals(TraceString(item, "stage"), "thread-start", StringComparison.Ordinal))
+            .Select(item => TraceString(item, "instanceId"))
+            .Where(instanceId => !string.IsNullOrWhiteSpace(instanceId) && !priorProviderInstances.Contains(instanceId!))
+            .Select(instanceId => instanceId!)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal([expectedProviderInstance], freshAttemptInstances);
+    }
+
+    private static async Task<JsonElement[]> ReadFakeCodexTraceAsync(TestWorkspace workspace)
+    {
+        var path = FakeCodexExecutable.ProtocolTracePath(workspace);
+        if (!File.Exists(path))
+        {
+            return [];
+        }
+
+        var events = new List<JsonElement>();
+        try
+        {
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            while (await reader.ReadLineAsync() is { } line)
+            {
+                try
+                {
+                    using var document = JsonDocument.Parse(line);
+                    events.Add(document.RootElement.Clone());
+                }
+                catch (JsonException)
+                {
+                }
+            }
+        }
+        catch (IOException)
+        {
+        }
+
+        return events.ToArray();
+    }
+
+    private static async Task<string> ReadFakeCodexTraceTextAsync(TestWorkspace workspace)
+    {
+        var path = FakeCodexExecutable.ProtocolTracePath(workspace);
+        if (!File.Exists(path))
+        {
+            return $"Trace file was not created: {path}";
+        }
+
+        try
+        {
+            return await File.ReadAllTextAsync(path);
+        }
+        catch (IOException exception)
+        {
+            return $"Trace file could not be read: {path}{Environment.NewLine}{exception}";
+        }
+    }
+
+    private static string? TraceString(JsonElement value, string propertyName)
+    {
+        return value.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
+    }
+
+    private static bool? TraceBoolean(JsonElement value, string propertyName)
+    {
+        return value.TryGetProperty(propertyName, out var property) && property.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? property.GetBoolean()
+            : null;
     }
 
     private static async Task ClickLoopByNameAsync(HeadlessBrowserSession browser, string name)
