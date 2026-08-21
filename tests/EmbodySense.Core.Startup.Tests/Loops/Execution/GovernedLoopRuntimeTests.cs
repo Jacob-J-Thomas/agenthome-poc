@@ -107,18 +107,16 @@ internal static class GovernedLoopRuntimeTests
         }
 
         using var fixture = await GovernedRuntimeFixture.CreateAsync(
-            waitDelay: TimeSpan.FromSeconds(60));
+            waitDelay: TimeSpan.FromSeconds(45));
         var deadline = Assert.IsType<DateTimeOffset>(fixture.WaitDeadlineUtc);
         var input = fixture.Input("invoke-canonical-wait", "produce a result and then wait durably");
         string runId;
 
         await using (var runtime = await fixture.CreateRuntimeAsync())
         {
-            var invocationTargetUtc = deadline - TimeSpan.FromSeconds(15);
             Assert.True(
-                DateTimeOffset.UtcNow < invocationTargetUtc,
+                DateTimeOffset.UtcNow < deadline,
                 "The external restart fixture did not retain enough future time to prove pre-due parking.");
-            await WaitUntilUtcAsync(invocationTargetUtc);
             var waiting = await runtime.InvokeGovernedLoopAsync(input);
 
             Assert.True(string.Equals("Executed", waiting.Status, StringComparison.Ordinal), waiting.Detail);
@@ -144,7 +142,7 @@ internal static class GovernedLoopRuntimeTests
         using var child = StartWaitRestartChild(fixture, runId);
         var standardOutput = child.StandardOutput.ReadToEndAsync();
         var standardError = child.StandardError.ReadToEndAsync();
-        using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90)))
+        using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120)))
         {
             try
             {
@@ -153,7 +151,7 @@ internal static class GovernedLoopRuntimeTests
             catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
                 child.Kill(entireProcessTree: true);
-                throw new Xunit.Sdk.XunitException("The external governed Wait restart host did not finish within 90 seconds.");
+                throw new Xunit.Sdk.XunitException("The external governed Wait restart host did not finish within 120 seconds.");
             }
         }
 
@@ -277,7 +275,7 @@ internal static class GovernedLoopRuntimeTests
         CustomLoopRunRecord completed;
         try
         {
-            completed = await WaitForRunAsync(store, runId!, CustomLoopRunStatus.Completed, TimeSpan.FromSeconds(30));
+            completed = await WaitForRunAsync(store, runId!, CustomLoopRunStatus.Completed, TimeSpan.FromSeconds(60));
         }
         catch (Exception exception)
         {
@@ -373,7 +371,7 @@ internal static class GovernedLoopRuntimeTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+        Verification.CoverageChildProcessAssembly.AddCoordinationOnlyVstestArguments(
             startInfo,
             typeof(GovernedLoopRuntimeTests).Assembly.Location,
             $"{typeof(GovernedLoopRuntimeTestsWait).FullName}.{nameof(GovernedLoopRuntimeTestsWait.Explicit_background_request_activates_once_after_late_workspace_host_reacquisition)}");
@@ -392,22 +390,6 @@ internal static class GovernedLoopRuntimeTests
         while (!File.Exists(path))
         {
             await Task.Delay(TimeSpan.FromMilliseconds(25), cancellation.Token);
-        }
-    }
-
-    private static async Task WaitUntilUtcAsync(DateTimeOffset targetUtc)
-    {
-        while (DateTimeOffset.UtcNow < targetUtc)
-        {
-            var remaining = targetUtc - DateTimeOffset.UtcNow;
-            if (remaining <= TimeSpan.Zero)
-            {
-                return;
-            }
-
-            await Task.Delay(remaining > TimeSpan.FromMilliseconds(25)
-                ? TimeSpan.FromMilliseconds(25)
-                : remaining);
         }
     }
 

@@ -56,6 +56,43 @@ internal static class CoverageChildProcessAssembly
         startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=" + fullyQualifiedTestName);
     }
 
+    internal static void AddCoordinationOnlyVstestArguments(
+        ProcessStartInfo startInfo,
+        string currentAssemblyPath,
+        string fullyQualifiedTestName)
+    {
+        ArgumentNullException.ThrowIfNull(startInfo);
+        ArgumentException.ThrowIfNullOrWhiteSpace(currentAssemblyPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fullyQualifiedTestName);
+
+        startInfo.ArgumentList.Add("vstest");
+        var isolatedDirectory = Environment.GetEnvironmentVariable(IsolatedAssemblyDirectoryVariable);
+        if (string.IsNullOrWhiteSpace(isolatedDirectory))
+        {
+            startInfo.ArgumentList.Add(currentAssemblyPath);
+        }
+        else
+        {
+            // This child only holds the cross-process workspace gate while the parent proves the
+            // production behavior. Reuse the verifier's immutable assembly without producing a
+            // redundant coverage report for the coordination process.
+            if (!Directory.Exists(isolatedDirectory))
+            {
+                throw new DirectoryNotFoundException($"The immutable coverage child-process directory is unavailable: `{isolatedDirectory}`.");
+            }
+
+            var isolatedPath = Path.Combine(isolatedDirectory, Path.GetFileName(currentAssemblyPath));
+            if (!File.Exists(isolatedPath))
+            {
+                throw new FileNotFoundException("The immutable coverage child-process assembly is unavailable.", isolatedPath);
+            }
+
+            startInfo.ArgumentList.Add(isolatedPath);
+        }
+
+        startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=" + fullyQualifiedTestName);
+    }
+
     private static void CopyDirectory(string sourceDirectory, string destinationDirectory)
     {
         Directory.CreateDirectory(destinationDirectory);
