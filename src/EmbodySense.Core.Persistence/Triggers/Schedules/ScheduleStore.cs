@@ -326,6 +326,83 @@ public sealed class ScheduleStore : IScheduleStorePort, IScheduleDeliveryProvena
         }
     }
 
+    internal async Task<(ScheduleStoreReadStatus Status, IReadOnlyList<ScheduleId> Candidates, bool PageTruncated)> ReadCandidatesAsync(
+        DateTimeOffset observedAtUtc,
+        int maximumCandidates,
+        ScheduleId? afterScheduleId,
+        CancellationToken cancellationToken)
+    {
+        if (observedAtUtc.Offset != TimeSpan.Zero || maximumCandidates < 1)
+        {
+            return (ScheduleStoreReadStatus.Corrupt, [], false);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            using var mutationLock = await _guard.AcquireMutationLockAsync(_observer, cancellationToken).ConfigureAwait(false);
+            var (catalog, _) = await LoadAsync(mutationLock, cancellationToken).ConfigureAwait(false);
+            var candidates = catalog.Entries
+                .Where(entry => IsRunnableCandidate(entry, observedAtUtc))
+                .Select(entry => entry.Definition.ScheduleId)
+                .Order()
+                .ToArray();
+            if (candidates.Length == 0)
+            {
+                return (ScheduleStoreReadStatus.NotFound, [], false);
+            }
+
+            var page = SelectCandidatePage(candidates, afterScheduleId, maximumCandidates);
+            return (ScheduleStoreReadStatus.Found, page, candidates.Length > page.Count);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsBackpressure(exception))
+        {
+            return (ScheduleStoreReadStatus.Backpressured, [], false);
+        }
+        catch (Exception exception) when (IsCorruption(exception))
+        {
+            return (ScheduleStoreReadStatus.Corrupt, [], false);
+        }
+        catch (Exception exception) when (IsUnavailable(exception))
+        {
+            return (ScheduleStoreReadStatus.Unavailable, [], false);
+        }
+    }
+
+    private static bool IsRunnableCandidate(ScheduleStoreEntry entry, DateTimeOffset observedAtUtc)
+        => entry.State.PendingDelivery is not null
+            || entry.State.LastClockObservedAtUtc is { } lastObservedAtUtc && observedAtUtc < lastObservedAtUtc
+            || entry.Definition.Enabled
+                && entry.State.Enabled
+                && entry.State.NextOccurrence is { } nextOccurrence
+                && nextOccurrence.ScheduledAtUtc <= observedAtUtc;
+
+    private static IReadOnlyList<ScheduleId> SelectCandidatePage(
+        IReadOnlyList<ScheduleId> candidates,
+        ScheduleId? afterScheduleId,
+        int maximumCandidates)
+    {
+        var start = 0;
+        if (afterScheduleId is not null)
+        {
+            start = candidates.ToList().FindIndex(candidate => candidate.CompareTo(afterScheduleId) > 0);
+            if (start < 0)
+            {
+                start = 0;
+            }
+        }
+
+        var count = Math.Min(maximumCandidates, candidates.Count);
+        return Array.AsReadOnly(
+            Enumerable.Range(0, count)
+                .Select(offset => candidates[(start + offset) % candidates.Count])
+                .ToArray());
+    }
+
     private async Task<(ScheduleStoreCatalog Catalog, TriggerQueueReadResult Identity)> LoadAsync(
         TriggerQueueMutationLease mutationLock,
         CancellationToken cancellationToken)

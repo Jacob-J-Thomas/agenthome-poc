@@ -15,6 +15,8 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
+using EmbodySense.Core.Application.Loops.Sleep;
+using EmbodySense.Core.Application.Loops.Sleep.Models;
 using EmbodySense.Core.Application.Triggers;
 using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Application.Triggers.Schedules;
@@ -58,6 +60,8 @@ using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
+using EmbodySense.Core.Startup.Loops.Execution.Sleep;
+using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Triggers;
@@ -237,6 +241,69 @@ internal static class GovernedLoopRuntimeTests
         Assert.Equal(blocker.Entry.GovernedRunId, thirdEvidence.Attempts[^1].BlockingRunId);
         Assert.Single(await runs.ListRecentAsync(10));
 
+        await using var background = runtime.CreateGovernedLoopLocalBackgroundRuntime(
+            first,
+            first,
+            first,
+            new ExactTriggerAuthorizer(),
+            new UnusedSleepPosture(),
+            new UnusedWakeContinuation(),
+            new UnusedWakeVerification(),
+            new GovernedLoopLocalWorkRunnerOptions(
+                "overlap-retry-worker",
+                TimeSpan.FromSeconds(30),
+                2,
+                3),
+            new GovernedLoopLocalCoordinatorOptions(
+                "overlap-retry-coordinator",
+                "overlap-retry-owner",
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(5),
+                1),
+            new FixedTriggerTimeProvider(dispatchNow.AddMinutes(1)));
+        var expectedRetries = overlap switch
+        {
+            ScheduleOverlapPolicy.Skip => 0,
+            ScheduleOverlapPolicy.DeferOne => 1,
+            ScheduleOverlapPolicy.Allow => 2,
+            _ => throw new InvalidOperationException("The overlap theory supplied an unsupported policy."),
+        };
+        for (var index = 0; index < expectedRetries; index++)
+        {
+            var retried = Assert.IsType<GovernedLoopLocalWorkResult>(
+                await background.RunOnceAsync(GovernedLoopLocalWorkFamily.Trigger));
+            Assert.Equal(GovernedLoopLocalWorkResultStatus.Completed, retried.Status);
+            Assert.Equal("schedule-retry-materialized", retried.ReasonCode);
+        }
+
+        var exhausted = Assert.IsType<GovernedLoopLocalWorkResult>(
+            await background.RunOnceAsync(GovernedLoopLocalWorkFamily.Trigger));
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, exhausted.Status);
+        Assert.Equal(1 + expectedRetries, fixture.ProviderAttempts);
+        Assert.Equal(1 + expectedRetries, (await runs.ListRecentAsync(10)).Count);
+
+        var refreshedSecond = Assert.IsType<ScheduleRunAdmissionEvidence>(
+            await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId));
+        var refreshedThird = Assert.IsType<ScheduleRunAdmissionEvidence>(
+            await runs.GetScheduleAdmissionAsync(third.CreateEnvelope().DeliveryId));
+        Assert.Equal(
+            overlap == ScheduleOverlapPolicy.Skip
+                ? ScheduleRunAdmissionDisposition.OverlapSkipped
+                : ScheduleRunAdmissionDisposition.RunCreated,
+            refreshedSecond.Attempts[^1].Disposition);
+        Assert.Equal(
+            overlap == ScheduleOverlapPolicy.Allow
+                ? ScheduleRunAdmissionDisposition.RunCreated
+                : thirdDisposition,
+            refreshedThird.Attempts[^1].Disposition);
+        Assert.All(
+            refreshedSecond.Attempts,
+            attempt => Assert.Equal(secondEvidence.Attempts[0].AdmissionOperationId, attempt.AdmissionOperationId));
+        Assert.All(
+            refreshedThird.Attempts,
+            attempt => Assert.Equal(thirdEvidence.Attempts[0].AdmissionOperationId, attempt.AdmissionOperationId));
+
         if (overlap == ScheduleOverlapPolicy.Skip)
         {
             var evidencePath = Path.Combine(
@@ -269,7 +336,7 @@ internal static class GovernedLoopRuntimeTests
             var generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
             var blockerTask = runtime
                 .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), workerClock)
-                .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-a", generation, dispatchNow, TimeSpan.FromSeconds(30), [], 3));
+                .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-a", generation, dispatchNow, TriggerWorkerLimits.MaxLeaseDuration, [], 3));
             await fixture.WaitForProviderAsync();
             TriggerWorkerRunResponse blockedSecond;
             TriggerWorkerRunResponse blockedThird;
@@ -293,11 +360,11 @@ internal static class GovernedLoopRuntimeTests
                 generation = (await queue.GetSnapshotAsync(contenderObservedNow)).Generation;
                 blockedSecond = await runtime
                     .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), workerClock)
-                    .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-b", generation, contenderObservedNow, TimeSpan.FromSeconds(30), [], 3));
+                    .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-b", generation, contenderObservedNow, TriggerWorkerLimits.MaxLeaseDuration, [], 3));
                 generation = (await queue.GetSnapshotAsync(contenderObservedNow)).Generation;
                 blockedThird = await runtime
                     .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), workerClock)
-                    .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-c", generation, contenderObservedNow, TimeSpan.FromSeconds(30), [], 3));
+                    .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-c", generation, contenderObservedNow, TriggerWorkerLimits.MaxLeaseDuration, [], 3));
                 Assert.Equal(1, fixture.ProviderAttempts);
             }
             finally
@@ -2506,6 +2573,35 @@ internal static class GovernedLoopRuntimeTests
 
             return commandPath;
         }
+    }
+
+    private sealed class UnusedSleepPosture : IGovernedLoopSleepCurrentPosturePort
+    {
+        public Task<GovernedLoopSleepCurrentPostureReadResult?> ReadAsync(
+            GovernedLoopExecutionBinding binding,
+            CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Trigger-only overlap retry must not read sleep posture.");
+    }
+
+    private sealed class UnusedWakeContinuation : IGovernedLoopWakeContinuationPort
+    {
+        public Task<GovernedLoopWakeContinuationResult?> ContinueAsync(
+            GovernedLoopWakeContinuationRequest request,
+            CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Trigger-only overlap retry must not continue a wake.");
+
+        public Task<GovernedLoopWakeContinuationResult?> ReconcileAsync(
+            GovernedLoopWakeContinuationRequest request,
+            CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Trigger-only overlap retry must not reconcile a wake.");
+    }
+
+    private sealed class UnusedWakeVerification : IGovernedLoopAuthenticatedWakeVerificationPort
+    {
+        public Task<GovernedLoopAuthenticatedWakeVerificationResult?> VerifyAsync(
+            GovernedLoopAuthenticatedWakeVerificationRequest request,
+            CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Trigger-only overlap retry must not verify wake evidence.");
     }
 
     private sealed class StaticNodeCatalog(GovernedLoopNodeCatalogSnapshot snapshot) : IGovernedLoopNodeCatalog

@@ -62,6 +62,8 @@ $expectedQualificationContracts = @("verify-bounded-phases.tests.ps1", "verify-c
 Assert-Equal -Actual (@($script:QualificationContractScheduleProfiles.ScriptName | Sort-Object) -join "|") -Expected ($expectedQualificationContracts -join "|") -Message "Qualification contract scheduling profiles must equal the canonical Windows contract inventory."
 $preflightScheduleProfile = Get-QualificationContractScheduleProfile -ScriptName "verify-preflight-overlap.tests.ps1"
 Assert-True -Condition ($preflightScheduleProfile.Weight -eq 3 -and $preflightScheduleProfile.ResourceClass -ceq "ProcessHeavy") -Message "The descendant-heavy preflight contract must retain protected process posture."
+$watchdogScheduleProfile = Get-QualificationContractScheduleProfile -ScriptName "verify-watchdog.tests.ps1"
+Assert-Equal -Actual $watchdogScheduleProfile.TimeoutSeconds -Expected 120 -Message "The source-heavy watchdog contract must retain bounded Windows scan headroom."
 $parallelScheduleProfile = Get-QualificationContractScheduleProfile -ScriptName "verify-parallel.tests.ps1"
 Assert-True -Condition ($parallelScheduleProfile.Weight -eq 3 -and $parallelScheduleProfile.ResourceClass -ceq "ProcessHeavy" -and $parallelScheduleProfile.Isolation -ceq "Exclusive") -Message "The descendant-heavy parallel scheduler proof must run in one exclusive qualification wave."
 Assert-True -Condition (@($script:QualificationContractScheduleProfiles | Where-Object { $_.ScriptName -cnotin @("verify-parallel.tests.ps1", "verify-preflight-overlap.tests.ps1") -and ($_.Weight -ne 1 -or $_.ResourceClass -cne "ProcessLight" -or $_.Isolation -cne "Shared") }).Count -eq 0) -Message "Measured source/temp-only verifier contracts must retain one-unit shared process-light posture."

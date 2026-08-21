@@ -253,8 +253,8 @@ foreach ($webSharedRuntimeTest in @(
     Assert-Contains -Actual $webSharedRuntimeTestSource -Expected '[Collection(EphemeralPortApiCollection.Name)]' -Message "Web runtime/API test '$webSharedRuntimeTest' must serialize shared default trust and host state inside the assembly-wide lane."
 }
 foreach ($assemblyProfile in @(
-    'Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 300; Weight = 3; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.Core.Startup.Tests-all"; EstimatedDurationSeconds = 240; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 300; Weight = 6; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Core.Startup.Tests-all"; EstimatedDurationSeconds = 240; Weight = 6; ResourceClass = "ProcessHeavy"'
     'Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; Weight = 3; ResourceClass = "ProcessHeavy"'
     'Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy"'
 )) {

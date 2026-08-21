@@ -4,6 +4,7 @@ using EmbodySense.Core.Application.Runtime;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Models;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Runtime.Commands;
@@ -12,6 +13,8 @@ using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Loops.Execution.Sleep;
+using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Application.Triggers;
 using EmbodySense.Core.Application.Triggers.Models;
@@ -276,13 +279,54 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(authorizer);
         var clock = timeProvider ?? TimeProvider.System;
         var store = new TriggerQueueStore(Paths, TriggerQueueQuota.Runtime, timeProvider: clock);
-        var service = new TriggerWorkerService(
-            store,
+        var service = CreateTriggerWorkerService(authorizer, store, clock);
+        return new TriggerWorkerRuntimeFacade(store, service);
+    }
+
+    /// <summary>Creates one inert canonical local background runtime bound to this runtime's exact governed dispatcher.</summary>
+    /// <remarks>The caller owns the returned lifetime and explicitly chooses whether to run one-shot work or start coordination.</remarks>
+    public GovernedLoopLocalBackgroundRuntime CreateGovernedLoopLocalBackgroundRuntime(
+        IScheduleCurrentEvidencePort scheduleCurrentEvidence,
+        IScheduleOverlapPort scheduleOverlap,
+        IScheduleTimeZonePort scheduleTimeZone,
+        ITriggerWorkerCurrentEvidenceAuthorizer triggerAuthorizer,
+        IGovernedLoopSleepCurrentPosturePort sleepCurrentPosture,
+        IGovernedLoopWakeContinuationPort wakeContinuation,
+        IGovernedLoopAuthenticatedWakeVerificationPort authenticatedWakeVerification,
+        GovernedLoopLocalWorkRunnerOptions workOptions,
+        GovernedLoopLocalCoordinatorOptions coordinatorOptions,
+        TimeProvider? timeProvider = null)
+    {
+        ArgumentNullException.ThrowIfNull(triggerAuthorizer);
+        return GovernedLoopLocalBackgroundRuntimeFactory.Create(
+            Paths,
+            scheduleCurrentEvidence,
+            scheduleOverlap,
+            scheduleTimeZone,
+            new TriggerWorkerCurrentEvidenceAuthorizerAdapter(triggerAuthorizer),
+            new TriggerCustomLoopDispatcher(_customLoops, _governedLoops),
+            sleepCurrentPosture,
+            wakeContinuation,
+            authenticatedWakeVerification,
+            workOptions,
+            coordinatorOptions,
+            timeProvider);
+    }
+
+    private TriggerWorkerService CreateTriggerWorkerService(
+        ITriggerWorkerCurrentEvidenceAuthorizer authorizer,
+        ITriggerWorkerStatePort state,
+        TimeProvider? timeProvider = null)
+    {
+        ArgumentNullException.ThrowIfNull(authorizer);
+        ArgumentNullException.ThrowIfNull(state);
+        var clock = timeProvider ?? TimeProvider.System;
+        return new TriggerWorkerService(
+            state,
             new TriggerWorkerCurrentEvidenceAuthorizerAdapter(authorizer),
             new TriggerCustomLoopDispatcher(_customLoops, _governedLoops),
             new ScheduleTriggerDispatchReadinessService(_scheduleDeliveryProvenance),
             clock);
-        return new TriggerWorkerRuntimeFacade(store, service);
     }
 
     /// <summary>

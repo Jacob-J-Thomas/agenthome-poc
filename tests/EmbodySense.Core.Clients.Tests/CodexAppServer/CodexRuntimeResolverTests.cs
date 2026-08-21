@@ -344,7 +344,7 @@ public sealed class CodexRuntimeResolverTests
             workspace,
             "staged-delay",
             "codex-cli staged-delay-test",
-            protocolStageDelayMilliseconds: 2_600,
+            protocolStageDelayMilliseconds: 4_000,
             protocolStageMarkerPath: protocolStageMarkerPath,
             advertisedModels: ["gpt-test"]);
 

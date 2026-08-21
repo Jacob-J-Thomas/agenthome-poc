@@ -223,13 +223,57 @@ $script:QualificationLinkedTestMappings = @(
         Path = "tests/EmbodySense.Core.Common.Tests/TriggerDeliveryTestData.cs"
         TestProjects = @(
             "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj",
-            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
         )
     },
     [pscustomobject]@{
         Path = "tests/EmbodySense.Core.Common.Tests/Triggers/Schedules/ScheduleContractTestData.cs"
         TestProjects = @(
             "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Common.Tests/Loops/Execution/Sleep/GovernedLoopSleepContractTestFixture.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Application.Tests/Loops/Sleep/GovernedLoopSleepApplicationTestFixture.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Application.Tests/Loops/Sleep/StubGovernedLoopAuthenticatedWakeVerificationPort.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Application.Tests/Loops/Sleep/StubGovernedLoopSleepCurrentPosturePort.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Application.Tests/Loops/Sleep/StubGovernedLoopSleepTimeProvider.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Application.Tests/Loops/Sleep/StubGovernedLoopWakeContinuationPort.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
             "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
         )
     }

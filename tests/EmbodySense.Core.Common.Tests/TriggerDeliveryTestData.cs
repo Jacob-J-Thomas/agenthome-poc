@@ -32,26 +32,26 @@ internal static class TriggerDeliveryTestData
         bool publicationRequested = false,
         CustomLoopConversationReference? conversation = null,
         TriggerAdmissionStatus visibleStatus = TriggerAdmissionStatus.Unknown,
-        TriggerAdmissionReason visibleReason = TriggerAdmissionReason.Unknown)
+        TriggerAdmissionReason visibleReason = TriggerAdmissionReason.Unknown,
+        ScheduleExecutionDirective? scheduleExecutionDirective = null)
     {
         adapter ??= Adapter();
         actorContext ??= ActorContext();
         authority ??= Authority();
         temporal ??= Temporal(admittedAtUtc: visibleStatus is TriggerAdmissionStatus.Admitted or TriggerAdmissionStatus.Replayed ? CreatedAtUtc.AddSeconds(3) : null);
         payload ??= InlinePayload();
-        ScheduleExecutionDirective? scheduleExecutionDirective = null;
         TriggerDeliveryId? delivery;
         TriggerDeduplicationId? deduplication;
         if (kind == TriggerKind.Time)
         {
-            loop ??= GovernedLoop();
+            loop ??= scheduleExecutionDirective?.Target ?? GovernedLoop();
             var occurrence = new ScheduleOccurrence(
                 ScheduleOccurrence.CurrentSchemaVersion,
                 1,
                 DateTime.SpecifyKind(temporal.CreatedAtUtc.UtcDateTime, DateTimeKind.Unspecified),
                 temporal.CreatedAtUtc,
                 new ScheduleTimeZoneReference("Etc/UTC", new string('e', 64)));
-            scheduleExecutionDirective = ScheduleDirective(occurrence: occurrence, target: loop);
+            scheduleExecutionDirective ??= ScheduleDirective(occurrence: occurrence, target: loop);
             delivery = scheduleExecutionDirective.Identity.DeliveryId;
             deduplication = scheduleExecutionDirective.Identity.DeduplicationId;
         }

@@ -7,6 +7,7 @@ using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
 using EmbodySense.Core.Common.Triggers.Schedules;
 using EmbodySense.Core.Common.Triggers.Schedules.Models;
+using EmbodySense.Core.Application.Loops.Sleep;
 
 namespace EmbodySense.Core.Application.Loops;
 
@@ -52,6 +53,31 @@ public interface ICustomLoopRunStore
     {
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult<ScheduleRunAdmissionEvidence?>(null);
+    }
+
+    /// <summary>Lists one bounded deterministic page of deferred or serialized schedule admissions awaiting reselection.</summary>
+    /// <remarks>
+    /// Skip and suppressed DeferOne dispositions are terminal and must never appear. Implementations must return only
+    /// evidence whose latest disposition is <c>OverlapDeferred</c> or <c>OverlapSerialized</c>, ordered by delivery identity.
+    /// The conservative compatibility implementation is unsupported rather than silently hiding retained work.
+    /// </remarks>
+    /// <param name="afterDeliveryId">An exclusive deterministic delivery cursor, or null for the first page.</param>
+    /// <param name="maximumCount">The bounded page size.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>Detached immutable admission evidence in canonical delivery order.</returns>
+    /// <exception cref="NotSupportedException">The store does not implement retained schedule-admission discovery.</exception>
+    Task<IReadOnlyList<ScheduleRunAdmissionEvidence>> ListPendingScheduleAdmissionsAsync(
+        TriggerDeliveryId? afterDeliveryId,
+        int maximumCount,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (maximumCount is < 1 or > GovernedLoopBackgroundWorkContractLimits.MaxCandidatesPerFamily)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumCount));
+        }
+
+        throw new NotSupportedException("This custom-loop run store does not support retained schedule-admission discovery.");
     }
 
     /// <summary>
