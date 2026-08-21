@@ -532,7 +532,7 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
-    public async Task Windows_public_reader_share_allows_atomic_update_while_reader_is_paused_before_completion()
+    public async Task Windows_public_reader_releases_its_handle_before_a_paused_consumer_continuation()
     {
         // FileShare enforcement is Windows-specific; other platforms cannot exercise this contract.
         if (!OperatingSystem.IsWindows())
@@ -552,6 +552,7 @@ public sealed class CustomLoopRunStoreTests
         var gated = new QueuedSynchronizationContext();
         var previous = SynchronizationContext.Current;
         Task<CustomLoopRunRecord?>? readTask = null;
+        Task<CustomLoopRunStoreResult>? updateTask = null;
         SynchronizationContext.SetSynchronizationContext(gated);
         try
         {
@@ -567,7 +568,8 @@ public sealed class CustomLoopRunStoreTests
             await gated.WaitForPostAsync(TimeSpan.FromSeconds(10));
             Assert.False(readTask!.IsCompleted);
             var running = Advance(admitted, CustomLoopRunStatus.Running);
-            var result = await store.UpdateAsync(running, admitted.LifecycleVersion);
+            updateTask = Task.Run(() => store.UpdateAsync(running, admitted.LifecycleVersion));
+            var result = await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
 
             Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
             await gated.DrainUntilCompletedAsync(readTask!, TimeSpan.FromSeconds(10));
@@ -590,6 +592,11 @@ public sealed class CustomLoopRunStoreTests
                 catch (OperationCanceledException) when (readCancellation.IsCancellationRequested)
                 {
                 }
+            }
+
+            if (updateTask is not null)
+            {
+                await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
             }
         }
     }
