@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
@@ -263,6 +264,8 @@ public sealed class GovernedWorkspaceActionFactoryTests
 
     private sealed class DirectAuthorityBoundary : IGovernedLoopEffectAuthorityDecisionBoundary
     {
+        public ICapabilityAuthorityTransaction AuthorityTransaction => throw new InvalidOperationException("The workspace action factory test boundary has no production workspace authority transaction.");
+
         public Task<GovernedLoopEffectAuthorityExecutionResult<TResult>> ExecuteAsync<TResult>(
             GovernedLoopEffectAuthorityRequest request,
             Func<CancellationToken, Task<TResult>> commit,
