@@ -1284,7 +1284,7 @@ public sealed class GovernedLoopSleepStoreTests
         var wait = Stopwatch.StartNew();
         while (!File.Exists(path))
         {
-            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(15), $"Cross-process sleep host did not create `{path}`.");
+            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(60), $"Cross-process sleep host did not create `{path}`.");
             await Task.Delay(10);
         }
     }

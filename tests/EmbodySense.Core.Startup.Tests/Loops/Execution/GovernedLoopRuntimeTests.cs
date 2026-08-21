@@ -336,7 +336,7 @@ internal static class GovernedLoopRuntimeTests
             var generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
             var blockerTask = runtime
                 .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), workerClock)
-                .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-a", generation, dispatchNow, TimeSpan.FromSeconds(30), [], 3));
+                .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-a", generation, dispatchNow, TriggerWorkerLimits.MaxLeaseDuration, [], 3));
             await fixture.WaitForProviderAsync();
             TriggerWorkerRunResponse blockedSecond;
             TriggerWorkerRunResponse blockedThird;
@@ -360,11 +360,11 @@ internal static class GovernedLoopRuntimeTests
                 generation = (await queue.GetSnapshotAsync(contenderObservedNow)).Generation;
                 blockedSecond = await runtime
                     .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), workerClock)
-                    .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-b", generation, contenderObservedNow, TimeSpan.FromSeconds(30), [], 3));
+                    .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-b", generation, contenderObservedNow, TriggerWorkerLimits.MaxLeaseDuration, [], 3));
                 generation = (await queue.GetSnapshotAsync(contenderObservedNow)).Generation;
                 blockedThird = await runtime
                     .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), workerClock)
-                    .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-c", generation, contenderObservedNow, TimeSpan.FromSeconds(30), [], 3));
+                    .RunOnceAsync(new TriggerWorkerSelectionInput("observed-overlap-worker-c", generation, contenderObservedNow, TriggerWorkerLimits.MaxLeaseDuration, [], 3));
                 Assert.Equal(1, fixture.ProviderAttempts);
             }
             finally
