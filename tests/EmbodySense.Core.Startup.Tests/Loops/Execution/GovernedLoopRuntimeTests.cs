@@ -172,7 +172,11 @@ internal static class GovernedLoopRuntimeTests
             Assert.Equal(GovernedLoopWakeDisposition.Prepared, prepared.Disposition);
             Assert.Equal(GovernedLoopWakeDisposition.Committed, committed.Disposition);
             Assert.Equal(1, prepared.EvidenceVersion);
-            Assert.Equal(2, committed.EvidenceVersion);
+            // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/472: restart reconciliation permits a committed successor at prepared +1 or +2.
+            Assert.True(
+                committed.EvidenceVersion == prepared.EvidenceVersion + 1
+                || committed.EvidenceVersion == prepared.EvidenceVersion + 2,
+                $"Committed wake evidence version {committed.EvidenceVersion} must be prepared version {prepared.EvidenceVersion} plus one or two.");
             Assert.Equal(continuation.PreparedWakeEvidence.ContentHash, prepared.ContentHash);
             Assert.Equal(prepared.ContinuationOperationId, committed.ContinuationOperationId);
             Assert.Equal(continuation.ContentHash, committed.ContinuationEvidenceHash);
