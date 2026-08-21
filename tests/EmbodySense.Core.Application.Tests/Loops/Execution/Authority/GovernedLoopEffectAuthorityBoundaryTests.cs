@@ -118,6 +118,9 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
     [InlineData(AuthorityGrantResolutionStatus.RoleUnavailable, GovernedLoopEffectAuthorityReason.RoleUnavailable)]
     [InlineData(AuthorityGrantResolutionStatus.LoopUnavailable, GovernedLoopEffectAuthorityReason.LoopUnavailable)]
     [InlineData(AuthorityGrantResolutionStatus.CeilingExceeded, GovernedLoopEffectAuthorityReason.CeilingExceeded)]
+    [InlineData(AuthorityGrantResolutionStatus.NotFound, GovernedLoopEffectAuthorityReason.GrantMissing)]
+    [InlineData(AuthorityGrantResolutionStatus.Invalid, GovernedLoopEffectAuthorityReason.GrantInvalid)]
+    [InlineData(AuthorityGrantResolutionStatus.Unavailable, GovernedLoopEffectAuthorityReason.GrantUnavailable)]
     public async Task Definitive_grant_posture_is_durably_denied_without_invoking_the_continuation(
         AuthorityGrantResolutionStatus status,
         GovernedLoopEffectAuthorityReason expectedReason)
@@ -152,9 +155,52 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         Assert.False(result.CommitInvoked);
         Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.Decided, result.Status);
         Assert.Equal(expectedReason, result.Decision?.Reason);
-        Assert.Equal(GovernedLoopEffectAuthorityDisposition.Deny, result.Decision?.Disposition);
+        Assert.Equal(status == AuthorityGrantResolutionStatus.Unavailable
+            ? GovernedLoopEffectAuthorityDisposition.Pause
+            : GovernedLoopEffectAuthorityDisposition.Deny, result.Decision?.Disposition);
         Assert.Single(evidence.Decisions);
         Assert.Equal(0, capabilities.Calls);
+    }
+
+    [Theory]
+    [InlineData("dependency", GovernedLoopEffectAuthorityReason.DependencyMismatch)]
+    [InlineData("future", GovernedLoopEffectAuthorityReason.GrantAmbiguous)]
+    public async Task Active_resolution_rejects_changed_or_untrusted_grant_evidence(string mode, GovernedLoopEffectAuthorityReason expectedReason)
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        var resolution = fixture.Resolution with
+        {
+            RequestedReference = fixture.Resolution.RequestedReference,
+            DependencyEvidenceHash = mode == "dependency" ? new string('9', 64) : fixture.Resolution.DependencyEvidenceHash,
+            EvaluatedAtUtc = mode == "future" ? GovernedLoopEffectAuthorityTestFixture.Now.AddHours(1) : fixture.Resolution.EvaluatedAtUtc,
+        };
+
+        var result = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = resolution },
+            new StubEffectCapabilityAdmissionService(),
+            new RecordingEffectAuthorityEvidenceStore()).ExecuteAsync(fixture.Request, _ => Task.FromResult(true));
+
+        Assert.False(result.CommitInvoked);
+        Assert.Equal(expectedReason, result.Decision?.Reason);
+        Assert.Equal(expectedReason == GovernedLoopEffectAuthorityReason.GrantAmbiguous
+            ? GovernedLoopEffectAuthorityDisposition.Pause
+            : GovernedLoopEffectAuthorityDisposition.Deny, result.Decision?.Disposition);
+    }
+
+    [Fact]
+    public async Task Missing_active_grant_proof_pauses_as_ambiguous_without_evidence_of_authority()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        var resolution = fixture.Resolution with { Grant = null, CurrentGrant = null };
+        var result = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = resolution },
+            new StubEffectCapabilityAdmissionService(),
+            new RecordingEffectAuthorityEvidenceStore()).ExecuteAsync(fixture.Request, _ => Task.FromResult(true));
+
+        Assert.False(result.CommitInvoked);
+        Assert.Equal(GovernedLoopEffectAuthorityDisposition.Pause, result.Decision?.Disposition);
+        Assert.Equal(GovernedLoopEffectAuthorityReason.GrantAmbiguous, result.Decision?.Reason);
+        Assert.Null(result.Decision?.CurrentAuthority);
     }
 
     [Fact]
@@ -570,6 +616,124 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         Assert.Equal(GovernedLoopEffectAuthorityReason.CapabilityAmbiguous, result.Decision?.Reason);
     }
 
+    [Theory]
+    [InlineData(CapabilityRevalidationStatus.InvalidSnapshot)]
+    [InlineData(CapabilityRevalidationStatus.WorkspaceMismatch)]
+    [InlineData(CapabilityRevalidationStatus.CatalogAmbiguous)]
+    [InlineData(CapabilityRevalidationStatus.Unknown)]
+    public async Task Ambiguous_capability_revalidation_pauses_without_invoking_the_continuation(CapabilityRevalidationStatus status)
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        var result = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
+            new StubEffectCapabilityAdmissionService
+            {
+                Result = new CapabilityRevalidationResult(false, [], "The capability snapshot is not authoritative.", status),
+            },
+            new RecordingEffectAuthorityEvidenceStore()).ExecuteAsync(fixture.Request, _ => Task.FromResult(true));
+
+        Assert.False(result.CommitInvoked);
+        Assert.Equal(GovernedLoopEffectAuthorityDisposition.Pause, result.Decision?.Disposition);
+        Assert.Equal(GovernedLoopEffectAuthorityReason.CapabilityAmbiguous, result.Decision?.Reason);
+    }
+
+    [Fact]
+    public async Task Missing_required_capability_pin_is_denied()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        var result = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
+            new StubEffectCapabilityAdmissionService
+            {
+                Result = new CapabilityRevalidationResult(false, [], "The required capability pin is inactive.", CapabilityRevalidationStatus.PinInactive),
+            },
+            new RecordingEffectAuthorityEvidenceStore()).ExecuteAsync(fixture.Request, _ => Task.FromResult(true));
+
+        Assert.False(result.CommitInvoked);
+        Assert.Equal(GovernedLoopEffectAuthorityDisposition.Deny, result.Decision?.Disposition);
+        Assert.Equal(GovernedLoopEffectAuthorityReason.CapabilityInactive, result.Decision?.Reason);
+    }
+
+    [Fact]
+    public async Task Null_capability_revalidation_pauses_as_ambiguous()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        var result = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
+            new StubEffectCapabilityAdmissionService { Result = null! },
+            new RecordingEffectAuthorityEvidenceStore()).ExecuteAsync(fixture.Request, _ => Task.FromResult(true));
+
+        Assert.False(result.CommitInvoked);
+        Assert.Equal(GovernedLoopEffectAuthorityDisposition.Pause, result.Decision?.Disposition);
+        Assert.Equal(GovernedLoopEffectAuthorityReason.CapabilityAmbiguous, result.Decision?.Reason);
+    }
+
+    [Fact]
+    public async Task Usage_store_exception_pauses_without_invoking_the_continuation()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create(toolEnabledProvider: true);
+        var usage = new RecordingEffectAuthorityUsageStore { Exception = new InvalidOperationException("usage-failure") };
+        var result = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
+            new StubEffectCapabilityAdmissionService
+            {
+                Result = new CapabilityRevalidationResult(true, fixture.Request.RequiredCapabilityPins, "Current.", CapabilityRevalidationStatus.Active),
+            },
+            new RecordingEffectAuthorityEvidenceStore(),
+            usage: usage).ExecuteAsync(WorkspaceRequest(fixture.Request), _ => Task.FromResult(true));
+
+        Assert.False(result.CommitInvoked);
+        Assert.Equal(GovernedLoopEffectAuthorityDisposition.Pause, result.Decision?.Disposition);
+        Assert.Equal(GovernedLoopEffectAuthorityReason.EvidenceUnavailable, result.Decision?.Reason);
+    }
+
+    [Fact]
+    public async Task Trusted_time_failure_is_reported_before_authority_reads()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        var grant = new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution };
+        var boundary = Boundary(grant, new StubEffectCapabilityAdmissionService(), new RecordingEffectAuthorityEvidenceStore(), timeProvider: new ThrowingEffectAuthorityTimeProvider());
+
+        var result = await boundary.ExecuteAsync(fixture.Request, _ => Task.FromResult(true));
+
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable, result.Status);
+        Assert.False(result.CommitInvoked);
+        Assert.Equal(0, grant.Calls);
+    }
+
+    [Fact]
+    public async Task Null_grant_resolution_is_reported_as_authority_unavailable()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        var grant = new StubEffectAuthorityGrantResolver { Resolution = null! };
+        var evidence = new RecordingEffectAuthorityEvidenceStore();
+        var result = await Boundary(
+            grant,
+            new StubEffectCapabilityAdmissionService(),
+            evidence).ExecuteAsync(fixture.Request, _ => Task.FromResult(true));
+
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable, result.Status);
+        Assert.False(result.CommitInvoked);
+        Assert.Empty(evidence.Decisions);
+    }
+
+    [Fact]
+    public async Task Trusted_time_failure_after_capability_revalidation_is_authority_unavailable()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        var result = await Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
+            new StubEffectCapabilityAdmissionService
+            {
+                Result = new CapabilityRevalidationResult(true, [fixture.RequiredPin], "Current.", CapabilityRevalidationStatus.Active),
+            },
+            new RecordingEffectAuthorityEvidenceStore(),
+            timeProvider: new FailingEffectAuthorityTimeProvider(2)).ExecuteAsync(fixture.Request, _ => Task.FromResult(true));
+
+        Assert.Equal(GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable, result.Status);
+        Assert.False(result.CommitInvoked);
+    }
+
     [Fact]
     public async Task Mismatched_node_fails_before_current_reads_persistence_or_continuation()
     {
@@ -707,4 +871,5 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
             [workspacePin],
             new string('f', 64));
     }
+
 }

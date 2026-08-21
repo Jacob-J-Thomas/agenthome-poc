@@ -289,6 +289,132 @@ public sealed class GovernedActuatorCatalogResolverTests
         Assert.Equal(descriptor, captured);
     }
 
+    [Fact]
+    public void Any_platform_is_rejected_for_exact_actuator_resolution()
+    {
+        var entry = Entry("org.example/probe");
+        Assert.True(CapabilityVersion.TryParse("1.0.0", out var hostVersion, out _));
+
+        Assert.Throws<ArgumentException>(() => new GovernedActuatorCatalogResolver(
+            new CountingCatalogStore(Page(null, 7, [entry], null)),
+            new GovernedActuatorOperationRegistry([Operation(entry)]),
+            hostVersion!,
+            CapabilityPlatform.Any));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(257)]
+    public async Task Invalid_catalog_read_bound_is_rejected_without_accessing_protected_ports(int maximumCount)
+    {
+        var entry = Entry("org.example/probe");
+        var store = new CountingCatalogStore(Page(null, 7, [entry], null));
+        var resolver = Resolver(store, new GovernedActuatorOperationRegistry([Operation(entry)]));
+
+        var result = await resolver.ReadAsync(maximumCount);
+
+        Assert.Equal(GovernedActuatorCatalogReadStatus.InvalidRequest, result.Status);
+        Assert.Equal(0, store.ReadCalls);
+    }
+
+    [Fact]
+    public async Task Inactive_and_missing_catalog_entries_are_not_resolvable()
+    {
+        var entry = Entry("org.example/probe");
+        var operation = Operation(entry);
+        var missing = Entry("org.example/other");
+        var inactive = entry with
+        {
+            Lifecycle = entry.Lifecycle with { Enablement = CapabilityEnablementState.Disabled },
+        };
+        var inactiveResult = await Resolver(
+            new ScriptedCatalogStore([Page(null, 7, [inactive], null)]),
+            new GovernedActuatorOperationRegistry([operation])).ResolveAsync(Pin(entry), operation.Descriptor.OperationId);
+        var missingResult = await Resolver(
+            new ScriptedCatalogStore([Page(null, 7, [missing], null)]),
+            new GovernedActuatorOperationRegistry([operation])).ResolveAsync(Pin(entry), operation.Descriptor.OperationId);
+
+        Assert.Equal(GovernedActuatorCatalogResolutionStatus.PinInactive, inactiveResult.Status);
+        Assert.Equal(GovernedActuatorCatalogResolutionStatus.PinMissing, missingResult.Status);
+    }
+
+    [Fact]
+    public async Task Cancelled_catalog_reads_are_not_translated_into_dependency_failures()
+    {
+        var entry = Entry("org.example/probe");
+        var operation = Operation(entry);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var resolver = Resolver(
+            new ScriptedCatalogStore([Page(null, 7, [entry], null)]),
+            new GovernedActuatorOperationRegistry([operation]));
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => resolver.ResolveAsync(Pin(entry), operation.Descriptor.OperationId, cancellation.Token));
+        await Assert.ThrowsAsync<OperationCanceledException>(() => resolver.ReadAsync(8, cancellation.Token));
+    }
+
+    [Theory]
+    [InlineData("https://example.test/effects/probe?query=secret", "provenance")]
+    [InlineData("../probe", "implementation")]
+    public async Task Noncanonical_pin_transport_values_are_rejected_before_catalog_access(string value, string field)
+    {
+        var entry = Entry("org.example/probe");
+        var operation = Operation(entry);
+        var store = new CountingCatalogStore(Page(null, 7, [entry], null));
+        var resolver = Resolver(store, new GovernedActuatorOperationRegistry([operation]));
+        var malformed = field == "provenance"
+            ? Pin(entry) with { Provenance = Pin(entry).Provenance with { SourceUri = value } }
+            : Pin(entry) with { Implementation = Pin(entry).Implementation with { ImplementationId = value } };
+
+        var result = await resolver.ResolveAsync(malformed, operation.Descriptor.OperationId);
+
+        Assert.Equal(GovernedActuatorCatalogResolutionStatus.InvalidRequest, result.Status);
+        Assert.Equal(0, store.ReadCalls);
+    }
+
+    [Fact]
+    public async Task Registry_key_collisions_and_malformed_page_shapes_fail_closed()
+    {
+        var entry = Entry("org.example/probe");
+        var operation = Operation(entry);
+        var duplicateRegistry = new TrackingRegistry([operation.Descriptor, operation.Descriptor]);
+        var registryResult = await Resolver(
+            new CountingCatalogStore(Page(null, 7, [entry], null)),
+            duplicateRegistry).ResolveAsync(Pin(entry), operation.Descriptor.OperationId);
+        Assert.Equal(GovernedActuatorCatalogResolutionStatus.CatalogUnavailable, registryResult.Status);
+    }
+
+    [Fact]
+    public void Registry_rejects_null_oversized_malformed_and_duplicate_registrations()
+    {
+        var entry = Entry("org.example/probe");
+        var operation = Operation(entry);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new GovernedActuatorOperationRegistry([null!]));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new GovernedActuatorOperationRegistry(Enumerable.Repeat<IGovernedActuatorOperation>(operation, 257)));
+        Assert.Throws<ArgumentException>(() => new GovernedActuatorOperationRegistry([operation, operation]));
+        Assert.Throws<ArgumentException>(() => new GovernedActuatorOperationRegistry([
+            new StubActuatorOperation(operation.Descriptor with { ContentHash = new string('a', 64) })]));
+
+        var registry = new GovernedActuatorOperationRegistry([operation]);
+        Assert.False(registry.TryResolve(operation.Descriptor with { ContentHash = new string('a', 64) }, out _));
+    }
+
+    [Fact]
+    public async Task Null_registry_snapshot_fails_closed_before_catalog_access()
+    {
+        var entry = Entry("org.example/probe");
+        var store = new CountingCatalogStore(Page(null, 7, [entry], null));
+        var resolver = Resolver(store, new NullRegistry());
+
+        var resolution = await resolver.ResolveAsync(Pin(entry), "probe/observe");
+        var read = await resolver.ReadAsync(8);
+
+        Assert.Equal(GovernedActuatorCatalogResolutionStatus.CatalogUnavailable, resolution.Status);
+        Assert.Equal(GovernedActuatorCatalogReadStatus.Unavailable, read.Status);
+        Assert.Equal(0, store.ReadCalls);
+    }
+
     private static GovernedActuatorCatalogResolver Resolver(
         ICapabilityCatalogStore store,
         IGovernedActuatorOperationRegistry registry)
