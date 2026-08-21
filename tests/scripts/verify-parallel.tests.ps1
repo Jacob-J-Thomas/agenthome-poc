@@ -205,6 +205,22 @@ catch {
     Assert-Contains -Actual $_.Exception.Message -Expected "unexpected_profiles=[" -Message "A profile without a current declared gate must fail closed."
 }
 
+try {
+    Assert-VerificationRequiredGateSchedule -Phases $declaredRequiredGateProfiles -ExcludedNames @("not-a-checked-in-gate")
+    throw "Expected unknown exclusion failure."
+}
+catch {
+    Assert-Contains -Actual $_.Exception.Message -Expected "unknown_exclusions=[not-a-checked-in-gate]" -Message "An unknown required-gate exclusion must fail closed instead of silently changing the plan."
+}
+
+try {
+    Assert-VerificationRequiredGateSchedule -Phases $declaredRequiredGateProfiles -ExcludedNames @("git-diff-check", "git-diff-check")
+    throw "Expected duplicate exclusion failure."
+}
+catch {
+    Assert-Contains -Actual $_.Exception.Message -Expected "duplicate_exclusions=[git-diff-check]" -Message "A duplicate required-gate exclusion must fail closed instead of silently changing the plan."
+}
+
 $scenarioRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-parallel-verifier-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scenarioRoot | Out-Null
 try {

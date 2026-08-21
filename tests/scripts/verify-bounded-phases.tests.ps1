@@ -178,6 +178,8 @@ Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "St
 Assert-Contains -Actual $verifyScript -Expected '[string]$Configuration = "Release"' -Message "The canonical verifier must default to Release."
 Assert-Contains -Actual $verifyScript -Expected '[int]$MaximumTestWorkers = [Math]::Min(8, [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount * 1.5)))' -Message "The required gate must request bounded logical concurrency above the physical processor count."
 Assert-Contains -Actual $watchdogScript -Expected '[int]$MaximumTestWorkers = [Math]::Min(8, [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount * 1.5)))' -Message "The external watchdog must preserve the bounded logical worker request."
+Assert-Contains -Actual $watchdogScript -Expected '[ValidateSet("Full", "Solution", "StaticContracts")]' -Message "The external watchdog must expose explicit full, solution, and static component modes."
+Assert-Contains -Actual $watchdogScript -Expected '"-VerificationComponent", $VerificationComponent' -Message "The watchdog must forward the selected component to the canonical verifier."
 Assert-Contains -Actual $phaseScript -Expected 'if ($null -ne $commandScriptPath) {' -Message "Windows batch phases must preserve cmd.exe quoting."
 Assert-Contains -Actual $phaseScript -Expected 'elseif ($null -ne $startInfo.PSObject.Properties["ArgumentList"]) {' -Message "Non-batch phases must use ArgumentList when available."
 Assert-Contains -Actual $phaseScript -Expected 'VERIFY_CHILD_TIMEOUT name=$Name' -Message "Sequential timeouts must emit structured watchdog evidence."
@@ -293,6 +295,68 @@ Assert-Contains -Actual $verifyScript -Expected 'kind=reconciliation' -Message "
 Assert-Contains -Actual $verifyScript -Expected '-Name "git-diff-check"' -Message "The canonical verifier must retain git diff validation."
 Assert-Contains -Actual $verifyScript -Expected '-Name "frontend-preflight"' -Message "The canonical verifier must retain frontend validation exactly once behind its npm install dependency."
 Assert-Contains -Actual $verifyScript -Expected 'VERIFY_COMPLETE schema_version=1 status=passed' -Message "A successful standard run must emit exact terminal evidence."
+Assert-Contains -Actual $verifyScript -Expected '$normalPullRequestVerification = $VerificationComponent -eq "Full" -and $VerificationTier -eq "PullRequest" -and -not $BrowserE2EOnly' -Message "The default Full component must retain the canonical preflight path."
+Assert-Contains -Actual $verifyScript -Expected 'function Invoke-StaticVerificationContracts {' -Message "The static component must have one bounded execution owner."
+Assert-True -Condition ($verifyScript.IndexOf(' -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") | Out-Null', [StringComparison]::Ordinal) -lt 0) -Message "Static contract phase completions must remain in the watchdog evidence stream for fan-in authentication."
+Assert-Contains -Actual $verifyScript -Expected 'Write-Output "VERIFY_COMPLETE schema_version=1 component=static-contracts status=passed elapsed_seconds=$elapsedText"' -Message "The static component must emit identity-bearing terminal evidence."
+Assert-Contains -Actual $verifyScript -Expected 'Write-Output "VERIFY_COMPLETE schema_version=1 component=solution status=passed elapsed_seconds=$elapsedText"' -Message "The solution component must emit identity-bearing terminal evidence."
+Assert-Contains -Actual $verifyScript -Expected '$excludedRequiredGateNames = if ($VerificationComponent -eq "Solution") { @("git-diff-check", "format-whitespace", "format-naming-style") } else { @() }' -Message "Only Solution may exclude the three static required-gate profiles; Full and StaticContracts must pass no exclusions."
+Assert-Contains -Actual $verifyScript -Expected '$excludedRequiredGateNames = if ($VerificationComponent -eq "Solution")' -Message "The solution component must explicitly exclude only static required-gate profiles."
+Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases) -ExcludedNames $excludedRequiredGateNames' -Message "Solution scheduling must be validated against the reduced but exact required-gate profile set."
+Assert-True -Condition ($phaseScript.IndexOf('$process.WaitForExit()', [StringComparison]::Ordinal) -lt 0) -Message "Sequential phase execution must not reintroduce an unbounded process wait after timeout or normal exit."
+Assert-Contains -Actual $phaseScript -Expected '$processExitedAfterStop = $process.HasExited -or $process.WaitForExit(5000)' -Message "Timeout cleanup must confirm process exit only through a bounded post-kill wait."
+Assert-Contains -Actual $phaseScript -Expected '[Threading.Tasks.Task]::WaitAll($captureTasks, $TimeoutMilliseconds)' -Message "Redirected output drain must remain bounded even when descendants retain inherited pipe handles."
+
+$phaseBehaviorRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-phase-output-" + [Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $phaseBehaviorRoot | Out-Null
+try {
+    $blockedOutput = [Threading.Tasks.TaskCompletionSource[string]]::new()
+    $blockedError = [Threading.Tasks.TaskCompletionSource[string]]::new()
+    $blockedCaptureLog = Join-Path $phaseBehaviorRoot "blocked-capture.log"
+    Assert-True -Condition (-not (Write-VerificationPhaseCapturedOutput -OutputPath $blockedCaptureLog -StandardOutputTask $blockedOutput.Task -StandardErrorTask $blockedError.Task -TimeoutMilliseconds 50)) -Message "Sequential phase output capture must return within its bounded drain window when inherited pipe handles remain open."
+    Assert-Contains -Actual (Get-Content -LiteralPath $blockedCaptureLog -Raw) -Expected "did not close within 50 milliseconds" -Message "A bounded output-drain failure must retain actionable diagnostics."
+
+    $outputScript = Join-Path $phaseBehaviorRoot "output.ps1"
+    [IO.File]::WriteAllText($outputScript, "Write-Output 'stdout-evidence'; [Console]::Error.WriteLine('stderr-evidence')", [Text.UTF8Encoding]::new($false))
+    $outputLog = Join-Path $phaseBehaviorRoot "output.log"
+    Invoke-VerificationPhase -Name "phase-output" -FileName $powerShellExecutable -Arguments @("-NoProfile", "-File", $outputScript) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $outputLog
+    $outputText = Get-Content -LiteralPath $outputLog -Raw
+    Assert-Contains -Actual $outputText -Expected "stdout-evidence" -Message "Sequential phase output capture must retain stdout."
+    Assert-Contains -Actual $outputText -Expected "stderr-evidence" -Message "Sequential phase output capture must retain stderr."
+
+    $silentScript = Join-Path $phaseBehaviorRoot "silent.ps1"
+    [IO.File]::WriteAllText($silentScript, "exit 0", [Text.UTF8Encoding]::new($false))
+    $silentLog = Join-Path $phaseBehaviorRoot "silent.log"
+    Invoke-VerificationPhase -Name "phase-silent" -FileName $powerShellExecutable -Arguments @("-NoProfile", "-File", $silentScript) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $silentLog
+    Assert-True -Condition ((Get-Item -LiteralPath $silentLog).Length -eq 0) -Message "A successful silent sequential phase must retain a zero-byte diagnostic log."
+
+    $failedScript = Join-Path $phaseBehaviorRoot "failed.ps1"
+    [IO.File]::WriteAllText($failedScript, "Write-Output 'failure-evidence'; exit 7", [Text.UTF8Encoding]::new($false))
+    $failedLog = Join-Path $phaseBehaviorRoot "failed.log"
+    try {
+        Invoke-VerificationPhase -Name "phase-failed" -FileName $powerShellExecutable -Arguments @("-NoProfile", "-File", $failedScript) -TimeoutSeconds 10 -WorkingDirectory $repoRoot -OutputPath $failedLog
+        throw "Expected nonzero phase failure."
+    }
+    catch {
+        Assert-Contains -Actual (Get-Content -LiteralPath $failedLog -Raw) -Expected "failure-evidence" -Message "A failed sequential phase must retain available diagnostics."
+    }
+
+    $timeoutScript = Join-Path $phaseBehaviorRoot "timeout.ps1"
+    [IO.File]::WriteAllText($timeoutScript, "Write-Output 'timeout-evidence'; Start-Sleep -Seconds 5", [Text.UTF8Encoding]::new($false))
+    $timeoutLog = Join-Path $phaseBehaviorRoot "timeout.log"
+    try {
+        Invoke-VerificationPhase -Name "phase-timeout" -FileName $powerShellExecutable -Arguments @("-NoProfile", "-File", $timeoutScript) -TimeoutSeconds 1 -WorkingDirectory $repoRoot -OutputPath $timeoutLog
+        throw "Expected sequential phase timeout."
+    }
+    catch {
+        Assert-Contains -Actual (Get-Content -LiteralPath $timeoutLog -Raw) -Expected "timeout-evidence" -Message "A timed-out sequential phase must retain available diagnostics."
+    }
+}
+finally {
+    Reset-VerificationPhaseState
+    Remove-Item -LiteralPath $phaseBehaviorRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Assert-Contains -Actual $gitIgnore -Expected 'tests/VerificationResults/' -Message "Generated verifier diagnostics must remain uploadable without dirtying a local worktree."
 Assert-Contains -Actual $gitIgnore -Expected 'tests/QualificationResults/' -Message "Generated qualification diagnostics must remain uploadable without dirtying a local worktree."
 Assert-Contains -Actual $coverageEvidenceScript -Expected 'if (!fileLines.TryGetValue(line.Key, out existingHits) || line.Value > existingHits)' -Message "Split coverage must merge duplicate source lines by maximum hits in the authenticated reduction owner."
@@ -311,14 +375,39 @@ Assert-Contains -Actual $verifyWorkflow -Expected "./scripts/verify-with-watchdo
 Assert-Contains -Actual $verifyWorkflow -Expected "github.event.pull_request.draft == false" -Message "Full verification must be a promotion gate for merge candidates and main."
 Assert-Contains -Actual $verifyWorkflow -Expected "types: [opened, synchronize, reopened, ready_for_review, edited]" -Message "Every non-draft metadata edit must rerun substantive verification under the protected context."
 Assert-Contains -Actual $verifyWorkflow -Expected "name: verify" -Message "Verification must always emit the exact protected context name."
-Assert-Contains -Actual $verifyWorkflow -Expected 'group: verify-${{ github.event.pull_request.number || github.ref }}' -Message "A newer promotion edge must cancel superseded full verification work."
+Assert-Contains -Actual $verifyWorkflow -Expected 'group: verify-solution-${{ github.event.pull_request.number || github.ref }}' -Message "A newer promotion edge must cancel superseded solution verification work."
+Assert-Contains -Actual $verifyWorkflow -Expected 'group: verify-contracts-${{ github.event.pull_request.number || github.ref }}' -Message "A newer promotion edge must cancel superseded contract verification work."
 Assert-Contains -Actual $verifyWorkflow -Expected "cancel-in-progress: true" -Message "Full verification must release its Windows runner when superseded."
-$verifyJobIndex = $verifyWorkflow.IndexOf("  verify:", [StringComparison]::Ordinal)
-$verifyJobConditionIndex = $verifyWorkflow.IndexOf("    if:", $verifyJobIndex, [StringComparison]::Ordinal)
-$verifyJobConcurrencyIndex = $verifyWorkflow.IndexOf("    concurrency:", $verifyJobIndex, [StringComparison]::Ordinal)
-Assert-True -Condition ($verifyJobIndex -ge 0 -and $verifyJobConditionIndex -gt $verifyJobIndex -and $verifyJobConcurrencyIndex -gt $verifyJobConditionIndex) -Message "Full verification cancellation must remain job-scoped behind non-draft eligibility."
+$solutionJobIndex = $verifyWorkflow.IndexOf("  verify-solution:", [StringComparison]::Ordinal)
+$solutionJobConditionIndex = $verifyWorkflow.IndexOf("    if:", $solutionJobIndex, [StringComparison]::Ordinal)
+$solutionJobConcurrencyIndex = $verifyWorkflow.IndexOf("    concurrency:", $solutionJobIndex, [StringComparison]::Ordinal)
+$contractJobIndex = $verifyWorkflow.IndexOf("  verify-contracts:", [StringComparison]::Ordinal)
+$contractJobConditionIndex = $verifyWorkflow.IndexOf("    if:", $contractJobIndex, [StringComparison]::Ordinal)
+$contractJobConcurrencyIndex = $verifyWorkflow.IndexOf("    concurrency:", $contractJobIndex, [StringComparison]::Ordinal)
+$fanInJobIndex = $verifyWorkflow.IndexOf("  verify:", [StringComparison]::Ordinal)
+$fanInJobConditionIndex = $verifyWorkflow.IndexOf("    if:", $fanInJobIndex, [StringComparison]::Ordinal)
+$fanInNeedsIndex = $verifyWorkflow.IndexOf("    needs: [verify-solution, verify-contracts]", $fanInJobIndex, [StringComparison]::Ordinal)
+Assert-True -Condition ($solutionJobIndex -ge 0 -and $solutionJobConditionIndex -gt $solutionJobIndex -and $solutionJobConcurrencyIndex -gt $solutionJobConditionIndex -and $contractJobIndex -gt $solutionJobIndex -and $contractJobConditionIndex -gt $contractJobIndex -and $contractJobConcurrencyIndex -gt $contractJobConditionIndex -and $fanInJobIndex -gt $contractJobIndex -and $fanInJobConditionIndex -gt $fanInJobIndex -and $fanInNeedsIndex -gt $fanInJobConditionIndex) -Message "Solution and contract cancellation must remain job-scoped behind non-draft eligibility, with a final fan-in after both children."
 Assert-True -Condition ($verifyWorkflow.IndexOf("`nconcurrency:", [StringComparison]::Ordinal) -lt 0) -Message "Full verification must not use workflow-scoped cancellation for ineligible metadata edits."
 Assert-True -Condition ($verifyWorkflow.IndexOf("-SkipCoverage", [StringComparison]::Ordinal) -lt 0) -Message "Promotion verification must retain exact coverage collection and reduction."
+Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900 -VerificationComponent Solution" -Message "The solution child must own build, lanes, inventory, and coverage behind the unchanged 900-second watchdog."
+Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600 -VerificationComponent StaticContracts" -Message "The static child must own all static contracts behind a bounded 600-second watchdog."
+Assert-Contains -Actual $verifyWorkflow -Expected "uses: actions/download-artifact@v7" -Message "The protected fan-in must transport child artifacts explicitly."
+Assert-Contains -Actual $verifyWorkflow -Expected 'name: verification-solution-diagnostics-${{ github.run_attempt }}' -Message "The solution evidence artifact must bind to the current workflow attempt."
+Assert-Contains -Actual $verifyWorkflow -Expected 'name: verification-contract-diagnostics-${{ github.run_attempt }}' -Message "The static evidence artifact must bind to the current workflow attempt."
+Assert-Contains -Actual $verifyWorkflow -Expected 'name: verification-solution-receipt-${{ github.run_attempt }}' -Message "The protected solution receipt must bind to the current workflow attempt."
+Assert-Contains -Actual $verifyWorkflow -Expected 'name: verification-contract-receipt-${{ github.run_attempt }}' -Message "The protected static receipt must bind to the current workflow attempt."
+foreach ($solutionReceiptPath in @("verification-component-evidence.json", "verification-component-manifest.json", "verification-watchdog-evidence.json", "watchdog.log", "required-test-lanes.json", "required-test-partition.json", "required-execution-tests.json", "required-test-report.json", "coverage-manifest.json", "coverage-summary.json", "**/*.trx")) {
+    Assert-Contains -Actual $verifyWorkflow -Expected "tests/VerificationResults/$solutionReceiptPath" -Message "The solution receipt must transport '$solutionReceiptPath'."
+}
+foreach ($staticReceiptPath in @("verify-sdk-diagnostics.tests.ps1.log", "verify-preflight-overlap.tests.ps1.log", "verify-coverage.tests.ps1.log", "verify-bounded-phases.tests.ps1.log", "verify-parallel.tests.ps1.log", "verify-test-inventory.tests.ps1.log", "verify-watchdog.tests.ps1.log", "verify-promotion-fan-in.tests.ps1.log", "frontend-preflight.log", "restore-static.log", "format-whitespace.log", "format-naming-style.log", "git-diff-check.log")) {
+    Assert-Contains -Actual $verifyWorkflow -Expected "tests/VerificationResults/Logs/$staticReceiptPath" -Message "The static receipt must transport '$staticReceiptPath'."
+}
+Assert-Contains -Actual $verifyWorkflow -Expected "scripts/verify-promotion-fan-in.ps1" -Message "The protected fan-in must delegate evidence authentication to the repository verifier contract."
+Assert-Contains -Actual $verifyWorkflow -Expected '-ExpectedRunId ''${{ github.run_id }}'' -ExpectedRunAttempt ''${{ github.run_attempt }}'' -SolutionResult ''${{ needs.verify-solution.result }}'' -StaticResult ''${{ needs.verify-contracts.result }}''' -Message "The protected fan-in must authenticate the current run, attempt, and both child results."
+Assert-Contains -Actual $verifyWorkflow -Expected 'name: verification-solution-receipt-${{ github.run_attempt }}' -Message "The protected fan-in must download the small solution receipt rather than the full diagnostics artifact."
+Assert-Contains -Actual $verifyWorkflow -Expected 'name: verification-contract-receipt-${{ github.run_attempt }}' -Message "The protected fan-in must download the small static receipt rather than the full diagnostics artifact."
+Assert-Contains -Actual $verifyWorkflow -Expected 'ref: ${{ github.sha }}' -Message "The protected fan-in must check out the exact reviewed SHA before running its verifier."
 Assert-Contains -Actual $browserWorkflow -Expected "github.event.pull_request.draft == false" -Message "Installed-browser verification must be a promotion gate for merge candidates and main."
 Assert-Contains -Actual $browserWorkflow -Expected "types: [opened, synchronize, reopened, ready_for_review, edited]" -Message "Every non-draft metadata edit must rerun installed-browser verification under the protected context."
 Assert-Contains -Actual $browserWorkflow -Expected "name: browser-e2e" -Message "Installed-browser verification must always emit the exact protected context name."
@@ -368,10 +457,11 @@ foreach ($workflowText in @($verifyWorkflow, $browserWorkflow, $qualificationWor
     Assert-True -Condition ($workflowText.IndexOf("metadata-edit", [StringComparison]::Ordinal) -lt 0) -Message "No workflow may replace a protected context with an unevaluated skipped metadata name."
 }
 Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./scripts/verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "Standard CI cannot bypass the watchdog."
-Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900" -Message "Promotion must have one explicit bounded fifteen-minute certification window."
+Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900" -Message "Promotion must have one explicit bounded fifteen-minute certification window for the complete solution child."
 Assert-Contains -Actual $verifyWorkflow -Expected "timeout-minutes: 20" -Message "Workflow setup and diagnostic upload must remain bounded outside the measured promotion child."
+Assert-Contains -Actual $verifyWorkflow -Expected "timeout-minutes: 15" -Message "The static child job must leave bounded setup and receipt-upload margin around its 600-second verifier."
 Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./tests/scripts/", [StringComparison]::Ordinal) -lt 0) -Message "Repository script tests must execute inside the measured verifier child."
-foreach ($contractScript in @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1")) {
+foreach ($contractScript in @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1", "verify-promotion-fan-in.tests.ps1")) {
     Assert-Contains -Actual $verifyScript -Expected $contractScript -Message "The measured verifier must own '$contractScript'."
 }
 Assert-Contains -Actual $stressWorkflow -Expected "./tests/scripts/verify-coverage.tests.ps1" -Message "Scheduled stress verification must retain coverage merger contracts."

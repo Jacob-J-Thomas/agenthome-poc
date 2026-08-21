@@ -17,14 +17,18 @@ function Test-VerificationDeadlineExceeded {
 function Get-VerificationCompletionMarkerCount {
     param(
         [AllowEmptyString()]
-        [string]$StandardOutput
+        [string]$StandardOutput,
+
+        [ValidateSet("", "solution", "static-contracts")]
+        [string]$ExpectedComponent = ""
     )
 
     if ([string]::IsNullOrEmpty($StandardOutput)) {
         return 0
     }
 
-    $pattern = '(?m)^VERIFY_COMPLETE schema_version=1 status=passed elapsed_seconds=[0-9]+(?:\.[0-9]+)?\r?$'
+    $componentText = if ([string]::IsNullOrWhiteSpace($ExpectedComponent)) { "" } else { " component=$ExpectedComponent" }
+    $pattern = "(?m)^VERIFY_COMPLETE schema_version=1$componentText status=passed elapsed_seconds=[0-9]+(?:\.[0-9]+)?\r?`$"
     return [regex]::Matches($StandardOutput, $pattern).Count
 }
 

@@ -63,6 +63,22 @@ function Get-VerificationPreflightNestedProcessContractWeight {
     return $ResourceCapacity
 }
 
+function Get-VerificationPreflightNestedProcessContractScripts {
+    param(
+        [switch]$RunningOnWindows
+    )
+
+    $scripts = @(
+        "verify-preflight-overlap.tests.ps1",
+        "verify-parallel.tests.ps1"
+    )
+    if ($RunningOnWindows) {
+        return @("verify-sdk-diagnostics.tests.ps1") + $scripts
+    }
+
+    return $scripts
+}
+
 function Assert-VerificationPreflightContractClassification {
     param(
         [Parameter(Mandatory = $true)]
@@ -158,11 +174,20 @@ function Get-VerificationRequiredGateScheduleProfile {
 function Assert-VerificationRequiredGateSchedule {
     param(
         [Parameter(Mandatory = $true)]
-        [object[]]$Phases
+        [object[]]$Phases,
+
+        [string[]]$ExcludedNames = @()
     )
 
     $declaredNames = @($Phases | ForEach-Object { [string]$_.Name })
-    $profileNames = @($script:VerificationRequiredGateScheduleProfiles | ForEach-Object { [string]$_.Name })
+    $knownProfileNames = @($script:VerificationRequiredGateScheduleProfiles | ForEach-Object { [string]$_.Name })
+    $duplicateExclusions = @($ExcludedNames | Group-Object -CaseSensitive | Where-Object Count -gt 1 | ForEach-Object Name | Sort-Object)
+    $unknownExclusions = @($ExcludedNames | Where-Object { $candidate = $_; $knownProfileNames -notcontains $candidate } | Sort-Object -Unique)
+    if ($duplicateExclusions.Count -gt 0 -or $unknownExclusions.Count -gt 0) {
+        throw "Required verification gate exclusions must be unique and match checked-in profiles exactly. duplicate_exclusions=[$($duplicateExclusions -join ',')] unknown_exclusions=[$($unknownExclusions -join ',')]"
+    }
+
+    $profileNames = @($script:VerificationRequiredGateScheduleProfiles | Where-Object { $ExcludedNames -notcontains $_.Name } | ForEach-Object { [string]$_.Name })
     $duplicateProfiles = @($profileNames | Group-Object -CaseSensitive | Where-Object Count -gt 1 | ForEach-Object Name | Sort-Object)
     $duplicatePhases = @($declaredNames | Group-Object -CaseSensitive | Where-Object Count -gt 1 | ForEach-Object Name | Sort-Object)
     $missingProfiles = @($declaredNames | Where-Object { $candidate = $_; @($profileNames | Where-Object { $_ -ceq $candidate }).Count -eq 0 } | Sort-Object)

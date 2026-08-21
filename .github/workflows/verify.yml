@@ -11,11 +11,11 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    name: verify
+  verify-solution:
+    name: verify-solution
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     concurrency:
-      group: verify-${{ github.event.pull_request.number || github.ref }}
+      group: verify-solution-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
     runs-on: windows-latest
     # Tool setup and diagnostic upload are outside the repository verifier budget.
@@ -32,24 +32,136 @@ jobs:
         with:
           global-json-file: global.json
 
-      - name: Install Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-          package-manager-cache: false
-
       - name: Verify solution
         shell: pwsh
-        run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900
+        run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900 -VerificationComponent Solution
 
       - name: Upload verification diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: verification-diagnostics-${{ github.run_attempt }}
+          name: verification-solution-diagnostics-${{ github.run_attempt }}
           path: |
             tests/VerificationResults/**
             tests/**/TestResults/**/*.trx
             tests/**/TestResults/**/coverage.cobertura.xml
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload solution receipt
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: verification-solution-receipt-${{ github.run_attempt }}
+          path: |
+            tests/VerificationResults/verification-component-evidence.json
+            tests/VerificationResults/verification-component-manifest.json
+            tests/VerificationResults/verification-watchdog-evidence.json
+            tests/VerificationResults/watchdog.log
+            tests/VerificationResults/required-test-lanes.json
+            tests/VerificationResults/required-test-partition.json
+            tests/VerificationResults/required-execution-tests.json
+            tests/VerificationResults/required-test-report.json
+            tests/VerificationResults/coverage-manifest.json
+            tests/VerificationResults/coverage-summary.json
+            tests/VerificationResults/**/*.trx
+          if-no-files-found: error
+          retention-days: 30
+
+  verify-contracts:
+    name: verify-contracts
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    concurrency:
+      group: verify-contracts-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    runs-on: windows-latest
+    # Checkout, SDK/Node setup, and diagnostic upload are outside the measured 600-second child.
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Verify static contracts
+        shell: pwsh
+        run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600 -VerificationComponent StaticContracts
+
+      - name: Upload contract diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: verification-contract-diagnostics-${{ github.run_attempt }}
+          path: |
+            tests/VerificationResults/**
+            tests/**/TestResults/**/*.trx
+            tests/**/TestResults/**/coverage.cobertura.xml
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload contract receipt
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: verification-contract-receipt-${{ github.run_attempt }}
+          path: |
+            tests/VerificationResults/verification-component-evidence.json
+            tests/VerificationResults/verification-component-manifest.json
+            tests/VerificationResults/verification-watchdog-evidence.json
+            tests/VerificationResults/watchdog.log
+            tests/VerificationResults/Logs/verify-sdk-diagnostics.tests.ps1.log
+            tests/VerificationResults/Logs/verify-preflight-overlap.tests.ps1.log
+            tests/VerificationResults/Logs/verify-coverage.tests.ps1.log
+            tests/VerificationResults/Logs/verify-bounded-phases.tests.ps1.log
+            tests/VerificationResults/Logs/verify-parallel.tests.ps1.log
+            tests/VerificationResults/Logs/verify-test-inventory.tests.ps1.log
+            tests/VerificationResults/Logs/verify-watchdog.tests.ps1.log
+            tests/VerificationResults/Logs/verify-promotion-fan-in.tests.ps1.log
+            tests/VerificationResults/Logs/frontend-preflight.log
+            tests/VerificationResults/Logs/restore-static.log
+            tests/VerificationResults/Logs/format-whitespace.log
+            tests/VerificationResults/Logs/format-naming-style.log
+            tests/VerificationResults/Logs/git-diff-check.log
+          if-no-files-found: error
+          retention-days: 30
+
+  verify:
+    name: verify
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    needs: [verify-solution, verify-contracts]
+    runs-on: ubuntu-latest
+    # The protected fan-in downloads only the small authenticated receipt bundles; full diagnostics remain separate.
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out exact reviewed SHA
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download solution evidence
+        uses: actions/download-artifact@v7
+        with:
+          name: verification-solution-receipt-${{ github.run_attempt }}
+          path: fan-in/solution
+
+      - name: Download static evidence
+        uses: actions/download-artifact@v7
+        with:
+          name: verification-contract-receipt-${{ github.run_attempt }}
+          path: fan-in/static
+
+      - name: Authenticate complete verification evidence
+        shell: pwsh
+        run: ./scripts/verify-promotion-fan-in.ps1 -SolutionArtifactRoot ./fan-in/solution -StaticArtifactRoot ./fan-in/static -ExpectedHead '${{ github.sha }}' -ExpectedRunId '${{ github.run_id }}' -ExpectedRunAttempt '${{ github.run_attempt }}' -SolutionResult '${{ needs.verify-solution.result }}' -StaticResult '${{ needs.verify-contracts.result }}'

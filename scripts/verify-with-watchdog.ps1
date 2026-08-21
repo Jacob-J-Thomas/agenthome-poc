@@ -10,6 +10,9 @@ param(
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
 
+    [ValidateSet("Full", "Solution", "StaticContracts")]
+    [string]$VerificationComponent = "Full",
+
     [ValidateRange(1, 8)]
     [int]$MaximumTestWorkers = [Math]::Min(8, [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount * 1.5))),
 
@@ -22,6 +25,11 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $verificationMode = if ($Qualification) { "qualification" } else { "promotion" }
+$verificationComponentName = switch ($VerificationComponent) {
+    "Full" { "full"; break }
+    "Solution" { "solution"; break }
+    "StaticContracts" { "static-contracts"; break }
+}
 $resultsRoot = Join-Path $repoRoot $(if ($Qualification) { "tests\QualificationResults" } else { "tests\VerificationResults" })
 $watchdogLogPath = Join-Path $resultsRoot "watchdog.log"
 $powerShellExecutable = (Get-Process -Id $PID).Path
@@ -30,11 +38,22 @@ $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 . (Join-Path $PSScriptRoot "verification-deadline.ps1")
 
+function Assert-VerificationWatchdogReceiptInput {
+    param([string]$Path, [string]$Description)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Verification watchdog cannot authenticate its successful receipt because the $Description is missing: $Path"
+    }
+}
+
 if ($Qualification -and ([string]::IsNullOrWhiteSpace($BaseCommit) -or [string]::IsNullOrWhiteSpace($HeadCommit))) {
     throw "Qualification requires exact -BaseCommit and -HeadCommit values."
 }
 if (-not $Qualification -and (-not [string]::IsNullOrWhiteSpace($BaseCommit) -or -not [string]::IsNullOrWhiteSpace($HeadCommit))) {
     throw "Commit selection is valid only with -Qualification."
+}
+if ($Qualification -and $VerificationComponent -ne "Full") {
+    throw "A non-Full verification component is valid only for promotion verification."
 }
 
 $arguments = @("-NoProfile")
@@ -50,7 +69,7 @@ if ($Qualification) {
     $arguments += @("-BaseCommit", $BaseCommit, "-HeadCommit", $HeadCommit, "-MaximumWorkers", ([Math]::Min(4, $MaximumTestWorkers)).ToString([Globalization.CultureInfo]::InvariantCulture))
 }
 else {
-    $arguments += @("-MaximumTestWorkers", $MaximumTestWorkers.ToString([Globalization.CultureInfo]::InvariantCulture))
+    $arguments += @("-MaximumTestWorkers", $MaximumTestWorkers.ToString([Globalization.CultureInfo]::InvariantCulture), "-VerificationComponent", $VerificationComponent)
 }
 
 $startInfo = New-VerificationProcessStartInfo -FileName $powerShellExecutable -Arguments $arguments -WorkingDirectory $repoRoot
@@ -99,11 +118,41 @@ try {
         [Console]::Error.WriteLine($standardError.TrimEnd())
     }
 
-    $completionMarkerCount = Get-VerificationCompletionMarkerCount -StandardOutput $standardOutput
+    $expectedComponent = if ($Qualification -or $VerificationComponent -eq "Full") { "" } else { $verificationComponentName }
+    $completionMarkerCount = Get-VerificationCompletionMarkerCount -StandardOutput $standardOutput -ExpectedComponent $expectedComponent
     $childTimedOut = [regex]::IsMatch($combinedOutput, '(?m)^VERIFY_CHILD_TIMEOUT name=')
     $elapsedTicks = if ($deadlineExceeded) { $deadlineTicks + 1L } else { $stopwatch.Elapsed.Ticks }
     $exitCode = if ($deadlineExceeded) { $null } else { $process.ExitCode }
     $disposition = Get-VerificationDeadlineDisposition -ElapsedTicks $elapsedTicks -DeadlineTicks $deadlineTicks -ProcessExited $process.HasExited -ExitCode $exitCode -CompletionMarkerCount $completionMarkerCount -ChildTimedOut $childTimedOut -CancellationRequested $cancellationRequested
+    if ($disposition.Succeeded -and -not $Qualification -and $VerificationComponent -ne "Full") {
+        Assert-VerificationWatchdogReceiptInput -Path $watchdogLogPath -Description "watchdog log"
+        $componentEvidencePath = Join-Path $resultsRoot "verification-component-evidence.json"
+        $componentManifestPath = Join-Path $resultsRoot "verification-component-manifest.json"
+        Assert-VerificationWatchdogReceiptInput -Path $componentEvidencePath -Description "component evidence"
+        Assert-VerificationWatchdogReceiptInput -Path $componentManifestPath -Description "component manifest"
+        $repositoryHead = (& git -C $repoRoot rev-parse HEAD 2>$null | Select-Object -First 1).Trim()
+        if ([string]::IsNullOrWhiteSpace($repositoryHead)) {
+            throw "Verification watchdog could not resolve the repository HEAD for its authenticated receipt."
+        }
+        $watchdogEvidencePath = Join-Path $resultsRoot "verification-watchdog-evidence.json"
+        $watchdogEvidence = [ordered]@{
+            schemaVersion = 1
+            component = $verificationComponentName
+            mode = $verificationMode
+            repositoryHead = $repositoryHead
+            githubRunId = $env:GITHUB_RUN_ID
+            githubRunAttempt = $env:GITHUB_RUN_ATTEMPT
+            deadlineSeconds = $DeadlineSeconds
+            elapsedSeconds = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)
+            exitCode = [int]$exitCode
+            completionMarkerCount = $completionMarkerCount
+            status = "passed"
+            watchdogLogSha256 = (Get-FileHash -LiteralPath $watchdogLogPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            componentEvidenceSha256 = (Get-FileHash -LiteralPath $componentEvidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            componentManifestSha256 = (Get-FileHash -LiteralPath $componentManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        [IO.File]::WriteAllText($watchdogEvidencePath, ($watchdogEvidence | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    }
     Write-Output "VERIFY_WATCHDOG_COMPLETE schema_version=1 mode=$verificationMode status=$($disposition.Code) elapsed_seconds=$([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) marker_count=$completionMarkerCount child_exit_code=$($process.ExitCode) log=$watchdogLogPath"
     if (-not $disposition.Succeeded) {
         throw "Verification watchdog failed closed: $($disposition.Code). $($disposition.Message) Log: $watchdogLogPath"
