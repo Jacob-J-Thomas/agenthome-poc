@@ -91,7 +91,7 @@ public sealed class GovernedWorkspaceActionFactoryTests
             trust,
             transaction,
             registry,
-            new DirectAuthorityBoundary(),
+            new DirectAuthorityBoundary(transaction),
             new FixedTimeProvider(WorkspaceToolAuthorityTestFixture.Now.AddMinutes(1)));
         var executor = new GovernedLoopWorkspaceActionExecutor(facade);
         var node = fixture.Plan.Nodes.Single(candidate => string.Equals(candidate.NodeId, WorkspaceToolAuthorityTestFixture.NodeId, StringComparison.Ordinal));
@@ -262,9 +262,9 @@ public sealed class GovernedWorkspaceActionFactoryTests
         }
     }
 
-    private sealed class DirectAuthorityBoundary : IGovernedLoopEffectAuthorityDecisionBoundary
+    private sealed class DirectAuthorityBoundary(ICapabilityAuthorityTransaction authorityTransaction) : IGovernedLoopEffectAuthorityDecisionBoundary
     {
-        public ICapabilityAuthorityTransaction AuthorityTransaction => throw new InvalidOperationException("The workspace action factory test boundary has no production workspace authority transaction.");
+        public ICapabilityAuthorityTransaction AuthorityTransaction { get; } = authorityTransaction;
 
         public Task<GovernedLoopEffectAuthorityExecutionResult<TResult>> ExecuteAsync<TResult>(
             GovernedLoopEffectAuthorityRequest request,
