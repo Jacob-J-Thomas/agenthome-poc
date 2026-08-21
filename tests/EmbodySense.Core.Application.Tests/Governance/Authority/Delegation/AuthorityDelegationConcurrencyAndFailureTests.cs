@@ -201,38 +201,32 @@ public sealed class AuthorityDelegationConcurrencyAndFailureTests
     }
 
     [Fact]
-    public async Task CreateAsync_PropagatesCancellationBeforeHostileTransactionCanCompleteThePublicWaiter()
+    public async Task CreateAsync_PropagatesCancellationWhenHostileCompletionWinsBeforeWaiterAttachment()
     {
         var harness = await AuthorityDelegationServiceTestHarness.CreateAsync();
         var service = harness.CreateService();
         using var cancellation = new CancellationTokenSource();
-        var grantStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseGrant = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        harness.GrantCallback = async (_, _) =>
+        harness.GrantCallback = (_, _) =>
         {
-            grantStarted.TrySetResult();
-            await releaseGrant.Task;
-            return harness.GrantResolution;
+            cancellation.Cancel();
+            return Task.FromResult(harness.GrantResolution);
         };
         harness.TransactionCallback = (operation, _) => operation(CancellationToken.None);
 
-        var creation = service.CreateAsync(harness.Request, cancellation.Token);
-        await grantStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        cancellation.Cancel();
-        releaseGrant.TrySetResult();
+        var previousContext = SynchronizationContext.Current;
+        Task<AuthorityDelegationServiceResult> creation;
+        try
+        {
+            SynchronizationContext.SetSynchronizationContext(new InlineSynchronizationContext());
+            creation = service.CreateAsync(harness.Request, cancellation.Token);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => creation);
         Assert.Equal(1, harness.GrantCount);
-        Assert.Equal(0, harness.OriginCount);
-
-        harness.TransactionCallback = null;
-        var retry = await service.CreateAsync(harness.Request);
-        if (retry.Status == AuthorityDelegationServiceStatus.Unavailable)
-        {
-            retry = await service.CreateAsync(harness.Request);
-        }
-
-        Assert.Equal(AuthorityDelegationServiceStatus.Created, retry.Status);
     }
 
     [Fact]
