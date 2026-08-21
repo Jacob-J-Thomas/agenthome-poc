@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 
 $script:VerificationRequiredGateResourceCapacity = 12
-$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 3
+$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 2
 $script:VerificationRequiredGateMaximumCpuBoundWorkers = 1
 $script:VerificationRequiredGateScheduleProfiles = @(
     # One VSTest process per assembly lets the test runner schedule isolated classes itself and
@@ -99,7 +99,9 @@ function Get-VerificationRequiredGateMaximumWorkers {
         [int]$HardwareProcessorCount
     )
 
-    $actualProcessCeiling = [Math]::Min(4, [Math]::Min($script:VerificationRequiredGateResourceCapacity, $HardwareProcessorCount))
+    # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422: keep the outer process load below the four-core hosted runner while retaining twelve logical units.
+    # Exact run 32451304219 proved that three internally parallel assemblies still starve Persistence; reserve the third process for CPU-bound or ordinary backfill.
+    $actualProcessCeiling = [Math]::Min(3, [Math]::Min($script:VerificationRequiredGateResourceCapacity, $HardwareProcessorCount))
     return [Math]::Min($MaximumTestWorkers, $actualProcessCeiling)
 }
 

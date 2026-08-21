@@ -162,21 +162,14 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
         using var cancellation = new CancellationTokenSource();
         using var registration = owner.RegisterActiveAttempt("run-shared-owner", cancellation);
-        var confirmation = Task.Run(async () =>
-        {
-            while (!cancellation.IsCancellationRequested)
-            {
-                await Task.Delay(10);
-            }
-
-            Assert.True(registration.TryConfirmProviderInterruption(cancellation.Token));
-        });
+        var confirmation = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var providerObservation = cancellation.Token.Register(() => confirmation.TrySetResult(registration.TryConfirmProviderInterruption(cancellation.Token)));
 
         var result = await requester.RequestCancellationAsync("run-shared-owner", "cancel-shared-owner");
-        await confirmation;
 
-        Assert.True(cancellation.IsCancellationRequested);
         Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, result.Status);
+        Assert.True(await confirmation.Task);
+        Assert.True(cancellation.IsCancellationRequested);
         Assert.StartsWith("owner-", result.OwnerId);
         Assert.Equal(Environment.ProcessId, result.OwnerProcessId);
     }
@@ -364,21 +357,14 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
             });
         await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
         requester.RelinquishWorkspaceHost();
-        var confirmation = Task.Run(async () =>
-        {
-            while (!cancellation.IsCancellationRequested)
-            {
-                await Task.Delay(10);
-            }
-
-            Assert.True(registration.TryConfirmProviderInterruption(cancellation.Token));
-        });
+        var confirmation = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var providerObservation = cancellation.Token.Register(() => confirmation.TrySetResult(registration.TryConfirmProviderInterruption(cancellation.Token)));
 
         var result = await requester.RequestCancellationAsync("run-null-authentication", "cancel-after-null-authentication");
-        await confirmation;
 
         Assert.Equal((int)CustomLoopAttemptCancellationStatus.Invalid, invalid["status"]!.GetValue<int>());
         Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, result.Status);
+        Assert.True(await confirmation.Task);
     }
 
     [Fact]
@@ -410,20 +396,13 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         await incomplete.WriteAsync(new byte[] { 1 });
         await incomplete.FlushAsync();
         await Task.Delay(TimeSpan.FromSeconds(1.2));
-        var confirmation = Task.Run(async () =>
-        {
-            while (!cancellation.IsCancellationRequested)
-            {
-                await Task.Delay(10);
-            }
-
-            Assert.True(registration.TryConfirmProviderInterruption(cancellation.Token));
-        });
+        var confirmation = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var providerObservation = cancellation.Token.Register(() => confirmation.TrySetResult(registration.TryConfirmProviderInterruption(cancellation.Token)));
 
         var result = await owner.RequestCancellationAsync("run-incomplete-client", "cancel-after-incomplete-client");
-        await confirmation;
 
         Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, result.Status);
+        Assert.True(await confirmation.Task);
     }
 
     [Fact]
@@ -523,19 +502,12 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         await using var replacement = new CustomLoopWorkspaceExecutionGate(new WorkspacePaths(workspace.RootPath));
         using var cancellation = new CancellationTokenSource();
         using var registration = replacement.RegisterActiveAttempt("run-owner-restart", cancellation);
-        var confirmation = Task.Run(async () =>
-        {
-            while (!cancellation.IsCancellationRequested)
-            {
-                await Task.Delay(10);
-            }
-
-            Assert.True(registration.TryConfirmProviderInterruption(cancellation.Token));
-        });
+        var confirmation = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var providerObservation = cancellation.Token.Register(() => confirmation.TrySetResult(registration.TryConfirmProviderInterruption(cancellation.Token)));
         var retried = await requester.RequestCancellationAsync("run-owner-restart", "cancel-owner-restart");
-        await confirmation;
 
         Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, retried.Status);
+        Assert.True(await confirmation.Task);
     }
 
     [Fact]

@@ -106,12 +106,12 @@ function Get-VirtualVerificationSchedule {
 
 $requiredGateProfiles = @(Get-VerificationRequiredGateScheduleProfiles)
 Assert-True -Condition ((Get-VerificationRequiredGateResourceCapacity) -eq 12) -Message "Required gates must retain the explicit twelve-unit logical resource capacity."
-Assert-True -Condition ((Get-VerificationRequiredGateMaximumProcessHeavyWorkers) -eq 3) -Message "Required gates must admit at most three assembly-wide helper-process-heavy phases."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumProcessHeavyWorkers) -eq 2) -Message "Required gates must admit at most two assembly-wide helper-process-heavy phases."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumCpuBoundWorkers) -eq 1) -Message "Required gates must admit at most one CPU-bound format gate."
-Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 8 -HardwareProcessorCount 10) -eq 4) -Message "A larger host must retain the checked-in four-process required-gate ceiling."
-Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 4) -eq 4) -Message "A hosted four-core runner must admit exactly four physical required-gate workers."
-Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 10) -eq 4) -Message "A lower explicit worker request must remain authoritative below the required-gate ceiling."
-Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 4) -eq 4) -Message "A hosted four-core request must not be expanded beyond its explicit four-worker bound."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 8 -HardwareProcessorCount 10) -eq 3) -Message "A larger host must retain the checked-in three-process required-gate ceiling."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 4) -eq 3) -Message "A hosted four-core runner must admit exactly three physical required-gate workers."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 10) -eq 3) -Message "An explicit four-worker request must remain capped by the required-gate outer-process policy."
+Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 4) -eq 3) -Message "A hosted four-core request must not expand beyond the three-worker required-gate bound."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 2) -eq 2) -Message "A smaller host must reduce required-gate workers to its physical processor count."
 Assert-True -Condition ($requiredGateProfiles.Count -eq 12) -Message "The exact nine-assembly test plan, two format gates, and git-diff gate must have checked-in duration/resource profiles."
 Assert-True -Condition (@($requiredGateProfiles | Group-Object Name -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Required gate scheduling profiles must have exact unique names."
@@ -154,17 +154,18 @@ foreach ($formatGateName in @("format-naming-style", "format-whitespace")) {
     Assert-True -Condition ($formatProfile.Weight -eq 2 -and $formatProfile.ResourceClass -ceq "CpuBound") -Message "Format gate '$formatGateName' must remain bounded and overlap only immutable test-output execution."
 }
 
-$requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 4 -MaximumResourceCapacity 12 -MaximumProcessHeavyWorkers 3 -MaximumCpuBoundWorkers 1
-Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -le 390) -Message "The assembly-wide resource-bounded schedule must retain a deterministic estimate no greater than six and one-half minutes. Actual: $($requiredGateVirtualSchedule.MakespanSeconds)."
-foreach ($assemblyGateName in @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-all", "tests-EmbodySense.Web.Tests-all")) {
-    Assert-True -Condition ($requiredGateVirtualSchedule.Starts[$assemblyGateName] -eq 0) -Message "The three longest assembly gates must start at virtual second zero."
+$requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 3 -MaximumResourceCapacity 12 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
+Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -le 480) -Message "The assembly-wide resource-bounded schedule must retain a deterministic estimate no greater than eight minutes. Actual: $($requiredGateVirtualSchedule.MakespanSeconds)."
+foreach ($assemblyGateName in @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-all")) {
+    Assert-True -Condition ($requiredGateVirtualSchedule.Starts[$assemblyGateName] -eq 0) -Message "The two longest assembly gates must start at virtual second zero."
 }
 $initialResourceCapacity = ($requiredGateProfiles | Where-Object { $requiredGateVirtualSchedule.Starts[$_.Name] -eq 0 } | Measure-Object -Property Weight -Sum).Sum
-Assert-True -Condition ($initialResourceCapacity -eq 11) -Message "Three assembly-wide phases and one format gate must occupy eleven logical units without exceeding four actual workers."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-naming-style"] -eq 0) -Message "The longer format gate must use the fourth initial process slot without admitting a fourth heavy assembly."
-Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.IntegrationTests-all"] -gt 0) -Message "The fourth internally parallel assembly must wait for one of the three admitted heavy slots."
+Assert-True -Condition ($initialResourceCapacity -eq 8) -Message "Two assembly-wide phases and one CPU-bound phase must occupy eight logical units without exceeding three actual workers."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-naming-style"] -eq 0) -Message "The longer format gate must backfill the third outer process slot beside exactly two heavy gates."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Web.Tests-all"] -gt 0) -Message "The third internally parallel assembly must wait for one of the two admitted heavy slots."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.IntegrationTests-all"] -gt 0) -Message "The fourth internally parallel assembly must wait for one of the two admitted heavy slots."
 foreach ($formatGateName in @("format-naming-style", "format-whitespace")) {
-    Assert-True -Condition ($requiredGateVirtualSchedule.Starts[$formatGateName] -lt 300) -Message "Format gate '$formatGateName' must execute while the longest immutable assembly gate is still running."
+    Assert-True -Condition ($requiredGateVirtualSchedule.Starts[$formatGateName] -lt 480) -Message "Format gate '$formatGateName' must execute before the final assembly-wide gate completes."
 }
 
 $counterexamplePhases = @(
