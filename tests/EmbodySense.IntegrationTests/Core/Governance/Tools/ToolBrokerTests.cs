@@ -71,8 +71,8 @@ public sealed class ToolBrokerTests
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
         using var cancellation = new CancellationTokenSource();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var executor = new CancellingWorkspaceToolExecutor(CreateWorkspaceClient(paths), cancellation);
-        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), workspaceToolExecutor: executor);
+        var executor = new CancellingWorkspaceMutationExecutor(paths, cancellation);
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), workspaceMutationExecutor: executor);
 
         var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", " second"), cancellation.Token);
 
@@ -83,6 +83,31 @@ public sealed class ToolBrokerTests
         var events = await ReadAuditAsync(workspace);
         Assert.Contains(events, auditEvent => auditEvent.Action == "tool.response.retain" && auditEvent.Outcome == "succeeded");
         Assert.Contains(events, auditEvent => auditEvent.Action == "tool.execute" && auditEvent.Outcome == "succeeded");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_fails_closed_when_no_canonical_workspace_mutation_executor_is_composed()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var path = workspace.File("shared", "note.txt");
+        await File.WriteAllTextAsync(path, "unchanged");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var policy = new PermissionPolicyStore().Load(paths);
+        var broker = new ToolBroker(
+            paths,
+            new ToolPermissionService(paths, policy),
+            new ThrowingApprovalPrompt(),
+            new LocalWorkspaceClient(paths),
+            new AuditLog(paths),
+            LoopDefinition.CreateDefaultConversation(),
+            new ToolResultRetentionStore(paths));
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Write, "shared/note.txt", "legacy raw mutation"));
+
+        Assert.Equal(ToolExecutionOutcome.Failed, result.Outcome);
+        Assert.Equal("failed: governed workspace mutation did not complete", result.OutputText);
+        Assert.Equal("unchanged", await File.ReadAllTextAsync(path));
     }
 
     [Fact]
@@ -220,7 +245,7 @@ public sealed class ToolBrokerTests
         var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Write, ".agent/skills/generated.md", "skill notes"));
 
         Assert.True(result.Succeeded);
-        Assert.Equal("wrote 11 characters", result.OutputText);
+        Assert.Equal("governed workspace mutation succeeded", result.OutputText);
         Assert.Single(prompt.Requests);
         Assert.Equal("skill notes", await File.ReadAllTextAsync(workspace.File(".agent", "skills", "generated.md")));
         var events = await ReadAuditAsync(workspace);
@@ -288,7 +313,7 @@ public sealed class ToolBrokerTests
         var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", " second"));
 
         Assert.True(result.Succeeded);
-        Assert.Equal("appended 7 characters", result.OutputText);
+        Assert.Equal("governed workspace mutation succeeded", result.OutputText);
         Assert.Equal("first second", await File.ReadAllTextAsync(workspace.File("shared", "note.txt")));
     }
 
@@ -308,7 +333,7 @@ public sealed class ToolBrokerTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_deletes_directory_after_approval()
+    public async Task ExecuteAsync_rejects_directory_delete_after_approval()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -319,8 +344,9 @@ public sealed class ToolBrokerTests
 
         var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Delete, "shared/delete-me"));
 
-        Assert.True(result.Succeeded);
-        Assert.False(Directory.Exists(workspace.File("shared", "delete-me")));
+        Assert.Equal(ToolExecutionOutcome.Failed, result.Outcome);
+        Assert.True(Directory.Exists(workspace.File("shared", "delete-me")));
+        Assert.True(File.Exists(workspace.File("shared", "delete-me", "note.txt")));
     }
 
     [Fact]
@@ -365,12 +391,42 @@ public sealed class ToolBrokerTests
         var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Write, "shared/note.txt", "changed"));
 
         Assert.Equal(ToolExecutionOutcome.Denied, result.Outcome);
-        Assert.Contains("does not grant", result.OutputText, StringComparison.Ordinal);
+        Assert.Equal("denied: governed workspace mutation authority did not permit execution", result.OutputText);
         Assert.Equal("unchanged", await File.ReadAllTextAsync(workspace.File("shared", "note.txt")));
         var events = await ReadAuditAsync(workspace);
         Assert.Contains(events, auditEvent => auditEvent.Action == "tool.loop_authority.evaluate" && auditEvent.Outcome == "denied");
         Assert.DoesNotContain(events, auditEvent => auditEvent.Action == "tool.permission.evaluate");
         Assert.DoesNotContain(events, auditEvent => auditEvent.Action == "tool.execute");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_does_not_retain_mutation_semantics_or_absolute_paths_in_results_or_audit()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        const string SemanticCanary = "mutation-semantic-canary-91f22a";
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Write, "shared/note.txt", SemanticCanary));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(SemanticCanary, await File.ReadAllTextAsync(workspace.File("shared", "note.txt")));
+        Assert.Null(result.Request.Content);
+        Assert.Equal("shared/note.txt", result.ResolvedPath);
+        Assert.DoesNotContain(SemanticCanary, result.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(paths.RootPath, result.ToString(), StringComparison.Ordinal);
+
+        var audit = JsonSerializer.Serialize(
+            (await ReadAuditAsync(workspace)).Where(item => item.Action.StartsWith("tool.", StringComparison.Ordinal)));
+        Assert.DoesNotContain(SemanticCanary, audit, StringComparison.Ordinal);
+        Assert.DoesNotContain(paths.RootPath, audit, StringComparison.Ordinal);
+        var responseEvidence = string.Join(
+            Environment.NewLine,
+            Directory.EnumerateFiles(paths.ToolResponsesPath, "*", SearchOption.AllDirectories)
+                .Select(File.ReadAllText));
+        Assert.DoesNotContain(SemanticCanary, responseEvidence, StringComparison.Ordinal);
+        Assert.DoesNotContain(paths.RootPath, responseEvidence, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -414,38 +470,54 @@ public sealed class ToolBrokerTests
         LoopDefinition? loopDefinition = null,
         IToolResultRetentionStore? retentionStore = null,
         IWorkspaceToolExecutor? workspaceToolExecutor = null,
+        IGovernedWorkspaceMutationToolExecutor? workspaceMutationExecutor = null,
         IAuditLog? auditLog = null,
         TimeSpan? postActuationIntegrityTimeout = null)
     {
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
-        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, workspaceToolExecutor ?? CreateWorkspaceClient(paths), auditLog ?? new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), retentionStore ?? new ToolResultRetentionStore(paths), postActuationIntegrityTimeout: postActuationIntegrityTimeout);
+        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, workspaceToolExecutor ?? CreateWorkspaceClient(paths), auditLog ?? new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), retentionStore ?? new ToolResultRetentionStore(paths), postActuationIntegrityTimeout: postActuationIntegrityTimeout, workspaceMutationExecutor: workspaceMutationExecutor ?? new TestWorkspaceMutationExecutor(paths));
     }
 
     private static LocalWorkspaceClient CreateWorkspaceClient(WorkspacePaths paths)
     {
         ICapabilityAuthorityTransaction authority = new CapabilityAuthorityTransaction(paths);
-        return new LocalWorkspaceClient(paths, new CapabilityAuthorityWorkspaceMutationCommitBoundary(paths, authority));
+        return new LocalWorkspaceClient(paths);
     }
 
-    private sealed class CancellingWorkspaceToolExecutor(IWorkspaceToolExecutor inner, CancellationTokenSource cancellation) : IWorkspaceToolExecutor
+    private sealed class CancellingWorkspaceMutationExecutor(WorkspacePaths paths, CancellationTokenSource cancellation) : IGovernedWorkspaceMutationToolExecutor
     {
-        public Task<LocalWorkspaceResult> ListAsync(string resolvedPath, CancellationToken cancellationToken = default) => inner.ListAsync(resolvedPath, cancellationToken);
-
-        public Task<LocalWorkspaceResult> ReadAsync(string resolvedPath, CancellationToken cancellationToken = default) => inner.ReadAsync(resolvedPath, cancellationToken);
-
-        public Task<LocalWorkspaceResult> SearchAsync(string resolvedPath, string? pattern, CancellationToken cancellationToken = default) => inner.SearchAsync(resolvedPath, pattern, cancellationToken);
-
-        public async Task<LocalWorkspaceResult> AppendAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default)
+        public async Task<LocalWorkspaceResult> ExecuteAsync(ToolRequest request, CancellationToken cancellationToken = default)
         {
-            var result = await inner.AppendAsync(resolvedPath, content, cancellationToken);
+            var result = await new TestWorkspaceMutationExecutor(paths).ExecuteAsync(request, cancellationToken);
             cancellation.Cancel();
             return result;
         }
+    }
 
-        public Task<LocalWorkspaceResult> WriteAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default) => inner.WriteAsync(resolvedPath, content, cancellationToken);
-
-        public Task<LocalWorkspaceResult> DeleteAsync(string resolvedPath, CancellationToken cancellationToken = default) => inner.DeleteAsync(resolvedPath, cancellationToken);
+    private sealed class TestWorkspaceMutationExecutor(WorkspacePaths paths) : IGovernedWorkspaceMutationToolExecutor
+    {
+        public async Task<LocalWorkspaceResult> ExecuteAsync(ToolRequest request, CancellationToken cancellationToken = default)
+        {
+            var target = paths.WorkspaceFile(request.TargetPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            if (request.Command == ToolCommand.Append)
+            {
+                await File.AppendAllTextAsync(target, request.Content, cancellationToken);
+                return new LocalWorkspaceResult($"appended {request.Content?.Length ?? 0} characters", new Dictionary<string, object?>());
+            }
+            if (request.Command == ToolCommand.Write)
+            {
+                await File.WriteAllTextAsync(target, request.Content, cancellationToken);
+                return new LocalWorkspaceResult($"wrote {request.Content?.Length ?? 0} characters", new Dictionary<string, object?>());
+            }
+            if (request.Command == ToolCommand.Delete)
+            {
+                File.Delete(target);
+                return new LocalWorkspaceResult("deleted", new Dictionary<string, object?>());
+            }
+            throw new ArgumentOutOfRangeException(nameof(request));
+        }
     }
 
     private sealed class ThrowingRetentionStore : IToolResultRetentionStore

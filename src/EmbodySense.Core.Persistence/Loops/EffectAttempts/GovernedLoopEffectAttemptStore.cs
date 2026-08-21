@@ -19,7 +19,7 @@ namespace EmbodySense.Core.Persistence.Loops.EffectAttempts;
 /// recovered by exact replay. Later head changes require both a live per-generation owner and the common direct-successor
 /// relation.
 /// </remarks>
-public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptStore
+public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptStore, IGovernedLoopEffectAttemptPreparationClaimStore
 {
     private const int MaximumConfiguredAttempts = 16_384;
     private const int MaximumConfiguredVersionsPerAttempt = 16;
@@ -118,9 +118,25 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
     }
 
     /// <inheritdoc />
-    public async Task<GovernedLoopEffectAttemptStoreResult> BeginAsync(
+    public Task<GovernedLoopEffectAttemptStoreResult> BeginAsync(
         GovernedLoopEffectAttempt prepared,
         CancellationToken cancellationToken = default)
+        => BeginCoreAsync(prepared, null, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<GovernedLoopEffectAttemptStoreResult> BeginWithPreparationClaimAsync(
+        GovernedLoopEffectAttempt prepared,
+        Func<CancellationToken, Task<bool>> preparationClaim,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(preparationClaim);
+        return BeginCoreAsync(prepared, preparationClaim, cancellationToken);
+    }
+
+    private async Task<GovernedLoopEffectAttemptStoreResult> BeginCoreAsync(
+        GovernedLoopEffectAttempt prepared,
+        Func<CancellationToken, Task<bool>>? preparationClaim,
+        CancellationToken cancellationToken)
     {
         if (!TryCapture(prepared, out var captured)
             || captured.Payload.Phase != GovernedLoopEffectPhase.IntentPrepared
@@ -177,6 +193,11 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
                 || retainedBytes > _maximumStoreBytes - encoded.Length - GovernedLoopExecutionLimits.Sha256HexCharacters)
             {
                 return Result(GovernedLoopEffectAttemptStoreStatus.Backpressured);
+            }
+            if (preparationClaim is not null
+                && !await preparationClaim(cancellationToken).ConfigureAwait(false))
+            {
+                return Result(GovernedLoopEffectAttemptStoreStatus.PreparationExpired);
             }
 
             var lease = TryAcquireOwner(captured.Payload.OperationId, captured.Payload.EffectGeneration);
@@ -287,6 +308,78 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         catch (Exception exception) when (IsUnavailable(exception))
         {
             return Result(GovernedLoopEffectAttemptStoreStatus.Unavailable);
+        }
+    }
+
+    internal async Task<(bool EvidenceComplete, int RemovedCount)> TryCleanupUnreferencedBeforeEvidenceAsync(
+        IReadOnlyList<string> beforeEvidenceIds,
+        int maximumRemovals,
+        Func<string, CancellationToken, Task<bool>> cleanup,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(beforeEvidenceIds);
+        ArgumentNullException.ThrowIfNull(cleanup);
+        if (beforeEvidenceIds.Count > MaximumConfiguredAttempts
+            || maximumRemovals is < 1 or > 64
+            || beforeEvidenceIds.Distinct(StringComparer.Ordinal).Count() != beforeEvidenceIds.Count
+            || beforeEvidenceIds.Any(beforeEvidenceId =>
+                !beforeEvidenceId.StartsWith("before-", StringComparison.Ordinal)
+                || !IsHash(beforeEvidenceId["before-".Length..])))
+        {
+            return (false, 0);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        var removed = 0;
+        try
+        {
+            using var mutation = await AcquireMutationLockAsync(cancellationToken).ConfigureAwait(false);
+            ValidateDirectory(out var retainedIdentities, out _);
+            var referenced = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var storageKey in retainedIdentities.Order(StringComparer.Ordinal))
+            {
+                var versions = VersionPaths(storageKey);
+                if (versions.Count == 0)
+                {
+                    throw new FormatException("Effect-attempt storage contains a head without immutable intent evidence.");
+                }
+                var identity = await ReadUnboundVersionAsync(versions[0], storageKey, cancellationToken).ConfigureAwait(false);
+                var current = await ReadAndRecoverCompleteGraphAsync(
+                    versions,
+                    storageKey,
+                    identity.Payload.OperationId,
+                    identity.Payload.EffectGeneration,
+                    cancellationToken).ConfigureAwait(false);
+                if (current.BeforeEvidenceId is not null)
+                {
+                    referenced.Add(current.BeforeEvidenceId);
+                }
+            }
+            foreach (var beforeEvidenceId in beforeEvidenceIds)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (referenced.Contains(beforeEvidenceId))
+                {
+                    continue;
+                }
+                if (!await cleanup(beforeEvidenceId, cancellationToken).ConfigureAwait(false))
+                {
+                    return (false, removed);
+                }
+                removed++;
+                if (removed == maximumRemovals)
+                {
+                    break;
+                }
+            }
+            return (true, removed);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsCorrupt(exception) || IsUnavailable(exception))
+        {
+            return (false, removed);
         }
     }
 
@@ -583,6 +676,26 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
             || !string.Equals(attempt!.Payload.OperationId, expectedOperationId, StringComparison.Ordinal)
             || attempt.Payload.EffectGeneration != expectedEffectGeneration
             || !string.Equals(StorageKey(attempt.Payload.OperationId, attempt.Payload.EffectGeneration), expectedStorageKey, StringComparison.Ordinal)
+            || !string.Equals(Path.GetFileName(path), VersionFileName(expectedStorageKey, attempt.ContentHash), StringComparison.Ordinal))
+        {
+            throw new FormatException("Governed-loop effect-attempt evidence is malformed, noncanonical, or stored under the wrong identity.");
+        }
+        return attempt;
+    }
+
+    private async Task<GovernedLoopEffectAttempt> ReadUnboundVersionAsync(
+        string path,
+        string expectedStorageKey,
+        CancellationToken cancellationToken)
+    {
+        var bytes = await _guard.ReadAllBytesAsync(
+            _root,
+            path,
+            _maximumRecordBytes,
+            "Governed-loop effect-attempt version",
+            cancellationToken).ConfigureAwait(false);
+        if (!GovernedLoopEffectAttemptRecordCodec.TryDecode(bytes, out var attempt, out _)
+            || !string.Equals(StorageKey(attempt!.Payload.OperationId, attempt.Payload.EffectGeneration), expectedStorageKey, StringComparison.Ordinal)
             || !string.Equals(Path.GetFileName(path), VersionFileName(expectedStorageKey, attempt.ContentHash), StringComparison.Ordinal))
         {
             throw new FormatException("Governed-loop effect-attempt evidence is malformed, noncanonical, or stored under the wrong identity.");

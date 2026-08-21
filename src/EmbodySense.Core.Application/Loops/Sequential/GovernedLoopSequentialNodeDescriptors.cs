@@ -2,6 +2,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Application.Loops.GraphValidation;
+using EmbodySense.Core.Common.LocalWorkspace.Actions;
 
 namespace EmbodySense.Core.Application.Loops.Sequential;
 
@@ -16,6 +17,15 @@ public static class GovernedLoopSequentialNodeDescriptors
 
     /// <summary>Gets the exact supported provider-inference descriptor.</summary>
     public static GovernedLoopNodeDescriptor ProviderInference { get; } = new(GovernedLoopNodeKind.Inference, "provider-inference", 1);
+
+    /// <summary>Gets the exact workspace append Action descriptor.</summary>
+    public static GovernedLoopNodeDescriptor WorkspaceAppend { get; } = WorkspaceActionNodeDescriptors.Append;
+
+    /// <summary>Gets the exact workspace write Action descriptor.</summary>
+    public static GovernedLoopNodeDescriptor WorkspaceWrite { get; } = WorkspaceActionNodeDescriptors.Write;
+
+    /// <summary>Gets the exact recoverable workspace delete Action descriptor.</summary>
+    public static GovernedLoopNodeDescriptor WorkspaceDelete { get; } = WorkspaceActionNodeDescriptors.Delete;
 
     /// <summary>Gets the exact supported successful-exit descriptor.</summary>
     public static GovernedLoopNodeDescriptor SuccessExit { get; } = new(GovernedLoopNodeKind.Exit, "success-exit", 1);
@@ -77,6 +87,7 @@ public static class GovernedLoopSequentialNodeDescriptors
             && (Equals(descriptor, ManualTrigger)
                 || Equals(descriptor, ScheduleTrigger)
                 || Equals(descriptor, ProviderInference)
+                || IsWorkspaceAction(descriptor)
                 || Equals(descriptor, SuccessExit)
                 || IsWait(descriptor)
                 || IsTopology(descriptor)
@@ -92,6 +103,10 @@ public static class GovernedLoopSequentialNodeDescriptors
             && descriptor.Kind == GovernedLoopNodeKind.Wait
             && descriptor.Version == GovernedLoopWaitVocabulary.DescriptorVersion
             && GovernedLoopWaitVocabulary.IsSupported(descriptor.TypeId);
+
+    /// <summary>Gets whether a descriptor exactly names one schema-1 governed workspace Action.</summary>
+    public static bool IsWorkspaceAction(GovernedLoopNodeDescriptor? descriptor)
+        => WorkspaceActionNodeDescriptors.TryResolve(descriptor, out _);
 
     /// <summary>Gets whether a descriptor exactly names one supported deterministic Condition or Join.</summary>
     public static bool IsTopology(GovernedLoopNodeDescriptor? descriptor)

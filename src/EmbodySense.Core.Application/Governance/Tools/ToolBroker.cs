@@ -34,6 +34,7 @@ public sealed class ToolBroker : IToolBroker
     private readonly IToolPermissionService _permissionService;
     private readonly IToolApprovalPrompt _approvalPrompt;
     private readonly IWorkspaceToolExecutor _workspaceToolExecutor;
+    private readonly IGovernedWorkspaceMutationToolExecutor? _workspaceMutationExecutor;
     private readonly IAuditLog _auditLog;
     private readonly LoopDefinition _loopDefinition;
     private readonly ToolResultRetentionService _toolResultRetention;
@@ -56,6 +57,7 @@ public sealed class ToolBroker : IToolBroker
     /// <param name="actuationAuthorityRevalidator">The temporary legacy authority revalidator used while existing custom-loop composition converges.</param>
     /// <param name="postActuationIntegrityTimeout">The post actuation integrity timeout.</param>
     /// <param name="actuationAuthorityBoundary">The continuation-inverting current-authority boundary.</param>
+    /// <param name="workspaceMutationExecutor">The optional canonical effect-attempt projection for structured mutations.</param>
     public ToolBroker(
         WorkspacePaths paths,
         IToolPermissionService permissionService,
@@ -67,7 +69,8 @@ public sealed class ToolBroker : IToolBroker
         IToolGovernanceObserver? governanceObserver = null,
         IToolActuationAuthorityRevalidator? actuationAuthorityRevalidator = null,
         TimeSpan? postActuationIntegrityTimeout = null,
-        IToolActuationAuthorityBoundary? actuationAuthorityBoundary = null)
+        IToolActuationAuthorityBoundary? actuationAuthorityBoundary = null,
+        IGovernedWorkspaceMutationToolExecutor? workspaceMutationExecutor = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(permissionService);
@@ -85,6 +88,7 @@ public sealed class ToolBroker : IToolBroker
         _permissionService = permissionService;
         _approvalPrompt = approvalPrompt;
         _workspaceToolExecutor = workspaceToolExecutor;
+        _workspaceMutationExecutor = workspaceMutationExecutor;
         _auditLog = auditLog;
         _loopDefinition = loopDefinition;
         _toolResultRetention = new ToolResultRetentionService(auditLog, loopDefinition, toolResultRetentionStore);
@@ -125,7 +129,8 @@ public sealed class ToolBroker : IToolBroker
             var detail = $"Active loop `{_loopDefinition.Id}` does not grant `{LoopCapabilityIds.WorkspaceCommandFor(request.Command)}` or `{LoopCapabilityIds.WorkspaceCommand}`.";
             var evidence = AuthorityDenied(detail);
             await ObserveDecisionAsync(requestId, request, request.TargetPath, evidence, cancellationToken);
-            var result = new ToolResult(ToolExecutionOutcome.Denied, $"denied: {detail}", requestId, request.TargetPath, request, evidence);
+            var result = WorkspaceMutationEvidenceProjection.ProjectResult(
+                new ToolResult(ToolExecutionOutcome.Denied, $"denied: {detail}", requestId, request.TargetPath, request, evidence));
             return await RetainAndObserveOutcomeAsync(result, cancellationToken);
         }
 
@@ -164,10 +169,12 @@ public sealed class ToolBroker : IToolBroker
 
         var approvalDecision = approvedByHuman ? ToolApprovalDecision.Approved : ToolApprovalDecision.NotRequired;
         var authorizedEvidence = DecisionEvidence(check, approvalDecision, approvalResponse);
+        var canonicalWorkspaceMutation = request.Command is ToolCommand.Append or ToolCommand.Write or ToolCommand.Delete
+            && _workspaceMutationExecutor is not null;
         using var actuation = new ToolActuationCallbackGuard(
             async (directExecution, actuatorCancellationToken) =>
             {
-                if (_actuationAuthorityBoundary is not null)
+                if (_actuationAuthorityBoundary is not null && !canonicalWorkspaceMutation)
                 {
                     await RecordActuationAuthorityAsync(requestId, request, check, directExecution, actuatorCancellationToken);
                 }
@@ -179,8 +186,8 @@ public sealed class ToolBroker : IToolBroker
         ToolActuationAuthorityExecution authorityExecution;
         try
         {
-            authorityExecution = _actuationAuthorityBoundary is null
-                ? await ExecuteWithoutDynamicBoundaryAsync(request, actuation, cancellationToken)
+            authorityExecution = _actuationAuthorityBoundary is null || canonicalWorkspaceMutation
+                ? await ExecuteDirectAsync(request, actuation, canonicalWorkspaceMutation, cancellationToken)
                 : await _actuationAuthorityBoundary.ExecuteAsync(request, check.ResolvedPath, actuation.ExecuteAsync, cancellationToken);
         }
         finally
@@ -226,13 +233,15 @@ public sealed class ToolBroker : IToolBroker
         if (expectedFailure is null)
         {
             ArgumentNullException.ThrowIfNull(output);
-            result = new ToolResult(ToolExecutionOutcome.Succeeded, output.Text, requestId, check.ResolvedPath, request, governance);
+            result = WorkspaceMutationEvidenceProjection.ProjectResult(
+                new ToolResult(ToolExecutionOutcome.Succeeded, output.Text, requestId, check.ResolvedPath, request, governance));
             executionMetadata = output.Metadata;
             executionOutcome = AuditSchema.Outcomes.Succeeded;
         }
         else
         {
-            result = new ToolResult(ToolExecutionOutcome.Failed, $"failed: {expectedFailure.Message}", requestId, check.ResolvedPath, request, governance);
+            result = WorkspaceMutationEvidenceProjection.ProjectResult(
+                new ToolResult(ToolExecutionOutcome.Failed, $"failed: {expectedFailure.Message}", requestId, check.ResolvedPath, request, governance));
             executionMetadata = ToolAuditMetadataFactory.ForError(expectedFailure);
             executionOutcome = AuditSchema.Outcomes.Failed;
         }
@@ -277,20 +286,34 @@ public sealed class ToolBroker : IToolBroker
             ToolCommand.List => _workspaceToolExecutor.ListAsync(check.ResolvedPath, cancellationToken),
             ToolCommand.Read => _workspaceToolExecutor.ReadAsync(check.ResolvedPath, cancellationToken),
             ToolCommand.Search => _workspaceToolExecutor.SearchAsync(check.ResolvedPath, request.Pattern ?? request.Content, cancellationToken),
-            ToolCommand.Append => _workspaceToolExecutor.AppendAsync(check.ResolvedPath, request.Content, cancellationToken),
-            ToolCommand.Write => _workspaceToolExecutor.WriteAsync(check.ResolvedPath, request.Content, cancellationToken),
-            ToolCommand.Delete => _workspaceToolExecutor.DeleteAsync(check.ResolvedPath, cancellationToken),
+            ToolCommand.Append or ToolCommand.Write or ToolCommand.Delete => _workspaceMutationExecutor is null
+                ? Task.FromException<LocalWorkspaceResult>(new IOException("Governed workspace mutation is unavailable because no canonical admitted effect executor was composed."))
+                : _workspaceMutationExecutor.ExecuteAsync(request, cancellationToken),
             _ => throw new ArgumentOutOfRangeException(nameof(request), request.Command, "Unsupported tool command.")
         };
     }
 
-    private static async Task<ToolActuationAuthorityExecution> ExecuteWithoutDynamicBoundaryAsync(ToolRequest request, ToolActuationCallbackGuard actuation, CancellationToken cancellationToken)
+    private static async Task<ToolActuationAuthorityExecution> ExecuteDirectAsync(
+        ToolRequest request,
+        ToolActuationCallbackGuard actuation,
+        bool canonicalWorkspaceMutation,
+        CancellationToken cancellationToken)
     {
         _ = request;
-        var direct = new ToolActuationAuthorityExecution(
-            ToolActuationAuthorityDisposition.Direct,
-            "No dynamic authority source was configured; admitted loop and permission authority allow direct actuation.",
-            new Dictionary<string, object?> { ["dynamic_authority_configured"] = false });
+        var direct = canonicalWorkspaceMutation
+            ? new ToolActuationAuthorityExecution(
+                ToolActuationAuthorityDisposition.Direct,
+                "Canonical effect-attempt dispatch owns the fresh exact authority decision; the legacy tool authority boundary is intentionally bypassed.",
+                new Dictionary<string, object?>
+                {
+                    ["dynamic_authority_configured"] = true,
+                    ["authority_boundary_owner"] = "canonical_effect_attempt",
+                    ["legacy_authority_boundary_bypassed"] = true,
+                })
+            : new ToolActuationAuthorityExecution(
+                ToolActuationAuthorityDisposition.Direct,
+                "No dynamic authority source was configured; admitted loop and permission authority allow direct actuation.",
+                new Dictionary<string, object?> { ["dynamic_authority_configured"] = false });
         _ = await actuation.ExecuteAsync(direct, cancellationToken);
         return direct;
     }
@@ -306,7 +329,8 @@ public sealed class ToolBroker : IToolBroker
     private async Task<ToolResult> FinalizeTerminalOutcomeAsync(string requestId, ToolRequest request, ToolPermissionCheck check, bool approvedByHuman, ToolTerminalOutcome outcome, CancellationToken cancellationToken)
     {
         await ObserveDecisionAsync(requestId, request, check.ResolvedPath, outcome.GovernanceEvidence, cancellationToken);
-        var result = new ToolResult(outcome.Outcome, outcome.Detail, requestId, check.ResolvedPath, request, outcome.GovernanceEvidence);
+        var result = WorkspaceMutationEvidenceProjection.ProjectResult(
+            new ToolResult(outcome.Outcome, outcome.Detail, requestId, check.ResolvedPath, request, outcome.GovernanceEvidence));
         result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
         await RecordExecutionAsync(requestId, request, check, approvedByHuman, outcome.AuditOutcome, outcome.AuditMetadata, cancellationToken);
         return result;
@@ -319,20 +343,30 @@ public sealed class ToolBroker : IToolBroker
         return AppendAuditAsync(AuditEvent.Create(
             AuditSchema.Actors.Tool,
             AuditSchema.Actions.ToolExecutionIntent,
-            check.ResolvedPath,
+            EvidenceTarget(request, check.ResolvedPath),
             AuditSchema.Outcomes.Requested,
-            $"Authorized {ToolCommandFormatter.Format(request.Command)} workspace observation is ready for execution.",
+            $"Authorized {ToolCommandFormatter.Format(request.Command)} workspace operation is ready for execution.",
             metadata), cancellationToken);
     }
 
     private Task ObserveDecisionAsync(string requestId, ToolRequest request, string resolvedPath, ToolGovernanceEvidence evidence, CancellationToken cancellationToken)
     {
-        return _governanceObserver?.ObserveDecisionAsync(requestId, request, resolvedPath, evidence, cancellationToken) ?? Task.CompletedTask;
+        return _governanceObserver?.ObserveDecisionAsync(
+            requestId,
+            WorkspaceMutationEvidenceProjection.ProjectRequest(request),
+            WorkspaceMutationEvidenceProjection.ProjectResolvedTarget(request, resolvedPath),
+            WorkspaceMutationEvidenceProjection.ProjectGovernance(request, evidence)!,
+            cancellationToken) ?? Task.CompletedTask;
     }
 
     private Task ObserveApprovalRequestAsync(string requestId, ToolRequest request, string resolvedPath, ToolGovernanceEvidence evidence, CancellationToken cancellationToken)
     {
-        return _governanceObserver?.ObserveApprovalRequestAsync(requestId, request, resolvedPath, evidence, cancellationToken) ?? Task.CompletedTask;
+        return _governanceObserver?.ObserveApprovalRequestAsync(
+            requestId,
+            WorkspaceMutationEvidenceProjection.ProjectRequest(request),
+            WorkspaceMutationEvidenceProjection.ProjectResolvedTarget(request, resolvedPath),
+            WorkspaceMutationEvidenceProjection.ProjectGovernance(request, evidence)!,
+            cancellationToken) ?? Task.CompletedTask;
     }
 
     private Task ObserveOutcomeAsync(ToolResult result, CancellationToken cancellationToken)
@@ -413,9 +447,9 @@ public sealed class ToolBroker : IToolBroker
         return AppendAuditAsync(AuditEvent.Create(
             actor: AuditSchema.Actors.Tool,
             action: AuditSchema.Actions.ToolPermissionEvaluate,
-            target: check.ResolvedPath,
+            target: EvidenceTarget(request, check.ResolvedPath),
             outcome: FormatDecision(check.Evaluation.Decision),
-            detail: check.Evaluation.Detail,
+            detail: EvidenceDetail(request, check.Evaluation.Detail, "Governed workspace mutation permission was evaluated."),
             metadata: _auditMetadataFactory.CreateBase(requestId, request, check)), cancellationToken);
     }
 
@@ -426,9 +460,9 @@ public sealed class ToolBroker : IToolBroker
         return AppendAuditAsync(AuditEvent.Create(
             actor: AuditSchema.Actors.Tool,
             action: AuditSchema.Actions.ToolApprovalRequest,
-            target: request.ResolvedPath,
+            target: EvidenceTarget(request.ToolRequest, request.ResolvedPath),
             outcome: AuditSchema.Outcomes.Requested,
-            detail: request.PermissionEvaluation.Detail,
+            detail: EvidenceDetail(request.ToolRequest, request.PermissionEvaluation.Detail, "Governed workspace mutation approval was requested."),
             metadata: metadata), cancellationToken);
     }
 
@@ -440,9 +474,11 @@ public sealed class ToolBroker : IToolBroker
         return AppendAuditAsync(AuditEvent.Create(
             actor: AuditSchema.Actors.Tool,
             action: AuditSchema.Actions.ToolApprovalDecision,
-            target: request.ResolvedPath,
+            target: EvidenceTarget(request.ToolRequest, request.ResolvedPath),
             outcome: response.Approved ? AuditSchema.Outcomes.Approved : AuditSchema.Outcomes.Rejected,
-            detail: response.Detail,
+            detail: EvidenceDetail(request.ToolRequest, response.Detail, response.Approved
+                ? "Governed workspace mutation approval was granted."
+                : "Governed workspace mutation approval was declined."),
             metadata: metadata), cancellationToken);
     }
 
@@ -457,12 +493,12 @@ public sealed class ToolBroker : IToolBroker
     {
         var metadata = _auditMetadataFactory.CreateBase(requestId, request, check);
         ToolAuditMetadataFactory.AddApprovedByHuman(metadata, approvedByHuman);
-        ToolAuditMetadataFactory.MergeExecution(metadata, executionMetadata);
+        ToolAuditMetadataFactory.MergeExecution(metadata, EvidenceExecutionMetadata(request, executionMetadata));
 
         return AppendAuditAsync(AuditEvent.Create(
             actor: AuditSchema.Actors.Tool,
             action: AuditSchema.Actions.ToolExecute,
-            target: check.ResolvedPath,
+            target: EvidenceTarget(request, check.ResolvedPath),
             outcome: outcome,
             detail: $"Executed {ToolCommandFormatter.Format(request.Command)} tool request.",
             metadata: metadata), cancellationToken);
@@ -480,7 +516,7 @@ public sealed class ToolBroker : IToolBroker
         return AppendAuditAsync(AuditEvent.Create(
             actor: AuditSchema.Actors.Tool,
             action: AuditSchema.Actions.ToolLoopAuthorityEvaluate,
-            target: resolvedPath,
+            target: EvidenceTarget(request, resolvedPath),
             outcome: outcome,
             detail: outcome == AuditSchema.Outcomes.Allowed
                 ? $"Loop `{_loopDefinition.Id}` allowed {ToolCommandFormatter.Format(request.Command)} workspace command authority."
@@ -501,7 +537,7 @@ public sealed class ToolBroker : IToolBroker
         return AppendAuditAsync(AuditEvent.Create(
             AuditSchema.Actors.Tool,
             AuditSchema.Actions.ToolLoopAuthorityEvaluate,
-            check.ResolvedPath,
+            EvidenceTarget(request, check.ResolvedPath),
             execution.Disposition switch
             {
                 ToolActuationAuthorityDisposition.Direct => AuditSchema.Outcomes.Allowed,
@@ -509,8 +545,34 @@ public sealed class ToolBroker : IToolBroker
                 ToolActuationAuthorityDisposition.ReviewRequired or ToolActuationAuthorityDisposition.Ambiguous => AuditSchema.Outcomes.NeedsReview,
                 _ => AuditSchema.Outcomes.Unknown
             },
-            execution.Detail,
+            EvidenceDetail(request, execution.Detail, $"Governed workspace mutation authority posture: {execution.Disposition.ToString().ToLowerInvariant()}."),
             metadata), cancellationToken);
+    }
+
+    private static string EvidenceTarget(ToolRequest request, string resolvedPath)
+        => WorkspaceMutationEvidenceProjection.ProjectResolvedTarget(request, resolvedPath);
+
+    private static string EvidenceDetail(ToolRequest request, string detail, string mutationDetail)
+        => WorkspaceMutationEvidenceProjection.IsMutation(request.Command) ? mutationDetail : detail;
+
+    private static IReadOnlyDictionary<string, object?> EvidenceExecutionMetadata(
+        ToolRequest request,
+        IReadOnlyDictionary<string, object?> metadata)
+    {
+        if (!WorkspaceMutationEvidenceProjection.IsMutation(request.Command))
+        {
+            return metadata;
+        }
+
+        var projected = new Dictionary<string, object?>();
+        foreach (var key in new[] { "effect_status", "after_evidence_id", "effect_generation", "error_type" })
+        {
+            if (metadata.TryGetValue(key, out var value))
+            {
+                projected[key] = value;
+            }
+        }
+        return projected;
     }
 
     private bool IsCommandAvailable(ToolCommand command)

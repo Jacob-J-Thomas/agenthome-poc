@@ -86,15 +86,17 @@ internal sealed class ToolAuditMetadataFactory
     /// <returns>Canonical request, path, loop, and correlation metadata.</returns>
     public Dictionary<string, object?> CreateBase(string requestId, ToolRequest request, string resolvedPath, FileSystemOperation operation, string matchedPath)
     {
+        var mutation = WorkspaceMutationEvidenceProjection.IsMutation(request.Command);
+        var evidenceRequest = WorkspaceMutationEvidenceProjection.ProjectRequest(request);
         var metadata = new Dictionary<string, object?>
         {
             [RequestId] = requestId,
             [Command] = ToolCommandFormatter.Format(request.Command),
-            [TargetPath] = request.TargetPath,
-            [ResolvedPath] = resolvedPath,
-            [WorkspaceRoot] = _paths.RootPath,
+            [TargetPath] = evidenceRequest.TargetPath,
+            [ResolvedPath] = WorkspaceMutationEvidenceProjection.ProjectResolvedTarget(request, resolvedPath),
+            [WorkspaceRoot] = mutation ? null : _paths.RootPath,
             [FileSystemOperation] = operation.ToString().ToLowerInvariant(),
-            [MatchedPath] = matchedPath,
+            [MatchedPath] = mutation ? null : matchedPath,
             [LoopId] = _loopDefinition.Id,
             [RoleId] = _loopDefinition.RoleId,
             [LoopTrigger] = _loopDefinition.Trigger.ToString()
@@ -112,12 +114,13 @@ internal sealed class ToolAuditMetadataFactory
     /// <returns>The required capabilities, active loop authority, and request correlation.</returns>
     public Dictionary<string, object?> CreateLoopAuthority(string requestId, ToolRequest request, string resolvedPath)
     {
+        var evidenceRequest = WorkspaceMutationEvidenceProjection.ProjectRequest(request);
         var metadata = new Dictionary<string, object?>
         {
             [RequestId] = requestId,
             [Command] = ToolCommandFormatter.Format(request.Command),
-            [TargetPath] = request.TargetPath,
-            [ResolvedPath] = resolvedPath,
+            [TargetPath] = evidenceRequest.TargetPath,
+            [ResolvedPath] = WorkspaceMutationEvidenceProjection.ProjectResolvedTarget(request, resolvedPath),
             [LoopId] = _loopDefinition.Id,
             [RoleId] = _loopDefinition.RoleId,
             [LoopTrigger] = _loopDefinition.Trigger.ToString(),

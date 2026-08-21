@@ -68,7 +68,7 @@ public static class GovernedLoopSequentialBindingResolver
         var graph = artifact.Graph;
         var graphNode = graph.Nodes.SingleOrDefault(value => string.Equals(value.Id, node.NodeId, StringComparison.Ordinal));
         if (graphNode is null
-            || graphNode.Descriptor.Kind is not (GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate or GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Inference or GovernedLoopNodeKind.Exit))
+            || graphNode.Descriptor.Kind is not (GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate or GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Inference or GovernedLoopNodeKind.Action or GovernedLoopNodeKind.Exit))
         {
             return Rejected("canonical-binding.node-invalid", "$.bindings");
         }
@@ -183,6 +183,19 @@ public static class GovernedLoopSequentialBindingResolver
                     GovernedLoopTypedValue.CurrentSchemaVersion,
                     GovernedLoopValueKind.Text,
                     JsonSerializer.Serialize(output),
+                    out value,
+                    out _);
+        }
+
+        if (GovernedLoopSequentialNodeDescriptors.IsWorkspaceAction(source.Descriptor))
+        {
+            return string.Equals(sourcePortId, "result", StringComparison.Ordinal)
+                && outcomeEvent is { Kind: CustomLoopRunEventKind.NodeAttemptCompleted, CanonicalOutput: { } actionResult, PureNodeOutcomeJson: null }
+                && EmbodySense.Core.Common.LocalWorkspace.Actions.WorkspaceActionResultContract.TryParse(actionResult, out _)
+                && GovernedLoopTypedValue.TryCreate(
+                    GovernedLoopTypedValue.CurrentSchemaVersion,
+                    GovernedLoopValueKind.Text,
+                    JsonSerializer.Serialize(actionResult),
                     out value,
                     out _);
         }
