@@ -89,6 +89,15 @@ public sealed class AuthorityDelegationEnvelopeService : IAuthorityDelegationEnv
             _ = ExecuteCreateOperationAsync(operation);
         }
 
+        var waiterReleased = 0;
+        using var cancellationRegistration = cancellationToken.Register(() =>
+        {
+            if (Interlocked.Exchange(ref waiterReleased, 1) == 0)
+            {
+                operation.ReleaseWaiter();
+            }
+        });
+
         try
         {
             var completed = await operation.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -98,7 +107,10 @@ public sealed class AuthorityDelegationEnvelopeService : IAuthorityDelegationEnv
         }
         finally
         {
-            operation.ReleaseWaiter();
+            if (Interlocked.Exchange(ref waiterReleased, 1) == 0)
+            {
+                operation.ReleaseWaiter();
+            }
         }
     }
 
@@ -172,6 +184,7 @@ public sealed class AuthorityDelegationEnvelopeService : IAuthorityDelegationEnv
                     }
                 },
                 cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             Volatile.Write(ref callbackState, 2);
             return Volatile.Read(ref callbackAttempts) == 1
                 && callbackResult is not null
@@ -599,8 +612,9 @@ public sealed class AuthorityDelegationEnvelopeService : IAuthorityDelegationEnv
 
     private void CompleteCreateOperation(AuthorityDelegationCreateOperation operation, AuthorityDelegationServiceResult? result)
     {
-        operation.Complete();
-        if (result?.Status == AuthorityDelegationServiceStatus.Created)
+        var committed = operation.Complete(result?.Status == AuthorityDelegationServiceStatus.Created);
+        if (committed
+            && result is not null)
         {
             operation.Completion.TrySetResult(result);
             return;
@@ -614,7 +628,9 @@ public sealed class AuthorityDelegationEnvelopeService : IAuthorityDelegationEnv
             }
         }
 
-        operation.Completion.TrySetResult(result ?? Result(AuthorityDelegationServiceStatus.Unavailable));
+        operation.Completion.TrySetResult(result?.Status == AuthorityDelegationServiceStatus.Created
+            ? Result(AuthorityDelegationServiceStatus.Unavailable)
+            : result ?? Result(AuthorityDelegationServiceStatus.Unavailable));
     }
 
     private static bool SameCreateRequest(AuthorityDelegationCreateRequest left, AuthorityDelegationCreateRequest right)
