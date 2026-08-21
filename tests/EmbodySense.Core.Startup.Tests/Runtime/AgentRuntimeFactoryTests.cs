@@ -12,6 +12,7 @@ using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
@@ -22,6 +23,7 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Posture.Models;
 using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Common.Runtime;
@@ -32,6 +34,7 @@ using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Loops.Posture.Models;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Models;
@@ -50,6 +53,55 @@ namespace EmbodySense.Core.Startup.Tests.Runtime;
 
 public sealed class AgentRuntimeFactoryTests
 {
+    [Fact]
+    public async Task CreateAsync_exposes_one_shared_operational_facade_over_the_canonical_runtime_stores()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(workspace.RootPath)["workspace-sha256:".Length..];
+        Assert.True(AuthorityActorId.TryParse("owner", out var actorId, out _));
+        Assert.True(TriggerDeliveryFactory.TryCreateActorContext(actorId, "runtime", workspaceId, "operator", out var actorContext, out _));
+        var envelope = TriggerWorkerTestData.Envelope(actorContext: actorContext);
+        var store = new TriggerQueueStore(paths, TriggerQueueQuota.Runtime);
+        Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(envelope, envelope.Loop, envelope.Adapter, true, envelope.ActorContext, envelope.Authority, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(3), out var delivery, out _));
+        var admission = await new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store).AdmitAsync(TriggerQueueAdmissionRequestFactory.Create(delivery!, TriggerQueueAdmissionMode.Queued, TriggerQueuePriority.Normal));
+
+        var posture = await runtime.GovernedLoopOperations.ReadAsync(new GovernedLoopOperationalPostureQuery(3, 4, 5, 6));
+
+        Assert.Equal(TriggerQueueAdmissionStatus.Queued, admission.Status);
+        Assert.Equal(GovernedLoopOperationalPostureReadStatus.Available, posture.Status);
+        var snapshot = Assert.IsType<GovernedLoopOperationalPostureSnapshot>(posture.Snapshot);
+        Assert.Equal(CapabilityWorkspaceScopeId.Create(workspace.RootPath), snapshot.WorkspaceId);
+        Assert.Equal(envelope.DeliveryId.Value, Assert.Single(snapshot.Queue.Items).DeliveryId);
+        Assert.Empty(snapshot.Schedules.Items);
+        Assert.Empty(snapshot.Wakes.Items);
+        Assert.Empty(snapshot.Runs.Items);
+        Assert.Equal("local-background", snapshot.Coordinator.CoordinatorId);
+        Assert.Equal("stopped", snapshot.Coordinator.State);
+
+        var control = await runtime.GovernedLoopOperations.ControlAsync(new LoopOperationalControlInput(
+            "operational-missing-delivery",
+            GovernedLoopOperationalControlKind.CancelDelivery,
+            "delivery-missing",
+            1,
+            new string('a', 64),
+            snapshot.ControlAuthorityEvidenceHash));
+        var replay = await runtime.GovernedLoopOperations.ControlAsync(new LoopOperationalControlInput(
+            "operational-missing-delivery",
+            GovernedLoopOperationalControlKind.CancelDelivery,
+            "delivery-missing",
+            1,
+            new string('a', 64),
+            snapshot.ControlAuthorityEvidenceHash));
+
+        Assert.Equal(GovernedLoopOperationalControlStatus.NotFound, control.Status);
+        Assert.Equal(GovernedLoopOperationalControlStatus.NotFound, replay.Status);
+        Assert.Equal(control.ReceiptHash, replay.ReceiptHash);
+        Assert.Single(Directory.EnumerateFiles(paths.GovernedLoopOperationalControlReceiptsPath, "*.json"));
+    }
+
     [Fact]
     public async Task CreateAsync_starts_with_fresh_transcript_without_exposing_runtime_internals()
     {

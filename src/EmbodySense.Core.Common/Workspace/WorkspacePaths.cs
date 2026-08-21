@@ -209,6 +209,9 @@ public sealed class WorkspacePaths
     /// <value>The loop runs path.</value>
     public string LoopRunsPath => Path.Combine(LoopsPath, "runs");
 
+    /// <summary>Gets the bounded operational-control receipt path.</summary>
+    public string GovernedLoopOperationalControlReceiptsPath => Path.Combine(LoopsPath, "operational-control-receipts");
+
     /// <summary>
     /// Gets the durable default-conversation turn protocol path.
     /// </summary>

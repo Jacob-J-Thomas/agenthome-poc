@@ -215,6 +215,20 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
         return ToSnapshot(swept, identity);
     }
 
+    /// <summary>Reads the exact validated durable queue without advancing time-based lifecycle state.</summary>
+    /// <remarks>
+    /// This read holds the same cross-process lock as mutations, but it never sweeps expired deliveries or abandoned
+    /// dispatches and never publishes a queue generation. Worker and background lifecycle paths remain the sole
+    /// terminalizers; callers may project overdue evidence from the returned immutable snapshot.
+    /// </remarks>
+    public async Task<TriggerQueueSnapshot> PeekSnapshotAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var mutationLock = await _guard.AcquireMutationLockAsync(_observer, cancellationToken).ConfigureAwait(false);
+        var (ledger, identity) = await LoadAsync(mutationLock, cancellationToken).ConfigureAwait(false);
+        return ToSnapshot(ledger, identity);
+    }
+
     /// <inheritdoc />
     public async Task<TriggerWorkerSelectionResult> SelectAsync(TriggerWorkerSelectionRequest request, CancellationToken cancellationToken = default)
     {
@@ -1086,7 +1100,27 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
         var eligibleAtUtc = notBefore is not null && notBefore > entry.RecordedAtUtc ? notBefore.Value : entry.RecordedAtUtc;
         var order = new TriggerQueueOrderKey(eligibleAtUtc, entry.Priority, entry.RecordedAtUtc, entry.Envelope.DeliveryId.Value);
         var queuedReservationBytes = IsNonterminal(entry) ? ReservedQueuedEntryBytes(entry) : 0;
-        return new TriggerQueueEntry(entry.Envelope.DeliveryId, entry.Envelope.DeduplicationId, entry.Envelope.Loop.LoopId, entry.CanonicalEnvelopeHash, EntryBytes(entry), queuedReservationBytes, ReservedEntryBytes(entry), entry.State, entry.TerminalReason, order, entry.Revision, entry.RecordedAtUtc, entry.TerminalAtUtc, entry.AdmissionStatus, entry.AdmissionReason, entry.WorkerLease, entry.Dispatch);
+        return new TriggerQueueEntry(
+            entry.Envelope.DeliveryId,
+            entry.Envelope.DeduplicationId,
+            entry.Envelope.Loop.LoopId,
+            entry.CanonicalEnvelopeHash,
+            EntryBytes(entry),
+            queuedReservationBytes,
+            ReservedEntryBytes(entry),
+            entry.State,
+            entry.TerminalReason,
+            order,
+            entry.Revision,
+            entry.RecordedAtUtc,
+            entry.TerminalAtUtc,
+            entry.AdmissionStatus,
+            entry.AdmissionReason,
+            entry.WorkerLease,
+            entry.Dispatch,
+            entry.Envelope.ActorContext.WorkspaceId,
+            entry.Envelope.Loop.GovernedPublication?.Revision.GraphId,
+            entry.Envelope.Loop.GovernedPublication?.Revision.RevisionId);
     }
 
     private static TriggerDeliveryAdmissionHistoryEntry? ToHistory(TriggerQueueLedgerEntry? entry)

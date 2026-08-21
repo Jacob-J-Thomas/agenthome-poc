@@ -2,7 +2,9 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
+using EmbodySense.Core.Application.Loops.Posture.Models;
 using EmbodySense.Core.Application.Triggers.Schedules.Models;
+using EmbodySense.Core.Common.Loops.Posture;
 using EmbodySense.Core.Common.Tests.Triggers.Schedules;
 using EmbodySense.Core.Common.Tests;
 using EmbodySense.Core.Common.Triggers;
@@ -118,6 +120,47 @@ public sealed class ScheduleStoreTests
             ScheduleDeliveryProvenanceStatus.Conflict,
             (await new ScheduleStore(preparedPaths).ResolveAsync(
                 preparedState.PendingDelivery!.Prepared!.Envelope)).Status);
+    }
+
+    [Fact]
+    public async Task Operational_pages_are_deterministic_cursor_safe_detached_and_validate_the_whole_catalog_before_projection()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ScheduleStore(paths);
+        foreach (var suffix in new[] { "c", "a", "b" })
+        {
+            Assert.Equal(
+                ScheduleStoreMutationStatus.Applied,
+                (await store.CreateAsync(ScheduleStoreTestData.CreateRequest($"schedule-{suffix}"))).Status);
+        }
+
+        var first = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1));
+        var firstAgain = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1));
+        var second = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, first.ContinuationCursor));
+        var third = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, second.ContinuationCursor));
+        var nonexistent = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, "schedule-aa"));
+        var beyondTail = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, "schedule-z"));
+        var malformed = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, "bad cursor"));
+
+        Assert.Equal("schedule-a", Assert.Single(first.Items).Definition.ScheduleId.Value);
+        Assert.Equal("schedule-a", first.ContinuationCursor);
+        Assert.Equal("schedule-b", Assert.Single(second.Items).Definition.ScheduleId.Value);
+        Assert.Equal("schedule-b", second.ContinuationCursor);
+        Assert.Equal("schedule-c", Assert.Single(third.Items).Definition.ScheduleId.Value);
+        Assert.False(third.HasMore);
+        Assert.Null(third.ContinuationCursor);
+        Assert.Equal("schedule-b", Assert.Single(nonexistent.Items).Definition.ScheduleId.Value);
+        Assert.Equal(GovernedLoopOperationalEvidenceReadStatus.Empty, beyondTail.Status);
+        Assert.Equal(GovernedLoopOperationalEvidenceReadStatus.Corrupt, malformed.Status);
+        Assert.NotSame(first.Items[0].Definition, firstAgain.Items[0].Definition);
+        Assert.NotSame(first.Items[0].State, firstAgain.Items[0].State);
+        var exposed = Assert.IsAssignableFrom<IList<GovernedLoopScheduleEvidenceSnapshot>>(first.Items);
+        Assert.Throws<NotSupportedException>(() => exposed.Add(first.Items[0]));
+
+        await File.WriteAllTextAsync(Assert.Single(Directory.EnumerateFiles(StoreRoot(paths), "ledger-*.json")), "{}");
+        var corruptOffPage = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, "schedule-z"));
+        Assert.Equal(GovernedLoopOperationalEvidenceReadStatus.Corrupt, corruptOffPage.Status);
     }
 
     [Fact]
@@ -351,10 +394,13 @@ public sealed class ScheduleStoreTests
 
         Assert.Equal(ScheduleStoreMutationStatus.Applied, applied.Status);
         Assert.Equal(replacement, applied.CurrentState);
+        Assert.False(applied.ExactReplay);
         Assert.Equal(ScheduleStoreMutationStatus.Applied, replay.Status);
         Assert.Equal(replacement, replay.CurrentState);
+        Assert.True(replay.ExactReplay);
         Assert.Equal(ScheduleStoreMutationStatus.Conflict, conflict.Status);
         Assert.Equal(replacement, conflict.CurrentState);
+        Assert.False(conflict.ExactReplay);
         Assert.Equal(replacement, read.State);
     }
 
@@ -932,7 +978,7 @@ public sealed class ScheduleStoreTests
         var missingExchange = await new ScheduleStore(emptyPaths).CompareExchangeAsync(new(
             request.InitialState,
             ScheduleStoreTestData.Replacement(request.InitialState)));
-        var invalidIdentity = await new ScheduleStore(emptyPaths).ReadAsync(null!);
+        var invalidIdentity = await new ScheduleStore(emptyPaths).ReadAsync((ScheduleId)null!);
 
         Assert.Equal(ScheduleStoreMutationStatus.Conflict, missingExchange.Status);
         Assert.Null(missingExchange.CurrentState);

@@ -27,7 +27,7 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 /// Lifecycle receipts are reserved before run mutation. Resume is never automatic: it requires an available workspace host,
 /// the admitted model, an exact paused lifecycle version, and an authenticated explicit request.
 /// </remarks>
-public sealed class CustomLoopLifecycleService
+public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
 {
     private const int MaxRetentionCleanupReplayTraversalCount = 64;
     private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);

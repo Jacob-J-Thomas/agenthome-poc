@@ -15,12 +15,14 @@ using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.Revisions;
+using EmbodySense.Core.Application.Loops.Posture;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.Wait;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Application.Runtime.State;
+using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
@@ -37,10 +39,11 @@ using EmbodySense.Core.Persistence.Loops.Execution.Authority;
 using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
 using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
+using EmbodySense.Core.Persistence.Triggers;
+using EmbodySense.Core.Persistence.Triggers.Schedules;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Persistence.ToolResults;
-using EmbodySense.Core.Persistence.Triggers.Schedules;
 using EmbodySense.Core.Persistence.Workspace;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Governance;
@@ -49,6 +52,7 @@ using EmbodySense.Core.Startup.Inference;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
+using EmbodySense.Core.Startup.Loops.Posture;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 
@@ -367,6 +371,11 @@ public sealed class AgentRuntimeFactory
                 capabilityAdmissionService: capabilityAdmission);
             _capabilityTrustProvider.RequireDisjointWorkspace(paths.RootPath);
             var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+            var triggerWorkspaceId = workspaceId["workspace-sha256:".Length..];
+            var operationalClock = TimeProvider.System;
+            var triggerQueueStore = new TriggerQueueStore(paths, TriggerQueueQuota.Runtime, timeProvider: operationalClock);
+            var scheduleStore = new ScheduleStore(paths);
+            var coordinatorEvidenceStore = new GovernedLoopCoordinatorEvidenceStore(paths);
             var governedRevisionStore = new GovernedLoopRevisionLifecycleStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedGraphStore = new GovernedLoopGraphRevisionStore(paths, governedRevisionStore, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedPublicationSource = new GovernedLoopPublishedRevisionSource(governedRevisionStore, capabilityAuthority);
@@ -467,10 +476,12 @@ public sealed class AgentRuntimeFactory
             governedWaitNodeRelay.Bind(governedWait);
             governedWaitContinuationRelay.Bind(governedWait);
             governedWaitRuntimeHost = new GovernedLoopWaitRuntimeHost(
-                paths,
+                scheduleStore,
                 governedSleepStore,
+                coordinatorEvidenceStore,
                 governedSleep,
-                governedWait);
+                governedWait,
+                operationalClock);
             var governedMaterializer = new GovernedLoopSequentialRunMaterializer(
                 customRunStore,
                 auditLog,
@@ -496,6 +507,37 @@ public sealed class AgentRuntimeFactory
                 legacyRunner,
                 governedRunner);
             var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, originAwareResumeExecutor, legacyInferenceExecutor, lifecycleCancellationSignal, auditLog, customExecutionGate, receiptRetention: customControlOperations, surface: runtimeSurface.SurfaceId.Id);
+            var operationalAuthority = new GovernedLoopLocalOperationalControlAuthority(
+                workspaceId,
+                actor,
+                runtimeSurface.Id,
+                operationalClock);
+            var operationalPosture = new GovernedLoopOperationalPostureService(
+                workspaceId,
+                triggerWorkspaceId,
+                GovernedLoopWaitRuntimeHost.CoordinatorId,
+                new TriggerQueueOperationalPostureAdapter(triggerQueueStore, triggerWorkspaceId),
+                scheduleStore,
+                governedSleepStore,
+                new CustomLoopRunOperationalPostureAdapter(customRunStore),
+                coordinatorEvidenceStore,
+                operationalAuthority,
+                operationalClock);
+            var operationalControls = new GovernedLoopOperationalControlService(
+                operationalAuthority,
+                new GovernedLoopOperationalControlReceiptStore(paths),
+                triggerQueueStore,
+                triggerQueueStore,
+                scheduleStore,
+                customRunStore,
+                customLifecycle,
+                operationalClock);
+            var operationalFacade = new GovernedLoopOperationalFacade(
+                workspaceId,
+                actor,
+                runtimeSurface.Id,
+                operationalPosture,
+                operationalControls);
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);
             var customLoops = new CustomLoopRuntimeFacade(
                 customDefinitionStore,
@@ -545,6 +587,7 @@ public sealed class AgentRuntimeFactory
                 customLoops,
                 governedLoops,
                 scheduleDeliveryProvenance,
+                operationalFacade,
                 defaultConversationReviews,
                 codexRuntimeStatus,
                 governedWaitRuntimeHost,

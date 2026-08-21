@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
+using EmbodySense.Core.Application.Loops.Posture.Models;
 using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.Sleep.Models;
 using EmbodySense.Core.Application.Tests.Loops.Sleep;
@@ -10,6 +11,7 @@ using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
+using EmbodySense.Core.Common.Loops.Posture;
 using EmbodySense.Core.Common.Tests.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
@@ -27,6 +29,54 @@ public sealed class GovernedLoopSleepStoreTests
     private const string CrossProcessOutput = "EMBODYSENSE_SLEEP_STORE_OUTPUT";
     private const string CrossProcessCrashBoundary = "EMBODYSENSE_SLEEP_STORE_CRASH_BOUNDARY";
     private const string CrossProcessOperation = "EMBODYSENSE_SLEEP_STORE_OPERATION";
+
+    [Fact]
+    public async Task Operational_pages_are_deterministic_cursor_safe_detached_and_validate_the_whole_catalog_before_projection()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new GovernedLoopSleepStore(paths);
+        var checkpoints = new[]
+        {
+            GovernedLoopSleepContractTestFixture.TimestampCheckpoint(binding: GovernedLoopSleepContractTestFixture.Binding(runId: "run-c")),
+            GovernedLoopSleepContractTestFixture.TimestampCheckpoint(binding: GovernedLoopSleepContractTestFixture.Binding(runId: "run-a")),
+            GovernedLoopSleepContractTestFixture.TimestampCheckpoint(binding: GovernedLoopSleepContractTestFixture.Binding(runId: "run-b"))
+        };
+        foreach (var checkpoint in checkpoints)
+        {
+            Assert.Equal(
+                GovernedLoopSleepCheckpointMutationStatus.Committed,
+                (await store.PublishAndReleaseAsync(checkpoint, GovernedLoopSleepContractTestFixture.Hash('9')))!.Status);
+        }
+        var expected = checkpoints.OrderBy(item => item.CheckpointId, StringComparer.Ordinal).ToArray();
+
+        var first = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1));
+        var firstAgain = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1));
+        var second = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, first.ContinuationCursor));
+        var third = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, second.ContinuationCursor));
+        var nonexistent = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, "0"));
+        var beyondTail = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, "z"));
+        var malformed = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, "bad cursor"));
+
+        Assert.Equal(expected[0].CheckpointId, Assert.Single(first.Items).Checkpoint.CheckpointId);
+        Assert.Equal(expected[0].CheckpointId, first.ContinuationCursor);
+        Assert.Equal(expected[1].CheckpointId, Assert.Single(second.Items).Checkpoint.CheckpointId);
+        Assert.Equal(expected[1].CheckpointId, second.ContinuationCursor);
+        Assert.Equal(expected[2].CheckpointId, Assert.Single(third.Items).Checkpoint.CheckpointId);
+        Assert.False(third.HasMore);
+        Assert.Null(third.ContinuationCursor);
+        Assert.Equal(expected[0].CheckpointId, Assert.Single(nonexistent.Items).Checkpoint.CheckpointId);
+        Assert.Equal(GovernedLoopOperationalEvidenceReadStatus.Empty, beyondTail.Status);
+        Assert.Equal(GovernedLoopOperationalEvidenceReadStatus.Corrupt, malformed.Status);
+        Assert.NotSame(first.Items[0].Checkpoint, firstAgain.Items[0].Checkpoint);
+        Assert.NotSame(first.Items[0].Checkpoint.Binding, firstAgain.Items[0].Checkpoint.Binding);
+        var exposed = Assert.IsAssignableFrom<IList<GovernedLoopWakeEvidenceSnapshot>>(first.Items);
+        Assert.Throws<NotSupportedException>(() => exposed.Add(first.Items[0]));
+
+        await File.WriteAllTextAsync(Assert.Single(Directory.EnumerateFiles(StoreRoot(paths), "ledger-*.json")), "{}");
+        var corruptOffPage = await store.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, "z"));
+        Assert.Equal(GovernedLoopOperationalEvidenceReadStatus.Corrupt, corruptOffPage.Status);
+    }
 
     [Fact]
     public async Task Publish_read_restart_and_exact_retry_preserve_immutable_checkpoint_and_posture_fence()

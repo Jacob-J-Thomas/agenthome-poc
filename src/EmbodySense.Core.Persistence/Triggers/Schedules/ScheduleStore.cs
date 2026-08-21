@@ -1,6 +1,10 @@
 using System.ComponentModel;
+using EmbodySense.Core.Application.Loops.Posture;
+using EmbodySense.Core.Application.Loops.Posture.Models;
 using EmbodySense.Core.Application.Triggers.Schedules;
 using EmbodySense.Core.Application.Triggers.Schedules.Models;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Posture;
 using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Schedules;
 using EmbodySense.Core.Common.Triggers.Schedules.Models;
@@ -17,7 +21,7 @@ namespace EmbodySense.Core.Persistence.Triggers.Schedules;
 /// staging starts, the immutable-generation protocol reaches a durable decision without observing caller cancellation.
 /// Exact retries resolve publication-boundary ambiguity through the canonical definition and state hashes.
 /// </remarks>
-public sealed class ScheduleStore : IScheduleStorePort, IScheduleDeliveryProvenancePort
+public sealed class ScheduleStore : IScheduleStorePort, IScheduleDeliveryProvenancePort, IScheduleOperationalPosturePort
 {
     private const int SchemaVersion = 1;
     private const int MaximumConfiguredSchedules = 4_096;
@@ -194,6 +198,61 @@ public sealed class ScheduleStore : IScheduleStorePort, IScheduleDeliveryProvena
     }
 
     /// <inheritdoc />
+    public async Task<GovernedLoopScheduleEvidenceReadResult> ReadAsync(
+        GovernedLoopOperationalEvidencePageRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request is null
+            || request.MaximumCount is < 1 or > GovernedLoopOperationalPostureLimits.MaxPageItems
+            || request.AfterId is not null
+                && !CustomLoopArtifactIdentifier.IsValid(request.AfterId, GovernedLoopOperationalPostureLimits.MaxTargetIdCharacters))
+        {
+            return Operational(GovernedLoopOperationalEvidenceReadStatus.Corrupt);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            using var mutationLock = await _guard.AcquireMutationLockAsync(_observer, cancellationToken).ConfigureAwait(false);
+            var (catalog, _) = await LoadAsync(mutationLock, cancellationToken).ConfigureAwait(false);
+            var selected = catalog.Entries
+                .Where(entry => request.AfterId is null || string.Compare(entry.Definition.ScheduleId.Value, request.AfterId, StringComparison.Ordinal) > 0)
+                .OrderBy(entry => entry.Definition.ScheduleId)
+                .Take(request.MaximumCount + 1)
+                .ToArray();
+            var hasMore = selected.Length > request.MaximumCount;
+            var items = Array.AsReadOnly(selected
+                .Take(request.MaximumCount)
+                .Select(entry => new GovernedLoopScheduleEvidenceSnapshot(
+                    ScheduleContractCopy.Copy(entry.Definition)!,
+                    ScheduleContractCopy.Copy(entry.State)!))
+                .ToArray());
+            return new GovernedLoopScheduleEvidenceReadResult(
+                items.Count == 0 ? GovernedLoopOperationalEvidenceReadStatus.Empty : GovernedLoopOperationalEvidenceReadStatus.Found,
+                catalog.Generation,
+                hasMore,
+                hasMore ? items[^1].Definition.ScheduleId.Value : null,
+                items);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsBackpressure(exception))
+        {
+            return Operational(GovernedLoopOperationalEvidenceReadStatus.Backpressured);
+        }
+        catch (Exception exception) when (IsCorruption(exception))
+        {
+            return Operational(GovernedLoopOperationalEvidenceReadStatus.Corrupt);
+        }
+        catch (Exception exception) when (IsUnavailable(exception))
+        {
+            return Operational(GovernedLoopOperationalEvidenceReadStatus.Unavailable);
+        }
+    }
+
+    /// <inheritdoc />
     public async Task<ScheduleStoreMutationResult> CreateAsync(ScheduleStoreCreateRequest request, CancellationToken cancellationToken = default)
     {
         if (!TryCaptureCreate(request, out var definition, out var state, out var definitionHash, out var stateHash))
@@ -283,7 +342,7 @@ public sealed class ScheduleStore : IScheduleStorePort, IScheduleDeliveryProvena
 
             if (string.Equals(existing.StateHash, replacementHash, StringComparison.Ordinal))
             {
-                return MutationResult(ScheduleStoreMutationStatus.Applied, existing.State);
+                return MutationResult(ScheduleStoreMutationStatus.Applied, existing.State, exactReplay: true);
             }
 
             if (!string.Equals(existing.StateHash, expectedHash, StringComparison.Ordinal))
@@ -494,8 +553,9 @@ public sealed class ScheduleStore : IScheduleStorePort, IScheduleDeliveryProvena
 
     private static ScheduleStoreMutationResult MutationResult(
         ScheduleStoreMutationStatus status,
-        ScheduleState? state = null)
-        => new(status, ScheduleContractCopy.Copy(state));
+        ScheduleState? state = null,
+        bool exactReplay = false)
+        => new(status, ScheduleContractCopy.Copy(state)) { ExactReplay = exactReplay };
 
     private static ScheduleDeliveryProvenanceResult ProvenanceResult(
         ScheduleDeliveryProvenanceStatus status,
@@ -527,6 +587,9 @@ public sealed class ScheduleStore : IScheduleStorePort, IScheduleDeliveryProvena
             occurrence,
             identity,
             result);
+
+    private static GovernedLoopScheduleEvidenceReadResult Operational(GovernedLoopOperationalEvidenceReadStatus status)
+        => new(status, 0, false, null, Array.AsReadOnly(Array.Empty<GovernedLoopScheduleEvidenceSnapshot>()));
 
     private static bool IsValidScheduleId(ScheduleId? scheduleId)
         => scheduleId is not null && ScheduleId.TryParse(scheduleId.Value, out _);

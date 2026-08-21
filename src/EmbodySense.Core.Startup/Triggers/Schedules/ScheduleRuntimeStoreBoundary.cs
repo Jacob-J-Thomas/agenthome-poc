@@ -106,7 +106,8 @@ internal sealed class ScheduleRuntimeStoreBoundary(IScheduleStorePort store) : I
     {
         if (result is null
             || !Enum.IsDefined(result.Status)
-            || result.Status == ScheduleStoreMutationStatus.Unknown)
+            || result.Status == ScheduleStoreMutationStatus.Unknown
+            || result.ExactReplay)
         {
             return Mutation(ScheduleStoreMutationStatus.Corrupt);
         }
@@ -154,13 +155,13 @@ internal sealed class ScheduleRuntimeStoreBoundary(IScheduleStorePort store) : I
         return result.Status switch
         {
             ScheduleStoreMutationStatus.Applied when current is not null && SameState(replacement, current)
-                => Mutation(ScheduleStoreMutationStatus.Applied, current),
+                => Mutation(ScheduleStoreMutationStatus.Applied, current, result.ExactReplay),
             ScheduleStoreMutationStatus.Conflict
-                => Mutation(ScheduleStoreMutationStatus.Conflict, current),
+                when !result.ExactReplay => Mutation(ScheduleStoreMutationStatus.Conflict, current),
             ScheduleStoreMutationStatus.Corrupt
-                => Mutation(ScheduleStoreMutationStatus.Corrupt, current),
+                when !result.ExactReplay => Mutation(ScheduleStoreMutationStatus.Corrupt, current),
             ScheduleStoreMutationStatus.Unavailable or ScheduleStoreMutationStatus.Backpressured
-                when current is null => Mutation(result.Status),
+                when current is null && !result.ExactReplay => Mutation(result.Status),
             _ => Mutation(ScheduleStoreMutationStatus.Corrupt),
         };
     }
@@ -203,6 +204,7 @@ internal sealed class ScheduleRuntimeStoreBoundary(IScheduleStorePort store) : I
 
     private static ScheduleStoreMutationResult Mutation(
         ScheduleStoreMutationStatus status,
-        ScheduleState? state = null)
-        => new(status, ScheduleContractCopy.Copy(state));
+        ScheduleState? state = null,
+        bool exactReplay = false)
+        => new(status, ScheduleContractCopy.Copy(state)) { ExactReplay = exactReplay };
 }

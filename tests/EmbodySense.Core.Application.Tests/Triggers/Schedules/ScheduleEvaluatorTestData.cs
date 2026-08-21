@@ -126,6 +126,8 @@ internal sealed class TestScheduleStore(
     internal bool ReturnNullRead { get; set; }
     internal bool ReturnNullMutation { get; set; }
     internal bool ReturnAppliedWithoutCurrentState { get; set; }
+    internal bool ReturnNextMutationWithoutCurrentState { get; set; }
+    internal bool ReturnExactReplay { get; set; }
     internal bool ThrowOnRead { get; set; }
     internal bool ThrowOnMutation { get; set; }
     internal bool CancelOnRead { get; set; }
@@ -180,11 +182,20 @@ internal sealed class TestScheduleStore(
             return Task.FromResult(new ScheduleStoreMutationResult(ScheduleStoreMutationStatus.Applied, null));
         }
 
+        if (ReturnExactReplay)
+        {
+            ReturnExactReplay = false;
+            State = ScheduleContractCopy.Copy(request.Replacement)!;
+            return Task.FromResult(new ScheduleStoreMutationResult(ScheduleStoreMutationStatus.Applied, ScheduleContractCopy.Copy(State)) { ExactReplay = true });
+        }
+
         var selectedStatus = MutationStatusSelector?.Invoke(Mutations.Count) ?? NextMutationStatus;
         if (selectedStatus is { } forced)
         {
             NextMutationStatus = null;
-            return Task.FromResult(new ScheduleStoreMutationResult(forced, ScheduleContractCopy.Copy(State)));
+            var current = ReturnNextMutationWithoutCurrentState ? null : ScheduleContractCopy.Copy(State);
+            ReturnNextMutationWithoutCurrentState = false;
+            return Task.FromResult(new ScheduleStoreMutationResult(forced, current));
         }
 
         if (!SameState(State, request.Expected))
