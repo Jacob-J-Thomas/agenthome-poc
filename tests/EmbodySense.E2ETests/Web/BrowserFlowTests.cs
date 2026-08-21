@@ -629,7 +629,9 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#loopsNav");
             await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && !document.getElementById('governedGraphTab').disabled");
             await ClickAsync(browser, "#governedGraphTab");
-            await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Published') && document.querySelectorAll('#governedGraphCanvas .governed-graph-node').length === 3");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphId').value === 'browser-profile-routing-graph' && !document.getElementById('governedGraphRefreshButton').disabled");
+            await ClickAsync(browser, "#governedGraphRefreshButton");
+            await browser.WaitForExpressionAsync($"document.getElementById('governedGraphLifecycle').textContent.includes('Published') && document.querySelectorAll('#governedGraphCanvas .governed-graph-node').length === 3 && document.getElementById('governedGraphRole').value === '{authoringRoleValue}' && document.getElementById('governedGraphModelProfile').value === '{PrimaryProfileId}'");
             Assert.Contains("org.example/model-profile/tertiary", await browser.EvaluateStringAsync("document.getElementById('governedGraphFallbackOrder').textContent"), StringComparison.Ordinal);
             Assert.True(await browser.EvaluateBooleanAsync("document.getElementById('governedGraphFallbackOrder').textContent.indexOf('org.example/model-profile/tertiary') < document.getElementById('governedGraphFallbackOrder').textContent.indexOf('org.example/model-profile/secondary')"));
             await ClickButtonByTextAsync(browser, "#governedGraphCanvas button", "provider-inference");
