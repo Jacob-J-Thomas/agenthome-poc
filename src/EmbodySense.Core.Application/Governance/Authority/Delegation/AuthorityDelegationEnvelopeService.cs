@@ -233,6 +233,7 @@ public sealed class AuthorityDelegationEnvelopeService : IAuthorityDelegationEnv
         }
 
         var grantResolution = await _grantResolver.ResolveAsync(receipt.Intent.AuthorityGrant, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (!TryAdvanceTrustedTime(ref observedAtUtc))
         {
             return Result(AuthorityDelegationServiceStatus.Unavailable);
