@@ -75,6 +75,16 @@ public sealed class GovernedLoopSequentialOrderedRuntimeAdapter : IGovernedLoopS
         return failure ?? await _orderedRunner.ResumeWaitSequentialAsync(request, _nodeEvidenceRecorder, _auditRecorder, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Re-enters the same ordered runtime from one exact retained retry dispatch or routed exhaustion.</summary>
+    public async Task<CustomLoopOrderedRunResult> ResumeRetryAsync(
+        GovernedLoopSequentialOrderedRetryResumeRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var failure = await ValidatePersistedEvidenceAsync(request.Anchor, cancellationToken).ConfigureAwait(false);
+        return failure ?? await _orderedRunner.ResumeRetrySequentialAsync(request, _nodeEvidenceRecorder, _auditRecorder, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<CustomLoopOrderedRunResult?> ValidatePersistedEvidenceAsync(
         GovernedLoopSequentialRunAnchor? anchor,
         CancellationToken cancellationToken)

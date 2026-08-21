@@ -84,5 +84,9 @@ public enum CustomLoopRunEventKind
     /// <summary>
     /// Identifies an append-once canonical topology-pruning event for one exact undispatched activation.
     /// </summary>
-    TopologyNodeSkipped = 19
+    TopologyNodeSkipped = 19,
+    /// <summary>
+    /// Identifies one append-only authenticated retry-series state transition.
+    /// </summary>
+    RetryStateChanged = 20
 }

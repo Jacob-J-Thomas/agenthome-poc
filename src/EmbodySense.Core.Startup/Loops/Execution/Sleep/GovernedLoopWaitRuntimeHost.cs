@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Loops.Sleep;
+using EmbodySense.Core.Application.Loops.Retry;
 using EmbodySense.Core.Application.Loops.Wait;
 using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 using EmbodySense.Core.Persistence.Triggers.Schedules;
@@ -24,6 +25,7 @@ internal sealed class GovernedLoopWaitRuntimeHost : ICustomLoopExecutionActivati
     private readonly GovernedLoopLocalCoordinator _coordinator;
     private readonly TimeProvider _timeProvider;
     private readonly GovernedLoopWaitExecutionService _wait;
+    private readonly GovernedLoopRetryExecutionService _retry;
     private int _activationRequested;
     private int _disposed;
 
@@ -33,6 +35,7 @@ internal sealed class GovernedLoopWaitRuntimeHost : ICustomLoopExecutionActivati
         GovernedLoopCoordinatorEvidenceStore coordinatorEvidenceStore,
         GovernedLoopSleepService sleep,
         GovernedLoopWaitExecutionService wait,
+        GovernedLoopRetryExecutionService retry,
         TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(scheduleStore);
@@ -40,6 +43,7 @@ internal sealed class GovernedLoopWaitRuntimeHost : ICustomLoopExecutionActivati
         ArgumentNullException.ThrowIfNull(coordinatorEvidenceStore);
         ArgumentNullException.ThrowIfNull(sleep);
         _wait = wait ?? throw new ArgumentNullException(nameof(wait));
+        _retry = retry ?? throw new ArgumentNullException(nameof(retry));
         _timeProvider = timeProvider ?? TimeProvider.System;
 
         var instanceId = Guid.NewGuid().ToString("N");
@@ -94,6 +98,15 @@ internal sealed class GovernedLoopWaitRuntimeHost : ICustomLoopExecutionActivati
                         retryAllowed: false,
                         status: "Failed",
                         detail: $"governed_wait_recovery_requires_review: {recovery.NeedsReview} retained Wait recovery item(s) could not be reconciled safely.");
+                }
+
+                var retryRecovery = await _retry.RecoverAsync(256, cancellationToken).ConfigureAwait(false);
+                if (retryRecovery.NeedsReview > 0)
+                {
+                    return Unavailable(
+                        retryAllowed: false,
+                        status: "Failed",
+                        detail: $"governed_retry_recovery_requires_review: {retryRecovery.NeedsReview} retained retry schedule(s) could not be reconciled safely.");
                 }
 
                 var start = await StartCoordinatorAsync(cancellationToken).ConfigureAwait(false);

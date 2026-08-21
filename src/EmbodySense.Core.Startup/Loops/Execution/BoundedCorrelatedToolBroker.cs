@@ -42,6 +42,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
     private readonly WorkspacePaths _paths;
     private readonly CustomLoopInferenceAttemptRequest _attempt;
     private readonly int _toolRequestsUsedInRun;
+    private readonly int? _retryToolRequestLimit;
     private readonly SemaphoreSlim _requestGate = new(1, 1);
     private int _requestsObserved;
     private int _toolRequestsConsumed;
@@ -132,6 +133,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
         _attempt = request ?? throw new ArgumentNullException(nameof(request));
         _toolRequestsUsedInRun = request.ToolRequestsUsedInRun;
+        _retryToolRequestLimit = request.RetryDispatchBudget?.RemainingToolCalls;
         if (governedAuthorityRequired && _effectAuthorityBoundary is null)
         {
             throw new ArgumentNullException(nameof(effectAuthorityBoundary));
@@ -143,6 +145,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
     /// </summary>
     public IReadOnlyList<ToolCommand> AvailableCommands => Volatile.Read(ref _requestsObserved) >= CustomLoopLimits.MaxGovernedToolRequestsPerAttempt
         || _toolRequestsUsedInRun + Volatile.Read(ref _toolRequestsConsumed) >= CustomLoopLimits.MaxGovernedToolRequestsPerRun
+        || _retryToolRequestLimit is { } retryLimit && Volatile.Read(ref _requestsObserved) >= retryLimit
             ? []
             : _inner.AvailableCommands;
 
@@ -206,11 +209,11 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
 
         var attemptLimitExceeded = requestOrdinal > CustomLoopLimits.MaxGovernedToolRequestsPerAttempt;
         var runLimitExceeded = _toolRequestsUsedInRun + requestOrdinal > CustomLoopLimits.MaxGovernedToolRequestsPerRun;
-        if ((attemptLimitExceeded || runLimitExceeded) && _visibleOverLimitDenied)
+        var retryLimitExceeded = _retryToolRequestLimit is { } retryLimit && requestOrdinal > retryLimit;
+        if ((attemptLimitExceeded || runLimitExceeded || retryLimitExceeded) && _visibleOverLimitDenied)
         {
             Interlocked.Increment(ref _toolRequestsConsumed);
-            var scope = attemptLimitExceeded ? "attempt" : "run";
-            var limit = attemptLimitExceeded ? CustomLoopLimits.MaxGovernedToolRequestsPerAttempt : CustomLoopLimits.MaxGovernedToolRequestsPerRun;
+            var (scope, limit) = ResolveLimit(attemptLimitExceeded, runLimitExceeded);
             await _observer.RecordIntegrityAsync(correlatedRequest, resolvedTarget, authority, requestOrdinal, cancellationToken);
             using var auditIntegrityWindow = new CancellationTokenSource(_integrityWriteTimeout);
             await RecordAuthorityAsync(
@@ -230,11 +233,10 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         await _observer.ReserveAsync(correlatedRequest, resolvedTarget, authority, requestOrdinal, cancellationToken);
         Interlocked.Increment(ref _toolRequestsConsumed);
 
-        if (attemptLimitExceeded || runLimitExceeded)
+        if (attemptLimitExceeded || runLimitExceeded || retryLimitExceeded)
         {
             _visibleOverLimitDenied = true;
-            var scope = attemptLimitExceeded ? "attempt" : "run";
-            var limit = attemptLimitExceeded ? CustomLoopLimits.MaxGovernedToolRequestsPerAttempt : CustomLoopLimits.MaxGovernedToolRequestsPerRun;
+            var (scope, limit) = ResolveLimit(attemptLimitExceeded, runLimitExceeded);
             return await DenyAsync(correlatedRequest, authority, resolvedTarget, requestOrdinal, scope, limit, cancellationToken);
         }
 
@@ -263,6 +265,13 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         await _observer.RecordReturnedAsync(result, cancellationToken);
         return result;
     }
+
+    private (string Scope, int Limit) ResolveLimit(bool attemptLimitExceeded, bool runLimitExceeded)
+        => attemptLimitExceeded
+            ? ("attempt", CustomLoopLimits.MaxGovernedToolRequestsPerAttempt)
+            : runLimitExceeded
+                ? ("run", CustomLoopLimits.MaxGovernedToolRequestsPerRun)
+                : ("retry", _retryToolRequestLimit!.Value);
 
     private async Task<GovernedLoopEffectAuthorityExecutionResult<bool>> EvaluateIntakeAuthorityAsync(
         ToolRequest request,

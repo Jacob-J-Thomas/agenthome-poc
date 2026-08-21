@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 
 namespace EmbodySense.Core.Application.Loops.Sequential.Models;
 
@@ -16,6 +17,7 @@ public sealed class GovernedLoopSequentialPlanNode
         IReadOnlyList<string> incomingControlEdgeIds,
         IReadOnlyList<string> outgoingControlEdgeIds,
         IReadOnlyDictionary<string, string> parameters,
+        GovernedLoopRetryPolicy? retryPolicy,
         string? incomingControlEdgeId,
         string? outgoingControlEdgeId)
     {
@@ -29,6 +31,7 @@ public sealed class GovernedLoopSequentialPlanNode
         IncomingControlEdgeIds = incomingControlEdgeIds;
         OutgoingControlEdgeIds = outgoingControlEdgeIds;
         Parameters = parameters;
+        RetryPolicy = retryPolicy;
         IncomingControlEdgeId = incomingControlEdgeId;
         OutgoingControlEdgeId = outgoingControlEdgeId;
     }
@@ -62,6 +65,9 @@ public sealed class GovernedLoopSequentialPlanNode
 
     /// <summary>Gets the immutable bounded descriptor parameters admitted with this exact plan node.</summary>
     public IReadOnlyDictionary<string, string> Parameters { get; }
+
+    /// <summary>Gets the exact optional retry policy admitted into this immutable plan.</summary>
+    public GovernedLoopRetryPolicy? RetryPolicy { get; }
 
     /// <summary>Gets the sole incoming edge for a linear node, or <see langword="null"/> for an entry or non-linear node.</summary>
     public string? IncomingControlEdgeId { get; }

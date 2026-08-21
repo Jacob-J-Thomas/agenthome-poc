@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Failures.Models;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using System.Text.Json.Serialization;
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
@@ -78,4 +79,9 @@ public sealed record CustomLoopRunEvent(
     /// <remarks>The JSON property is required even when null so schema-1 run artifacts cannot omit failure classification posture.</remarks>
     [JsonRequired]
     public GovernedLoopFailureEvidence? FailureEvidence { get; init; }
+
+    /// <summary>Gets one exact append-only durable retry-series state version, or null for every non-retry event.</summary>
+    /// <remarks>The JSON property is required even when null so schema-1 run artifacts cannot omit retry posture.</remarks>
+    [JsonRequired]
+    public GovernedLoopRetryState? RetryState { get; init; }
 }

@@ -235,8 +235,8 @@ public static class GovernedLoopExecutionStateMatrix
     /// <summary>Determines whether one retained node-evidence item may directly replace its prior frontier posture.</summary>
     /// <param name="current">The current node evidence.</param>
     /// <param name="next">The proposed successor evidence for the same node.</param>
-    /// <returns><see langword="true"/> when identity and incoming controls are immutable, the status edge is legal, and the same attempt is preserved.</returns>
-    /// <remarks>Schema 1 intentionally defines no retry edge. A later retry policy must preserve prior committed outcomes and introduce an explicitly governed attempt or execution generation instead of reinterpreting this posture.</remarks>
+    /// <returns><see langword="true"/> when identity and incoming controls are immutable and the status edge preserves either one attempt or an explicit next-attempt reservation.</returns>
+    /// <remarks>A retry reservation is the sole edge that increments an attempt: Running to Waiting, exactly plus one, with a distinct operation identity and no fabricated outcome or route.</remarks>
     public static bool IsNodeEvidenceTransitionAllowed(GovernedLoopNodeExecutionEvidence? current, GovernedLoopNodeExecutionEvidence? next)
     {
         if (current is null || next is null
@@ -280,6 +280,20 @@ public static class GovernedLoopExecutionStateMatrix
                     && next.OutcomeEvidenceId is not null,
                 _ => false
             };
+        }
+
+        if (current.Status == GovernedLoopNodeExecutionStatus.Running
+            && next.Status == GovernedLoopNodeExecutionStatus.Waiting
+            && next.Attempt == current.Attempt + 1
+            && next.AttemptOperationId is not null
+            && !string.Equals(next.AttemptOperationId, current.AttemptOperationId, StringComparison.Ordinal))
+        {
+            return current.OutcomeEvidenceId is null
+                && current.ControlOutcome is null
+                && next.OutcomeEvidenceId is null
+                && next.ControlOutcome is null
+                && next.SelectedControlEdgeIds.Count == 0
+                && next.SkippedControlEdgeIds.Count == 0;
         }
 
         return current.Attempt == next.Attempt

@@ -12,7 +12,7 @@ Explicit non-goals are:
 
 - full default/custom runtime convergence;
 - a new execution store, compatibility store, serializer, migration, alias, or fallback reader;
-- graph dispatch, durable frontier mutation, retry, repair, reconciliation, escalation, or actuator implementation;
+- graph dispatch, durable frontier mutation, repair, reconciliation, escalation, or actuator implementation;
 - changing the current default-conversation or custom-loop runtime behavior;
 - treating executor-specific crash failpoints as persisted product state;
 - inventing one universal enum for every executor-internal event.
@@ -70,7 +70,7 @@ Effect origins are closed to provider, actuator, publication, memory mutation, n
 | `ReconciliationRequired` | Evidence is ambiguous or conflicting. | Explicit reconciliation or operator disposition is required. |
 | `Reconciled` | An explicit disposition is retained. | The disposition does not fabricate an external outcome. |
 
-The public state matrix exposes structural dispatch eligibility for `IntentPrepared` and `DispatchNotStarted`, and specifically forbids redispatch for `Committed`, `ReconciliationRequired`, and `Reconciled` effects. `IntentPrepared` permits only the initial governed dispatch; treating `DispatchNotStarted` as safe to redispatch still requires later policy. #116 owns the future canonical effect-attempt protocol and operator disposition. #117 owns retry eligibility, ambiguity policy, repair, reconciliation, compensation, escalation, and failure routing after the facts are known.
+The public state matrix exposes structural dispatch eligibility for `IntentPrepared` and `DispatchNotStarted`, and specifically forbids redispatch for `Committed`, `ReconciliationRequired`, and `Reconciled` effects. `IntentPrepared` permits only the initial governed dispatch. #343 may retry `DispatchNotStarted` only when exact #342 classification, an opt-in node policy, current posture, hard budgets, and the immutable deadline all affirm safety; it never retries an ambiguous or conclusive effect. #116 owns the canonical effect-attempt protocol and operator disposition. Later #117 policy owns repair, reconciliation, compensation, escalation, and fallback after the facts are known.
 
 ### Projection evidence
 
@@ -214,7 +214,7 @@ The current custom runtime remains an ordered, separately persisted execution tr
 
 - #326 owns only the shared vocabulary, legality matrix, read-only mapping, and this migration inventory.
 - #338/#116 owns canonical effect-attempt intent and outcome evidence plus operator disposition.
-- #342/#117 owns failure taxonomy and explicit Fail routes; later #117 children own retry, reconciliation, compensation, escalation, circuit breaking, and fallback selection.
+- #342/#117 owns failure taxonomy and explicit Fail routes; #343 owns bounded opt-in retry over exact retry-safe evidence, while later #117 children own reconciliation, compensation, escalation, circuit breaking, and fallback selection.
 - #311 owns sequential canonical graph dispatch parity.
 - #312 owns the durable canonical graph frontier.
 - #333/#120 owns immutable revision lifecycle; execution binding consumes its exact published revision.

@@ -206,7 +206,12 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     {
         ArgumentNullException.ThrowIfNull(request);
         ValidateRequestEnvelope(request, _options.Surface, validateLegacyModelSnapshot: _modelPrimaryExecution is null);
+        var retryUsageCeiling = CreateRetryUsageCeiling(request.RetryDispatchBudget);
         var legacyDispatch = IsLegacyDispatch(request);
+        if (legacyDispatch && retryUsageCeiling is not null)
+        {
+            throw new InvalidOperationException("A retry-bounded token or monetary allowance requires the canonical pre-transport model reservation boundary.");
+        }
         GovernedLoopEffectAuthorityRequest? providerAuthorityRequest = null;
         if (legacyDispatch)
         {
@@ -323,7 +328,10 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
                 request.VisitOrdinal,
                 request.AttemptOperationId!,
                 request.Attempt,
-                routingEntry.Primary.ContentHash);
+                routingEntry.Primary.ContentHash)
+            {
+                RetryUsageCeiling = retryUsageCeiling,
+            };
             var primary = await _modelPrimaryExecution.ExecuteAsync(
                 new GovernedModelPrimaryExecutionRequest(primaryRequest, request.InferenceRequest, toolBroker),
                 CreateProviderTransportBoundary(providerAuthorityRequest!, injectedProviderRequestStarted: null),
@@ -807,6 +815,11 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             throw new ArgumentOutOfRangeException(nameof(request), request.ToolRequestsUsedInRun, "Persisted run tool-request usage is outside the governed evidence limit.");
         }
 
+        if (!IsValidRetryDispatchBudget(request.RetryDispatchBudget))
+        {
+            throw new ArgumentException("Retry dispatch ceilings must retain only positive bounded allowances and one exact cost currency.", nameof(request));
+        }
+
         if (validateLegacyModelSnapshot && !ProviderMatches(configuredSurface, request.ModelSnapshot.Provider))
         {
             throw new ArgumentException("The admitted provider snapshot does not match this inference executor.", nameof(request));
@@ -853,6 +866,30 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             throw new ArgumentException("Inference attempt tool exposure must exactly match the current effective intersection.", nameof(request));
         }
     }
+
+    private static GovernedModelUsageCeiling? CreateRetryUsageCeiling(CustomLoopRetryDispatchBudget? budget)
+    {
+        if (budget is null || budget.RemainingTokens is null && budget.RemainingCostMicrounits is null)
+        {
+            return null;
+        }
+
+        return GovernedModelUsageCeiling.Create(
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            budget.RemainingTokens is { } remainingTokens ? GovernedModelUsageLimit.Bounded(remainingTokens) : GovernedModelUsageLimit.Unbounded,
+            budget.RemainingCostMicrounits is { } remainingCost
+                ? GovernedModelMonetaryLimit.Bounded(budget.CostCurrency!, remainingCost)
+                : GovernedModelMonetaryLimit.Unbounded);
+    }
+
+    private static bool IsValidRetryDispatchBudget(CustomLoopRetryDispatchBudget? budget)
+        => budget is null
+            || budget.RemainingTokens is null or > 0
+                && budget.RemainingToolCalls is null or > 0
+                && budget.RemainingCostMicrounits is null or > 0
+                && (budget.RemainingCostMicrounits is null) == (budget.CostCurrency is null);
 
     private static bool ProviderMatches(LlmInferenceSurface surface, string provider)
     {

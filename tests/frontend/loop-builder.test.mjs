@@ -389,6 +389,42 @@ test("governed graph catalog projects safe command identity and keeps unavailabl
     status: 200,
     body: catalog,
   }));
+  server.on("POST", "/api/governed-graphs/retry-preview", ({ body }) => ({
+    status: 200,
+    body: {
+      status: "valid",
+      reason: "Runtime admission is still required.",
+      policy: {
+        schemaVersion: 1,
+        ...body,
+        failureClasses: ["retryable-no-effect"],
+        serverCodes: [],
+        maximumTokens: null,
+        maximumToolCalls: null,
+        maximumCostMicrounits: null,
+        maximumCostCurrency: null,
+        maximumResourceUnits: null,
+        contentHash: "9".repeat(64),
+      },
+      preview: {
+        maximumAttempts: body.maximumAttempts,
+        maximumRetries: body.maximumAttempts - 1,
+        maximumBackoffMilliseconds: 2000,
+        maximumAttemptExecutionMilliseconds: 180000,
+        maximumReachableElapsedMilliseconds: 182000,
+        currentAdmissionStillRequired: true,
+      },
+    },
+  }));
+  server.on("POST", "/api/governed-graphs/mutate", () => ({
+    status: 400,
+    body: {
+      status: "validation-rejected",
+      operationId: "command-graph-save",
+      errors: [],
+      current: null,
+    },
+  }));
   const app = await loadLoopBuilder({ server });
 
   await app.elements.governedGraphTab.click();
@@ -418,6 +454,25 @@ test("governed graph catalog projects safe command identity and keeps unavailabl
     app.elements.governedGraphInspector.textContent,
     /Command template.*org\.example\/render-e v3.*Command availability.*Ready.*credentials not required.*Artifact root working scope.*Denied network.*process tree must be proved terminal/i,
   );
+  const enableRetry = findByTag(
+    app.elements.governedGraphInspector,
+    "button",
+  ).find((button) => /Preview and enable retry/.test(button.textContent));
+  assert.ok(enableRetry);
+  await enableRetry.click();
+  assert.match(
+    app.elements.governedGraphInspector.textContent,
+    /retry-command-e+.*3 total attempts.*Fixed backoff.*Finite preview.*2 retries.*runtime admission still required/i,
+  );
+  await app.elements.governedGraphSaveButton.click();
+  const mutation = server.calls.find(
+    (call) =>
+      call.method === "POST" && call.url === "/api/governed-graphs/mutate",
+  );
+  const retryPolicy = mutation.body.graphCandidate.nodes[0].retryPolicy;
+  assert.match(retryPolicy.nodeId, /^command-e+$/);
+  assert.equal(retryPolicy.contentHash, "9".repeat(64));
+  assert.equal(Object.hasOwn(mutation.body, "authorityEvidenceHash"), false);
 });
 
 test("loaded governed graph restores a non-first primary before deriving ordered fallback state", async () => {
@@ -4167,6 +4222,88 @@ test("Runs projects durable timeline and context evidence from the authenticated
     app.elements.inspectorContent.textContent,
     /chain-of-thought/i,
   );
+});
+
+test("waiting retry evidence projects exact series budgets and keeps pause and cancel controls available", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  const retryState = {
+    seriesId: "1".repeat(64),
+    policyId: "retry-step-research",
+    policyHash: "2".repeat(64),
+    nodeId: "step-research",
+    activationOrdinal: 1,
+    visitOrdinal: 1,
+    stateVersion: 2,
+    disposition: "Scheduled",
+    currentAttempt: 1,
+    currentAttemptOperationId: "event-2",
+    nextAttempt: 2,
+    attemptOperationId: "retry-attempt-2",
+    budget: {
+      attempts: 2,
+      tokens: null,
+      toolCalls: 1,
+      costMicrounits: null,
+      costCurrency: null,
+      resourceUnits: 2,
+    },
+    startedAtUtc: "2026-07-16T12:00:01Z",
+    deadlineUtc: "2026-07-16T12:05:01Z",
+    nextRetryAtUtc: "2026-07-16T12:00:03Z",
+    wakeCheckpointId: "retry-wake-2",
+    wakeCheckpointHash: "3".repeat(64),
+    failureEvidenceId: "failure-1",
+    failureEvidenceHash: "4".repeat(64),
+    recordedAtUtc: "2026-07-16T12:00:02Z",
+    contentHash: "5".repeat(64),
+  };
+  run.status = "Waiting";
+  run.lifecycleVersion = 5;
+  run.completedAtUtc = null;
+  run.retrySeries = [retryState];
+  run.events[3].retryState = retryState;
+  replaceInstalledRun(server, run);
+  const posture = createOperationalPosture();
+  posture.snapshot.runs.items = [
+    {
+      runId: run.id,
+      loopId: run.loopId,
+      status: run.status,
+      reasonCode: "run-control-eligible",
+      lifecycleVersion: run.lifecycleVersion,
+      eligibleControls: [
+        operationalControl("pause-run", run.lifecycleVersion, "6"),
+        operationalControl("cancel-run", run.lifecycleVersion, "7"),
+      ],
+    },
+  ];
+  server.on("GET", operationalPostureUrl, () => ({
+    status: 200,
+    body: posture,
+  }));
+
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  await flushAsyncWork();
+
+  assert.match(app.elements.runTimeline.textContent, /1 durable retry series/);
+  assert.match(
+    app.elements.runTimeline.textContent,
+    /Scheduled · attempt 1 → 2/,
+  );
+  assert.match(
+    app.elements.runTimeline.textContent,
+    /2 attempts · tokens unknown · 1 tool calls · cost unknown · 2 resource units/,
+  );
+  assert.match(app.elements.runTimeline.textContent, /Retry transition/);
+  assert.match(app.elements.runTimeline.textContent, /next wake Jul 16, 2026/);
+  const actions = Object.fromEntries(
+    app.elements.runActions.children.map((item) => [item.textContent, item]),
+  );
+  assert.equal(actions["Pause at boundary"].disabled, false);
+  assert.equal(actions.Cancel.disabled, false);
 });
 
 test("Runs keeps canonical failure evidence distinct, exact, and inert", async () => {
@@ -10475,6 +10612,25 @@ function createGovernedGraphCatalog() {
       ],
       nextCursor: null,
       error: null,
+    },
+    retryPolicies: {
+      failureClasses: [
+        "dependency-unavailable-before-dispatch",
+        "dispatch-proved-not-started",
+        "retryable-no-effect",
+        "timeout-cancellation-no-effect",
+      ],
+      backoffStrategies: ["none", "fixed", "exponential"],
+      jitterStrategies: ["none", "deterministic-bounded"],
+      maximumAttempts: 8,
+      maximumPerAttemptTimeoutMilliseconds: 900000,
+      maximumElapsedMilliseconds: 2592000000,
+      maximumDelayMilliseconds: 604800000,
+      maximumServerCodes: 16,
+      maximumTokens: 1000000000,
+      maximumToolCalls: 1024,
+      maximumCostMicrounits: 1000000000000,
+      maximumResourceUnits: 1024,
     },
   };
 }

@@ -73,6 +73,9 @@ public sealed record LoopRunSnapshot(
     /// <summary>Gets authenticated per-attempt, node-series, and run-wide model reservation and usage posture.</summary>
     public LoopRunModelUsageSnapshot? ModelUsage { get; init; }
 
+    /// <summary>Gets the latest exact state of every immutable retry series retained by this run.</summary>
+    public IReadOnlyList<LoopRunRetryStateSnapshot> RetrySeries { get; init; } = [];
+
     /// <summary>
     /// Gets the canonical disposition for each correlated conversation-publication operation.
     /// The projection is derived from the ordered durable protocol events; raw events remain available through <see cref="Events"/>.

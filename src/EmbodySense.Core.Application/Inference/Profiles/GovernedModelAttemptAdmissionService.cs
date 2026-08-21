@@ -55,6 +55,10 @@ public sealed class GovernedModelAttemptAdmissionService
         {
             return Result(GovernedModelAttemptAdmissionStatus.Invalid);
         }
+        if (!GovernedModelBudgetPolicy.TryRestrictPerAttempt(node.Requirements.Budget, request.RetryUsageCeiling, out var effectiveBudget))
+        {
+            return Result(GovernedModelAttemptAdmissionStatus.Invalid);
+        }
 
         var priorOperation = await ReadPriorOperationAsync(request, primary, cancellationToken).ConfigureAwait(false);
         if (priorOperation.Status == PriorOperationReadStatus.Unavailable)
@@ -69,7 +73,7 @@ public sealed class GovernedModelAttemptAdmissionService
             new ModelInferenceDataPostureRequest(request, inferenceRequest!, inputPayloadHash!),
             cancellationToken).ConfigureAwait(false);
         if (priorOperation.Entries is { Count: > 0 } priorEntries
-            && !PriorOperationMatchesRequest(priorEntries[0].Identity, request, node, primary))
+            && !PriorOperationMatchesRequest(priorEntries[0].Identity, request, primary, effectiveBudget!))
         {
             return ConflictingPriorOperationResult(primary, priorEntries);
         }
@@ -90,7 +94,7 @@ public sealed class GovernedModelAttemptAdmissionService
         GovernedModelUsageLedgerIdentity identity;
         try
         {
-            identity = GovernedModelUsageLedgerIdentity.Create(1, admission.WorkspaceId, request.RunId, admission.GraphId, admission.GraphRevisionId, admission.GraphExecutableHash, request.ExecutionGeneration, request.AdmissionReceipt.ContentHash, admission.ContentHash, current.Evidence.AuthorityEvidenceHash, current.Evidence.DataPostureEvidenceHash, request.NodeId, request.PlanOrdinal, request.ActivationOrdinal, request.VisitOrdinal, request.AttemptOperationId, request.AttemptNumber, primary.ContentHash, node.Requirements.Budget.ContentHash);
+            identity = GovernedModelUsageLedgerIdentity.Create(1, admission.WorkspaceId, request.RunId, admission.GraphId, admission.GraphRevisionId, admission.GraphExecutableHash, request.ExecutionGeneration, request.AdmissionReceipt.ContentHash, admission.ContentHash, current.Evidence.AuthorityEvidenceHash, current.Evidence.DataPostureEvidenceHash, request.NodeId, request.PlanOrdinal, request.ActivationOrdinal, request.VisitOrdinal, request.AttemptOperationId, request.AttemptNumber, primary.ContentHash, effectiveBudget!.ContentHash);
         }
         catch
         {
@@ -122,7 +126,7 @@ public sealed class GovernedModelAttemptAdmissionService
 
         try
         {
-            var reserve = await _ledger.ReserveAsync(new GovernedModelUsageReservationRequest(identity, node.Requirements.Budget, primary.ContentHash, _timeProvider.GetUtcNow()), cancellationToken).ConfigureAwait(false);
+            var reserve = await _ledger.ReserveAsync(new GovernedModelUsageReservationRequest(identity, effectiveBudget!, primary.ContentHash, _timeProvider.GetUtcNow()), cancellationToken).ConfigureAwait(false);
             if (!IsValidReservationResult(reserve, identity, primary))
             {
                 return Result(GovernedModelAttemptAdmissionStatus.Unavailable);
@@ -480,8 +484,8 @@ public sealed class GovernedModelAttemptAdmissionService
     private static bool PriorOperationMatchesRequest(
         GovernedModelUsageLedgerIdentity identity,
         GovernedModelAttemptAdmissionRequest request,
-        GovernedModelRoutingAdmissionEntry node,
-        GovernedModelProfilePin primary)
+        GovernedModelProfilePin primary,
+        GovernedModelBudgetPolicy effectiveBudget)
         => string.Equals(identity.WorkspaceId, request.RoutingAdmission.WorkspaceId, StringComparison.Ordinal)
             && string.Equals(identity.RunId, request.RunId, StringComparison.Ordinal)
             && string.Equals(identity.GraphId, request.RoutingAdmission.GraphId, StringComparison.Ordinal)
@@ -497,7 +501,7 @@ public sealed class GovernedModelAttemptAdmissionService
             && string.Equals(identity.AttemptOperationId, request.AttemptOperationId, StringComparison.Ordinal)
             && identity.AttemptNumber == request.AttemptNumber
             && string.Equals(identity.ProfilePinHash, primary.ContentHash, StringComparison.Ordinal)
-            && string.Equals(identity.BudgetPolicyHash, node.Requirements.Budget.ContentHash, StringComparison.Ordinal);
+            && string.Equals(identity.BudgetPolicyHash, effectiveBudget.ContentHash, StringComparison.Ordinal);
 
     private static GovernedModelAttemptAdmissionResult PriorOperationResult(
         GovernedModelAttemptAdmissionStatus status,
@@ -536,6 +540,7 @@ public sealed class GovernedModelAttemptAdmissionService
                 || request.ActivationOrdinal is < 0 or >= GovernedLoopExecutionLimits.MaxFrontierNodes
                 || request.VisitOrdinal is < 1 or > GovernedLoopExecutionLimits.MaxNodeVisits
                 || !ModelProfileCatalogService.IsHash(request.RequestedPrimaryPinHash)
+                || request.RetryUsageCeiling is not null && !GovernedModelContractValidator.IsValid(request.RetryUsageCeiling)
                 || !string.Equals(request.AdmissionReceipt.Evidence.ModelRoutingAdmission.ContentHash, request.RoutingAdmission.ContentHash, StringComparison.Ordinal)
                 || !string.Equals(request.AdmissionReceipt.Evidence.Binding.RunId, request.RunId, StringComparison.Ordinal)
                 || request.AdmissionReceipt.Evidence.Binding.ExecutionGeneration != request.ExecutionGeneration

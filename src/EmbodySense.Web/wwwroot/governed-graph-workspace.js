@@ -5,6 +5,7 @@ import {
   compatibleBindings,
   configureGraphModelRouting,
   configureInferenceModelRouting,
+  configureNodeRetryPolicy,
   configureNodeParameter,
   connectBinding,
   connectControl,
@@ -19,6 +20,7 @@ import {
   mutationInput,
   moveOrderedProfileSelection,
   removeGraphNode,
+  selectHydratedNodeId,
   updateOrderedProfileSelection,
 } from "./governed-graph-authoring.js";
 
@@ -67,6 +69,7 @@ export function createGovernedGraphWorkspace({
   let pendingMutation = null;
   let routingPreview = null;
   let routingPreviewGeneration = 0;
+  let retryPolicyPreview = null;
   let graphFallbackOrder = [];
 
   bindEvents();
@@ -97,6 +100,7 @@ export function createGovernedGraphWorkspace({
       dirty = false;
       routingPreview = null;
       routingPreviewGeneration++;
+      retryPolicyPreview = null;
       graphFallbackOrder = [];
       pendingMutation = restorePendingMutation();
       elements.graphId.value = "";
@@ -255,7 +259,7 @@ export function createGovernedGraphWorkspace({
       );
       aggregate = read;
       graph = candidateFromGraph(currentGraph(read));
-      selectedNodeId = graph?.nodes?.[0]?.id ?? null;
+      selectedNodeId = selectHydratedNodeId(graph?.nodes, selectedNodeId);
       errors = [];
       dirty = false;
       outcome = `Loaded durable ${read.lifecycle?.status ?? "unknown"} lifecycle version ${read.lifecycle?.lifecycleVersion ?? 0}.`;
@@ -381,7 +385,11 @@ export function createGovernedGraphWorkspace({
         );
       }
       clearPendingMutation();
-      applyCurrentAggregate(response.current);
+      aggregate = response.current;
+      graph = candidateFromGraph(currentGraph(response.current)) ?? graph;
+      selectedNodeId = selectHydratedNodeId(graph?.nodes, selectedNodeId);
+      syncFieldsFromGraph();
+      rememberSelection();
       errors = response.errors ?? [];
       dirty = false;
       outcome = `${humanize(response.status)} · ${humanize(response.changeKind)} · request ${response.authoringRequestHash || "not published"}`;
@@ -1032,6 +1040,8 @@ export function createGovernedGraphWorkspace({
 
     if (String(node.descriptor.kind).toLowerCase() === "inference")
       elements.inspector.append(modelRoutingField(node));
+    const retryField = retryPolicyField(node);
+    if (retryField) elements.inspector.append(retryField);
 
     const position = graph.displayMetadata?.nodes?.find(
       (item) => item.nodeId === node.id,
@@ -1208,6 +1218,314 @@ export function createGovernedGraphWorkspace({
     fallbackLabel.append(fallbackTitle, fallbacks, fallbackOrderList);
     wrapper.append(label, fallbackLabel);
     return wrapper;
+  }
+
+  function retryPolicyField(node) {
+    const kind = String(node.descriptor?.kind ?? "").toLowerCase();
+    if (
+      [
+        "trigger",
+        "wait",
+        "humanreview",
+        "human-review",
+        "humaninput",
+        "human-input",
+        "exit",
+        "fail",
+      ].includes(kind)
+    )
+      return null;
+    const vocabulary = catalog?.retryPolicies;
+    if (!vocabulary) return null;
+    const policy = node.retryPolicy;
+    const section = document.createElement("section");
+    section.className = "governed-retry-policy";
+    const heading = document.createElement("h4");
+    heading.textContent = "Bounded retry policy";
+    const status = document.createElement("p");
+    status.textContent = policy
+      ? `${policy.policyId} · ${policy.maximumAttempts} total attempts · ${humanize(policy.backoffStrategy)} backoff · ${policy.contentHash}`
+      : "Off by default. Only an exact server-canonicalized policy can be attached.";
+    section.append(heading, status);
+
+    const policyId = textInput(
+      "Policy ID",
+      policy?.policyId ?? `retry-${node.id}`,
+    );
+    const failureClasses = document.createElement("select");
+    failureClasses.multiple = true;
+    for (const value of vocabulary.failureClasses ?? []) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = humanize(value);
+      option.selected = (
+        policy?.failureClasses ?? ["retryable-no-effect"]
+      ).includes(value);
+      failureClasses.append(option);
+    }
+    const failureLabel = document.createElement("label");
+    failureLabel.append(
+      labelText("Retry-safe failure classes"),
+      failureClasses,
+    );
+    const serverCodes = textInput(
+      "Optional server codes",
+      (policy?.serverCodes ?? []).join(","),
+    );
+    const attempts = boundedInput(
+      "Maximum total attempts",
+      policy?.maximumAttempts ?? 3,
+      2,
+      vocabulary.maximumAttempts,
+    );
+    const timeout = boundedInput(
+      "Per-attempt timeout (ms)",
+      policy?.perAttemptTimeoutMilliseconds ?? 60_000,
+      1,
+      vocabulary.maximumPerAttemptTimeoutMilliseconds,
+    );
+    const elapsed = boundedInput(
+      "Maximum elapsed (ms)",
+      policy?.maximumElapsedMilliseconds ?? 300_000,
+      1,
+      vocabulary.maximumElapsedMilliseconds,
+    );
+    const backoff = choiceInput(
+      "Backoff",
+      vocabulary.backoffStrategies,
+      token(policy?.backoffStrategy) ?? "fixed",
+    );
+    const initialDelay = boundedInput(
+      "Initial delay (ms)",
+      policy?.initialDelayMilliseconds ?? 1_000,
+      0,
+      vocabulary.maximumDelayMilliseconds,
+    );
+    const maximumDelay = boundedInput(
+      "Maximum delay (ms)",
+      policy?.maximumDelayMilliseconds ?? 30_000,
+      0,
+      vocabulary.maximumDelayMilliseconds,
+    );
+    const jitter = choiceInput(
+      "Jitter",
+      vocabulary.jitterStrategies,
+      token(policy?.jitterStrategy) ?? "deterministic-bounded",
+    );
+    const maximumJitter = boundedInput(
+      "Maximum jitter (ms)",
+      policy?.maximumJitterMilliseconds ?? 250,
+      0,
+      vocabulary.maximumDelayMilliseconds,
+    );
+    const maximumTokens = optionalBoundedInput(
+      "Maximum tokens",
+      policy?.maximumTokens,
+      vocabulary.maximumTokens,
+    );
+    const maximumToolCalls = optionalBoundedInput(
+      "Maximum tool calls",
+      policy?.maximumToolCalls,
+      vocabulary.maximumToolCalls,
+    );
+    const maximumCost = optionalBoundedInput(
+      "Maximum cost microunits",
+      policy?.maximumCostMicrounits,
+      vocabulary.maximumCostMicrounits,
+    );
+    const costCurrency = textInput(
+      "Cost currency",
+      policy?.maximumCostCurrency ?? "",
+    );
+    const maximumResourceUnits = optionalBoundedInput(
+      "Maximum resource units",
+      policy?.maximumResourceUnits,
+      vocabulary.maximumResourceUnits,
+    );
+    for (const input of [
+      policyId.input,
+      failureClasses,
+      serverCodes.input,
+      attempts.input,
+      timeout.input,
+      elapsed.input,
+      backoff.input,
+      initialDelay.input,
+      maximumDelay.input,
+      jitter.input,
+      maximumJitter.input,
+      maximumTokens.input,
+      maximumToolCalls.input,
+      maximumCost.input,
+      costCurrency.input,
+      maximumResourceUnits.input,
+    ])
+      input.disabled = inFlight || Boolean(pendingMutation);
+    section.append(
+      policyId.label,
+      failureLabel,
+      serverCodes.label,
+      attempts.label,
+      timeout.label,
+      elapsed.label,
+      backoff.label,
+      initialDelay.label,
+      maximumDelay.label,
+      jitter.label,
+      maximumJitter.label,
+      maximumTokens.label,
+      maximumToolCalls.label,
+      maximumCost.label,
+      costCurrency.label,
+      maximumResourceUnits.label,
+    );
+    const apply = document.createElement("button");
+    apply.type = "button";
+    apply.textContent = policy
+      ? "Revalidate and update retry"
+      : "Preview and enable retry";
+    apply.disabled = inFlight || Boolean(pendingMutation);
+    apply.addEventListener("click", async () => {
+      inFlight = true;
+      outcome = `Server is canonicalizing the finite retry policy for ${node.id}…`;
+      renderStatusOnly();
+      try {
+        const response = await requestJson(
+          "/api/governed-graphs/retry-preview",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              policyId: policyId.input.value.trim(),
+              nodeId: node.id,
+              failureClasses: selectedOptionValues(failureClasses),
+              serverCodes: serverCodes.input.value
+                .split(",")
+                .map((value) => value.trim())
+                .filter(Boolean)
+                .sort(),
+              maximumAttempts: Number(attempts.input.value),
+              perAttemptTimeoutMilliseconds: Number(timeout.input.value),
+              maximumElapsedMilliseconds: Number(elapsed.input.value),
+              backoffStrategy: backoff.input.value,
+              initialDelayMilliseconds: Number(initialDelay.input.value),
+              maximumDelayMilliseconds: Number(maximumDelay.input.value),
+              jitterStrategy: jitter.input.value,
+              maximumJitterMilliseconds: Number(maximumJitter.input.value),
+              maximumTokens: optionalNumber(maximumTokens.input.value),
+              maximumToolCalls: optionalNumber(maximumToolCalls.input.value),
+              maximumCostMicrounits: optionalNumber(maximumCost.input.value),
+              maximumCostCurrency: costCurrency.input.value.trim() || null,
+              maximumResourceUnits: optionalNumber(
+                maximumResourceUnits.input.value,
+              ),
+            }),
+          },
+        );
+        const next = configureNodeRetryPolicy(graph, node.id, response.policy);
+        if (!next)
+          throw new Error(
+            "The server retry policy did not match the selected node.",
+          );
+        graph = next;
+        retryPolicyPreview = { nodeId: node.id, response };
+        dirty = true;
+        errors = [];
+        outcome = `Retry policy ${response.policy.policyId} is attached with ${response.preview.maximumAttempts} total attempts, at most ${response.preview.maximumReachableElapsedMilliseconds} ms reachable elapsed time, and current runtime admission still required.`;
+      } catch (error) {
+        retryPolicyPreview = {
+          nodeId: node.id,
+          response: error.payload ?? null,
+        };
+        outcome = `Retry policy rejected: ${error.message}`;
+      } finally {
+        inFlight = false;
+        render();
+      }
+    });
+    section.append(apply);
+    if (policy) {
+      const disable = document.createElement("button");
+      disable.type = "button";
+      disable.className = "secondary-button";
+      disable.textContent = "Disable retry";
+      disable.disabled = apply.disabled;
+      disable.addEventListener("click", () => {
+        const next = configureNodeRetryPolicy(graph, node.id, null);
+        if (!next) return;
+        graph = next;
+        retryPolicyPreview = null;
+        dirty = true;
+        errors = [];
+        outcome = `Retry is disabled for ${node.id}; single-attempt behavior is restored.`;
+        render();
+      });
+      section.append(disable);
+    }
+    if (
+      retryPolicyPreview?.nodeId === node.id &&
+      retryPolicyPreview.response?.preview
+    )
+      section.append(
+        fact(
+          "Finite preview",
+          `${retryPolicyPreview.response.preview.maximumRetries} retries · ${retryPolicyPreview.response.preview.maximumBackoffMilliseconds} ms backoff · ${retryPolicyPreview.response.preview.maximumAttemptExecutionMilliseconds} ms attempt execution · runtime admission still required`,
+        ),
+      );
+    return section;
+  }
+
+  function labelText(value) {
+    const span = document.createElement("span");
+    span.textContent = value;
+    return span;
+  }
+
+  function textInput(title, value) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = value ?? "";
+    label.append(labelText(title), input);
+    return { label, input };
+  }
+
+  function boundedInput(title, value, minimum, maximum) {
+    const field = numericInput(title, value);
+    field.input.min = String(minimum);
+    field.input.max = String(maximum);
+    return field;
+  }
+
+  function optionalBoundedInput(title, value, maximum) {
+    const field = boundedInput(title, value ?? "", 0, maximum);
+    field.input.placeholder = "Unbounded";
+    return field;
+  }
+
+  function choiceInput(title, values, selected) {
+    const label = document.createElement("label");
+    const input = document.createElement("select");
+    for (const value of values ?? []) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = humanize(value);
+      input.append(option);
+    }
+    input.value = selected;
+    label.append(labelText(title), input);
+    return { label, input };
+  }
+
+  function optionalNumber(value) {
+    return String(value).trim() === "" ? null : Number(value);
+  }
+
+  function token(value) {
+    return value == null
+      ? null
+      : String(value)
+          .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+          .toLowerCase();
   }
 
   function renderErrors() {
