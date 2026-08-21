@@ -34,6 +34,33 @@ public sealed class BrowserFlowTests
 {
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
 
+    [Fact]
+    public void Restart_diagnostic_classifier_accepts_connection_reset_only_for_expected_target_traffic()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "ws://127.0.0.1:5001/hubs/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(false, true, "wss://127.0.0.1:5001/hubs/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(false, false, "ws://127.0.0.1:5001/hubs/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/", "net::ERR_CONNECTION_RESET", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/loops", "net::ERR_CONNECTION_RESET", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://example.test/api/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
+    }
+
+    [Fact]
+    public void Restart_log_classifier_matches_connection_reset_route_and_keeps_other_errors_visible()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://127.0.0.1:5001/hubs/session", TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/api/session", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://example.test/hubs/session", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "console", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://127.0.0.1:5001/hubs/session", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "500 (Internal Server Error)", "https://127.0.0.1:5001/api/session", TargetAuthority));
+    }
+
     [InstalledBrowserFact]
     public async Task Default_chat_recovers_in_place_after_process_restart_and_preserves_unsaved_draft()
     {
@@ -1491,10 +1518,13 @@ public sealed class BrowserFlowTests
                 return false;
             }
 
-            var expected = text?.Contains("401 (Unauthorized)", StringComparison.OrdinalIgnoreCase) == true
-                || (text?.Contains("WebSocket", StringComparison.OrdinalIgnoreCase) == true
-                    || IsExpectedServerRestartUrl(url))
-                && (text?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true || text?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true);
+            var expected = ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(
+                Volatile.Read(ref _expectedServerRestart) != 0,
+                beganDuringOutage,
+                source,
+                text,
+                url,
+                _targetAuthority);
             if (expected && requestId is not null)
             {
                 _expectedServerRestartRequests.TryRemove(requestId, out _);
@@ -1525,14 +1555,18 @@ public sealed class BrowserFlowTests
             if (Volatile.Read(ref _expectedServerRestart) == 0 && !beganDuringOutage
                 || !Uri.TryCreate(requestUrl, UriKind.Absolute, out var uri)
                 || !string.Equals(uri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase)
-                || !IsExpectedServerRestartScheme(uri))
+                || !ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartUrl(requestUrl, _targetAuthority))
             {
                 return false;
             }
 
             var errorText = parameters.TryGetProperty("errorText", out var errorTextValue) ? errorTextValue.GetString() : null;
-            var expected = errorText?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true
-                || errorText?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true;
+            var expected = ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(
+                Volatile.Read(ref _expectedServerRestart) != 0,
+                beganDuringOutage,
+                requestUrl,
+                errorText,
+                _targetAuthority);
             if (expected)
             {
                 _expectedServerRestartRequests.TryRemove(requestIdValue.GetString()!, out _);
@@ -1556,17 +1590,7 @@ public sealed class BrowserFlowTests
 
         private bool IsExpectedServerRestartUrl(string? value)
         {
-            return Uri.TryCreate(value, UriKind.Absolute, out var uri)
-                && string.Equals(uri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase)
-                && IsExpectedServerRestartScheme(uri);
-        }
-
-        private static bool IsExpectedServerRestartScheme(Uri uri)
-        {
-            return string.Equals(uri.Scheme, "ws", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(uri.Scheme, "wss", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase);
+            return ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartUrl(value, _targetAuthority);
         }
 
         private async Task AcceptJavaScriptDialogAsync()
