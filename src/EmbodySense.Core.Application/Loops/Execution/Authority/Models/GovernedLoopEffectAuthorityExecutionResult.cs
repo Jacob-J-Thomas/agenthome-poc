@@ -11,10 +11,12 @@ namespace EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 /// <param name="CommitInvoked">Whether the protected continuation was invoked exactly once.</param>
 /// <param name="Result">The continuation result when it was invoked.</param>
 /// <param name="Detail">A bounded operator-safe explanation.</param>
+/// <param name="StoredDecisionContentHash">The exact durably stored decision hash when the store proved one.</param>
 public sealed record GovernedLoopEffectAuthorityExecutionResult<TResult>(
     GovernedLoopEffectAuthorityExecutionStatus Status,
     GovernedLoopEffectAuthorityDecision? Decision,
     GovernedLoopEffectAuthorityEvidenceStoreStatus EvidenceStatus,
     bool CommitInvoked,
     TResult? Result,
-    string Detail);
+    string Detail,
+    string? StoredDecisionContentHash = null);

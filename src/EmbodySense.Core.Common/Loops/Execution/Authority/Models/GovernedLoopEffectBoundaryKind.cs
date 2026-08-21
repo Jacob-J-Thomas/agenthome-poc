@@ -13,5 +13,8 @@ public enum GovernedLoopEffectBoundaryKind
     WorkspaceActuation = 3,
 
     /// <summary>The identity-bearing append that publishes one conversation message.</summary>
-    ConversationPublication = 4
+    ConversationPublication = 4,
+
+    /// <summary>A server-registered structured actuator operation's irreversible dispatch boundary.</summary>
+    ActuatorDispatch = 5
 }

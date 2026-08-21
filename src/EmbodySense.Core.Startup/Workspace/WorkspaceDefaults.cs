@@ -33,6 +33,7 @@ internal static class WorkspaceDefaults
             paths.LoopDefinitionsPath,
             paths.GovernedLoopRevisionsPath,
             paths.LoopRunsPath,
+            paths.GovernedLoopEffectAttemptsPath,
             paths.TasksPath,
             paths.LogsPath,
             paths.ToolResponsesPath,

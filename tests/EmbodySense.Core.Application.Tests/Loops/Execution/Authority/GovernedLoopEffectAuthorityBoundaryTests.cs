@@ -51,6 +51,36 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
     }
 
     [Fact]
+    public async Task Decision_aware_continuation_receives_the_exact_appended_direct_hash_before_it_runs()
+    {
+        var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
+        var evidence = new RecordingEffectAuthorityEvidenceStore();
+        var boundary = Boundary(
+            new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
+            new StubEffectCapabilityAdmissionService
+            {
+                Result = new CapabilityRevalidationResult(true, [fixture.RequiredPin], "The required pin is current.", CapabilityRevalidationStatus.Active),
+            },
+            evidence);
+        string? callbackHash = null;
+
+        var result = await boundary.ExecuteWithDecisionAsync(
+            fixture.Request,
+            (decision, _) =>
+            {
+                callbackHash = decision.ContentHash;
+                Assert.Equal(Assert.Single(evidence.Decisions).ContentHash, callbackHash);
+                Assert.Equal(GovernedLoopEffectAuthorityDisposition.Direct, decision.Disposition);
+                return Task.FromResult("committed");
+            });
+
+        Assert.True(result.CommitInvoked);
+        Assert.Equal(result.Decision?.ContentHash, callbackHash);
+        Assert.Equal(callbackHash, result.StoredDecisionContentHash);
+        Assert.Equal("committed", result.Result);
+    }
+
+    [Fact]
     public async Task Replayed_exact_direct_decision_never_invokes_the_continuation_again()
     {
         var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
@@ -76,6 +106,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         Assert.Equal(GovernedLoopEffectAuthorityEvidenceStoreStatus.AlreadyPresent, replay.EvidenceStatus);
         Assert.Equal(GovernedLoopEffectAuthorityDisposition.Pause, replay.Decision?.Disposition);
         Assert.Equal(GovernedLoopEffectAuthorityReason.EvidenceAmbiguous, replay.Decision?.Reason);
+        Assert.Equal(evidence.Decisions[0].ContentHash, replay.StoredDecisionContentHash);
         Assert.Equal(evidence.Decisions[0].ContentHash, evidence.Decisions[1].ContentHash);
     }
 

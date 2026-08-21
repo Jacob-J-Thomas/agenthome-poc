@@ -1,0 +1,41 @@
+using EmbodySense.Core.Common.Loops.Execution.Models;
+
+namespace EmbodySense.Core.Common.Loops.Execution.Effects.Models;
+
+/// <summary>Defines the flattened value-free schema-1 persistence shape for one effect-attempt version.</summary>
+public sealed record GovernedLoopEffectAttemptRecord(
+    int SchemaVersion,
+    string RunId,
+    int RevisionSchemaVersion,
+    string GraphId,
+    string RevisionId,
+    string ExecutableHash,
+    long ExecutionGeneration,
+    string NodeId,
+    int NodeAttempt,
+    string CapabilityId,
+    string CapabilityVersion,
+    string CapabilityDescriptorHash,
+    string ProviderId,
+    string ImplementationId,
+    string ActuatorOperationId,
+    string OperationDescriptorHash,
+    string InputFingerprint,
+    string TargetFingerprint,
+    string? PreconditionEvidenceHash,
+    string AdmissionAuthorityEvidenceHash,
+    string? DispatchAuthorityEvidenceHash,
+    string? BeforeEvidenceId,
+    string? AfterEvidenceId,
+    string EffectId,
+    string IdempotencyOperationId,
+    long EffectGeneration,
+    string IntentHash,
+    GovernedLoopEffectPhase Phase,
+    GovernedLoopEffectOutcome Outcome,
+    GovernedLoopEffectEvidenceStatus EvidenceStatus,
+    string? OutcomeEvidenceId,
+    string? ReconciliationEvidenceId,
+    DateTimeOffset UpdatedAtUtc,
+    string? PreviousContentHash,
+    string ContentHash);
