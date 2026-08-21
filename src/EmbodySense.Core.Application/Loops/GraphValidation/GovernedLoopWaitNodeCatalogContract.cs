@@ -11,6 +11,8 @@ public static class GovernedLoopWaitNodeCatalogContract
     private const int CanonicalUtcTimestampCharacters = 28;
     private static readonly IReadOnlyList<GovernedLoopControlCondition> _success =
         Array.AsReadOnly(new[] { GovernedLoopControlCondition.Success });
+    private static readonly IReadOnlyList<GovernedLoopControlCondition> _successFailure =
+        Array.AsReadOnly(new[] { GovernedLoopControlCondition.Success, GovernedLoopControlCondition.Failure });
     private static readonly IReadOnlyList<GovernedLoopNodeCatalogDescriptor> _descriptors = CreateDescriptors();
 
     /// <summary>Gets the two exact Wait descriptor declarations in canonical key order.</summary>
@@ -89,7 +91,7 @@ public static class GovernedLoopWaitNodeCatalogContract
             IsExecutable: true,
             IsLegalEntry: false,
             IsLegalTerminal: false,
-            _success,
+            _successFailure,
             _success,
             GovernedLoopJoinPolicy.None,
             MinimumIncomingControlEdges: 1,

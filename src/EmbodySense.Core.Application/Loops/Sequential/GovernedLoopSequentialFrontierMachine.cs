@@ -182,7 +182,7 @@ public static class GovernedLoopSequentialFrontierMachine
             : Selection(GovernedLoopSequentialFrontierSelectionStatus.Ready, plan!.Nodes[ready.PlanOrdinal], ready, null, null, "The exact lowest admitted Ready activation was selected deterministically.");
     }
 
-    /// <summary>Returns the exact Ready activations that require append-once skip evidence for a committed route.</summary>
+    /// <summary>Returns the exact Ready activations that require append-once skip evidence for a committed Running or Waiting route.</summary>
     public static GovernedLoopSequentialPruningPlanResult PlanPruning(
         GovernedLoopFrontierPosture? frontier,
         GovernedLoopSequentialAdapterBinding? binding,
@@ -191,11 +191,20 @@ public static class GovernedLoopSequentialFrontierMachine
         GovernedLoopControlCondition controlOutcome)
     {
         var selected = Select(frontier, binding, plan);
-        if (selected.Status != GovernedLoopSequentialFrontierSelectionStatus.Running
-            || !SameActivation(selected.Activation, activation)
-            || !TryResolveRoute(plan!, selected.Node!, controlOutcome, out _, out var skippedEdges))
+        var selectedRunning = selected.Status == GovernedLoopSequentialFrontierSelectionStatus.Running
+            && SameActivation(selected.Activation, activation);
+        var selectedWaiting = Validate(frontier, binding, plan)
+            && activation?.Status == GovernedLoopNodeExecutionStatus.Waiting
+            && frontier!.Payload.Nodes.Count(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Waiting) == 1
+            && SameActivation(frontier.Payload.Nodes.Single(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Waiting), activation);
+        var selectedNode = activation is null || plan is null || activation.PlanOrdinal < 0 || activation.PlanOrdinal >= plan.Nodes.Count
+            ? null
+            : plan.Nodes[activation.PlanOrdinal];
+        if ((!selectedRunning && !selectedWaiting)
+            || selectedNode is null
+            || !TryResolveRoute(plan!, selectedNode, controlOutcome, out _, out var skippedEdges))
         {
-            return new GovernedLoopSequentialPruningPlanResult(GovernedLoopSequentialFrontierTransitionStatus.Invalid, [], "Only the exact Running activation and one admitted control outcome can plan pruning.");
+            return new GovernedLoopSequentialPruningPlanResult(GovernedLoopSequentialFrontierTransitionStatus.Invalid, [], "Only the exact Running or Waiting activation and one admitted control outcome can plan pruning.");
         }
 
         var pruned = frontier!.Payload.Nodes
@@ -380,9 +389,9 @@ public static class GovernedLoopSequentialFrontierMachine
         IReadOnlyList<GovernedLoopSequentialSkipEvidenceReference>? skipEvidence,
         DateTimeOffset updatedAtUtc,
         DateTimeOffset? cycleStartedAtUtc = null)
-        => ResolveRunning(frontier, binding, plan, node, activation, attempt, attemptOperationId, GovernedLoopNodeExecutionStatus.Completed, outcomeEvidenceId, outcomeEvidenceHash, controlOutcome, skipEvidence, updatedAtUtc, cycleStartedAtUtc);
+        => ResolveClaimed(frontier, binding, plan, node, activation, attempt, attemptOperationId, GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Completed, outcomeEvidenceId, outcomeEvidenceHash, controlOutcome, skipEvidence, updatedAtUtc, cycleStartedAtUtc);
 
-    /// <summary>Commits one exact definitive failed outcome without dispatching successors.</summary>
+    /// <summary>Commits one exact definitive failed outcome and advances only an admitted Failure route, when present.</summary>
     public static GovernedLoopSequentialFrontierTransitionResult FailRunning(
         GovernedLoopFrontierPosture? frontier,
         GovernedLoopSequentialAdapterBinding? binding,
@@ -394,8 +403,27 @@ public static class GovernedLoopSequentialFrontierMachine
         string? outcomeEvidenceId,
         string? outcomeEvidenceHash,
         GovernedLoopControlCondition controlOutcome,
-        DateTimeOffset updatedAtUtc)
-        => ResolveRunning(frontier, binding, plan, node, activation, attempt, attemptOperationId, GovernedLoopNodeExecutionStatus.Failed, outcomeEvidenceId, outcomeEvidenceHash, controlOutcome, [], updatedAtUtc, null);
+        DateTimeOffset updatedAtUtc,
+        IReadOnlyList<GovernedLoopSequentialSkipEvidenceReference>? skipEvidence = null,
+        DateTimeOffset? cycleStartedAtUtc = null)
+        => ResolveClaimed(frontier, binding, plan, node, activation, attempt, attemptOperationId, GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Failed, outcomeEvidenceId, outcomeEvidenceHash, controlOutcome, skipEvidence, updatedAtUtc, cycleStartedAtUtc);
+
+    /// <summary>Commits one exact definitive failed Waiting outcome and advances only an admitted Failure route, when present.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult FailWaiting(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
+        int attempt,
+        string? attemptOperationId,
+        string? outcomeEvidenceId,
+        string? outcomeEvidenceHash,
+        GovernedLoopControlCondition controlOutcome,
+        DateTimeOffset updatedAtUtc,
+        IReadOnlyList<GovernedLoopSequentialSkipEvidenceReference>? skipEvidence = null,
+        DateTimeOffset? cycleStartedAtUtc = null)
+        => ResolveClaimed(frontier, binding, plan, node, activation, attempt, attemptOperationId, GovernedLoopNodeExecutionStatus.Waiting, GovernedLoopNodeExecutionStatus.Failed, outcomeEvidenceId, outcomeEvidenceHash, controlOutcome, skipEvidence, updatedAtUtc, cycleStartedAtUtc);
 
     /// <summary>Blocks one exact Running activation on review without route commitment or redispatch.</summary>
     public static GovernedLoopSequentialFrontierTransitionResult ReviewBlockRunning(
@@ -409,7 +437,7 @@ public static class GovernedLoopSequentialFrontierMachine
         string? outcomeEvidenceId,
         string? outcomeEvidenceHash,
         DateTimeOffset updatedAtUtc)
-        => ResolveRunning(frontier, binding, plan, node, activation, attempt, attemptOperationId, GovernedLoopNodeExecutionStatus.ReviewBlocked, outcomeEvidenceId, outcomeEvidenceHash, null, [], updatedAtUtc, null);
+        => ResolveClaimed(frontier, binding, plan, node, activation, attempt, attemptOperationId, GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.ReviewBlocked, outcomeEvidenceId, outcomeEvidenceHash, null, [], updatedAtUtc, null);
 
     /// <summary>Atomically claims the exact selected Ready activation and blocks it on review with authenticated outcome evidence.</summary>
     public static GovernedLoopSequentialFrontierTransitionResult ReviewBlockReady(
@@ -632,7 +660,7 @@ public static class GovernedLoopSequentialFrontierMachine
             && frontier.Payload.Nodes.Any(node => node.Status == GovernedLoopNodeExecutionStatus.Ready)
             && frontier.Payload.Nodes.All(node => node.Status != GovernedLoopNodeExecutionStatus.Running);
 
-    private static GovernedLoopSequentialFrontierTransitionResult ResolveRunning(
+    private static GovernedLoopSequentialFrontierTransitionResult ResolveClaimed(
         GovernedLoopFrontierPosture? frontier,
         GovernedLoopSequentialAdapterBinding? binding,
         GovernedLoopSequentialPlan? plan,
@@ -640,6 +668,7 @@ public static class GovernedLoopSequentialFrontierMachine
         GovernedLoopNodeExecutionEvidence? activation,
         int attempt,
         string? attemptOperationId,
+        GovernedLoopNodeExecutionStatus claimedStatus,
         GovernedLoopNodeExecutionStatus resolution,
         string? outcomeEvidenceId,
         string? outcomeEvidenceHash,
@@ -649,14 +678,25 @@ public static class GovernedLoopSequentialFrontierMachine
         DateTimeOffset? cycleStartedAtUtc)
     {
         var selected = Select(frontier, binding, plan);
-        if (selected.Status != GovernedLoopSequentialFrontierSelectionStatus.Running
-            || !SamePlanNode(selected.Node, node)
-            || !SameActivation(selected.Activation, activation)
-            || selected.Attempt != attempt
-            || !string.Equals(selected.AttemptOperationId, attemptOperationId, StringComparison.Ordinal)
+        var exactRunning = claimedStatus == GovernedLoopNodeExecutionStatus.Running
+            && selected.Status == GovernedLoopSequentialFrontierSelectionStatus.Running
+            && SamePlanNode(selected.Node, node)
+            && SameActivation(selected.Activation, activation)
+            && selected.Attempt == attempt
+            && string.Equals(selected.AttemptOperationId, attemptOperationId, StringComparison.Ordinal);
+        var exactWaiting = claimedStatus == GovernedLoopNodeExecutionStatus.Waiting
+            && Validate(frontier, binding, plan)
+            && activation?.Status == GovernedLoopNodeExecutionStatus.Waiting
+            && activation.Attempt == attempt
+            && string.Equals(activation.AttemptOperationId, attemptOperationId, StringComparison.Ordinal)
+            && node is not null
+            && activation.PlanOrdinal == node.Ordinal
+            && frontier!.Payload.Nodes.Count(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Waiting) == 1
+            && SameActivation(frontier.Payload.Nodes.Single(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Waiting), activation);
+        if ((!exactRunning && !exactWaiting)
             || resolution is not (GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked))
         {
-            return Invalid("Only the exact committed Running activation can resolve the canonical frontier.");
+            return Invalid("Only the exact committed Running or Waiting activation can resolve the canonical frontier.");
         }
 
         if (resolution == GovernedLoopNodeExecutionStatus.ReviewBlocked)
@@ -695,7 +735,8 @@ public static class GovernedLoopSequentialFrontierMachine
             var resolved = CopyActivation(activation!, resolution, attempt, attemptOperationId, outcomeEvidenceId, outcomeEvidenceHash, controlOutcome, selectedEdges, skippedEdges);
             var nodes = frontier!.Payload.Nodes.ToList();
             nodes[resolved.ActivationOrdinal] = resolved;
-            if (resolution == GovernedLoopNodeExecutionStatus.Completed)
+            var routedFailure = resolution == GovernedLoopNodeExecutionStatus.Failed && selectedEdges.Length == 1;
+            if (resolution == GovernedLoopNodeExecutionStatus.Completed || routedFailure)
             {
                 var pruning = ExpectedPruning(nodes, resolved, skippedEdges);
                 if (!TryApplyPruning(nodes, pruning, skipEvidence, out var pruningFailure))
@@ -717,20 +758,20 @@ public static class GovernedLoopSequentialFrontierMachine
             var aggregate = resolution switch
             {
                 GovernedLoopNodeExecutionStatus.ReviewBlocked => GovernedLoopFrontierStatus.ReviewBlocked,
-                GovernedLoopNodeExecutionStatus.Failed => GovernedLoopFrontierStatus.Failed,
-                GovernedLoopNodeExecutionStatus.Completed when nodes.Any(item => item.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running) => GovernedLoopFrontierStatus.Active,
-                GovernedLoopNodeExecutionStatus.Completed when nodes.Any(item => item.Status == GovernedLoopNodeExecutionStatus.Waiting) => GovernedLoopFrontierStatus.Waiting,
+                GovernedLoopNodeExecutionStatus.Failed when !routedFailure => GovernedLoopFrontierStatus.Failed,
+                _ when nodes.Any(item => item.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running) => GovernedLoopFrontierStatus.Active,
+                _ when nodes.Any(item => item.Status == GovernedLoopNodeExecutionStatus.Waiting) => GovernedLoopFrontierStatus.Waiting,
                 GovernedLoopNodeExecutionStatus.Completed when resolved.Descriptor.Kind == GovernedLoopNodeKind.Exit => GovernedLoopFrontierStatus.Completed,
                 _ => throw new InvalidOperationException("A completed non-Exit route ended without an eligible successor."),
             };
             var successor = CreatePosture(binding!, checked(frontier.Payload.FrontierVersion + 1), aggregate, nodes, updatedAtUtc);
             return TransitionIsValid(frontier, successor, binding, plan)
                 ? Applied(successor, "The exact outcome, route, pruning evidence, and eligible successors committed atomically.")
-                : Invalid("The Running resolution violates the exact canonical frontier transition contract.");
+                : Invalid("The claimed activation resolution violates the exact canonical frontier transition contract.");
         }
         catch (Exception exception) when (IsContractFailure(exception))
         {
-            return Invalid($"The Running resolution was rejected by its bounded contract: {exception.GetType().Name}.");
+            return Invalid($"The claimed activation resolution was rejected by its bounded contract: {exception.GetType().Name}.");
         }
     }
 
@@ -959,7 +1000,7 @@ public static class GovernedLoopSequentialFrontierMachine
             .Where(target => target.Descriptor.Kind == GovernedLoopNodeKind.Join)
             .SelectMany(target => target.IncomingControlEdgeIds
                 .SelectMany(edgeId => nodes
-                    .Where(source => source.Status == GovernedLoopNodeExecutionStatus.Completed
+                    .Where(source => HasResolvedRoute(source)
                         && source.SelectedControlEdgeIds.Contains(edgeId, StringComparer.Ordinal)
                         && TryGetTargetCycleIteration(plan, source, target, out _, out _))
                     .Select(source =>
@@ -1075,7 +1116,7 @@ public static class GovernedLoopSequentialFrontierMachine
         foreach (var edgeId in target.IncomingControlEdgeIds)
         {
             var source = nodes
-                .Where(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Completed
+                .Where(candidate => HasResolvedRoute(candidate)
                     && candidate.ActivationOrdinal < nodes.Count
                     && candidate.SelectedControlEdgeIds.Contains(edgeId, StringComparer.Ordinal)
                     && SourceReachesTargetIteration(plan, candidate, target, targetCycleIteration))
@@ -1156,7 +1197,7 @@ public static class GovernedLoopSequentialFrontierMachine
             .ToArray();
         if (exactSources.Length > 0)
         {
-            return exactSources.Any(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Completed
+            return exactSources.Any(candidate => HasResolvedRoute(candidate)
                 && candidate.SkippedControlEdgeIds.Contains(edgeId, StringComparer.Ordinal));
         }
 
@@ -1229,10 +1270,14 @@ public static class GovernedLoopSequentialFrontierMachine
             };
         }
 
-        return activation.IncomingControlEdgeIds.Any(edgeId => prior.Any(source => source.Status == GovernedLoopNodeExecutionStatus.Completed
+        return activation.IncomingControlEdgeIds.Any(edgeId => prior.Any(source => HasResolvedRoute(source)
             && source.SelectedControlEdgeIds.Contains(edgeId, StringComparer.Ordinal)
             && SourceReachesTargetIteration(plan, source, plan.Nodes[activation.PlanOrdinal], activation.CycleIteration)));
     }
+
+    private static bool HasResolvedRoute(GovernedLoopNodeExecutionEvidence source)
+        => source.Status == GovernedLoopNodeExecutionStatus.Completed
+            || source.Status == GovernedLoopNodeExecutionStatus.Failed && source.SelectedControlEdgeIds.Count == 1;
 
     private static bool HasExactRoute(GovernedLoopSequentialPlan plan, GovernedLoopNodeExecutionEvidence activation)
     {

@@ -4,6 +4,7 @@ using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using EmbodySense.Core.Common.CommandActions;
+using EmbodySense.Core.Common.Loops.Failures;
 
 namespace EmbodySense.Core.Application.Loops.Sequential;
 
@@ -30,6 +31,9 @@ public static class GovernedLoopSequentialNodeDescriptors
 
     /// <summary>Gets the exact supported successful-exit descriptor.</summary>
     public static GovernedLoopNodeDescriptor SuccessExit { get; } = new(GovernedLoopNodeKind.Exit, "success-exit", 1);
+
+    /// <summary>Gets the exact supported failed-terminal descriptor.</summary>
+    public static GovernedLoopNodeDescriptor FailTerminal { get; } = new(GovernedLoopNodeKind.Fail, GovernedLoopFailNodeVocabulary.TypeId, GovernedLoopFailNodeVocabulary.DescriptorVersion);
 
     /// <summary>Gets the exact supported UTC timestamp Wait descriptor.</summary>
     public static GovernedLoopNodeDescriptor TimestampWait { get; } = Wait(GovernedLoopWaitVocabulary.Timestamp);
@@ -91,6 +95,7 @@ public static class GovernedLoopSequentialNodeDescriptors
                 || IsWorkspaceAction(descriptor)
                 || IsCommandAction(descriptor)
                 || Equals(descriptor, SuccessExit)
+                || Equals(descriptor, FailTerminal)
                 || IsWait(descriptor)
                 || IsTopology(descriptor)
                 || IsPure(descriptor));

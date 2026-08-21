@@ -51,6 +51,8 @@ public sealed partial record CustomLoopSequentialNodeEvidence
             && string.Equals(GoverningControlEdgeId, other.GoverningControlEdgeId, StringComparison.Ordinal)
             && Disposition == other.Disposition
             && string.Equals(OutcomeArtifactHash, other.OutcomeArtifactHash, StringComparison.Ordinal)
+            && string.Equals(FailureEvidenceId, other.FailureEvidenceId, StringComparison.Ordinal)
+            && string.Equals(FailureEvidenceHash, other.FailureEvidenceHash, StringComparison.Ordinal)
             && string.Equals(EvidenceHash, other.EvidenceHash, StringComparison.Ordinal);
 
     /// <summary>Hashes the same exact scalar and ordinal route values used by typed equality.</summary>
@@ -86,6 +88,8 @@ public sealed partial record CustomLoopSequentialNodeEvidence
         hash.Add(GoverningControlEdgeId, StringComparer.Ordinal);
         hash.Add(Disposition);
         hash.Add(OutcomeArtifactHash, StringComparer.Ordinal);
+        hash.Add(FailureEvidenceId, StringComparer.Ordinal);
+        hash.Add(FailureEvidenceHash, StringComparer.Ordinal);
         hash.Add(EvidenceHash, StringComparer.Ordinal);
         return hash.ToHashCode();
     }

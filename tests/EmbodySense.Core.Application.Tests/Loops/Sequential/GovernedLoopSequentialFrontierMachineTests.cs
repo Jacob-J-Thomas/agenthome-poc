@@ -219,6 +219,69 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
     }
 
     [Fact]
+    public async Task Exact_known_failure_advances_only_its_admitted_failure_route()
+    {
+        var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync(artifactFactory: role =>
+        {
+            var source = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(owningRole: role).Graph;
+            var inference = source.Nodes.Single(node => node.Descriptor == GovernedLoopSequentialNodeDescriptors.ProviderInference);
+            var fail = GovernedLoopSequentialApplicationTestFixture.Node("fail", GovernedLoopSequentialNodeDescriptors.FailTerminal);
+            return GovernedLoopSequentialApplicationTestFixture.Artifact(
+                source.Nodes.Append(fail).ToArray(),
+                source.ControlEdges.Append(new GovernedLoopControlEdgeDefinition("infer-to-fail", inference.Id, fail.Id, GovernedLoopControlCondition.Failure)).ToArray(),
+                [source.TerminalNodeIds.Single(), fail.Id],
+                role,
+                source.Bindings,
+                source.ValueSchemas,
+                source.OutputContract,
+                source.AuthorityCeiling);
+        });
+        var initial = Frontier(Initialize(context));
+        var selected = GovernedLoopSequentialFrontierMachine.Select(initial, context.AdapterBinding, context.Plan);
+        var running = Frontier(GovernedLoopSequentialFrontierMachine.Start(
+            initial,
+            context.AdapterBinding,
+            context.Plan,
+            selected.Node,
+            selected.Activation,
+            1,
+            "attempt-known-failure",
+            _startedAtUtc.AddSeconds(1)));
+
+        var routed = Frontier(GovernedLoopSequentialFrontierMachine.FailRunning(
+            running,
+            context.AdapterBinding,
+            context.Plan,
+            selected.Node,
+            SelectedActivation(running, context),
+            1,
+            "attempt-known-failure",
+            "event-known-failure",
+            Hash('f'),
+            GovernedLoopControlCondition.Failure,
+            _startedAtUtc.AddSeconds(2)));
+
+        Assert.Equal(GovernedLoopFrontierStatus.Active, routed.Payload.Status);
+        Assert.Collection(
+            routed.Payload.Nodes,
+            trigger => Assert.Equal(GovernedLoopNodeExecutionStatus.Completed, trigger.Status),
+            failed =>
+            {
+                Assert.Equal(GovernedLoopNodeExecutionStatus.Failed, failed.Status);
+                Assert.Equal(["infer-to-fail"], failed.SelectedControlEdgeIds);
+                Assert.Single(failed.SkippedControlEdgeIds);
+            },
+            fail =>
+            {
+                Assert.Equal(GovernedLoopSequentialNodeDescriptors.FailTerminal, fail.Descriptor);
+                Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, fail.Status);
+                Assert.Equal(["infer-to-fail"], fail.IncomingControlEdgeIds);
+            });
+        Assert.True(GovernedLoopSequentialFrontierMachine.Validate(routed, context.AdapterBinding, context.Plan));
+        Assert.Equal(GovernedLoopSequentialFrontierSelectionStatus.Ready, GovernedLoopSequentialFrontierMachine.Select(routed, context.AdapterBinding, context.Plan).Status);
+    }
+
+    [Fact]
     public async Task Undispatched_ready_frontier_can_enter_aggregate_review_or_cancellation_without_fabricating_an_attempt()
     {
         var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync();

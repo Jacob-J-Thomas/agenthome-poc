@@ -35,7 +35,7 @@ public sealed class GovernedLoopTopologyNodeCatalogContractTests
         Assert.All(conditions, descriptor =>
         {
             Assert.Equal([GovernedLoopControlCondition.True, GovernedLoopControlCondition.False], descriptor.AllowedControlOutcomes);
-            Assert.Equal(descriptor.AllowedControlOutcomes, descriptor.RequiredControlOutcomes);
+            Assert.Equal([GovernedLoopControlCondition.True, GovernedLoopControlCondition.False], descriptor.RequiredControlOutcomes);
             Assert.Equal(GovernedLoopJoinPolicy.None, descriptor.JoinPolicy);
             Assert.True(descriptor.AllowsCycle);
             var input = Assert.Single(descriptor.Ports);

@@ -1,4 +1,8 @@
+using System.Security.Cryptography;
+using System.Text;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Loops.Failures;
+using EmbodySense.Core.Application.Loops.Failures.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
@@ -14,6 +18,8 @@ using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
+using EmbodySense.Core.Common.Loops.Failures;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
@@ -34,6 +40,7 @@ public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExec
     private readonly ICustomLoopWorkspaceExecutionGate _executionGate;
     private readonly IGovernedLoopWaitOrderedResumePort _orderedResume;
     private readonly TimeProvider _timeProvider;
+    private readonly IGovernedLoopFailureClassifier _failureClassifier;
 
     /// <summary>Creates one adapter-independent executable Wait coordinator over the canonical run store.</summary>
     public GovernedLoopWaitExecutionService(
@@ -43,7 +50,8 @@ public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExec
         ICapabilityAuthorityTransaction authorityTransaction,
         ICustomLoopWorkspaceExecutionGate executionGate,
         IGovernedLoopWaitOrderedResumePort orderedResume,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IGovernedLoopFailureClassifier? failureClassifier = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _sleepService = sleepService ?? throw new ArgumentNullException(nameof(sleepService));
@@ -52,6 +60,7 @@ public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExec
         _executionGate = executionGate ?? throw new ArgumentNullException(nameof(executionGate));
         _orderedResume = orderedResume ?? throw new ArgumentNullException(nameof(orderedResume));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _failureClassifier = failureClassifier ?? new GovernedLoopFailureClassifier();
     }
 
     /// <inheritdoc />
@@ -826,16 +835,20 @@ public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExec
             var frontierTransition = targetStatus switch
             {
                 CustomLoopRunStatus.Cancelled => GovernedLoopSequentialFrontierMachine.CancelCurrent(current.Frontier, binding, now),
-                CustomLoopRunStatus.Failed => GovernedLoopSequentialFrontierMachine.FailCurrent(
+                CustomLoopRunStatus.Failed => GovernedLoopSequentialFrontierMachine.FailWaiting(
                     current.Frontier,
                     binding,
-                    null,
+                    publicationFailure!.Context.Plan,
+                    publicationFailure.Node,
+                    publicationFailure.Activation,
+                    publicationFailure.Activation.Attempt!.Value,
+                    publicationFailure.Activation.AttemptOperationId,
                     publicationFailure!.Event.EventId,
                     publicationFailure.Event.SequentialNodeEvidence!.OutcomeArtifactHash,
                     GovernedLoopControlCondition.Failure,
-                    publicationFailure.SelectedControlEdgeIds,
-                    publicationFailure.SkippedControlEdgeIds,
-                    now),
+                    now,
+                    publicationFailure.SkipReferences,
+                    FindCycleStartedAtUtc(current, publicationFailure.Activation.CycleId)),
                 CustomLoopRunStatus.NeedsReview => GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(current.Frontier, binding, null, null, now),
                 _ => null,
             };
@@ -845,31 +858,39 @@ public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExec
                 return Park(GovernedLoopWaitParkResultStatus.Conflict, run: current, detail: "sleep-publication-frontier-disposition-conflict");
             }
 
+            var routedFailure = targetStatus == CustomLoopRunStatus.Failed
+                && frontierTransition.Frontier.Payload.Status == GovernedLoopFrontierStatus.Active;
             var detail = publicationStatus switch
             {
                 GovernedLoopSleepPublicationStatus.Cancelled => "Checkpoint publication observed a definitive cancellation posture; the canonical sleeping run was cancelled without continuation.",
+                GovernedLoopSleepPublicationStatus.Expired when routedFailure => "Checkpoint publication observed an expired admitted boundary; exact failure evidence advanced only the admitted Failure route.",
                 GovernedLoopSleepPublicationStatus.Expired => "Checkpoint publication observed an expired admitted boundary; the canonical sleeping run failed without continuation.",
                 _ => "Checkpoint publication observed a definitive review posture; the canonical sleeping run was attention-blocked without continuation.",
             };
-            var terminalEvents = publicationFailure is null
+            var dispositionEvents = publicationFailure is null
                 ? Array.Empty<CustomLoopRunEvent>()
-                : new[] { publicationFailure.Event };
-            var lifecycleOwner = terminalEvents.Length == 0
+                : new[] { publicationFailure.Event }.Concat(publicationFailure.SkipEvents).ToArray();
+            var lifecycleOwner = dispositionEvents.Length == 0
                 ? current
-                : current with { Events = [.. current.Events, .. terminalEvents] };
-            var lifecycle = LifecycleEvent(lifecycleOwner, now, detail);
-            var candidate = Append(current, now, [.. terminalEvents, lifecycle]) with
+                : current with { Events = [.. current.Events, .. dispositionEvents] };
+            var lifecycleEvents = !routedFailure || current.Status == CustomLoopRunStatus.Waiting
+                ? new[] { LifecycleEvent(lifecycleOwner, now, detail) }
+                : [];
+            var effectiveStatus = routedFailure ? CustomLoopRunStatus.Running : targetStatus;
+            var candidate = Append(current, now, [.. dispositionEvents, .. lifecycleEvents]) with
             {
-                Status = targetStatus,
-                CompletedAtUtc = targetStatus is CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview ? now : null,
-                ExecutionClock = StopClock(current.ExecutionClock, now),
-                FailureCode = targetStatus switch
+                Status = effectiveStatus,
+                CompletedAtUtc = routedFailure ? null : now,
+                ExecutionClock = routedFailure && current.Status == CustomLoopRunStatus.Waiting
+                    ? current.ExecutionClock with { ActiveSinceUtc = now }
+                    : routedFailure ? current.ExecutionClock : StopClock(current.ExecutionClock, now),
+                FailureCode = routedFailure ? null : targetStatus switch
                 {
                     CustomLoopRunStatus.Failed => "wait_checkpoint_publication_expired",
                     CustomLoopRunStatus.NeedsReview => "wait_checkpoint_publication_review_blocked",
                     _ => null,
                 },
-                FailureDetail = targetStatus is CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview ? detail : null,
+                FailureDetail = routedFailure ? null : targetStatus is CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview ? detail : null,
                 Frontier = frontierTransition.Frontier,
             };
             var mutation = await UpdateAsync(
@@ -1010,6 +1031,68 @@ public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExec
             PureNodeOutcomeJson = null,
             WaitContinuationEvidenceHash = null,
         };
+        var dispatch = run.Events
+            .Where(item => string.Equals(item.EventId, activation.AttemptOperationId, StringComparison.Ordinal)
+                && item.SequentialNodeEvidence is
+                {
+                    Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+                    Disposition: CustomLoopSequentialNodeDisposition.Unknown,
+                } start
+                && start.ActivationOrdinal == activation.ActivationOrdinal
+                && start.VisitOrdinal == activation.VisitOrdinal
+                && string.Equals(start.NodeId, activation.NodeId, StringComparison.Ordinal)
+                && start.Attempt == attempt
+                && CustomLoopSequentialNodeEvidenceHash.Matches(start)
+                && CustomLoopSequentialOutcomeArtifactHash.Matches(item))
+            .Take(2)
+            .ToArray();
+        if (dispatch.Length != 1)
+        {
+            return null;
+        }
+
+        var boundary = new GovernedLoopFailureEvidenceReference(dispatch[0].EventId, dispatch[0].SequentialNodeEvidence!.EvidenceHash);
+        var classificationContext = new GovernedLoopFailureClassificationContext(
+            $"failure-{Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(runEvent.EventId)))[..24]}",
+            binding.WorkspaceId,
+            binding.ExecutionBinding.RunId,
+            binding.ExecutionBinding.Revision,
+            binding.ExecutionBinding.ExecutionGeneration,
+            activation.ActivationOrdinal,
+            activation.VisitOrdinal,
+            activation.NodeId,
+            attempt,
+            boundary);
+        GovernedLoopFailureClassificationResult? classification = null;
+        try
+        {
+            classification = _failureClassifier.Classify(
+                classificationContext,
+                [new GovernedLoopFailureObservation(GovernedLoopFailureObservationKind.DeadlineExhausted, GovernedLoopFailureSource.Wait, "wait-deadline-exhausted", boundary)],
+                timestampUtc);
+        }
+        catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException))
+        {
+        }
+        if (classification is not { Status: GovernedLoopFailureClassificationStatus.Classified, Evidence: { } failure }
+            || !GovernedLoopFailureEvidenceContract.IsValid(failure)
+            || !string.Equals(failure.EvidenceId, classificationContext.FailureEvidenceId, StringComparison.Ordinal)
+            || !string.Equals(failure.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(failure.RunId, binding.ExecutionBinding.RunId, StringComparison.Ordinal)
+            || !Equals(failure.Revision, binding.ExecutionBinding.Revision)
+            || failure.ExecutionGeneration != binding.ExecutionBinding.ExecutionGeneration
+            || failure.ActivationOrdinal != activation.ActivationOrdinal
+            || failure.VisitOrdinal != activation.VisitOrdinal
+            || !string.Equals(failure.NodeId, activation.NodeId, StringComparison.Ordinal)
+            || failure.Attempt != attempt
+            || failure.ObservedAtUtc != timestampUtc
+            || failure.CausalEvidence.Count != 1
+            || !Equals(failure.CausalEvidence[0], boundary))
+        {
+            return null;
+        }
+
+        runEvent = runEvent with { FailureEvidence = failure };
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
             CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
@@ -1030,8 +1113,61 @@ public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExec
             null,
             CustomLoopSequentialNodeDisposition.Rejected,
             CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
-            string.Empty));
-        return new PublicationFailure(runEvent with { SequentialNodeEvidence = evidence }, selected, skipped);
+            string.Empty)
+        {
+            FailureEvidenceId = failure.EvidenceId,
+            FailureEvidenceHash = failure.ContentHash,
+        });
+        runEvent = runEvent with { SequentialNodeEvidence = evidence };
+        var pruning = selected.Length == 0
+            ? new GovernedLoopSequentialPruningPlanResult(GovernedLoopSequentialFrontierTransitionStatus.Applied, [], "An unrouted definitive failure prunes no Ready activation.")
+            : GovernedLoopSequentialFrontierMachine.PlanPruning(
+                run.Frontier,
+                binding,
+                context.Plan,
+                activation,
+                GovernedLoopControlCondition.Failure);
+        if (pruning.Status != GovernedLoopSequentialFrontierTransitionStatus.Applied)
+        {
+            return null;
+        }
+
+        var skipEvents = new List<CustomLoopRunEvent>();
+        var skipReferences = new List<GovernedLoopSequentialSkipEvidenceReference>();
+        foreach (var pruned in pruning.Activations)
+        {
+            var owner = run with { Events = [.. run.Events, runEvent, .. skipEvents] };
+            var skippedEvent = new CustomLoopRunEvent(
+                owner.Events.Length + 1,
+                $"wait-failure-pruning-{Guid.NewGuid():N}",
+                timestampUtc,
+                CustomLoopRunEventKind.TopologyNodeSkipped,
+                pruned.Activation.CycleIteration,
+                pruned.Activation.NodeId,
+                null,
+                $"Activation `{pruned.Activation.ActivationOrdinal}` was pruned by exact failed edge selection `{pruned.GoverningControlEdgeId}`.",
+                [],
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null);
+            skippedEvent = WithSequentialSkipEvidence(skippedEvent, binding, pruned);
+            skipEvents.Add(skippedEvent);
+            skipReferences.Add(new GovernedLoopSequentialSkipEvidenceReference(
+                pruned.Activation.ActivationOrdinal,
+                pruned.GoverningActivationOrdinal,
+                pruned.GoverningControlEdgeId,
+                skippedEvent.EventId,
+                skippedEvent.SequentialNodeEvidence!.OutcomeArtifactHash));
+        }
+
+        return new PublicationFailure(runEvent, skipEvents, skipReferences, context, node, activation);
     }
 
     private async Task<RunRead> ReadRunAsync(
@@ -1354,6 +1490,45 @@ public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExec
             null,
             null);
 
+    private static CustomLoopRunEvent WithSequentialSkipEvidence(
+        CustomLoopRunEvent runEvent,
+        GovernedLoopSequentialAdapterBinding binding,
+        GovernedLoopSequentialPrunedActivation pruning)
+    {
+        var activation = pruning.Activation;
+        var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
+            CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
+            CustomLoopSequentialNodeEvidenceKind.TopologySkipped,
+            binding.WorkspaceId,
+            binding.ExecutionBinding.RunId,
+            binding.ExecutionBinding.Revision,
+            binding.ExecutionBinding.ExecutionGeneration,
+            activation.ActivationOrdinal,
+            activation.VisitOrdinal,
+            activation.NodeId,
+            null,
+            activation.CycleId,
+            activation.CycleIteration,
+            null,
+            [],
+            [],
+            pruning.GoverningActivationOrdinal,
+            pruning.GoverningControlEdgeId,
+            CustomLoopSequentialNodeDisposition.Completed,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
+            string.Empty));
+        return runEvent with { SequentialNodeEvidence = evidence };
+    }
+
+    private static DateTimeOffset? FindCycleStartedAtUtc(CustomLoopRunRecord run, string? cycleId)
+        => cycleId is null
+            ? null
+            : run.Events
+                .Where(item => string.Equals(item.SequentialNodeEvidence?.CycleId, cycleId, StringComparison.Ordinal)
+                    && item.SequentialNodeEvidence?.CycleIteration == 1)
+                .Select(item => (DateTimeOffset?)item.TimestampUtc)
+                .Min();
+
     private static CustomLoopExecutionClock StopClock(CustomLoopExecutionClock clock, DateTimeOffset now)
     {
         var accumulated = clock.AccumulatedRunningMilliseconds;
@@ -1454,8 +1629,11 @@ public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExec
     private sealed record RunMutation(RunMutationStatus Status, CustomLoopRunRecord? Run);
     private sealed record PublicationFailure(
         CustomLoopRunEvent Event,
-        IReadOnlyList<string> SelectedControlEdgeIds,
-        IReadOnlyList<string> SkippedControlEdgeIds);
+        IReadOnlyList<CustomLoopRunEvent> SkipEvents,
+        IReadOnlyList<GovernedLoopSequentialSkipEvidenceReference> SkipReferences,
+        GovernedLoopWaitOrderedContext Context,
+        GovernedLoopSequentialPlanNode Node,
+        GovernedLoopNodeExecutionEvidence Activation);
     private sealed record ContinuationPreparation(
         CustomLoopRunRecord? Run,
         GovernedLoopWaitOrderedContext? Context,

@@ -27,6 +27,8 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         Array.AsReadOnly(new[] { GovernedLoopControlCondition.Always });
     private static readonly IReadOnlyList<GovernedLoopControlCondition> _success =
         Array.AsReadOnly(new[] { GovernedLoopControlCondition.Success });
+    private static readonly IReadOnlyList<GovernedLoopControlCondition> _successFailure =
+        Array.AsReadOnly(new[] { GovernedLoopControlCondition.Success, GovernedLoopControlCondition.Failure });
     private static readonly GovernedLoopValueKindSet _textKind =
         GovernedLoopValueKindSet.Create([GovernedLoopValueKind.Text]);
     private readonly GovernedLoopNodeCatalogSnapshot _snapshot;
@@ -72,10 +74,11 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             .Concat(GovernedLoopPureNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopTopologyNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopWaitNodeCatalogContract.Descriptors)
+            .Concat(GovernedLoopFailNodeCatalogContract.Descriptors)
             .Concat(graphCompatibleCommandActions.Select(candidate => CommandAction(candidate.Registration, candidate.PayloadCharacters, isCommandActionExecutable?.Invoke(candidate.Registration) == true)))
             .OrderBy(DescriptorKey, StringComparer.Ordinal)
             .ToArray();
-        if (descriptors.Length != 24 + graphCompatibleCommandActions.Length
+        if (descriptors.Length != 25 + graphCompatibleCommandActions.Length
             || descriptors.Select(item => item.Descriptor).Distinct().Count() != descriptors.Length
             || descriptors.Any(item => !GovernedLoopSequentialNodeDescriptors.IsSupported(item.Descriptor)))
         {
@@ -139,7 +142,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                 IsExecutable: true,
                 IsLegalEntry: false,
                 IsLegalTerminal: false,
-                _success,
+                _successFailure,
                 _success,
                 GovernedLoopJoinPolicy.None,
                 MinimumIncomingControlEdges: 1,
@@ -195,7 +198,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             IsExecutable: true,
             IsLegalEntry: false,
             IsLegalTerminal: false,
-            _success,
+            _successFailure,
             _success,
             GovernedLoopJoinPolicy.None,
             MinimumIncomingControlEdges: 1,
@@ -238,7 +241,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             IsExecutable: isolationAvailable && !template.RequiresCredentialChannel,
             IsLegalEntry: false,
             IsLegalTerminal: false,
-            _success,
+            _successFailure,
             _success,
             GovernedLoopJoinPolicy.None,
             MinimumIncomingControlEdges: 1,

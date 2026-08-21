@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using System.Text.Json.Serialization;
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
@@ -72,4 +73,9 @@ public sealed record CustomLoopRunEvent(
     /// <remarks>The JSON property is required even when null so schema-1 artifacts cannot silently omit this evidence plane.</remarks>
     [JsonRequired]
     public GovernedModelAttemptExecutionEvidence? ModelExecutionEvidence { get; init; }
+
+    /// <summary>Gets the exact immutable classified failure artifact carried by this failed or review-blocked node outcome.</summary>
+    /// <remarks>The JSON property is required even when null so schema-1 run artifacts cannot omit failure classification posture.</remarks>
+    [JsonRequired]
+    public GovernedLoopFailureEvidence? FailureEvidence { get; init; }
 }

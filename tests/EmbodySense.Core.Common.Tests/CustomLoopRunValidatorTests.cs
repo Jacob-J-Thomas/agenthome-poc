@@ -15,6 +15,8 @@ using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
+using EmbodySense.Core.Common.Loops.Failures;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
@@ -2119,6 +2121,35 @@ public sealed class CustomLoopRunValidatorTests
             ? [TriggerControlEdgeId]
             : [];
         skippedControlEdgeIds ??= [];
+        if (kind is CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection or CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention)
+        {
+            var requiresReview = kind == CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention;
+            runEvent = runEvent with
+            {
+                FailureEvidence = GovernedLoopFailureEvidenceContract.Create(
+                    $"failure-{runEvent.EventId}",
+                    binding.WorkspaceId,
+                    binding.ExecutionBinding.RunId,
+                    binding.ExecutionBinding.Revision,
+                    binding.ExecutionBinding.ExecutionGeneration,
+                    activationOrdinal,
+                    1,
+                    nodeId,
+                    attempt ?? 1,
+                    requiresReview ? GovernedLoopFailureClass.AmbiguousExternalOutcome : GovernedLoopFailureClass.ValidationConfiguration,
+                    requiresReview ? "ambiguous-outcome" : "validation-rejected",
+                    requiresReview ? GovernedLoopFailureSource.Provider : GovernedLoopFailureSource.Validation,
+                    requiresReview ? GovernedLoopFailureEffectCertainty.Ambiguous : GovernedLoopFailureEffectCertainty.NotApplicable,
+                    GovernedLoopFailureAuthorityPosture.NotApplicable,
+                    GovernedLoopFailureHumanPosture.None,
+                    requiresReview ? GovernedLoopFailureRetrySafety.Unknown : GovernedLoopFailureRetrySafety.NotRetryable,
+                    requiresReview ? GovernedLoopFailureSeverity.ReviewBlocked : GovernedLoopFailureSeverity.Error,
+                    requiresReview ? 990 : 700,
+                    [new GovernedLoopFailureEvidenceReference("test-boundary", new string('a', CustomLoopLimits.Sha256HexCharacters))],
+                    null,
+                    runEvent.TimestampUtc),
+            };
+        }
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
             kind,
@@ -2139,7 +2170,11 @@ public sealed class CustomLoopRunValidatorTests
             governingControlEdgeId,
             disposition,
             CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
-            string.Empty));
+            string.Empty)
+        {
+            FailureEvidenceId = runEvent.FailureEvidence?.EvidenceId,
+            FailureEvidenceHash = runEvent.FailureEvidence?.ContentHash,
+        });
         return runEvent with { SequentialNodeEvidence = evidence };
     }
 
