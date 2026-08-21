@@ -129,6 +129,7 @@ export function createGovernedGraphWorkspace({
     },
     async refresh() {
       if (!active) return;
+      // Follow-up: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/470 tracks making restored graph selection hydration conclusive across session reloads.
       await refreshCatalog();
       if (pendingMutation) {
         outcome =
