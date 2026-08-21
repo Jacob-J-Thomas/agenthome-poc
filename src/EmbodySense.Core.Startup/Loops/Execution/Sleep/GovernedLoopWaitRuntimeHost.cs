@@ -11,8 +11,11 @@ namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
 internal sealed class GovernedLoopWaitRuntimeHost : ICustomLoopExecutionActivation, IAsyncDisposable
 {
     private static readonly TimeSpan _cycleInterval = TimeSpan.FromMilliseconds(100);
-    private static readonly TimeSpan _heartbeatInterval = TimeSpan.FromMilliseconds(250);
-    private static readonly TimeSpan _ownershipLeaseDuration = TimeSpan.FromSeconds(2);
+    // The canonical Wait host may share a constrained Windows runner with the full verification
+    // suite. Keep heartbeats frequent, but leave enough fenced lease headroom for scheduler and
+    // cross-process persistence stalls without falsely terminating a healthy coordinator.
+    private static readonly TimeSpan _heartbeatInterval = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan _ownershipLeaseDuration = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan _takeoverMargin = TimeSpan.FromMilliseconds(25);
     internal const string CoordinatorId = "local-background";
     private const int CandidateReadLimit = 16;
