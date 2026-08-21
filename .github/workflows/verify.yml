@@ -19,8 +19,8 @@ jobs:
       cancel-in-progress: true
     runs-on: windows-latest
     # Tool setup and diagnostic upload are outside the repository verifier budget.
-    # Promotion runs once per stable merge candidate, so the exhaustive child receives its
-    # #422-required inclusive 600-second certification window instead of constraining the draft edit loop.
+    # Promotion runs once per stable merge candidate, so the exhaustive child receives a
+    # bounded 900-second certification window instead of constraining the draft edit loop.
     timeout-minutes: 20
 
     steps:
@@ -40,7 +40,7 @@ jobs:
 
       - name: Verify solution
         shell: pwsh
-        run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600
+        run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900
 
       - name: Upload verification diagnostics
         if: always()

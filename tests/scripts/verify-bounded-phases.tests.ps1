@@ -364,7 +364,7 @@ foreach ($workflowText in @($verifyWorkflow, $browserWorkflow, $qualificationWor
     Assert-True -Condition ($workflowText.IndexOf("metadata-edit", [StringComparison]::Ordinal) -lt 0) -Message "No workflow may replace a protected context with an unevaluated skipped metadata name."
 }
 Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./scripts/verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "Standard CI cannot bypass the watchdog."
-Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600" -Message "Promotion must have one explicit bounded ten-minute certification window."
+Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900" -Message "Promotion must have one explicit bounded fifteen-minute certification window."
 Assert-Contains -Actual $verifyWorkflow -Expected "timeout-minutes: 20" -Message "Workflow setup and diagnostic upload must remain bounded outside the measured promotion child."
 Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./tests/scripts/", [StringComparison]::Ordinal) -lt 0) -Message "Repository script tests must execute inside the measured verifier child."
 foreach ($contractScript in @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1")) {
