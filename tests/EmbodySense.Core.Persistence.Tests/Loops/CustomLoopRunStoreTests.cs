@@ -532,27 +532,36 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
-    public async Task Public_monitor_readers_allow_atomic_update_during_restart_polling()
+    public async Task Public_reader_share_allows_atomic_update_while_reader_is_paused_before_completion()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopRunStore(paths);
-        var admitted = CustomLoopAdmissionRequestHash.Apply(CreateRun() with { TriggerPrompt = new string('p', CustomLoopLimits.MaxPresetPromptCharacters), AdmissionRequestHash = string.Empty });
+        var admitted = CreateRun() with { TriggerPrompt = new string('p', CustomLoopLimits.MaxPresetPromptCharacters) };
+        admitted = admitted with { Events = [admitted.Events[0] with { Detail = new string('x', CustomLoopLimits.MaxRunDetailCharacters) }] };
+        admitted = CustomLoopAdmissionRequestHash.Apply(admitted with { AdmissionRequestHash = string.Empty });
         await store.CreateAsync(admitted);
-        var running = Advance(admitted, CustomLoopRunStatus.Running);
-        await store.UpdateAsync(running, admitted.LifecycleVersion);
         using var reader = new CustomLoopRunStore(paths);
-        Assert.NotNull(await reader.GetMonitorAsync(admitted.Id));
+        var gated = new QueuedSynchronizationContext();
+        var previous = SynchronizationContext.Current;
+        Task<CustomLoopRunRecord?> readTask;
+        SynchronizationContext.SetSynchronizationContext(gated);
+        try
+        {
+            readTask = reader.GetAsync(admitted.Id);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previous);
+        }
 
-        // Maximize the bounded canonical payload and overlap public monitor reads with final trace persistence (#475).
-        var monitorReads = Enumerable.Range(0, 64).Select(_ => reader.GetMonitorAsync(admitted.Id)).ToArray();
-        var completed = Advance(running, CustomLoopRunStatus.Completed);
-        var result = await store.UpdateAsync(completed, running.LifecycleVersion);
-        var monitors = await Task.WhenAll(monitorReads);
+        await gated.WaitForPostAsync(TimeSpan.FromSeconds(10));
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        var result = await store.UpdateAsync(running, admitted.LifecycleVersion);
 
         Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
-        Assert.All(monitors, monitor => Assert.Equal(admitted.Id, monitor?.Summary.Id));
-        Assert.Equal(CustomLoopRunStatus.Completed, (await reader.GetAsync(admitted.Id))!.Status);
+        gated.Drain();
+        Assert.Equal(admitted.Id, (await readTask)!.Id);
     }
 
     [Fact]
