@@ -25,6 +25,7 @@ public sealed class WorkspacePathsTests
         Assert.Equal(Path.Combine(paths.CustomLoopReceiptCleanupHistoryPath, "definition-tombstone"), paths.CustomLoopDefinitionTombstoneCleanupHistoryPath);
         Assert.Equal(Path.Combine(paths.CustomLoopReceiptCleanupHistoryPath, "lifecycle-control-receipt"), paths.CustomLoopLifecycleControlReceiptCleanupHistoryPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs"), paths.LoopRunsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "execution", "effect-attempts"), paths.GovernedLoopEffectAttemptsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "default-conversation-turns"), paths.DefaultConversationTurnsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom"), paths.CustomLoopRunsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "receipt-retention"), paths.CustomLoopReceiptRetentionPath);

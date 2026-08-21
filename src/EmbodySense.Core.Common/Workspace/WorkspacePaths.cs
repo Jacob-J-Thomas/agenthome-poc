@@ -215,6 +215,9 @@ public sealed class WorkspacePaths
     /// <summary>Gets the bounded operational-control receipt path.</summary>
     public string GovernedLoopOperationalControlReceiptsPath => Path.Combine(LoopsPath, "operational-control-receipts");
 
+    /// <summary>Gets the crash-safe governed-loop effect-attempt evidence path.</summary>
+    public string GovernedLoopEffectAttemptsPath => Path.Combine(LoopsPath, "execution", "effect-attempts");
+
     /// <summary>
     /// Gets the durable default-conversation turn protocol path.
     /// </summary>

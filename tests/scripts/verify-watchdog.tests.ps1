@@ -436,6 +436,18 @@ Assert-True -Condition ($linkedCommonFixturePlan.TestProjects -ccontains "tests/
 Assert-True -Condition ($linkedCommonFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj") -Message "A linked Common fixture must execute its Persistence consumer."
 Assert-True -Condition (@($linkedCommonFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Linked test inputs must run every consuming suite without focused filtering."
 
+$linkedApplicationFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/Governance/Authority/Grants/AuthorityGrantApplicationTestFixture.cs")
+Assert-Equal -Actual $linkedApplicationFixturePlan.TestProjects.Count -Expected 2 -Message "A linked Application fixture must select both the Application and Startup consumers."
+Assert-True -Condition ($linkedApplicationFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj") -Message "A linked Application fixture must retain its source project."
+Assert-True -Condition ($linkedApplicationFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj") -Message "A linked Application fixture must execute its Startup consumer."
+Assert-True -Condition (@($linkedApplicationFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Linked Application test inputs must run every consuming suite without focused filtering."
+
+$linkedEffectFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/Loops/Execution/Effects/GovernedLoopEffectAttemptTestFixture.cs")
+Assert-Equal -Actual $linkedEffectFixturePlan.TestProjects.Count -Expected 2 -Message "A linked effect-attempt fixture must select both the Application and Startup consumers."
+Assert-True -Condition ($linkedEffectFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj") -Message "A linked effect-attempt fixture must retain its source project."
+Assert-True -Condition ($linkedEffectFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj") -Message "A linked effect-attempt fixture must execute its Startup consumer."
+Assert-True -Condition (@($linkedEffectFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Linked effect-attempt inputs must run every consuming suite without focused filtering."
+
 $frontendConfigurationPlan = Get-QualificationPlan -ChangedPaths @("eslint.config.js", ".prettierignore")
 Assert-True -Condition ($frontendConfigurationPlan.RequiresFrontend -and $frontendConfigurationPlan.TestProjects.Count -eq 0) -Message "Tracked lint and formatting configuration must run frontend verification without unrelated .NET tests."
 

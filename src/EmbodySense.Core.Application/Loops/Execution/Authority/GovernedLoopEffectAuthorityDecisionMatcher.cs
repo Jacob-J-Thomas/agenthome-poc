@@ -54,7 +54,7 @@ public static class GovernedLoopEffectAuthorityDecisionMatcher
                 && admitted.ObservedCapabilityPins.Count == 0
                 && string.Equals(admitted.DependencyEvidenceHash, receipt.Evidence.GrantDependencyEvidenceHash, StringComparison.Ordinal);
         }
-        catch (Exception malformed) when (malformed is ArgumentException or InvalidOperationException or NotSupportedException)
+        catch (Exception malformed) when (malformed is not OutOfMemoryException)
         {
             return false;
         }

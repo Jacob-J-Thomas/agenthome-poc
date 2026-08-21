@@ -19,7 +19,7 @@ using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 namespace EmbodySense.Core.Application.Loops.Execution.Authority;
 
 /// <summary>Revalidates exact admitted authority and durably fences one governed-loop effect continuation.</summary>
-public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAuthorityBoundary
+public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAuthorityDecisionBoundary
 {
     private readonly IAuthorityGrantResolver _grantResolver;
     private readonly ICapabilityAdmissionService _capabilityAdmissionService;
@@ -52,9 +52,25 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
     }
 
     /// <inheritdoc />
+    public ICapabilityAuthorityTransaction AuthorityTransaction => _authorityTransaction;
+
+    /// <inheritdoc />
     public Task<GovernedLoopEffectAuthorityExecutionResult<TResult>> ExecuteAsync<TResult>(
         GovernedLoopEffectAuthorityRequest request,
         Func<CancellationToken, Task<TResult>> commit,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(commit);
+        return _authorityTransaction.ExecuteAsync(
+            transactionToken => ExecuteUnderAuthorityAsync(request, (_, token) => commit(token), transactionToken),
+            cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<GovernedLoopEffectAuthorityExecutionResult<TResult>> ExecuteWithDecisionAsync<TResult>(
+        GovernedLoopEffectAuthorityRequest request,
+        Func<GovernedLoopEffectAuthorityDecision, CancellationToken, Task<TResult>> commit,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -66,7 +82,7 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
 
     private async Task<GovernedLoopEffectAuthorityExecutionResult<TResult>> ExecuteUnderAuthorityAsync<TResult>(
         GovernedLoopEffectAuthorityRequest request,
-        Func<CancellationToken, Task<TResult>> commit,
+        Func<GovernedLoopEffectAuthorityDecision, CancellationToken, Task<TResult>> commit,
         CancellationToken cancellationToken)
     {
         if (!TryGetUtcNow(out var evaluatedAtUtc))
@@ -159,7 +175,7 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
 
         if (decision.Disposition != GovernedLoopEffectAuthorityDisposition.Direct)
         {
-            return Result<TResult>(GovernedLoopEffectAuthorityExecutionStatus.Decided, decision, stored.Status, "The durable authority decision stopped the effect before its boundary.");
+            return Result<TResult>(GovernedLoopEffectAuthorityExecutionStatus.Decided, decision, stored.Status, "The durable authority decision stopped the effect before its boundary.", decision.ContentHash);
         }
 
         // An exact prior Direct decision proves only that authority was durably admitted. It cannot prove
@@ -168,7 +184,7 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
         if (stored.Status == GovernedLoopEffectAuthorityEvidenceStoreStatus.AlreadyPresent)
         {
             var replayDecision = CreateEvidenceStoppedDecision(request, admitted, decision.CurrentAuthority!, stored.Status, evaluatedAtUtc);
-            return Result<TResult>(GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected, replayDecision, stored.Status, "The exact direct decision was already present; effect completion is ambiguous and the continuation was not retried.");
+            return Result<TResult>(GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected, replayDecision, stored.Status, "The exact direct decision was already present; effect completion is ambiguous and the continuation was not retried.", decision.ContentHash);
         }
 
         if (cancellationToken.IsCancellationRequested
@@ -186,17 +202,19 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
                 GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected,
                 stoppedDecision,
                 stored.Status,
-                "Authority expired, trusted time became unavailable, or cancellation arrived after the direct decision was appended; the protected continuation was not invoked and reconciliation is required.");
+                "Authority expired, trusted time became unavailable, or cancellation arrived after the direct decision was appended; the protected continuation was not invoked and reconciliation is required.",
+                decision.ContentHash);
         }
 
-        var commitResult = await commit(cancellationToken).ConfigureAwait(false);
+        var commitResult = await commit(decision, cancellationToken).ConfigureAwait(false);
         return new GovernedLoopEffectAuthorityExecutionResult<TResult>(
             GovernedLoopEffectAuthorityExecutionStatus.Decided,
             decision,
             stored.Status,
             true,
             commitResult,
-            "The durable direct decision invoked the protected continuation exactly once.");
+            "The durable direct decision invoked the protected continuation exactly once.",
+            decision.ContentHash);
     }
 
     private static bool TryCreateAdmittedProof(
@@ -697,6 +715,7 @@ public sealed class GovernedLoopEffectAuthorityBoundary : IGovernedLoopEffectAut
         GovernedLoopEffectAuthorityExecutionStatus status,
         GovernedLoopEffectAuthorityDecision? decision,
         GovernedLoopEffectAuthorityEvidenceStoreStatus evidenceStatus,
-        string detail)
-        => new(status, decision, evidenceStatus, false, default, detail);
+        string detail,
+        string? storedDecisionContentHash = null)
+        => new(status, decision, evidenceStatus, false, default, detail, storedDecisionContentHash);
 }
