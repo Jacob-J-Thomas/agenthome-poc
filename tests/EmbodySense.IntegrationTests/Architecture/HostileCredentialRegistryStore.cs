@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.Credentials.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Credentials;
+using EmbodySense.Core.Common.Credentials.Leases.Models;
 using EmbodySense.Core.Common.Credentials.Models;
 
 namespace EmbodySense.IntegrationTests.Architecture;
@@ -38,6 +39,7 @@ internal sealed class HostileCredentialRegistryStore : ICredentialRegistryStore
     }
 
     public Task<bool> AcknowledgeAuditAsync(CredentialContractId auditOperationId, CancellationToken cancellationToken = default) => Task.FromResult(true);
+    public ValueTask<CredentialEvidenceWriteResult> ReserveAsync(CredentialLeaseIntent intent, CancellationToken cancellationToken) => ValueTask.FromResult(CredentialEvidenceWriteResult.Success());
     public ValueTask<CredentialEvidenceWriteResult> AppendAsync(CredentialUseEvidence evidence, CancellationToken cancellationToken) => ValueTask.FromResult(CredentialEvidenceWriteResult.Success());
 
     private static CapabilityId CapabilityId(string value) => EmbodySense.Core.Common.Capabilities.CapabilityId.TryParse(value, out var parsed, out _) ? parsed! : throw new InvalidOperationException();

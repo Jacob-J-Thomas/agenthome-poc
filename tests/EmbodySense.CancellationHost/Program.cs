@@ -51,6 +51,11 @@ if (args is ["credential-external-value"])
     return await WindowsCredentialProviderCrossProcessHost.RunExternalValueAsync();
 }
 
+if (args is ["credential-lease-attempt", var credentialLeasePhase, var credentialLeaseWorkspaceRoot])
+{
+    return await CredentialLeaseAttemptCrossProcessHost.RunAsync(credentialLeasePhase, credentialLeaseWorkspaceRoot);
+}
+
 if (args is ["authority-grant-store", var authorityMode, var authorityWorkspaceRoot, var authorityTrustRoot, var authorityMarkerPath, var authorityResultPath])
 {
     return await AuthorityGrantStoreCrossProcessHost.RunAsync(authorityMode, authorityWorkspaceRoot, authorityTrustRoot, authorityMarkerPath, authorityResultPath);

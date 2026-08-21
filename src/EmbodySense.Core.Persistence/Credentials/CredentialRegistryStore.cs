@@ -2,9 +2,12 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Credentials;
+using EmbodySense.Core.Application.Credentials.Leases;
 using EmbodySense.Core.Application.Credentials.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Credentials;
+using EmbodySense.Core.Common.Credentials.Leases;
+using EmbodySense.Core.Common.Credentials.Leases.Models;
 using EmbodySense.Core.Common.Credentials.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Workspace;
@@ -19,6 +22,9 @@ namespace EmbodySense.Core.Persistence.Credentials;
 public sealed class CredentialRegistryStore : ICredentialRegistryStore
 {
     private const int MaximumActiveRuns = 1_024;
+    // Credential JSON is bounded by UTF-16 characters. A future terminal record can expand each character to one
+    // six-byte JSON escape when embedded in the registry; the remainder covers the operation/envelope fields.
+    private const int MaximumReservedTerminalArtifactUtf8Bytes = (6 * CredentialContractLimits.MaxCanonicalJsonCharacters) + (16 * 1024);
     private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { WriteIndented = true, UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow };
     private static readonly JsonSerializerOptions _canonicalJson = new(JsonSerializerDefaults.Web) { UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow };
     private static readonly UTF8Encoding _utf8 = new(false, true);
@@ -148,7 +154,7 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
             }
 
             var newRegistrationExceedsEntryQuota = current.Public.Entries.Count >= _quota.MaximumEntries && (mutation.Kind == CredentialRegistryMutationKind.Register || mutation.Kind == CredentialRegistryMutationKind.BeginCreate && current.Public.Entries.All(item => !Matches(item, mutation.ReferenceId)));
-            if (current.Public.Operations.Count >= _quota.MaximumOperations || newRegistrationExceedsEntryQuota || mutation.Kind == CredentialRegistryMutationKind.Tombstone && current.Public.Tombstones.Count >= _quota.MaximumTombstones)
+            if (current.Public.Operations.Count + current.Public.EvidenceReservations!.Count >= _quota.MaximumOperations || newRegistrationExceedsEntryQuota || mutation.Kind == CredentialRegistryMutationKind.Tombstone && current.Public.Tombstones.Count >= _quota.MaximumTombstones)
             {
                 return Mutation(CredentialRegistryMutationStatus.Unavailable, mutation.OperationId, current.Public.Revision, null, CredentialFailureCode.LimitExceeded);
             }
@@ -213,6 +219,90 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
     }
 
     /// <inheritdoc />
+    public async ValueTask<CredentialEvidenceWriteResult> ReserveAsync(CredentialLeaseIntent intent, CancellationToken cancellationToken)
+    {
+        if (CredentialLeaseContract.Validate(intent) is not null)
+        {
+            return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.InvalidRequest));
+        }
+
+        var evidenceId = CredentialLeaseContract.ComputeEvidenceId(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+        try
+        {
+            await using var session = await AcquireAsync(cancellationToken);
+            var current = await LoadAsync(session, cancellationToken);
+            if (current is null || current.Recovered)
+            {
+                return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Unavailable));
+            }
+            var reservations = current.Public.EvidenceReservations ?? [];
+
+            var existingEvidence = current.Public.Evidence.SingleOrDefault(item => HasEvidenceId(item, evidenceId));
+            if (existingEvidence is not null)
+            {
+                return CredentialContractJson.TryDeserializeEvidence(existingEvidence.EvidenceJson, out var mapped, out _)
+                    && mapped!.Lease is not null
+                    && string.Equals(mapped.Lease.Intent.ContentHash, intent.ContentHash, StringComparison.Ordinal)
+                    ? CredentialEvidenceWriteResult.Success()
+                    : CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Conflict));
+            }
+
+            var existingReservation = reservations.SingleOrDefault(item => string.Equals(item.EvidenceId, evidenceId.Value, StringComparison.Ordinal));
+            if (existingReservation is not null)
+            {
+                return ReservationMatches(existingReservation, intent)
+                    ? CredentialEvidenceWriteResult.Success()
+                    : CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Conflict));
+            }
+
+            if (!TryGetUtcNow(out var trustedNowUtc))
+            {
+                return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Unavailable));
+            }
+            var registryMatch = CredentialLeaseRegistryMatcher.Match(intent, ToReadResult(current), trustedNowUtc);
+            if (!registryMatch.Succeeded)
+            {
+                return CredentialEvidenceWriteResult.Failed(registryMatch.Failure ?? CredentialFailure.FromCode(CredentialFailureCode.Conflict));
+            }
+
+            if (current.Public.Evidence.Count + reservations.Count >= _quota.MaximumEvidence
+                || current.Public.Operations.Count + reservations.Count >= _quota.MaximumOperations
+                || current.Public.Operations.Any(item => string.Equals(item.OperationId, evidenceId.Value, StringComparison.Ordinal)))
+            {
+                return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.LimitExceeded));
+            }
+
+            var reservation = new CredentialRegistryEvidenceReservationDocument(
+                evidenceId.Value,
+                intent.CredentialUseOperationId,
+                intent.CredentialUseGeneration,
+                intent.ContentHash,
+                intent.Registry.ReferenceId,
+                intent.Registry.BindingHash);
+            var publicCandidate = current.Public with
+            {
+                Generation = checked(current.Public.Generation + 1),
+                EvidenceReservations = [.. reservations, reservation],
+            };
+            var candidate = Complete(current.WorkspaceIdentity, publicCandidate, current.Private);
+            if (!FitsArtifactSize(candidate))
+            {
+                return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.LimitExceeded));
+            }
+            await CommitAsync(session, current, candidate, cancellationToken);
+            return CredentialEvidenceWriteResult.Success();
+        }
+        catch (OperationCanceledException)
+        {
+            return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Unavailable));
+        }
+        catch (Exception exception) when (IsStorageFailure(exception))
+        {
+            return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Unavailable));
+        }
+    }
+
+    /// <inheritdoc />
     public async ValueTask<CredentialEvidenceWriteResult> AppendAsync(CredentialUseEvidence evidence, CancellationToken cancellationToken)
     {
         if (!CredentialContractJson.TrySerialize(evidence, out var evidenceJson, out _))
@@ -228,6 +318,7 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
             {
                 return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Unavailable));
             }
+            var reservations = current.Public.EvidenceReservations ?? [];
 
             var existing = current.Public.Evidence.SingleOrDefault(item => HasEvidenceId(item, evidence!.EvidenceId));
             if (existing is not null)
@@ -235,35 +326,56 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
                 return string.Equals(existing.EvidenceJson, evidenceJson, StringComparison.Ordinal) ? CredentialEvidenceWriteResult.Success() : CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Conflict));
             }
 
+            var reservation = reservations.SingleOrDefault(item => string.Equals(item.EvidenceId, evidence!.EvidenceId.Value, StringComparison.Ordinal));
+            var boundaryCrossed = evidence.Lease?.TerminalPhase is CredentialLeasePhase.Redeemed or CredentialLeasePhase.RedemptionFailed or CredentialLeasePhase.RedemptionAmbiguous;
+            var reservationBacked = reservation is not null && evidence.Lease is not null && ReservationMatches(reservation, evidence.Lease.Intent);
+            if (boundaryCrossed && !reservationBacked)
+            {
+                return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Conflict));
+            }
+            if (reservation is not null && !reservationBacked)
+            {
+                return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Conflict));
+            }
+
             var reference = FindEntry(current.Public, evidence.ReferenceId);
-            if (reference is null)
+            var requiresCurrentBinding = !boundaryCrossed && !reservationBacked;
+            if (requiresCurrentBinding && reference is null)
             {
                 return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.NotFound));
             }
 
-            if (reference.Health == CredentialProviderHealthStatus.NeedsRepair)
+            if (requiresCurrentBinding && reference!.Health == CredentialProviderHealthStatus.NeedsRepair)
             {
                 return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Conflict));
             }
 
-            if (!reference.BindingHash.FixedTimeEquals(evidence.BindingHash))
+            if (requiresCurrentBinding && !reference!.BindingHash.FixedTimeEquals(evidence.BindingHash))
             {
                 return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Conflict));
             }
 
-            if (!CredentialScopeRules.IsNarrowerThanOrEqual(evidence.UsedScope, reference.Binding.Scope))
+            if (requiresCurrentBinding && !CredentialScopeRules.IsNarrowerThanOrEqual(evidence.UsedScope, reference!.Binding.Scope))
             {
                 return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Unauthorized));
             }
 
-            if (current.Public.Evidence.Count >= _quota.MaximumEvidence || current.Public.Operations.Count >= _quota.MaximumOperations || current.Public.Operations.Any(item => string.Equals(item.OperationId, evidence!.EvidenceId.Value, StringComparison.Ordinal)))
+            if (reservation is null && (current.Public.Evidence.Count + reservations.Count >= _quota.MaximumEvidence || current.Public.Operations.Count + reservations.Count >= _quota.MaximumOperations)
+                || current.Public.Operations.Any(item => string.Equals(item.OperationId, evidence!.EvidenceId.Value, StringComparison.Ordinal)))
             {
                 return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.LimitExceeded));
             }
 
             var revision = checked(current.Public.Revision + 1);
             var operation = new CredentialRegistryOperationDocument(evidence!.EvidenceId.Value, Hash("evidence\n" + evidenceJson), -1, revision, evidence.ReferenceId.Value, null);
-            var publicCandidate = current.Public with { Generation = checked(current.Public.Generation + 1), Revision = revision, Evidence = [.. current.Public.Evidence, new CredentialRegistryEvidenceDocument(evidenceJson!)], Operations = [.. current.Public.Operations, operation] };
+            var publicCandidate = current.Public with
+            {
+                Generation = checked(current.Public.Generation + 1),
+                Revision = revision,
+                Evidence = [.. current.Public.Evidence, new CredentialRegistryEvidenceDocument(evidenceJson!)],
+                Operations = [.. current.Public.Operations, operation],
+                EvidenceReservations = reservation is null ? reservations : reservations.Where(item => !string.Equals(item.EvidenceId, reservation.EvidenceId, StringComparison.Ordinal)).ToArray(),
+            };
             var candidate = Complete(current.WorkspaceIdentity, publicCandidate, current.Private with { Revision = revision });
             await CommitAsync(session, current, candidate, cancellationToken);
             return CredentialEvidenceWriteResult.Success();
@@ -507,14 +619,22 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
 
     private void PreflightArtifactSize(State state)
     {
+        if (!FitsArtifactSize(state))
+        {
+            throw new IOException("The bounded credential-registry artifact limit would be exceeded.");
+        }
+    }
+
+    private bool FitsArtifactSize(State state)
+    {
         var authenticationTagPlaceholder = new string('\u0001', _trustProvider.MaximumAuthenticationTagUtf8Bytes);
         var digest = ComputeDocumentDigest(state.Public);
         var publicJson = JsonSerializer.Serialize(state.Public with { ContentDigest = digest, AuthenticationTag = authenticationTagPlaceholder }, _json) + Environment.NewLine;
         var privateJson = JsonSerializer.Serialize(state.Private, _json) + Environment.NewLine;
-        if (_utf8.GetByteCount(publicJson) > _quota.MaximumArtifactUtf8Bytes || _utf8.GetByteCount(privateJson) > _quota.MaximumArtifactUtf8Bytes)
-        {
-            throw new IOException("The bounded credential-registry artifact limit would be exceeded.");
-        }
+        var reservations = state.Public.EvidenceReservations?.Count ?? 0;
+        var reservedTerminalBytes = checked((long)reservations * MaximumReservedTerminalArtifactUtf8Bytes);
+        return _utf8.GetByteCount(publicJson) <= (long)_quota.MaximumArtifactUtf8Bytes - reservedTerminalBytes
+            && _utf8.GetByteCount(privateJson) <= _quota.MaximumArtifactUtf8Bytes;
     }
 
     private async Task WritePairAsync(CapabilityCatalogPathSession session, string publicPath, string privatePath, SerializedState state, CancellationToken cancellationToken)
@@ -786,7 +906,7 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
 
     private bool ValidatePair(CredentialRegistryDocument publicDocument, CredentialRegistryPrivateDocument privateDocument, string identity)
     {
-        if (publicDocument.SchemaVersion != CredentialRegistryDocument.CurrentSchemaVersion || publicDocument.LifecycleShape != CredentialRegistryDocument.CurrentLifecycleShape || privateDocument.SchemaVersion != CredentialRegistryPrivateDocument.CurrentSchemaVersion || publicDocument.Revision < 0 || privateDocument.Revision != publicDocument.Revision || !string.Equals(publicDocument.WorkspaceIdentity, identity, StringComparison.Ordinal) || !string.Equals(privateDocument.WorkspaceIdentity, identity, StringComparison.Ordinal) || string.IsNullOrEmpty(publicDocument.AuthenticationTag) || _utf8.GetByteCount(publicDocument.AuthenticationTag) > _trustProvider.MaximumAuthenticationTagUtf8Bytes || publicDocument.Entries is null || publicDocument.Tombstones is null || publicDocument.Operations is null || publicDocument.Evidence is null || publicDocument.AuditDeliveries is null || privateDocument.Locators is null || publicDocument.Entries.Count > _quota.MaximumEntries || publicDocument.Tombstones.Count > _quota.MaximumTombstones || publicDocument.Operations.Count > _quota.MaximumOperations || publicDocument.Evidence.Count > _quota.MaximumEvidence || publicDocument.AuditDeliveries.Count > publicDocument.Operations.Count)
+        if (publicDocument.SchemaVersion != CredentialRegistryDocument.CurrentSchemaVersion || publicDocument.LifecycleShape != CredentialRegistryDocument.CurrentLifecycleShape || privateDocument.SchemaVersion != CredentialRegistryPrivateDocument.CurrentSchemaVersion || publicDocument.Revision < 0 || privateDocument.Revision != publicDocument.Revision || !string.Equals(publicDocument.WorkspaceIdentity, identity, StringComparison.Ordinal) || !string.Equals(privateDocument.WorkspaceIdentity, identity, StringComparison.Ordinal) || string.IsNullOrEmpty(publicDocument.AuthenticationTag) || _utf8.GetByteCount(publicDocument.AuthenticationTag) > _trustProvider.MaximumAuthenticationTagUtf8Bytes || publicDocument.Entries is null || publicDocument.Tombstones is null || publicDocument.Operations is null || publicDocument.Evidence is null || publicDocument.AuditDeliveries is null || publicDocument.EvidenceReservations is null || privateDocument.Locators is null || publicDocument.Entries.Count > _quota.MaximumEntries || publicDocument.Tombstones.Count > _quota.MaximumTombstones || publicDocument.Operations.Count + publicDocument.EvidenceReservations.Count > _quota.MaximumOperations || publicDocument.Evidence.Count + publicDocument.EvidenceReservations.Count > _quota.MaximumEvidence || publicDocument.AuditDeliveries.Count > publicDocument.Operations.Count)
         {
             return false;
         }
@@ -859,7 +979,12 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         }
 
         var evidenceIds = new HashSet<string>(StringComparer.Ordinal);
-        return publicDocument.Evidence.All(item => CredentialContractJson.TryDeserializeEvidence(item.EvidenceJson, out var evidence, out _) && evidenceIds.Add(evidence!.EvidenceId.Value));
+        if (!publicDocument.Evidence.All(item => CredentialContractJson.TryDeserializeEvidence(item.EvidenceJson, out var evidence, out _) && evidenceIds.Add(evidence!.EvidenceId.Value)))
+        {
+            return false;
+        }
+
+        return publicDocument.EvidenceReservations.All(item => ValidateReservation(item, evidenceIds, operationIds));
     }
 
     private static bool ValidateAuditOutbox(CredentialRegistryOperationDocument operation)
@@ -1027,7 +1152,7 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         return new CredentialLifecycleAuditOutboxItem(ParseContractId(item.OperationId), ParseContractId(item.LifecycleIntentOperationId!), ParseReferenceId(item.ReferenceId), item.WorkspaceId!, item.ActorId!, (CredentialLifecycleOperationKind)item.LifecycleOperation!.Value, audit.OccurredAtUtc, audit.RegistryRevision, item.PreviewHash, audit.Action, audit.Outcome, audit.Detail);
     }
 
-    private static State Empty(string identity) => Complete(identity, new CredentialRegistryDocument(1, 1, identity, 0, 0, [], [], [], [], string.Empty, string.Empty, string.Empty, []), new CredentialRegistryPrivateDocument(1, identity, 0, [], string.Empty));
+    private static State Empty(string identity) => Complete(identity, new CredentialRegistryDocument(1, 1, identity, 0, 0, [], [], [], [], string.Empty, string.Empty, string.Empty, [], []), new CredentialRegistryPrivateDocument(1, identity, 0, [], string.Empty));
 
     private static State Complete(string identity, CredentialRegistryDocument publicDocument, CredentialRegistryPrivateDocument privateDocument)
     {
@@ -1049,9 +1174,47 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
     private static bool Matches(CredentialRegistryEntryDocument document, CredentialReferenceId id) => string.Equals(GetReferenceId(document), id.Value, StringComparison.Ordinal);
     private static string GetReferenceId(CredentialRegistryEntryDocument document) => CredentialContractJson.TryDeserializeReference(document.ReferenceJson, out var reference, out _) ? reference!.Id.Value : throw new FormatException();
     private static bool HasEvidenceId(CredentialRegistryEvidenceDocument document, CredentialContractId id) => CredentialContractJson.TryDeserializeEvidence(document.EvidenceJson, out var evidence, out _) && evidence!.EvidenceId.Equals(id);
+    private static bool ReservationMatches(CredentialRegistryEvidenceReservationDocument reservation, CredentialLeaseIntent intent)
+        => string.Equals(reservation.EvidenceId, CredentialLeaseContract.ComputeEvidenceId(intent.CredentialUseOperationId, intent.CredentialUseGeneration).Value, StringComparison.Ordinal)
+            && string.Equals(reservation.CredentialUseOperationId, intent.CredentialUseOperationId, StringComparison.Ordinal)
+            && reservation.CredentialUseGeneration == intent.CredentialUseGeneration
+            && string.Equals(reservation.IntentHash, intent.ContentHash, StringComparison.Ordinal)
+            && string.Equals(reservation.ReferenceId, intent.Registry.ReferenceId, StringComparison.Ordinal)
+            && string.Equals(reservation.BindingHash, intent.Registry.BindingHash, StringComparison.Ordinal);
+    private static bool ValidateReservation(CredentialRegistryEvidenceReservationDocument reservation, HashSet<string> evidenceIds, HashSet<string> operationIds)
+    {
+        if (!CredentialContractId.TryParse(reservation.EvidenceId, out var evidenceId, out _)
+            || !CredentialContractId.TryParse(reservation.CredentialUseOperationId, out _, out _)
+            || reservation.CredentialUseGeneration < 1
+            || !CredentialReferenceId.TryParse(reservation.ReferenceId, out _, out _)
+            || !CredentialContractHash.TryParse(reservation.IntentHash, out _, out _)
+            || !CredentialContractHash.TryParse(reservation.BindingHash, out _, out _)
+            || !evidenceId!.Equals(CredentialLeaseContract.ComputeEvidenceId(reservation.CredentialUseOperationId, reservation.CredentialUseGeneration))
+            || evidenceIds.Contains(reservation.EvidenceId)
+            || operationIds.Contains(reservation.EvidenceId))
+        {
+            return false;
+        }
+
+        return evidenceIds.Add(reservation.EvidenceId);
+    }
     private static CredentialReferenceId ParseReferenceId(string value) => CredentialReferenceId.TryParse(value, out var parsed, out _) ? parsed! : throw new FormatException();
     private static CredentialContractId ParseContractId(string value) => CredentialContractId.TryParse(value, out var parsed, out _) ? parsed! : throw new FormatException();
     private static CredentialContractHash ParseHash(string value) => CredentialContractHash.TryParse(value, out var parsed, out _) ? parsed! : throw new FormatException();
+
+    private bool TryGetUtcNow(out DateTimeOffset nowUtc)
+    {
+        try
+        {
+            nowUtc = _timeProvider.GetUtcNow();
+            return nowUtc != default && nowUtc.Offset == TimeSpan.Zero;
+        }
+        catch (Exception)
+        {
+            nowUtc = default;
+            return false;
+        }
+    }
     private static CredentialRegistryReadResult FailedRead(CredentialFailureCode code) => new(null, [], [], [], [], CredentialFailure.FromCode(code));
     private static CredentialRegistryMutationResult Mutation(CredentialRegistryMutationStatus status, CredentialContractId? operationId, long? revision, CredentialRegistryEntry? entry, CredentialFailureCode? failure) => new(status, operationId ?? ParseContractId("invalid"), revision, entry, failure is null ? null : CredentialFailure.FromCode(failure.Value));
     private static bool IsStorageFailure(Exception exception) => exception is IOException or UnauthorizedAccessException or FormatException or JsonException or OverflowException or ArgumentException;
