@@ -87,6 +87,129 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.saveState.textContent, "Saved · v2");
 });
 
+test("governed graph activation awaits the selected published graph read", async () => {
+  const sessionStorage = new FakeStorage();
+  sessionStorage.setItem(
+    `embodysense.governed-graph-selection.v1.${encodeURIComponent("C:/workspace")}`,
+    "published-graph",
+  );
+  const server = new FakeFetchServer(createCatalog());
+  const catalogReady = createDeferred();
+  const graphReady = createDeferred();
+  let catalogStarted;
+  let graphStarted;
+  server.on("GET", "/api/governed-graphs/catalog", async () => {
+    catalogStarted?.();
+    await catalogReady.promise;
+    return { status: 200, body: createGovernedGraphCatalog() };
+  });
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    async () => {
+      graphStarted?.();
+      await graphReady.promise;
+      return {
+        status: 200,
+        body: governedGraphRead(
+          governedGraphLifecycle("published", 4),
+          governedGraphArtifact(
+            governedGraphLifecycle("published", 4),
+            "Published graph",
+          ),
+        ),
+      };
+    },
+  );
+  const catalogRequestStarted = new Promise((resolve) => {
+    catalogStarted = resolve;
+  });
+  const graphRequestStarted = new Promise((resolve) => {
+    graphStarted = resolve;
+  });
+  const app = await loadLoopBuilder({
+    server,
+    sessionStorage,
+    loopsViewHidden: true,
+  });
+  await app.window.embodySenseLoopBuilder.activate();
+
+  const activation = app.elements.governedGraphTab.click();
+  await catalogRequestStarted;
+  assert.equal(
+    server.calls.some((call) =>
+      call.url.startsWith("/api/governed-graphs/detail"),
+    ),
+    false,
+  );
+  catalogReady.resolve();
+  await graphRequestStarted;
+  assert.equal(
+    app.elements.governedGraphLifecycle.textContent,
+    "No graph loaded",
+  );
+  graphReady.resolve();
+  await activation;
+
+  assert.match(
+    app.elements.governedGraphLifecycle.textContent,
+    /Published · lifecycle v4/,
+  );
+  assert.equal(
+    server.calls.filter((call) =>
+      call.url.startsWith("/api/governed-graphs/detail"),
+    ).length,
+    1,
+  );
+});
+
+test("governed graph activation does not read a changed selection after catalog hydration", async () => {
+  const sessionStorage = new FakeStorage();
+  sessionStorage.setItem(
+    `embodysense.governed-graph-selection.v1.${encodeURIComponent("C:/workspace")}`,
+    "published-graph",
+  );
+  const server = new FakeFetchServer(createCatalog());
+  const catalogReady = createDeferred();
+  let catalogStarted;
+  server.on("GET", "/api/governed-graphs/catalog", async () => {
+    catalogStarted?.();
+    await catalogReady.promise;
+    return { status: 200, body: createGovernedGraphCatalog() };
+  });
+  const catalogRequestStarted = new Promise((resolve) => {
+    catalogStarted = resolve;
+  });
+  const app = await loadLoopBuilder({
+    server,
+    sessionStorage,
+    loopsViewHidden: true,
+  });
+  await app.window.embodySenseLoopBuilder.activate();
+
+  const activation = app.elements.governedGraphTab.click();
+  await catalogRequestStarted;
+  app.elements.governedGraphId.value = "draft-while-loading";
+  await app.elements.governedGraphId.input();
+  catalogReady.resolve();
+  await activation;
+
+  assert.equal(app.elements.governedGraphId.value, "draft-while-loading");
+  assert.equal(
+    server.calls.some((call) =>
+      call.url.startsWith("/api/governed-graphs/detail"),
+    ),
+    false,
+  );
+
+  await app.elements.governedGraphNewButton.click();
+  assert.equal(
+    app.elements.governedGraphLifecycle.textContent,
+    "Local draft · not durable",
+  );
+  assert.equal(app.elements.governedGraphId.value, "draft-while-loading");
+});
+
 test("governed graph workspace uses the server catalog and submits no caller-owned authority", async () => {
   const server = new FakeFetchServer(createCatalog());
   server.on("GET", "/api/governed-graphs/catalog", () => ({
