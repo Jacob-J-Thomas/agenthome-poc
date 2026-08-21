@@ -1111,7 +1111,7 @@ public sealed class CustomLoopFrontierStoreTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+        Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(
             startInfo,
             typeof(CustomLoopFrontierStoreTests).Assembly.Location,
             "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopFrontierStoreTests.External_process_crash_probe_child_stages_one_authenticated_successor_while_holding_the_mutation_lease");

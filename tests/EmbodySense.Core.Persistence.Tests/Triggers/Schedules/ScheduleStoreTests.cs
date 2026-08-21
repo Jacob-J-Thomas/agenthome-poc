@@ -1267,10 +1267,15 @@ public sealed class ScheduleStoreTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
-            startInfo,
-            typeof(ScheduleStoreTests).Assembly.Location,
-            "EmbodySense.Core.Persistence.Tests.Triggers.Schedules.ScheduleStoreTests.Cross_process_schedule_create_host");
+        const string CrossProcessHostTestName = "EmbodySense.Core.Persistence.Tests.Triggers.Schedules.ScheduleStoreTests.Cross_process_schedule_create_host";
+        if (crashBoundary is not null)
+        {
+            Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(startInfo, typeof(ScheduleStoreTests).Assembly.Location, CrossProcessHostTestName);
+        }
+        else
+        {
+            Verification.CoverageChildProcessAssembly.AddVstestArguments(startInfo, typeof(ScheduleStoreTests).Assembly.Location, CrossProcessHostTestName);
+        }
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         startInfo.Environment[CrossProcessWorkspace] = workspace;
         startInfo.Environment[CrossProcessGate] = gate;
