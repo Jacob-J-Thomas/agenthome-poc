@@ -172,6 +172,7 @@ internal static class GovernedLoopRuntimeTests
             Assert.Equal(GovernedLoopWakeDisposition.Prepared, prepared.Disposition);
             Assert.Equal(GovernedLoopWakeDisposition.Committed, committed.Disposition);
             Assert.Equal(1, prepared.EvidenceVersion);
+            // Restart reconciliation can retain an intermediate ambiguous attempt; see #472.
             Assert.Equal(2, committed.EvidenceVersion);
             Assert.Equal(continuation.PreparedWakeEvidence.ContentHash, prepared.ContentHash);
             Assert.Equal(prepared.ContinuationOperationId, committed.ContinuationOperationId);
