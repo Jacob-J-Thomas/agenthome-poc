@@ -321,7 +321,9 @@ try {
                 $contractArguments += @("-ExecutionPolicy", "Bypass")
             }
             $contractArguments += @("-File", (Join-Path $testsPath "scripts\$contractScript"))
-            Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 90 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
+            # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422 tracks the broader bounded Windows verifier contention; only this source-heavy contract receives the measured headroom.
+            $contractTimeoutSeconds = if ($contractScript -ceq "verify-watchdog.tests.ps1") { 120 } else { 90 }
+            Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds $contractTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
         }
         $coverageContractArguments = @("-NoProfile")
         if ($runningOnWindows) {
