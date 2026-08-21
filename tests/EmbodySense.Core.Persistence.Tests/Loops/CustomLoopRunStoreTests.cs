@@ -532,25 +532,27 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
-    public async Task Ordinary_reader_share_allows_atomic_update_during_restart_polling()
+    public async Task Public_monitor_readers_allow_atomic_update_during_restart_polling()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopRunStore(paths);
-        var admitted = CreateRun();
+        var admitted = CustomLoopAdmissionRequestHash.Apply(CreateRun() with { TriggerPrompt = new string('p', CustomLoopLimits.MaxPresetPromptCharacters), AdmissionRequestHash = string.Empty });
         await store.CreateAsync(admitted);
         var running = Advance(admitted, CustomLoopRunStatus.Running);
         await store.UpdateAsync(running, admitted.LifecycleVersion);
-        var path = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        using var reader = new CustomLoopRunStore(paths);
+        Assert.NotNull(await reader.GetMonitorAsync(admitted.Id));
 
-        // Keep the ordinary reader open to model the external restart poller overlapping final trace persistence (#475).
-        await using var ordinaryReader = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        // Maximize the bounded canonical payload and overlap public monitor reads with final trace persistence (#475).
+        var monitorReads = Enumerable.Range(0, 64).Select(_ => reader.GetMonitorAsync(admitted.Id)).ToArray();
         var completed = Advance(running, CustomLoopRunStatus.Completed);
-
         var result = await store.UpdateAsync(completed, running.LifecycleVersion);
+        var monitors = await Task.WhenAll(monitorReads);
 
         Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
-        Assert.Equal(CustomLoopRunStatus.Completed, (await new CustomLoopRunStore(paths).GetAsync(admitted.Id))!.Status);
+        Assert.All(monitors, monitor => Assert.Equal(admitted.Id, monitor?.Summary.Id));
+        Assert.Equal(CustomLoopRunStatus.Completed, (await reader.GetAsync(admitted.Id))!.Status);
     }
 
     [Fact]
