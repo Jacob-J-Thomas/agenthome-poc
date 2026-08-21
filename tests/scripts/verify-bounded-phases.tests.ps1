@@ -263,7 +263,7 @@ foreach ($retiredLane in @("loop-execution-custom-runtime", "loop-execution-gove
     Assert-True -Condition ($laneScript.IndexOf("New-VerificationTestLane -Name `"$retiredLane`"", [StringComparison]::Ordinal) -lt 0) -Message "Assembly-wide execution must not retain report-amplifying lane '$retiredLane'."
 }
 Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateResourceCapacity = 12' -Message "Required gates must retain twelve logical resource units independently of the three-process host ceiling."
-Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 3' -Message "Required gates must enforce an explicit three-process-heavy concurrency ceiling."
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 2' -Message "Required gates must enforce an explicit two-process-heavy concurrency ceiling."
 Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumCpuBoundWorkers = 1' -Message "Required gates must enforce an explicit one-CPU-bound concurrency ceiling."
 Assert-Contains -Actual $scheduleScript -Expected 'Weight = 3; ResourceClass = "ProcessHeavy"' -Message "Process-heavy required gates must retain their evidence-backed logical weight."
 Assert-Contains -Actual $scheduleScript -Expected '"ProcessHeavy" { 3; break }' -Message "Required-gate profile validation must reject underweighted process-heavy gates."
