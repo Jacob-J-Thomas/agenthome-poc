@@ -201,6 +201,41 @@ public sealed class AuthorityDelegationConcurrencyAndFailureTests
     }
 
     [Fact]
+    public async Task CreateAsync_PropagatesCancellationBeforeHostileTransactionCanCompleteThePublicWaiter()
+    {
+        var harness = await AuthorityDelegationServiceTestHarness.CreateAsync();
+        var service = harness.CreateService();
+        using var cancellation = new CancellationTokenSource();
+        var grantStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseGrant = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.GrantCallback = async (_, _) =>
+        {
+            grantStarted.TrySetResult();
+            await releaseGrant.Task;
+            return harness.GrantResolution;
+        };
+        harness.TransactionCallback = (operation, _) => operation(CancellationToken.None);
+
+        var creation = service.CreateAsync(harness.Request, cancellation.Token);
+        await grantStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        releaseGrant.TrySetResult();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => creation);
+        Assert.Equal(1, harness.GrantCount);
+        Assert.Equal(0, harness.OriginCount);
+
+        harness.TransactionCallback = null;
+        var retry = await service.CreateAsync(harness.Request);
+        if (retry.Status == AuthorityDelegationServiceStatus.Unavailable)
+        {
+            retry = await service.CreateAsync(harness.Request);
+        }
+
+        Assert.Equal(AuthorityDelegationServiceStatus.Created, retry.Status);
+    }
+
+    [Fact]
     public async Task CreateAsync_DoesNotPublishWhenHostileTransactionReturnsAfterCallerCancellation()
     {
         var harness = await AuthorityDelegationServiceTestHarness.CreateAsync();

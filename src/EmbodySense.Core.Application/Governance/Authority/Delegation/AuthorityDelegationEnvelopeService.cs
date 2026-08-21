@@ -100,6 +100,7 @@ public sealed class AuthorityDelegationEnvelopeService : IAuthorityDelegationEnv
 
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var completed = await operation.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             return !ownsOperation && completed.Status == AuthorityDelegationServiceStatus.Created
                 ? Result(AuthorityDelegationServiceStatus.Replayed, completed.Envelope)
