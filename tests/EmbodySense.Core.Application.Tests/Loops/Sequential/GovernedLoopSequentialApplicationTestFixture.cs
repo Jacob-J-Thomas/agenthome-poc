@@ -13,9 +13,16 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Common.LocalWorkspace.Actions;
+using EmbodySense.Core.Common.LocalWorkspace.Actions.Models;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
@@ -134,6 +141,67 @@ internal static class GovernedLoopSequentialApplicationTestFixture
                 new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, false),
                 new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)
             ]);
+    }
+
+    internal static GovernedLoopGraphRevisionArtifact WorkspaceActionArtifact(
+        WorkspaceActionKind kind = WorkspaceActionKind.Write,
+        string? inputJson = null,
+        ContextualRoleRevisionPin? owningRole = null)
+    {
+        inputJson ??= "{\"precondition\":{\"kind\":\"expectedAbsent\"},\"schemaVersion\":1,\"scopeId\":\"workspace\",\"segments\":[{\"kind\":\"literalUtf8\",\"literal\":\"hello\"}],\"target\":\"notes.txt\"}";
+        Assert.True(WorkspaceActionInputContract.TryParse(inputJson, kind, out var input, out var reason), reason);
+        var nodes = new GovernedLoopNodeDefinition[]
+        {
+            Trigger("trigger"),
+            Inference("infer", "Produce one bounded result before the exact Action."),
+            new(
+                "workspace-action",
+                kind switch
+                {
+                    WorkspaceActionKind.Append => GovernedLoopSequentialNodeDescriptors.WorkspaceAppend,
+                    WorkspaceActionKind.Write => GovernedLoopSequentialNodeDescriptors.WorkspaceWrite,
+                    WorkspaceActionKind.Delete => GovernedLoopSequentialNodeDescriptors.WorkspaceDelete,
+                    _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+                },
+                [Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([WorkspaceCommandCapabilityId]),
+                new Dictionary<string, string> { ["input"] = WorkspaceActionInputContract.Encode(input!) }),
+            Exit("exit"),
+        };
+        return Artifact(
+            nodes,
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("infer-to-action", "infer", "workspace-action", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("action-to-exit", "workspace-action", "exit", GovernedLoopControlCondition.Success),
+            ],
+            ["exit"],
+            owningRole,
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new GovernedLoopBindingDefinition("action-result-to-exit", GovernedLoopBindingKind.Data, "workspace-action", "result", "exit", "result"),
+            ],
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceCommandCapabilityId]));
+    }
+
+    internal static GovernedLoopSequentialInvocationSnapshot InvocationSnapshot(
+        GovernedLoopGraphRevisionArtifact artifact,
+        bool includeConversation = true)
+    {
+        ArgumentNullException.ThrowIfNull(artifact);
+        var context = CustomLoopContextSnapshot.CreateEmpty(Now);
+        return GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
+            GovernedLoopSequentialInvocationSnapshot.CurrentSchemaVersion,
+            "Execute the exact admitted request.",
+            new CustomLoopModelSnapshot("provider", "model"),
+            includeConversation
+                ? new CustomLoopConversationReference("conversation-1", "version-1", Now.AddMinutes(-1))
+                : null,
+            context.CapturedAtUtc,
+            context.SourceManifest,
+            string.Empty));
     }
 
     internal static GovernedLoopGraphRevisionArtifact ParallelAllJoinArtifact(ContextualRoleRevisionPin? owningRole = null)

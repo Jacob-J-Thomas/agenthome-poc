@@ -1770,6 +1770,7 @@ public sealed class BrowserFlowTests
             }
 
             var errorText = parameters.TryGetProperty("errorText", out var errorTextValue) ? errorTextValue.GetString() : null;
+            // Intentional server termination can surface ERR_CONNECTION_RESET; strict handling remains tracked by #418.
             var expected = errorText?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true
                 || errorText?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true;
             if (expected)

@@ -454,6 +454,14 @@ public sealed class CodexAppServerInferenceTests
         var commandEnum = toolSpec.GetProperty("inputSchema").GetProperty("properties").GetProperty("command").GetProperty("enum").EnumerateArray().Select(item => item.GetString() ?? "").ToArray();
         Assert.Contains("read", commandEnum);
         Assert.Contains("write", commandEnum);
+        var inputSchema = toolSpec.GetProperty("inputSchema");
+        var inputProperties = inputSchema.GetProperty("properties");
+        Assert.False(inputProperties.TryGetProperty("content", out _));
+        var mutationInput = inputProperties.GetProperty("input");
+        Assert.False(mutationInput.GetProperty("additionalProperties").GetBoolean());
+        Assert.Equal(1, mutationInput.GetProperty("properties").GetProperty("schemaVersion").GetProperty("const").GetInt32());
+        Assert.Equal("workspace", mutationInput.GetProperty("properties").GetProperty("scopeId").GetProperty("const").GetString());
+        Assert.Equal(2, inputSchema.GetProperty("allOf").GetArrayLength());
         var auditText = await File.ReadAllTextAsync(new WorkspacePaths(workspace.RootPath).EventsLogPath);
         Assert.Contains("llm.inference.start", auditText, StringComparison.Ordinal);
         Assert.Contains("llm.inference.complete", auditText, StringComparison.Ordinal);
@@ -476,6 +484,48 @@ public sealed class CodexAppServerInferenceTests
             Assert.Equal("run-1", GetMetadataString(auditEvent, "run_id"));
             Assert.Equal("provider-correlation-1", GetMetadataString(auditEvent, "attempt_correlation_id"));
         });
+    }
+
+    [Fact]
+    public async Task Dynamic_mutation_forwards_only_the_structured_semantic_input_to_the_broker()
+    {
+        var broker = new CapturingToolBroker();
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Request(99, "item/tool/call", """{"threadId":"thread-1","turnId":"turn-1","callId":"call-write-1","namespace":"embodysense","tool":"command","arguments":{"command":"write","path":"shared/note.txt","input":{"schemaVersion":1,"scopeId":"workspace","target":"shared/note.txt","precondition":{"kind":"expectedAbsent"},"segments":[{"kind":"literalUtf8","literal":"exact"}]}}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport, broker);
+
+        _ = await client.GenerateAsync(LlmInferenceRequest.FromUserText("write"), (_, _) => Task.CompletedTask);
+
+        var request = Assert.IsType<ToolRequest>(broker.Request);
+        Assert.Equal(ToolCommand.Write, request.Command);
+        Assert.Equal("shared/note.txt", request.TargetPath);
+        Assert.Equal("call-write-1", request.CorrelationId);
+        using var semantic = JsonDocument.Parse(request.Content!);
+        Assert.Equal("exact", semantic.RootElement.GetProperty("segments")[0].GetProperty("literal").GetString());
+    }
+
+    [Fact]
+    public async Task Dynamic_mutation_rejects_legacy_or_aliased_outer_arguments_before_the_broker()
+    {
+        var broker = new CapturingToolBroker();
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Request(99, "item/tool/call", """{"threadId":"thread-1","turnId":"turn-1","callId":"call-write-legacy","namespace":"embodysense","tool":"command","arguments":{"operation":"write","target":"shared/note.txt","content":"legacy raw content","input":{"schemaVersion":1,"scopeId":"workspace","target":"shared/note.txt","precondition":{"kind":"expectedAbsent"},"segments":[{"kind":"literalUtf8","literal":"exact"}]}}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport, broker);
+
+        _ = await client.GenerateAsync(LlmInferenceRequest.FromUserText("write"), (_, _) => Task.CompletedTask);
+
+        Assert.Null(broker.Request);
+        var response = Assert.Single(transport.Writes, line => line.Contains("\"id\":99", StringComparison.Ordinal));
+        Assert.Contains("\"success\":false", response, StringComparison.Ordinal);
+        Assert.DoesNotContain("legacy raw content", response, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -553,7 +603,7 @@ public sealed class CodexAppServerInferenceTests
         Assert.Equal("Use embodysense.command.", response.OutputText);
         var toolResponse = Assert.Single(transport.Writes, line => line.Contains("\"id\":99", StringComparison.Ordinal));
         Assert.Contains("\"success\":false", toolResponse, StringComparison.Ordinal);
-        Assert.Contains("Unsupported EmbodySense dynamic tool: read", toolResponse, StringComparison.Ordinal);
+        Assert.Contains("The EmbodySense dynamic tool is unsupported.", toolResponse, StringComparison.Ordinal);
         var auditText = await File.ReadAllTextAsync(new WorkspacePaths(workspace.RootPath).EventsLogPath);
         Assert.Contains("llm.appserver.request", auditText, StringComparison.Ordinal);
         Assert.Contains("\"outcome\":\"failed\"", auditText, StringComparison.Ordinal);
@@ -1407,7 +1457,7 @@ public sealed class CodexAppServerInferenceTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
         ICapabilityAuthorityTransaction authority = new CapabilityAuthorityTransaction(paths);
-        var workspaceClient = new LocalWorkspaceClient(paths, new CapabilityAuthorityWorkspaceMutationCommitBoundary(paths, authority));
+        var workspaceClient = new LocalWorkspaceClient(paths);
         return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, workspaceClient, new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), new ToolResultRetentionStore(paths));
     }
 
@@ -1601,6 +1651,25 @@ public sealed class CodexAppServerInferenceTests
         public Task<ToolApprovalResponse> RequestApprovalAsync(ToolApprovalRequest request, CancellationToken cancellationToken = default)
         {
             throw new InvalidOperationException("Approval prompt should not have been called.");
+        }
+    }
+
+    private sealed class CapturingToolBroker : IToolBroker
+    {
+        public IReadOnlyList<ToolCommand> AvailableCommands { get; } = [ToolCommand.Write];
+
+        public ToolRequest? Request { get; private set; }
+
+        public Task<ToolResult> ExecuteAsync(ToolRequest request, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Request = request;
+            return Task.FromResult(new ToolResult(
+                ToolExecutionOutcome.Succeeded,
+                "captured",
+                "request-captured",
+                request.TargetPath,
+                request));
         }
     }
 }

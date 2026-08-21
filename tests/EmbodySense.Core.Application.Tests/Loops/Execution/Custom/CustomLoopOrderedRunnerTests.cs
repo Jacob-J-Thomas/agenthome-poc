@@ -25,6 +25,8 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.Sequential.Actions;
+using EmbodySense.Core.Application.Loops.Sequential.Actions.Models;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Loops.Wait;
 using EmbodySense.Core.Application.Tests.Loops.Admission;
@@ -57,6 +59,8 @@ using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.LocalWorkspace.Actions;
+using EmbodySense.Core.Common.LocalWorkspace.Actions.Models;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
@@ -144,6 +148,107 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal("final outcome", publication.CanonicalOutput);
         Assert.True(Array.FindIndex(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted && item.StepId == "infer-01")
             < Array.FindIndex(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted && item.Detail.Contains("infer-01", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task Canonical_adapter_executes_one_exact_workspace_action_and_publishes_only_value_free_result_evidence()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact(owningRole: role));
+        var store = new FakeRunStore(context.Run);
+        var inference = new QueueExecutor(Result("bounded provider output"));
+        var action = new QueueWorkspaceActionExecutor(WorkspaceActionOutcome(WorkspaceActionResultStatus.Committed));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, inference, workspaceActionExecutor: action), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.True(store.ValidationFailures.Count == 0, string.Join(Environment.NewLine, store.ValidationFailures));
+        Assert.True(result.Status == CustomLoopOrderedRunStatus.Completed, result.Detail);
+        Assert.Single(inference.Requests);
+        var actionRequest = Assert.Single(action.Requests);
+        Assert.Equal("workspace-action", actionRequest.Dispatch.Node.NodeId);
+        Assert.Equal(context.Artifact.ArtifactHash, actionRequest.GraphArtifact.ArtifactHash);
+        Assert.Equal(actionRequest.Dispatch.Activation.AttemptOperationId, actionRequest.AttemptOperationId);
+        Assert.True(WorkspaceActionResultContract.TryParse(result.Run!.FinalOutput, out var retained));
+        Assert.Equal(WorkspaceActionResultStatus.Committed, retained!.Status);
+        Assert.DoesNotContain("notes.txt", result.Run.FinalOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("bounded provider output", result.Run.FinalOutput, StringComparison.Ordinal);
+        Assert.Single(result.Run.Events, item => IsWorkspaceActionStart(item));
+        Assert.Single(result.Run.Events, item => IsWorkspaceActionCompletion(item));
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Canonical_workspace_action_start_recovers_and_replays_one_retained_mutation_after_process_loss()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact(owningRole: role));
+        CustomLoopRunRecord? retainedStart = null;
+        var firstStore = new FakeRunStore(context.Run)
+        {
+            AfterUpdate = candidate =>
+            {
+                if (retainedStart is null && candidate.Events.Any(IsWorkspaceActionStart))
+                {
+                    retainedStart = candidate;
+                }
+
+                return Task.CompletedTask;
+            },
+        };
+        var action = new CrashThenReplayWorkspaceActionExecutor();
+        var firstEvidence = new SequentialEvidenceHarness(firstStore, context.Evidence);
+        var firstAdapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(firstStore, new QueueExecutor(Result("bounded provider output")), workspaceActionExecutor: action),
+            firstEvidence,
+            firstEvidence);
+
+        var interrupted = await firstAdapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, interrupted.Status);
+        var recoveryStore = new FakeRunStore(Assert.IsType<CustomLoopRunRecord>(retainedStart));
+        var recoveryAudit = new RecordingAuditLog();
+        var recovery = Assert.Single(await new CustomLoopRecoveryService(recoveryStore, recoveryAudit, new FixedTimeProvider(_now.AddMinutes(1))).RecoverAsync(AuditSchema.Actors.Web));
+        Assert.True(recovery.Status == CustomLoopRecoveryStatus.Paused, $"{recovery.Status}: {recovery.Detail} Validation: {string.Join("; ", recoveryStore.ValidationFailures.Select(item => item.Code + ": " + item.Message))}");
+        Assert.All(recoveryAudit.Events, item => Assert.Equal(true, item.Metadata["restartSafeWorkspaceActionAttemptAfterCheckpoint"]));
+        var resumable = ResumeReady(recovery.Run, "resume-workspace-action-crash");
+        var resumedStore = new FakeRunStore(resumable);
+        var resumedEvidence = new SequentialEvidenceHarness(resumedStore, context.Evidence);
+        var resumedAdapter = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(resumedStore, new QueueExecutor(), workspaceActionExecutor: action),
+            resumedEvidence,
+            resumedEvidence);
+
+        var resumed = await resumedAdapter.ResumeAsync(new GovernedLoopSequentialOrderedResumeRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            resumable.LifecycleVersion,
+            "resume-workspace-action-crash",
+            AuditSchema.Actors.Web));
+
+        Assert.True(resumed.Status == CustomLoopOrderedRunStatus.Completed, resumed.Detail);
+        Assert.Equal(2, action.Requests.Count);
+        Assert.Equal(1, action.MutationCount);
+        Assert.True(WorkspaceActionResultContract.TryParse(resumed.Run!.FinalOutput, out var replayed));
+        Assert.Equal(WorkspaceActionResultStatus.Replayed, replayed!.Status);
+        Assert.Single(resumed.Run.Events, item => IsWorkspaceActionStart(item));
+        Assert.Single(resumed.Run.Events, item => IsWorkspaceActionCompletion(item));
+        Assert.Empty(resumedStore.ValidationFailures);
     }
 
     [Fact]
@@ -6376,7 +6481,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
         IGovernedLoopConversationPublicationAuthorityBoundaryProvider? conversationPublicationAuthorityBoundaryProvider = null,
         GovernedLoopFirstBoundRunCompletionBoundary? firstBoundRunCompletionBoundary = null,
         bool composeFirstBoundRunCompletionBoundary = true,
-        IGovernedLoopWaitNodeExecutor? waitNodeExecutor = null)
+        IGovernedLoopWaitNodeExecutor? waitNodeExecutor = null,
+        IGovernedLoopWorkspaceActionExecutor? workspaceActionExecutor = null)
     {
         return new CustomLoopOrderedRunner(
             store,
@@ -6394,8 +6500,29 @@ public sealed partial class CustomLoopOrderedRunnerTests
                     new RecordingEffectAuthorityTransaction(),
                     timeProvider ?? new FixedTimeProvider(_now))
                 : null,
-            waitNodeExecutor: waitNodeExecutor);
+            waitNodeExecutor: waitNodeExecutor,
+            workspaceActionExecutor: workspaceActionExecutor);
     }
+
+    private static GovernedLoopWorkspaceActionExecutionResult WorkspaceActionOutcome(WorkspaceActionResultStatus status)
+    {
+        var output = WorkspaceActionResultContract.Encode(WorkspaceActionResultContract.Create(status, "after-" + new string('a', 64), 1));
+        return new GovernedLoopWorkspaceActionExecutionResult(GovernedLoopWorkspaceActionExecutionStatus.Completed, output, "The exact workspace Action outcome is durable.");
+    }
+
+    private static bool IsWorkspaceActionStart(CustomLoopRunEvent item)
+        => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted
+            && item.SequentialNodeEvidence is { Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted }
+            && string.Equals(item.StepId, "workspace-action", StringComparison.Ordinal);
+
+    private static bool IsWorkspaceActionCompletion(CustomLoopRunEvent item)
+        => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted
+            && item.SequentialNodeEvidence is
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+                Disposition: CustomLoopSequentialNodeDisposition.Completed,
+            }
+            && string.Equals(item.StepId, "workspace-action", StringComparison.Ordinal);
 
     private static async Task<(
         CustomLoopOrderedRunResult Result,
@@ -7180,6 +7307,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
             {
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Trigger => orderedEvent?.Kind == CustomLoopRunEventKind.Admitted,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Inference => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
+                EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Action => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Transform or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Validate => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Condition or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Join => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Wait => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,

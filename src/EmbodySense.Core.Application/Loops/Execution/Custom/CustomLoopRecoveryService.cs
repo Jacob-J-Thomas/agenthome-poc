@@ -16,6 +16,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.LocalWorkspace.Actions;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
@@ -79,6 +80,8 @@ public sealed class CustomLoopRecoveryService
 
         var admissionAuditComplete = CustomLoopRunValidator.HasCompleteAdmissionAudit(run);
         var hasRestartSafeDeterministicAttempt = HasRestartSafeDeterministicAttemptSinceCheckpoint(run);
+        var hasRestartSafeWorkspaceActionAttempt = HasRestartSafeWorkspaceActionAttemptSinceCheckpoint(run);
+        var hasRestartSafeAttempt = hasRestartSafeDeterministicAttempt || hasRestartSafeWorkspaceActionAttempt;
         var hasOpenAttempt = HasOpenAttemptSinceCheckpoint(run);
         var recoverableWaitClaims = GovernedLoopWaitClaimEvidence.FindExactRecoverableClaims(run);
         var recoverableWaitContinuations = GovernedLoopWaitClaimEvidence.FindExactRecoverableContinuations(run);
@@ -114,7 +117,7 @@ public sealed class CustomLoopRecoveryService
                 CustomLoopRunStatus.Paused when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
                 CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
                 CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested => CustomLoopRunStatus.Paused,
-                CustomLoopRunStatus.CancelRequested when hasRestartSafeDeterministicAttempt => CustomLoopRunStatus.NeedsReview,
+                CustomLoopRunStatus.CancelRequested when hasRestartSafeAttempt => CustomLoopRunStatus.NeedsReview,
                 CustomLoopRunStatus.CancelRequested when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
                 CustomLoopRunStatus.CancelRequested => CustomLoopRunStatus.Cancelled,
                 _ => CustomLoopRunStatus.Unknown
@@ -128,21 +131,21 @@ public sealed class CustomLoopRecoveryService
         var detail = (run.Status, target) switch
         {
             (_, CustomLoopRunStatus.NeedsReview) when !admissionAuditComplete => "Restart recovery found no valid durable admission-audit completion marker; execution is permanently stopped for review.",
-            (CustomLoopRunStatus.CancelRequested, CustomLoopRunStatus.NeedsReview) when hasRestartSafeDeterministicAttempt => "Restart recovery found cancellation over an unadopted deterministic node attempt; operator reconciliation is required before any terminal disposition.",
+            (CustomLoopRunStatus.CancelRequested, CustomLoopRunStatus.NeedsReview) when hasRestartSafeAttempt => "Restart recovery found cancellation over an unadopted restart-safe node attempt; operator reconciliation is required before any terminal disposition.",
             (CustomLoopRunStatus.Admitted, CustomLoopRunStatus.Paused) => "Restart recovery parked the admitted run at Paused without dispatch.",
             (_, CustomLoopRunStatus.NeedsReview) => "Restart recovery found an unresolved effectful or unauthenticated canonical attempt after the last committed checkpoint; execution remains stopped for review.",
-            (_, CustomLoopRunStatus.Paused) when hasRestartSafeDeterministicAttempt => "Restart recovery parked an authenticated deterministic node attempt for explicit resume without evaluating it.",
+            (_, CustomLoopRunStatus.Paused) when hasRestartSafeAttempt => "Restart recovery parked an authenticated restart-safe node attempt for explicit resume without evaluating or redispatching an unbound operation.",
             (CustomLoopRunStatus.CancelRequested, CustomLoopRunStatus.Cancelled) => "Restart recovery proved there was no open attempt after the checkpoint and completed cancellation without dispatch.",
             _ => "Restart recovery parked the interrupted run at its last proved checkpoint without dispatch."
         };
         var now = Now(run);
         var failureCode = !admissionAuditComplete
             ? "recovery_incomplete_admission_audit"
-            : target == CustomLoopRunStatus.NeedsReview && run.Status == CustomLoopRunStatus.CancelRequested && hasRestartSafeDeterministicAttempt
+            : target == CustomLoopRunStatus.NeedsReview && run.Status == CustomLoopRunStatus.CancelRequested && hasRestartSafeAttempt
                 ? "recovery_deterministic_cancellation_reconciliation_required"
                 : target == CustomLoopRunStatus.NeedsReview ? "recovery_open_attempt" : null;
         var candidate = CreateCandidate(run, target, failureCode, detail, now);
-        var metadata = RecoveryMetadata(run, candidate, hasOpenAttempt, hasRestartSafeDeterministicAttempt, admissionAuditComplete);
+        var metadata = RecoveryMetadata(run, candidate, hasOpenAttempt, hasRestartSafeDeterministicAttempt, hasRestartSafeWorkspaceActionAttempt, admissionAuditComplete);
 
         // Record intent before the lifecycle mutation so a crash never produces an unexplained
         // recovery transition.
@@ -242,6 +245,7 @@ public sealed class CustomLoopRecoveryService
         CustomLoopRunRecord candidate,
         bool hasOpenAttempt,
         bool hasRestartSafeDeterministicAttempt,
+        bool hasRestartSafeWorkspaceActionAttempt,
         bool admissionAuditComplete)
     {
         return new Dictionary<string, object?>
@@ -258,6 +262,7 @@ public sealed class CustomLoopRecoveryService
             ["recoveryEventId"] = candidate.Events[^1].EventId,
             ["openAttemptAfterCheckpoint"] = hasOpenAttempt,
             ["restartSafeDeterministicAttemptAfterCheckpoint"] = hasRestartSafeDeterministicAttempt,
+            ["restartSafeWorkspaceActionAttemptAfterCheckpoint"] = hasRestartSafeWorkspaceActionAttempt,
             ["admissionAuditComplete"] = admissionAuditComplete,
             ["automaticExecution"] = false
         };
@@ -338,6 +343,7 @@ public sealed class CustomLoopRecoveryService
             && (item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
             && !HasAuthenticatedTerminalSequentialOutcome(run, item)
             && !IsRestartSafeDeterministicAttemptStart(run, item)
+            && !IsRestartSafeWorkspaceActionAttemptStart(run, item)
             && !GovernedLoopWaitClaimEvidence.IsExactRecoverableClaimStart(run, item)
             && !GovernedLoopWaitClaimEvidence.IsExactRecoverableContinuationStart(run, item)
             && !IsExactWaitingAttemptStart(run, item));
@@ -368,6 +374,7 @@ public sealed class CustomLoopRecoveryService
         return exactStarts.Length != 1
             || (!HasAuthenticatedTerminalSequentialOutcome(run, exactStarts[0])
                 && !IsRestartSafeDeterministicAttemptStart(run, exactStarts[0])
+                && !IsRestartSafeWorkspaceActionAttemptStart(run, exactStarts[0])
                 && !GovernedLoopWaitClaimEvidence.IsExactRecoverableClaimStart(run, exactStarts[0])
                 && !GovernedLoopWaitClaimEvidence.IsExactRecoverableContinuationStart(run, exactStarts[0])
                 && !IsExactWaitingAttemptStart(run, exactStarts[0]));
@@ -505,6 +512,52 @@ public sealed class CustomLoopRecoveryService
 
     internal static bool HasRestartSafeDeterministicAttemptSinceCheckpoint(CustomLoopRunRecord run)
         => run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence && IsRestartSafeDeterministicAttemptStart(run, item));
+
+    internal static bool HasRestartSafeWorkspaceActionAttemptSinceCheckpoint(CustomLoopRunRecord run)
+        => run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence && IsRestartSafeWorkspaceActionAttemptStart(run, item));
+
+    private static bool IsRestartSafeWorkspaceActionAttemptStart(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        if (run.Frontier is not { } frontier
+            || run.SequentialAdapterBinding is not { } binding
+            || item is not
+            {
+                Kind: CustomLoopRunEventKind.NodeAttemptStarted,
+                Iteration: > 0,
+                TraceReservationUtf8Bytes: CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
+                SequentialNodeEvidence:
+                {
+                    Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+                    Disposition: CustomLoopSequentialNodeDisposition.Unknown,
+                } evidence,
+            }
+            || frontier.Payload.Nodes.SingleOrDefault(candidate =>
+                candidate.ActivationOrdinal == evidence.ActivationOrdinal
+                && candidate.VisitOrdinal == evidence.VisitOrdinal
+                && string.Equals(candidate.NodeId, evidence.NodeId, StringComparison.Ordinal)
+                && candidate.Status == GovernedLoopNodeExecutionStatus.Running) is not
+                {
+                    Attempt: { } attempt,
+                    AttemptOperationId: { } attemptOperationId,
+                } node
+            || !WorkspaceActionNodeDescriptors.TryResolve(node.Descriptor, out _))
+        {
+            return false;
+        }
+
+        return string.Equals(item.EventId, attemptOperationId, StringComparison.Ordinal)
+            && item.Attempt == attempt
+            && string.Equals(item.StepId, node.NodeId, StringComparison.Ordinal)
+            && evidence.ActivationOrdinal == node.ActivationOrdinal
+            && evidence.VisitOrdinal == node.VisitOrdinal
+            && evidence.Attempt == attempt
+            && string.Equals(evidence.NodeId, node.NodeId, StringComparison.Ordinal)
+            && string.Equals(evidence.CycleId, node.CycleId, StringComparison.Ordinal)
+            && evidence.CycleIteration == node.CycleIteration
+            && SequentialBindingMatchesRun(evidence, run, binding)
+            && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(item);
+    }
 
     private static bool IsRestartSafeDeterministicAttemptStart(CustomLoopRunRecord run, CustomLoopRunEvent item)
     {

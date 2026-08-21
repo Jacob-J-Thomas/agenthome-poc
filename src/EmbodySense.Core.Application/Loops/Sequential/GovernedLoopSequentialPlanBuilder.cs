@@ -5,6 +5,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
+using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
@@ -544,6 +545,7 @@ public static class GovernedLoopSequentialPlanBuilder
 
         var scheduleEntry = Equals(planNodes[0].Descriptor, GovernedLoopSequentialNodeDescriptors.ScheduleTrigger);
         var hasInference = planNodes.Any(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference));
+        var hasWorkspaceAction = planNodes.Any(node => GovernedLoopSequentialNodeDescriptors.IsWorkspaceAction(node.Descriptor));
         var routedProfileIds = graph.Nodes
             .Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference)
             .SelectMany(node => CandidateProfileIds(node.ModelRoutingPolicy ?? graph.DefaultModelRoutingPolicy))
@@ -554,20 +556,19 @@ public static class GovernedLoopSequentialPlanBuilder
             .Concat(routedProfileIds)
             .Order(StringComparer.Ordinal)
             .ToArray();
-        var toolEnabledCapabilities = inferenceCapabilities
-            .Append(WorkspaceCommandCapabilityId)
+        var inferenceAllowsWorkspaceTools = graph.Nodes.Any(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference
+            && node.AuthorityCeiling.CapabilityIds.Contains(WorkspaceCommandCapabilityId, StringComparer.Ordinal));
+        var expectedCapabilities = inferenceCapabilities
+            .Concat(hasWorkspaceAction || inferenceAllowsWorkspaceTools ? [WorkspaceCommandCapabilityId] : [])
             .Order(StringComparer.Ordinal)
             .ToArray();
         var noInferenceCapabilities = scheduleEntry
             ? new[] { ConversationTurnCapabilityId, ScheduleTriggerCapabilityId }
             : [ConversationTurnCapabilityId];
-        var allowsWorkspaceTools = hasInference
-            && graph.AuthorityCeiling.CapabilityIds.SequenceEqual(toolEnabledCapabilities, StringComparer.Ordinal);
         if ((!hasInference
                 && !graph.AuthorityCeiling.CapabilityIds.SequenceEqual(noInferenceCapabilities, StringComparer.Ordinal))
             || (hasInference
-                && !allowsWorkspaceTools
-                && !graph.AuthorityCeiling.CapabilityIds.SequenceEqual(inferenceCapabilities, StringComparer.Ordinal)))
+                && !graph.AuthorityCeiling.CapabilityIds.SequenceEqual(expectedCapabilities, StringComparer.Ordinal)))
         {
             return "$.graph.authorityCeiling";
         }
@@ -580,7 +581,8 @@ public static class GovernedLoopSequentialPlanBuilder
             var exact = planNode.Descriptor.Kind switch
             {
                 GovernedLoopNodeKind.Trigger => IsExactTrigger(node, schemaById),
-                GovernedLoopNodeKind.Inference => IsExactInference(node, schemaById, graph.DefaultModelRoutingPolicy, allowsWorkspaceTools, topology.ComponentByNodeId[node.Id].IsCyclic),
+                GovernedLoopNodeKind.Inference => IsExactInference(node, schemaById, graph.DefaultModelRoutingPolicy, inferenceAllowsWorkspaceTools, topology.ComponentByNodeId[node.Id].IsCyclic),
+                GovernedLoopNodeKind.Action => IsExactWorkspaceAction(node, schemaById),
                 GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate => IsExactPureNode(node, schemaById),
                 GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Join => IsExactTopologyNode(node, schemaById),
                 GovernedLoopNodeKind.Wait => IsExactWaitNode(node),
@@ -699,6 +701,26 @@ public static class GovernedLoopSequentialPlanBuilder
             && HasExactPortSet(node, schemas,
                 ("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, GovernedLoopValueKind.Text),
                 ("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, GovernedLoopValueKind.Text));
+
+    private static bool IsExactWorkspaceAction(
+        GovernedLoopNodeDefinition node,
+        IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas)
+    {
+        if (!WorkspaceActionNodeDescriptors.TryResolve(node.Descriptor, out var kind)
+            || !node.AuthorityCeiling.CapabilityIds.SequenceEqual([WorkspaceCommandCapabilityId], StringComparer.Ordinal)
+            || node.ModelRoutingPolicy is not null
+            || node.AuthoredInputDataClasses is not null
+            || node.Parameters.Count != 1
+            || !node.Parameters.TryGetValue("input", out var input)
+            || !WorkspaceActionInputContract.TryParse(input, kind, out var parsed, out _)
+            || !string.Equals(WorkspaceActionInputContract.Encode(parsed!), input, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return HasExactPortSet(node, schemas,
+            ("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, GovernedLoopValueKind.Text));
+    }
 
     private static bool IsExactPureNode(
         GovernedLoopNodeDefinition node,
