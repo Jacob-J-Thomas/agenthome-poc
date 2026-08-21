@@ -2,6 +2,7 @@ using EmbodySense.Core.Application.CommandActions.Models;
 using EmbodySense.Core.Application.Loops.Execution.Effects;
 using EmbodySense.Core.Application.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.CommandActions;
+using EmbodySense.Core.Common.CommandActions.Models;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 
@@ -27,7 +28,7 @@ public sealed class GovernedCommandActionOperation : IGovernedActuatorOperation,
             1,
             template.Capability,
             template.Implementation,
-            "command/" + template.ContentHash[..32] + "/" + template.ContentHash[32..],
+            CreateOperationId(template),
             "Execute one exact immutable command template through pre-launch process isolation.",
             GovernedActuatorTargetSemantics.ExactOpaqueFingerprint,
             GovernedActuatorIdempotencyPosture.ReconciliationOnly,
@@ -39,6 +40,16 @@ public sealed class GovernedCommandActionOperation : IGovernedActuatorOperation,
             requiresBeforeEvidence: true,
             requiresAfterEvidence: false,
             requiresOutcomeEvidence: true);
+    }
+
+    /// <summary>Creates the exact actuator operation identity for one immutable command template content hash.</summary>
+    /// <param name="template">The validated immutable command template whose complete content hash is pinned into the identity.</param>
+    /// <returns>The exact slash-separated operation identity used to register and dispatch the template.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="template"/> is <see langword="null"/>.</exception>
+    public static string CreateOperationId(CommandActionTemplate template)
+    {
+        ArgumentNullException.ThrowIfNull(template);
+        return "command/" + template.ContentHash[..32] + "/" + template.ContentHash[32..];
     }
 
     /// <inheritdoc />
