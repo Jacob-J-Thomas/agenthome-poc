@@ -95,11 +95,19 @@ export function createGovernedGraphWorkspace({
     },
     async activate() {
       active = true;
+      const activationSelection = restoreSelection();
       if (!catalog) await refreshCatalog();
-      restoreSelection();
       if (pendingMutation) restorePendingCandidate();
       render();
-      if (elements.graphId.value && !aggregate && !graph && !pendingMutation)
+      // Issue #470: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/470 — only the exact pre-activation selection owns auto-hydration after this await.
+      if (
+        activationSelection &&
+        elements.graphId.value.trim() === activationSelection &&
+        !dirty &&
+        !aggregate &&
+        !graph &&
+        !pendingMutation
+      )
         await readGraph(true);
     },
     deactivate() {
@@ -953,13 +961,15 @@ export function createGovernedGraphWorkspace({
   }
 
   function restoreSelection() {
-    if (elements.graphId.value || !selectionKey) return;
-    try {
-      elements.graphId.value =
-        window.sessionStorage?.getItem(selectionKey) ?? "";
-    } catch {
-      // Selection persistence is convenience only; durable evidence remains authoritative.
+    if (!elements.graphId.value && selectionKey) {
+      try {
+        elements.graphId.value =
+          window.sessionStorage?.getItem(selectionKey) ?? "";
+      } catch {
+        // Selection persistence is convenience only; durable evidence remains authoritative.
+      }
     }
+    return elements.graphId.value.trim();
   }
 
   function rememberSelection() {
