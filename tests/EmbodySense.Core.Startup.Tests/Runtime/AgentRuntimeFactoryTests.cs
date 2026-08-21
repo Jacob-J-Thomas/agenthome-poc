@@ -1,8 +1,14 @@
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Sleep;
+using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Application.Loops.Models;
@@ -20,6 +26,7 @@ using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Common.Runtime;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Memory;
@@ -547,6 +554,34 @@ public sealed class AgentRuntimeFactoryTests
 
         Assert.NotSame(factory, configured);
         Assert.Throws<ArgumentNullException>(() => factory.WithAuthenticatedWakeVerifier(null!));
+    }
+
+    [Fact]
+    public async Task Authenticated_event_delivery_flows_through_the_configured_surface_verifier()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var checkpoint = AuthenticatedEventCheckpoint(DateTimeOffset.Parse("2026-08-20T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture));
+        var persisted = await new GovernedLoopSleepStore(paths).PublishAndReleaseAsync(checkpoint, new string('4', 64));
+        Assert.Equal(checkpoint.ContentHash, persisted!.Checkpoint!.ContentHash);
+        var verifier = new RecordingAuthenticatedWakeVerifier();
+        await using var runtime = await CreateRuntimeAsync(workspace, verifier: verifier);
+        var authenticationEvidenceHash = new string('5', 64);
+
+        var result = await runtime.DeliverAuthenticatedWakeAsync(new AgentRuntimeAuthenticatedWakeDeliveryInput(
+            checkpoint.CheckpointId,
+            checkpoint.ContentHash,
+            authenticationEvidenceHash));
+
+        Assert.Equal(AgentRuntimeAuthenticatedWakeDeliveryStatus.NotFound, result.Status);
+        Assert.Null(result.WakeId);
+        Assert.Null(result.EvidenceHash);
+        Assert.False(result.ContinuationInvoked);
+        Assert.Equal(1, verifier.VerifyCount);
+        Assert.Equal(checkpoint.CheckpointId, verifier.LastRequest!.CheckpointId);
+        Assert.Equal(checkpoint.AuthenticatedEventReference, verifier.LastRequest.AuthenticatedEventReference);
+        Assert.Equal(authenticationEvidenceHash, verifier.LastRequest.AuthenticationEvidenceHash);
     }
 
     [Fact]
@@ -1205,11 +1240,21 @@ public sealed class AgentRuntimeFactoryTests
         return commandPath;
     }
 
-    private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, AgentRuntimeSurface? runtimeSurface = null, string? codexPath = null)
+    private static async Task<AgentRuntime> CreateRuntimeAsync(
+        TestWorkspace workspace,
+        AgentRuntimeSurface? runtimeSurface = null,
+        string? codexPath = null,
+        IAgentRuntimeAuthenticatedWakeVerifier? verifier = null)
     {
         var executablePath = codexPath ?? await CreateFakeCodexExecutableAsync(workspace);
         var status = CreateCompatibleRuntimeStatus(executablePath);
-        return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath, status).CreateAsync(
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath, status);
+        if (verifier is not null)
+        {
+            factory = factory.WithAuthenticatedWakeVerifier(verifier);
+        }
+
+        return await factory.CreateAsync(
             "test-model",
             workspace.RootPath,
             executablePath,
@@ -1240,6 +1285,38 @@ public sealed class AgentRuntimeFactoryTests
             "The isolated fake provider is pre-admitted for this runtime behavior test.");
     }
 
+    private static GovernedLoopSleepCheckpoint AuthenticatedEventCheckpoint(DateTimeOffset publishedAtUtc)
+    {
+        var revision = GovernedLoopRevisionReference.Create(1, "graph-authenticated-wake", "revision-authenticated-wake", new string('1', 64));
+        var execution = GovernedLoopExecutionBinding.Create(1, "run-authenticated-wake", revision, 1);
+        var publication = new GovernedLoopRevisionPublicationPin(
+            1,
+            revision,
+            "publication-authenticated-wake",
+            new string('2', 64));
+        var binding = new GovernedLoopSleepBinding(
+            execution,
+            publication,
+            1,
+            new string('3', 64),
+            1,
+            null,
+            null,
+            "wait-authenticated-wake",
+            1,
+            1,
+            "wait-operation-authenticated-wake");
+        return GovernedLoopSleepContractHash.Apply(new GovernedLoopSleepCheckpoint(
+            GovernedLoopSleepCheckpoint.CurrentSchemaVersion,
+            string.Empty,
+            binding,
+            GovernedLoopWakeMode.AuthenticatedEvent,
+            null,
+            "event-subscription-authenticated-wake",
+            publishedAtUtc,
+            string.Empty));
+    }
+
     private sealed class RejectingApprovalPrompt : IAgentToolApprovalPrompt
     {
         public Task<(bool Approved, string DecisionBy, string Detail)> RequestApprovalAsync(AgentToolApprovalRequest request, CancellationToken cancellationToken = default)
@@ -1250,11 +1327,17 @@ public sealed class AgentRuntimeFactoryTests
 
     private sealed class RecordingAuthenticatedWakeVerifier : IAgentRuntimeAuthenticatedWakeVerifier
     {
+        internal int VerifyCount { get; private set; }
+
+        internal AgentRuntimeAuthenticatedWakeVerificationRequest? LastRequest { get; private set; }
+
         public Task<AgentRuntimeAuthenticatedWakeVerificationResult?> VerifyAsync(
             AgentRuntimeAuthenticatedWakeVerificationRequest request,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            VerifyCount++;
+            LastRequest = request;
             return Task.FromResult<AgentRuntimeAuthenticatedWakeVerificationResult?>(
                 new AgentRuntimeAuthenticatedWakeVerificationResult(
                     AgentRuntimeAuthenticatedWakeVerificationStatus.NotFound));

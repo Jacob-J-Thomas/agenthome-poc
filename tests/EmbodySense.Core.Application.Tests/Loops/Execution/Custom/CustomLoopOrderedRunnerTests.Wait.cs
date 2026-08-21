@@ -652,7 +652,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.NotNull(recoveredWait.ParkEvidence);
         Assert.Equal(1, sleepStore.CheckpointCount);
 
-        Assert.Equal(new GovernedLoopWaitRecoveryResult(1, 0, 0), await waitService.RecoverAsync(16));
+        Assert.Equal(new GovernedLoopWaitRecoveryResult(0, 0, 0), await waitService.RecoverAsync(16));
         Assert.Single(restartedStore.Current.WaitEvidence);
         Assert.Equal(1, sleepStore.CheckpointCount);
     }
@@ -948,6 +948,12 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(new GovernedLoopWaitRecoveryResult(0, 0, 1), await harness.WaitService.RecoverAsync(16));
 
         harness.Store.ReturnDuplicateNonterminalList = false;
+        var unpublished = Assert.Single(harness.Store.Writes, candidate =>
+            candidate.WaitEvidence.SingleOrDefault()?.ParkEvidence is null
+            && candidate.Frontier!.Payload.Nodes.Any(item =>
+                item.Descriptor.Kind == GovernedLoopNodeKind.Wait
+                && item.Status == GovernedLoopNodeExecutionStatus.Waiting));
+        harness.Store.ReplaceCurrent(unpublished);
         harness.Store.GetException = new InvalidOperationException("simulated candidate read failure");
         Assert.Equal(new GovernedLoopWaitRecoveryResult(1, 0, 1), await harness.WaitService.RecoverAsync(16));
     }

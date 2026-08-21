@@ -1148,7 +1148,13 @@ public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExec
     }
 
     private static bool HasRecoveryWork(CustomLoopRunRecord candidate)
-        => candidate.WaitEvidence.Count > 0
+        => candidate.WaitEvidence.Any(wait =>
+            candidate.Frontier?.Payload.Nodes.ElementAtOrDefault(wait.ActivationOrdinal)?.Status switch
+            {
+                GovernedLoopNodeExecutionStatus.Waiting => wait.ParkEvidence is null,
+                GovernedLoopNodeExecutionStatus.Running => wait.ParkEvidence is not null && wait.ContinuationEvidence is not null,
+                _ => false,
+            })
             || GovernedLoopWaitClaimEvidence.FindExactRecoverableClaims(candidate).Count > 0;
 
     private static bool HasPotentialWaitRecoveryWork(CustomLoopRunRecord candidate)
@@ -1443,24 +1449,6 @@ public sealed class GovernedLoopWaitExecutionService : IGovernedLoopWaitNodeExec
             GovernedLoopSleepPublicationStatus.Ambiguous => GovernedLoopWaitParkResultStatus.Ambiguous,
             _ => GovernedLoopWaitParkResultStatus.Conflict,
         };
-
-    private enum RunReadStatus
-    {
-        Found,
-        NotFound,
-        Conflict,
-        Unavailable,
-    }
-
-    private enum RunMutationStatus
-    {
-        Committed,
-        Replayed,
-        NotFound,
-        Conflict,
-        Unavailable,
-        Ambiguous,
-    }
 
     private sealed record RunRead(RunReadStatus Status, CustomLoopRunRecord? Run);
     private sealed record RunMutation(RunMutationStatus Status, CustomLoopRunRecord? Run);

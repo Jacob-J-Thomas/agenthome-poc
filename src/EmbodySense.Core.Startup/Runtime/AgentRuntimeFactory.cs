@@ -249,6 +249,7 @@ public sealed class AgentRuntimeFactory
         var paths = new WorkspacePaths(workingDirectory);
         var customExecutionGate = new CustomLoopWorkspaceExecutionGate(paths);
         GovernedLoopWaitRuntimeHost? governedWaitRuntimeHost = null;
+        GovernedLoopSleepService? governedSleep = null;
         try
         {
             var permissionPolicy = new PermissionPolicyStore().Load(paths);
@@ -418,7 +419,7 @@ public sealed class AgentRuntimeFactory
             IGovernedLoopAuthenticatedWakeVerificationPort authenticatedWakeVerification = _authenticatedWakeVerifier is null
                 ? new GovernedLoopUnavailableAuthenticatedWakeVerificationPort()
                 : new AgentRuntimeAuthenticatedWakeVerificationAdapter(_authenticatedWakeVerifier);
-            var governedSleep = new GovernedLoopSleepService(
+            governedSleep = new GovernedLoopSleepService(
                 governedSleepStore,
                 governedWaitPosture,
                 governedWaitContinuationRelay,
@@ -546,7 +547,8 @@ public sealed class AgentRuntimeFactory
                 scheduleDeliveryProvenance,
                 defaultConversationReviews,
                 codexRuntimeStatus,
-                governedWaitRuntimeHost);
+                governedWaitRuntimeHost,
+                governedSleep);
         }
         catch
         {
