@@ -239,7 +239,7 @@ public sealed class CapabilityApiControllerTests
         options = WebRunOptions.FromArguments(arguments);
         var builder = Program.CreateBuilder(arguments, options);
         builder.Services.AddSingleton<ICapabilityCatalogFacade>(facade);
-        builder.Services.AddSingleton(new WebAgentRuntimeHost(options, new WebApprovalCoordinator(), WorkspaceInitializer.ForFileCapabilityTrustRoot(trustRootPath)));
+        builder.Services.AddSingleton(new WebAgentRuntimeHost(options, new WebApprovalCoordinator(), WorkspaceInitializer.ForFileCapabilityTrustRoot(trustRootPath), trustRootPath));
         var app = builder.Build();
         Program.ConfigurePipeline(app);
         return app;

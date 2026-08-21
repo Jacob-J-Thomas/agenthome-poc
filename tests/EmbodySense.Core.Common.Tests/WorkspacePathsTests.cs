@@ -16,6 +16,7 @@ public sealed class WorkspacePathsTests
         Assert.Equal(paths.RootPath, paths.WorkspacePath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops"), paths.LoopsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions"), paths.LoopDefinitionsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "revisions"), paths.GovernedLoopRevisionsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom"), paths.CustomLoopDefinitionsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom-tombstones"), paths.CustomLoopDefinitionTombstonesPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom-create-operations"), paths.CustomLoopDefinitionOperationsPath);

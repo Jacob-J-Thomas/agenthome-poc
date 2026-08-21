@@ -1,9 +1,11 @@
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using System.Text.Json.Serialization;
 
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 /// <summary>Identifies one immutable executable loop revision without owning revision lifecycle.</summary>
 /// <remarks>This schema-1 reference is the stable hand-off contract for revision storage and trigger consumers.</remarks>
+[JsonConverter(typeof(GovernedLoopRevisionReferenceJsonConverter))]
 public sealed record GovernedLoopRevisionReference
 {
     private GovernedLoopRevisionReference(string graphId, string revisionId, string executableHash)

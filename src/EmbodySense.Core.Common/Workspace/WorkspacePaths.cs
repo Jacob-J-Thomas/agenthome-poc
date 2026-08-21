@@ -137,6 +137,9 @@ public sealed class WorkspacePaths
     /// <value>The loop definitions path.</value>
     public string LoopDefinitionsPath => Path.Combine(LoopsPath, "definitions");
 
+    /// <summary>Gets the durable governed-loop revision lifecycle path.</summary>
+    public string GovernedLoopRevisionsPath => Path.Combine(LoopsPath, "revisions");
+
     /// <summary>
     /// Gets the custom loop definitions path.
     /// </summary>

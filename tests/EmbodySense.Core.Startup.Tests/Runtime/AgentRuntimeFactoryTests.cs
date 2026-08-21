@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
@@ -34,6 +35,8 @@ using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Loops.GraphAuthoring;
+using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Startup.Loops.Posture.Models;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Loops;
@@ -100,6 +103,83 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(GovernedLoopOperationalControlStatus.NotFound, replay.Status);
         Assert.Equal(control.ReceiptHash, replay.ReceiptHash);
         Assert.Single(Directory.EnumerateFiles(paths.GovernedLoopOperationalControlReceiptsPath, "*.json"));
+    }
+
+    [Fact]
+    public async Task CreateAsync_exposes_role_bound_graph_authoring_catalog_create_and_exact_reload()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+
+        var catalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        var role = Assert.Single(catalog.Roles.Roles, item => item.IsAdmissionReady);
+        var candidate = BrowserGraphCandidate(new ContextualRoleRevisionPin(
+            new ContextualRoleRevisionIdentity(role.RoleId, role.Revision),
+            role.ContentHash));
+        var created = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "create-browser-governed-graph",
+            GovernedLoopGraphMutationKind.CreateDraft,
+            candidate.GraphId!,
+            GovernedLoopRevisionLifecycleStatus.Unknown,
+            0,
+            null,
+            null,
+            candidate));
+        var reloaded = await runtime.GovernedLoopGraphAuthoring.ReadAsync(candidate.GraphId!);
+
+        Assert.Equal("available", catalog.Status);
+        Assert.Contains(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.Trigger && item.IsExecutable);
+        Assert.Contains(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.Wait && item.IsExecutable);
+        Assert.Equal("committed", created.Status);
+        Assert.Matches("^[0-9a-f]{64}$", created.AuthoringRequestHash);
+        Assert.Matches("^[0-9a-f]{64}$", created.GraphValidationEvidenceHash);
+        Assert.Equal("ready", reloaded.Status);
+        Assert.Equal(candidate.GraphId, reloaded.Lifecycle?.GraphId);
+        Assert.Equal(candidate.RevisionId, reloaded.Lifecycle?.DraftRevision?.RevisionId);
+        Assert.Single(reloaded.Artifacts);
+    }
+
+    [Fact]
+    public void Graph_authoring_selects_the_exact_lifecycle_target_role_when_a_publication_has_a_successor_draft()
+    {
+        var draft = GovernedLoopRevisionReference.Create(1, "browser-governed-graph", "revision-2", new string('b', 64));
+        var published = GovernedLoopRevisionReference.Create(1, "browser-governed-graph", "revision-1", new string('a', 64));
+        var pin = new GovernedLoopRevisionPublicationPin(1, published, "publish-browser-graph", new string('c', 64));
+
+        var disableTarget = GovernedLoopGraphAuthoringFacade.SelectTargetRevision(new GovernedLoopGraphMutationInput(
+            "disable-browser-graph",
+            GovernedLoopGraphMutationKind.Disable,
+            published.GraphId,
+            GovernedLoopRevisionLifecycleStatus.Published,
+            3,
+            draft,
+            pin,
+            null));
+        var archiveTarget = GovernedLoopGraphAuthoringFacade.SelectTargetRevision(new GovernedLoopGraphMutationInput(
+            "archive-browser-graph",
+            GovernedLoopGraphMutationKind.Archive,
+            published.GraphId,
+            GovernedLoopRevisionLifecycleStatus.Disabled,
+            4,
+            draft,
+            pin,
+            null));
+        var replaceTarget = GovernedLoopGraphAuthoringFacade.SelectTargetRevision(new GovernedLoopGraphMutationInput(
+            "replace-browser-graph",
+            GovernedLoopGraphMutationKind.ReplaceDraft,
+            published.GraphId,
+            GovernedLoopRevisionLifecycleStatus.Published,
+            3,
+            draft,
+            pin,
+            BrowserGraphCandidate(new ContextualRoleRevisionPin(
+                new ContextualRoleRevisionIdentity("default-assistant", 1),
+                new string('d', 64)))));
+
+        Assert.Same(published, disableTarget);
+        Assert.Same(published, archiveTarget);
+        Assert.Same(draft, replaceTarget);
     }
 
     [Fact]
@@ -1312,6 +1392,52 @@ public sealed class AgentRuntimeFactoryTests
             executablePath,
             "read-only",
             runtimeSurface ?? AgentRuntimeSurface.Cli);
+    }
+
+    private static GovernedLoopGraphCandidate BrowserGraphCandidate(ContextualRoleRevisionPin role)
+    {
+        const string ConversationTurnCapability = "org.embodysense/conversation-turn";
+        var trigger = new GovernedLoopNodeDefinition(
+            "trigger",
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Trigger, "manual-trigger", 1),
+            [
+                new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context, "text", true),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        var exit = new GovernedLoopNodeDefinition(
+            "exit",
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
+            [
+                new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+            ],
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapability]),
+            new Dictionary<string, string>());
+        return new GovernedLoopGraphCandidate(
+            1,
+            "browser-governed-graph",
+            "revision-1",
+            "Publish one exact invocation value through the governed graph runtime.",
+            role,
+            trigger.Id,
+            [exit.Id],
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapability]),
+            [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
+            [trigger, exit],
+            [new GovernedLoopControlEdgeDefinition("trigger-to-exit", trigger.Id, exit.Id, GovernedLoopControlCondition.Always)],
+            [new GovernedLoopBindingDefinition("request-to-result", GovernedLoopBindingKind.Data, trigger.Id, "request", exit.Id, "result")],
+            new GovernedLoopOutputContract(
+                "Return the exact invocation value.",
+                [new GovernedLoopOutputDefinition("result", "text", exit.Id, "published-result", true)]),
+            new GovernedLoopDisplayMetadata(
+                "Browser governed graph",
+                "Exact durable Web authoring fixture.",
+                [
+                    new GovernedLoopNodeDisplayMetadata(trigger.Id, "Trigger", "Start.", 0, 0),
+                    new GovernedLoopNodeDisplayMetadata(exit.Id, "Exit", "Publish.", 200, 0),
+                ]));
     }
 
     private static async Task<AgentRuntime> CreateRuntimeWithLiveDiscoveryAsync(TestWorkspace workspace)

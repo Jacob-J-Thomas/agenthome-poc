@@ -4,10 +4,21 @@ import fs from "node:fs";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
 import vm from "node:vm";
+import { projectFrontier } from "../../src/EmbodySense.Web/wwwroot/frontier-projection.js";
+import { createGovernedGraphWorkspace } from "../../src/EmbodySense.Web/wwwroot/governed-graph-workspace.js";
+import {
+  controlKinds,
+  controlRequest,
+  exactControl,
+  postureSnapshot,
+} from "../../src/EmbodySense.Web/wwwroot/operational-posture.js";
 
-const builderSource = fs.readFileSync(
+const rawBuilderSource = fs.readFileSync(
   new URL("../../src/EmbodySense.Web/wwwroot/loop-builder.js", import.meta.url),
   "utf8",
+);
+const builderSource = rawBuilderSource.slice(
+  rawBuilderSource.indexOf("let catalog = null;"),
 );
 const builderScript = new vm.Script(builderSource, {
   filename: "loop-builder.js",
@@ -16,6 +27,8 @@ const loopsHtml = fs.readFileSync(
   new URL("../../src/EmbodySense.Web/wwwroot/index.html", import.meta.url),
   "utf8",
 );
+const operationalPostureUrl =
+  "/api/loop-operations/posture?maximumQueueEntries=50&maximumSchedules=50&maximumWakes=50&maximumRuns=50";
 
 test("catalog loading is authenticated and projects the system loop as read-only", async () => {
   const app = await loadLoopBuilder();
@@ -72,6 +85,1100 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.deleteButton.disabled, false);
   assert.equal(app.elements.saveButton.disabled, true);
   assert.equal(app.elements.saveState.textContent, "Saved · v2");
+});
+
+test("governed graph workspace uses the server catalog and submits no caller-owned authority", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on("POST", "/api/governed-graphs/mutate", () => ({
+    status: 400,
+    body: {
+      status: "validation-rejected",
+      operationId: "graph-draft-operation",
+      authoringRequestHash: "",
+      graphValidationEvidenceHash: null,
+      changeKind: "unknown",
+      errors: [
+        {
+          code: "graph.terminal.required",
+          elementKind: "graph",
+          elementId: "scheduled-review",
+          path: "terminalNodeIds",
+          message: "A terminal node is required.",
+        },
+      ],
+      current: null,
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = "scheduled-review";
+  app.elements.governedGraphRevisionId.value = "revision-1";
+  app.elements.governedGraphDisplayName.value = "Scheduled review";
+  app.elements.governedGraphPurpose.value = "Run one scheduled review.";
+  await app.elements.governedGraphNewButton.click();
+  const schedule = findByTag(app.elements.governedGraphCatalog, "button").find(
+    (button) => /schedule-trigger/.test(button.textContent),
+  );
+  await schedule.click();
+  const wait = findByTag(app.elements.governedGraphCatalog, "button").find(
+    (button) => /wait-timestamp/.test(button.textContent),
+  );
+  await wait.click();
+  const parameterInputs = findByTag(
+    app.elements.governedGraphInspector,
+    "input",
+  );
+  parameterInputs[0].value = "2026-08-13T12:00:00.0000000Z";
+  await parameterInputs[0].input();
+
+  await app.context.refreshWorkspace();
+
+  assert.equal(
+    server.calls.filter(
+      (call) =>
+        call.method === "GET" &&
+        call.url.startsWith("/api/governed-graphs/detail"),
+    ).length,
+    0,
+  );
+  assert.equal(
+    findByTag(app.elements.governedGraphInspector, "input")[0].value,
+    "2026-08-13T12:00:00.0000000Z",
+  );
+  assert.match(
+    app.elements.governedGraphNotice.textContent,
+    /unsaved graph edits remain local/i,
+  );
+
+  await app.elements.governedGraphSaveButton.click();
+
+  const mutation = server.calls.find(
+    (call) =>
+      call.method === "POST" && call.url === "/api/governed-graphs/mutate",
+  );
+  assert.equal(mutation.body.kind, "create-draft");
+  assert.equal(mutation.body.graphId, "scheduled-review");
+  assert.deepEqual(
+    mutation.body.graphCandidate.nodes.map((node) => node.descriptor.typeId),
+    ["schedule-trigger", "wait-timestamp"],
+  );
+  assert.deepEqual(mutation.body.graphCandidate.nodes[0].parameters, {});
+  assert.equal(
+    mutation.body.graphCandidate.nodes[1].parameters["deadline-utc"],
+    "2026-08-13T12:00:00.0000000Z",
+  );
+  assert.equal(Object.hasOwn(mutation.body, "actorId"), false);
+  assert.equal(Object.hasOwn(mutation.body, "workspaceId"), false);
+  assert.equal(Object.hasOwn(mutation.body, "authorityEvidenceHash"), false);
+  assert.match(
+    app.elements.governedGraphErrors.textContent,
+    /graph\.terminal\.required.*terminalNodeIds.*terminal node is required/i,
+  );
+});
+
+test("governed graph workspace disables and archives the exact published revision", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let lifecycle = governedGraphLifecycle("published", 4);
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => ({
+      status: 200,
+      body: governedGraphRead(lifecycle),
+    }),
+  );
+  server.on("POST", "/api/governed-graphs/mutate", ({ body }) => {
+    lifecycle = governedGraphLifecycle(
+      body.kind === "disable" ? "disabled" : "archived",
+      lifecycle.lifecycleVersion + 1,
+    );
+    return {
+      status: 200,
+      body: {
+        status: "committed",
+        operationId: body.operationId,
+        authoringRequestHash: "a".repeat(64),
+        graphValidationEvidenceHash: null,
+        changeKind: body.kind,
+        errors: [],
+        current: governedGraphRead(lifecycle),
+      },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = "published-graph";
+  await app.elements.governedGraphId.input();
+  await app.elements.governedGraphLoadButton.click();
+  assert.equal(app.elements.governedGraphDisableButton.disabled, false);
+  await app.elements.governedGraphDisableButton.click();
+  assert.equal(app.elements.governedGraphArchiveButton.disabled, false);
+  await app.elements.governedGraphArchiveButton.click();
+
+  const mutations = server.calls.filter(
+    (call) =>
+      call.method === "POST" && call.url === "/api/governed-graphs/mutate",
+  );
+  assert.deepEqual(
+    mutations.map((call) => call.body.kind),
+    ["disable", "archive"],
+  );
+  assert.equal(mutations[0].body.graphCandidate, null);
+  assert.equal(mutations[0].body.expectedLifecycleVersion, 4);
+  assert.equal(
+    mutations[0].body.expectedPublishedRevision.revision.graphId,
+    "published-graph",
+  );
+  assert.equal(mutations[1].body.expectedLifecycleStatus, "disabled");
+  assert.equal(app.elements.governedGraphArchiveButton.disabled, true);
+});
+
+test("governed graph lifecycle conflicts rehydrate the current graph before another action", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const originalLifecycle = governedGraphLifecycle("draft", 4, "revision-a");
+  const currentLifecycle = governedGraphLifecycle("draft", 5, "revision-b");
+  let attempts = 0;
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => ({
+      status: 200,
+      body: governedGraphRead(
+        originalLifecycle,
+        governedGraphArtifact(originalLifecycle, "Original draft"),
+      ),
+    }),
+  );
+  server.on("POST", "/api/governed-graphs/mutate", ({ body }) => {
+    attempts++;
+    if (attempts === 1)
+      return {
+        status: 409,
+        body: {
+          status: "conflict",
+          operationId: body.operationId,
+          authoringRequestHash: "",
+          graphValidationEvidenceHash: null,
+          changeKind: "publish",
+          errors: [],
+          current: governedGraphRead(
+            currentLifecycle,
+            governedGraphArtifact(currentLifecycle, "Current draft"),
+          ),
+        },
+      };
+    return {
+      status: 200,
+      body: {
+        status: "committed",
+        operationId: body.operationId,
+        authoringRequestHash: "a".repeat(64),
+        graphValidationEvidenceHash: null,
+        changeKind: "publish",
+        errors: [],
+        current: governedGraphRead(
+          currentLifecycle,
+          governedGraphArtifact(currentLifecycle, "Current draft"),
+        ),
+      },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = "published-graph";
+  await app.elements.governedGraphId.input();
+  await app.elements.governedGraphLoadButton.click();
+  assert.equal(app.elements.governedGraphDisplayName.value, "Original draft");
+  await app.elements.governedGraphPublishButton.click();
+
+  assert.equal(app.elements.governedGraphDisplayName.value, "Current draft");
+  assert.equal(app.elements.governedGraphRevisionId.value, "revision-b");
+  assert.equal(app.elements.governedGraphPublishButton.disabled, false);
+  await app.elements.governedGraphPublishButton.click();
+
+  const mutations = server.calls.filter(
+    (call) =>
+      call.method === "POST" && call.url === "/api/governed-graphs/mutate",
+  );
+  assert.equal(
+    mutations[1].body.expectedDraftRevision.revisionId,
+    "revision-b",
+  );
+});
+
+test("governed graph reconnect retries the exact retained mutation after an ambiguous transport", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const sessionStorage = new FakeStorage();
+  let attempts = 0;
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on("POST", "/api/governed-graphs/mutate", ({ body }) => {
+    attempts++;
+    if (attempts === 1) throw new Error("The response was lost.");
+    return {
+      status: 400,
+      body: {
+        status: "validation-rejected",
+        operationId: body.operationId,
+        authoringRequestHash: "",
+        graphValidationEvidenceHash: null,
+        changeKind: "unknown",
+        errors: [
+          {
+            code: "graph.terminal.required",
+            elementKind: "graph",
+            elementId: body.graphId,
+            path: "terminalNodeIds",
+            message: "A terminal node is required.",
+          },
+        ],
+        current: null,
+      },
+    };
+  });
+
+  const first = await loadLoopBuilder({ server, sessionStorage });
+  await first.elements.governedGraphTab.click();
+  first.elements.governedGraphId.value = "reconnect-graph";
+  first.elements.governedGraphRevisionId.value = "revision-1";
+  first.elements.governedGraphDisplayName.value = "Reconnect graph";
+  first.elements.governedGraphPurpose.value = "Prove exact retry identity.";
+  await first.elements.governedGraphNewButton.click();
+  const schedule = findByTag(
+    first.elements.governedGraphCatalog,
+    "button",
+  ).find((button) => /schedule-trigger/.test(button.textContent));
+  await schedule.click();
+  await first.elements.governedGraphSaveButton.click();
+
+  const firstMutation = server.calls.find(
+    (call) =>
+      call.method === "POST" && call.url === "/api/governed-graphs/mutate",
+  );
+  assert.match(
+    first.elements.governedGraphNotice.textContent,
+    /exact operation retained for retry/i,
+  );
+  assert.equal(
+    [...sessionStorage.values.values()].some((stored) =>
+      stored.includes(firstMutation.body.operationId),
+    ),
+    true,
+  );
+
+  const reconnected = await loadLoopBuilder({ server, sessionStorage });
+  await reconnected.elements.governedGraphTab.click();
+  assert.equal(
+    reconnected.elements.governedGraphSaveButton.textContent,
+    "Retry exact mutation",
+  );
+  assert.match(
+    reconnected.elements.governedGraphNotice.textContent,
+    /restored after reconnect/i,
+  );
+  await reconnected.elements.governedGraphSaveButton.click();
+
+  const mutations = server.calls.filter(
+    (call) =>
+      call.method === "POST" && call.url === "/api/governed-graphs/mutate",
+  );
+  assert.equal(mutations.length, 2);
+  assert.deepEqual(mutations[1].body, mutations[0].body);
+  assert.match(
+    reconnected.elements.governedGraphErrors.textContent,
+    /graph\.terminal\.required.*terminalNodeIds/i,
+  );
+  assert.equal(
+    [...sessionStorage.values.values()].some((stored) =>
+      stored.includes(firstMutation.body.operationId),
+    ),
+    false,
+  );
+});
+
+test("governed graph retry and selection storage are bound to the trusted workspace root", async () => {
+  const sessionStorage = new FakeStorage();
+  sessionStorage.setItem(
+    "embodysense.governed-graph-pending-mutation.v1",
+    JSON.stringify({
+      schemaVersion: 1,
+      input: {
+        operationId: "legacy-unscoped-mutation",
+        kind: "create-draft",
+        graphId: "legacy-graph",
+      },
+    }),
+  );
+  const firstServer = new FakeFetchServer(createCatalog());
+  firstServer.on("GET", "/api/status", () => ({
+    status: 200,
+    body: { workspaceRoot: "C:/workspace-one", initialized: true },
+  }));
+  firstServer.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  firstServer.on("POST", "/api/governed-graphs/mutate", () => {
+    throw new Error("The mutation response was lost.");
+  });
+  const first = await loadLoopBuilder({
+    server: firstServer,
+    sessionStorage,
+  });
+  await first.elements.governedGraphTab.click();
+  first.elements.governedGraphId.value = "workspace-one-graph";
+  first.elements.governedGraphRevisionId.value = "revision-1";
+  first.elements.governedGraphPurpose.value = "Remain in workspace one.";
+  await first.elements.governedGraphNewButton.click();
+  await findByTag(first.elements.governedGraphCatalog, "button")[0].click();
+  await first.elements.governedGraphSaveButton.click();
+  const firstMutation = firstServer.calls.find(
+    (call) => call.url === "/api/governed-graphs/mutate",
+  ).body;
+
+  const secondServer = new FakeFetchServer(createCatalog());
+  secondServer.on("GET", "/api/status", () => ({
+    status: 200,
+    body: { workspaceRoot: "C:/workspace-two", initialized: true },
+  }));
+  secondServer.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  const second = await loadLoopBuilder({
+    server: secondServer,
+    sessionStorage,
+  });
+  await second.elements.governedGraphTab.click();
+
+  const firstScope = encodeURIComponent("C:/workspace-one".normalize("NFC"));
+  const secondScope = encodeURIComponent("C:/workspace-two".normalize("NFC"));
+  const firstKey = `embodysense.governed-graph-pending-mutation.v1.${firstScope}`;
+  const secondKey = `embodysense.governed-graph-pending-mutation.v1.${secondScope}`;
+  assert.equal(
+    sessionStorage.getItem("embodysense.governed-graph-pending-mutation.v1"),
+    null,
+  );
+  assert.match(
+    sessionStorage.getItem(firstKey),
+    new RegExp(firstMutation.operationId),
+  );
+  assert.equal(sessionStorage.getItem(secondKey), null);
+  assert.equal(second.elements.governedGraphId.value, "");
+  assert.notEqual(
+    second.elements.governedGraphSaveButton.textContent,
+    "Retry exact mutation",
+  );
+});
+
+test("runs project authoritative temporal posture and send only exact shared-facade controls", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const posture = createOperationalPosture();
+  posture.snapshot.queue = {
+    generation: 9,
+    queuedEntries: 2,
+    queuedReservationBytes: 2048,
+    retainedEntries: 2,
+    retainedReservationBytes: 4096,
+    persistenceBackpressured: false,
+    hasMore: false,
+    items: [
+      {
+        deliveryId: "delivery-queued",
+        loopId: "loop-research",
+        state: "queued",
+        reasonCode: "trigger-queued",
+        eligibleAtUtc: "2026-08-11T19:59:00Z",
+        revision: 7,
+        workerId: null,
+        workerGeneration: null,
+        workerLeaseExpiresAtUtc: null,
+        workerLeaseExpired: false,
+        eligibleControls: [operationalControl("cancel-delivery", 7, "b")],
+      },
+      {
+        deliveryId: "delivery-owned",
+        loopId: "loop-research",
+        state: "running",
+        reasonCode: "trigger-worker-owned",
+        eligibleAtUtc: "2026-08-11T19:58:00Z",
+        revision: 8,
+        workerId: "worker-1",
+        workerGeneration: 3,
+        workerLeaseExpiresAtUtc: "2026-08-11T20:01:00Z",
+        workerLeaseExpired: false,
+      },
+    ],
+  };
+  posture.snapshot.schedules.items = [
+    {
+      scheduleId: "daily-review",
+      definitionRevision: 2,
+      stateRevision: 5,
+      evidenceHash: "d".repeat(64),
+      enabled: true,
+      state: "waiting",
+      reasonCode: "schedule-not-due",
+      nextEligibleAtUtc: "2026-08-12T13:00:00Z",
+      pendingDeliveryId: null,
+      pendingDeliveryPhase: null,
+      eligibleControls: [operationalControl("disable-schedule", 5, "d")],
+    },
+  ];
+  posture.snapshot.wakes.items = [
+    {
+      checkpointId: "checkpoint-wait",
+      runId: "run-waiting",
+      nodeId: "wait-for-review",
+      state: "sleeping",
+      reasonCode: "wake-timestamp-pending",
+      wakeAtUtc: "2026-08-12T12:00:00Z",
+      wakeEvidenceVersion: null,
+      wakeId: null,
+    },
+  ];
+  posture.snapshot.coordinator = {
+    state: "running",
+    reasonCode: "coordinator-running",
+    coordinatorId: "background-coordinator",
+    ownerId: "process-1",
+    ownershipEpoch: 4,
+    leaseExpiresAtUtc: "2026-08-11T20:01:00Z",
+    leaseExpired: false,
+    latestFailureSequence: 0,
+    latestFailureHash: null,
+  };
+  posture.snapshot.queue.eligibleControls = [
+    operationalControl("cancel-pending-deliveries", 9, "e"),
+  ];
+  const postureUrl =
+    "/api/loop-operations/posture?maximumQueueEntries=50&maximumSchedules=50&maximumWakes=50&maximumRuns=50";
+  server.on("GET", postureUrl, () => ({ status: 200, body: posture }));
+  server.on("POST", "/api/loop-operations/control", ({ body }) => ({
+    status: 200,
+    body: {
+      status: "applied",
+      operationId: body.operationId,
+      reasonCode: "operational-control-applied",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  assert.match(
+    app.elements.operationalPostureContent.textContent,
+    /background-coordinator.*delivery-queued.*daily-review.*checkpoint-wait/,
+  );
+  let buttons = findByTag(app.elements.operationalPostureContent, "button");
+  await buttons.find((button) => button.textContent === "Disable").click();
+  buttons = findByTag(app.elements.operationalPostureContent, "button");
+  await buttons
+    .find((button) => button.textContent === "Cancel 1 for loop")
+    .click();
+  buttons = findByTag(app.elements.operationalPostureContent, "button");
+  await buttons.find((button) => button.textContent === "Cancel").click();
+
+  const scheduleCall = server.calls.find(
+    (call) =>
+      call.method === "POST" &&
+      call.url === "/api/loop-operations/control" &&
+      call.body.kind === "disable-schedule",
+  );
+  const pendingCall = server.calls.find(
+    (call) =>
+      call.method === "POST" &&
+      call.url === "/api/loop-operations/control" &&
+      call.body.kind === "cancel-pending-deliveries",
+  );
+  const deliveryCall = server.calls.find(
+    (call) =>
+      call.method === "POST" &&
+      call.url === "/api/loop-operations/control" &&
+      call.body.kind === "cancel-delivery",
+  );
+  assert.equal(scheduleCall.body.targetId, "daily-review");
+  assert.equal(scheduleCall.body.expectedRevision, 5);
+  assert.equal(scheduleCall.body.expectedEvidenceHash, "d".repeat(64));
+  assert.equal(scheduleCall.body.expectedAuthorityEvidenceHash, "c".repeat(64));
+  assert.equal(pendingCall.body.targetId, "loop-research");
+  assert.equal(pendingCall.body.maximumBatchItems, 1);
+  assert.equal(deliveryCall.body.targetId, "delivery-queued");
+  assert.equal(deliveryCall.body.expectedRevision, 7);
+  assert.match(app.window.confirmations.join("\n"), /exact state revision 5/i);
+  assert.match(app.window.confirmations.join("\n"), /proved bound of 1/i);
+  assert.match(app.window.confirmations.join("\n"), /exact revision 7/i);
+});
+
+test("operational posture exposes exact continuation pages for queue, schedules, and wakes", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const first = createOperationalPosture();
+  first.snapshot.queue.hasMore = true;
+  first.snapshot.queue.continuationCursor = "queue-next";
+  first.snapshot.schedules.hasMore = true;
+  first.snapshot.schedules.continuationCursor = "schedule-next";
+  first.snapshot.wakes.hasMore = true;
+  first.snapshot.wakes.continuationCursor = "wake-next";
+  const queuePage = clone(first);
+  queuePage.snapshot.queue = {
+    ...queuePage.snapshot.queue,
+    hasMore: false,
+    continuationCursor: null,
+    items: [
+      { deliveryId: "delivery-later", state: "queued", reasonCode: "later" },
+    ],
+  };
+  const schedulePage = clone(first);
+  schedulePage.snapshot.schedules = {
+    ...schedulePage.snapshot.schedules,
+    hasMore: false,
+    continuationCursor: null,
+    items: [
+      { scheduleId: "schedule-later", state: "waiting", reasonCode: "later" },
+    ],
+  };
+  const wakePage = clone(first);
+  wakePage.snapshot.wakes = {
+    ...wakePage.snapshot.wakes,
+    hasMore: false,
+    continuationCursor: null,
+    items: [
+      {
+        checkpointId: "wake-later",
+        runId: "run-later",
+        nodeId: "wait",
+        state: "sleeping",
+      },
+    ],
+  };
+  server.on("GET", operationalPostureUrl, () => ({ status: 200, body: first }));
+  server.on("GET", `${operationalPostureUrl}&queueCursor=queue-next`, () => ({
+    status: 200,
+    body: queuePage,
+  }));
+  server.on(
+    "GET",
+    `${operationalPostureUrl}&afterScheduleId=schedule-next`,
+    () => ({ status: 200, body: schedulePage }),
+  );
+  server.on(
+    "GET",
+    `${operationalPostureUrl}&afterCheckpointId=wake-next`,
+    () => ({ status: 200, body: wakePage }),
+  );
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  await findByTag(app.elements.operationalPostureContent, "button")
+    .find((button) => button.textContent === "Next queue page")
+    .click();
+  assert.match(
+    app.elements.operationalPostureContent.textContent,
+    /delivery-later/,
+  );
+  await findByTag(app.elements.operationalPostureContent, "button")
+    .find((button) => button.textContent === "Next schedule page")
+    .click();
+  assert.match(
+    app.elements.operationalPostureContent.textContent,
+    /schedule-later/,
+  );
+  await findByTag(app.elements.operationalPostureContent, "button")
+    .find((button) => button.textContent === "Next wake page")
+    .click();
+  assert.match(
+    app.elements.operationalPostureContent.textContent,
+    /wake-later/,
+  );
+});
+
+test("batch cancellation proves its matching count across every canonical queue page", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const first = createOperationalPosture();
+  first.snapshot.queue = {
+    ...first.snapshot.queue,
+    generation: 9,
+    queuedEntries: 51,
+    queuedReservationBytes: 52224,
+    retainedEntries: 51,
+    retainedReservationBytes: 52224,
+    hasMore: true,
+    continuationCursor: "queue-next",
+    eligibleControls: [operationalControl("cancel-pending-deliveries", 9, "e")],
+    items: Array.from({ length: 50 }, (_, index) =>
+      queuedDelivery(`delivery-${index + 1}`),
+    ),
+  };
+  const final = clone(first);
+  final.snapshot.queue = {
+    ...final.snapshot.queue,
+    hasMore: false,
+    continuationCursor: null,
+    items: [queuedDelivery("delivery-51")],
+  };
+  server.on("GET", operationalPostureUrl, () => ({ status: 200, body: first }));
+  server.on("GET", `${operationalPostureUrl}&queueCursor=queue-next`, () => ({
+    status: 200,
+    body: final,
+  }));
+  server.on("POST", "/api/loop-operations/control", ({ body }) => ({
+    status: 200,
+    body: {
+      status: "applied",
+      operationId: body.operationId,
+      reasonCode: "operational-control-applied",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  await findByTag(app.elements.operationalPostureContent, "button")
+    .find((button) => button.textContent === "Next queue page")
+    .click();
+  const firstPageReadsBeforeBatch = server.calls.filter(
+    (call) => call.url === operationalPostureUrl,
+  ).length;
+  const finalPageReadsBeforeBatch = server.calls.filter(
+    (call) => call.url === `${operationalPostureUrl}&queueCursor=queue-next`,
+  ).length;
+  await findByTag(app.elements.operationalPostureContent, "button")
+    .find(
+      (button) => button.textContent === "Count and cancel pending for loop",
+    )
+    .click();
+
+  const batch = server.calls.find(
+    (call) =>
+      call.method === "POST" &&
+      call.url === "/api/loop-operations/control" &&
+      call.body.kind === "cancel-pending-deliveries",
+  );
+  assert.equal(batch.body.maximumBatchItems, 51);
+  assert.match(app.window.confirmations.join("\n"), /proved bound of 51/i);
+  assert.equal(
+    server.calls.filter((call) => call.url === operationalPostureUrl).length,
+    firstPageReadsBeforeBatch + 2,
+  );
+  assert.equal(
+    server.calls.filter(
+      (call) => call.url === `${operationalPostureUrl}&queueCursor=queue-next`,
+    ).length,
+    finalPageReadsBeforeBatch + 1,
+  );
+});
+
+test("an ambiguous operational control survives reload and retries the exact workspace-scoped intent", async () => {
+  const sessionStorage = new FakeStorage();
+  const firstServer = new FakeFetchServer(createCatalog());
+  const firstPosture = createOperationalPosture();
+  firstPosture.snapshot.schedules.items = [
+    {
+      scheduleId: "daily-review",
+      stateRevision: 5,
+      enabled: true,
+      state: "waiting",
+      reasonCode: "schedule-not-due",
+      eligibleControls: [operationalControl("disable-schedule", 5, "d")],
+    },
+  ];
+  firstServer.on("GET", operationalPostureUrl, () => ({
+    status: 200,
+    body: firstPosture,
+  }));
+  firstServer.on("POST", "/api/loop-operations/control", () => {
+    throw new Error("The lifecycle-control response was lost.");
+  });
+  const first = await loadLoopBuilder({ server: firstServer, sessionStorage });
+  await selectCustomLoop(first);
+  await first.elements.runsTab.click();
+  await findByTag(first.elements.operationalPostureContent, "button")
+    .find((button) => button.textContent === "Disable")
+    .click();
+  const firstRequest = firstServer.calls.find(
+    (call) =>
+      call.method === "POST" && call.url === "/api/loop-operations/control",
+  ).body;
+  assert.match(
+    first.elements.operationalPostureNotice.textContent,
+    new RegExp(`exact operation ${firstRequest.operationId} retained`, "i"),
+  );
+
+  const secondServer = new FakeFetchServer(createCatalog());
+  const secondPosture = createOperationalPosture();
+  secondPosture.snapshot.schedules.items =
+    firstPosture.snapshot.schedules.items;
+  secondServer.on("GET", operationalPostureUrl, () => ({
+    status: 200,
+    body: secondPosture,
+  }));
+  secondServer.on("POST", "/api/loop-operations/control", ({ body }) => ({
+    status: 200,
+    body: {
+      status: "replayed",
+      operationId: body.operationId,
+      reasonCode: "operational-control-terminal-replay",
+    },
+  }));
+  const second = await loadLoopBuilder({
+    server: secondServer,
+    sessionStorage,
+  });
+  await selectCustomLoop(second);
+  await second.elements.runsTab.click();
+  const retry = findByTag(
+    second.elements.operationalPostureNotice,
+    "button",
+  ).find((button) => button.textContent === "Retry exact control");
+  assert.ok(retry);
+  await retry.click();
+
+  const secondRequest = secondServer.calls.find(
+    (call) =>
+      call.method === "POST" && call.url === "/api/loop-operations/control",
+  ).body;
+  assert.deepEqual(secondRequest, firstRequest);
+  const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
+  assert.equal(
+    sessionStorage.getItem(
+      `embodysense.pending-operational-control.v1.${scope}`,
+    ),
+    null,
+  );
+});
+
+test("a conclusive operational control remains authoritative when browser cleanup fails", async () => {
+  const sessionStorage = new FakeStorage();
+  const server = new FakeFetchServer(createCatalog());
+  const posture = createOperationalPosture();
+  posture.snapshot.schedules.items = [
+    {
+      scheduleId: "daily-review",
+      stateRevision: 5,
+      enabled: true,
+      state: "waiting",
+      reasonCode: "schedule-not-due",
+      eligibleControls: [operationalControl("disable-schedule", 5, "d")],
+    },
+  ];
+  server.on("GET", operationalPostureUrl, () => ({
+    status: 200,
+    body: posture,
+  }));
+  server.on("POST", "/api/loop-operations/control", ({ body }) => {
+    sessionStorage.removeItem = () => {
+      throw new Error("Storage cleanup failed.");
+    };
+    return {
+      status: 200,
+      body: {
+        status: "applied",
+        operationId: body.operationId,
+        reasonCode: "operational-control-applied",
+      },
+    };
+  });
+  const app = await loadLoopBuilder({ server, sessionStorage });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  await findByTag(app.elements.operationalPostureContent, "button")
+    .find((button) => button.textContent === "Disable")
+    .click();
+
+  assert.equal(vm.runInContext("pendingOperationalControl", app.context), null);
+  assert.match(
+    app.elements.operationalPostureNotice.textContent,
+    /applied.*operational control applied/i,
+  );
+});
+
+test("a retained operational control is not restored in another trusted workspace", async () => {
+  const sessionStorage = new FakeStorage();
+  const firstScope = encodeURIComponent("C:/workspace-one".normalize("NFC"));
+  const request = {
+    operationId: "operation-workspace-one",
+    kind: "disable-schedule",
+    targetId: "daily-review",
+    expectedRevision: 5,
+    expectedEvidenceHash: "d".repeat(64),
+    expectedAuthorityEvidenceHash: "c".repeat(64),
+    maximumBatchItems: 1,
+  };
+  sessionStorage.setItem(
+    `embodysense.pending-operational-control.v1.${firstScope}`,
+    JSON.stringify({ schemaVersion: 1, workspaceScope: firstScope, request }),
+  );
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/status", () => ({
+    status: 200,
+    body: { workspaceRoot: "C:/workspace-two", initialized: true },
+  }));
+  const app = await loadLoopBuilder({ server, sessionStorage });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  assert.equal(
+    findByTag(app.elements.operationalPostureNotice, "button").some(
+      (button) => button.textContent === "Retry exact control",
+    ),
+    false,
+  );
+  assert.ok(
+    sessionStorage.getItem(
+      `embodysense.pending-operational-control.v1.${firstScope}`,
+    ),
+  );
+});
+
+test("backpressured temporal posture stays visible and grants only item-specific exact controls", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const posture = createOperationalPosture();
+  posture.status = "backpressured";
+  posture.reasonCode = "trigger-queue-persistence-backpressured";
+  posture.snapshot.queue.persistenceBackpressured = true;
+  posture.snapshot.queue.items = [
+    {
+      deliveryId: "delivery-blocked",
+      loopId: "loop-research",
+      state: "blocked",
+      reasonCode: "trigger-worker-lease-expired",
+      eligibleAtUtc: "2026-08-11T19:59:00Z",
+      revision: 4,
+      workerId: "worker-1",
+      workerGeneration: 2,
+      workerLeaseExpiresAtUtc: "2026-08-11T19:59:30Z",
+      workerLeaseExpired: true,
+    },
+  ];
+  server.on(
+    "GET",
+    "/api/loop-operations/posture?maximumQueueEntries=50&maximumSchedules=50&maximumWakes=50&maximumRuns=50",
+    () => ({ status: 200, body: posture }),
+  );
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  assert.match(
+    app.elements.operationalPostureContent.textContent,
+    /delivery-blocked.*worker lease expired/i,
+  );
+  assert.match(
+    app.elements.operationalPostureNotice.textContent,
+    /backpressured.*exact controls remain available/i,
+  );
+  assert.equal(
+    findByTag(app.elements.operationalPostureContent, "button").every(
+      (button) => button.disabled,
+    ),
+    true,
+  );
+});
+
+test("stale posture success and failure cannot replace a newer snapshot or unlock concurrent reads", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  const postureUrl =
+    "/api/loop-operations/posture?maximumQueueEntries=50&maximumSchedules=50&maximumWakes=50&maximumRuns=50";
+  const oldSuccess = createDeferred();
+  const oldPosture = createOperationalPosture();
+  oldPosture.snapshot.coordinator.coordinatorId = "old-coordinator";
+  const newPosture = createOperationalPosture();
+  newPosture.snapshot.coordinator.coordinatorId = "new-coordinator";
+  newPosture.snapshot.queue.items = [
+    {
+      deliveryId: "new-delivery",
+      loopId: "loop-research",
+      state: "queued",
+      reasonCode: "trigger-queued",
+      eligibleAtUtc: "2026-08-11T20:00:00Z",
+      revision: 2,
+      workerId: null,
+      workerGeneration: null,
+      workerLeaseExpiresAtUtc: null,
+      workerLeaseExpired: false,
+    },
+  ];
+  let reads = 0;
+  server.on("GET", postureUrl, async () => {
+    reads++;
+    if (reads === 1) {
+      await oldSuccess.promise;
+      return { status: 200, body: oldPosture };
+    }
+    return { status: 200, body: newPosture };
+  });
+
+  const staleRead = app.context.loadOperationalPosture();
+  await Promise.resolve();
+  await app.context.loadOperationalPosture();
+  assert.equal(
+    findByTag(app.elements.operationalPostureContent, "button").every(
+      (button) => button.disabled,
+    ),
+    true,
+  );
+  oldSuccess.resolve();
+  await staleRead;
+
+  assert.match(
+    app.elements.operationalPostureContent.textContent,
+    /new-coordinator.*new-delivery/,
+  );
+  assert.doesNotMatch(
+    app.elements.operationalPostureContent.textContent,
+    /old-coordinator/,
+  );
+
+  const oldFailure = createDeferred();
+  reads = 0;
+  server.on("GET", postureUrl, async () => {
+    reads++;
+    if (reads === 1) {
+      await oldFailure.promise;
+      throw new Error("stale workspace failure");
+    }
+    return { status: 200, body: newPosture };
+  });
+  const staleFailure = app.context.loadOperationalPosture();
+  await Promise.resolve();
+  await app.context.loadOperationalPosture();
+  oldFailure.resolve();
+  await staleFailure;
+
+  assert.equal(vm.runInContext("operationalPostureFailure", app.context), null);
+  assert.doesNotMatch(
+    app.elements.operationalPostureNotice.textContent,
+    /stale workspace failure/,
+  );
+});
+
+test("a workspace transition rejects late posture and keeps controls bound to the displayed workspace", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  const postureUrl =
+    "/api/loop-operations/posture?maximumQueueEntries=50&maximumSchedules=50&maximumWakes=50&maximumRuns=50";
+  const workspaceARead = createDeferred();
+  const workspaceA = createOperationalPosture();
+  workspaceA.snapshot.coordinator.coordinatorId = "workspace-a-coordinator";
+  const workspaceB = createOperationalPosture();
+  workspaceB.snapshot.coordinator.coordinatorId = "workspace-b-coordinator";
+  let reads = 0;
+  server.on("GET", postureUrl, async () => {
+    reads++;
+    if (reads === 1) {
+      await workspaceARead.promise;
+      return { status: 200, body: workspaceA };
+    }
+    return { status: 200, body: workspaceB };
+  });
+  vm.runInContext(
+    'workspaceStatusSnapshot = { workspaceRoot: "C:/workspace-a", initialized: true }; operationalPostureWorkspaceRoot = "C:/workspace-a";',
+    app.context,
+  );
+
+  const staleRead = app.context.loadOperationalPosture();
+  await Promise.resolve();
+  vm.runInContext(
+    'workspaceStatusSnapshot = { workspaceRoot: "C:/workspace-b", initialized: true }; invalidateOperationalPostureForWorkspace("C:/workspace-b");',
+    app.context,
+  );
+  await app.context.loadOperationalPosture();
+  workspaceARead.resolve();
+  await staleRead;
+
+  assert.match(
+    app.elements.operationalPostureContent.textContent,
+    /workspace-b-coordinator/,
+  );
+  assert.doesNotMatch(
+    app.elements.operationalPostureContent.textContent,
+    /workspace-a-coordinator/,
+  );
+  assert.equal(
+    vm.runInContext("operationalPostureWorkspaceRoot", app.context),
+    "C:/workspace-b",
+  );
+});
+
+test("an exact control stays disabled until its deferred authoritative refresh settles", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const posture = createOperationalPosture();
+  posture.snapshot.queue.items = [
+    {
+      deliveryId: "delivery-refresh",
+      loopId: "loop-research",
+      state: "queued",
+      reasonCode: "trigger-queued",
+      eligibleAtUtc: "2026-08-11T20:00:00Z",
+      revision: 3,
+      workerId: null,
+      workerGeneration: null,
+      workerLeaseExpiresAtUtc: null,
+      workerLeaseExpired: false,
+      eligibleControls: [operationalControl("cancel-delivery", 3, "f")],
+    },
+  ];
+  const postureUrl =
+    "/api/loop-operations/posture?maximumQueueEntries=50&maximumSchedules=50&maximumWakes=50&maximumRuns=50";
+  let refresh = null;
+  let deferRefresh = false;
+  server.on("GET", postureUrl, async () => {
+    if (deferRefresh) {
+      refresh = createDeferred();
+      await refresh.promise;
+    }
+    return { status: 200, body: posture };
+  });
+  let cancellationPosts = 0;
+  server.on("POST", "/api/loop-operations/control", () => {
+    cancellationPosts++;
+    return {
+      status: 200,
+      body: {
+        status: "applied",
+        reasonCode: "trigger-cancellation-applied",
+      },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  deferRefresh = true;
+  const firstButton = findByTag(
+    app.elements.operationalPostureContent,
+    "button",
+  ).find((button) => button.textContent === "Cancel");
+  const firstClick = firstButton.click();
+  for (let attempt = 0; attempt < 20 && !refresh; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  const guardedButton = findByTag(
+    app.elements.operationalPostureContent,
+    "button",
+  ).find((button) => button.textContent === "Cancel");
+
+  assert.equal(guardedButton.disabled, true);
+  await guardedButton.click();
+  assert.equal(cancellationPosts, 1);
+  refresh.resolve();
+  await firstClick;
+  assert.equal(cancellationPosts, 1);
 });
 
 test("retention stays lazy and performs only an explicit policy-permitted bounded cleanup", async () => {
@@ -4035,790 +5142,176 @@ test("an admission audit failure selects the durable parked run and surfaces its
   );
 });
 
-test("a rejected Resume response is shown as a failure instead of a success toast", async () => {
+test("a rejected shared-facade Resume response is shown as a failure instead of a success toast", async () => {
   const server = new FakeFetchServer(createCatalog());
-  const paused = createRunSnapshot();
-  paused.status = "Paused";
-  paused.completedAtUtc = null;
-  server.runs = [
-    {
-      id: paused.id,
-      loopId: paused.loopId,
-      admissionOperationId: paused.admissionOperationId,
-      definitionVersion: 2,
-      status: paused.status,
-      createdAtUtc: paused.createdAtUtc,
-      updatedAtUtc: paused.updatedAtUtc,
-      completedAtUtc: null,
-      iteration: 1,
-      nextStepIndex: 1,
-      failureCode: null,
-      isDeleted: false,
+  const paused = installRun(server, "Paused");
+  const posture = operationalPostureForRun(paused, "resume-run", "a");
+  server.on("GET", operationalPostureUrl, () => ({
+    status: 200,
+    body: posture,
+  }));
+  server.on("POST", "/api/loop-operations/control", ({ body }) => ({
+    status: 409,
+    body: {
+      status: "ineligible",
+      operationId: body.operationId,
+      kind: body.kind,
+      targetId: body.targetId,
+      reasonCode: "run-control-workspace-busy",
     },
-  ];
-  server.runDetails.set(paused.id, paused);
+  }));
   const app = await loadLoopBuilder({ server });
   await selectCustomLoop(app);
   await app.elements.runsTab.click();
-  app.context.testHub = {
-    connected: true,
-    invoke: () =>
-      Promise.resolve({
-        status: "WorkspaceExecutionBusy",
-        run: paused,
-        detail: "Another loop is actively executing.",
-      }),
-  };
-  vm.runInContext("hub = testHub", app.context);
 
   const resumeButton = app.elements.runActions.children.find(
     (child) => child.textContent === "Resume",
   );
   assert.ok(resumeButton);
+  assert.equal(resumeButton.disabled, false);
   await resumeButton.click();
 
   assert.match(
     app.elements.validationBanner.textContent,
-    /Resume failed: Another loop is actively executing/,
+    /Resume failed: ineligible · run control workspace busy/,
   );
   assert.equal(app.elements.toast.textContent, "");
+  const call = server.calls.find(
+    (candidate) =>
+      candidate.method === "POST" &&
+      candidate.url === "/api/loop-operations/control",
+  );
+  assert.equal(call.body.kind, "resume-run");
+  assert.equal(call.body.targetId, paused.id);
+  assert.equal(call.body.expectedRevision, paused.lifecycleVersion);
+  assert.equal(call.body.expectedEvidenceHash, "a".repeat(64));
 });
 
-test("a committed Resume audit warning refreshes the durable run instead of reporting failure", async () => {
+test("an older selected run obtains controls from its exact continuation posture page", async () => {
   const server = new FakeFetchServer(createCatalog());
-  const paused = createRunSnapshot();
-  paused.status = "Paused";
-  paused.completedAtUtc = null;
-  const resumed = {
-    ...paused,
-    status: "Running",
-    lifecycleVersion: paused.lifecycleVersion + 1,
-  };
-  server.runs = [
-    {
-      id: paused.id,
-      loopId: paused.loopId,
-      admissionOperationId: paused.admissionOperationId,
-      definitionVersion: 2,
-      status: paused.status,
-      createdAtUtc: paused.createdAtUtc,
-      updatedAtUtc: paused.updatedAtUtc,
-      completedAtUtc: null,
-      iteration: 1,
-      nextStepIndex: 1,
-      failureCode: null,
-      isDeleted: false,
-    },
-  ];
-  server.runDetails.set(paused.id, paused);
+  const paused = installRun(server, "Paused");
+  const first = createOperationalPosture();
+  first.snapshot.runs.hasMore = true;
+  first.snapshot.runs.continuationCursor = "run-next";
+  const second = operationalPostureForRun(paused, "resume-run", "9");
+  server.on("GET", operationalPostureUrl, () => ({ status: 200, body: first }));
+  server.on("GET", `${operationalPostureUrl}&afterRunId=run-next`, () => ({
+    status: 200,
+    body: second,
+  }));
   const app = await loadLoopBuilder({ server });
   await selectCustomLoop(app);
   await app.elements.runsTab.click();
-  app.context.testHub = {
-    connected: true,
-    invoke: () => {
-      server.runs[0] = {
-        ...server.runs[0],
-        status: resumed.status,
-        updatedAtUtc: resumed.updatedAtUtc,
-      };
-      server.runDetails.set(resumed.id, resumed);
-      return Promise.resolve({
-        status: "AuditWarning",
-        run: resumed,
-        detail: "Resume committed, but its outcome audit needs review.",
-      });
-    },
-  };
-  vm.runInContext("hub = testHub", app.context);
 
   const resumeButton = app.elements.runActions.children.find(
     (child) => child.textContent === "Resume",
   );
   assert.ok(resumeButton);
+  assert.ok(
+    server.calls.some(
+      (call) => call.url === `${operationalPostureUrl}&afterRunId=run-next`,
+    ),
+  );
+  assert.equal(resumeButton.disabled, false);
+});
+
+test("an ambiguous shared-facade Resume outcome refreshes the durable run into review without reporting success", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const paused = installRun(server, "Paused");
+  const posture = operationalPostureForRun(paused, "resume-run", "b");
+  server.on("GET", operationalPostureUrl, () => ({
+    status: 200,
+    body: posture,
+  }));
+  server.on("POST", "/api/loop-operations/control", ({ body }) => {
+    const review = {
+      ...paused,
+      status: "NeedsReview",
+      lifecycleVersion: paused.lifecycleVersion + 1,
+    };
+    replaceInstalledRun(server, review);
+    posture.snapshot.runs.items = [];
+    return {
+      status: 409,
+      body: {
+        status: "needs-review",
+        operationId: body.operationId,
+        kind: body.kind,
+        targetId: body.targetId,
+        reasonCode: "operational-control-outcome-ambiguous",
+      },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  const resumeButton = app.elements.runActions.children.find(
+    (child) => child.textContent === "Resume",
+  );
+  assert.ok(resumeButton);
+  assert.equal(resumeButton.disabled, false);
+  await resumeButton.click();
+
+  assert.equal(app.elements.toast.textContent, "");
+  assert.match(
+    app.elements.validationBanner.textContent,
+    /Resume failed: needs review · operational control outcome ambiguous/,
+  );
+  assert.match(app.elements.runSubtitle.textContent, /Needs Review/);
+});
+
+test("a committed shared-facade Resume sends no trusted identity and reloads current posture", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const paused = installRun(server, "Paused");
+  const posture = operationalPostureForRun(paused, "resume-run", "d");
+  server.on("GET", operationalPostureUrl, () => ({
+    status: 200,
+    body: posture,
+  }));
+  server.on("POST", "/api/loop-operations/control", ({ body }) => {
+    replaceInstalledRun(server, {
+      ...paused,
+      status: "Running",
+      lifecycleVersion: paused.lifecycleVersion + 1,
+    });
+    posture.snapshot.runs.items = [];
+    return {
+      status: 200,
+      body: {
+        status: "applied",
+        operationId: body.operationId,
+        kind: body.kind,
+        targetId: body.targetId,
+        reasonCode: "operational-control-applied",
+      },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  const resumeButton = app.elements.runActions.children.find(
+    (child) => child.textContent === "Resume",
+  );
+  assert.ok(resumeButton);
+  assert.equal(resumeButton.disabled, false);
   await resumeButton.click();
 
   assert.equal(
     app.elements.toast.textContent,
-    "Resume committed, but its outcome audit needs review.",
-  );
-  assert.doesNotMatch(
-    app.elements.validationBanner.textContent,
-    /Resume failed/,
+    "Resume · operational control applied",
   );
   assert.match(app.elements.runSubtitle.textContent, /Running/);
-});
-
-test("Resume preserves unreadable operations but retires identities proved absent", async () => {
-  const server = new FakeFetchServer(createCatalog());
-  const paused = createRunSnapshot();
-  paused.status = "Paused";
-  paused.completedAtUtc = null;
-  server.runs = [
-    {
-      id: paused.id,
-      loopId: paused.loopId,
-      admissionOperationId: paused.admissionOperationId,
-      definitionVersion: 2,
-      status: paused.status,
-      createdAtUtc: paused.createdAtUtc,
-      updatedAtUtc: paused.updatedAtUtc,
-      completedAtUtc: null,
-      iteration: 1,
-      nextStepIndex: 1,
-      failureCode: null,
-      isDeleted: false,
-    },
-  ];
-  server.runDetails.set(paused.id, paused);
-  const app = await loadLoopBuilder({ server });
-  await selectCustomLoop(app);
-  await app.elements.runsTab.click();
-  const operationIds = [];
-  app.context.testHub = {
-    connected: true,
-    invoke: (_target, input) => {
-      operationIds.push(input.operationId);
-      if (operationIds.length === 1)
-        return Promise.reject(
-          new Error(
-            "Failed to invoke 'ResumeLoop': unsupported_loop_persistence_schema: Delete `.custom-loop-run-index.json` and retry the operation.",
-          ),
-        );
-      if (operationIds.length === 2)
-        return Promise.resolve({
-          status: "WorkspaceHostUnavailable",
-          run: paused,
-          operationId: input.operationId,
-          detail: "Hosting is temporarily unavailable.",
-        });
-      return Promise.resolve({
-        status: "InvalidState",
-        run: paused,
-        operationId: input.operationId,
-        detail: "Definitive retry response.",
-      });
-    },
-  };
-  vm.runInContext("hub = testHub", app.context);
-
-  let resumeButton = app.elements.runActions.children.find(
-    (child) => child.textContent === "Resume",
+  const call = server.calls.find(
+    (candidate) =>
+      candidate.method === "POST" &&
+      candidate.url === "/api/loop-operations/control",
   );
-  assert.ok(resumeButton);
-  await resumeButton.click();
-  assert.match(
-    app.elements.validationBanner.textContent,
-    /unsupported_loop_persistence_schema.*Delete `.custom-loop-run-index\.json`/i,
-  );
-
-  resumeButton = app.elements.runActions.children.find(
-    (child) => child.textContent === "Resume",
-  );
-  assert.ok(resumeButton);
-  await resumeButton.click();
-  assert.match(
-    app.elements.validationBanner.textContent,
-    /Hosting is temporarily unavailable/,
-  );
-
-  resumeButton = app.elements.runActions.children.find(
-    (child) => child.textContent === "Resume",
-  );
-  assert.ok(resumeButton);
-  await resumeButton.click();
-
-  assert.equal(operationIds.length, 3);
-  assert.equal(operationIds[1], operationIds[0]);
-  assert.notEqual(operationIds[2], operationIds[0]);
-  assert.match(
-    app.elements.validationBanner.textContent,
-    /Definitive retry response/,
-  );
-});
-
-test("lifecycle identities survive reload for pause cancel resume and multiple runs", async () => {
-  const localStorage = new FakeStorage();
-  const locks = new FakeLockManager();
-  const first = await loadLoopBuilder({ localStorage, locks });
-  const pause = await first.context.getOrCreatePendingLifecycleRequest(
-    "pause",
-    "run-one",
-    3,
-  );
-  const cancel = await first.context.getOrCreatePendingLifecycleRequest(
-    "cancel",
-    "run-one",
-    3,
-  );
-  const resume = await first.context.getOrCreatePendingLifecycleRequest(
-    "resume",
-    "run-two",
-    7,
-  );
-  const storageKey = vm.runInContext(
-    "pendingLifecycleStorageKey",
-    first.context,
-  );
-  const stored = localStorage.getItem(storageKey);
-
-  assert.ok(stored);
-  assert.equal(JSON.parse(stored).schemaVersion, 1);
-  assert.deepEqual(
-    JSON.parse(stored).requests.map((request) => request.kind),
-    ["pause", "cancel", "resume"],
-  );
-  assert.doesNotMatch(stored, /prompt|context/i);
-
-  const secondServer = new FakeFetchServer(createCatalog());
-  secondServer.runDetails.set("run-one", {
-    ...createRunSnapshot(),
-    id: "run-one",
-    lifecycleVersion: 3,
-  });
-  secondServer.runDetails.set("run-two", {
-    ...createRunSnapshot(),
-    id: "run-two",
-    lifecycleVersion: 7,
-  });
-  const second = await loadLoopBuilder({
-    server: secondServer,
-    localStorage,
-    locks,
-  });
-  const restoredPause = await second.context.getOrCreatePendingLifecycleRequest(
-    "pause",
-    "run-one",
-    3,
-  );
-  const restoredCancel =
-    await second.context.getOrCreatePendingLifecycleRequest(
-      "cancel",
-      "run-one",
-      3,
-    );
-  const restoredResume =
-    await second.context.getOrCreatePendingLifecycleRequest(
-      "resume",
-      "run-two",
-      7,
-    );
-
-  assert.equal(restoredPause.operationId, pause.operationId);
-  assert.equal(restoredCancel.operationId, cancel.operationId);
-  assert.equal(restoredResume.operationId, resume.operationId);
-});
-
-test("concurrent tabs coordinate one lifecycle operation identity", async () => {
-  const localStorage = new FakeStorage();
-  const locks = new FakeLockManager();
-  const first = await loadLoopBuilder({ localStorage, locks });
-  const second = await loadLoopBuilder({ localStorage, locks });
-
-  const [firstRequest, secondRequest] = await Promise.all([
-    first.context.getOrCreatePendingLifecycleRequest("pause", "run-shared", 4),
-    second.context.getOrCreatePendingLifecycleRequest("pause", "run-shared", 4),
-  ]);
-
-  assert.equal(secondRequest.operationId, firstRequest.operationId);
-  const storageKey = vm.runInContext(
-    "pendingLifecycleStorageKey",
-    first.context,
-  );
-  assert.equal(JSON.parse(localStorage.getItem(storageKey)).requests.length, 1);
-});
-
-test("registry setup failures remain isolated by operation family", async () => {
-  const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
-  const corruptLifecycleStorage = new FakeStorage();
-  corruptLifecycleStorage.setItem(
-    `embodysense.pending-loop-lifecycle.v1.${scope}`,
-    "{ malformed",
-  );
-  const invocationAvailable = await loadLoopBuilder({
-    localStorage: corruptLifecycleStorage,
-  });
-
-  assert.ok(
-    vm.runInContext(
-      "pendingInvocationRegistryLockName",
-      invocationAvailable.context,
-    ),
-  );
-  assert.equal(
-    vm.runInContext(
-      "pendingLifecycleRegistryLockName",
-      invocationAvailable.context,
-    ),
-    null,
-  );
-
-  const corruptInvocationStorage = new FakeStorage();
-  corruptInvocationStorage.setItem(
-    `embodysense.pending-loop-invocations.v1.${scope}`,
-    "{ malformed",
-  );
-  const lifecycleAvailable = await loadLoopBuilder({
-    localStorage: corruptInvocationStorage,
-  });
-
-  assert.equal(
-    vm.runInContext(
-      "pendingInvocationRegistryLockName",
-      lifecycleAvailable.context,
-    ),
-    null,
-  );
-  assert.ok(
-    vm.runInContext(
-      "pendingLifecycleRegistryLockName",
-      lifecycleAvailable.context,
-    ),
-  );
-});
-
-test("definitive HTTP lifecycle errors retire their operation identity", async () => {
-  const server = new FakeFetchServer(createCatalog());
-  const run = createRunSnapshot();
-  const operationIds = [];
-  server.on("POST", `/api/loop-runs/${run.id}/pause`, ({ body }) => {
-    operationIds.push(body.operationId);
-    return {
-      status: 409,
-      body: {
-        status: "Conflict",
-        run,
-        operationId: body.operationId,
-        detail: "The lifecycle version is stale.",
-      },
-    };
-  });
-  const app = await loadLoopBuilder({ server });
-  app.context.testRun = run;
-  vm.runInContext("selectedRun = testRun", app.context);
-
-  await app.context.controlRun("pause");
-  await app.context.controlRun("pause");
-
-  assert.equal(operationIds.length, 2);
-  assert.notEqual(operationIds[1], operationIds[0]);
-  assert.equal(
-    vm.runInContext("pendingLifecycleRequests.size", app.context),
-    0,
-  );
-});
-
-test("receipt-pending lifecycle failures retain their operation identity", async () => {
-  const server = new FakeFetchServer(createCatalog());
-  const run = createRunSnapshot();
-  const operationIds = [];
-  server.on("POST", `/api/loop-runs/${run.id}/cancel`, ({ body }) => {
-    operationIds.push(body.operationId);
-    server.controlReceipts.set(body.operationId, {
-      operationId: body.operationId,
-      kind: "Cancel",
-      runId: run.id,
-      expectedLifecycleVersion: run.lifecycleVersion,
-      state: "Pending",
-      outcome: "Unknown",
-      completionDurablyProved: false,
-    });
-    return {
-      status: 503,
-      body: {
-        status: "Failed",
-        run,
-        operationId: body.operationId,
-        detail:
-          "The cancellation signal failed; the control receipt remains pending so the same operation can retry.",
-      },
-    };
-  });
-  const app = await loadLoopBuilder({ server });
-  app.context.testRun = run;
-  vm.runInContext("selectedRun = testRun", app.context);
-
-  await app.context.controlRun("cancel");
-  await app.context.controlRun("cancel");
-
-  assert.equal(operationIds.length, 2);
-  assert.equal(operationIds[1], operationIds[0]);
-  assert.equal(
-    vm.runInContext("pendingLifecycleRequests.size", app.context),
-    1,
-  );
-});
-
-test("receipt I/O failures retain their lifecycle operation identity", async () => {
-  const server = new FakeFetchServer(createCatalog());
-  const run = createRunSnapshot();
-  const operationIds = [];
-  server.on("POST", `/api/loop-runs/${run.id}/pause`, ({ body }) => {
-    operationIds.push(body.operationId);
-    return {
-      status: 503,
-      body: {
-        status: "Failed",
-        run,
-        operationId: body.operationId,
-        detail: "A receipt I/O failure occurred.",
-      },
-    };
-  });
-  server.on(
-    "GET",
-    "/api/loop-runs/controls/00000000-0000-4000-8000-000000000001",
-    () => ({
-      status: 503,
-      body: { detail: "Receipt storage is temporarily unavailable." },
-    }),
-  );
-  const app = await loadLoopBuilder({ server });
-  app.context.testRun = run;
-  vm.runInContext("selectedRun = testRun", app.context);
-
-  await app.context.controlRun("pause");
-  await app.context.controlRun("pause");
-
-  assert.deepEqual(operationIds, [
-    "00000000-0000-4000-8000-000000000001",
-    "00000000-0000-4000-8000-000000000001",
-  ]);
-  assert.equal(
-    vm.runInContext("pendingLifecycleRequests.size", app.context),
-    1,
-  );
-});
-
-test("stalled lifecycle receipt reads stop at one bounded deadline and retain their identities", async () => {
-  const localStorage = new FakeStorage();
-  const app = await loadLoopBuilder({ localStorage });
-  const storageKey = vm.runInContext("pendingLifecycleStorageKey", app.context);
-  localStorage.setItem(
-    storageKey,
-    JSON.stringify({
-      schemaVersion: 1,
-      requests: [
-        {
-          kind: "pause",
-          runId: "run-stalled",
-          expectedLifecycleVersion: 4,
-          operationId: "operation-stalled",
-        },
-      ],
-    }),
-  );
-  app.server.on(
-    "GET",
-    "/api/loop-runs/controls/operation-stalled",
-    () => new Promise(() => {}),
-  );
-  let scheduledDeadlineMilliseconds = null;
-  app.context.setTimeout = (handler, delay) => {
-    scheduledDeadlineMilliseconds = delay;
-    queueMicrotask(handler);
-    return 1;
-  };
-  app.context.clearTimeout = () => {};
-
-  await app.context.reconcilePendingLifecycleRequests(performance.now() + 25);
-
-  assert.ok(
-    scheduledDeadlineMilliseconds > 0 && scheduledDeadlineMilliseconds <= 25,
-  );
-  assert.equal(
-    vm.runInContext("pendingLifecycleRequests.size", app.context),
-    1,
-  );
-  assert.equal(
-    JSON.parse(localStorage.getItem(storageKey)).requests[0].operationId,
-    "operation-stalled",
-  );
-});
-
-test("startup preserves receipt-pending identities after lifecycle advancement", async () => {
-  const localStorage = new FakeStorage();
-  const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
-  const storageKey = `embodysense.pending-loop-lifecycle.v1.${scope}`;
-  localStorage.setItem(
-    storageKey,
-    JSON.stringify({
-      schemaVersion: 1,
-      requests: [
-        {
-          kind: "resume",
-          runId: "run-advanced",
-          expectedLifecycleVersion: 4,
-          operationId: "operation-before-response-loss",
-        },
-      ],
-    }),
-  );
-  const server = new FakeFetchServer(createCatalog());
-  server.runDetails.set("run-advanced", {
-    ...createRunSnapshot(),
-    id: "run-advanced",
-    lifecycleVersion: 5,
-  });
-  server.controlReceipts.set("operation-before-response-loss", {
-    operationId: "operation-before-response-loss",
-    kind: "Resume",
-    runId: "run-advanced",
-    expectedLifecycleVersion: 4,
-    state: "Pending",
-    outcome: "Unknown",
-    completionDurablyProved: false,
-  });
-
-  const app = await loadLoopBuilder({ server, localStorage });
-
-  assert.equal(
-    vm.runInContext("pendingLifecycleRequests.size", app.context),
-    1,
-  );
-  assert.equal(
-    JSON.parse(localStorage.getItem(storageKey)).requests[0].operationId,
-    "operation-before-response-loss",
-  );
-});
-
-test("startup retires only matching durably completed lifecycle receipts", async () => {
-  const localStorage = new FakeStorage();
-  const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
-  const storageKey = `embodysense.pending-loop-lifecycle.v1.${scope}`;
-  localStorage.setItem(
-    storageKey,
-    JSON.stringify({
-      schemaVersion: 1,
-      requests: [
-        {
-          kind: "pause",
-          runId: "run-complete",
-          expectedLifecycleVersion: 2,
-          operationId: "operation-complete",
-        },
-        {
-          kind: "cancel",
-          runId: "run-pending",
-          expectedLifecycleVersion: 3,
-          operationId: "operation-pending",
-        },
-      ],
-    }),
-  );
-  const server = new FakeFetchServer(createCatalog());
-  server.controlReceipts.set("operation-complete", {
-    operationId: "operation-complete",
-    kind: "Pause",
-    runId: "run-complete",
-    expectedLifecycleVersion: 2,
-    state: "Complete",
-    outcome: "Paused",
-    completionDurablyProved: true,
-  });
-  server.controlReceipts.set("operation-pending", {
-    operationId: "operation-pending",
-    kind: "Cancel",
-    runId: "run-pending",
-    expectedLifecycleVersion: 3,
-    state: "Pending",
-    outcome: "Unknown",
-    completionDurablyProved: false,
-  });
-
-  const app = await loadLoopBuilder({ server, localStorage });
-
-  assert.equal(
-    vm.runInContext("pendingLifecycleRequests.size", app.context),
-    1,
-  );
-  assert.equal(
-    JSON.parse(localStorage.getItem(storageKey)).requests[0].operationId,
-    "operation-pending",
-  );
-});
-
-test("structured completion retires partial-success responses without reading receipt detail", async () => {
-  const server = new FakeFetchServer(createCatalog());
-  const run = createRunSnapshot();
-  let operationId = null;
-  server.on("POST", `/api/loop-runs/${run.id}/cancel`, ({ body }) => {
-    operationId = body.operationId;
-    server.controlReceipts.set(operationId, {
-      operationId,
-      kind: "Cancel",
-      runId: run.id,
-      expectedLifecycleVersion: run.lifecycleVersion,
-      state: "Complete",
-      outcome: "NeedsReview",
-      completionDurablyProved: true,
-    });
-    return {
-      status: 503,
-      body: {
-        status: "NeedsReview",
-        run,
-        operationId,
-        detail: "This misleading detail says the receipt remains pending.",
-      },
-    };
-  });
-  const app = await loadLoopBuilder({ server });
-  app.context.testRun = run;
-  vm.runInContext("selectedRun = testRun", app.context);
-
-  await app.context.controlRun("cancel");
-
-  assert.ok(operationId);
-  assert.equal(
-    vm.runInContext("pendingLifecycleRequests.size", app.context),
-    0,
-  );
-});
-
-test("the lifecycle registry remains bounded when safe reconciliation is unavailable", async () => {
-  const localStorage = new FakeStorage();
-  const app = await loadLoopBuilder({ localStorage });
-  const storageKey = vm.runInContext("pendingLifecycleStorageKey", app.context);
-  localStorage.setItem(
-    storageKey,
-    JSON.stringify({
-      schemaVersion: 1,
-      requests: Array.from({ length: 100 }, (_, index) => ({
-        kind: "pause",
-        runId: "run-advancing",
-        expectedLifecycleVersion: index + 1,
-        operationId: `operation-${String(index + 1).padStart(3, "0")}`,
-      })),
-    }),
-  );
-
-  await assert.rejects(
-    app.context.getOrCreatePendingLifecycleRequest(
-      "cancel",
-      "run-advancing",
-      101,
-    ),
-    /100 unresolved lifecycle requests/i,
-  );
-
-  assert.equal(
-    vm.runInContext("pendingLifecycleRequests.size", app.context),
-    100,
-  );
-  assert.equal(
-    JSON.parse(localStorage.getItem(storageKey)).requests.length,
-    100,
-  );
-});
-
-test("completed lifecycle receipts are reconciled before enforcing the registry bound", async () => {
-  const localStorage = new FakeStorage();
-  const app = await loadLoopBuilder({ localStorage });
-  const storageKey = vm.runInContext("pendingLifecycleStorageKey", app.context);
-  const requests = Array.from({ length: 100 }, (_, index) => ({
-    kind: "pause",
-    runId: "run-advancing",
-    expectedLifecycleVersion: index + 1,
-    operationId: `operation-${String(index + 1).padStart(3, "0")}`,
-  }));
-  localStorage.setItem(
-    storageKey,
-    JSON.stringify({ schemaVersion: 1, requests }),
-  );
-  app.server.controlReceipts.set("operation-001", {
-    operationId: "operation-001",
-    kind: "Pause",
-    runId: "run-advancing",
-    expectedLifecycleVersion: 1,
-    state: "Complete",
-    outcome: "Paused",
-    completionDurablyProved: true,
-  });
-
-  const reserved = await app.context.getOrCreatePendingLifecycleRequest(
-    "cancel",
-    "run-advancing",
-    101,
-  );
-
-  assert.equal(reserved.kind, "cancel");
-  assert.equal(
-    vm.runInContext("pendingLifecycleRequests.size", app.context),
-    100,
-  );
-  assert.equal(
-    JSON.parse(localStorage.getItem(storageKey)).requests.some(
-      (request) => request.operationId === "operation-001",
-    ),
-    false,
-  );
-});
-
-test("authoritative lifecycle responses survive browser cleanup failures", async () => {
-  const localStorage = new FakeStorage();
-  const server = new FakeFetchServer(createCatalog());
-  const run = createRunSnapshot();
-  const paused = {
-    ...run,
-    status: "PauseRequested",
-    lifecycleVersion: run.lifecycleVersion + 1,
-  };
-  server.runs = [
-    {
-      id: run.id,
-      loopId: run.loopId,
-      admissionOperationId: run.admissionOperationId,
-      definitionVersion: run.admittedDefinition.definitionVersion,
-      lifecycleVersion: run.lifecycleVersion,
-      status: run.status,
-      createdAtUtc: run.createdAtUtc,
-      updatedAtUtc: run.updatedAtUtc,
-      completedAtUtc: null,
-      iteration: run.iteration,
-      nextStepIndex: run.nextStepIndex,
-      failureCode: null,
-      isDeleted: false,
-    },
-  ];
-  server.runDetails.set(run.id, run);
-  server.on("POST", `/api/loop-runs/${run.id}/pause`, ({ body }) => {
-    server.runs[0] = {
-      ...server.runs[0],
-      lifecycleVersion: paused.lifecycleVersion,
-      status: paused.status,
-    };
-    server.runDetails.set(run.id, paused);
-    localStorage.removeItem = () => {
-      throw new Error("Storage cleanup failed.");
-    };
-    return {
-      status: 200,
-      body: {
-        status: "PauseRequested",
-        run: paused,
-        operationId: body.operationId,
-        detail: "Pause recorded.",
-      },
-    };
-  });
-  const app = await loadLoopBuilder({ server, localStorage });
-  await selectCustomLoop(app);
-  await app.elements.runsTab.click();
-  app.context.testRun = run;
-  vm.runInContext("selectedRun = testRun", app.context);
-
-  await app.context.controlRun("pause");
-
-  assert.equal(app.elements.toast.textContent, "Pause recorded.");
-  assert.match(
-    app.elements.validationBanner.textContent,
-    /returned, but its durable receipt is still pending or unreadable/i,
-  );
-  assert.equal(
-    vm.runInContext("selectedRun.lifecycleVersion", app.context),
-    paused.lifecycleVersion,
-  );
+  assert.equal(call.body.expectedAuthorityEvidenceHash, "c".repeat(64));
+  assert.equal(Object.hasOwn(call.body, "actorId"), false);
+  assert.equal(Object.hasOwn(call.body, "workspaceId"), false);
+  assert.equal(Object.hasOwn(call.body, "surfaceId"), false);
 });
 
 test("a lost invocation connection reconciles the admitted run and continues monitoring", async () => {
@@ -8782,8 +9275,14 @@ async function loadLoopBuilder(options = {}) {
     Date: options.Date ?? Date,
     document,
     fetch: server.fetch.bind(server),
+    controlKinds,
+    controlRequest,
+    createGovernedGraphWorkspace,
+    exactControl,
     navigator: { locks },
     performance,
+    postureSnapshot,
+    projectFrontier,
     setTimeout,
     clearTimeout,
     structuredClone,
@@ -9461,6 +9960,260 @@ function createTraceQuota(
   };
 }
 
+function createOperationalPosture() {
+  return {
+    status: "available",
+    reasonCode: "operational-posture-available",
+    snapshot: {
+      schemaVersion: 1,
+      observedAtUtc: "2026-08-11T20:00:00Z",
+      controlAuthorityEvidenceHash: "c".repeat(64),
+      queue: {
+        generation: 1,
+        queuedEntries: 0,
+        queuedReservationBytes: 0,
+        retainedEntries: 0,
+        retainedReservationBytes: 0,
+        persistenceBackpressured: false,
+        hasMore: false,
+        items: [],
+        eligibleControls: [],
+      },
+      schedules: { generation: 0, hasMore: false, items: [] },
+      wakes: { generation: 0, hasMore: false, items: [] },
+      runs: { generation: 0, hasMore: false, items: [] },
+      coordinator: {
+        state: "stopped",
+        reasonCode: "coordinator-not-started",
+        coordinatorId: null,
+        ownerId: null,
+        ownershipEpoch: null,
+        leaseExpiresAtUtc: null,
+        leaseExpired: false,
+        latestFailureSequence: 0,
+        latestFailureHash: null,
+      },
+    },
+  };
+}
+
+function createGovernedGraphCatalog() {
+  return {
+    status: "available",
+    sourceEvidenceId: "1".repeat(64),
+    nodeDescriptors: [
+      {
+        descriptor: { kind: "trigger", typeId: "schedule-trigger", version: 1 },
+        isAdvertised: true,
+        isExecutable: true,
+        isLegalEntry: true,
+        isLegalTerminal: false,
+        allowedControlOutcomes: ["always"],
+        requiredControlOutcomes: ["always"],
+        joinPolicy: "none",
+        minimumIncomingControlEdges: 0,
+        allowsCycle: false,
+        cycleIterationBudgetParameterId: null,
+        cycleTimeBudgetMillisecondsParameterId: null,
+        ports: [
+          {
+            id: "request",
+            direction: "output",
+            bindingKind: "data",
+            allowedValueKinds: ["text"],
+            required: true,
+          },
+          {
+            id: "invocation-context",
+            direction: "output",
+            bindingKind: "context",
+            allowedValueKinds: ["text"],
+            required: true,
+          },
+        ],
+        parameters: [],
+        requiredCapabilityIds: ["org.embodysense/triggers/time"],
+      },
+      {
+        descriptor: { kind: "wait", typeId: "wait-timestamp", version: 1 },
+        isAdvertised: true,
+        isExecutable: true,
+        isLegalEntry: false,
+        isLegalTerminal: false,
+        allowedControlOutcomes: ["success"],
+        requiredControlOutcomes: ["success"],
+        joinPolicy: "none",
+        minimumIncomingControlEdges: 1,
+        allowsCycle: false,
+        cycleIterationBudgetParameterId: null,
+        cycleTimeBudgetMillisecondsParameterId: null,
+        ports: [],
+        parameters: [
+          {
+            id: "deadline-utc",
+            valueKind: "text",
+            required: true,
+            minimumCharacters: 28,
+            maximumCharacters: 28,
+            minimumInteger: null,
+            maximumInteger: null,
+            allowedValues: [],
+          },
+        ],
+        requiredCapabilityIds: [],
+      },
+    ],
+    roles: {
+      status: "available",
+      roles: [
+        {
+          roleId: "researcher",
+          revision: 1,
+          contentHash: "2".repeat(64),
+          displayName: "Researcher",
+          purpose: "Research safely.",
+          isAdmissionReady: true,
+          capabilityMaximumIds: ["org.embodysense/triggers/time"],
+        },
+      ],
+      nextCursor: null,
+      error: null,
+    },
+  };
+}
+
+function governedGraphLifecycle(
+  status,
+  lifecycleVersion,
+  revisionId = "revision-1",
+) {
+  const revision = {
+    graphId: "published-graph",
+    revisionId,
+    executableHash: "b".repeat(64),
+  };
+  return {
+    graphId: "published-graph",
+    lifecycleVersion,
+    status,
+    draftRevision: status === "draft" ? revision : null,
+    publishedRevision:
+      status === "draft"
+        ? null
+        : {
+            revision,
+            publicationOperationId: "publish-graph",
+            publishedAtUtc: "2026-08-16T12:00:00Z",
+          },
+    lastOperationId: "publish-graph",
+    updatedAtUtc: "2026-08-16T12:00:00Z",
+  };
+}
+
+function governedGraphRead(lifecycle, graph = null) {
+  return {
+    status: "ready",
+    storeGeneration: lifecycle.lifecycleVersion,
+    lifecycle,
+    artifacts: graph ? [{ graph }] : [],
+    operations: [],
+  };
+}
+
+function governedGraphArtifact(lifecycle, displayName) {
+  const revision =
+    lifecycle.draftRevision ?? lifecycle.publishedRevision.revision;
+  return {
+    schemaVersion: 1,
+    revisionReference: revision,
+    graphId: revision.graphId,
+    revisionId: revision.revisionId,
+    purpose: `${displayName} purpose.`,
+    owningRole: {
+      identity: { roleId: "researcher", revision: 1 },
+      contentHash: "2".repeat(64),
+    },
+    entryNodeId: null,
+    terminalNodeIds: [],
+    authorityCeiling: { capabilityIds: [] },
+    valueSchemas: [],
+    nodes: [],
+    controlEdges: [],
+    bindings: [],
+    outputContract: {
+      summary: "Return declared terminal outputs.",
+      outputs: [],
+    },
+    displayMetadata: { displayName, description: "", nodes: [] },
+  };
+}
+
+function queuedDelivery(deliveryId) {
+  return {
+    deliveryId,
+    loopId: "loop-research",
+    state: "queued",
+    reasonCode: "trigger-queued",
+    eligibleControls: [operationalControl("cancel-delivery", 7, "b")],
+  };
+}
+
+function operationalControl(kind, expectedRevision, evidenceCharacter) {
+  return {
+    kind,
+    expectedRevision,
+    expectedEvidenceHash: evidenceCharacter.repeat(64),
+  };
+}
+
+function installRun(server, status) {
+  const run = {
+    ...createRunSnapshot(),
+    status,
+    completedAtUtc: null,
+  };
+  replaceInstalledRun(server, run);
+  return run;
+}
+
+function replaceInstalledRun(server, run) {
+  server.runs = [
+    {
+      id: run.id,
+      loopId: run.loopId,
+      admissionOperationId: run.admissionOperationId,
+      definitionVersion: run.admittedDefinition.definitionVersion,
+      lifecycleVersion: run.lifecycleVersion,
+      status: run.status,
+      createdAtUtc: run.createdAtUtc,
+      updatedAtUtc: run.updatedAtUtc,
+      completedAtUtc: run.completedAtUtc,
+      iteration: run.iteration,
+      nextStepIndex: run.nextStepIndex,
+      failureCode: run.failureCode,
+      isDeleted: false,
+    },
+  ];
+  server.runDetails.set(run.id, run);
+}
+
+function operationalPostureForRun(run, kind, evidenceCharacter) {
+  const posture = createOperationalPosture();
+  posture.snapshot.runs.items = [
+    {
+      runId: run.id,
+      loopId: run.loopId,
+      status: run.status,
+      reasonCode: "run-control-eligible",
+      lifecycleVersion: run.lifecycleVersion,
+      eligibleControls: [
+        operationalControl(kind, run.lifecycleVersion, evidenceCharacter),
+      ],
+    },
+  ];
+  return posture;
+}
+
 function authoringResponse(status, definition) {
   return {
     status,
@@ -9540,7 +10293,6 @@ class FakeFetchServer {
     this.runDetails = new Map();
     this.traceDetails = new Map();
     this.invocationReceipts = new Map();
-    this.controlReceipts = new Map();
     this.traceQuota = null;
     this.calls = [];
     this.handlers = new Map();
@@ -9574,6 +10326,11 @@ class FakeFetchServer {
       });
     if (method === "GET" && url === "/api/loops")
       return responseFrom({ status: 200, body: clone(this.catalog) });
+    if (method === "GET" && url.startsWith("/api/loop-operations/posture"))
+      return responseFrom({
+        status: 200,
+        body: createOperationalPosture(),
+      });
     if (method === "GET" && url.startsWith("/api/loop-runs?")) {
       const query = new URLSearchParams(url.slice(url.indexOf("?") + 1));
       const loopId = query.get("loopId");
@@ -9600,18 +10357,6 @@ class FakeFetchServer {
         : responseFrom({
             status: 404,
             body: { detail: "Invocation receipt not found." },
-          });
-    }
-    if (method === "GET" && url.startsWith("/api/loop-runs/controls/")) {
-      const operationId = decodeURIComponent(
-        url.slice("/api/loop-runs/controls/".length),
-      );
-      const receipt = this.controlReceipts.get(operationId);
-      return receipt
-        ? responseFrom({ status: 200, body: clone(receipt) })
-        : responseFrom({
-            status: 404,
-            body: { detail: "Control receipt not found." },
           });
     }
     if (
@@ -9726,6 +10471,7 @@ class FakeElement {
     this.attributes = new Map();
     this.children = [];
     this.dataset = {};
+    this.style = {};
     this.listeners = new Map();
     this.className = "";
     this.disabled = false;
@@ -9831,4 +10577,14 @@ function clone(value) {
 
 async function flushAsyncWork() {
   await new Promise((resolve) => setTimeout(resolve, 35));
+}
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }

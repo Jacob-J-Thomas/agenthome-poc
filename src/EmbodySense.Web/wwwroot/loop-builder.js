@@ -1,3 +1,12 @@
+import {
+  controlKinds,
+  controlRequest,
+  exactControl,
+  postureSnapshot,
+} from "./operational-posture.js";
+import { projectFrontier } from "./frontier-projection.js";
+import { createGovernedGraphWorkspace } from "./governed-graph-workspace.js";
+
 let catalog = null;
 let currentDefinition = null;
 let draft = null;
@@ -52,6 +61,35 @@ let selectedRunMonitorFailureKind = null;
 let selectedRunMonitorFallbackFailureCount = 0;
 let selectedRunMonitorNextFallbackAt = 0;
 let traceQuota = null;
+let operationalPosture = null;
+let operationalPostureFailure = null;
+let operationalPostureInFlight = false;
+let operationalControlInFlight = false;
+let operationalPostureOutcome = null;
+let operationalPostureRequestGeneration = 0;
+let operationalPostureActiveReads = 0;
+let operationalPostureWorkspaceRoot = null;
+const pendingOperationalControlStorageKeyPrefix =
+  "embodysense.pending-operational-control.v1";
+const maximumOperationalControlBatchItems = 100;
+const maximumOperationalQueueBatchPages = 100;
+const conclusiveOperationalControlStatuses = new Set([
+  "applied",
+  "replayed",
+  "conflict",
+  "not-found",
+  "unauthorized",
+  "ineligible",
+  "partially-applied",
+  "backpressured",
+  "corrupt",
+  "unavailable",
+  "invalid",
+  "needs-review",
+]);
+let pendingOperationalControlStorageKey = null;
+let pendingOperationalControlWorkspaceScope = null;
+let pendingOperationalControl = null;
 let hub = null;
 let invokeReturnFocus = null;
 let historicalLoopId = null;
@@ -75,17 +113,6 @@ let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
 let invocationInFlight = false;
 let activeInvocationAttempt = null;
-const pendingLifecycleStorageKeyPrefix =
-  "embodysense.pending-loop-lifecycle.v1";
-const pendingLifecycleRegistryLockNamePrefix =
-  "embodysense.pending-loop-lifecycle";
-let pendingLifecycleStorageKey = null;
-let pendingLifecycleRegistryLockName = null;
-let reconciledPendingLifecycleStorageKey = null;
-const maximumPendingLifecycleRequests = 100;
-const maximumConcurrentLifecycleReceiptReads = 8;
-const pendingLifecycleReconciliationDeadlineMilliseconds = 2000;
-const pendingLifecycleRequests = new Map();
 const retentionCleanupStorageKeyPrefix =
   "embodysense.pending-receipt-cleanup.v1";
 const retentionCleanupRegistryLockNamePrefix =
@@ -123,6 +150,8 @@ const elements = {
   builderTab: document.getElementById("builderTab"),
   builderLayout: document.getElementById("builderLayout"),
   builderView: document.getElementById("builderView"),
+  governedGraphTab: document.getElementById("governedGraphTab"),
+  governedGraphView: document.getElementById("governedGraphView"),
   cancelInvokeButton: document.getElementById("cancelInvokeButton"),
   canvas: document.getElementById("loopCanvas"),
   canvasAuthority: document.getElementById("canvasAuthority"),
@@ -168,6 +197,17 @@ const elements = {
   roleId: document.getElementById("roleId"),
   rolePath: document.getElementById("rolePath"),
   loadMoreRunsButton: document.getElementById("loadMoreRunsButton"),
+  operationalPosture: document.getElementById("operationalPosture"),
+  operationalPostureContent: document.getElementById(
+    "operationalPostureContent",
+  ),
+  operationalPostureNotice: document.getElementById("operationalPostureNotice"),
+  operationalPostureObservedAt: document.getElementById(
+    "operationalPostureObservedAt",
+  ),
+  refreshOperationalPostureButton: document.getElementById(
+    "refreshOperationalPostureButton",
+  ),
   runActions: document.getElementById("runActions"),
   runCount: document.getElementById("runCount"),
   runList: document.getElementById("runList"),
@@ -191,6 +231,14 @@ const elements = {
   zoomLevel: document.getElementById("zoomLevel"),
   zoomOutButton: document.getElementById("zoomOutButton"),
 };
+
+const governedGraphWorkspace = createGovernedGraphWorkspace({
+  document,
+  window,
+  requestJson,
+  operationId: (prefix) => `${prefix}-${newOperationId()}`,
+  runtimeCatalog: () => catalog,
+});
 
 function activate() {
   loopBuilderSurfaceActive = true;
@@ -300,7 +348,7 @@ async function rehydrateSession({
     elements.workspaceRoot.textContent &&
     elements.workspaceRoot.textContent !== "Workspace loading" &&
     elements.workspaceRoot.textContent !== workspaceRoot &&
-    dirty
+    (dirty || governedGraphWorkspace.isDirty())
   ) {
     showBanner(
       "The host workspace changed. This unsaved loop draft remains loaded and was not applied to the new workspace.",
@@ -329,7 +377,10 @@ async function refreshWorkspaceCore(
     const requestOptions = { signal, suppressRecovery };
     const status = await requestJson("/api/status", requestOptions);
     if (signal?.aborted) return false;
+    governedGraphWorkspace.configureWorkspace(status.workspaceRoot);
+    configurePendingOperationalControlJournal(status.workspaceRoot);
     workspaceStatusSnapshot = status;
+    invalidateOperationalPostureForWorkspace(status.workspaceRoot);
     renderWorkspaceInitialization();
     try {
       await configurePendingInvocationRegistry(status.workspaceRoot);
@@ -337,17 +388,6 @@ async function refreshWorkspaceCore(
       pendingInvocationStorageKey = null;
       pendingInvocationRegistryLockName = null;
       pendingInvocationRequests.clear();
-    }
-    try {
-      await configurePendingLifecycleRegistry(
-        status.workspaceRoot,
-        status.initialized,
-      );
-    } catch {
-      pendingLifecycleStorageKey = null;
-      pendingLifecycleRegistryLockName = null;
-      reconciledPendingLifecycleStorageKey = null;
-      pendingLifecycleRequests.clear();
     }
     try {
       configureRetentionCleanupRegistry(status.workspaceRoot);
@@ -387,6 +427,7 @@ async function refreshWorkspaceCore(
     const runsLoaded = await loadRuns({ propagateFailure, requestOptions });
     if (runsLoaded === false) return false;
     renderAll();
+    if (currentView === "graph") await governedGraphWorkspace.refresh();
     workspaceAuthoringHydrated = true;
     renderWorkspaceInitialization();
     return true;
@@ -631,6 +672,9 @@ function bindStaticEvents() {
   );
   elements.createLoopButton.addEventListener("click", createLoop);
   elements.builderTab.addEventListener("click", () => switchView("builder"));
+  elements.governedGraphTab.addEventListener("click", () =>
+    switchView("graph"),
+  );
   elements.runsTab.addEventListener("click", () => switchView("runs"));
   elements.retentionTab.addEventListener("click", () =>
     switchView("retention"),
@@ -662,16 +706,25 @@ function bindStaticEvents() {
   });
   bindTabKeyboard(elements.builderTab, [
     elements.builderTab,
+    elements.governedGraphTab,
+    elements.runsTab,
+    elements.retentionTab,
+  ]);
+  bindTabKeyboard(elements.governedGraphTab, [
+    elements.builderTab,
+    elements.governedGraphTab,
     elements.runsTab,
     elements.retentionTab,
   ]);
   bindTabKeyboard(elements.runsTab, [
     elements.builderTab,
+    elements.governedGraphTab,
     elements.runsTab,
     elements.retentionTab,
   ]);
   bindTabKeyboard(elements.retentionTab, [
     elements.builderTab,
+    elements.governedGraphTab,
     elements.runsTab,
     elements.retentionTab,
   ]);
@@ -695,6 +748,9 @@ function bindStaticEvents() {
   );
   elements.zoomFitButton.addEventListener("click", fitCanvas);
   elements.loadMoreRunsButton.addEventListener("click", loadMoreRuns);
+  elements.refreshOperationalPostureButton.addEventListener("click", () =>
+    loadOperationalPosture(),
+  );
   elements.name.addEventListener("input", (event) =>
     updateDraftValue("displayName", event.target.value),
   );
@@ -702,7 +758,7 @@ function bindStaticEvents() {
     updateDraftValue("description", event.target.value),
   );
   window.addEventListener("beforeunload", (event) => {
-    if (dirty) {
+    if (dirty || governedGraphWorkspace.isDirty()) {
       event.preventDefault();
       event.returnValue = "";
     }
@@ -721,16 +777,6 @@ function bindStaticEvents() {
         synchronizePendingInvocationRequestsFromStorage();
       } catch {
         // Retain the last verified in-memory view and fail closed on the next reservation attempt.
-      }
-    }
-    if (
-      pendingLifecycleStorageKey &&
-      event.key === pendingLifecycleStorageKey
-    ) {
-      try {
-        synchronizePendingLifecycleRequestsFromStorage();
-      } catch {
-        // Retain the last verified in-memory view and fail closed on the next lifecycle request.
       }
     }
     if (
@@ -1566,6 +1612,8 @@ function renderAll() {
   if (currentView === "builder") {
     renderCanvas();
     renderInspector();
+  } else if (currentView === "graph") {
+    // The graph workspace owns and renders its state inside its feature module.
   } else if (currentView === "runs") {
     renderRuns();
     renderRunEvidence();
@@ -1579,27 +1627,35 @@ function renderAll() {
 
 function renderTabs() {
   const builderActive = currentView === "builder" && !historicalLoopId;
+  const graphActive = currentView === "graph";
   const runsActive =
     currentView === "runs" ||
     (currentView === "builder" && Boolean(historicalLoopId));
   const retentionActive = currentView === "retention";
   elements.builderTab.disabled = mutationInFlight || Boolean(historicalLoopId);
+  elements.governedGraphTab.disabled =
+    mutationInFlight || Boolean(historicalLoopId);
   elements.runsTab.disabled = mutationInFlight || isNewLoopDraft();
   elements.retentionTab.disabled = mutationInFlight || retentionCleanupInFlight;
   elements.builderTab.classList.toggle("active", builderActive);
+  elements.governedGraphTab.classList.toggle("active", graphActive);
   elements.runsTab.classList.toggle("active", runsActive);
   elements.retentionTab.classList.toggle("active", retentionActive);
   elements.builderTab.setAttribute("aria-selected", String(builderActive));
+  elements.governedGraphTab.setAttribute("aria-selected", String(graphActive));
   elements.runsTab.setAttribute("aria-selected", String(runsActive));
   elements.retentionTab.setAttribute("aria-selected", String(retentionActive));
   elements.builderTab.tabIndex = builderActive ? 0 : -1;
+  elements.governedGraphTab.tabIndex = graphActive ? 0 : -1;
   elements.runsTab.tabIndex = runsActive ? 0 : -1;
   elements.retentionTab.tabIndex = retentionActive ? 0 : -1;
   elements.builderView.hidden = !builderActive;
+  elements.governedGraphView.hidden = !graphActive;
   elements.runsView.hidden = !runsActive;
   elements.retentionView.hidden = !retentionActive;
   elements.inspectorTabs.hidden = !builderActive;
   elements.builderLayout.classList.toggle("runs-active", !builderActive);
+  elements.builderLayout.classList.toggle("graph-active", graphActive);
   elements.inspectorContent.setAttribute(
     "role",
     builderActive ? "tabpanel" : "region",
@@ -1617,10 +1673,16 @@ function renderTabs() {
 
 async function switchView(view) {
   if (mutationInFlight) return;
-  if (view !== "builder" && view !== "runs" && view !== "retention") return;
+  if (!["builder", "graph", "runs", "retention"].includes(view)) return;
   if (view === "builder" && historicalLoopId) return;
   if (view === "runs" && isNewLoopDraft()) return;
   currentView = view;
+  if (view === "graph") {
+    renderAll();
+    await governedGraphWorkspace.activate();
+    return;
+  }
+  governedGraphWorkspace.deactivate();
   if (view === "runs") {
     renderAll();
     await loadRuns();
@@ -1665,6 +1727,7 @@ async function loadRuns({
       requestJson("/api/loop-runs?maximumCount=50", requestOptions),
       filteredPageRequest,
       requestJson("/api/loop-runs/quota", requestOptions),
+      loadOperationalPosture({ requestOptions, silent: true }),
     ]);
     if (
       requestGeneration !== runEvidenceRequestGeneration ||
@@ -1730,6 +1793,13 @@ async function loadRuns({
         return null;
       selectedRun = evidence.run;
       selectedTrace = evidence.trace;
+      await loadOperationalPostureForRun(requestedRunId, requestOptions);
+      if (
+        requestGeneration !== runEvidenceRequestGeneration ||
+        selectedLoopId() !== loopId ||
+        selectedRunId !== requestedRunId
+      )
+        return null;
       bindSelectedRunMonitor(selectedRun?.id ?? null);
       selectedRunMonitorMissCount = 0;
     } else {
@@ -1989,6 +2059,816 @@ function resetSelectedRunMonitorFallback() {
   selectedRunMonitorNextFallbackAt = 0;
 }
 
+async function loadOperationalPosture({
+  requestOptions = {},
+  silent = false,
+  cursors = {},
+} = {}) {
+  const requestGeneration = ++operationalPostureRequestGeneration;
+  const workspaceRoot = currentOperationalWorkspaceRoot();
+  operationalPostureActiveReads++;
+  operationalPostureInFlight = true;
+  renderOperationalPosture();
+  try {
+    const response = await requestJson(
+      operationalPosturePageUrl(cursors),
+      requestOptions,
+    );
+    if (!isCurrentOperationalPostureRequest(requestGeneration, workspaceRoot))
+      return false;
+    operationalPosture = response;
+    operationalPostureFailure = null;
+    operationalPostureWorkspaceRoot = workspaceRoot;
+    return true;
+  } catch (error) {
+    if (!isCurrentOperationalPostureRequest(requestGeneration, workspaceRoot))
+      return false;
+    operationalPosture = null;
+    operationalPostureFailure = error.message;
+    operationalPostureWorkspaceRoot = workspaceRoot;
+    if (!silent)
+      showBanner(`Operational posture unavailable: ${error.message}`);
+    return false;
+  } finally {
+    operationalPostureActiveReads = Math.max(
+      0,
+      operationalPostureActiveReads - 1,
+    );
+    operationalPostureInFlight = operationalPostureActiveReads > 0;
+    if (
+      isCurrentOperationalPostureRequest(requestGeneration, workspaceRoot) ||
+      !operationalPostureInFlight
+    ) {
+      renderOperationalPosture();
+    }
+  }
+}
+
+function operationalPosturePageUrl({
+  queueCursor = null,
+  afterScheduleId = null,
+  afterCheckpointId = null,
+  afterRunId = null,
+} = {}) {
+  const parameters = [
+    "maximumQueueEntries=50",
+    "maximumSchedules=50",
+    "maximumWakes=50",
+    "maximumRuns=50",
+  ];
+  for (const [name, value] of [
+    ["queueCursor", queueCursor],
+    ["afterScheduleId", afterScheduleId],
+    ["afterCheckpointId", afterCheckpointId],
+    ["afterRunId", afterRunId],
+  ]) {
+    if (typeof value === "string" && value)
+      parameters.push(`${name}=${encodeURIComponent(value)}`);
+  }
+  return `/api/loop-operations/posture?${parameters.join("&")}`;
+}
+
+async function loadOperationalPostureForRun(runId, requestOptions = {}) {
+  if (typeof runId !== "string" || !runId) return false;
+  let afterRunId = null;
+  for (let page = 0; page < 100; page++) {
+    const loaded = await loadOperationalPosture({
+      requestOptions,
+      silent: true,
+      cursors: { afterRunId },
+    });
+    if (!loaded) return false;
+    const runs = postureSnapshot(operationalPosture)?.runs;
+    if ((runs?.items ?? []).some((item) => item.runId === runId)) return true;
+    if (
+      !runs?.hasMore ||
+      typeof runs.continuationCursor !== "string" ||
+      !runs.continuationCursor ||
+      runs.continuationCursor === afterRunId
+    )
+      return false;
+    afterRunId = runs.continuationCursor;
+  }
+  return false;
+}
+
+function configurePendingOperationalControlJournal(workspaceRoot) {
+  if (typeof workspaceRoot !== "string" || !workspaceRoot)
+    throw new Error(
+      "The operational-control workspace identity is unavailable.",
+    );
+  const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
+  const nextKey = `${pendingOperationalControlStorageKeyPrefix}.${scope}`;
+  if (pendingOperationalControlStorageKey === nextKey) return;
+  if (pendingOperationalControl)
+    throw new Error(
+      "The workspace changed while an exact operational control remained unresolved.",
+    );
+
+  pendingOperationalControlWorkspaceScope = scope;
+  pendingOperationalControlStorageKey = nextKey;
+  pendingOperationalControl = restorePendingOperationalControl();
+}
+
+function restorePendingOperationalControl() {
+  const storage = operationalControlSessionStorage();
+  if (
+    !pendingOperationalControlStorageKey ||
+    !pendingOperationalControlWorkspaceScope ||
+    !storage
+  )
+    return null;
+  try {
+    const stored = storage.getItem(pendingOperationalControlStorageKey);
+    if (!stored) return null;
+    const payload = JSON.parse(stored);
+    if (
+      payload?.schemaVersion !== 1 ||
+      payload.workspaceScope !== pendingOperationalControlWorkspaceScope ||
+      !isExactOperationalControlRequest(payload.request)
+    ) {
+      storage.removeItem(pendingOperationalControlStorageKey);
+      return null;
+    }
+    return Object.freeze({ ...payload.request });
+  } catch {
+    try {
+      storage.removeItem(pendingOperationalControlStorageKey);
+    } catch {
+      // Corrupt convenience evidence never becomes exact mutation truth.
+    }
+    return null;
+  }
+}
+
+function persistPendingOperationalControl(request) {
+  const storage = operationalControlSessionStorage();
+  if (
+    !pendingOperationalControlStorageKey ||
+    !pendingOperationalControlWorkspaceScope ||
+    !storage ||
+    !isExactOperationalControlRequest(request)
+  )
+    return false;
+  try {
+    storage.setItem(
+      pendingOperationalControlStorageKey,
+      JSON.stringify({
+        schemaVersion: 1,
+        workspaceScope: pendingOperationalControlWorkspaceScope,
+        request,
+      }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function clearPendingOperationalControl() {
+  try {
+    if (pendingOperationalControlStorageKey)
+      operationalControlSessionStorage()?.removeItem(
+        pendingOperationalControlStorageKey,
+      );
+  } catch {
+    // In-memory identity is still retired only after an exact conclusive response.
+  }
+  pendingOperationalControl = null;
+}
+
+function operationalControlSessionStorage() {
+  try {
+    return window.sessionStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function isExactOperationalControlRequest(request) {
+  const identifier = (value, maximum) =>
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximum &&
+    !/[\s\u0000-\u001f\u007f]/.test(value);
+  return (
+    request &&
+    identifier(request.operationId, 128) &&
+    Object.values(controlKinds).includes(request.kind) &&
+    identifier(request.targetId, 256) &&
+    Number.isSafeInteger(request.expectedRevision) &&
+    request.expectedRevision > 0 &&
+    /^[0-9a-f]{64}$/.test(request.expectedEvidenceHash ?? "") &&
+    /^[0-9a-f]{64}$/.test(request.expectedAuthorityEvidenceHash ?? "") &&
+    Number.isSafeInteger(request.maximumBatchItems) &&
+    request.maximumBatchItems > 0 &&
+    request.maximumBatchItems <= 100 &&
+    (request.kind === controlKinds.cancelPendingDeliveries ||
+      request.maximumBatchItems === 1)
+  );
+}
+
+function currentOperationalWorkspaceRoot() {
+  return typeof workspaceStatusSnapshot?.workspaceRoot === "string"
+    ? workspaceStatusSnapshot.workspaceRoot
+    : null;
+}
+
+function isCurrentOperationalPostureRequest(requestGeneration, workspaceRoot) {
+  return (
+    requestGeneration === operationalPostureRequestGeneration &&
+    workspaceRoot !== null &&
+    currentOperationalWorkspaceRoot() === workspaceRoot
+  );
+}
+
+function hasCurrentOperationalPosture() {
+  const workspaceRoot = currentOperationalWorkspaceRoot();
+  return (
+    workspaceRoot !== null &&
+    operationalPostureWorkspaceRoot === workspaceRoot &&
+    postureSnapshot(operationalPosture)
+  );
+}
+
+function invalidateOperationalPostureForWorkspace(workspaceRoot) {
+  if (
+    operationalPostureWorkspaceRoot === null ||
+    operationalPostureWorkspaceRoot === workspaceRoot
+  )
+    return;
+  operationalPostureRequestGeneration++;
+  operationalPosture = null;
+  operationalPostureFailure = null;
+  operationalPostureOutcome = null;
+  operationalPostureWorkspaceRoot = null;
+  renderOperationalPosture();
+}
+
+function renderOperationalPosture() {
+  if (!elements.operationalPostureContent) return;
+  elements.refreshOperationalPostureButton.disabled =
+    operationalPostureInFlight || operationalControlInFlight;
+  elements.operationalPostureContent.replaceChildren();
+  elements.operationalPostureNotice.className = "operational-posture-notice";
+  elements.operationalPostureNotice.textContent =
+    operationalPostureOutcome ?? "";
+
+  const snapshot = hasCurrentOperationalPosture()
+    ? postureSnapshot(operationalPosture)
+    : null;
+  if (!snapshot) {
+    elements.operationalPostureObservedAt.textContent =
+      operationalPostureInFlight
+        ? "Reading authoritative evidence"
+        : "Authoritative evidence unavailable";
+    if (operationalPostureFailure) {
+      elements.operationalPostureNotice.textContent = operationalPostureFailure;
+      elements.operationalPostureNotice.className =
+        "operational-posture-notice warning";
+    }
+    elements.operationalPostureContent.append(
+      node(
+        "p",
+        "empty-state",
+        "Queue, schedule, wake, and worker state remains unavailable until the shared runtime facade can prove a complete snapshot.",
+      ),
+    );
+    renderPendingOperationalControlRetry();
+    return;
+  }
+
+  elements.operationalPostureObservedAt.textContent = `${formatStatus(operationalPosture.status)} · observed ${formatTimestamp(snapshot.observedAtUtc)}`;
+  if (String(operationalPosture.status).toLowerCase() === "backpressured") {
+    elements.operationalPostureNotice.textContent =
+      "One or more durable sources are backpressured. Exact controls remain available only where this snapshot advertises their own current optimistic evidence.";
+    elements.operationalPostureNotice.className =
+      "operational-posture-notice warning";
+  }
+  renderPendingOperationalControlRetry();
+  const queue = snapshot.queue ?? { items: [] };
+  const schedules = snapshot.schedules ?? { items: [] };
+  const wakes = snapshot.wakes ?? { items: [] };
+  elements.operationalPostureContent.append(
+    renderWorkerPosture(snapshot.coordinator),
+    renderQueuePosture(queue),
+    renderSchedulePosture(schedules, queue),
+    renderWakePosture(wakes),
+  );
+}
+
+function renderPendingOperationalControlRetry() {
+  if (!pendingOperationalControl) return;
+  elements.operationalPostureNotice.className =
+    "operational-posture-notice warning";
+  elements.operationalPostureNotice.textContent =
+    operationalPostureOutcome ??
+    `Exact ${splitWords(pendingOperationalControl.kind)} operation ${pendingOperationalControl.operationId} remains unresolved.`;
+  elements.operationalPostureNotice.append(
+    actionButton(
+      "Retry exact control",
+      retryPendingOperationalControl,
+      operationalControlInFlight,
+      "secondary-button",
+    ),
+  );
+}
+
+function operationalPostureCard(title, meta) {
+  const card = node("section", "operational-posture-card");
+  const header = node("header", "operational-posture-card-header");
+  header.append(node("strong", "", title), node("span", "", meta));
+  card.append(header);
+  return { card, header };
+}
+
+function renderWorkerPosture(worker) {
+  const state = worker?.state ?? "unavailable";
+  const { card } = operationalPostureCard("Worker", formatStatus(state));
+  const items = node("div", "operational-posture-items");
+  items.append(
+    operationalPostureItem(
+      worker?.coordinatorId ?? "No coordinator",
+      `${splitWords(worker?.reasonCode)}${worker?.leaseExpiresAtUtc ? ` · lease ${formatTimestamp(worker.leaseExpiresAtUtc)}` : ""}`,
+    ),
+  );
+  card.append(items);
+  return card;
+}
+
+function renderQueuePosture(queue) {
+  const { card, header } = operationalPostureCard(
+    "Queue",
+    `${queue.queuedEntries ?? 0} pending${queue.hasMore ? "+" : ""}`,
+  );
+  const loopId = selectedLoopId();
+  if (queue.hasMore && queue.continuationCursor) {
+    header.append(
+      actionButton(
+        "Next queue page",
+        () =>
+          loadOperationalPosture({
+            cursors: { queueCursor: queue.continuationCursor },
+          }),
+        operationalPostureInFlight || operationalControlInFlight,
+        "secondary-button",
+      ),
+    );
+  }
+  const matching = (queue.items ?? []).filter(
+    (item) =>
+      item.loopId === loopId && exactControl(item, controlKinds.cancelDelivery),
+  );
+  if (
+    loopId &&
+    (matching.length > 0 ||
+      queue.queuedEntries !== (queue.items ?? []).length) &&
+    (matching.length <= maximumOperationalControlBatchItems || queue.hasMore) &&
+    exactControl(queue, controlKinds.cancelPendingDeliveries)
+  ) {
+    header.append(
+      actionButton(
+        queue.queuedEntries === (queue.items ?? []).length
+          ? `Cancel ${matching.length} for loop`
+          : "Count and cancel pending for loop",
+        () => cancelOperationalPending(loopId),
+        operationalControlInFlight,
+        "danger-button",
+      ),
+    );
+  }
+
+  const items = node("div", "operational-posture-items");
+  for (const item of queue.items ?? []) {
+    const row = operationalPostureItem(
+      item.deliveryId,
+      `${formatStatus(item.state)} · ${splitWords(item.reasonCode)}${item.queuePosition ? ` · position ${item.queuePosition}` : ""}`,
+    );
+    if (exactControl(item, controlKinds.cancelDelivery)) {
+      row.append(
+        actionButton(
+          "Cancel",
+          () => cancelOperationalDelivery(item),
+          operationalControlInFlight,
+          "danger-button",
+        ),
+      );
+    }
+    items.append(row);
+  }
+  if ((queue.items ?? []).length === 0)
+    items.append(
+      operationalPostureItem("No retained deliveries", "Queue is empty"),
+    );
+  card.append(items);
+  return card;
+}
+
+function renderSchedulePosture(schedules, queue) {
+  const { card, header } = operationalPostureCard(
+    "Schedules",
+    `${(schedules.items ?? []).length}${schedules.hasMore ? "+" : ""} visible`,
+  );
+  if (schedules.hasMore && schedules.continuationCursor) {
+    header.append(
+      actionButton(
+        "Next schedule page",
+        () =>
+          loadOperationalPosture({
+            cursors: { afterScheduleId: schedules.continuationCursor },
+          }),
+        operationalPostureInFlight || operationalControlInFlight,
+        "secondary-button",
+      ),
+    );
+  }
+  const items = node("div", "operational-posture-items");
+  for (const schedule of schedules.items ?? []) {
+    const row = operationalPostureItem(
+      schedule.scheduleId,
+      `${formatStatus(schedule.state)} · ${schedule.nextEligibleAtUtc ? `next ${formatTimestamp(schedule.nextEligibleAtUtc)}` : splitWords(schedule.reasonCode)}`,
+    );
+    const delivery = schedule.pendingDeliveryId
+      ? (queue.items ?? []).find(
+          (candidate) => candidate.deliveryId === schedule.pendingDeliveryId,
+        )
+      : null;
+    if (delivery && exactControl(delivery, controlKinds.cancelDelivery)) {
+      row.append(
+        actionButton(
+          "Cancel delivery",
+          () => cancelOperationalDelivery(delivery),
+          operationalControlInFlight,
+          "danger-button",
+        ),
+      );
+    } else if (
+      typeof schedule.enabled === "boolean" &&
+      exactControl(
+        schedule,
+        schedule.enabled
+          ? controlKinds.disableSchedule
+          : controlKinds.enableSchedule,
+      )
+    ) {
+      row.append(
+        actionButton(
+          schedule.enabled ? "Disable" : "Enable",
+          () => setOperationalScheduleEnabled(schedule, !schedule.enabled),
+          operationalControlInFlight,
+        ),
+      );
+    }
+    items.append(row);
+  }
+  if ((schedules.items ?? []).length === 0)
+    items.append(operationalPostureItem("No schedules", "Catalog is empty"));
+  card.append(items);
+  return card;
+}
+
+function renderWakePosture(wakes) {
+  const { card, header } = operationalPostureCard(
+    "Wakes",
+    `${(wakes.items ?? []).length}${wakes.hasMore ? "+" : ""} visible`,
+  );
+  if (wakes.hasMore && wakes.continuationCursor) {
+    header.append(
+      actionButton(
+        "Next wake page",
+        () =>
+          loadOperationalPosture({
+            cursors: { afterCheckpointId: wakes.continuationCursor },
+          }),
+        operationalPostureInFlight || operationalControlInFlight,
+        "secondary-button",
+      ),
+    );
+  }
+  const items = node("div", "operational-posture-items");
+  for (const wake of wakes.items ?? []) {
+    items.append(
+      operationalPostureItem(
+        wake.checkpointId,
+        `${formatStatus(wake.state)} · run ${wake.runId} · node ${wake.nodeId}${wake.wakeAtUtc ? ` · ${formatTimestamp(wake.wakeAtUtc)}` : ""}`,
+      ),
+    );
+  }
+  if ((wakes.items ?? []).length === 0)
+    items.append(
+      operationalPostureItem(
+        "No sleeping checkpoints",
+        "Wake catalog is empty",
+      ),
+    );
+  card.append(items);
+  return card;
+}
+
+function operationalPostureItem(identity, detail) {
+  const row = node("div", "operational-posture-item");
+  const copy = node("div", "");
+  copy.append(node("code", "", identity), node("span", "", detail));
+  row.append(copy);
+  return row;
+}
+
+async function cancelOperationalDelivery(item) {
+  if (
+    !window.confirm(
+      `Cancel delivery ${item.deliveryId} at exact revision ${item.revision}? A dispatch already in progress may require review.`,
+    )
+  )
+    return;
+  await performOperationalControl(
+    item,
+    controlKinds.cancelDelivery,
+    item.deliveryId,
+  );
+}
+
+async function cancelOperationalPending(loopId) {
+  const batch = await capturePendingDeliveryBatch(loopId);
+  if (!batch) return;
+  if (batch.matchingCount === 0) {
+    operationalPostureOutcome = `No pending deliveries remain for ${loopId}.`;
+    renderOperationalPosture();
+    return;
+  }
+  if (
+    !window.confirm(
+      `Cancel every currently pending delivery for ${loopId}, up to the proved bound of ${batch.matchingCount}?`,
+    )
+  )
+    return;
+  await performOperationalControl(
+    batch.queue,
+    controlKinds.cancelPendingDeliveries,
+    loopId,
+    batch.matchingCount,
+  );
+}
+
+async function capturePendingDeliveryBatch(loopId) {
+  const workspaceRoot = operationalPostureWorkspaceRoot;
+  if (
+    !hasCurrentOperationalPosture() ||
+    operationalPostureInFlight ||
+    operationalControlInFlight ||
+    workspaceRoot !== currentOperationalWorkspaceRoot()
+  ) {
+    operationalPostureOutcome =
+      "Refresh authoritative posture before proving a batch cancellation bound.";
+    renderOperationalPosture();
+    return null;
+  }
+
+  const requestGeneration = ++operationalPostureRequestGeneration;
+  operationalPostureActiveReads++;
+  operationalPostureInFlight = true;
+  operationalPostureOutcome =
+    "Reading the complete canonical queue before batch cancellation…";
+  renderOperationalPosture();
+  let firstResponse = null;
+  let firstSnapshot = null;
+  let firstQueue = null;
+  let continuationCursor = null;
+  let matchingCount = 0;
+
+  try {
+    for (let page = 0; page < maximumOperationalQueueBatchPages; page++) {
+      const response = await requestJson(
+        operationalPosturePageUrl({ queueCursor: continuationCursor }),
+      );
+      if (!isCurrentOperationalPostureRequest(requestGeneration, workspaceRoot))
+        return null;
+      const snapshot = postureSnapshot(response);
+      const queue = snapshot?.queue;
+      if (!queue || !exactControl(queue, controlKinds.cancelPendingDeliveries))
+        throw new Error(
+          "The queue no longer advertises exact batch-control evidence.",
+        );
+      if (!firstResponse) {
+        firstResponse = response;
+        firstSnapshot = snapshot;
+        firstQueue = queue;
+      } else if (
+        !sameCanonicalQueue(firstSnapshot, firstQueue, snapshot, queue)
+      ) {
+        throw new Error(
+          "The queue changed while its complete batch bound was being read.",
+        );
+      }
+
+      matchingCount += (queue.items ?? []).filter(
+        (item) =>
+          item.loopId === loopId &&
+          exactControl(item, controlKinds.cancelDelivery),
+      ).length;
+      if (matchingCount > maximumOperationalControlBatchItems) {
+        operationalPostureOutcome = `More than ${maximumOperationalControlBatchItems} pending deliveries match ${loopId}; the bounded batch action was not sent.`;
+        return null;
+      }
+      if (!queue.hasMore) {
+        operationalPosture = firstResponse;
+        operationalPostureFailure = null;
+        operationalPostureWorkspaceRoot = workspaceRoot;
+        operationalPostureOutcome = null;
+        return { queue: firstQueue, matchingCount };
+      }
+      if (
+        typeof queue.continuationCursor !== "string" ||
+        !queue.continuationCursor ||
+        queue.continuationCursor === continuationCursor
+      )
+        throw new Error("The queue continuation evidence is incomplete.");
+      continuationCursor = queue.continuationCursor;
+    }
+    throw new Error("The complete queue exceeds the bounded batch-proof read.");
+  } catch (error) {
+    if (isCurrentOperationalPostureRequest(requestGeneration, workspaceRoot))
+      operationalPostureOutcome = `Batch cancellation was not sent because its complete queue bound could not be proved: ${error.message}`;
+    return null;
+  } finally {
+    operationalPostureActiveReads = Math.max(
+      0,
+      operationalPostureActiveReads - 1,
+    );
+    operationalPostureInFlight = operationalPostureActiveReads > 0;
+    if (
+      isCurrentOperationalPostureRequest(requestGeneration, workspaceRoot) ||
+      !operationalPostureInFlight
+    ) {
+      renderOperationalPosture();
+    }
+  }
+}
+
+function sameCanonicalQueue(firstSnapshot, firstQueue, snapshot, queue) {
+  const firstControl = exactControl(
+    firstQueue,
+    controlKinds.cancelPendingDeliveries,
+  );
+  const currentControl = exactControl(
+    queue,
+    controlKinds.cancelPendingDeliveries,
+  );
+  return (
+    firstSnapshot.controlAuthorityEvidenceHash ===
+      snapshot.controlAuthorityEvidenceHash &&
+    firstQueue.generation === queue.generation &&
+    firstQueue.queuedEntries === queue.queuedEntries &&
+    firstQueue.queuedReservationBytes === queue.queuedReservationBytes &&
+    firstQueue.retainedEntries === queue.retainedEntries &&
+    firstQueue.retainedReservationBytes === queue.retainedReservationBytes &&
+    firstQueue.persistenceBackpressured === queue.persistenceBackpressured &&
+    firstControl?.expectedRevision === currentControl?.expectedRevision &&
+    firstControl?.expectedEvidenceHash === currentControl?.expectedEvidenceHash
+  );
+}
+
+async function setOperationalScheduleEnabled(schedule, enabled) {
+  if (
+    !window.confirm(
+      `${enabled ? "Enable" : "Disable"} schedule ${schedule.scheduleId} at exact state revision ${schedule.stateRevision}?`,
+    )
+  )
+    return;
+  await performOperationalControl(
+    schedule,
+    enabled ? controlKinds.enableSchedule : controlKinds.disableSchedule,
+    schedule.scheduleId,
+  );
+}
+
+async function performOperationalControl(
+  owner,
+  kind,
+  targetId,
+  maximumBatchItems = 1,
+) {
+  if (operationalControlInFlight)
+    return { ok: false, message: "Another lifecycle control is in progress." };
+  if (pendingOperationalControl) {
+    operationalPostureOutcome = `Exact ${splitWords(pendingOperationalControl.kind)} operation ${pendingOperationalControl.operationId} remains unresolved. Retry that exact control before starting another.`;
+    renderOperationalPosture();
+    return { ok: false, message: operationalPostureOutcome };
+  }
+  const workspaceRoot = operationalPostureWorkspaceRoot;
+  if (
+    !hasCurrentOperationalPosture() ||
+    operationalPostureInFlight ||
+    workspaceRoot !== currentOperationalWorkspaceRoot()
+  ) {
+    operationalPostureOutcome =
+      "Refresh authoritative posture before applying lifecycle controls.";
+    renderOperationalPosture();
+    return { ok: false, message: operationalPostureOutcome };
+  }
+  const snapshot = postureSnapshot(operationalPosture);
+  const body = controlRequest({
+    operationId: newOperationId(),
+    targetId,
+    owner,
+    kind,
+    authorityEvidenceHash: snapshot?.controlAuthorityEvidenceHash,
+    maximumBatchItems,
+  });
+  if (!body)
+    return {
+      ok: false,
+      message:
+        "The selected control no longer has exact optimistic evidence. Refresh posture before retrying.",
+    };
+  if (!persistPendingOperationalControl(body)) {
+    operationalPostureOutcome =
+      "The exact lifecycle control identity could not be retained in this workspace-scoped tab journal, so no control was sent.";
+    renderOperationalPosture();
+    return { ok: false, message: operationalPostureOutcome };
+  }
+  pendingOperationalControl = Object.freeze({ ...body });
+  return await submitPendingOperationalControl(workspaceRoot);
+}
+
+async function retryPendingOperationalControl() {
+  if (!pendingOperationalControl || operationalControlInFlight) return;
+  const workspaceRoot = currentOperationalWorkspaceRoot();
+  if (
+    !workspaceRoot ||
+    pendingOperationalControlWorkspaceScope !==
+      encodeURIComponent(workspaceRoot.normalize("NFC"))
+  ) {
+    operationalPostureOutcome =
+      "The retained operational control does not belong to this trusted workspace.";
+    renderOperationalPosture();
+    return;
+  }
+  await submitPendingOperationalControl(workspaceRoot);
+}
+
+async function submitPendingOperationalControl(workspaceRoot) {
+  const body = pendingOperationalControl;
+  if (!body)
+    return { ok: false, message: "No exact lifecycle control is retained." };
+  operationalControlInFlight = true;
+  operationalPostureOutcome = `Applying exact ${splitWords(body.kind)} operation ${body.operationId}…`;
+  renderOperationalPosture();
+  let outcome;
+  try {
+    const response = await requestJson("/api/loop-operations/control", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    if (
+      response?.operationId !== body.operationId ||
+      !conclusiveOperationalControlStatuses.has(
+        operationalControlStatusToken(response?.status),
+      )
+    )
+      throw new Error(
+        "The lifecycle-control response did not prove the exact operation outcome.",
+      );
+    clearPendingOperationalControl();
+    if (workspaceRoot === currentOperationalWorkspaceRoot())
+      operationalPostureOutcome = `${formatStatus(response.status)} · ${splitWords(response.reasonCode)}`;
+    outcome = { ok: true, response };
+  } catch (error) {
+    const exactConclusiveResponse =
+      error.payload?.operationId === body.operationId &&
+      conclusiveOperationalControlStatuses.has(
+        operationalControlStatusToken(error.payload?.status),
+      );
+    if (exactConclusiveResponse) clearPendingOperationalControl();
+    const status = error.payload?.status
+      ? `${formatStatus(error.payload.status)} · `
+      : "";
+    const detail = error.payload?.reasonCode
+      ? splitWords(error.payload.reasonCode)
+      : error.message;
+    if (workspaceRoot === currentOperationalWorkspaceRoot())
+      operationalPostureOutcome = `${status}${detail}${pendingOperationalControl ? ` · exact operation ${body.operationId} retained for retry` : ""}`;
+    outcome = {
+      ok: false,
+      error,
+      message: `${status}${detail}${pendingOperationalControl ? ` · exact operation ${body.operationId} retained for retry` : ""}`,
+    };
+  } finally {
+    if (workspaceRoot === currentOperationalWorkspaceRoot()) {
+      await loadOperationalPosture({ silent: true });
+    }
+    operationalControlInFlight = false;
+    renderOperationalPosture();
+  }
+  return outcome;
+}
+
+function operationalControlStatusToken(value) {
+  return String(value ?? "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replaceAll("_", "-")
+    .toLowerCase();
+}
+
 function renderRuns() {
   renderTraceQuota();
   renderRunPagination();
@@ -2089,13 +2969,44 @@ function renderRuns() {
   }
 
   const timeline = node("div", "timeline");
+  const frontier = projectFrontier(selectedRun);
+  if (frontier) timeline.append(renderFrontier(frontier));
   for (const event of selectedRun.events ?? [])
     timeline.append(renderRunEvent(event));
-  if ((selectedRun.events ?? []).length === 0)
+  if (!frontier && (selectedRun.events ?? []).length === 0)
     timeline.append(
       node("p", "empty-state", "No persisted events were returned."),
     );
   elements.runTimeline.append(timeline);
+}
+
+function renderFrontier(frontier) {
+  const section = node("section", "frontier-projection");
+  section.append(
+    node(
+      "h3",
+      "frontier-title",
+      `Durable frontier v${frontier.version} · ${formatStatus(frontier.status)}`,
+    ),
+  );
+  const path = node("ol", "frontier-path");
+  for (const item of frontier.nodes) {
+    const entry = node("li", `frontier-node ${item.visualState}`);
+    entry.dataset.frontierState = item.visualState;
+    entry.dataset.nodeId = item.nodeId;
+    entry.append(
+      node("span", "frontier-node-state", splitWords(item.visualState)),
+      node("strong", "frontier-node-id", item.nodeId),
+      node(
+        "span",
+        "frontier-node-detail",
+        `${formatStatus(item.kind)} · ${item.typeId}${item.visitOrdinal ? ` · visit ${item.visitOrdinal}` : ""}${item.attempt ? ` · attempt ${item.attempt}` : ""}${item.controlOutcome ? ` · ${formatStatus(item.controlOutcome)}` : ""}`,
+      ),
+    );
+    path.append(entry);
+  }
+  section.append(path);
+  return section;
 }
 
 function renderRunPagination() {
@@ -2133,6 +3044,12 @@ async function selectRun(runId) {
       return;
     selectedRun = evidence.run;
     selectedTrace = evidence.trace;
+    await loadOperationalPostureForRun(runId);
+    if (
+      requestGeneration !== runEvidenceRequestGeneration ||
+      selectedRunId !== runId
+    )
+      return;
     renderRuns();
     renderRunEvidence();
     scheduleSelectedRunRefresh();
@@ -2147,20 +3064,32 @@ async function selectRun(runId) {
 }
 
 function renderRunActions(run) {
+  const operationalRun = postureSnapshot(operationalPosture)?.runs?.items?.find(
+    (item) => item.runId === run.id,
+  );
   if (run.status === "Running")
     elements.runActions.append(
-      actionButton("Pause at boundary", () => controlRun("pause"), false),
+      actionButton(
+        "Pause at boundary",
+        () => controlRun("pause"),
+        !exactControl(operationalRun, controlKinds.pauseRun),
+      ),
     );
   if (run.status === "Paused")
     elements.runActions.append(
-      actionButton("Resume", resumeRun, false, "primary-button"),
+      actionButton(
+        "Resume",
+        resumeRun,
+        !exactControl(operationalRun, controlKinds.resumeRun),
+        "primary-button",
+      ),
     );
   if (["Admitted", "Running", "PauseRequested", "Paused"].includes(run.status))
     elements.runActions.append(
       actionButton(
         "Cancel",
         () => controlRun("cancel"),
-        false,
+        !exactControl(operationalRun, controlKinds.cancelRun),
         "danger-button",
       ),
     );
@@ -2421,6 +3350,13 @@ function renderRunEvidence() {
     `Operation ${selectedRun.admissionOperationId}\nRequest hash ${selectedRun.admissionRequestHash}`,
   );
   appendRunProgressEvidence(selectedRun, definition);
+  const frontier = projectFrontier(selectedRun);
+  if (frontier)
+    appendEvidenceSection(
+      "Canonical frontier",
+      `Version ${frontier.version} · ${formatStatus(frontier.status)}`,
+      `${frontier.contentHash}\n${frontier.nodes.map((item) => `${item.activationOrdinal}: ${item.nodeId} · ${item.visualState}${item.controlOutcome ? ` · ${item.controlOutcome}` : ""}`).join("\n")}`,
+    );
   appendEvidenceSection(
     "Provider and model",
     `${selectedRun.model.provider} · ${selectedRun.model.model || "provider default"}`,
@@ -3872,6 +4808,26 @@ function evidenceNote() {
 }
 
 function renderToolbar() {
+  if (currentView === "graph") {
+    elements.name.disabled = true;
+    elements.description.disabled = true;
+    elements.saveButton.disabled = true;
+    elements.reloadButton.disabled = true;
+    elements.deleteButton.disabled = true;
+    elements.invokeButton.disabled = true;
+    elements.addStepButton.disabled = true;
+    elements.loopSettingsButton.disabled = true;
+    elements.selectedNodeButton.disabled = true;
+    elements.createLoopButton.disabled = mutationInFlight || !catalog;
+    elements.loopSearch.disabled = mutationInFlight || !catalog;
+    elements.zoomFitButton.disabled = true;
+    elements.zoomInButton.disabled = true;
+    elements.zoomOutButton.disabled = true;
+    elements.saveState.textContent = "Canonical graph workspace";
+    elements.loopHeaderMeta.textContent =
+      "Immutable revisions · server validation · layout excluded from executable hash";
+    return;
+  }
   const newDraft = isNewLoopDraft();
   const uncertainFirstSave =
     newDraft && newLoopDraftCommitState === "uncertain";
@@ -4936,249 +5892,6 @@ async function withPendingInvocationRegistryLock(callback) {
   );
 }
 
-function lifecycleRequestKey(kind, runId, expectedLifecycleVersion) {
-  return JSON.stringify([kind, runId, expectedLifecycleVersion]);
-}
-
-async function reconcilePendingLifecycleRequest(
-  request,
-  receiptAbsenceIsDefinitive = false,
-  deadline = performance.now() +
-    pendingLifecycleReconciliationDeadlineMilliseconds,
-) {
-  let receipt;
-  try {
-    receipt = await requestLifecycleReceiptBeforeDeadline(
-      `/api/loop-runs/controls/${encodeURIComponent(request.operationId)}`,
-      deadline,
-    );
-  } catch (error) {
-    if (error.status === 404 && receiptAbsenceIsDefinitive)
-      return await tryForgetPendingLifecycleRequest(request);
-    return false;
-  }
-
-  if (receipt?.operationId !== request.operationId) return false;
-  const receiptMatchesRequest =
-    String(receipt.kind ?? "").toLowerCase() === request.kind &&
-    receipt.runId === request.runId &&
-    receipt.expectedLifecycleVersion === request.expectedLifecycleVersion;
-  if (!receiptMatchesRequest)
-    return await tryForgetPendingLifecycleRequest(request);
-  if (receipt.state !== "Complete" || receipt.completionDurablyProved !== true)
-    return false;
-  return await tryForgetPendingLifecycleRequest(request);
-}
-
-async function reconcilePendingLifecycleRequests(
-  deadline = performance.now() +
-    pendingLifecycleReconciliationDeadlineMilliseconds,
-) {
-  const requests = await withPendingLifecycleRegistryLock(async () => {
-    synchronizePendingLifecycleRequestsFromStorage();
-    return [...pendingLifecycleRequests.values()];
-  });
-  let nextIndex = 0;
-  const workerCount = Math.min(
-    maximumConcurrentLifecycleReceiptReads,
-    requests.length,
-  );
-  await Promise.all(
-    Array.from({ length: workerCount }, async () => {
-      while (nextIndex < requests.length) {
-        const request = requests[nextIndex++];
-        await reconcilePendingLifecycleRequest(request, false, deadline);
-      }
-    }),
-  );
-}
-
-async function requestLifecycleReceiptBeforeDeadline(url, deadline) {
-  const remainingMilliseconds = deadline - performance.now();
-  if (remainingMilliseconds <= 0)
-    throw new Error("The lifecycle receipt reconciliation deadline elapsed.");
-  const abortController = new AbortController();
-  let timeoutHandle = null;
-  try {
-    const timeout = new Promise((_, reject) => {
-      timeoutHandle = setTimeout(() => {
-        abortController.abort();
-        reject(
-          new Error("The lifecycle receipt reconciliation deadline elapsed."),
-        );
-      }, remainingMilliseconds);
-    });
-    return await Promise.race([
-      requestJson(url, { signal: abortController.signal }),
-      timeout,
-    ]);
-  } finally {
-    if (timeoutHandle !== null) clearTimeout(timeoutHandle);
-  }
-}
-
-async function getOrCreatePendingLifecycleRequest(
-  kind,
-  runId,
-  expectedLifecycleVersion,
-) {
-  await reconcilePendingLifecycleRequests();
-  return withPendingLifecycleRegistryLock(async () => {
-    synchronizePendingLifecycleRequestsFromStorage();
-    const requestKey = lifecycleRequestKey(
-      kind,
-      runId,
-      expectedLifecycleVersion,
-    );
-    const existing = pendingLifecycleRequests.get(requestKey);
-    if (existing) return existing;
-    if (pendingLifecycleRequests.size >= maximumPendingLifecycleRequests)
-      throw new Error(
-        `The workspace already has ${maximumPendingLifecycleRequests} unresolved lifecycle requests.`,
-      );
-    const pending = {
-      kind,
-      runId,
-      expectedLifecycleVersion,
-      operationId: newOperationId(),
-    };
-    const next = new Map(pendingLifecycleRequests);
-    next.set(requestKey, pending);
-    commitPendingLifecycleRequests(next);
-    return pending;
-  });
-}
-
-async function forgetPendingLifecycleRequest(request) {
-  return withPendingLifecycleRegistryLock(async () => {
-    synchronizePendingLifecycleRequestsFromStorage();
-    const requestKey = lifecycleRequestKey(
-      request.kind,
-      request.runId,
-      request.expectedLifecycleVersion,
-    );
-    const stored = pendingLifecycleRequests.get(requestKey);
-    if (!stored || stored.operationId !== request.operationId) return;
-    const next = new Map(pendingLifecycleRequests);
-    next.delete(requestKey);
-    commitPendingLifecycleRequests(next);
-  });
-}
-
-async function tryForgetPendingLifecycleRequest(request) {
-  try {
-    await forgetPendingLifecycleRequest(request);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function withPendingLifecycleRegistryLock(callback) {
-  const locks = globalThis.navigator?.locks;
-  if (!locks?.request)
-    throw new Error(
-      "This browser does not provide the required cross-tab lock service.",
-    );
-  if (!pendingLifecycleRegistryLockName)
-    throw new Error("The workspace-scoped lifecycle registry is unavailable.");
-  return locks.request(
-    pendingLifecycleRegistryLockName,
-    { mode: "exclusive" },
-    callback,
-  );
-}
-
-async function configurePendingLifecycleRegistry(workspaceRoot, initialized) {
-  if (typeof workspaceRoot !== "string" || !workspaceRoot)
-    throw new Error("The workspace identity is unavailable.");
-  const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
-  pendingLifecycleStorageKey = `${pendingLifecycleStorageKeyPrefix}.${scope}`;
-  pendingLifecycleRegistryLockName = `${pendingLifecycleRegistryLockNamePrefix}.${scope}`;
-  synchronizePendingLifecycleRequestsFromStorage();
-  if (
-    initialized &&
-    reconciledPendingLifecycleStorageKey !== pendingLifecycleStorageKey
-  ) {
-    await reconcilePendingLifecycleRequests();
-    reconciledPendingLifecycleStorageKey = pendingLifecycleStorageKey;
-  }
-}
-
-function synchronizePendingLifecycleRequestsFromStorage() {
-  const stored = restorePendingLifecycleRequests();
-  pendingLifecycleRequests.clear();
-  for (const [requestKey, request] of stored)
-    pendingLifecycleRequests.set(requestKey, request);
-}
-
-function restorePendingLifecycleRequests() {
-  if (!pendingLifecycleStorageKey || !window.localStorage)
-    throw new Error("Shared lifecycle storage is unavailable.");
-  const stored = window.localStorage.getItem(pendingLifecycleStorageKey);
-  if (!stored) return new Map();
-  let payload;
-  try {
-    payload = JSON.parse(stored);
-  } catch {
-    throw new Error("The shared lifecycle registry is corrupt.");
-  }
-  if (payload?.schemaVersion !== 1 || !Array.isArray(payload.requests))
-    throw new Error("The shared lifecycle registry schema is unsupported.");
-  const requests = new Map();
-  for (const request of payload.requests) {
-    if (!isStoredPendingLifecycleRequest(request))
-      throw new Error(
-        "The shared lifecycle registry contains invalid entries.",
-      );
-    const requestKey = lifecycleRequestKey(
-      request.kind,
-      request.runId,
-      request.expectedLifecycleVersion,
-    );
-    if (requests.has(requestKey))
-      throw new Error(
-        "The shared lifecycle registry contains duplicate entries.",
-      );
-    requests.set(requestKey, request);
-  }
-  return requests;
-}
-
-function isStoredPendingLifecycleRequest(request) {
-  return (
-    request &&
-    ["pause", "cancel", "resume"].includes(request.kind) &&
-    typeof request.runId === "string" &&
-    request.runId.length > 0 &&
-    request.runId.length <= 200 &&
-    Number.isInteger(request.expectedLifecycleVersion) &&
-    request.expectedLifecycleVersion > 0 &&
-    typeof request.operationId === "string" &&
-    /^[a-z0-9-]{8,128}$/.test(request.operationId)
-  );
-}
-
-function persistPendingLifecycleRequests(requests) {
-  if (!pendingLifecycleStorageKey || !window.localStorage)
-    throw new Error("Shared lifecycle storage is unavailable.");
-  if (!requests.size) {
-    window.localStorage.removeItem(pendingLifecycleStorageKey);
-    return;
-  }
-  window.localStorage.setItem(
-    pendingLifecycleStorageKey,
-    JSON.stringify({ schemaVersion: 1, requests: [...requests.values()] }),
-  );
-}
-
-function commitPendingLifecycleRequests(next) {
-  persistPendingLifecycleRequests(next);
-  pendingLifecycleRequests.clear();
-  for (const [requestKey, request] of next)
-    pendingLifecycleRequests.set(requestKey, request);
-}
-
 function configureRetentionCleanupRegistry(workspaceRoot) {
   if (typeof workspaceRoot !== "string" || !workspaceRoot)
     throw new Error("The workspace identity is unavailable.");
@@ -5836,116 +6549,43 @@ function invocationReconciliationDeadlineError() {
 
 async function controlRun(action) {
   if (!selectedRun) return;
-  const runId = selectedRun.id;
-  const expectedLifecycleVersion = selectedRun.lifecycleVersion;
-  let pending = null;
-  try {
-    pending = await getOrCreatePendingLifecycleRequest(
-      action,
-      runId,
-      expectedLifecycleVersion,
-    );
-    const response = await requestJson(
-      `/api/loop-runs/${encodeURIComponent(runId)}/${action}`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          expectedLifecycleVersion,
-          operationId: pending.operationId,
-        }),
-      },
-    );
-    selectedRun = response.run ?? response;
-    await loadRuns({ silent: true });
-    const cleanupSucceeded = await reconcilePendingLifecycleRequest(
-      pending,
-      response?.operationId === pending.operationId,
-    );
-    showToast(response.detail ?? `${capitalize(action)} request recorded.`);
-    if (!cleanupSucceeded)
-      showBanner(
-        `${capitalize(action)} returned, but its durable receipt is still pending or unreadable. Retrying the same operation is safe.`,
-        "notice",
-      );
-  } catch (error) {
-    const cleanupSucceeded =
-      !pending ||
-      (await reconcilePendingLifecycleRequest(
-        pending,
-        error.payload?.operationId === pending.operationId,
-      ));
-    const cleanupDetail = cleanupSucceeded
-      ? ""
-      : " The operation identity remains pending for safe replay.";
+  const run = postureSnapshot(operationalPosture)?.runs?.items?.find(
+    (item) => item.runId === selectedRun.id,
+  );
+  const kind =
+    action === "pause" ? controlKinds.pauseRun : controlKinds.cancelRun;
+  const result = await performOperationalControl(run, kind, selectedRun.id);
+  await loadRuns({ silent: true, preferredRunId: selectedRun.id });
+  if (!result?.ok) {
     showBanner(
-      `${capitalize(action)} failed: ${error.message}${cleanupDetail}`,
+      `${capitalize(action)} failed: ${result?.message ?? "The exact control was not applied."}`,
     );
+    return;
   }
+  showToast(
+    `${capitalize(action)} · ${splitWords(result.response.reasonCode)}`,
+  );
 }
 
 async function resumeRun() {
   if (!selectedRun || selectedRun.status !== "Paused") return;
   const runId = selectedRun.id;
-  const expectedLifecycleVersion = selectedRun.lifecycleVersion;
-  let pending = null;
-  try {
-    pending = await getOrCreatePendingLifecycleRequest(
-      "resume",
-      runId,
-      expectedLifecycleVersion,
+  const run = postureSnapshot(operationalPosture)?.runs?.items?.find(
+    (item) => item.runId === runId,
+  );
+  const result = await performOperationalControl(
+    run,
+    controlKinds.resumeRun,
+    runId,
+  );
+  await loadRuns({ silent: true, preferredRunId: runId });
+  if (!result?.ok) {
+    showBanner(
+      `Resume failed: ${result?.message ?? "The exact control was not applied."}`,
     );
-    const connection = await getHub();
-    const invocation = connection.invoke("ResumeLoop", {
-      runId,
-      expectedLifecycleVersion,
-      operationId: pending.operationId,
-    });
-    const response = await waitForRunOperation(invocation, {
-      preferredRunId: runId,
-    });
-    const accepted = [
-      "Resumed",
-      "Completed",
-      "Cancelled",
-      "Paused",
-      "NeedsReview",
-      "AuditWarning",
-    ].includes(response?.status);
-    selectedRun = response?.run ?? selectedRun;
-    if (!accepted) {
-      await loadRuns({ silent: true, preferredRunId: runId });
-      renderAll();
-      const cleanupSucceeded = await reconcilePendingLifecycleRequest(
-        pending,
-        response?.operationId === pending.operationId,
-      );
-      const cleanupDetail = cleanupSucceeded
-        ? ""
-        : " The operation identity remains pending for safe replay.";
-      showBanner(
-        `Resume failed: ${response?.detail ?? "The runtime rejected the Resume operation."}${cleanupDetail}`,
-      );
-      return;
-    }
-    await loadRuns({ silent: true });
-    const cleanupSucceeded = await reconcilePendingLifecycleRequest(
-      pending,
-      response?.operationId === pending.operationId,
-    );
-    showToast(response?.detail ?? "Resume completed.");
-    if (!cleanupSucceeded)
-      showBanner(
-        "Resume returned, but its durable receipt is still pending or unreadable. Retrying the same operation is safe.",
-        "notice",
-      );
-  } catch (error) {
-    const cleanupSucceeded =
-      !pending || (await reconcilePendingLifecycleRequest(pending));
-    const cleanupDetail = cleanupSucceeded
-      ? ""
-      : " The operation identity remains pending for safe replay.";
-    showBanner(`Resume failed: ${error.message}${cleanupDetail}`);
+    return;
   }
+  showToast(`Resume · ${splitWords(result.response.reasonCode)}`);
 }
 
 async function waitForRunOperation(invocation, preferredSelection) {

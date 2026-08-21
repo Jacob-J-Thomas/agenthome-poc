@@ -3,6 +3,9 @@ namespace EmbodySense.Core.Common.Loops.Posture.Models;
 /// <summary>Identifies the closed controls admitted by the local-background operational plane.</summary>
 public enum GovernedLoopOperationalControlKind
 {
+    /// <summary>Represents a missing or unrecognized public control token.</summary>
+    Unknown = 0,
+
     /// <summary>Requests checkpoint-bound run pause.</summary>
     PauseRun = 1,
 
