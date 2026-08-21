@@ -30,27 +30,37 @@ internal sealed class AuthorityDelegationCreateOperation
         }
     }
 
-    internal void Complete()
+    internal bool Complete(bool publish)
     {
         lock (_waitersSync)
         {
+            publish &= !_executionCancellation.IsCancellationRequested;
             _completed = true;
-        }
+            if (_waiters == 0)
+            {
+                _executionCancellation.Dispose();
+            }
 
-        _executionCancellation.Dispose();
+            return publish;
+        }
     }
 
     internal void ReleaseWaiter()
     {
-        var cancelExecution = false;
         lock (_waitersSync)
         {
             _waiters--;
-            cancelExecution = _waiters == 0 && !_completed;
-        }
+            if (_waiters != 0)
+            {
+                return;
+            }
 
-        if (cancelExecution)
-        {
+            if (_completed)
+            {
+                _executionCancellation.Dispose();
+                return;
+            }
+
             _executionCancellation.Cancel();
         }
     }
