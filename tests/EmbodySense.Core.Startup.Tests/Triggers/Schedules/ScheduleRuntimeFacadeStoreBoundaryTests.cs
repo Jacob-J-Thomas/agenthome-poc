@@ -117,6 +117,13 @@ public sealed class ScheduleRuntimeFacadeStoreBoundaryTests
             (request, _) => Task.FromResult(new ScheduleStoreMutationResult(
                 ScheduleStoreMutationStatus.Applied,
                 request.InitialState)));
+        var invalidCreateReplay = await CreateAsync(
+            workspace,
+            context,
+            (request, _) => Task.FromResult(new ScheduleStoreMutationResult(
+                ScheduleStoreMutationStatus.Applied,
+                request.InitialState)
+            { ExactReplay = true }));
 
         Assert.All([nullResult, invalidStatus, missingAppliedState, substitutedAppliedState, corruptFailure], result =>
         {
@@ -127,6 +134,8 @@ public sealed class ScheduleRuntimeFacadeStoreBoundaryTests
         Assert.Null(unavailableFailure.CurrentState);
         Assert.Equal(ScheduleRuntimeCreateStatus.Created, exactApplied.Status);
         Assert.NotNull(exactApplied.CurrentState);
+        Assert.Equal(ScheduleRuntimeCreateStatus.Corrupt, invalidCreateReplay.Status);
+        Assert.Null(invalidCreateReplay.CurrentState);
     }
 
     [Fact]
@@ -172,12 +181,19 @@ public sealed class ScheduleRuntimeFacadeStoreBoundaryTests
             ScheduleStoreMutationStatus.Applied,
             request.Replacement));
         var exactApplied = await runtime.SetEnabledAsync(created.CurrentState!, false);
+        store.CompareExchangeBehavior = (request, _) => Task.FromResult(new ScheduleStoreMutationResult(
+            ScheduleStoreMutationStatus.Applied,
+            request.Replacement)
+        { ExactReplay = true });
+        var exactReplay = await runtime.SetEnabledAsync(created.CurrentState!, false);
 
         Assert.All(
             [nullResult, invalidStatus, missingAppliedState, substitutedAppliedState, malformedConflict, corruptFailure],
             result => Assert.Equal(ScheduleStoreMutationStatus.Corrupt, result.Status));
         Assert.Equal(ScheduleStoreMutationStatus.Unavailable, unavailableFailure.Status);
         Assert.Equal(ScheduleStoreMutationStatus.Applied, exactApplied.Status);
+        Assert.Equal(ScheduleStoreMutationStatus.Applied, exactReplay.Status);
+        Assert.True(exactReplay.ExactReplay);
         Assert.Equal(2, exactApplied.CurrentState!.StateRevision);
         Assert.False(exactApplied.CurrentState.Enabled);
     }

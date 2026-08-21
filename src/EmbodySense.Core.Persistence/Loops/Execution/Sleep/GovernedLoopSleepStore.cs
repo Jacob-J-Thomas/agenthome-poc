@@ -1,6 +1,10 @@
 using System.ComponentModel;
 using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.Sleep.Models;
+using EmbodySense.Core.Application.Loops.Posture;
+using EmbodySense.Core.Application.Loops.Posture.Models;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Posture;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
@@ -21,7 +25,7 @@ namespace EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 /// terminal or reconcilable head. Cancellation is honored through the last check before staging, after which the durable
 /// publication protocol runs to a conclusive or explicitly ambiguous boundary.
 /// </remarks>
-public sealed class GovernedLoopSleepStore : IGovernedLoopSleepStore
+public sealed class GovernedLoopSleepStore : IGovernedLoopSleepStore, IGovernedLoopWakeOperationalPosturePort
 {
     private const int SchemaVersion = 1;
     private const int MaximumConfiguredCheckpoints = 16_384;
@@ -168,6 +172,61 @@ public sealed class GovernedLoopSleepStore : IGovernedLoopSleepStore
         catch (Exception exception) when (IsUnavailable(exception))
         {
             return WakeRead(GovernedLoopSleepStoreReadStatus.Unavailable);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<GovernedLoopWakeCatalogEvidenceReadResult> ReadAsync(
+        GovernedLoopOperationalEvidencePageRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request is null
+            || request.MaximumCount is < 1 or > GovernedLoopOperationalPostureLimits.MaxPageItems
+            || request.AfterId is not null
+                && !CustomLoopArtifactIdentifier.IsValid(request.AfterId, GovernedLoopOperationalPostureLimits.MaxTargetIdCharacters))
+        {
+            return Operational(GovernedLoopOperationalEvidenceReadStatus.Corrupt);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            using var mutationLock = await _guard.AcquireMutationLockAsync(_observer, cancellationToken).ConfigureAwait(false);
+            var (catalog, _) = await LoadAsync(mutationLock, cancellationToken).ConfigureAwait(false);
+            var selected = catalog.Entries
+                .Where(entry => request.AfterId is null || string.Compare(entry.Checkpoint.CheckpointId, request.AfterId, StringComparison.Ordinal) > 0)
+                .OrderBy(entry => entry.Checkpoint.CheckpointId, StringComparer.Ordinal)
+                .Take(request.MaximumCount + 1)
+                .ToArray();
+            var hasMore = selected.Length > request.MaximumCount;
+            var items = Array.AsReadOnly(selected
+                .Take(request.MaximumCount)
+                .Select(entry => new GovernedLoopWakeEvidenceSnapshot(
+                    Copy(entry.Checkpoint),
+                    entry.WakeEvidence.Count == 0 ? null : Copy(entry.WakeEvidence[^1])))
+                .ToArray());
+            return new GovernedLoopWakeCatalogEvidenceReadResult(
+                items.Count == 0 ? GovernedLoopOperationalEvidenceReadStatus.Empty : GovernedLoopOperationalEvidenceReadStatus.Found,
+                catalog.Generation,
+                hasMore,
+                hasMore ? items[^1].Checkpoint.CheckpointId : null,
+                items);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is GovernedLoopSleepStoreLimitException or TriggerQueuePersistenceBackpressureException)
+        {
+            return Operational(GovernedLoopOperationalEvidenceReadStatus.Backpressured);
+        }
+        catch (Exception exception) when (exception is FormatException or InvalidDataException or OverflowException or ArgumentException or Win32Exception)
+        {
+            return Operational(GovernedLoopOperationalEvidenceReadStatus.Corrupt);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or TimeoutException or PlatformNotSupportedException or NotSupportedException)
+        {
+            return Operational(GovernedLoopOperationalEvidenceReadStatus.Unavailable);
         }
     }
 
@@ -626,6 +685,9 @@ public sealed class GovernedLoopSleepStore : IGovernedLoopSleepStore
             status,
             evidence is null ? null : Copy(evidence),
             preparedEvidence is null ? null : Copy(preparedEvidence));
+
+    private static GovernedLoopWakeCatalogEvidenceReadResult Operational(GovernedLoopOperationalEvidenceReadStatus status)
+        => new(status, 0, false, null, Array.AsReadOnly(Array.Empty<GovernedLoopWakeEvidenceSnapshot>()));
 
     private static GovernedLoopBackgroundWorkReadResult Background(
         GovernedLoopBackgroundWorkReadStatus status,

@@ -1,6 +1,5 @@
 using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.Wait;
-using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 using EmbodySense.Core.Persistence.Triggers.Schedules;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
@@ -15,7 +14,7 @@ internal sealed class GovernedLoopWaitRuntimeHost : ICustomLoopExecutionActivati
     private static readonly TimeSpan _heartbeatInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan _ownershipLeaseDuration = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan _takeoverMargin = TimeSpan.FromMilliseconds(25);
-    private const string CoordinatorId = "local-background";
+    internal const string CoordinatorId = "local-background";
     private const int CandidateReadLimit = 16;
     private const int MaximumItemsPerFamilyPerCycle = 4;
     private readonly SemaphoreSlim _activationGate = new(1, 1);
@@ -26,21 +25,23 @@ internal sealed class GovernedLoopWaitRuntimeHost : ICustomLoopExecutionActivati
     private int _disposed;
 
     internal GovernedLoopWaitRuntimeHost(
-        WorkspacePaths paths,
+        ScheduleStore scheduleStore,
         GovernedLoopSleepStore sleepStore,
+        GovernedLoopCoordinatorEvidenceStore coordinatorEvidenceStore,
         GovernedLoopSleepService sleep,
         GovernedLoopWaitExecutionService wait,
         TimeProvider? timeProvider = null)
     {
-        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(scheduleStore);
         ArgumentNullException.ThrowIfNull(sleepStore);
+        ArgumentNullException.ThrowIfNull(coordinatorEvidenceStore);
         ArgumentNullException.ThrowIfNull(sleep);
         _wait = wait ?? throw new ArgumentNullException(nameof(wait));
         _timeProvider = timeProvider ?? TimeProvider.System;
 
         var instanceId = Guid.NewGuid().ToString("N");
         var backgroundWork = new GovernedLoopBackgroundWorkSource(
-            new ScheduleStore(paths),
+            scheduleStore,
             sleepStore);
         var canonicalWork = new GovernedLoopLocalWorkRunner(
             backgroundWork,
@@ -56,7 +57,7 @@ internal sealed class GovernedLoopWaitRuntimeHost : ICustomLoopExecutionActivati
             wait,
             CandidateReadLimit);
         _coordinator = new GovernedLoopLocalCoordinator(
-            new GovernedLoopCoordinatorEvidenceStore(paths),
+            coordinatorEvidenceStore,
             recoveringWork,
             new GovernedLoopLocalCoordinatorOptions(
                 CoordinatorId,

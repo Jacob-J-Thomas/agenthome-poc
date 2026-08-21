@@ -2,8 +2,10 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
+using EmbodySense.Core.Application.Loops.Posture.Models;
 using EmbodySense.Core.Application.Triggers;
 using EmbodySense.Core.Application.Triggers.Models;
+using EmbodySense.Core.Common.Loops.Posture;
 using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
 using EmbodySense.Core.Common.Workspace;
@@ -14,6 +16,104 @@ namespace EmbodySense.Core.Persistence.Tests.Triggers;
 
 public sealed class TriggerQueueStoreTests
 {
+    [Fact]
+    public async Task Operational_pages_are_deterministic_cursor_safe_detached_and_validate_the_whole_queue_before_projection()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new TriggerQueueStore(paths);
+        var priorities = new[]
+        {
+            (Suffix: "3", Priority: TriggerQueuePriority.Critical),
+            (Suffix: "1", Priority: TriggerQueuePriority.Background),
+            (Suffix: "2", Priority: TriggerQueuePriority.Elevated)
+        };
+        foreach (var item in priorities)
+        {
+            var envelope = TriggerQueueTestData.Envelope($"delivery-{item.Suffix}", $"dedup-{item.Suffix}", $"loop-{item.Suffix}");
+            var admitted = await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(envelope, item.Priority));
+            Assert.Equal(TriggerQueueAdmissionStatus.Queued, admitted.Status);
+        }
+        var adapter = new TriggerQueueOperationalPostureAdapter(store, "workspace-1");
+        var observedAtUtc = TriggerQueueTestData.CreatedAtUtc.AddMinutes(1);
+
+        var first = await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1), observedAtUtc);
+        var firstAgain = await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1), observedAtUtc);
+        var second = await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, first.ContinuationCursor), observedAtUtc);
+        var third = await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, second.ContinuationCursor), observedAtUtc);
+        var malformed = await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, "q1.bad"), observedAtUtc);
+
+        Assert.Equal("delivery-3", Assert.Single(first.Items).DeliveryId.Value);
+        Assert.StartsWith("q1.", first.ContinuationCursor, StringComparison.Ordinal);
+        Assert.Equal("delivery-2", Assert.Single(second.Items).DeliveryId.Value);
+        Assert.StartsWith("q1.", second.ContinuationCursor, StringComparison.Ordinal);
+        Assert.Equal("delivery-1", Assert.Single(third.Items).DeliveryId.Value);
+        Assert.False(third.HasMore);
+        Assert.Null(third.ContinuationCursor);
+        Assert.Equal(GovernedLoopOperationalEvidenceReadStatus.Corrupt, malformed.Status);
+        Assert.Equal(3, first.Items.Concat(second.Items).Concat(third.Items).Select(item => item.DeliveryId.Value).Distinct(StringComparer.Ordinal).Count());
+        Assert.NotSame(first.Items[0], firstAgain.Items[0]);
+        var exposed = Assert.IsAssignableFrom<IList<TriggerQueueEntry>>(first.Items);
+        Assert.Throws<NotSupportedException>(() => exposed.Add(first.Items[0]));
+
+        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope("delivery-4", "dedup-4", "loop-4")));
+        var stale = await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, first.ContinuationCursor), observedAtUtc);
+        Assert.Equal(GovernedLoopOperationalEvidenceReadStatus.Corrupt, stale.Status);
+
+        await File.WriteAllTextAsync(Assert.Single(Directory.EnumerateFiles(QueueRoot(paths), "ledger-*.json")), "{}");
+        var corruptOffPage = await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1), observedAtUtc);
+        Assert.Equal(GovernedLoopOperationalEvidenceReadStatus.Corrupt, corruptOffPage.Status);
+    }
+
+    [Fact]
+    public async Task Operational_read_projects_abandoned_dispatch_attention_without_sweeping_or_publishing_queue_state()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new TriggerQueueStore(paths);
+        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
+        var queued = await store.PeekSnapshotAsync();
+        var selected = await store.SelectAsync(new TriggerWorkerSelectionRequest(
+            "worker-1",
+            queued.Generation,
+            TriggerQueueTestData.CreatedAtUtc.AddSeconds(4),
+            TimeSpan.FromSeconds(3),
+            [],
+            2));
+        Assert.Equal(TriggerWorkerSelectionStatus.Acquired, selected.Status);
+        var dispatching = await store.BeginDispatchAsync(
+            selected.Entry!.DeliveryId,
+            "worker-1",
+            selected.Entry.WorkerLease!.Generation,
+            selected.Entry.Revision,
+            Intent(selected.Entry, TriggerQueueTestData.CreatedAtUtc.AddSeconds(5)));
+        Assert.Equal(TriggerWorkerMutationStatus.Committed, dispatching.Status);
+        var before = await store.PeekSnapshotAsync();
+        var beforeFiles = Directory.EnumerateFiles(QueueRoot(paths), "ledger-*.json")
+            .Order(StringComparer.Ordinal)
+            .ToDictionary(path => path, File.ReadAllBytes);
+
+        var read = await new TriggerQueueOperationalPostureAdapter(store, "workspace-1").ReadAsync(
+            new GovernedLoopOperationalEvidencePageRequest(10),
+            TriggerQueueTestData.CreatedAtUtc.AddSeconds(8));
+        var after = await store.PeekSnapshotAsync();
+        var afterFiles = Directory.EnumerateFiles(QueueRoot(paths), "ledger-*.json")
+            .Order(StringComparer.Ordinal)
+            .ToDictionary(path => path, File.ReadAllBytes);
+
+        Assert.Equal(GovernedLoopOperationalEvidenceReadStatus.Found, read.Status);
+        Assert.Equal(before.Generation, read.Generation);
+        Assert.Equal(before.Generation, after.Generation);
+        Assert.Equal(TriggerQueueEntryState.Dispatching, Assert.Single(read.Items).State);
+        Assert.Equal(before.Entries[0].Revision, read.Items[0].Revision);
+        Assert.Equal(TriggerQueueEntryState.Dispatching, after.Entries[0].State);
+        Assert.Equal(beforeFiles.Keys, afterFiles.Keys);
+        foreach (var item in beforeFiles)
+        {
+            Assert.Equal(item.Value, afterFiles[item.Key]);
+        }
+    }
+
     [Fact]
     public async Task Windows_staging_path_identity_check_allows_publication_and_prior_generation_cleanup()
     {

@@ -22,6 +22,7 @@ using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Application.Triggers.Schedules;
 using EmbodySense.Core.Persistence.Triggers;
 using EmbodySense.Core.Startup.Triggers;
+using EmbodySense.Core.Startup.Loops.Posture;
 
 namespace EmbodySense.Core.Startup.Runtime;
 
@@ -45,6 +46,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly CustomLoopRuntimeFacade _customLoops;
     private readonly GovernedLoopRuntimeFacade _governedLoops;
     private readonly IScheduleDeliveryProvenancePort _scheduleDeliveryProvenance;
+    private readonly GovernedLoopOperationalFacade _governedLoopOperations;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
     private readonly GovernedLoopWaitRuntimeHost? _governedWaitRuntimeHost;
     private readonly GovernedLoopSleepService? _governedSleep;
@@ -60,6 +62,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         CustomLoopRuntimeFacade customLoops,
         GovernedLoopRuntimeFacade governedLoops,
         IScheduleDeliveryProvenancePort scheduleDeliveryProvenance,
+        GovernedLoopOperationalFacade governedLoopOperations,
         DefaultConversationTurnReviewService defaultConversationReviews,
         CodexRuntimeStatus codexRuntimeStatus,
         GovernedLoopWaitRuntimeHost? governedWaitRuntimeHost = null,
@@ -74,6 +77,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(loopRunner);
         ArgumentNullException.ThrowIfNull(customLoops);
         ArgumentNullException.ThrowIfNull(governedLoops);
+        ArgumentNullException.ThrowIfNull(governedLoopOperations);
         ArgumentNullException.ThrowIfNull(defaultConversationReviews);
         ArgumentNullException.ThrowIfNull(codexRuntimeStatus);
 
@@ -87,6 +91,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _customLoops = customLoops;
         _governedLoops = governedLoops;
         _scheduleDeliveryProvenance = scheduleDeliveryProvenance ?? throw new ArgumentNullException(nameof(scheduleDeliveryProvenance));
+        _governedLoopOperations = governedLoopOperations ?? throw new ArgumentNullException(nameof(governedLoopOperations));
         _defaultConversationReviews = defaultConversationReviews;
         _governedWaitRuntimeHost = governedWaitRuntimeHost;
         _governedSleep = governedSleep;
@@ -110,6 +115,9 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// Gets a value indicating whether custom-loop execution remains disabled pending explicit persistence cleanup or recovery.
     /// </summary>
     public bool CustomLoopRecoveryRequired => _customLoops.CustomRecoveryRequired;
+
+    /// <summary>Gets the shared typed posture and lifecycle-control facade over this runtime's canonical stores.</summary>
+    public GovernedLoopOperationalFacade GovernedLoopOperations => _governedLoopOperations;
 
     internal IConversationMemoryStore ConversationMemory { get; }
 

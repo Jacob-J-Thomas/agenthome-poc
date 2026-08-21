@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Posture.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using System.Diagnostics;
 using System.Security.Cryptography;
@@ -22,6 +23,7 @@ using EmbodySense.Core.Common.Tests.Triggers.Schedules;
 using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Schedules;
 using EmbodySense.Core.Common.Triggers.Schedules.Models;
+using EmbodySense.Core.Common.Loops.Posture;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Tests.Support;
@@ -130,6 +132,85 @@ public sealed class CustomLoopRunStoreTests
 
         string ordinalArtifact(TriggerDeliveryId deliveryId)
             => Path.Combine(paths.CustomLoopScheduleAdmissionsPath, $"{deliveryId.Value}.json");
+    }
+
+    [Fact]
+    public async Task Operational_pages_preserve_opaque_cursor_snapshots_reject_unknown_cursors_and_detach_results()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteDirectAsync(paths, At(CreateRun("loop-a", "run-a", "invoke-a"), 3));
+        await WriteDirectAsync(paths, At(CreateRun("loop-b", "run-b", "invoke-b"), 2));
+        await WriteDirectAsync(paths, At(CreateRun("loop-c", "run-c", "invoke-c"), 1));
+        var adapter = new CustomLoopRunOperationalPostureAdapter(new CustomLoopRunStore(paths));
+
+        var first = await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1));
+        var firstAgain = await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1));
+        Assert.Equal("run-a", Assert.Single(first.Items).Summary.Id);
+        Assert.True(first.HasMore);
+        Assert.NotNull(first.ContinuationCursor);
+        Assert.NotSame(first.Items[0].Summary, firstAgain.Items[0].Summary);
+        var exposed = Assert.IsAssignableFrom<IList<GovernedLoopRunEvidenceSnapshot>>(first.Items);
+        Assert.Throws<NotSupportedException>(() => exposed.Add(first.Items[0]));
+
+        await WriteDirectAsync(paths, At(CreateRun("loop-new", "run-new", "invoke-new"), 4));
+        var second = await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, first.ContinuationCursor));
+        var third = await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, second.ContinuationCursor));
+        Assert.Equal("run-b", Assert.Single(second.Items).Summary.Id);
+        Assert.Equal("run-c", Assert.Single(third.Items).Summary.Id);
+        Assert.False(third.HasMore);
+        Assert.Null(third.ContinuationCursor);
+
+        var impossibleCursorJson = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            version = 1,
+            createdAtUtcTicks = DateTimeOffset.MinValue.UtcTicks,
+            runId = "run-impossible-cursor",
+            loopId = (string?)null
+        });
+        var impossibleCursor = Convert.ToBase64String(impossibleCursorJson).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        Assert.Equal(
+            GovernedLoopOperationalEvidenceReadStatus.Corrupt,
+            (await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, impossibleCursor))).Status);
+        Assert.Equal(
+            GovernedLoopOperationalEvidenceReadStatus.Corrupt,
+            (await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1, "bad cursor"))).Status);
+
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopRunsPath, "loop-c", "run-c.json"), "{}");
+        Assert.Equal(
+            GovernedLoopOperationalEvidenceReadStatus.Corrupt,
+            (await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1))).Status);
+    }
+
+    [Fact]
+    public async Task Operational_pages_reconcile_a_valid_lifecycle_update_after_page_discovery()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var writer = new CustomLoopRunStore(paths);
+        var admitted = CreateRun();
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await writer.CreateAsync(admitted)).Status);
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        var mutationCount = 0;
+        using var reader = new CustomLoopRunStore(paths, path =>
+        {
+            Assert.Equal(1, Interlocked.Increment(ref mutationCount));
+            var update = writer.UpdateAsync(running, admitted.LifecycleVersion).GetAwaiter().GetResult();
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, update.Status);
+            return new FileSystemWatcher(path);
+        });
+        var adapter = new CustomLoopRunOperationalPostureAdapter(reader);
+
+        var read = await adapter.ReadAsync(new GovernedLoopOperationalEvidencePageRequest(1));
+
+        Assert.Equal(GovernedLoopOperationalEvidenceReadStatus.Found, read.Status);
+        var snapshot = Assert.Single(read.Items);
+        Assert.Equal(CustomLoopRunStatus.Running, snapshot.Summary.Status);
+        Assert.Equal(running.LifecycleVersion, snapshot.Summary.LifecycleVersion);
+        Assert.Equal(
+            Convert.ToHexString(SHA256.HashData(CustomLoopRunArtifactSerializer.Serialize(running))).ToLowerInvariant(),
+            snapshot.EvidenceHash);
+        Assert.Equal(1, mutationCount);
     }
 
     [Fact]
