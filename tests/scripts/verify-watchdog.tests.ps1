@@ -675,12 +675,6 @@ Assert-Equal -Actual $exactDeadline.Code -Expected "passed" -Message "Successful
 $overDeadline = Get-VerificationDeadlineDisposition -ElapsedTicks ($deadlineTicks + 1) -DeadlineTicks $deadlineTicks -ProcessExited $true -ExitCode 0 -CompletionMarkerCount 1 -ChildTimedOut $false -CancellationRequested $false
 Assert-Equal -Actual $overDeadline.Code -Expected "deadline-exceeded" -Message "One tick over 600 seconds must fail."
 
-$promotionDeadlineTicks = [TimeSpan]::FromSeconds(900).Ticks
-$exactPromotionDeadline = Get-VerificationDeadlineDisposition -ElapsedTicks $promotionDeadlineTicks -DeadlineTicks $promotionDeadlineTicks -ProcessExited $true -ExitCode 0 -CompletionMarkerCount 1 -ChildTimedOut $false -CancellationRequested $false
-Assert-True -Condition $exactPromotionDeadline.Succeeded -Message "Exactly 900 seconds must remain inside the explicit promotion deadline."
-$overPromotionDeadline = Get-VerificationDeadlineDisposition -ElapsedTicks ($promotionDeadlineTicks + 1) -DeadlineTicks $promotionDeadlineTicks -ProcessExited $true -ExitCode 0 -CompletionMarkerCount 1 -ChildTimedOut $false -CancellationRequested $false
-Assert-Equal -Actual $overPromotionDeadline.Code -Expected "deadline-exceeded" -Message "One tick over the bounded promotion deadline must fail."
-
 $childTimeout = Get-VerificationDeadlineDisposition -ElapsedTicks 1 -DeadlineTicks $deadlineTicks -ProcessExited $true -ExitCode 1 -CompletionMarkerCount 0 -ChildTimedOut $true -CancellationRequested $false
 Assert-Equal -Actual $childTimeout.Code -Expected "child-timeout" -Message "A child phase timeout must be retained as its own failure."
 
@@ -707,7 +701,7 @@ $workflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
 $qualificationWorkflow = (Get-Content -LiteralPath $qualificationWorkflowPath -Raw).Replace("`r`n", "`n")
 $trustedLocalQualificationWorkflow = (Get-Content -LiteralPath $trustedLocalQualificationWorkflowPath -Raw).Replace("`r`n", "`n")
 Assert-True -Condition ($watchdogScript.IndexOf('[int]$DeadlineSeconds = 600', [StringComparison]::Ordinal) -ge 0) -Message "The external watchdog must default to exactly 600 seconds."
-Assert-True -Condition ($watchdogScript.IndexOf('[ValidateRange(1, 900)]', [StringComparison]::Ordinal) -ge 0) -Message "No accepted watchdog override may exceed the bounded 900-second promotion window."
+Assert-True -Condition ($watchdogScript.IndexOf('[ValidateRange(1, 600)]', [StringComparison]::Ordinal) -ge 0) -Message "No accepted watchdog override may exceed the inclusive 600-second promotion window."
 Assert-True -Condition ($watchdogScript.IndexOf('[switch]$Qualification', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must expose the bounded qualification child explicitly."
 Assert-True -Condition ($watchdogScript.IndexOf('"qualify.ps1"', [StringComparison]::Ordinal) -ge 0) -Message "Qualification must execute through its dedicated bounded orchestrator."
 Assert-True -Condition ($watchdogScript.IndexOf('Qualification requires exact -BaseCommit and -HeadCommit values.', [StringComparison]::Ordinal) -ge 0) -Message "Qualification must bind its exact comparison commits."
@@ -756,7 +750,7 @@ Assert-True -Condition ($qualificationScript.IndexOf('@("prettier", "--check", "
 Assert-True -Condition ($watchdogScript.IndexOf('Test-VerificationDeadlineExceeded -ElapsedTicks $stopwatch.Elapsed.Ticks -DeadlineTicks $deadlineTicks', [StringComparison]::Ordinal) -ge 0) -Message "The running watchdog must use the tested inclusive deadline decision."
 Assert-True -Condition ($watchdogScript.IndexOf('Stop-VerificationProcessTree $process', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must terminate the full verifier process tree."
 Assert-True -Condition ($verifyScript.IndexOf('VERIFY_COMPLETE schema_version=1 status=passed', [StringComparison]::Ordinal) -ge 0) -Message "The verifier must emit an exact terminal marker only after successful completion."
-Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900', [StringComparison]::Ordinal) -ge 0) -Message "Standard promotion must invoke the external watchdog with its explicit fifteen-minute certification bound."
+Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600', [StringComparison]::Ordinal) -ge 0) -Message "Standard promotion must invoke the external watchdog with its explicit ten-minute certification bound."
 Assert-True -Condition ($workflow.IndexOf('-SkipCoverage', [StringComparison]::Ordinal) -lt 0) -Message "Promotion verification must retain coverage collection and thresholds."
 Assert-True -Condition ($workflow.IndexOf("github.event.pull_request.draft == false", [StringComparison]::Ordinal) -ge 0) -Message "Promotion verification must run only for a merge-candidate pull request or main."
 Assert-True -Condition ($workflow.IndexOf('types: [opened, synchronize, reopened, ready_for_review, edited]', [StringComparison]::Ordinal) -ge 0) -Message "Every non-draft metadata edit must rerun substantive promotion verification."

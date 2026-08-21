@@ -262,7 +262,7 @@ foreach ($assemblyName in @("EmbodySense.Cli.Command.Tests", "EmbodySense.Core.A
 foreach ($retiredLane in @("loop-execution-custom-runtime", "loop-execution-governed-runtime", "contextual-roles", "codex-app-server", "runtime-host", "remainder-triggers")) {
     Assert-True -Condition ($laneScript.IndexOf("New-VerificationTestLane -Name `"$retiredLane`"", [StringComparison]::Ordinal) -lt 0) -Message "Assembly-wide execution must not retain report-amplifying lane '$retiredLane'."
 }
-Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateResourceCapacity = 12' -Message "Required gates must retain twelve logical resource units independently of the four-process host ceiling."
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateResourceCapacity = 12' -Message "Required gates must retain twelve logical resource units independently of the three-process host ceiling."
 Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumProcessHeavyWorkers = 3' -Message "Required gates must enforce an explicit three-process-heavy concurrency ceiling."
 Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumCpuBoundWorkers = 1' -Message "Required gates must enforce an explicit one-CPU-bound concurrency ceiling."
 Assert-Contains -Actual $scheduleScript -Expected 'Weight = 3; ResourceClass = "ProcessHeavy"' -Message "Process-heavy required gates must retain their evidence-backed logical weight."
@@ -274,8 +274,8 @@ Assert-Contains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationRequiredGateScheduleProfile -Name $Name' -Message "Every required gate must obtain checked-in duration and resource metadata by exact name."
 Assert-Contains -Actual $verifyScript -Expected '-EstimatedDurationSeconds $profile.EstimatedDurationSeconds -Weight $profile.Weight -ResourceClass $profile.ResourceClass' -Message "Every required gate must pass its exact checked-in scheduler profile."
 Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases)' -Message "The complete required gate plan must fail closed before execution when a profile is missing or mismatched."
-Assert-Contains -Actual $scheduleScript -Expected '$actualProcessCeiling = [Math]::Min(4, [Math]::Min($script:VerificationRequiredGateResourceCapacity, $HardwareProcessorCount))' -Message "Required gates must separate twelve logical resource units from the hard four-process execution ceiling."
-Assert-Contains -Actual $scheduleScript -Expected 'return [Math]::Min($MaximumTestWorkers, $actualProcessCeiling)' -Message "Required gates must preserve lower explicit worker requests without bypassing the four-process ceiling."
+Assert-Contains -Actual $scheduleScript -Expected '$actualProcessCeiling = [Math]::Min(3, [Math]::Min($script:VerificationRequiredGateResourceCapacity, $HardwareProcessorCount))' -Message "Required gates must separate twelve logical resource units from the hard three-process execution ceiling."
+Assert-Contains -Actual $scheduleScript -Expected 'return [Math]::Min($MaximumTestWorkers, $actualProcessCeiling)' -Message "Required gates must preserve lower explicit worker requests without bypassing the three-process ceiling."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers $MaximumTestWorkers -HardwareProcessorCount $hardwareProcessorCount' -Message "Required gate execution must use the behavior-tested worker derivation."
 Assert-Contains -Actual $verifyScript -Expected '$effectiveRequiredGateMaximumProcessHeavyWorkers = [Math]::Min($requiredGateMaximumProcessHeavyWorkers, $requiredGateMaximumWorkers)' -Message "Low-core execution must cap the process-heavy limit at the effective worker ceiling."
 Assert-Contains -Actual $verifyScript -Expected '$effectiveRequiredGateMaximumCpuBoundWorkers = [Math]::Min($requiredGateMaximumCpuBoundWorkers, $requiredGateMaximumWorkers)' -Message "Low-core execution must cap the CPU-bound limit at the effective worker ceiling."
@@ -364,7 +364,7 @@ foreach ($workflowText in @($verifyWorkflow, $browserWorkflow, $qualificationWor
     Assert-True -Condition ($workflowText.IndexOf("metadata-edit", [StringComparison]::Ordinal) -lt 0) -Message "No workflow may replace a protected context with an unevaluated skipped metadata name."
 }
 Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./scripts/verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "Standard CI cannot bypass the watchdog."
-Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900" -Message "Promotion must have one explicit bounded fifteen-minute certification window."
+Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600" -Message "Promotion must have one explicit bounded ten-minute certification window."
 Assert-Contains -Actual $verifyWorkflow -Expected "timeout-minutes: 20" -Message "Workflow setup and diagnostic upload must remain bounded outside the measured promotion child."
 Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./tests/scripts/", [StringComparison]::Ordinal) -lt 0) -Message "Repository script tests must execute inside the measured verifier child."
 foreach ($contractScript in @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1")) {

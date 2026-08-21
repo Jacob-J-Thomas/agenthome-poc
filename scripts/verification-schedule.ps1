@@ -99,7 +99,8 @@ function Get-VerificationRequiredGateMaximumWorkers {
         [int]$HardwareProcessorCount
     )
 
-    $actualProcessCeiling = [Math]::Min(4, [Math]::Min($script:VerificationRequiredGateResourceCapacity, $HardwareProcessorCount))
+    # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422: keep the outer process load below the four-core hosted runner while retaining twelve logical units.
+    $actualProcessCeiling = [Math]::Min(3, [Math]::Min($script:VerificationRequiredGateResourceCapacity, $HardwareProcessorCount))
     return [Math]::Min($MaximumTestWorkers, $actualProcessCeiling)
 }
 
