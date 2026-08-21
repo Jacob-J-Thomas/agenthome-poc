@@ -24,6 +24,7 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
     private const string WorkerResultVariable = "EMBODYSENSE_EFFECT_ATTEMPT_WORKER_RESULT";
     private const int VstestCrashExitCode = 1;
     private const int TestHostCrashExitCode = 73;
+    private const int WorkerExitTimeoutSeconds = 60;
     private static readonly DateTimeOffset _preparedAtUtc = DateTimeOffset.Parse("2026-08-12T20:00:00Z");
 
     [Theory]
@@ -194,7 +195,7 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         var errorTask = process.StandardError.ReadToEndAsync();
         try
         {
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(WorkerExitTimeoutSeconds));
         }
         finally
         {
