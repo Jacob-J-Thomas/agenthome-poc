@@ -8,6 +8,7 @@ import {
   compatibleBindings,
   configureGraphModelRouting,
   configureInferenceModelRouting,
+  configureNodeParameter,
   connectBinding,
   connectControl,
   connectorDecision,
@@ -203,6 +204,110 @@ test("graph module keeps layout separate, permits only cataloged connectors, and
   assert.equal(
     indexed.get("control-edge:edge-1")[0].path,
     "controlEdges[0].condition",
+  );
+});
+
+test("cataloged Fail terminals preserve exact Failure routing and omit optional agent-selected parameters until authored", () => {
+  const inference = {
+    descriptor: { kind: "inference", typeId: "model-inference", version: 1 },
+    isAdvertised: true,
+    isExecutable: true,
+    isLegalEntry: false,
+    isLegalTerminal: false,
+    allowedControlOutcomes: ["success", "failure"],
+    minimumIncomingControlEdges: 1,
+    ports: [],
+    parameters: [
+      { id: "instruction", valueKind: "text", required: true },
+      {
+        id: "max-iterations",
+        valueKind: "integer",
+        required: false,
+        minimumInteger: 1,
+      },
+      {
+        id: "max-duration-milliseconds",
+        valueKind: "integer",
+        required: false,
+        minimumInteger: 1,
+      },
+    ],
+    requiredCapabilityIds: [],
+  };
+  const fail = {
+    descriptor: { kind: "fail", typeId: "fail-terminal", version: 1 },
+    isAdvertised: true,
+    isExecutable: true,
+    isLegalEntry: false,
+    isLegalTerminal: true,
+    allowedControlOutcomes: [],
+    minimumIncomingControlEdges: 1,
+    ports: [],
+    parameters: [
+      { id: "code", valueKind: "text", required: false, maximumCharacters: 64 },
+      {
+        id: "explanation",
+        valueKind: "text",
+        required: false,
+        maximumCharacters: 256,
+      },
+    ],
+    requiredCapabilityIds: [],
+  };
+  const catalog = { nodeDescriptors: [inference, fail] };
+  let graph = {
+    graphId: "graph-failure",
+    revisionId: "revision-failure",
+    defaultModelRoutingPolicy: defaultRoutingPolicy,
+    nodes: [],
+    controlEdges: [],
+    bindings: [],
+    terminalNodeIds: [],
+    authorityCeiling: { capabilityIds: [] },
+    valueSchemas: [],
+    outputContract: { summary: "Failure graph", outputs: [] },
+    displayMetadata: {
+      displayName: "Failure graph",
+      description: "",
+      nodes: [],
+    },
+  };
+  graph = addCatalogNode(graph, inference, "infer", 0, 0);
+  graph = addCatalogNode(graph, fail, "fail", 200, 0);
+
+  assert.deepEqual(graph.nodes.find((item) => item.id === "infer").parameters, {
+    instruction: "",
+  });
+  assert.deepEqual(
+    graph.nodes.find((item) => item.id === "fail").parameters,
+    {},
+  );
+  assert.deepEqual(connectorDecision(catalog, graph, "infer", "fail"), {
+    allowed: true,
+    conditions: ["success", "failure"],
+  });
+  graph = connectControl(graph, catalog, "infer", "fail", "failure");
+  assert.equal(graph.controlEdges[0].condition, "failure");
+
+  graph = configureNodeParameter(graph, "fail", "code", "agent-selected", true);
+  graph = configureNodeParameter(
+    graph,
+    "fail",
+    "explanation",
+    "Stop deliberately.",
+    true,
+  );
+  assert.deepEqual(graph.nodes.find((item) => item.id === "fail").parameters, {
+    code: "agent-selected",
+    explanation: "Stop deliberately.",
+  });
+  graph = configureNodeParameter(graph, "fail", "code", "", true);
+  assert.equal(
+    Object.hasOwn(
+      graph.nodes.find((item) => item.id === "fail").parameters,
+      "code",
+    ),
+    false,
   );
 });
 

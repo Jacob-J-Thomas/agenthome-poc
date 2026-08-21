@@ -20,6 +20,8 @@ namespace EmbodySense.Core.Application.Loops.Sequential.Models;
 /// <param name="SkippedControlEdgeIds">The sorted exact skipped outgoing control edges.</param>
 /// <param name="Disposition">The exact handler disposition proved by the evidence.</param>
 /// <param name="OutcomeArtifactHash">The exact digest of the authenticated durable outcome event.</param>
+/// <param name="FailureEvidenceId">The exact classified-failure evidence identity for a rejected or review-blocked disposition.</param>
+/// <param name="FailureEvidenceHash">The exact classified-failure evidence digest paired with <paramref name="FailureEvidenceId"/>.</param>
 /// <param name="EvidenceHash">The canonical hash over every preceding field.</param>
 public sealed record GovernedLoopSequentialNodeEvidenceReceipt(
     int SchemaVersion,
@@ -39,6 +41,8 @@ public sealed record GovernedLoopSequentialNodeEvidenceReceipt(
     string[] SkippedControlEdgeIds,
     GovernedLoopSequentialNodeHandlerResultStatus Disposition,
     string OutcomeArtifactHash,
+    string? FailureEvidenceId,
+    string? FailureEvidenceHash,
     string EvidenceHash)
 {
     /// <summary>Gets the only supported experimental receipt schema version.</summary>

@@ -3177,6 +3177,8 @@ function renderRunEvent(event) {
   ].filter(Boolean);
   if (attemptEvidence.length)
     card.append(node("div", "evidence-code", attemptEvidence.join("\n")));
+  if (event.failureEvidence)
+    card.append(renderFailureEvidence(event.failureEvidence));
   if (event.toolEvidence)
     card.append(renderToolEvidence(event.toolEvidence, false));
   else if (event.toolAuthority)
@@ -3247,6 +3249,41 @@ function renderToolEvidence(evidence, includePayload = true) {
     if (evidence.canonicalResultReturnedToModel != null)
       details.append(node("pre", "", evidence.canonicalResultReturnedToModel));
   }
+  return details;
+}
+
+function renderFailureEvidence(evidence) {
+  const details = node("details", "context-block failure-evidence");
+  details.append(
+    node(
+      "summary",
+      "",
+      `${formatStatus(evidence.failureClass)} · ${evidence.serverCode} · precedence ${evidence.precedence}`,
+    ),
+  );
+  const causal = (evidence.causalEvidence ?? [])
+    .map((item) => `${item.evidenceId} · ${item.evidenceHash}`)
+    .join("\n");
+  details.append(
+    node(
+      "div",
+      "evidence-code",
+      [
+        `evidence ${evidence.evidenceId} · ${evidence.contentHash}`,
+        `binding workspace ${evidence.workspaceId} · run ${evidence.runId} · generation ${evidence.executionGeneration}`,
+        `revision ${evidence.graphId} · ${evidence.revisionId} · ${evidence.executableHash}`,
+        `node ${evidence.nodeId} · activation ${evidence.activationOrdinal} · visit ${evidence.visitOrdinal} · attempt ${evidence.attempt}`,
+        `source ${formatStatus(evidence.source)} · certainty ${formatStatus(evidence.effectCertainty)}`,
+        `authority ${formatStatus(evidence.authorityPosture)} · human ${formatStatus(evidence.humanPosture)}`,
+        `retry posture ${formatStatus(evidence.retrySafety)} · severity ${formatStatus(evidence.severity)}`,
+        `mapping ${evidence.mappingVersion} · observed ${formatTimestamp(evidence.observedAtUtc)}`,
+        evidence.safeDetail ? `safe detail ${evidence.safeDetail}` : null,
+        causal ? `causal evidence\n${causal}` : "causal evidence unavailable",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    ),
+  );
   return details;
 }
 
@@ -3478,6 +3515,15 @@ function renderRunEvidence() {
   const toolEvents = (selectedRun.events ?? []).filter(
     (event) => event.toolEvidence,
   );
+  const failureEvents = (selectedRun.events ?? []).filter(
+    (event) => event.failureEvidence,
+  );
+  if (failureEvents.length > 0) {
+    const failureSection = evidenceSection("Classified failure evidence");
+    for (const event of failureEvents)
+      failureSection.append(renderFailureEvidence(event.failureEvidence));
+    elements.inspectorContent.append(failureSection);
+  }
   if (toolEvents.length > 0) {
     const toolSection = evidenceSection(
       "Tool requests, governance, and model-visible results",

@@ -7,6 +7,8 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Failures;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Sequential;
@@ -863,6 +865,7 @@ public sealed class CustomLoopFrontierStoreTests
     {
         var node = context.Plan.Nodes[1];
         var activation = running.Frontier!.Payload.Nodes[1];
+        var dispatchStart = running.Events.Single(item => string.Equals(item.EventId, activation.AttemptOperationId, StringComparison.Ordinal));
         var outcomeAtUtc = running.UpdatedAtUtc.AddMinutes(1);
         var outcome = CreateSequentialEvent(
             running.Events[^1].Sequence + 1,
@@ -873,7 +876,8 @@ public sealed class CustomLoopFrontierStoreTests
             activation,
             evidenceKind,
             disposition,
-            outcomeAtUtc);
+            outcomeAtUtc,
+            new GovernedLoopFailureEvidenceReference(dispatchStart.EventId, dispatchStart.SequentialNodeEvidence!.EvidenceHash));
         var evidence = outcome.SequentialNodeEvidence!;
         var outcomeNode = GovernedLoopNodeExecutionEvidence.CreateActivation(
             activation.ActivationOrdinal,
@@ -1002,7 +1006,8 @@ public sealed class CustomLoopFrontierStoreTests
         GovernedLoopNodeExecutionEvidence activation,
         CustomLoopSequentialNodeEvidenceKind evidenceKind,
         CustomLoopSequentialNodeDisposition disposition,
-        DateTimeOffset timestampUtc)
+        DateTimeOffset timestampUtc,
+        GovernedLoopFailureEvidenceReference? failureSource = null)
     {
         var runEvent = new CustomLoopRunEvent(
             sequence,
@@ -1040,6 +1045,47 @@ public sealed class CustomLoopFrontierStoreTests
         IReadOnlyList<string> skippedControlEdgeIds = controlOutcome == GovernedLoopControlCondition.Failure
             ? activation.OutgoingControlEdgeIds
             : [];
+        var failure = disposition is CustomLoopSequentialNodeDisposition.Rejected or CustomLoopSequentialNodeDisposition.NeedsReview
+            ? GovernedLoopFailureEvidenceContract.Create(
+                runEvent.EventId + "-failure",
+                binding.WorkspaceId,
+                binding.ExecutionBinding.RunId,
+                binding.ExecutionBinding.Revision,
+                binding.ExecutionBinding.ExecutionGeneration,
+                activation.ActivationOrdinal,
+                activation.VisitOrdinal,
+                node.NodeId,
+                1,
+                disposition == CustomLoopSequentialNodeDisposition.NeedsReview
+                    ? GovernedLoopFailureClass.EvidenceIntegrityFailure
+                    : GovernedLoopFailureClass.ValidationConfiguration,
+                disposition == CustomLoopSequentialNodeDisposition.NeedsReview
+                    ? "persistence-fixture-review"
+                    : "persistence-fixture-rejected",
+                disposition == CustomLoopSequentialNodeDisposition.NeedsReview
+                    ? GovernedLoopFailureSource.Evidence
+                    : GovernedLoopFailureSource.Validation,
+                disposition == CustomLoopSequentialNodeDisposition.NeedsReview
+                    ? GovernedLoopFailureEffectCertainty.Unknown
+                    : GovernedLoopFailureEffectCertainty.NotApplicable,
+                disposition == CustomLoopSequentialNodeDisposition.NeedsReview
+                    ? GovernedLoopFailureAuthorityPosture.Unknown
+                    : GovernedLoopFailureAuthorityPosture.NotApplicable,
+                disposition == CustomLoopSequentialNodeDisposition.NeedsReview
+                    ? GovernedLoopFailureHumanPosture.Unknown
+                    : GovernedLoopFailureHumanPosture.None,
+                disposition == CustomLoopSequentialNodeDisposition.NeedsReview
+                    ? GovernedLoopFailureRetrySafety.Unknown
+                    : GovernedLoopFailureRetrySafety.NotRetryable,
+                disposition == CustomLoopSequentialNodeDisposition.NeedsReview
+                    ? GovernedLoopFailureSeverity.ReviewBlocked
+                    : GovernedLoopFailureSeverity.Error,
+                disposition == CustomLoopSequentialNodeDisposition.NeedsReview ? 1_000 : 700,
+                [failureSource ?? throw new InvalidOperationException("Failed sequential fixture evidence requires an exact causal source.")],
+                null,
+                timestampUtc)
+            : null;
+        var outcomeEvent = runEvent with { FailureEvidence = failure };
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             1,
             evidenceKind,
@@ -1059,9 +1105,13 @@ public sealed class CustomLoopFrontierStoreTests
             null,
             null,
             disposition,
-            CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
-            string.Empty));
-        return runEvent with { SequentialNodeEvidence = evidence };
+            CustomLoopSequentialOutcomeArtifactHash.Compute(outcomeEvent),
+            string.Empty)
+        {
+            FailureEvidenceId = failure?.EvidenceId,
+            FailureEvidenceHash = failure?.ContentHash,
+        });
+        return outcomeEvent with { SequentialNodeEvidence = evidence };
     }
 
     private static CustomLoopRunEvent CreateRunEvent(

@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.LocalWorkspace.Actions.Models;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
@@ -568,7 +569,7 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
     }
 
     [Fact]
-    public void Multiple_terminals_and_wrong_control_outcome_fail_closed()
+    public void Multiple_success_terminals_and_wrong_control_outcome_fail_closed()
     {
         var nodes = new[]
         {
@@ -595,6 +596,51 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
 
         Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, GovernedLoopSequentialPlanBuilder.Build(extraTerminal).Status);
         Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, GovernedLoopSequentialPlanBuilder.Build(wrongOutcome).Status);
+    }
+
+    [Fact]
+    public void One_optional_fail_terminal_and_one_exact_failure_edge_are_admitted()
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.LinearArtifact().Graph;
+        var inference = source.Nodes.Single(node => node.Descriptor == GovernedLoopSequentialNodeDescriptors.ProviderInference);
+        var fail = GovernedLoopSequentialApplicationTestFixture.Node("fail", GovernedLoopSequentialNodeDescriptors.FailTerminal);
+        var artifact = GovernedLoopSequentialApplicationTestFixture.Artifact(
+            source.Nodes.Append(fail).ToArray(),
+            source.ControlEdges.Append(new GovernedLoopControlEdgeDefinition("infer-fail", inference.Id, fail.Id, GovernedLoopControlCondition.Failure)).ToArray(),
+            [source.TerminalNodeIds.Single(), fail.Id],
+            source.OwningRole,
+            source.Bindings,
+            source.ValueSchemas,
+            source.OutputContract,
+            source.AuthorityCeiling);
+
+        var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, result.Status);
+        Assert.Contains(result.Plan!.Nodes, node => node.Descriptor == GovernedLoopSequentialNodeDescriptors.FailTerminal);
+        Assert.Contains(result.Plan.ControlEdges, edge => edge.Condition == GovernedLoopControlCondition.Failure && edge.ToNodeId == fail.Id);
+    }
+
+    [Fact]
+    public void Fail_terminal_rejects_missing_classified_route_and_caller_authored_taxonomy()
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.LinearArtifact().Graph;
+        var inference = source.Nodes.Single(node => node.Descriptor == GovernedLoopSequentialNodeDescriptors.ProviderInference);
+        var classifiedFail = GovernedLoopSequentialApplicationTestFixture.Node("fail", GovernedLoopSequentialNodeDescriptors.FailTerminal);
+        var invalidExplicitFail = classifiedFail with { Parameters = new Dictionary<string, string> { ["failure-class"] = "retryable-no-effect" } };
+        GovernedLoopGraphRevisionArtifact Candidate(GovernedLoopNodeDefinition fail)
+            => GovernedLoopSequentialApplicationTestFixture.Artifact(
+                source.Nodes.Append(fail).ToArray(),
+                source.ControlEdges.Append(new GovernedLoopControlEdgeDefinition("infer-fail", inference.Id, fail.Id, GovernedLoopControlCondition.Success)).ToArray(),
+                [source.TerminalNodeIds.Single(), fail.Id],
+                source.OwningRole,
+                source.Bindings,
+                source.ValueSchemas,
+                source.OutputContract,
+                source.AuthorityCeiling);
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, GovernedLoopSequentialPlanBuilder.Build(Candidate(classifiedFail)).Status);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, GovernedLoopSequentialPlanBuilder.Build(Candidate(invalidExplicitFail)).Status);
     }
 
     [Fact]

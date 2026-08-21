@@ -2,6 +2,8 @@ using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Loops.Admission.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
+using EmbodySense.Core.Application.Loops.Failures;
+using EmbodySense.Core.Application.Loops.Failures.Models;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
@@ -24,6 +26,8 @@ using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
+using EmbodySense.Core.Common.Loops.Failures;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -505,6 +509,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
         var result = await harness.RunToParkAsync();
 
+        Assert.True(harness.Store.ValidationFailures.Count == 0, string.Join(Environment.NewLine, harness.Store.ValidationFailures));
         Assert.Equal(orderedStatus, result.Status);
         Assert.Equal(runStatus, harness.Store.Current.Status);
         Assert.Equal(frontierStatus, harness.Store.Current.Frontier!.Payload.Status);
@@ -516,6 +521,77 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.True(CustomLoopRunValidator.Validate(harness.Store.Current).IsValid);
         Assert.Empty(harness.Store.ValidationFailures);
         Assert.Equal(new GovernedLoopWaitRecoveryResult(0, 0, 0), await harness.WaitService.RecoverAsync(16));
+    }
+
+    [Fact]
+    public async Task Expired_checkpoint_publication_routes_exact_failure_evidence_to_fail_without_redispatching_wait()
+    {
+        var harness = await CreateWaitRuntimeAsync(includeFailureRoute: true);
+        harness.Posture.ExecutionExpiresAtUtc = harness.Time.UtcNow;
+
+        var result = await harness.RunToParkAsync();
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Failed, harness.Store.Current.Status);
+        var wait = Assert.Single(harness.Store.Current.WaitEvidence);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Failed, harness.Store.Current.Frontier!.Payload.Nodes[wait.ActivationOrdinal].Status);
+        var fail = Assert.Single(harness.Store.Current.Frontier.Payload.Nodes, item => item.Descriptor == GovernedLoopSequentialNodeDescriptors.FailTerminal);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Failed, fail.Status);
+        var failures = harness.Store.Current.Events
+            .Where(item => item.FailureEvidence is not null)
+            .OrderBy(item => item.Sequence)
+            .ToArray();
+        Assert.Equal(2, failures.Length);
+        Assert.All(failures, item => Assert.True(GovernedLoopFailureEvidenceContract.IsValid(item.FailureEvidence)));
+        var sourceFailure = Assert.IsType<GovernedLoopFailureEvidence>(failures[0].FailureEvidence);
+        var terminalFailure = Assert.IsType<GovernedLoopFailureEvidence>(failures[1].FailureEvidence);
+        Assert.Equal(sourceFailure.FailureClass, terminalFailure.FailureClass);
+        Assert.Contains(terminalFailure.CausalEvidence, item => item.EvidenceId == sourceFailure.EvidenceId && item.EvidenceHash == sourceFailure.ContentHash);
+        Assert.Equal(1, harness.RecordingWait.RequestCount);
+        Assert.Equal(0, harness.SleepStore.CheckpointCount);
+        Assert.True(CustomLoopRunValidator.Validate(harness.Store.Current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(harness.Store.Current).Errors.Select(item => $"{item.Field}:{item.Code}")));
+        Assert.Empty(harness.Store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Expired_checkpoint_publication_rejects_hash_valid_classifier_evidence_from_another_boundary()
+    {
+        var classifier = new DelegatingGovernedLoopFailureClassifier((context, _, observedAtUtc) =>
+        {
+            var unrelated = new GovernedLoopFailureEvidenceReference("unrelated-dispatch", Hash("unrelated-dispatch"));
+            var evidence = GovernedLoopFailureEvidenceContract.Create(
+                "unrelated-failure",
+                context.WorkspaceId,
+                context.RunId,
+                context.Revision,
+                context.ExecutionGeneration,
+                context.ActivationOrdinal,
+                context.VisitOrdinal,
+                context.NodeId,
+                context.Attempt,
+                GovernedLoopFailureClass.Exhaustion,
+                "wait-deadline-exhausted",
+                GovernedLoopFailureSource.Runtime,
+                GovernedLoopFailureEffectCertainty.NotApplicable,
+                GovernedLoopFailureAuthorityPosture.NotApplicable,
+                GovernedLoopFailureHumanPosture.None,
+                GovernedLoopFailureRetrySafety.NotRetryable,
+                GovernedLoopFailureSeverity.Critical,
+                849,
+                [unrelated],
+                null,
+                observedAtUtc.AddSeconds(-1));
+            return new GovernedLoopFailureClassificationResult(GovernedLoopFailureClassificationStatus.Classified, evidence, "hostile-evidence");
+        });
+        var harness = await CreateWaitRuntimeAsync(includeFailureRoute: true, failureClassifier: classifier);
+        harness.Posture.ExecutionExpiresAtUtc = harness.Time.UtcNow;
+
+        var result = await harness.RunToParkAsync();
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Waiting, harness.Store.Current.Status);
+        Assert.DoesNotContain(harness.Store.Current.Events, item => item.FailureEvidence is not null);
+        Assert.DoesNotContain(harness.Store.Current.Frontier!.Payload.Nodes, item => item.Descriptor == GovernedLoopSequentialNodeDescriptors.FailTerminal);
     }
 
     [Theory]
@@ -1198,12 +1274,14 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     private static async Task<WaitRuntimeHarness> CreateWaitRuntimeAsync(
-        CustomLoopExecutionLeaseStatus leaseStatus = CustomLoopExecutionLeaseStatus.Acquired)
+        CustomLoopExecutionLeaseStatus leaseStatus = CustomLoopExecutionLeaseStatus.Acquired,
+        bool includeFailureRoute = false,
+        IGovernedLoopFailureClassifier? failureClassifier = null)
     {
         var deadline = _now.AddMinutes(1);
         var context = await SequentialContextAsync(
             Run(SequentialDefinition()),
-            artifactFactory: role => TimestampWaitArtifact(role, deadline));
+            artifactFactory: role => TimestampWaitArtifact(role, deadline, includeFailureRoute));
         var store = new FakeRunStore(context.Run);
         var time = new StubGovernedLoopSleepTimeProvider(_now);
         var sleepStore = new InMemoryGovernedLoopSleepStore();
@@ -1219,7 +1297,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
             time);
         var gate = new TestExecutionGate(leaseStatus);
         var authority = new StubCapabilityAuthorityTransaction();
-        var wait = new GovernedLoopWaitExecutionService(store, sleep, posture, authority, gate, orderedResume, time);
+        var wait = new GovernedLoopWaitExecutionService(store, sleep, posture, authority, gate, orderedResume, time, failureClassifier);
         var recordingWait = new RecordingWaitNodeExecutor(wait);
         nodeRelay.Bind(recordingWait);
         continuationRelay.Bind(wait);
@@ -1248,7 +1326,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
     private static GovernedLoopGraphRevisionArtifact TimestampWaitArtifact(
         ContextualRoleRevisionPin owningRole,
-        DateTimeOffset deadline)
+        DateTimeOffset deadline,
+        bool includeFailureRoute = false)
     {
         var trigger = GovernedLoopSequentialApplicationTestFixture.Trigger("trigger");
         var inference = GovernedLoopSequentialApplicationTestFixture.Inference("infer-01", "Produce the result before waiting.");
@@ -1264,14 +1343,25 @@ public sealed partial class CustomLoopOrderedRunnerTests
                     System.Globalization.CultureInfo.InvariantCulture),
             });
         var exit = GovernedLoopSequentialApplicationTestFixture.Exit("exit");
+        var fail = GovernedLoopSequentialApplicationTestFixture.Node("fail", GovernedLoopSequentialNodeDescriptors.FailTerminal);
+        var nodes = includeFailureRoute
+            ? new[] { trigger, inference, wait, exit, fail }
+            : [trigger, inference, wait, exit];
+        var edges = new List<GovernedLoopControlEdgeDefinition>
+        {
+            new("trigger-to-inference", "trigger", "infer-01", GovernedLoopControlCondition.Always),
+            new("inference-to-wait", "infer-01", "wait", GovernedLoopControlCondition.Success),
+            new("wait-to-exit", "wait", "exit", GovernedLoopControlCondition.Success),
+        };
+        if (includeFailureRoute)
+        {
+            edges.Add(new GovernedLoopControlEdgeDefinition("wait-to-fail", "wait", "fail", GovernedLoopControlCondition.Failure));
+        }
+
         return GovernedLoopSequentialApplicationTestFixture.Artifact(
-            [trigger, inference, wait, exit],
-            [
-                new GovernedLoopControlEdgeDefinition("trigger-to-inference", "trigger", "infer-01", GovernedLoopControlCondition.Always),
-                new GovernedLoopControlEdgeDefinition("inference-to-wait", "infer-01", "wait", GovernedLoopControlCondition.Success),
-                new GovernedLoopControlEdgeDefinition("wait-to-exit", "wait", "exit", GovernedLoopControlCondition.Success),
-            ],
-            ["exit"],
+            nodes,
+            edges,
+            includeFailureRoute ? ["exit", "fail"] : ["exit"],
             owningRole,
             bindings:
             [
@@ -1428,11 +1518,14 @@ public sealed partial class CustomLoopOrderedRunnerTests
     {
         internal GovernedLoopSequentialNodeDispatchRequest? LastRequest { get; private set; }
 
+        internal int RequestCount { get; private set; }
+
         public Task<GovernedLoopWaitParkResult> ParkAsync(
             GovernedLoopSequentialNodeDispatchRequest request,
             CancellationToken cancellationToken = default)
         {
             LastRequest = request;
+            RequestCount++;
             return target.ParkAsync(request, cancellationToken);
         }
     }

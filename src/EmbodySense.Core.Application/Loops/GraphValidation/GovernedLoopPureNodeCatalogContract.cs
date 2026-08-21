@@ -11,6 +11,8 @@ public static class GovernedLoopPureNodeCatalogContract
 {
     private static readonly IReadOnlyList<GovernedLoopControlCondition> _success =
         Array.AsReadOnly(new[] { GovernedLoopControlCondition.Success });
+    private static readonly IReadOnlyList<GovernedLoopControlCondition> _successFailure =
+        Array.AsReadOnly(new[] { GovernedLoopControlCondition.Success, GovernedLoopControlCondition.Failure });
     private static readonly IReadOnlyList<string> _noCapabilities = Array.Empty<string>();
     private static readonly GovernedLoopValueKindSet _pureKinds = GovernedLoopPureNodeVocabulary.PureValueKinds();
     private static readonly GovernedLoopValueKindSet _structuredKinds = Kinds(GovernedLoopValueKind.Object, GovernedLoopValueKind.Array);
@@ -136,7 +138,7 @@ public static class GovernedLoopPureNodeCatalogContract
             IsExecutable: true,
             IsLegalEntry: false,
             IsLegalTerminal: false,
-            _success,
+            _successFailure,
             _success,
             GovernedLoopJoinPolicy.None,
             MinimumIncomingControlEdges: 1,

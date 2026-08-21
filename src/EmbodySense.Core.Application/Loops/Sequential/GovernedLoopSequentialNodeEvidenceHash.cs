@@ -60,6 +60,8 @@ public static class GovernedLoopSequentialNodeEvidenceHash
         writer.WriteNull("governingControlEdgeId");
         writer.WriteString("disposition", ToCanonical(receipt.Disposition));
         writer.WriteString("outcomeArtifactHash", receipt.OutcomeArtifactHash);
+        writer.WriteString("failureEvidenceId", receipt.FailureEvidenceId);
+        writer.WriteString("failureEvidenceHash", receipt.FailureEvidenceHash);
         writer.WriteEndObject();
         writer.Flush();
         return Convert.ToHexString(SHA256.HashData(buffer.WrittenSpan)).ToLowerInvariant();
@@ -72,7 +74,13 @@ public static class GovernedLoopSequentialNodeEvidenceHash
     /// <summary>Returns whether the declared digest matches every exact receipt coordinate.</summary>
     public static bool Matches(GovernedLoopSequentialNodeEvidenceReceipt? receipt)
     {
-        if (receipt is null || !IsHash(receipt.EvidenceHash) || !IsHash(receipt.OutcomeArtifactHash))
+        if (receipt is null
+            || !IsHash(receipt.EvidenceHash)
+            || !IsHash(receipt.OutcomeArtifactHash)
+            || (receipt.FailureEvidenceId is null) != (receipt.FailureEvidenceHash is null)
+            || receipt.FailureEvidenceHash is not null && !IsHash(receipt.FailureEvidenceHash)
+            || receipt.Disposition == GovernedLoopSequentialNodeHandlerResultStatus.Completed && receipt.FailureEvidenceId is not null
+            || receipt.Disposition is GovernedLoopSequentialNodeHandlerResultStatus.Rejected or GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview && receipt.FailureEvidenceId is null)
         {
             return false;
         }

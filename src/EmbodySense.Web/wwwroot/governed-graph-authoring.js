@@ -353,10 +353,13 @@ export function addCatalogNode(graph, contractItem, nodeId, canvasX, canvasY) {
     .filter((value, index, values) => values.indexOf(value) === index)
     .sort();
   const parameters = Object.fromEntries(
-    (contractItem.parameters ?? []).map((parameter) => [
-      parameter.id,
-      defaultParameterValue(parameter),
-    ]),
+    (contractItem.parameters ?? [])
+      .map((parameter) => [
+        parameter,
+        parameter.required ? defaultParameterValue(parameter) : "",
+      ])
+      .filter(([parameter, value]) => parameter.required || value !== "")
+      .map(([parameter, value]) => [parameter.id, value]),
   );
   const node = {
     id: nodeId,
@@ -522,18 +525,23 @@ export function connectBinding(graph, fromNodeId, toNodeId, binding) {
   };
 }
 
-export function configureNodeParameter(graph, nodeId, parameterId, value) {
+export function configureNodeParameter(
+  graph,
+  nodeId,
+  parameterId,
+  value,
+  omitWhenEmpty = false,
+) {
   if (!graph?.nodes?.some((item) => item.id === nodeId)) return null;
   return {
     ...graph,
-    nodes: graph.nodes.map((item) =>
-      item.id === nodeId
-        ? {
-            ...item,
-            parameters: { ...(item.parameters ?? {}), [parameterId]: value },
-          }
-        : item,
-    ),
+    nodes: graph.nodes.map((item) => {
+      if (item.id !== nodeId) return item;
+      const parameters = { ...(item.parameters ?? {}) };
+      if (omitWhenEmpty && value === "") delete parameters[parameterId];
+      else parameters[parameterId] = value;
+      return { ...item, parameters };
+    }),
   };
 }
 

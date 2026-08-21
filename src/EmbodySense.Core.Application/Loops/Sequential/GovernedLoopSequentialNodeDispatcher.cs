@@ -121,6 +121,9 @@ public sealed class GovernedLoopSequentialNodeDispatcher
             && evidence.Attempt == request.Attempt
             && string.Equals(evidence.CycleId, request.Activation.CycleId, StringComparison.Ordinal)
             && evidence.CycleIteration == request.Activation.CycleIteration
+            && (result.Status == GovernedLoopSequentialNodeHandlerResultStatus.Completed
+                ? evidence.FailureEvidenceId is null && evidence.FailureEvidenceHash is null
+                : evidence.FailureEvidenceId is not null && evidence.FailureEvidenceHash is not null)
             && IsExactRouteEvidence(evidence, request)
             && GovernedLoopSequentialNodeEvidenceHash.Matches(evidence);
     }

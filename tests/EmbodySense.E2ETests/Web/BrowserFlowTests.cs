@@ -320,6 +320,8 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#builderTab");
             await InvokeLoopAsync(browser, "browser-provider-failure");
             await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '3' && document.getElementById('runSubtitle').textContent.includes('· Failed') && document.getElementById('runTimeline').textContent.includes('Provider attempt failed without an automatic retry')");
+            Assert.Contains("Failed", await browser.EvaluateStringAsync("document.getElementById('runSubtitle').textContent"), StringComparison.Ordinal);
+            Assert.False(await browser.EvaluateBooleanAsync("document.getElementById('runTimeline').textContent.includes('Needs Review')"));
             Assert.False(await browser.EvaluateBooleanAsync("[...document.querySelectorAll('#runActions button')].some((button) => /resume|cancel/i.test(button.textContent))"));
 
             await ClickAsync(browser, "#builderTab");
@@ -394,7 +396,7 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#loopsNav");
             await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
             await ClickAsync(browser, "#governedGraphTab");
-            await browser.WaitForExpressionAsync("document.getElementById('governedGraphCatalog').textContent.includes('schedule-trigger') && document.getElementById('governedGraphCatalog').textContent.includes('provider-inference') && document.getElementById('governedGraphCatalog').textContent.includes('success-exit')");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphCatalog').textContent.includes('schedule-trigger') && document.getElementById('governedGraphCatalog').textContent.includes('provider-inference') && document.getElementById('governedGraphCatalog').textContent.includes('success-exit') && document.getElementById('governedGraphCatalog').textContent.includes('fail-terminal')");
             await browser.WaitForExpressionAsync($"document.getElementById('governedGraphModelProfile').textContent.includes('gpt-test') && [...document.getElementById('governedGraphModelProfile').options].some((option) => option.value === '{BrowserProfileId}' && !option.disabled)");
             Assert.True(await browser.EvaluateBooleanAsync($"[...document.querySelectorAll('#governedGraphModelProfile option')].some((option) => option.value === '{BuiltInCapabilityCatalog.CodexModelProfileCapabilityId}' && option.disabled && option.textContent.toLowerCase().includes('adapterunavailable'))"));
 
@@ -426,12 +428,14 @@ public sealed class BrowserFlowTests
             Assert.Contains("Input Tokens Authoritative and hard bounded at dispatch", modelInspector, StringComparison.Ordinal);
             Assert.Contains("Monetary Cost Unavailable", modelInspector, StringComparison.Ordinal);
             Assert.Contains("Ordered model fallback candidatesNone", modelInspector, StringComparison.Ordinal);
+            await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "fail-terminal");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "success-exit");
 
             await AddGovernedGraphControlAsync(browser, "schedule-trigger", "provider-inference", "Always");
             await AddGovernedGraphBindingAsync(browser, "schedule-trigger", "provider-inference", "Data · request → request");
             await AddGovernedGraphBindingAsync(browser, "schedule-trigger", "provider-inference", "Context · invocation-context → invocation-context");
             await AddGovernedGraphControlAsync(browser, "provider-inference", "success-exit", "Success");
+            await AddGovernedGraphControlAsync(browser, "provider-inference", "fail-terminal", "Failure");
             await AddGovernedGraphBindingAsync(browser, "provider-inference", "success-exit", "Data · result → result");
 
             await browser.WaitForExpressionAsync($"!document.getElementById('governedGraphSaveButton').disabled && document.getElementById('governedGraphModelProfile').value === '{BrowserProfileId}'");
@@ -441,6 +445,7 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#governedGraphPublishButton");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Published') && document.getElementById('governedGraphNotice').textContent.includes('Committed')");
             Assert.Contains("schedule-trigger", await browser.EvaluateStringAsync("document.getElementById('governedGraphCanvas').textContent"), StringComparison.Ordinal);
+            Assert.Contains("fail-terminal", await browser.EvaluateStringAsync("document.getElementById('governedGraphCanvas').textContent"), StringComparison.Ordinal);
             await ClickButtonByTextAsync(browser, "#governedGraphCanvas button", "schedule-trigger");
             Assert.Contains("org.embodysense/triggers/time", await browser.EvaluateStringAsync("document.getElementById('governedGraphInspector').textContent"), StringComparison.Ordinal);
 
@@ -449,7 +454,7 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#loopsNav");
             await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop') && !document.getElementById('governedGraphTab').disabled");
             await ClickAsync(browser, "#governedGraphTab");
-            await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Published') && document.querySelectorAll('#governedGraphCanvas .governed-graph-node').length === 3");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Published') && document.querySelectorAll('#governedGraphCanvas .governed-graph-node').length === 4 && document.getElementById('governedGraphCanvas').textContent.includes('fail-terminal')");
             Assert.Equal("browser-scheduled-graph", await browser.EvaluateStringAsync("document.getElementById('governedGraphId').value"));
             Assert.Equal(BrowserProfileId, await browser.EvaluateStringAsync("document.getElementById('governedGraphModelProfile').value"));
             Assert.Equal("exact", await browser.EvaluateStringAsync("document.getElementById('governedGraphModelRoutingMode').value"));
@@ -598,6 +603,113 @@ public sealed class BrowserFlowTests
         catch
         {
             await WriteFailureDiagnosticsAsync(nameof(Browser_authors_publishes_and_executes_an_exact_governed_command_action), browser, app);
+            throw;
+        }
+    }
+
+    [InstalledBrowserFact]
+    public async Task Browser_authors_executes_and_inspects_one_explicit_fail_terminal()
+    {
+        using var workspace = new TestWorkspace();
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var capabilityTrustRoot = Path.Combine(workspace.ServerStatePath, "browser-fail-capability-catalog");
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(capabilityTrustRoot).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths);
+        var serverEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT"] = capabilityTrustRoot,
+        };
+        await using var app = await ExternalWebApplicationProcess.StartAsync(
+            workspace.RootPath,
+            GetFreePort(),
+            codexExecutable,
+            "gpt-test",
+            serverEnvironment);
+        await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
+
+        try
+        {
+            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
+            await ClickAsync(browser, "#governedGraphTab");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphCatalog').textContent.includes('manual-trigger') && document.getElementById('governedGraphCatalog').textContent.includes('fail-terminal')");
+            await SetValueAsync(browser, "#governedGraphRole", $"{authoringRole.Identity.RoleId}:{authoringRole.Identity.Revision}:{authoringRole.ContentHash}", "change");
+            await SetValueAsync(browser, "#governedGraphId", "browser-explicit-fail-graph");
+            await SetValueAsync(browser, "#governedGraphRevisionId", "revision-1");
+            await SetValueAsync(browser, "#governedGraphDisplayName", "Browser explicit failure graph");
+            await SetValueAsync(browser, "#governedGraphPurpose", "Retain one exact agent-selected failure through the public browser boundary.");
+            await ClickAsync(browser, "#governedGraphNewButton");
+            await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "manual-trigger");
+            await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "provider-inference");
+            await SetValueAsync(browser, "#governedGraphInspector input:not([type='number'])", "Return the exact browser-explicit-fail decision token.");
+            await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "model-decision-condition");
+            await browser.EvaluateAsync("(() => { const set = (id, value) => { const label = [...document.querySelectorAll('#governedGraphInspector label')].find((item) => item.querySelector('span')?.textContent?.startsWith(id)); const input = label?.querySelector('input'); if (!input) throw new Error(`Condition parameter ${id} was not rendered.`); input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })); }; set('true-decision', 'select-fail'); set('false-decision', 'continue'); })()");
+            await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "fail-terminal");
+            await browser.EvaluateAsync("(() => { const set = (id, value) => { const label = [...document.querySelectorAll('#governedGraphInspector label')].find((item) => item.querySelector('span')?.textContent?.startsWith(id)); const input = label?.querySelector('input'); if (!input) throw new Error(`Fail parameter ${id} was not rendered.`); input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })); }; set('code', 'agent-selected-stop'); set('explanation', 'Stop at the admitted explicit failure.'); })()");
+            await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "success-exit");
+            await AddGovernedGraphControlAsync(browser, "manual-trigger", "provider-inference", "Always");
+            await AddGovernedGraphControlAsync(browser, "provider-inference", "model-decision-condition", "Success");
+            await AddGovernedGraphControlAsync(browser, "model-decision-condition", "fail-terminal", "True");
+            await AddGovernedGraphControlAsync(browser, "model-decision-condition", "success-exit", "False");
+            await AddGovernedGraphBindingAsync(browser, "manual-trigger", "provider-inference", "Data · request → request");
+            await AddGovernedGraphBindingAsync(browser, "manual-trigger", "provider-inference", "Context · invocation-context → invocation-context");
+            await AddGovernedGraphBindingAsync(browser, "provider-inference", "model-decision-condition", "Data · result → decision");
+            await AddGovernedGraphBindingAsync(browser, "provider-inference", "success-exit", "Data · result → result");
+            await browser.WaitForExpressionAsync("!document.getElementById('governedGraphSaveButton').disabled");
+            await ClickAsync(browser, "#governedGraphSaveButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Draft') && document.getElementById('governedGraphNotice').textContent.includes('Committed')");
+            await ClickAsync(browser, "#governedGraphPublishButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Published') && document.getElementById('governedGraphNotice').textContent.includes('Committed')");
+
+            var lifecycle = await new GovernedLoopRevisionLifecycleStore(paths, new FileCapabilityCatalogTrustProvider(capabilityTrustRoot)).ReadGraphAsync("browser-explicit-fail-graph");
+            var publication = Assert.IsType<GovernedLoopRevisionPublicationPin>(lifecycle.Snapshot?.Head.PublishedRevision);
+            var grant = await CreateBrowserFailGrantAsync(paths, capabilityTrustRoot, authoringRole, publication);
+            var invocation = new GovernedLoopRunInvocationTransportInput(
+                "invoke-browser-explicit-fail",
+                new GovernedLoopRevisionPublicationInput(
+                    publication.SchemaVersion,
+                    publication.Revision.SchemaVersion,
+                    publication.Revision.GraphId,
+                    publication.Revision.RevisionId,
+                    publication.Revision.ExecutableHash,
+                    publication.PublicationOperationId,
+                    publication.ValidationEvidenceHash),
+                new GovernedLoopAuthorityGrantInput(grant.GrantId.Value, grant.Revision.Value, grant.ContentHash),
+                "Select the exact explicit failure.");
+            var responseJson = await InvokeGovernedLoopFromBrowserAsync(browser, JsonSerializer.Serialize(invocation, _jsonOptions));
+            var response = Assert.IsType<GovernedLoopRunInvocationTransportResponse>(JsonSerializer.Deserialize<GovernedLoopRunInvocationTransportResponse>(responseJson, _jsonOptions));
+
+            Assert.True(string.Equals("Executed", response.Status, StringComparison.Ordinal), responseJson);
+            Assert.True(string.Equals("Admitted", response.AdmissionStatus, StringComparison.Ordinal), responseJson);
+            Assert.True(string.Equals("Failed", response.ExecutionStatus, StringComparison.Ordinal), responseJson);
+            Assert.True(response.WasDispatched, responseJson);
+            var runId = Assert.IsType<string>(response.Run?.Id);
+            var runUrl = JsonSerializer.Serialize($"/api/loop-runs/{runId}");
+            var runJson = await browser.EvaluateStringAsync($"(async () => {{ const response = await fetch({runUrl}); if (!response.ok) throw new Error(`run read ${{response.status}}`); return JSON.stringify(await response.json()); }})()");
+            using var runDocument = JsonDocument.Parse(runJson);
+            Assert.Equal(CustomLoopRunStatus.Failed.ToString(), runDocument.RootElement.GetProperty("status").GetString());
+            Assert.Equal("agent-selected-stop", runDocument.RootElement.GetProperty("failureCode").GetString());
+            var failureEvents = runDocument.RootElement.GetProperty("events").EnumerateArray()
+                .Where(item => item.TryGetProperty("failureEvidence", out var evidence) && evidence.ValueKind == JsonValueKind.Object)
+                .ToArray();
+            var failure = Assert.Single(failureEvents).GetProperty("failureEvidence");
+            Assert.Equal("AgentSelectedFailure", failure.GetProperty("failureClass").GetString());
+            Assert.Equal("agent-selected-stop", failure.GetProperty("serverCode").GetString());
+            Assert.Equal("Agent", failure.GetProperty("source").GetString());
+            Assert.Equal(790, failure.GetProperty("precedence").GetInt32());
+            Assert.Equal("Stop at the admitted explicit failure.", failure.GetProperty("safeDetail").GetString());
+            var causalEvidence = Assert.Single(failure.GetProperty("causalEvidence").EnumerateArray());
+            Assert.StartsWith("frontier-attempt-", causalEvidence.GetProperty("evidenceId").GetString(), StringComparison.Ordinal);
+            Assert.Matches("^[0-9a-f]{64}$", causalEvidence.GetProperty("evidenceHash").GetString());
+            Assert.DoesNotContain("token=", runJson, StringComparison.OrdinalIgnoreCase);
+            app.AssertHealthy();
+            await browser.AssertHealthyAsync();
+        }
+        catch
+        {
+            await WriteFailureDiagnosticsAsync(nameof(Browser_authors_executes_and_inspects_one_explicit_fail_terminal), browser, app);
             throw;
         }
     }
@@ -1046,6 +1158,103 @@ public sealed class BrowserFlowTests
         }
 
         return (Encoding.UTF8.GetBytes("#!/bin/sh\nIFS= read -r value\nprintf '%s' \"$value\"\n"), "browser-json-echo");
+    }
+
+    private static async Task<AuthorityGrantReference> CreateBrowserFailGrantAsync(
+        WorkspacePaths paths,
+        string capabilityTrustRoot,
+        ContextualRoleRevisionPin role,
+        GovernedLoopRevisionPublicationPin publication)
+    {
+        Assert.True(AuthorityActorId.TryParse("browser-e2e", out var actor, out _));
+        Assert.True(AuthorityPurpose.TryParse("Execute one exact explicit Fail terminal.", out var purpose, out _));
+        Assert.True(AuthorityProfileId.TryParse("browser-fail-profile", out var profileId, out _));
+        Assert.True(AuthorityProfileRevision.TryParse("1", out var profileRevision, out _));
+        var capabilities = BuiltInCapabilityCatalog.Descriptors
+            .Where(item => item.Id.Value is "org.embodysense/conversation-turn" or "org.embodysense/model-inference"
+                || string.Equals(item.Id.Value, BuiltInCapabilityCatalog.CodexModelProfileCapabilityId, StringComparison.Ordinal))
+            .Select(item =>
+            {
+                Assert.True(CapabilityDescriptorIdentity.TryCreate(item, out var identity, out _));
+                return identity!;
+            })
+            .OrderBy(item => item.Id.Value, StringComparer.Ordinal)
+            .ToArray();
+        Assert.True(CapabilityDataClass.TryParse("sensitive", out var sensitive, out _));
+        var ceiling = new AuthorityCeiling(
+            capabilities,
+            [sensitive!],
+            1,
+            CapabilitySideEffectClass.None,
+            false,
+            true,
+            false);
+        var store = new AuthorityProfileStore(paths, new FileCapabilityCatalogTrustProvider(capabilityTrustRoot));
+        var now = DateTimeOffset.UtcNow;
+        var profile = new AuthorityProfile(
+            AuthorityProfile.CurrentSchemaVersion,
+            profileId!,
+            profileRevision!,
+            AuthorityProfileStatus.Active,
+            purpose!,
+            new AuthorityProvenance(actor!, AuthorityProvenanceKind.UserDeclaration),
+            now.AddMinutes(-1),
+            now.AddHours(1),
+            ceiling,
+            []);
+        var profileResult = await store.MutateAsync(new AuthorityProfileMutation(
+            AuthorityProfileMutationKind.Create,
+            "create-browser-fail-profile",
+            0,
+            profile,
+            null,
+            null,
+            actor!,
+            purpose!));
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, profileResult.Status);
+        var profileRecord = Assert.IsType<AuthorityProfileRecord>(profileResult.Record);
+        var binding = new AuthorityGrantBinding(
+            new AuthorityGrantProfilePin(
+                new AuthorityProfileReference(profileRecord.ProfileId, profileRecord.CurrentProfile.Revision),
+                profileRecord.CurrentHash),
+            role,
+            publication);
+        Assert.True(AuthorityGrantId.TryParse("browser-fail-grant", out var grantId, out _));
+        Assert.True(AuthorityGrantRevision.TryParse("1", out var grantRevision, out _));
+        var grant = AuthorityGrantHash.Apply(new AuthorityGrant(
+            AuthorityGrantContractLimits.CurrentSchemaVersion,
+            grantId!,
+            grantRevision!,
+            null,
+            null,
+            AuthorityGrantLifecycleStatus.Active,
+            binding,
+            ceiling,
+            new AuthorityGrantBoundary(now.AddMinutes(-1), now.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
+            actor!,
+            purpose!,
+            now,
+            string.Empty));
+        var requestHash = Sha256("browser-fail-grant-request");
+        var observed = await store.ReadForMutationAsync(grant.GrantId, "create-browser-fail-grant", requestHash);
+        var reference = new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);
+        var evidence = new AuthorityGrantOperationEvidence(
+            AuthorityGrantContractLimits.CurrentSchemaVersion,
+            "create-browser-fail-grant",
+            requestHash,
+            AuthorityGrantOperationKind.Create,
+            AuthorityGrantOperationOutcome.Committed,
+            AuthorityGrantOperationFailureCode.None,
+            grant.GrantId,
+            0,
+            reference,
+            actor!,
+            purpose!,
+            Sha256("browser-fail-authority"),
+            Sha256("browser-fail-dependencies"),
+            now);
+        Assert.Equal(AuthorityGrantStoreCommitStatus.Committed, (await store.CommitAsync(new AuthorityGrantStoreMutation(observed.StoreGeneration, grant, evidence))).Status);
+        return reference;
     }
 
     private static async Task<AuthorityGrantReference> CreateBrowserCommandGrantAsync(
