@@ -17,6 +17,9 @@ using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
@@ -48,7 +51,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var trust = new TestCapabilityLifecycleTrustProvider();
-        var graph = Graph();
+        var graph = Graph(retryPolicy: RetryPolicy());
         var mutation = CreateDraft(graph, "create-one", HashA, HashB, 0, _time);
 
         var committed = await Store(paths, trust).CommitAsync(mutation);
@@ -68,6 +71,12 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         Assert.Equal(expectedArtifact.ArtifactHash, storedArtifact.ArtifactHash);
         Assert.Equal(graph.RevisionReference, storedArtifact.Graph.RevisionReference);
         Assert.Equal(expectedArtifact.ArtifactHash, artifactRead.Artifact!.ArtifactHash);
+        var expectedRetry = Assert.IsType<GovernedLoopRetryPolicy>(graph.Nodes.Single(node => node.Id == "infer").RetryPolicy);
+        var restoredRetry = Assert.IsType<GovernedLoopRetryPolicy>(artifactRead.Artifact.Graph.Nodes.Single(node => node.Id == "infer").RetryPolicy);
+        Assert.Equal(expectedRetry.ContentHash, restoredRetry.ContentHash);
+        Assert.Equal(expectedRetry.FailureClasses, restoredRetry.FailureClasses);
+        Assert.Equal(expectedRetry.ServerCodes, restoredRetry.ServerCodes);
+        Assert.True(GovernedLoopRetryContract.IsValid(restoredRetry));
         Assert.Equal(GovernedLoopGraphRevisionOperationState.Terminal, mutationRead.ExistingOperation!.State);
         Assert.Equal(HashA, mutationRead.ExistingOperation.LifecycleRequestHash);
         Assert.Equal(HashB, mutationRead.ExistingOperation.AuthoringRequestHash);
@@ -89,6 +98,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         Assert.Equal(graph.OwningRole.Identity.Revision, owningRole.GetProperty("revision").GetInt32());
         Assert.Equal(graph.OwningRole.Identity.RoleId, owningRole.GetProperty("roleId").GetString());
         Assert.DoesNotContain("owningRoleId", payload, StringComparison.Ordinal);
+        Assert.Equal("retry-infer", executableGraph.GetProperty("nodes")[1].GetProperty("retryPolicy").GetProperty("policyId").GetString());
     }
 
     [Fact]
@@ -1566,7 +1576,8 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         string graphId = "graph-one",
         string revisionId = "revision-one",
         GovernedLoopDisplayMetadata? display = null,
-        ContextualRoleRevisionPin? owningRole = null)
+        ContextualRoleRevisionPin? owningRole = null,
+        GovernedLoopRetryPolicy? retryPolicy = null)
         => GovernedLoopGraphDefinition.Create(
             1,
             graphId,
@@ -1589,7 +1600,10 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                     new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
                     [InputPort("request"), OutputPort("result")],
                     GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
-                    new Dictionary<string, string> { ["instruction"] = "Answer from the explicit input." }),
+                    new Dictionary<string, string> { ["instruction"] = "Answer from the explicit input." },
+                    null,
+                    null,
+                    retryPolicy),
                 new GovernedLoopNodeDefinition(
                     "exit",
                     new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
@@ -1610,6 +1624,22 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                 [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
             display ?? Display("Graph one", 100, 200),
             GovernedLoopGraphTestFixture.DefaultModelRoutingPolicy());
+
+    private static GovernedLoopRetryPolicy RetryPolicy()
+        => GovernedLoopRetryContract.CreatePolicy(
+            "retry-infer",
+            "infer",
+            [GovernedLoopFailureClass.RetryableNoEffect],
+            [],
+            3,
+            1_000,
+            10_000,
+            GovernedLoopRetryBackoffStrategy.Fixed,
+            250,
+            250,
+            GovernedLoopRetryJitterStrategy.None,
+            0,
+            maximumTokens: 3_000);
 
     private static GovernedLoopGraphDefinition GraphWithEveryClosedEnum()
     {

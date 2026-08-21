@@ -9,4 +9,5 @@ public sealed record GovernedLoopGraphCatalogResponse(
     string SourceEvidenceId,
     IReadOnlyList<GovernedLoopGraphCatalogNodeSnapshot> NodeDescriptors,
     ContextualRoleCatalogResponse Roles,
-    ModelProfileCatalogResponse ModelProfiles);
+    ModelProfileCatalogResponse ModelProfiles,
+    GovernedLoopRetryPolicyCatalogSnapshot RetryPolicies);

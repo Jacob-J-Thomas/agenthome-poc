@@ -10,6 +10,7 @@ using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Application.Loops.Models;
@@ -120,6 +121,42 @@ public sealed class AgentRuntimeFactoryTests
         await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
 
         var catalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        var retryPreview = runtime.GovernedLoopGraphAuthoring.PreviewRetryPolicy(new GovernedLoopRetryPolicyPreviewInput(
+            "retry-infer",
+            "infer",
+            ["retryable-no-effect"],
+            [],
+            3,
+            1_000,
+            10_000,
+            "fixed",
+            250,
+            250,
+            "none",
+            0,
+            3_000,
+            null,
+            null,
+            null,
+            null));
+        var rejectedRetryPreview = runtime.GovernedLoopGraphAuthoring.PreviewRetryPolicy(new GovernedLoopRetryPolicyPreviewInput(
+            "retry-infer",
+            "infer",
+            ["retryable-no-effect"],
+            [],
+            catalog.RetryPolicies.MaximumAttempts + 1,
+            1_000,
+            10_000,
+            "fixed",
+            250,
+            250,
+            "none",
+            0,
+            null,
+            null,
+            null,
+            null,
+            null));
         var role = Assert.Single(catalog.Roles.Roles, item => item.IsAdmissionReady);
         var candidate = BrowserGraphCandidate(new ContextualRoleRevisionPin(
             new ContextualRoleRevisionIdentity(role.RoleId, role.Revision),
@@ -138,6 +175,19 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal("available", catalog.Status);
         Assert.Contains(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.Trigger && item.IsExecutable);
         Assert.Contains(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.Wait && item.IsExecutable);
+        Assert.Equal(8, catalog.RetryPolicies.MaximumAttempts);
+        Assert.Equal(["none", "fixed", "exponential"], catalog.RetryPolicies.BackoffStrategies);
+        Assert.Equal("valid", retryPreview.Status);
+        var retryPolicy = Assert.IsType<GovernedLoopRetryPolicy>(retryPreview.Policy);
+        var retryBounds = Assert.IsType<GovernedLoopRetryPolicyPreviewSnapshot>(retryPreview.Preview);
+        Assert.Equal("retry-infer", retryPolicy.PolicyId);
+        Assert.Equal("infer", retryPolicy.NodeId);
+        Assert.Matches("^[0-9a-f]{64}$", retryPolicy.ContentHash);
+        Assert.Equal(500, retryBounds.MaximumBackoffMilliseconds);
+        Assert.Equal(3_500, retryBounds.MaximumReachableElapsedMilliseconds);
+        Assert.True(retryBounds.CurrentAdmissionStillRequired);
+        Assert.Equal("invalid", rejectedRetryPreview.Status);
+        Assert.Null(rejectedRetryPreview.Policy);
         Assert.Equal("committed", created.Status);
         Assert.Matches("^[0-9a-f]{64}$", created.AuthoringRequestHash);
         Assert.Matches("^[0-9a-f]{64}$", created.GraphValidationEvidenceHash);

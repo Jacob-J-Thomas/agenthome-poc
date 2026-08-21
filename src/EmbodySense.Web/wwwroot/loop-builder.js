@@ -2971,6 +2971,19 @@ function renderRuns() {
   const timeline = node("div", "timeline");
   const frontier = projectFrontier(selectedRun);
   if (frontier) timeline.append(renderFrontier(frontier));
+  if ((selectedRun.retrySeries ?? []).length) {
+    const retrySection = node("section", "retry-series-projection");
+    retrySection.append(
+      node(
+        "h3",
+        "frontier-title",
+        `${selectedRun.retrySeries.length} durable retry series`,
+      ),
+    );
+    for (const state of selectedRun.retrySeries)
+      retrySection.append(renderRetryState(state));
+    timeline.append(retrySection);
+  }
   for (const event of selectedRun.events ?? [])
     timeline.append(renderRunEvent(event));
   if (!frontier && (selectedRun.events ?? []).length === 0)
@@ -3067,7 +3080,7 @@ function renderRunActions(run) {
   const operationalRun = postureSnapshot(operationalPosture)?.runs?.items?.find(
     (item) => item.runId === run.id,
   );
-  if (run.status === "Running")
+  if (["Running", "Waiting"].includes(run.status))
     elements.runActions.append(
       actionButton(
         "Pause at boundary",
@@ -3084,7 +3097,11 @@ function renderRunActions(run) {
         "primary-button",
       ),
     );
-  if (["Admitted", "Running", "PauseRequested", "Paused"].includes(run.status))
+  if (
+    ["Admitted", "Running", "Waiting", "PauseRequested", "Paused"].includes(
+      run.status,
+    )
+  )
     elements.runActions.append(
       actionButton(
         "Cancel",
@@ -3179,12 +3196,68 @@ function renderRunEvent(event) {
     card.append(node("div", "evidence-code", attemptEvidence.join("\n")));
   if (event.failureEvidence)
     card.append(renderFailureEvidence(event.failureEvidence));
+  if (event.retryState)
+    card.append(renderRetryState(event.retryState, "Retry transition"));
   if (event.toolEvidence)
     card.append(renderToolEvidence(event.toolEvidence, false));
   else if (event.toolAuthority)
     card.append(renderToolAuthority(event.toolAuthority));
   container.append(card);
   return container;
+}
+
+function renderRetryState(state, title = "Retry series") {
+  const details = node("details", "context-block retry-evidence");
+  details.append(
+    node(
+      "summary",
+      "",
+      `${title} · ${formatStatus(state.disposition)} · attempt ${state.currentAttempt}${state.nextAttempt ? ` → ${state.nextAttempt}` : ""}`,
+    ),
+  );
+  details.append(
+    node(
+      "div",
+      "evidence-code",
+      [
+        `series ${state.seriesId}`,
+        `policy ${state.policyId} · ${state.policyHash}`,
+        `node ${state.nodeId} · activation ${state.activationOrdinal} · visit ${state.visitOrdinal}`,
+        `current attempt ${state.currentAttempt} · ${state.currentAttemptOperationId}`,
+        state.nextAttempt
+          ? `next attempt ${state.nextAttempt} · ${state.attemptOperationId}`
+          : "next attempt none",
+        `budget ${formatRetryBudget(state.budget)}`,
+        `series window ${formatTimestamp(state.startedAtUtc)} → ${formatTimestamp(state.deadlineUtc)}`,
+        state.nextRetryAtUtc
+          ? `next wake ${formatTimestamp(state.nextRetryAtUtc)}`
+          : "next wake none",
+        state.wakeCheckpointId
+          ? `wake checkpoint ${state.wakeCheckpointId} · ${state.wakeCheckpointHash}`
+          : "wake checkpoint none",
+        `failure evidence ${state.failureEvidenceId} · ${state.failureEvidenceHash}`,
+        `state v${state.stateVersion} · ${state.contentHash}`,
+      ].join("\n"),
+    ),
+  );
+  return details;
+}
+
+function formatRetryBudget(budget) {
+  if (!budget) return "unavailable";
+  return [
+    `${budget.attempts} attempt${budget.attempts === 1 ? "" : "s"}`,
+    budget.tokens == null ? "tokens unknown" : `${budget.tokens} tokens`,
+    budget.toolCalls == null
+      ? "tool calls unknown"
+      : `${budget.toolCalls} tool calls`,
+    budget.costMicrounits == null
+      ? "cost unknown"
+      : `${budget.costMicrounits} ${budget.costCurrency ?? "currency unknown"} microunits`,
+    budget.resourceUnits == null
+      ? "resource units unknown"
+      : `${budget.resourceUnits} resource units`,
+  ].join(" · ");
 }
 
 function renderToolEvidence(evidence, includePayload = true) {

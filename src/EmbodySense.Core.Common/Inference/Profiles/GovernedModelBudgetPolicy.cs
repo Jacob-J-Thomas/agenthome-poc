@@ -43,6 +43,43 @@ public sealed class GovernedModelBudgetPolicy
         return new GovernedModelBudgetPolicy(perAttempt, perNodeSeries, perRun);
     }
 
+    /// <summary>Intersects an admitted policy's per-attempt bound with a narrower runtime ceiling without widening any nested limit.</summary>
+    /// <param name="policy">The immutable admitted model budget policy.</param>
+    /// <param name="restriction">The optional narrower per-attempt runtime ceiling.</param>
+    /// <param name="restricted">The exact effective policy when every input is canonical and compatible.</param>
+    /// <returns><see langword="true"/> when an effective nested policy was created; otherwise <see langword="false"/>.</returns>
+    public static bool TryRestrictPerAttempt(GovernedModelBudgetPolicy? policy, GovernedModelUsageCeiling? restriction, out GovernedModelBudgetPolicy? restricted)
+    {
+        restricted = null;
+        if (!GovernedModelContractValidator.IsValid(policy)
+            || restriction is not null && !GovernedModelContractValidator.IsValid(restriction))
+        {
+            return false;
+        }
+
+        if (restriction is null)
+        {
+            restricted = policy;
+            return true;
+        }
+
+        try
+        {
+            var perAttempt = GovernedModelUsageCeiling.Create(
+                Restrict(policy!.PerAttempt.InputTokens, restriction.InputTokens),
+                Restrict(policy.PerAttempt.OutputTokens, restriction.OutputTokens),
+                Restrict(policy.PerAttempt.CachedTokens, restriction.CachedTokens),
+                Restrict(policy.PerAttempt.TotalTokens, restriction.TotalTokens),
+                Restrict(policy.PerAttempt.MonetaryCost, restriction.MonetaryCost));
+            restricted = Create(1, perAttempt, policy.PerNodeSeries, policy.PerRun);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>Returns whether a profile can affirmatively hard-enforce every bounded dimension before dispatch.</summary>
     public bool CanBeHardEnforcedBy(GovernedModelUsageSupportPolicy? support)
     {
@@ -88,6 +125,31 @@ public sealed class GovernedModelBudgetPolicy
         {
             throw new ArgumentException("The monetary budget widens an enclosing ceiling.");
         }
+    }
+
+    private static GovernedModelUsageLimit Restrict(GovernedModelUsageLimit admitted, GovernedModelUsageLimit restriction)
+        => !restriction.IsBounded
+            ? admitted
+            : !admitted.IsBounded
+                ? restriction
+                : GovernedModelUsageLimit.Bounded(Math.Min(admitted.Maximum, restriction.Maximum));
+
+    private static GovernedModelMonetaryLimit Restrict(GovernedModelMonetaryLimit admitted, GovernedModelMonetaryLimit restriction)
+    {
+        if (!restriction.IsBounded)
+        {
+            return admitted;
+        }
+        if (!admitted.IsBounded)
+        {
+            return restriction;
+        }
+        if (!string.Equals(admitted.Currency, restriction.Currency, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("A runtime monetary restriction must use the admitted currency.", nameof(restriction));
+        }
+
+        return GovernedModelMonetaryLimit.Bounded(admitted.Currency!, Math.Min(admitted.MaximumMicros, restriction.MaximumMicros));
     }
 
     private void WriteCanonical(Utf8JsonWriter writer)

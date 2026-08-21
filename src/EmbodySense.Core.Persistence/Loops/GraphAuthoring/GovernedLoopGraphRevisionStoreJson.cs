@@ -226,7 +226,8 @@ internal static class GovernedLoopGraphRevisionStoreJson
                 node.Parameters,
                 node.Ports.Select(port => new PortJson(port.Id, PortDirection(port.Direction), BindingKind(port.BindingKind), port.ValueSchemaId, port.Required)).ToArray(),
                 node.ModelRoutingPolicy,
-                node.AuthoredInputDataClasses?.ToArray())).ToArray(),
+                node.AuthoredInputDataClasses?.ToArray(),
+                node.RetryPolicy)).ToArray(),
             graph.ControlEdges.Select(edge => new ControlEdgeJson(edge.Id, edge.FromNodeId, edge.ToNodeId, ControlCondition(edge.Condition))).ToArray(),
             graph.Bindings.Select(binding => new BindingJson(binding.Id, BindingKind(binding.Kind), binding.FromNodeId, binding.FromPortId, binding.ToNodeId, binding.ToPortId)).ToArray(),
             new OutputContractJson(
@@ -278,7 +279,8 @@ internal static class GovernedLoopGraphRevisionStoreJson
             GovernedLoopAuthorityCeiling.Create(Required(node.AuthorityCeiling, "node authority ceiling")),
             Required(node.Parameters, "node parameters"),
             node.ModelRoutingPolicy is null ? null : RequiredRoutingPolicy(node.ModelRoutingPolicy, "node model-routing policy"),
-            node.AuthoredInputDataClasses);
+            node.AuthoredInputDataClasses,
+            node.RetryPolicy);
 
     private static GovernedLoopControlEdgeDefinition ControlEdge(ControlEdgeJson edge)
         => new(

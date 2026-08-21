@@ -27,4 +27,16 @@ public interface IGovernedLoopSequentialOrderedRuntime
             null,
             "This ordered runtime does not support canonical Wait re-entry."));
     }
+
+    /// <summary>Re-enters ordered execution from an exact durable retry dispatch or routed exhaustion.</summary>
+    Task<CustomLoopOrderedRunResult> ResumeRetryAsync(
+        GovernedLoopSequentialOrderedRetryResumeRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new CustomLoopOrderedRunResult(
+            CustomLoopOrderedRunStatus.InvalidState,
+            null,
+            "This ordered runtime does not support canonical retry re-entry."));
+    }
 }

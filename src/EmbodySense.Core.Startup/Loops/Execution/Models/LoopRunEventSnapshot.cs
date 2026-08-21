@@ -54,4 +54,7 @@ public sealed record LoopRunEventSnapshot(
 
     /// <summary>Gets the bounded value-free canonical failure classification retained before any Failure route commitment.</summary>
     public LoopRunFailureEvidenceSnapshot? FailureEvidence { get; init; }
+
+    /// <summary>Gets the exact value-free retry-state version retained by this event.</summary>
+    public LoopRunRetryStateSnapshot? RetryState { get; init; }
 }

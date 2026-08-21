@@ -72,14 +72,67 @@ public sealed class GovernedGraphsApiControllerTests
             var beforeInitialization = await SendAsync(client, HttpMethod.Get, "/api/governed-graphs/catalog", token);
             var initialized = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token);
             var catalog = await SendAsync(client, HttpMethod.Get, "/api/governed-graphs/catalog", token);
+            var retryPreview = await SendAsync(
+                client,
+                HttpMethod.Post,
+                "/api/governed-graphs/retry-preview",
+                token,
+                new
+                {
+                    policyId = "retry-infer",
+                    nodeId = "infer",
+                    failureClasses = new[] { "retryable-no-effect" },
+                    serverCodes = Array.Empty<string>(),
+                    maximumAttempts = 3,
+                    perAttemptTimeoutMilliseconds = 1_000,
+                    maximumElapsedMilliseconds = 10_000,
+                    backoffStrategy = "fixed",
+                    initialDelayMilliseconds = 250,
+                    maximumDelayMilliseconds = 250,
+                    jitterStrategy = "none",
+                    maximumJitterMilliseconds = 0,
+                    maximumTokens = 3_000,
+                    maximumToolCalls = (int?)null,
+                    maximumCostMicrounits = (long?)null,
+                    maximumCostCurrency = (string?)null,
+                    maximumResourceUnits = (int?)null,
+                });
+            var invalidRetryPreview = await SendAsync(
+                client,
+                HttpMethod.Post,
+                "/api/governed-graphs/retry-preview",
+                token,
+                new
+                {
+                    policyId = "retry-infer",
+                    nodeId = "infer",
+                    failureClasses = new[] { "retryable-no-effect" },
+                    serverCodes = Array.Empty<string>(),
+                    maximumAttempts = 9,
+                    perAttemptTimeoutMilliseconds = 1_000,
+                    maximumElapsedMilliseconds = 10_000,
+                    backoffStrategy = "fixed",
+                    initialDelayMilliseconds = 250,
+                    maximumDelayMilliseconds = 250,
+                    jitterStrategy = "none",
+                    maximumJitterMilliseconds = 0,
+                    maximumTokens = (long?)null,
+                    maximumToolCalls = (int?)null,
+                    maximumCostMicrounits = (long?)null,
+                    maximumCostCurrency = (string?)null,
+                    maximumResourceUnits = (int?)null,
+                });
             var missing = await SendAsync(client, HttpMethod.Get, "/api/governed-graphs/detail?graphId=missing-graph", token);
             var catalogJson = await catalog.Content.ReadAsStringAsync();
+            var retryPreviewJson = await retryPreview.Content.ReadAsStringAsync();
             var missingJson = await missing.Content.ReadAsStringAsync();
 
             Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, beforeInitialization.StatusCode);
             Assert.Equal(HttpStatusCode.OK, initialized.StatusCode);
             Assert.True(catalog.StatusCode == HttpStatusCode.OK, catalogJson);
+            Assert.True(retryPreview.StatusCode == HttpStatusCode.OK, retryPreviewJson);
+            Assert.Equal(HttpStatusCode.BadRequest, invalidRetryPreview.StatusCode);
             Assert.True(catalog.Headers.CacheControl?.NoStore == true);
             Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
             using var missingDocument = JsonDocument.Parse(missingJson);
@@ -94,10 +147,19 @@ public sealed class GovernedGraphsApiControllerTests
             Assert.Equal("adapterunavailable", modelProfile.GetProperty("availabilityReason").GetString());
             Assert.Equal(JsonValueKind.Null, modelProfile.GetProperty("recommendedExactPolicy").ValueKind);
             Assert.Equal(JsonValueKind.Null, modelProfile.GetProperty("exactProfilePin").ValueKind);
+            Assert.Single(modelProfiles.GetProperty("profiles").EnumerateArray());
+            var retryPolicies = document.RootElement.GetProperty("retryPolicies");
+            Assert.Equal(8, retryPolicies.GetProperty("maximumAttempts").GetInt32());
+            Assert.Contains("retryable-no-effect", retryPolicies.GetProperty("failureClasses").EnumerateArray().Select(item => item.GetString()));
             var descriptors = document.RootElement.GetProperty("nodeDescriptors").EnumerateArray().ToArray();
             Assert.Contains(descriptors, descriptor => descriptor.GetProperty("descriptor").GetProperty("kind").GetString() == "trigger");
             Assert.Contains(descriptors, descriptor => descriptor.GetProperty("descriptor").GetProperty("kind").GetString() == "wait");
             Assert.DoesNotContain(workspace.RootPath, catalogJson, StringComparison.Ordinal);
+            using var retryDocument = JsonDocument.Parse(retryPreviewJson);
+            Assert.Equal("valid", retryDocument.RootElement.GetProperty("status").GetString());
+            Assert.Equal("retry-infer", retryDocument.RootElement.GetProperty("policy").GetProperty("policyId").GetString());
+            Assert.Matches("^[0-9a-f]{64}$", retryDocument.RootElement.GetProperty("policy").GetProperty("contentHash").GetString());
+            Assert.True(retryDocument.RootElement.GetProperty("preview").GetProperty("currentAdmissionStillRequired").GetBoolean());
         }
         finally
         {

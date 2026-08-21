@@ -196,7 +196,7 @@ public sealed class GovernedLoopExecutionStateMatrixTests
     }
 
     [Fact]
-    public void Node_evidence_transition_matrix_has_no_implicit_retry_edge()
+    public void Node_evidence_transition_matrix_permits_only_one_exact_retry_reservation_edge()
     {
         var ready = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready);
         var running = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Running);
@@ -206,6 +206,9 @@ public sealed class GovernedLoopExecutionStateMatrixTests
         var unprovedReview = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.ReviewBlocked);
         var changedNode = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Running, "other");
         var changedEdges = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Running, incomingEdgeIds: ["other-edge"]);
+        var retryReservation = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Waiting, attempt: 2);
+        var skippedRetryAttempt = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Waiting, attempt: 3);
+        var reusedAttemptOperation = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Waiting, attempt: 2, attemptOperationId: running.AttemptOperationId);
 
         Assert.True(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(ready, running));
         Assert.True(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(ready, skipped));
@@ -216,6 +219,9 @@ public sealed class GovernedLoopExecutionStateMatrixTests
         Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(null, running));
         Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(running, changedNode));
         Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(running, changedEdges));
+        Assert.True(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(running, retryReservation));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(running, skippedRetryAttempt));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(running, reusedAttemptOperation));
     }
 
     [Fact]
