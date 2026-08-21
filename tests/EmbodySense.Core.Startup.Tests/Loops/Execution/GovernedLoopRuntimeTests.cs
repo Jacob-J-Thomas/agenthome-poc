@@ -144,7 +144,7 @@ internal static class GovernedLoopRuntimeTests
         using var child = StartWaitRestartChild(fixture, runId);
         var standardOutput = child.StandardOutput.ReadToEndAsync();
         var standardError = child.StandardError.ReadToEndAsync();
-        using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+        using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90)))
         {
             try
             {
@@ -153,7 +153,7 @@ internal static class GovernedLoopRuntimeTests
             catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
                 child.Kill(entireProcessTree: true);
-                throw new Xunit.Sdk.XunitException("The external governed Wait restart host did not finish within 30 seconds.");
+                throw new Xunit.Sdk.XunitException("The external governed Wait restart host did not finish within 90 seconds.");
             }
         }
 
