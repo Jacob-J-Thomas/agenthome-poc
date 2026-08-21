@@ -532,6 +532,28 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Ordinary_reader_share_allows_atomic_update_during_restart_polling()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun();
+        await store.CreateAsync(admitted);
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        await store.UpdateAsync(running, admitted.LifecycleVersion);
+        var path = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+
+        // Keep the ordinary reader open to model the external restart poller overlapping final trace persistence (#475).
+        await using var ordinaryReader = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var completed = Advance(running, CustomLoopRunStatus.Completed);
+
+        var result = await store.UpdateAsync(completed, running.LifecycleVersion);
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Completed, (await new CustomLoopRunStore(paths).GetAsync(admitted.Id))!.Status);
+    }
+
+    [Fact]
     public async Task Os_exclusive_lock_serializes_mutation_and_cancellation_releases_the_process_gate()
     {
         using var workspace = new TestWorkspace();
