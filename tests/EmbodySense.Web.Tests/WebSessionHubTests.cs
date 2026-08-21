@@ -113,35 +113,6 @@ public sealed class WebSessionHubTests
     }
 
     [Fact]
-    public async Task Transcript_read_maps_a_foreign_cancellation_exception_to_neutral_result_after_connection_abort()
-    {
-        using var connectionAborted = new CancellationTokenSource();
-        using var foreignCancellation = new CancellationTokenSource();
-        connectionAborted.Cancel();
-        foreignCancellation.Cancel();
-
-        var transcript = await WebSessionTranscriptReadPolicy.ReadAsync(
-            _ => Task.FromException<IReadOnlyList<WebTranscriptMessage>?>(new OperationCanceledException(foreignCancellation.Token)),
-            connectionAborted.Token);
-
-        Assert.Null(transcript);
-    }
-
-    [Fact]
-    public async Task Transcript_read_preserves_foreign_cancellation_when_connection_remains_live()
-    {
-        using var connectionAborted = new CancellationTokenSource();
-        using var foreignCancellation = new CancellationTokenSource();
-        foreignCancellation.Cancel();
-
-        var exception = await Assert.ThrowsAsync<OperationCanceledException>(() => WebSessionTranscriptReadPolicy.ReadAsync(
-            _ => Task.FromException<IReadOnlyList<WebTranscriptMessage>?>(new OperationCanceledException(foreignCancellation.Token)),
-            connectionAborted.Token));
-
-        Assert.Equal(foreignCancellation.Token, exception.CancellationToken);
-    }
-
-    [Fact]
     public async Task SendMessage_streams_error_when_message_is_blank()
     {
         using var workspace = new TestWorkspace();

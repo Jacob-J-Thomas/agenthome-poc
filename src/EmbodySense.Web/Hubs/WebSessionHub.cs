@@ -95,7 +95,15 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     /// </returns>
     public async Task<IReadOnlyList<WebTranscriptMessage>?> GetCurrentTranscript()
     {
-        return await WebSessionTranscriptReadPolicy.ReadAsync(_host.GetCurrentTranscriptAsync, Context.ConnectionAborted);
+        var connectionAborted = Context.ConnectionAborted;
+        try
+        {
+            return await _host.GetCurrentTranscriptAsync(connectionAborted);
+        }
+        catch (OperationCanceledException) when (connectionAborted.IsCancellationRequested)
+        {
+            return null;
+        }
     }
 
     /// <summary>
