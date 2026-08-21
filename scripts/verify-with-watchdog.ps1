@@ -25,7 +25,11 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $verificationMode = if ($Qualification) { "qualification" } else { "promotion" }
-$verificationComponentName = $VerificationComponent.ToLowerInvariant()
+$verificationComponentName = switch ($VerificationComponent) {
+    "Full" { "full"; break }
+    "Solution" { "solution"; break }
+    "StaticContracts" { "static-contracts"; break }
+}
 $resultsRoot = Join-Path $repoRoot $(if ($Qualification) { "tests\QualificationResults" } else { "tests\VerificationResults" })
 $watchdogLogPath = Join-Path $resultsRoot "watchdog.log"
 $powerShellExecutable = (Get-Process -Id $PID).Path
