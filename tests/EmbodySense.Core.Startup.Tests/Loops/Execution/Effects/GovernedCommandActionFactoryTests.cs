@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.CommandActions;
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.CommandActions.Models;
 using EmbodySense.Core.Clients.Capabilities;
@@ -27,7 +28,7 @@ public sealed class GovernedCommandActionFactoryTests
             DenyingCommandActionProcessIsolationBoundary.Instance);
 
         var descriptor = Assert.Single(registry.Descriptors);
-        Assert.Equal(CommandOperationId(registration.Template.ContentHash), descriptor.OperationId);
+        Assert.Equal(GovernedCommandActionOperation.CreateOperationId(registration.Template), descriptor.OperationId);
         Assert.True(registry.TryResolve(descriptor, out var operation));
         Assert.NotNull(operation);
     }
@@ -47,8 +48,8 @@ public sealed class GovernedCommandActionFactoryTests
 
         Assert.Equal(2, registry.Descriptors.Count);
         Assert.NotEqual(registration.Template.ContentHash, revised.Template.ContentHash);
-        Assert.Contains(registry.Descriptors, descriptor => descriptor.OperationId == CommandOperationId(registration.Template.ContentHash));
-        Assert.Contains(registry.Descriptors, descriptor => descriptor.OperationId == CommandOperationId(revised.Template.ContentHash));
+        Assert.Contains(registry.Descriptors, descriptor => descriptor.OperationId == GovernedCommandActionOperation.CreateOperationId(registration.Template));
+        Assert.Contains(registry.Descriptors, descriptor => descriptor.OperationId == GovernedCommandActionOperation.CreateOperationId(revised.Template));
     }
 
     [Fact]
@@ -200,6 +201,4 @@ public sealed class GovernedCommandActionFactoryTests
         };
     }
 
-    private static string CommandOperationId(string templateContentHash)
-        => "command/" + templateContentHash[..32] + "/" + templateContentHash[32..];
 }

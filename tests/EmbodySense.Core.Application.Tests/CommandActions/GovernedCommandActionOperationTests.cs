@@ -19,7 +19,12 @@ public sealed class GovernedCommandActionOperationTests
         var operation = new GovernedCommandActionOperation(registration, new StubNativeHost());
 
         Assert.Null(CommandActionRegistrationContract.Validate(registration));
-        Assert.Equal(CommandOperationId(registration.Template.ContentHash), operation.Descriptor.OperationId);
+        var expectedOperationId = "command/" + registration.Template.ContentHash[..32] + "/" + registration.Template.ContentHash[32..];
+        Assert.Equal(expectedOperationId, GovernedCommandActionOperation.CreateOperationId(registration.Template));
+        Assert.Equal(expectedOperationId, operation.Descriptor.OperationId);
+        var registry = new GovernedActuatorOperationRegistry([operation]);
+        Assert.True(registry.TryResolve(operation.Descriptor, out var resolved));
+        Assert.Same(operation, resolved);
         Assert.Equal(GovernedActuatorTargetSemantics.ExactOpaqueFingerprint, operation.Descriptor.TargetSemantics);
         Assert.Equal(GovernedActuatorIdempotencyPosture.ReconciliationOnly, operation.Descriptor.Idempotency);
         Assert.True(operation.Descriptor.RequiresOptimisticPrecondition);
@@ -112,9 +117,6 @@ public sealed class GovernedCommandActionOperationTests
         Assert.Equal(expected, result.Outcome?.Outcome);
         Assert.Equal(evidenceId, result.Outcome?.OutcomeEvidenceId);
     }
-
-    private static string CommandOperationId(string templateContentHash)
-        => "command/" + templateContentHash[..32] + "/" + templateContentHash[32..];
 
     private sealed class StubNativeHost : ICommandActionNativeHost
     {

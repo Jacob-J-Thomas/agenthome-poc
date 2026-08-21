@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.CommandActions;
 using EmbodySense.Core.Application.CommandActions.Models;
 using EmbodySense.Core.Application.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Application.Loops.Sequential.Actions;
@@ -53,13 +54,14 @@ public sealed class GovernedLoopCommandActionExecutor : IGovernedLoopCommandActi
             var command = validated!;
             var dispatch = request.Dispatch;
             var binding = dispatch.Anchor.AdapterBinding;
+            var operationId = GovernedCommandActionOperation.CreateOperationId(command.Registration.Template);
             var identity = CommandActionFingerprint.Compute(
                 "embodysense.graph-command-effect.v1",
                 binding.ExecutionBinding.RunId,
                 dispatch.Node.NodeId,
                 dispatch.Attempt.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 request.AttemptOperationId,
-                command.Registration.Template.TemplateId,
+                operationId,
                 command.CanonicalInput);
             var result = await _facade.ExecuteAsync(
                 new GovernedLoopEffectAttemptRequest(
@@ -69,7 +71,7 @@ public sealed class GovernedLoopCommandActionExecutor : IGovernedLoopCommandActi
                     dispatch.Node.NodeId,
                     dispatch.Attempt,
                     command.CapabilityPin,
-                    command.Registration.Template.TemplateId,
+                    operationId,
                     "effect-" + identity,
                     "operation-" + identity,
                     1,
