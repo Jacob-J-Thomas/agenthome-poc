@@ -532,8 +532,14 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
-    public async Task Public_reader_share_allows_atomic_update_while_reader_is_paused_before_completion()
+    public async Task Windows_public_reader_share_allows_atomic_update_while_reader_is_paused_before_completion()
     {
+        // FileShare enforcement is Windows-specific; other platforms cannot exercise this contract.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopRunStore(paths);
@@ -542,26 +548,63 @@ public sealed class CustomLoopRunStoreTests
         admitted = CustomLoopAdmissionRequestHash.Apply(admitted with { AdmissionRequestHash = string.Empty });
         await store.CreateAsync(admitted);
         using var reader = new CustomLoopRunStore(paths);
+        using var readCancellation = new CancellationTokenSource();
         var gated = new QueuedSynchronizationContext();
         var previous = SynchronizationContext.Current;
-        Task<CustomLoopRunRecord?> readTask;
+        Task<CustomLoopRunRecord?>? readTask = null;
         SynchronizationContext.SetSynchronizationContext(gated);
         try
         {
-            readTask = reader.GetAsync(admitted.Id);
+            readTask = reader.GetAsync(admitted.Id, readCancellation.Token);
         }
         finally
         {
             SynchronizationContext.SetSynchronizationContext(previous);
         }
 
-        await gated.WaitForPostAsync(TimeSpan.FromSeconds(10));
-        var running = Advance(admitted, CustomLoopRunStatus.Running);
-        var result = await store.UpdateAsync(running, admitted.LifecycleVersion);
+        try
+        {
+            await gated.WaitForPostAsync(TimeSpan.FromSeconds(10));
+            Assert.False(readTask!.IsCompleted);
+            var running = Advance(admitted, CustomLoopRunStatus.Running);
+            var result = await store.UpdateAsync(running, admitted.LifecycleVersion);
 
-        Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
-        gated.Drain();
-        Assert.Equal(admitted.Id, (await readTask)!.Id);
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+            await gated.DrainUntilCompletedAsync(readTask!, TimeSpan.FromSeconds(10));
+            Assert.Equal(admitted.Id, (await readTask)!.Id);
+        }
+        finally
+        {
+            if (readTask is not null && !readTask.IsCompleted)
+            {
+                readCancellation.Cancel();
+            }
+
+            if (readTask is not null)
+            {
+                await gated.DrainUntilCompletedAsync(readTask, TimeSpan.FromSeconds(10));
+                try
+                {
+                    await readTask;
+                }
+                catch (OperationCanceledException) when (readCancellation.IsCancellationRequested)
+                {
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Queued_synchronization_context_drains_a_posted_task_until_completion()
+    {
+        var gated = new QueuedSynchronizationContext();
+        var completion = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var post = Task.Run(() => gated.Post(_ => completion.TrySetResult(null), null));
+
+        await gated.DrainUntilCompletedAsync(completion.Task, TimeSpan.FromSeconds(10));
+        await post;
+
+        Assert.True(completion.Task.IsCompletedSuccessfully);
     }
 
     [Fact]
