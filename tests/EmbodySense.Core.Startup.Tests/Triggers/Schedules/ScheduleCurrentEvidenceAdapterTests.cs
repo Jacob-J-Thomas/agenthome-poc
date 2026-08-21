@@ -327,8 +327,7 @@ public sealed class ScheduleCurrentEvidenceAdapterTests
         duplicate.CatalogReads.Enqueue(Page(1, [duplicate.CatalogEntry], duplicate.CatalogEntry.Descriptor.Id.Value));
         duplicate.CatalogReads.Enqueue(Page(1, [duplicate.CatalogEntry], null));
 
-        var nullEntry = ScheduleCurrentEvidenceTestContext.Create();
-        nullEntry.CatalogRead = Page(1, [null!], null);
+        Assert.Throws<ArgumentException>(() => Page(1, [null!], null));
 
         var revisionChange = ScheduleCurrentEvidenceTestContext.Create();
         var revisionEarlier = revisionChange.CatalogEntryWithId("org.embodysense/a-before");
@@ -343,13 +342,12 @@ public sealed class ScheduleCurrentEvidenceAdapterTests
 
         var laterResult = await laterMatch.AdapterUnderTest().ResolveAsync(laterMatch.Definition, laterMatch.Occurrence, ScheduleCurrentEvidenceTestContext.ObservedAtUtc);
         var duplicateResult = await duplicate.AdapterUnderTest().ResolveAsync(duplicate.Definition, duplicate.Occurrence, ScheduleCurrentEvidenceTestContext.ObservedAtUtc);
-        var nullResult = await nullEntry.AdapterUnderTest().ResolveAsync(nullEntry.Definition, nullEntry.Occurrence, ScheduleCurrentEvidenceTestContext.ObservedAtUtc);
         var revisionResult = await revisionChange.AdapterUnderTest().ResolveAsync(revisionChange.Definition, revisionChange.Occurrence, ScheduleCurrentEvidenceTestContext.ObservedAtUtc);
         var cycleResult = await cursorCycle.AdapterUnderTest().ResolveAsync(cursorCycle.Definition, cursorCycle.Occurrence, ScheduleCurrentEvidenceTestContext.ObservedAtUtc);
 
         Assert.Equal(ScheduleCurrentEvidenceStatus.Available, laterResult.Status);
         Assert.Equal(2, laterMatch.CatalogReadCount);
-        Assert.All([duplicateResult, nullResult, revisionResult, cycleResult], result =>
+        Assert.All([duplicateResult, revisionResult, cycleResult], result =>
         {
             Assert.Equal(ScheduleCurrentEvidenceStatus.Corrupt, result.Status);
             Assert.Null(result.Evidence);

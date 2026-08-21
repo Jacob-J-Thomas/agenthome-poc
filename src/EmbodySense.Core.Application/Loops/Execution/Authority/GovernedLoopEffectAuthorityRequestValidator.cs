@@ -89,6 +89,8 @@ internal static class GovernedLoopEffectAuthorityRequestValidator
                 && RequiresOnly(pins, WorkspaceCommandCapabilityId),
             GovernedLoopEffectBoundaryKind.ConversationPublication => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit)
                 && RequiresOnly(pins, ConversationTurnCapabilityId),
+            GovernedLoopEffectBoundaryKind.ActuatorDispatch => node.Descriptor.Kind == EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Action
+                && pins.All(pin => pin.Kind == CapabilityKind.Actuator),
             _ => false,
         };
     }
@@ -119,7 +121,8 @@ internal static class GovernedLoopEffectAuthorityRequestValidator
     {
         var targetBoundary = boundaryKind is GovernedLoopEffectBoundaryKind.WorkspaceToolIntake
             or GovernedLoopEffectBoundaryKind.WorkspaceActuation
-            or GovernedLoopEffectBoundaryKind.ConversationPublication;
+            or GovernedLoopEffectBoundaryKind.ConversationPublication
+            or GovernedLoopEffectBoundaryKind.ActuatorDispatch;
         return targetBoundary
             ? targetFingerprint is { Length: GovernedLoopEffectAuthorityContractLimits.Sha256HexCharacters }
                 && targetFingerprint.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f')
