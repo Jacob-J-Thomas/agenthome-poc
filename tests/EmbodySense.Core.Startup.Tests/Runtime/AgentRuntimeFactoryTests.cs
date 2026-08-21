@@ -14,6 +14,11 @@ using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.CommandActions;
+using EmbodySense.Core.Clients.Capabilities;
+using EmbodySense.Core.Clients.CommandActions;
+using EmbodySense.Core.Common.CommandActions;
+using EmbodySense.Core.Common.CommandActions.Models;
 using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
@@ -40,6 +45,7 @@ using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Startup.Loops.Posture.Models;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Loops.Execution.Effects;
 using EmbodySense.Core.Startup.Loops.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
@@ -50,6 +56,7 @@ using EmbodySense.Core.Persistence.Triggers;
 using EmbodySense.Core.Startup.Triggers;
 using EmbodySense.Core.Startup.Triggers.Models;
 using EmbodySense.Core.Startup.Tests.Triggers;
+using EmbodySense.Core.Startup.Tests.Loops.Execution.Effects;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Runtime;
@@ -138,6 +145,110 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(candidate.GraphId, reloaded.Lifecycle?.GraphId);
         Assert.Equal(candidate.RevisionId, reloaded.Lifecycle?.DraftRevision?.RevisionId);
         Assert.Single(reloaded.Artifacts);
+    }
+
+    [Fact]
+    public async Task Explicit_command_provider_projects_only_safe_exact_template_identity_and_fails_closed_without_artifact_readiness()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var registration = GovernedCommandActionFactoryTests.TypedRegistration();
+        var provider = new CommandActionRuntimeProvider(
+            [registration],
+            DenyingCapabilityExecutableArtifactResolver.Instance,
+            AvailableCommandActionProcessIsolationBoundary.Instance);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web, commandActionRuntimeProvider: provider);
+
+        var catalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+
+        var descriptor = Assert.Single(catalog.NodeDescriptors, item => CommandActionNodeDescriptors.Matches(item.Descriptor, registration.Template));
+        var command = Assert.IsType<GovernedLoopGraphCatalogCommandActionSnapshot>(descriptor.CommandAction);
+        Assert.True(descriptor.IsAdvertised);
+        Assert.False(descriptor.IsExecutable);
+        Assert.Equal("runtime-unavailable", command.Availability);
+        Assert.Equal(registration.Template.TemplateId, command.TemplateId);
+        Assert.Equal(registration.Template.TemplateVersion, command.TemplateVersion);
+        Assert.Equal(registration.Template.ContentHash, command.TemplateHash);
+        Assert.Equal("denied", command.Network);
+        Assert.Equal("artifact-root", command.WorkingDirectory);
+        var input = Assert.Single(descriptor.Parameters, parameter => parameter.Id == "input");
+        var identifier = Assert.Single(descriptor.Parameters, parameter => parameter.Id == "identifier");
+        var literal = Assert.Single(descriptor.Parameters, parameter => parameter.Id == "literal");
+        Assert.Equal("json", input.ValueKind);
+        Assert.Equal(512, input.MaximumUtf8Bytes);
+        Assert.Equal("capability-path", identifier.ValueKind);
+        Assert.Equal(128, identifier.MaximumUtf8Bytes);
+        Assert.Equal("text", literal.ValueKind);
+        Assert.Equal(8, literal.MaximumUtf8Bytes);
+        Assert.False(literal.AllowLeadingOption);
+        Assert.False(literal.AllowResponseFileReference);
+        var serialized = System.Text.Json.JsonSerializer.Serialize(command);
+        Assert.DoesNotContain("command.exe", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("file:///", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("Arguments", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("Environment", serialized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Command_catalog_keeps_a_registered_template_visible_but_disabled_without_isolation()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var registration = GovernedCommandActionFactoryTests.Registration(workspaceTarget: true);
+        var provider = new CommandActionRuntimeProvider(
+            [registration],
+            DenyingCapabilityExecutableArtifactResolver.Instance,
+            DenyingCommandActionProcessIsolationBoundary.Instance);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web, commandActionRuntimeProvider: provider);
+
+        var catalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+
+        var descriptor = Assert.Single(catalog.NodeDescriptors, item => CommandActionNodeDescriptors.Matches(item.Descriptor, registration.Template));
+        var command = Assert.IsType<GovernedLoopGraphCatalogCommandActionSnapshot>(descriptor.CommandAction);
+        Assert.True(descriptor.IsAdvertised);
+        Assert.False(descriptor.IsExecutable);
+        Assert.Equal("runtime-unavailable", command.Availability);
+        var target = Assert.Single(descriptor.Parameters, parameter => parameter.Id == "target");
+        Assert.Equal("workspace-relative-target", target.ValueKind);
+        Assert.Equal(512, target.MaximumUtf8Bytes);
+        Assert.False(target.AllowLeadingOption);
+        Assert.False(target.AllowResponseFileReference);
+    }
+
+    [Fact]
+    public async Task Command_catalog_omits_a_registration_that_cannot_preserve_graph_value_semantics()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var registration = GovernedCommandActionFactoryTests.Registration();
+        var incompatibleTemplate = CommandActionTemplateContract.Create(
+            registration.Template.SchemaVersion,
+            registration.Template.Capability,
+            registration.Template.Implementation,
+            registration.Template.ArtifactDigest,
+            registration.Template.ActivationRevision,
+            registration.Template.TemplateId,
+            registration.Template.TemplateVersion,
+            [new CommandActionSlotDefinition("mode", CommandActionSlotKind.Enumeration, 64, null, null, ["@file"], true)],
+            [new CommandActionArgumentPart(CommandActionArgumentPartKind.Slot, "mode")],
+            registration.Template.Environment,
+            registration.Template.SecondaryGrammar,
+            CommandActionStandardInputKind.Closed,
+            null,
+            registration.Template.Output,
+            registration.Template.Isolation,
+            registration.Template.RequiresCredentialChannel);
+        var incompatible = registration with { Template = incompatibleTemplate };
+        var provider = new CommandActionRuntimeProvider(
+            [incompatible],
+            DenyingCapabilityExecutableArtifactResolver.Instance,
+            AvailableCommandActionProcessIsolationBoundary.Instance);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web, commandActionRuntimeProvider: provider);
+
+        var catalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+
+        Assert.Equal("available", catalog.Status);
+        Assert.DoesNotContain(catalog.NodeDescriptors, item => CommandActionNodeDescriptors.IsCommandAction(item.Descriptor));
     }
 
     [Fact]
@@ -1378,11 +1489,16 @@ public sealed class AgentRuntimeFactoryTests
         TestWorkspace workspace,
         AgentRuntimeSurface? runtimeSurface = null,
         string? codexPath = null,
-        IAgentRuntimeAuthenticatedWakeVerifier? verifier = null)
+        IAgentRuntimeAuthenticatedWakeVerifier? verifier = null,
+        CommandActionRuntimeProvider? commandActionRuntimeProvider = null)
     {
         var executablePath = codexPath ?? await CreateFakeCodexExecutableAsync(workspace);
         var status = CreateCompatibleRuntimeStatus(executablePath);
-        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath, status);
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+            new RejectingApprovalPrompt(),
+            workspace.ServerStatePath,
+            status,
+            commandActionRuntimeProvider: commandActionRuntimeProvider);
         if (verifier is not null)
         {
             factory = factory.WithAuthenticatedWakeVerifier(verifier);

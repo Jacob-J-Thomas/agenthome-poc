@@ -38,7 +38,8 @@ public static class GovernedLoopEffectAuthorityUsageRequestValidator
 
         var targetBoundary = request.BoundaryKind is GovernedLoopEffectBoundaryKind.WorkspaceToolIntake
             or GovernedLoopEffectBoundaryKind.WorkspaceActuation
-            or GovernedLoopEffectBoundaryKind.ConversationPublication;
+            or GovernedLoopEffectBoundaryKind.ConversationPublication
+            or GovernedLoopEffectBoundaryKind.ActuatorDispatch;
         return targetBoundary
             ? request.MaxTargetCount > 0 && IsLowerHash(request.TargetFingerprint)
             : request.TargetFingerprint is null;

@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Text;
 using EmbodySense.Web;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Governance;
@@ -9,6 +11,7 @@ using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.SignalR.Protocol;
 
 namespace EmbodySense.Web.Tests;
 
@@ -20,7 +23,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         var clients = new RecordingHubClients();
         var hub = CreateHub(host, approvals, clients);
         approvals.RegisterOwnerConnection("connection-1");
@@ -47,7 +50,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         var clients = new RecordingHubClients();
         var hub = CreateHub(host, approvals, clients);
 
@@ -117,7 +120,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         var clients = new RecordingHubClients();
         var hub = CreateHub(host, approvals, clients);
 
@@ -135,7 +138,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         var clients = new RecordingHubClients();
         var hub = CreateHub(host, approvals, clients);
 
@@ -157,8 +160,7 @@ public sealed class WebSessionHubTests
         using var workspace = new TestWorkspace();
         var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
         var approvals = new WebApprovalCoordinator();
-        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
-        await using var host = new WebAgentRuntimeHost(options, approvals);
+        await using var host = CreateHost(workspace, approvals, codexPath);
         var clients = new RecordingHubClients();
         clients.CallerClient.StreamEventFailure = failureKind switch
         {
@@ -185,7 +187,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         var hub = CreateHub(host, approvals, new RecordingHubClients());
         _ = await hub.InitializeWorkspace();
 
@@ -201,7 +203,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         var hub = CreateHub(host, approvals, new RecordingHubClients());
 
         var exception = await Assert.ThrowsAsync<HubException>(() => hub.ReconcileMessage("hello", "chat-11111111-1111-4111-8111-111111111111"));
@@ -216,8 +218,7 @@ public sealed class WebSessionHubTests
         using var workspace = new TestWorkspace();
         var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
         var approvals = new WebApprovalCoordinator();
-        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
-        await using var host = new WebAgentRuntimeHost(options, approvals);
+        await using var host = CreateHost(workspace, approvals, codexPath);
         var clients = new RecordingHubClients();
         var hub = CreateHub(host, approvals, clients);
         _ = await hub.InitializeWorkspace();
@@ -234,7 +235,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         var clients = new RecordingHubClients();
         var hub = CreateHub(host, approvals, clients);
         await hub.OnConnectedAsync();
@@ -256,7 +257,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         var firstHub = CreateHub(host, approvals, new RecordingHubClients(), context: new TestHubCallerContext("connection-1"));
         var secondHub = CreateHub(host, approvals, new RecordingHubClients(), context: new TestHubCallerContext("connection-2"));
         await firstHub.OnConnectedAsync();
@@ -292,7 +293,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         var invoker = new ApprovalContinuingLoopRuntimeInvoker(approvals);
         var hub = CreateHub(host, approvals, new RecordingHubClients(), invoker);
         await hub.OnConnectedAsync();
@@ -314,7 +315,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         var clients = new RecordingHubClients();
         var hub = CreateHub(host, approvals, clients);
 
@@ -326,7 +327,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         var invoker = new RecordingLoopRuntimeInvoker();
         var hub = CreateHub(host, approvals, new RecordingHubClients(), invoker);
         var invocation = new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-one", "prompt");
@@ -341,6 +342,44 @@ public sealed class WebSessionHubTests
         Assert.Equal(resume, invoker.ResumeInput);
     }
 
+    [Fact]
+    public async Task Invoke_governed_loop_binds_approval_ownership_only_to_the_authenticated_hub_connection()
+    {
+        using var workspace = new TestWorkspace();
+        var approvals = new WebApprovalCoordinator();
+        await using var host = CreateHost(workspace, approvals);
+        var invoker = new RecordingLoopRuntimeInvoker();
+        var hub = CreateHub(host, approvals, new RecordingHubClients(), invoker);
+        var invocation = new GovernedLoopRunInvocationTransportInput(
+            "governed-one",
+            new GovernedLoopRevisionPublicationInput(1, 1, "graph-one", "revision-one", new string('a', 64), "publish-one", new string('b', 64)),
+            new GovernedLoopAuthorityGrantInput("grant-one", 1, "sha256:" + new string('c', 64)),
+            "prompt");
+
+        var response = await hub.InvokeGovernedLoop(invocation);
+
+        Assert.Equal("Completed", response.Status);
+        Assert.Equal("connection-1", invoker.GovernedInvocationOwner);
+        Assert.Equal(invocation.OperationId, invoker.GovernedInvocationInput?.OperationId);
+        Assert.Equal(invocation.Publication.GraphId, invoker.GovernedInvocationInput?.Publication.Revision.GraphId);
+        Assert.Equal(invocation.AuthorityGrant.GrantId, invoker.GovernedInvocationInput?.AuthorityGrant.GrantId.Value);
+    }
+
+    [Fact]
+    public void Governed_loop_invocation_response_retains_its_public_contract_on_the_signalr_wire()
+    {
+        var response = new GovernedLoopRunInvocationTransportResponse("Executed", "Admitted", null, "Created", "Completed", false, null, "Completed.");
+        var writer = new ArrayBufferWriter<byte>();
+
+        new JsonHubProtocol().WriteMessage(CompletionMessage.WithResult("invocation-1", response), writer);
+
+        var payload = Encoding.UTF8.GetString(writer.WrittenSpan).TrimEnd('\u001e');
+        Assert.Contains("\"status\":\"Executed\"", payload, StringComparison.Ordinal);
+        Assert.Contains("\"admissionStatus\":\"Admitted\"", payload, StringComparison.Ordinal);
+        Assert.Contains("\"executionStatus\":\"Completed\"", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("admissionOutcome", payload, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(false, false, "custom-loop invocation could not be processed safely")]
     [InlineData(false, true, "custom-loop invocation was cancelled")]
@@ -350,7 +389,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         var hub = CreateHub(host, approvals, new RecordingHubClients(), new ThrowingLoopRuntimeInvoker(cancelled));
 
         var exception = resume
@@ -368,7 +407,7 @@ public sealed class WebSessionHubTests
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        await using var host = CreateHost(workspace, approvals);
         const string Guidance = "Delete `.custom-loop-run-index.json` and retry the operation.";
         var hub = CreateHub(host, approvals, new RecordingHubClients(), new UnsupportedSchemaLoopRuntimeInvoker(Guidance));
 
@@ -380,10 +419,20 @@ public sealed class WebSessionHubTests
         Assert.Contains(Guidance, exception.Message, StringComparison.Ordinal);
     }
 
-    private static WebAgentRuntimeHost CreateHost(string rootPath, WebApprovalCoordinator approvals)
+    private static WebAgentRuntimeHost CreateHost(TestWorkspace workspace, WebApprovalCoordinator approvals, string? codexPath = null)
     {
-        var options = WebRunOptions.FromArguments(["--workdir", rootPath, "--model", "gpt-test"]);
-        return new WebAgentRuntimeHost(options, approvals);
+        var arguments = new List<string> { "--workdir", workspace.RootPath, "--model", "gpt-test" };
+        if (codexPath is not null)
+        {
+            arguments.AddRange(["--codex-path", codexPath]);
+        }
+        var options = WebRunOptions.FromArguments(arguments.ToArray());
+        var capabilityTrustRoot = Path.Combine(workspace.ServerStatePath, "capability-catalog");
+        return new WebAgentRuntimeHost(
+            options,
+            approvals,
+            EmbodySense.Core.Startup.Workspace.WorkspaceInitializer.ForFileCapabilityTrustRoot(capabilityTrustRoot),
+            capabilityTrustRoot);
     }
 
     private static WebSessionHub CreateHub(
@@ -406,6 +455,10 @@ public sealed class WebSessionHubTests
 
         public string? InvocationOwner { get; private set; }
 
+        public GovernedLoopRunInvocationInput? GovernedInvocationInput { get; private set; }
+
+        public string? GovernedInvocationOwner { get; private set; }
+
         public LoopRunControlInput? ResumeInput { get; private set; }
 
         public string? ResumeOwner { get; private set; }
@@ -415,6 +468,13 @@ public sealed class WebSessionHubTests
             InvocationInput = input;
             InvocationOwner = ownerConnectionId;
             return Task.FromResult(new LoopRunInvocationResponse("Admitted", "Completed", false, null, [], "Recorded invocation."));
+        }
+
+        public Task<GovernedLoopRunInvocationResponse> InvokeGovernedLoopAsync(GovernedLoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
+        {
+            GovernedInvocationInput = input;
+            GovernedInvocationOwner = ownerConnectionId;
+            return Task.FromResult(new GovernedLoopRunInvocationResponse("Completed", null, null, null, null, false, null, null, "Recorded governed invocation."));
         }
 
         public Task<LoopRunControlResponse> ResumeLoopAsync(LoopRunControlInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
@@ -443,6 +503,11 @@ public sealed class WebSessionHubTests
             return new LoopRunInvocationResponse("Admitted", "Completed", false, null, [], "Run continued after governed denial.");
         }
 
+        public Task<GovernedLoopRunInvocationResponse> InvokeGovernedLoopAsync(GovernedLoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
+
         public Task<LoopRunControlResponse> ResumeLoopAsync(LoopRunControlInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
         {
             throw new NotSupportedException();
@@ -454,6 +519,11 @@ public sealed class WebSessionHubTests
         public Task<LoopRunInvocationResponse> InvokeLoopAsync(LoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
         {
             return Task.FromException<LoopRunInvocationResponse>(CreateException());
+        }
+
+        public Task<GovernedLoopRunInvocationResponse> InvokeGovernedLoopAsync(GovernedLoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
+        {
+            return Task.FromException<GovernedLoopRunInvocationResponse>(CreateException());
         }
 
         public Task<LoopRunControlResponse> ResumeLoopAsync(LoopRunControlInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
@@ -474,6 +544,11 @@ public sealed class WebSessionHubTests
         public Task<LoopRunInvocationResponse> InvokeLoopAsync(LoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
         {
             return Task.FromException<LoopRunInvocationResponse>(new LoopRunEvidenceUnsupportedSchemaException(guidance));
+        }
+
+        public Task<GovernedLoopRunInvocationResponse> InvokeGovernedLoopAsync(GovernedLoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
+        {
+            return Task.FromException<GovernedLoopRunInvocationResponse>(new LoopRunEvidenceUnsupportedSchemaException(guidance));
         }
 
         public Task<LoopRunControlResponse> ResumeLoopAsync(LoopRunControlInput input, string ownerConnectionId, CancellationToken cancellationToken = default)

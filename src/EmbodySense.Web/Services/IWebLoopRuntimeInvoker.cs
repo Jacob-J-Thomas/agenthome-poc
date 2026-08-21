@@ -17,6 +17,13 @@ public interface IWebLoopRuntimeInvoker
     /// <returns>The durable admission or rejection response.</returns>
     Task<LoopRunInvocationResponse> InvokeLoopAsync(LoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default);
 
+    /// <summary>Invokes one exact published governed-loop revision for one owning browser connection.</summary>
+    /// <param name="input">The immutable publication, authority-grant, operation, and prompt coordinates.</param>
+    /// <param name="ownerConnectionId">The authenticated SignalR connection that owns any resulting approval interaction.</param>
+    /// <param name="cancellationToken">The token used to cancel runtime acquisition or pre-boundary work.</param>
+    /// <returns>The canonical governed admission, execution, replay, or recovery-required response.</returns>
+    Task<GovernedLoopRunInvocationResponse> InvokeGovernedLoopAsync(GovernedLoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default);
+
     /// <summary>
     /// Explicitly resumes a paused custom-loop run for one owning browser connection.
     /// </summary>

@@ -234,6 +234,7 @@ public sealed class GovernedLoopSequentialContractTests
         Assert.False(GovernedLoopSequentialContractHash.Matches(binding with { InvocationPayloadHash = Hash('d') }));
         Assert.False(GovernedLoopSequentialContractHash.Matches(binding with { GraphArtifactHash = Hash('e') }));
         Assert.False(GovernedLoopSequentialContractHash.Matches(binding with { GraphLayoutHash = Hash('f') }));
+        Assert.False(GovernedLoopSequentialContractHash.Matches(NewBinding(binding, binding.AdmissionReceipt, ["org.embodysense/command-action-test"])));
     }
 
     [Fact]
@@ -393,7 +394,7 @@ public sealed class GovernedLoopSequentialContractTests
         var validSnapshot = Snapshot();
         var validBinding = AdapterBinding();
         var missingSnapshotValues = new GovernedLoopSequentialInvocationSnapshot(1, "Prompt.", null!, null, default, null!, Hash('f'));
-        var missingBindingValues = new GovernedLoopSequentialAdapterBinding(1, validBinding.WorkspaceId, null!, "admit-1", null!, Hash('1'), Hash('2'), Hash('3'), Hash('4'), Hash('5'), Hash('6'));
+        var missingBindingValues = new GovernedLoopSequentialAdapterBinding(1, validBinding.WorkspaceId, null!, "admit-1", null!, Hash('1'), Hash('2'), Hash('3'), Hash('4'), Hash('5'), null!, Hash('6'));
         var futureConversation = CopySnapshot(validSnapshot, conversation: validSnapshot.InvokingConversation! with { CapturedAtUtc = validSnapshot.ContextCapturedAtUtc.AddSeconds(1) });
 
         Assert.Contains(GovernedLoopSequentialContractValidator.Validate((GovernedLoopSequentialInvocationSnapshot?)null).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.Required && error.Path == "$");
@@ -402,6 +403,7 @@ public sealed class GovernedLoopSequentialContractTests
         Assert.Contains(GovernedLoopSequentialContractValidator.Validate(missingSnapshotValues).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.Required && error.Path == "$.contextManifest");
         Assert.Contains(GovernedLoopSequentialContractValidator.Validate(missingSnapshotValues).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidTimestamp && error.Path == "$.contextCapturedAtUtc");
         Assert.Contains(GovernedLoopSequentialContractValidator.Validate(missingBindingValues).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidComposition && error.Path == "$.executionBinding");
+        Assert.Contains(GovernedLoopSequentialContractValidator.Validate(missingBindingValues).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidComposition && error.Path == "$.commandActionCapabilityIds");
         Assert.Contains(GovernedLoopSequentialContractValidator.Validate(futureConversation).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.InvalidTimestamp && error.Path == "$.invokingConversation.capturedAtUtc");
         Assert.Contains(GovernedLoopSequentialContractValidator.Validate(validSnapshot with { ContentHash = Hash('f') }).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.HashMismatch && error.Path == "$.contentHash");
         Assert.Contains(GovernedLoopSequentialContractValidator.Validate(validBinding with { ContentHash = Hash('f') }).Errors, error => error.Code == GovernedLoopSequentialValidationErrorCode.HashMismatch && error.Path == "$.contentHash");
@@ -571,6 +573,7 @@ public sealed class GovernedLoopSequentialContractTests
             Hash('4'),
             Hash('5'),
             Hash('6'),
+            [],
             string.Empty));
     }
 
@@ -642,12 +645,14 @@ public sealed class GovernedLoopSequentialContractTests
             source.InvocationPayloadHash,
             source.GraphArtifactHash,
             source.GraphLayoutHash,
+            source.CommandActionCapabilityIds,
             source.ContentHash);
     }
 
     private static GovernedLoopSequentialAdapterBinding NewBinding(
         GovernedLoopSequentialAdapterBinding source,
-        GovernedLoopAdmissionReceipt receipt)
+        GovernedLoopAdmissionReceipt receipt,
+        IReadOnlyList<string>? commandActionCapabilityIds = null)
         => new(
             source.SchemaVersion,
             source.WorkspaceId,
@@ -659,6 +664,7 @@ public sealed class GovernedLoopSequentialContractTests
             source.InvocationPayloadHash,
             source.GraphArtifactHash,
             source.GraphLayoutHash,
+            commandActionCapabilityIds ?? source.CommandActionCapabilityIds,
             source.ContentHash);
 
     private static CustomLoopContextManifestSource ConversationSource(

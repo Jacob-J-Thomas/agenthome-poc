@@ -1466,6 +1466,7 @@ public sealed class CustomLoopRunValidatorTests
             invocation.ContentHash,
             graphArtifactHash,
             new string('f', 64),
+            [],
             string.Empty));
         var admitted = WithSequentialEvidence(
             run.Events[0],
@@ -2080,6 +2081,7 @@ public sealed class CustomLoopRunValidatorTests
             binding.InvocationPayloadHash,
             binding.GraphArtifactHash,
             binding.GraphLayoutHash,
+            binding.CommandActionCapabilityIds,
             string.Empty));
     }
 

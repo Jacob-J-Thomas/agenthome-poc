@@ -1072,6 +1072,7 @@ public sealed class CustomLoopRunStore :
             binding.InvocationPayloadHash,
             binding.GraphArtifactHash,
             binding.GraphLayoutHash,
+            binding.CommandActionCapabilityIds,
             binding.ContentHash);
         var snapshotCopy = new EmbodySense.Core.Common.Loops.Sequential.Models.GovernedLoopSequentialInvocationSnapshot(
             snapshot.SchemaVersion,
@@ -2931,7 +2932,11 @@ public sealed class CustomLoopRunStore :
             return checked(persistedUtf8Bytes + (HasTerminalIntegrityWarning(run) ? 0 : CustomLoopLimits.MaxTraceControlEventUtf8Bytes));
         }
 
-        var maximumAttempts = CustomLoopLimits.GetMaximumModelAttempts(run.AdmittedDefinition.InferenceSteps.Length, run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations);
+        var maximumAttempts = run.SequentialInvocationSnapshot is not null
+                && run.SequentialAdapterBinding is not null
+                && run.AdmittedDefinition.InferenceSteps.Length == 0
+            ? 0
+            : CustomLoopLimits.GetMaximumModelAttempts(run.AdmittedDefinition.InferenceSteps.Length, run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations);
         var canonicalExitStarts = run.Events.Count(IsCanonicalDeterministicExitStart);
         if (canonicalExitStarts > 1)
         {
@@ -3054,7 +3059,8 @@ public sealed class CustomLoopRunStore :
             or GovernedLoopNodeKind.Validate
             or GovernedLoopNodeKind.Condition
             or GovernedLoopNodeKind.Join
-            or GovernedLoopNodeKind.Wait;
+            or GovernedLoopNodeKind.Wait
+            or GovernedLoopNodeKind.Action;
     }
 
     /// <summary>

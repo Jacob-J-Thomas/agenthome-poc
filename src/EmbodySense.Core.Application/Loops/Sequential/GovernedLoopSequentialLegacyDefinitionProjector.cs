@@ -136,7 +136,7 @@ public static class GovernedLoopSequentialLegacyDefinitionProjector
                 CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(graph.GraphId, toolAssignments),
             };
             definition = CustomLoopDefinitionContentHash.Apply(definition);
-            return CustomLoopDefinitionValidator.Validate(definition).IsValid
+            return CustomLoopDefinitionValidator.ValidateSequentialProjection(definition).IsValid
                 ? new GovernedLoopSequentialLegacyDefinitionProjectionResult(
                     GovernedLoopSequentialLegacyDefinitionProjectionStatus.Ready,
                     definition)

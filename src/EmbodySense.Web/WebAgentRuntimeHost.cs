@@ -263,7 +263,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     internal async Task<GovernedLoopGraphCatalogResponse> ReadGovernedLoopGraphCatalogAsync(
         CancellationToken cancellationToken)
     {
-        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        var runtime = await BeginGraphAuthoringRuntimeOperationAsync(cancellationToken);
         try
         {
             return await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync(cancellationToken);
@@ -325,7 +325,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
-        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        var runtime = await BeginGraphAuthoringRuntimeOperationAsync(cancellationToken);
         try
         {
             return await runtime.GovernedLoopGraphAuthoring.MutateAsync(input, cancellationToken);
@@ -335,6 +335,16 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             await EndCustomRuntimeOperationAsync();
         }
     }
+
+    /// <summary>Retires the cached runtime after an applied capability lifecycle mutation.</summary>
+    /// <remarks>
+    /// Command Action availability is verified while a runtime is composed and retained in its immutable graph catalog.
+    /// Retiring that runtime prevents later authoring requests from accepting an activation state observed before the mutation.
+    /// Active custom operations retain their current runtime until their safe completion boundary so lifecycle
+    /// control remains available, while graph catalog and authoring operations wait for a fresh runtime.
+    /// </remarks>
+    internal Task InvalidateRuntimeAfterCapabilityLifecycleMutationAsync()
+        => DiscardRuntimeAsync();
 
     /// <summary>
     /// Gets the complete canonical default-conversation transcript at a serialized turn boundary.
@@ -578,6 +588,29 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         try
         {
             return await runtime.InvokeCustomLoopAsync(input, executionCancellation.Token);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
+    }
+
+    /// <summary>Invokes one exact published governed-loop revision under one live browser connection's approval ownership.</summary>
+    /// <param name="input">The immutable publication, authority-grant, operation, and prompt coordinates.</param>
+    /// <param name="ownerConnectionId">The live SignalR connection that owns governed approvals.</param>
+    /// <param name="cancellationToken">The caller token linked with host shutdown for runtime acquisition and pre-boundary work.</param>
+    /// <returns>The canonical governed admission, execution, replay, or recovery-required response.</returns>
+    public async Task<GovernedLoopRunInvocationResponse> InvokeGovernedLoopAsync(GovernedLoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerConnectionId);
+
+        using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
+        using var approvalScope = _approvalCoordinator.BeginApprovalScope(ownerConnectionId);
+        var runtime = await BeginCustomRuntimeOperationAsync(executionCancellation.Token);
+        try
+        {
+            return await runtime.InvokeGovernedLoopAsync(input, executionCancellation.Token);
         }
         finally
         {
@@ -889,6 +922,34 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         finally
         {
             _runtimeGate.Release();
+        }
+    }
+
+    private async Task<AgentRuntime> BeginGraphAuthoringRuntimeOperationAsync(CancellationToken cancellationToken)
+    {
+        EnsureWorkspaceInitialized("authoring governed graphs");
+
+        while (true)
+        {
+            Task? discardCompletion = null;
+            await _runtimeGate.WaitAsync(cancellationToken);
+            try
+            {
+                if (!_discardRuntimeWhenCustomOperationsComplete)
+                {
+                    var runtime = await GetOrCreateRuntimeUnderGateAsync(cancellationToken);
+                    _activeCustomRuntimeOperations++;
+                    return runtime;
+                }
+
+                discardCompletion = _runtimeDiscardCompletion?.Task;
+            }
+            finally
+            {
+                _runtimeGate.Release();
+            }
+
+            await (discardCompletion ?? throw new InvalidOperationException("The pending runtime discard did not retain a completion boundary.")).WaitAsync(cancellationToken);
         }
     }
 

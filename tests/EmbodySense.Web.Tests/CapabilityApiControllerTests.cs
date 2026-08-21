@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Capabilities.Models;
+using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
@@ -128,6 +129,49 @@ public sealed class CapabilityApiControllerTests
     }
 
     [Fact]
+    public async Task Applied_lifecycle_confirmation_retires_the_cached_runtime_before_the_next_graph_catalog_read()
+    {
+        using var workspace = new TestWorkspace();
+        var facade = new StubCapabilityCatalogFacade();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var approvals = new WebApprovalCoordinator();
+        var runtimeFactoryCalls = 0;
+        var hostOptions = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
+        var host = new WebAgentRuntimeHost(
+            hostOptions,
+            approvals,
+            WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath),
+            null,
+            runtimeStatus =>
+            {
+                runtimeFactoryCalls++;
+                return AgentRuntimeFactory.ForFileCapabilityTrustRoot(approvals, workspace.ServerStatePath, runtimeStatus);
+            });
+        await using var app = CreateApp(workspace.RootPath, workspace.ServerStatePath, facade, out var options, host);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
+            var initialize = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { });
+            var firstCatalog = await SendAsync(client, HttpMethod.Get, "/api/governed-graphs/catalog", token);
+            var confirmation = await SendAsync(client, HttpMethod.Post, "/api/capabilities/lifecycle/confirm", token, ConfirmationBody());
+            var refreshedCatalog = await SendAsync(client, HttpMethod.Get, "/api/governed-graphs/catalog", token);
+
+            Assert.Equal(HttpStatusCode.OK, initialize.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, firstCatalog.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, confirmation.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, refreshedCatalog.StatusCode);
+            Assert.Equal(2, runtimeFactoryCalls);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task Capability_api_projects_stable_read_preview_and_mutation_failures()
     {
         using var workspace = new TestWorkspace();
@@ -232,14 +276,14 @@ public sealed class CapabilityApiControllerTests
         previewHash = "sha256:preview"
     };
 
-    private static WebApplication CreateApp(string rootPath, string trustRootPath, ICapabilityCatalogFacade facade, out WebRunOptions options)
+    private static WebApplication CreateApp(string rootPath, string trustRootPath, ICapabilityCatalogFacade facade, out WebRunOptions options, WebAgentRuntimeHost? host = null)
     {
         var port = GetFreePort();
         var arguments = new[] { "--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test" };
         options = WebRunOptions.FromArguments(arguments);
         var builder = Program.CreateBuilder(arguments, options);
         builder.Services.AddSingleton<ICapabilityCatalogFacade>(facade);
-        builder.Services.AddSingleton(new WebAgentRuntimeHost(options, new WebApprovalCoordinator(), WorkspaceInitializer.ForFileCapabilityTrustRoot(trustRootPath), trustRootPath));
+        builder.Services.AddSingleton(host ?? new WebAgentRuntimeHost(options, new WebApprovalCoordinator(), WorkspaceInitializer.ForFileCapabilityTrustRoot(trustRootPath), trustRootPath));
         var app = builder.Build();
         Program.ConfigurePipeline(app);
         return app;

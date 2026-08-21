@@ -266,6 +266,36 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
         }
     }
 
+    /// <summary>Invokes one exact published governed-loop revision under the calling connection's approval ownership.</summary>
+    /// <param name="input">The primitive immutable publication, authority-grant, operation, and prompt coordinates.</param>
+    /// <returns>The bounded admission, execution, replay, or recovery-required interface projection.</returns>
+    /// <exception cref="HubException">The invocation is cancelled or fails bounded validation or persistence safety checks.</exception>
+    public async Task<GovernedLoopRunInvocationTransportResponse> InvokeGovernedLoop(GovernedLoopRunInvocationTransportInput input)
+    {
+        try
+        {
+            if (!GovernedLoopRunInvocationTransport.TryCreate(input, out var canonical) || canonical is null)
+            {
+                throw new HubException("The governed-loop invocation coordinates are malformed.");
+            }
+
+            var response = await _loopRuntime.InvokeGovernedLoopAsync(canonical, Context.ConnectionId, CancellationToken.None);
+            return GovernedLoopRunInvocationTransport.CreateResponse(response);
+        }
+        catch (OperationCanceledException)
+        {
+            throw new HubException("The governed-loop invocation was cancelled.");
+        }
+        catch (LoopRunEvidenceUnsupportedSchemaException exception)
+        {
+            throw new HubException($"unsupported_loop_persistence_schema: {exception.Message}");
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or FormatException or IOException)
+        {
+            throw new HubException("The governed-loop invocation could not be processed safely. Check durable run evidence and the local audit log.");
+        }
+    }
+
     /// <summary>
     /// Explicitly resumes a paused custom-loop run under the calling connection's approval ownership.
     /// </summary>

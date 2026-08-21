@@ -108,6 +108,7 @@ internal static class GovernedLoopWaitApplicationTestFixture
             invocation.ContentHash,
             artifact.ArtifactHash,
             artifact.LayoutHash,
+            [],
             string.Empty));
         var anchor = Assert.IsType<GovernedLoopSequentialRunAnchor>(GovernedLoopSequentialRunAnchorGuard.Create(binding, request, receipt, invocation, artifact).Anchor);
         var initialized = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Initialize(binding, plan, "trigger-attempt", Hash('1'), Hash('2'), Now.AddMinutes(-1)).Frontier);

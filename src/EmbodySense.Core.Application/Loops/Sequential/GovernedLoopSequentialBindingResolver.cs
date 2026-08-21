@@ -9,6 +9,8 @@ using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Sequential;
+using EmbodySense.Core.Common.CommandActions;
+using EmbodySense.Core.Common.CommandActions.Models;
 
 namespace EmbodySense.Core.Application.Loops.Sequential;
 
@@ -196,6 +198,20 @@ public static class GovernedLoopSequentialBindingResolver
                     GovernedLoopTypedValue.CurrentSchemaVersion,
                     GovernedLoopValueKind.Text,
                     JsonSerializer.Serialize(actionResult),
+                    out value,
+                    out _);
+        }
+
+        if (GovernedLoopSequentialNodeDescriptors.IsCommandAction(source.Descriptor))
+        {
+            return string.Equals(sourcePortId, "result", StringComparison.Ordinal)
+                && outcomeEvent is { Kind: CustomLoopRunEventKind.NodeAttemptCompleted, CanonicalOutput: { } commandResult, PureNodeOutcomeJson: null }
+                && CommandActionResultContract.TryParse(commandResult, out var parsed)
+                && parsed!.Outcome == CommandActionResultOutcome.Succeeded
+                && GovernedLoopTypedValue.TryCreate(
+                    GovernedLoopTypedValue.CurrentSchemaVersion,
+                    GovernedLoopValueKind.Text,
+                    JsonSerializer.Serialize(commandResult),
                     out value,
                     out _);
         }

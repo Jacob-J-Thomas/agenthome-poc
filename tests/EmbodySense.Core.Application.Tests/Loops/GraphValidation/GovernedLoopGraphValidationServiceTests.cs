@@ -703,6 +703,63 @@ public sealed class GovernedLoopGraphValidationServiceTests
     }
 
     [Fact]
+    public async Task ValidateEnforcesTemplateDerivedJsonTargetUtf8AndTokenPrefixContracts()
+    {
+        var nodes = Nodes();
+        nodes[1] = nodes[1] with
+        {
+            Parameters = new Dictionary<string, string>
+            {
+                ["json"] = "{\"a\":\"\\uD83D\\uDE00\"}",
+                ["identifier"] = "group/item",
+                ["literal"] = "safe",
+                ["option"] = "value",
+                ["response"] = "file",
+                ["target"] = "folder/file.txt",
+            }
+        };
+        var candidate = Candidate(nodes: nodes);
+        var descriptors = Descriptors(candidate).Select(descriptor => descriptor.Descriptor.TypeId == "provider-inference" ? descriptor with
+        {
+            Parameters =
+            [
+                new GovernedLoopCatalogParameterContract("json", GovernedLoopParameterValueKind.Json, true, 1, 48, null, null, [], 20, false, false),
+                new GovernedLoopCatalogParameterContract("identifier", GovernedLoopParameterValueKind.CapabilityPath, true, 1, 128, null, null, [], 128, false, false),
+                new GovernedLoopCatalogParameterContract("literal", GovernedLoopParameterValueKind.Text, true, 1, 8, null, null, [], 4, false, false),
+                new GovernedLoopCatalogParameterContract("option", GovernedLoopParameterValueKind.Text, true, 1, 8, null, null, [], 8, false, false),
+                new GovernedLoopCatalogParameterContract("response", GovernedLoopParameterValueKind.Text, true, 1, 8, null, null, [], 8, true, false),
+                new GovernedLoopCatalogParameterContract("target", GovernedLoopParameterValueKind.WorkspaceRelativeTarget, true, 1, 64, null, null, [], 64, false, false),
+            ]
+        } : descriptor).ToArray();
+
+        var valid = await Service(descriptors).ValidateAsync(candidate);
+        var invalidNodes = nodes.ToArray();
+        invalidNodes[1] = invalidNodes[1] with
+        {
+            Parameters = new Dictionary<string, string>
+            {
+                ["json"] = "{\"a\":\"\\uD83D\\uDE00\\uD83D\\uDE00\"}",
+                ["identifier"] = "Alpha",
+                ["literal"] = "ééé",
+                ["option"] = "-unsafe",
+                ["response"] = "@file",
+                ["target"] = "../outside.txt",
+            }
+        };
+        var invalid = await Service(descriptors).ValidateAsync(candidate with { Nodes = invalidNodes });
+        var noncanonicalJsonNodes = nodes.ToArray();
+        noncanonicalJsonNodes[1] = noncanonicalJsonNodes[1] with
+        {
+            Parameters = new Dictionary<string, string>(nodes[1].Parameters) { ["json"] = "{ \"a\": \"\\uD83D\\uDE00\" }" }
+        };
+        var noncanonicalJson = await Service(descriptors).ValidateAsync(candidate with { Nodes = noncanonicalJsonNodes });
+
+        Assert.True(valid.IsValid, string.Join(Environment.NewLine, valid.Errors.Select(error => $"{error.Code}: {error.Element.Path}")));
+        Assert.Equal(6, invalid.Errors.Count(error => error.Code == "node.parameter.incompatible"));
+        Assert.Contains(noncanonicalJson.Errors, error => error.Code == "node.parameter.incompatible" && error.Element.Path.EndsWith("[json]", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task ValidateEnforcesCanonicalFiniteNumberAndJsonPointerParameters()
     {
         var nodes = Nodes();
