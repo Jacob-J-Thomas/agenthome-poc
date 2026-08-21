@@ -281,6 +281,7 @@ internal static class GovernedLoopRuntimeTests
         {
             completed = await WaitForRunAsync(store, runId!, CustomLoopRunStatus.Completed, TimeSpan.FromSeconds(60));
         }
+        // Keep restart persistence failures diagnosable while the hosted conflict is tracked in #475: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/475
         catch (Exception exception)
         {
             var failedCoordinator = await new GovernedLoopCoordinatorEvidenceStore(paths)
