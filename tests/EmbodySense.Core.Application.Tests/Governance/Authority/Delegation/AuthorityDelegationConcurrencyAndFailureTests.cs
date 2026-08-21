@@ -201,17 +201,23 @@ public sealed class AuthorityDelegationConcurrencyAndFailureTests
     }
 
     [Fact]
-    public async Task CreateAsync_PropagatesCancellationWhenHostileCompletionWinsBeforeWaiterAttachment()
+    public async Task CreateAsync_PropagatesCancellationAndReplaysWhenCommitWinsBeforeWaiterAttachment()
     {
         var harness = await AuthorityDelegationServiceTestHarness.CreateAsync();
         var service = harness.CreateService();
         using var cancellation = new CancellationTokenSource();
+        var committed = new TaskCompletionSource<AuthorityDelegationServiceResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         harness.GrantCallback = (_, _) =>
         {
             cancellation.Cancel();
             return Task.FromResult(harness.GrantResolution);
         };
-        harness.TransactionCallback = (operation, _) => operation(CancellationToken.None);
+        harness.TransactionCallback = async (operation, _) =>
+        {
+            var result = await operation(CancellationToken.None);
+            committed.TrySetResult(result);
+            return result;
+        };
 
         var previousContext = SynchronizationContext.Current;
         Task<AuthorityDelegationServiceResult> creation;
@@ -226,24 +232,50 @@ public sealed class AuthorityDelegationConcurrencyAndFailureTests
         }
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => creation);
+        var committedResult = await committed.Task;
+        var committedEnvelope = Assert.IsType<AuthorityDelegationEnvelope>(committedResult.Envelope);
+        var replay = await service.CreateAsync(harness.Request);
+
+        Assert.Equal(AuthorityDelegationServiceStatus.Replayed, replay.Status);
+        Assert.Equal(committedEnvelope, replay.Envelope);
         Assert.Equal(1, harness.GrantCount);
+        Assert.Equal(1, harness.OriginCount);
+        Assert.Equal(1, harness.TargetCount);
+        Assert.Equal(1, harness.CompletionCount);
+        Assert.Equal(1, harness.TransactionCount);
     }
 
     [Fact]
-    public async Task CreateAsync_DoesNotPublishWhenHostileTransactionReturnsAfterCallerCancellation()
+    public async Task CreateAsync_DoesNotPublishWhenCallerCancellationWinsBeforeHostileTransactionCommit()
     {
         var harness = await AuthorityDelegationServiceTestHarness.CreateAsync();
         var service = harness.CreateService();
         using var cancellation = new CancellationTokenSource();
+        var transactionEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseTransaction = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var transactionFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         harness.TransactionCallback = async (operation, _) =>
         {
-            var result = await operation(CancellationToken.None);
-            cancellation.Cancel();
-            return result;
+            transactionEntered.TrySetResult();
+            try
+            {
+                await releaseTransaction.Task;
+                return await operation(CancellationToken.None);
+            }
+            finally
+            {
+                transactionFinished.TrySetResult();
+            }
         };
 
+        var creation = service.CreateAsync(harness.Request, cancellation.Token);
+        await transactionEntered.Task;
+        cancellation.Cancel();
+        releaseTransaction.TrySetResult();
+
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => service.CreateAsync(harness.Request, cancellation.Token));
+            () => creation);
+        await transactionFinished.Task;
 
         harness.TransactionCallback = null;
         var retry = await service.CreateAsync(harness.Request);
@@ -253,6 +285,12 @@ public sealed class AuthorityDelegationConcurrencyAndFailureTests
         }
 
         Assert.Equal(AuthorityDelegationServiceStatus.Created, retry.Status);
+        Assert.NotNull(retry.Envelope);
+        Assert.Equal(1, harness.GrantCount);
+        Assert.Equal(1, harness.OriginCount);
+        Assert.Equal(1, harness.TargetCount);
+        Assert.Equal(1, harness.CompletionCount);
+        Assert.Equal(2, harness.TransactionCount);
     }
 
     [Fact]
