@@ -271,7 +271,7 @@ internal static class GovernedLoopRuntimeTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+        Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(
             startInfo,
             typeof(GovernedLoopRuntimeTests).Assembly.Location,
             $"{typeof(GovernedLoopRuntimeTestsModels).FullName}.{nameof(GovernedLoopRuntimeTestsModels.Model_attempt_crash_windows_are_durable_and_never_redispatch_across_external_restart)}");
