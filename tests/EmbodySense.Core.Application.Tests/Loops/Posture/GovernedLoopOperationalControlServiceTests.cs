@@ -457,19 +457,91 @@ public sealed class GovernedLoopOperationalControlServiceTests
         Assert.Equal(expectedStatus, receipts.Current!.Outcome);
     }
 
+    [Theory]
+    [InlineData(GovernedLoopOperationalControlKind.PauseRun, CustomLoopRunStatus.Running, CustomLoopControlStatus.Paused, "pause")]
+    [InlineData(GovernedLoopOperationalControlKind.CancelRun, CustomLoopRunStatus.Admitted, CustomLoopControlStatus.Cancelled, "cancel")]
+    [InlineData(GovernedLoopOperationalControlKind.ResumeRun, CustomLoopRunStatus.Paused, CustomLoopControlStatus.Resumed, "resume")]
+    public async Task Fresh_run_control_revalidates_the_current_monitor_before_delegating_the_exact_lifecycle_operation(
+        GovernedLoopOperationalControlKind kind,
+        CustomLoopRunStatus runStatus,
+        CustomLoopControlStatus lifecycleStatus,
+        string expectedOperation)
+    {
+        var artifactHash = new string('b', 64);
+        var runStore = new StubRunStore { Monitor = RunMonitor(runStatus, 2, artifactHash) };
+        var lifecycle = new StubLifecycle { ResultStatus = lifecycleStatus };
+        var receipts = new InMemoryReceiptStore();
+        var (service, authority) = await ServiceAsync(
+            new StubOperationalTriggerQueuePort { Snapshot = Snapshot() },
+            receipts,
+            runs: runStore,
+            lifecycle: lifecycle);
+        var request = Request(kind, "run-1", 2, artifactHash, authority.EvidenceHash);
+
+        var result = await service.ExecuteAsync(request);
+
+        Assert.Equal(GovernedLoopOperationalControlStatus.Applied, result.Status);
+        Assert.Equal("run-control-" + lifecycleStatus.ToString().ToLowerInvariant(), result.ReasonCode);
+        Assert.Equal(expectedOperation, lifecycle.LastOperation);
+        Assert.Null(result.CurrentRevision);
+        Assert.Equal(GovernedLoopOperationalControlReceiptState.Complete, receipts.Current!.State);
+    }
+
+    [Theory]
+    [InlineData(0, GovernedLoopOperationalControlStatus.NotFound, "run-control-not-found")]
+    [InlineData(1, GovernedLoopOperationalControlStatus.Corrupt, "run-control-evidence-corrupt")]
+    [InlineData(2, GovernedLoopOperationalControlStatus.Conflict, "run-control-revision-conflict")]
+    [InlineData(3, GovernedLoopOperationalControlStatus.Ineligible, "run-control-lifecycle-ineligible")]
+    public async Task Fresh_run_control_fails_closed_when_current_monitor_evidence_cannot_admit_the_requested_effect(
+        int scenario,
+        GovernedLoopOperationalControlStatus expectedStatus,
+        string expectedReason)
+    {
+        var artifactHash = new string('b', 64);
+        var runStore = new StubRunStore
+        {
+            Monitor = scenario switch
+            {
+                0 => null,
+                1 => RunMonitor(CustomLoopRunStatus.Running, 2, "not-a-sha256-hash"),
+                2 => RunMonitor(CustomLoopRunStatus.Running, 3, artifactHash),
+                _ => RunMonitor(CustomLoopRunStatus.Completed, 2, artifactHash)
+            }
+        };
+        var lifecycle = new StubLifecycle();
+        var receipts = new InMemoryReceiptStore();
+        var (service, authority) = await ServiceAsync(
+            new StubOperationalTriggerQueuePort { Snapshot = Snapshot() },
+            receipts,
+            runs: runStore,
+            lifecycle: lifecycle);
+        var request = Request(GovernedLoopOperationalControlKind.PauseRun, "run-1", 2, artifactHash, authority.EvidenceHash);
+
+        var result = await service.ExecuteAsync(request);
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Equal(expectedReason, result.ReasonCode);
+        Assert.Null(lifecycle.LastOperation);
+        Assert.Equal(expectedStatus, receipts.Current!.Outcome);
+    }
+
     private static async Task<(GovernedLoopOperationalControlService Service, GovernedLoopOperationalControlAuthority Authority)> ServiceAsync(
         StubOperationalTriggerQueuePort queue,
         InMemoryReceiptStore receipts,
-        IScheduleStorePort? schedules = null)
+        IScheduleStorePort? schedules = null,
+        ICustomLoopRunStore? runs = null,
+        ICustomLoopLifecycleControlPort? lifecycle = null)
     {
-        var (service, _, authority) = await ServiceWithAuthorityAsync(queue, receipts, schedules);
+        var (service, _, authority) = await ServiceWithAuthorityAsync(queue, receipts, schedules, runs, lifecycle);
         return (service, authority);
     }
 
     private static async Task<(GovernedLoopOperationalControlService Service, StubOperationalControlAuthorityPort AuthorityPort, GovernedLoopOperationalControlAuthority Authority)> ServiceWithAuthorityAsync(
         StubOperationalTriggerQueuePort queue,
         InMemoryReceiptStore receipts,
-        IScheduleStorePort? schedules = null)
+        IScheduleStorePort? schedules = null,
+        ICustomLoopRunStore? runs = null,
+        ICustomLoopLifecycleControlPort? lifecycle = null)
     {
         var authority = new StubOperationalControlAuthorityPort { WorkspaceId = _workspaceId, ObservedAtUtc = _now };
         return (
@@ -479,12 +551,30 @@ public sealed class GovernedLoopOperationalControlServiceTests
                 queue,
                 queue,
                 schedules ?? new StubScheduleStore(),
-                new StubRunStore(),
-                new StubLifecycle(),
+                runs ?? new StubRunStore(),
+                lifecycle ?? new StubLifecycle(),
                 new FixedTimeProvider(_now)),
             authority,
             (await authority.ReadCurrentAsync())!);
     }
+
+    private static CustomLoopRunMonitor RunMonitor(CustomLoopRunStatus status, int lifecycleVersion, string artifactHash)
+        => new(
+            new CustomLoopRunSummary(
+                "run-1",
+                "loop-1",
+                "admission-1",
+                1,
+                lifecycleVersion,
+                status,
+                _now,
+                _now,
+                null,
+                0,
+                0,
+                null,
+                IsDeleted: false),
+            artifactHash);
 
     private static GovernedLoopOperationalControlRequest Request(
         GovernedLoopOperationalControlKind kind,
@@ -626,15 +716,35 @@ public sealed class GovernedLoopOperationalControlServiceTests
 
     private sealed class StubLifecycle : ICustomLoopLifecycleControlPort
     {
-        public Task<CustomLoopControlResult> PauseAsync(CustomLoopPauseRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-        public Task<CustomLoopControlResult> CancelAsync(CustomLoopCancelRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-        public Task<CustomLoopControlResult> ResumeAsync(CustomLoopResumeRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        internal CustomLoopControlStatus ResultStatus { get; init; } = CustomLoopControlStatus.Paused;
+        internal string? LastOperation { get; private set; }
+
+        public Task<CustomLoopControlResult> PauseAsync(CustomLoopPauseRequest request, CancellationToken cancellationToken = default)
+        {
+            LastOperation = "pause";
+            return Task.FromResult(new CustomLoopControlResult(ResultStatus, null, request.OperationId, "test"));
+        }
+
+        public Task<CustomLoopControlResult> CancelAsync(CustomLoopCancelRequest request, CancellationToken cancellationToken = default)
+        {
+            LastOperation = "cancel";
+            return Task.FromResult(new CustomLoopControlResult(ResultStatus, null, request.OperationId, "test"));
+        }
+
+        public Task<CustomLoopControlResult> ResumeAsync(CustomLoopResumeRequest request, CancellationToken cancellationToken = default)
+        {
+            LastOperation = "resume";
+            return Task.FromResult(new CustomLoopControlResult(ResultStatus, null, request.OperationId, "test"));
+        }
     }
 
     private sealed class StubRunStore : ICustomLoopRunStore
     {
+        internal CustomLoopRunMonitor? Monitor { get; init; }
+
         public Task<CustomLoopRunStoreResult> CreateAsync(CustomLoopRunRecord run, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default) => Task.FromResult<CustomLoopRunRecord?>(null);
+        public Task<CustomLoopRunMonitor?> GetMonitorAsync(string runId, CancellationToken cancellationToken = default) => Task.FromResult(Monitor);
         public Task<CustomLoopRunRecord?> GetByAdmissionOperationAsync(string admissionOperationId, CancellationToken cancellationToken = default) => Task.FromResult<CustomLoopRunRecord?>(null);
         public Task<CustomLoopRunRecord?> GetNonterminalByLoopAsync(string loopId, CancellationToken cancellationToken = default) => Task.FromResult<CustomLoopRunRecord?>(null);
         public Task<IReadOnlyList<CustomLoopRunSummary>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<CustomLoopRunSummary>>([]);
