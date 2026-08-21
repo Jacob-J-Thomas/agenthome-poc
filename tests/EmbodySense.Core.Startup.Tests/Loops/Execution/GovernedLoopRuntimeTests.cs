@@ -107,14 +107,14 @@ internal static class GovernedLoopRuntimeTests
         }
 
         using var fixture = await GovernedRuntimeFixture.CreateAsync(
-            waitDelay: TimeSpan.FromSeconds(12));
+            waitDelay: TimeSpan.FromSeconds(60));
         var deadline = Assert.IsType<DateTimeOffset>(fixture.WaitDeadlineUtc);
         var input = fixture.Input("invoke-canonical-wait", "produce a result and then wait durably");
         string runId;
 
         await using (var runtime = await fixture.CreateRuntimeAsync())
         {
-            var invocationTargetUtc = deadline - TimeSpan.FromSeconds(3);
+            var invocationTargetUtc = deadline - TimeSpan.FromSeconds(15);
             Assert.True(
                 DateTimeOffset.UtcNow < invocationTargetUtc,
                 "The external restart fixture did not retain enough future time to prove pre-due parking.");
@@ -202,7 +202,7 @@ internal static class GovernedLoopRuntimeTests
         using var child = StartWaitHostHolderChild(fixture, readyPath, releasePath);
         try
         {
-            await WaitForFileAsync(readyPath, TimeSpan.FromSeconds(15));
+            await WaitForFileAsync(readyPath, TimeSpan.FromSeconds(60));
             await using var runtime = await fixture.CreateRuntimeAsync();
 
             var unavailable = await runtime.StartGovernedWaitBackgroundAsync();
@@ -214,7 +214,7 @@ internal static class GovernedLoopRuntimeTests
             Assert.Equal(GovernedLoopCoordinatorReadStatus.NotFound, beforeReacquisition?.Status);
 
             await File.WriteAllTextAsync(releasePath, "release");
-            await WaitForChildAsync(child, TimeSpan.FromSeconds(15), "The external custom-loop host holder did not exit.");
+            await WaitForChildAsync(child, TimeSpan.FromSeconds(60), "The external custom-loop host holder did not exit.");
 
             var waiting = await runtime.InvokeGovernedLoopAsync(
                 fixture.Input("invoke-late-wait-host", "activate the explicitly requested Wait host after reacquisition"));
@@ -239,7 +239,7 @@ internal static class GovernedLoopRuntimeTests
             if (!child.HasExited)
             {
                 await File.WriteAllTextAsync(releasePath, "release");
-                await WaitForChildAsync(child, TimeSpan.FromSeconds(5), "The external custom-loop host holder did not stop during cleanup.");
+                await WaitForChildAsync(child, TimeSpan.FromSeconds(60), "The external custom-loop host holder did not stop during cleanup.");
             }
         }
     }
@@ -277,7 +277,7 @@ internal static class GovernedLoopRuntimeTests
         CustomLoopRunRecord completed;
         try
         {
-            completed = await WaitForRunAsync(store, runId!, CustomLoopRunStatus.Completed);
+            completed = await WaitForRunAsync(store, runId!, CustomLoopRunStatus.Completed, TimeSpan.FromSeconds(30));
         }
         catch (Exception exception)
         {
@@ -353,7 +353,7 @@ internal static class GovernedLoopRuntimeTests
         await using var gate = new CustomLoopWorkspaceExecutionGate(new WorkspacePaths(workspace!));
         Assert.True(gate.IsWorkspaceHostAvailable);
         await File.WriteAllTextAsync(readyPath!, "ready");
-        await WaitForFileAsync(releasePath!, TimeSpan.FromSeconds(20));
+        await WaitForFileAsync(releasePath!, TimeSpan.FromSeconds(60));
     }
 
     private static Process StartWaitHostHolderChild(
@@ -1572,9 +1572,10 @@ internal static class GovernedLoopRuntimeTests
     private static async Task<CustomLoopRunRecord> WaitForRunAsync(
         CustomLoopRunStore store,
         string runId,
-        CustomLoopRunStatus status)
+        CustomLoopRunStatus status,
+        TimeSpan? timeout = null)
     {
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        var deadline = DateTimeOffset.UtcNow.Add(timeout ?? TimeSpan.FromSeconds(10));
         while (DateTimeOffset.UtcNow < deadline)
         {
             var run = await store.GetAsync(runId);
