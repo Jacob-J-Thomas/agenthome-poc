@@ -618,6 +618,8 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             skipped,
             disposition,
             Hash('f'),
+            disposition == GovernedLoopSequentialNodeHandlerResultStatus.Completed ? null : "failure-evidence",
+            disposition == GovernedLoopSequentialNodeHandlerResultStatus.Completed ? null : Hash('e'),
             string.Empty));
     }
 

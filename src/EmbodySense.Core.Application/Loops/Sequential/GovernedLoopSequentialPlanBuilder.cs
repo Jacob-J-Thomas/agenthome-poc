@@ -42,7 +42,7 @@ public static class GovernedLoopSequentialPlanBuilder
 
         if (graph.Nodes.Count is < CustomLoopLimits.MinInferenceSteps + 2 or > CustomLoopLimits.MaxGraphNodes
             || graph.ControlEdges.Count is < 1 or > CustomLoopLimits.MaxGraphControlEdges
-            || graph.TerminalNodeIds.Count != 1)
+            || graph.TerminalNodeIds.Count is < 1 or > 2)
         {
             return Failure(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, "$.graph");
         }
@@ -54,8 +54,12 @@ public static class GovernedLoopSequentialPlanBuilder
             return Failure(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, "$.graph.entryNodeId");
         }
 
-        var terminal = nodeById.GetValueOrDefault(graph.TerminalNodeIds[0]);
-        if (terminal is null || !Equals(terminal.Descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit))
+        var terminals = graph.TerminalNodeIds.Select(nodeById.GetValueOrDefault).ToArray();
+        if (terminals.Any(terminal => terminal is null)
+            || terminals.Count(terminal => Equals(terminal!.Descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit)) != 1
+            || terminals.Count(terminal => Equals(terminal!.Descriptor, GovernedLoopSequentialNodeDescriptors.FailTerminal)) > 1
+            || terminals.Any(terminal => !Equals(terminal!.Descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit)
+                && !Equals(terminal.Descriptor, GovernedLoopSequentialNodeDescriptors.FailTerminal)))
         {
             return Failure(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, "$.graph.terminalNodeIds");
         }
@@ -128,10 +132,13 @@ public static class GovernedLoopSequentialPlanBuilder
             reverse[edge.ToNodeId].Add(edge.FromNodeId);
         }
 
+        var terminalReachability = graph.TerminalNodeIds
+            .SelectMany(terminalNodeId => Traverse(terminalNodeId, reverse))
+            .ToHashSet(StringComparer.Ordinal);
         if (!Traverse(graph.EntryNodeId, adjacency).SetEquals(nodeIds)
-            || !Traverse(graph.TerminalNodeIds[0], reverse).SetEquals(nodeIds)
+            || !terminalReachability.SetEquals(nodeIds)
             || reverse[graph.EntryNodeId].Count != 0
-            || adjacency[graph.TerminalNodeIds[0]].Count != 0
+            || graph.TerminalNodeIds.Any(terminalNodeId => adjacency[terminalNodeId].Count != 0)
             || !HasExactControlOutcomes(graph)
             || HasImpossibleJoin(graph))
         {
@@ -367,19 +374,25 @@ public static class GovernedLoopSequentialPlanBuilder
             {
                 if (outgoing.Count(edge => edge.Condition == GovernedLoopControlCondition.True) != 1
                     || outgoing.Count(edge => edge.Condition == GovernedLoopControlCondition.False) != 1
-                    || outgoing.Length != 2)
+                    || outgoing.Count(edge => edge.Condition == GovernedLoopControlCondition.Failure) > 1
+                    || outgoing.Any(edge => edge.Condition is not (GovernedLoopControlCondition.True or GovernedLoopControlCondition.False or GovernedLoopControlCondition.Failure)))
                 {
                     return false;
                 }
             }
-            else if (Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit))
+            else if (Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit)
+                || Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.FailTerminal))
             {
                 if (outgoing.Length != 0)
                 {
                     return false;
                 }
             }
-            else if (outgoing.Length == 0 || outgoing.Any(edge => edge.Condition != GovernedLoopControlCondition.Success))
+            else if (outgoing.Count(edge => edge.Condition == GovernedLoopControlCondition.Success) == 0
+                || outgoing.Count(edge => edge.Condition == GovernedLoopControlCondition.Failure) > 1
+                || outgoing.Any(edge => edge.Condition == GovernedLoopControlCondition.Failure)
+                    && !IsFallibleExecutable(node.Descriptor)
+                || outgoing.Any(edge => edge.Condition is not (GovernedLoopControlCondition.Success or GovernedLoopControlCondition.Failure)))
             {
                 return false;
             }
@@ -397,6 +410,12 @@ public static class GovernedLoopSequentialPlanBuilder
 
         return true;
     }
+
+    private static bool IsFallibleExecutable(GovernedLoopNodeDescriptor descriptor)
+        => Equals(descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference)
+            || GovernedLoopSequentialNodeDescriptors.IsRecoverableAction(descriptor)
+            || GovernedLoopSequentialNodeDescriptors.IsPure(descriptor)
+            || GovernedLoopSequentialNodeDescriptors.IsWait(descriptor);
 
     private static bool HasImpossibleJoin(GovernedLoopGraphDefinition graph)
     {
@@ -601,6 +620,9 @@ public static class GovernedLoopSequentialPlanBuilder
                 GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Join => IsExactTopologyNode(node, schemaById),
                 GovernedLoopNodeKind.Wait => IsExactWaitNode(node),
                 GovernedLoopNodeKind.Exit => IsExactExit(node, schemaById),
+                GovernedLoopNodeKind.Fail => GovernedLoopFailNodeCatalogContract.HasExactNodeSemantics(
+                    node,
+                    graph.ControlEdges.Where(edge => string.Equals(edge.ToNodeId, node.Id, StringComparison.Ordinal)).OrderBy(edge => edge.Id, StringComparer.Ordinal).ToArray()),
                 _ => false,
             };
             if (!exact)
@@ -614,7 +636,7 @@ public static class GovernedLoopSequentialPlanBuilder
             return "$.graph.bindings";
         }
 
-        var exitNode = nodeById[graph.TerminalNodeIds[0]];
+        var exitNode = graph.TerminalNodeIds.Select(nodeId => nodeById[nodeId]).Single(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit));
         var published = exitNode.Ports.Single(port => string.Equals(port.Id, "published-result", StringComparison.Ordinal));
         if (graph.OutputContract.Outputs.Count != 1
             || graph.OutputContract.Outputs[0] is not { Id: "result", SourcePortId: "published-result", Required: true } output

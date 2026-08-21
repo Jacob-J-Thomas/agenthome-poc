@@ -13,6 +13,7 @@ using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Failures;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
@@ -433,6 +434,7 @@ public sealed class AgentRuntimeFactory
             var customAdmission = new CustomLoopAdmissionService(customDefinitionStore, customRunStore, auditLog, customToolAuthority, capabilityAdmission);
             var customRuntimeContext = new CustomLoopRuntimeContext(paths, conversationState, conversationMemory);
             var customPublisher = new CurrentConversationLoopPublisher(conversationState, conversationMemory, _conversationPublicationObserver);
+            var failureClassifier = new GovernedLoopFailureClassifier();
             var legacyInferenceExecutor = new CustomLoopInferenceAttemptExecutor(
                 effectiveOptions,
                 _approvalPrompt,
@@ -448,7 +450,8 @@ public sealed class AgentRuntimeFactory
                 auditLog,
                 customToolAuthority,
                 attemptCancellationBroker: customExecutionGate,
-                capabilityAdmissionService: capabilityAdmission);
+                capabilityAdmissionService: capabilityAdmission,
+                failureClassifier: failureClassifier);
             _capabilityTrustProvider.RequireDisjointWorkspace(paths.RootPath);
             var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
             var triggerWorkspaceId = workspaceId["workspace-sha256:".Length..];
@@ -576,7 +579,8 @@ public sealed class AgentRuntimeFactory
                 firstBoundRunCompletionBoundary: governedRunCompletion,
                 waitNodeExecutor: governedWaitNodeRelay,
                 workspaceActionExecutor: governedWorkspaceActionExecutor,
-                commandActionExecutor: governedCommandActionExecutor);
+                commandActionExecutor: governedCommandActionExecutor,
+                failureClassifier: failureClassifier);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,

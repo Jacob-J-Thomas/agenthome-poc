@@ -3286,7 +3286,8 @@ public sealed class CustomLoopRunStore :
             or GovernedLoopNodeKind.Condition
             or GovernedLoopNodeKind.Join
             or GovernedLoopNodeKind.Wait
-            or GovernedLoopNodeKind.Action;
+            or GovernedLoopNodeKind.Action
+            or GovernedLoopNodeKind.Fail;
     }
 
     /// <summary>
@@ -4166,6 +4167,8 @@ public sealed class CustomLoopRunStore :
             evidence.SkippedControlEdgeIds.ToArray(),
             disposition,
             evidence.OutcomeArtifactHash,
+            evidence.FailureEvidenceId,
+            evidence.FailureEvidenceHash,
             evidence.EvidenceHash);
     }
 

@@ -75,6 +75,8 @@ public static class CustomLoopSequentialNodeEvidenceHash
         writer.WriteString("governingControlEdgeId", evidence.GoverningControlEdgeId);
         writer.WriteString("disposition", ToCanonical(evidence.Disposition));
         writer.WriteString("outcomeArtifactHash", evidence.OutcomeArtifactHash);
+        writer.WriteString("failureEvidenceId", evidence.FailureEvidenceId);
+        writer.WriteString("failureEvidenceHash", evidence.FailureEvidenceHash);
         writer.WriteEndObject();
         writer.Flush();
         return Convert.ToHexString(SHA256.HashData(buffer.WrittenSpan)).ToLowerInvariant();
@@ -87,7 +89,11 @@ public static class CustomLoopSequentialNodeEvidenceHash
     /// <summary>Returns whether the declared digest matches every exact evidence coordinate.</summary>
     public static bool Matches(CustomLoopSequentialNodeEvidence? evidence)
     {
-        if (evidence is null || !IsHash(evidence.EvidenceHash) || !IsHash(evidence.OutcomeArtifactHash))
+        if (evidence is null
+            || !IsHash(evidence.EvidenceHash)
+            || !IsHash(evidence.OutcomeArtifactHash)
+            || (evidence.FailureEvidenceId is null) != (evidence.FailureEvidenceHash is null)
+            || evidence.FailureEvidenceHash is not null && !IsHash(evidence.FailureEvidenceHash))
         {
             return false;
         }

@@ -155,6 +155,11 @@ public static class FakeCodexExecutable
                   const inputText = turnInput(message);
                   const prompt = userText(message);
                   write({ id: message.id, result: { turn: { id: turnId } } });
+                  if (inputText.includes("browser-explicit-fail")) {
+                    completeTurn(threadId, turnId, "select-fail");
+                    break;
+                  }
+
                   if (inputText.includes("browser-provider-failure")) {
                     write({
                       method: "turn/completed",

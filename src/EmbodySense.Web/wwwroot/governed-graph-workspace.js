@@ -1131,6 +1131,7 @@ export function createGovernedGraphWorkspace({
         node.id,
         parameter.id,
         input.value,
+        !parameter.required,
       );
       if (!next) return;
       graph = next;
