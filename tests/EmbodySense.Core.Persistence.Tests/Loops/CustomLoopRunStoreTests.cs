@@ -602,6 +602,62 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Windows_atomic_replace_converges_after_a_short_external_reader_releases_the_destination()
+    {
+        // FileShare enforcement is Windows-specific; other platforms cannot exercise this contract.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun();
+        await store.CreateAsync(admitted);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        var artifactDirectory = Path.GetDirectoryName(artifactPath)!;
+        var stagingPattern = $".{Path.GetFileName(artifactPath)}.*.tmp";
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        Task<CustomLoopRunStoreResult>? updateTask = null;
+        CustomLoopRunStoreResult result;
+
+        try
+        {
+            await using (var externalReader = new FileStream(artifactPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                updateTask = Task.Run(() => store.UpdateAsync(running, admitted.LifecycleVersion));
+                var wait = Stopwatch.StartNew();
+                while (!Directory.EnumerateFiles(artifactDirectory, stagingPattern).Any())
+                {
+                    Assert.False(updateTask.IsCompleted, "The atomic update exhausted its transient retry budget before the external reader released the destination.");
+                    Assert.True(wait.Elapsed < TimeSpan.FromSeconds(10), "The atomic update did not reach its staged replacement boundary within the bounded wait.");
+                    await Task.Delay(TimeSpan.FromMilliseconds(15));
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(250));
+                Assert.False(updateTask.IsCompleted, "The atomic update exhausted its transient retry budget before the external reader released the destination.");
+            }
+
+            result = await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            if (updateTask is not null && !updateTask.IsCompleted)
+            {
+                await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            else if (updateTask?.IsFaulted == true)
+            {
+                _ = updateTask.Exception;
+            }
+        }
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Running, (await store.GetAsync(admitted.Id))!.Status);
+    }
+
+    [Fact]
     public async Task Queued_synchronization_context_drains_a_posted_task_until_completion()
     {
         var gated = new QueuedSynchronizationContext();

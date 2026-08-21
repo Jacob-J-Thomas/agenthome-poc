@@ -50,7 +50,7 @@ public sealed class CustomLoopRunStore :
     private const string DiscoveryIndexPendingFileName = ".custom-loop-run-index.pending";
     private const string ScheduleAdmissionRetirementFileName = ".schedule-admission-retirements.json";
     private const int MaximumScheduleAdmissionInterruptedWriteArtifacts = 32;
-    private const int MaximumAtomicMoveAttempts = 3;
+    private const int MaximumAtomicMoveAttempts = 41;
     private static readonly byte[] _discoveryIndexPendingContent = "pending\n"u8.ToArray();
     private static readonly TimeSpan _atomicMoveRetryDelay = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan _discoveryIndexMaintenanceTimeout = TimeSpan.FromSeconds(30);
