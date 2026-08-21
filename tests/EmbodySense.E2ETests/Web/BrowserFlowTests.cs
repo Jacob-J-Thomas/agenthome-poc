@@ -339,6 +339,7 @@ public sealed class BrowserFlowTests
     [InstalledBrowserFact]
     public async Task Browser_authors_publishes_and_reloads_a_server_cataloged_schedule_graph()
     {
+        const string BrowserProfileId = "org.example/model-profile/browser-schedule";
         using var workspace = new TestWorkspace();
         using var serverAccount = new BrowserServerAccountDirectory(workspace.ServerStatePath);
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
@@ -349,21 +350,23 @@ public sealed class BrowserFlowTests
         var capabilityTrustRoot = Path.Combine(localApplicationData, "EmbodySense", "server-state", "capability-catalog");
         Directory.CreateDirectory(localApplicationData);
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(capabilityTrustRoot).InitializeAsync(workspace.RootPath);
+        var browserProfile = new BrowserModelProfileSpec(
+            BrowserProfileId,
+            "browser-schedule",
+            "Test-only exact bounded browser model profile.",
+            "gpt-test",
+            true);
+        var browserProfileDescriptor = BrowserProfileWebHost.CreateDescriptor(browserProfile);
+        await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [browserProfileDescriptor]);
         var paths = new WorkspacePaths(workspace.RootPath);
-        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths);
-        var serverEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["CFFIXED_USER_HOME"] = serverAccountHome,
-            ["EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT"] = capabilityTrustRoot,
-            ["LOCALAPPDATA"] = localApplicationData,
-            ["XDG_DATA_HOME"] = localApplicationData,
-        };
-        await using var app = await ExternalWebApplicationProcess.StartAsync(
+        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths, [browserProfileDescriptor.Id.Value]);
+        await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(
             workspace.RootPath,
             GetFreePort(),
             codexExecutable,
             "gpt-test",
-            serverEnvironment);
+            capabilityTrustRoot,
+            [browserProfile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
 
         try
@@ -374,19 +377,21 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
             await ClickAsync(browser, "#governedGraphTab");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphCatalog').textContent.includes('schedule-trigger') && document.getElementById('governedGraphCatalog').textContent.includes('provider-inference') && document.getElementById('governedGraphCatalog').textContent.includes('success-exit')");
-            await browser.WaitForExpressionAsync("document.getElementById('governedGraphModelProfile').value === 'org.embodysense/model-profile/codex' && document.getElementById('governedGraphModelProfile').textContent.includes('gpt-test') && document.getElementById('governedGraphModelProfile').textContent.includes('configured default')");
+            await browser.WaitForExpressionAsync($"document.getElementById('governedGraphModelProfile').textContent.includes('gpt-test') && [...document.getElementById('governedGraphModelProfile').options].some((option) => option.value === '{BrowserProfileId}' && !option.disabled)");
+            Assert.True(await browser.EvaluateBooleanAsync($"[...document.querySelectorAll('#governedGraphModelProfile option')].some((option) => option.value === '{BuiltInCapabilityCatalog.CodexModelProfileCapabilityId}' && option.disabled && option.textContent.toLowerCase().includes('adapterunavailable'))"));
 
             await SetValueAsync(
                 browser,
                 "#governedGraphRole",
                 $"{authoringRole.Identity.RoleId}:{authoringRole.Identity.Revision}:{authoringRole.ContentHash}",
                 "change");
-            await SetValueAsync(browser, "#governedGraphModelRoutingMode", "inherit", "change");
+            await SetValueAsync(browser, "#governedGraphModelRoutingMode", "exact", "change");
             await SetValueAsync(browser, "#governedGraphId", "browser-scheduled-graph");
             await SetValueAsync(browser, "#governedGraphRevisionId", "revision-1");
             await SetValueAsync(browser, "#governedGraphDisplayName", "Browser scheduled graph");
             await SetValueAsync(browser, "#governedGraphPurpose", "Publish one server-cataloged scheduled graph.");
             await ClickAsync(browser, "#governedGraphNewButton");
+            await SetValueAsync(browser, "#governedGraphModelProfile", BrowserProfileId, "change");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "schedule-trigger");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "provider-inference");
             await SetValueAsync(browser, "#governedGraphInspector input:not([type='number'])", "Return the exact scheduled request.");
@@ -394,13 +399,13 @@ public sealed class BrowserFlowTests
             var modelInspector = await browser.EvaluateStringAsync("document.getElementById('governedGraphInspector').textContent");
             Assert.Contains("Eligible", modelInspector, StringComparison.Ordinal);
             Assert.Contains("runtime admission still required", modelInspector, StringComparison.Ordinal);
-            Assert.Contains("org.embodysense/model-profile/codex", modelInspector, StringComparison.Ordinal);
+            Assert.Contains(BrowserProfileId, modelInspector, StringComparison.Ordinal);
             Assert.Contains("sensitive", modelInspector, StringComparison.Ordinal);
             Assert.Contains("remote", modelInspector, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("attempt input unbounded", modelInspector, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("node input unbounded", modelInspector, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("run input unbounded", modelInspector, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("Input Tokens Authoritative after dispatch", modelInspector, StringComparison.Ordinal);
+            Assert.Contains("Input Tokens Authoritative and hard bounded at dispatch", modelInspector, StringComparison.Ordinal);
             Assert.Contains("Monetary Cost Unavailable", modelInspector, StringComparison.Ordinal);
             Assert.Contains("Ordered model fallback candidatesNone", modelInspector, StringComparison.Ordinal);
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "success-exit");
@@ -411,7 +416,7 @@ public sealed class BrowserFlowTests
             await AddGovernedGraphControlAsync(browser, "provider-inference", "success-exit", "Success");
             await AddGovernedGraphBindingAsync(browser, "provider-inference", "success-exit", "Data · result → result");
 
-            await browser.WaitForExpressionAsync("!document.getElementById('governedGraphSaveButton').disabled");
+            await browser.WaitForExpressionAsync($"!document.getElementById('governedGraphSaveButton').disabled && document.getElementById('governedGraphModelProfile').value === '{BrowserProfileId}'");
             await ClickAsync(browser, "#governedGraphSaveButton");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Draft') && document.getElementById('governedGraphNotice').textContent.includes('Committed')");
             await browser.WaitForExpressionAsync("!document.getElementById('governedGraphPublishButton').disabled");
@@ -428,11 +433,11 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#governedGraphTab");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Published') && document.querySelectorAll('#governedGraphCanvas .governed-graph-node').length === 3");
             Assert.Equal("browser-scheduled-graph", await browser.EvaluateStringAsync("document.getElementById('governedGraphId').value"));
-            Assert.Equal("org.embodysense/model-profile/codex", await browser.EvaluateStringAsync("document.getElementById('governedGraphModelProfile').value"));
-            Assert.Equal("inherit", await browser.EvaluateStringAsync("document.getElementById('governedGraphModelRoutingMode').value"));
+            Assert.Equal(BrowserProfileId, await browser.EvaluateStringAsync("document.getElementById('governedGraphModelProfile').value"));
+            Assert.Equal("exact", await browser.EvaluateStringAsync("document.getElementById('governedGraphModelRoutingMode').value"));
             await ClickButtonByTextAsync(browser, "#governedGraphCanvas button", "provider-inference");
-            await browser.WaitForExpressionAsync("document.getElementById('governedGraphInspector').textContent.includes('Eligible') && document.getElementById('governedGraphInspector').textContent.includes('inherit selector')");
-            Assert.Contains("org.embodysense/model-profile/codex", await browser.EvaluateStringAsync("document.getElementById('governedGraphInspector').textContent"), StringComparison.Ordinal);
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphInspector').textContent.includes('Eligible') && document.getElementById('governedGraphInspector').textContent.includes('exact selector')");
+            Assert.Contains(BrowserProfileId, await browser.EvaluateStringAsync("document.getElementById('governedGraphInspector').textContent"), StringComparison.Ordinal);
             Assert.Contains("1 immutable revision artifact", await browser.EvaluateStringAsync("document.getElementById('governedGraphLifecycle').textContent"), StringComparison.Ordinal);
             app.AssertHealthy();
             await browser.AssertHealthyAsync();
@@ -447,6 +452,7 @@ public sealed class BrowserFlowTests
     [InstalledBrowserFact]
     public async Task Browser_preserves_server_owned_profile_fallback_order_override_conflicts_and_safe_text()
     {
+        const string PrimaryProfileId = "org.example/model-profile/primary";
         const string SecondaryProfileId = "org.example/model-profile/secondary";
         const string TertiaryProfileId = "org.example/model-profile/tertiary";
         const string UnavailableProfileId = "org.example/model-profile/unavailable";
@@ -457,6 +463,7 @@ public sealed class BrowserFlowTests
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(capabilityTrustRoot).InitializeAsync(workspace.RootPath);
         var profileSpecs = new[]
         {
+            new BrowserModelProfileSpec(PrimaryProfileId, "primary", "Primary browser model profile.", "gpt-primary", true),
             new BrowserModelProfileSpec(SecondaryProfileId, "secondary", UnsafePurpose, "gpt-secondary", true),
             new BrowserModelProfileSpec(TertiaryProfileId, "tertiary", "Tertiary browser model profile.", "gpt-tertiary", true),
             new BrowserModelProfileSpec(UnavailableProfileId, "unavailable", "Unavailable browser model profile.", "gpt-unavailable", false),
@@ -490,7 +497,7 @@ public sealed class BrowserFlowTests
             var authoringRoleValue = $"{authoringRole.Identity.RoleId}:{authoringRole.Identity.Revision}:{authoringRole.ContentHash}";
             await SetValueAsync(browser, "#governedGraphRole", authoringRoleValue, "change");
             await SetValueAsync(browser, "#governedGraphModelRoutingMode", "exact", "change");
-            await SetValueAsync(browser, "#governedGraphModelProfile", BuiltInCapabilityCatalog.CodexModelProfileCapabilityId, "change");
+            await SetValueAsync(browser, "#governedGraphModelProfile", PrimaryProfileId, "change");
             await SetValueAsync(browser, "#governedGraphId", "browser-profile-routing-graph");
             await SetValueAsync(browser, "#governedGraphRevisionId", "revision-1");
             await SetValueAsync(browser, "#governedGraphDisplayName", "Browser profile routing graph");
@@ -501,9 +508,9 @@ public sealed class BrowserFlowTests
             await browser.EvaluateWithUserGestureAsync("document.querySelector('#governedGraphFallbackOrder li:first-child button:last-child').click()");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphFallbackOrder').textContent.indexOf('org.example/model-profile/tertiary') < document.getElementById('governedGraphFallbackOrder').textContent.indexOf('org.example/model-profile/secondary')");
 
-            var forgedStatus = await browser.EvaluateInt32Async("(async () => { const catalog = await fetch('/api/governed-graphs/catalog').then((response) => response.json()); const profile = catalog.modelProfiles.profiles.find((item) => item.profileId === 'org.embodysense/model-profile/codex'); const response = await fetch('/api/model-profiles/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ policy: profile.recommendedExactPolicy, roleId: 'schedule-graph-author', nodeTypeId: 'provider-inference', authoredInputDataClasses: null, metadata: { modelId: 'forged-browser-model' } }) }); return response.status; })()");
+            var forgedStatus = await browser.EvaluateInt32Async($"(async () => {{ const catalog = await fetch('/api/governed-graphs/catalog').then((response) => response.json()); const profile = catalog.modelProfiles.profiles.find((item) => item.profileId === '{PrimaryProfileId}'); const response = await fetch('/api/model-profiles/preview', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ policy: profile.recommendedExactPolicy, roleId: 'schedule-graph-author', nodeTypeId: 'provider-inference', authoredInputDataClasses: null, metadata: {{ modelId: 'forged-browser-model' }} }}) }}); return response.status; }})()");
             Assert.Equal(400, forgedStatus);
-            Assert.Equal(BuiltInCapabilityCatalog.CodexModelProfileCapabilityId, await browser.EvaluateStringAsync("document.getElementById('governedGraphModelProfile').value"));
+            Assert.Equal(PrimaryProfileId, await browser.EvaluateStringAsync("document.getElementById('governedGraphModelProfile').value"));
 
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "schedule-trigger");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "provider-inference");

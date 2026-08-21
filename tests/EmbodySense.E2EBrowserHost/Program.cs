@@ -127,23 +127,24 @@ namespace EmbodySense.E2EBrowserHost
                     GovernedModelRetentionPosture.Indefinite,
                     GovernedModelTrainingPosture.Allowed),
                 GovernedModelUsageSupportPolicy.Create(
-                    GovernedModelUsageSupport.AuthoritativeAfterDispatch,
-                    GovernedModelUsageSupport.AuthoritativeAfterDispatch,
-                    GovernedModelUsageSupport.AuthoritativeAfterDispatch,
-                    GovernedModelUsageSupport.AuthoritativeAfterDispatch,
+                    GovernedModelUsageSupport.AuthoritativeAndHardBoundedAtDispatch,
+                    GovernedModelUsageSupport.AuthoritativeAndHardBoundedAtDispatch,
+                    GovernedModelUsageSupport.AuthoritativeAndHardBoundedAtDispatch,
+                    GovernedModelUsageSupport.AuthoritativeAndHardBoundedAtDispatch,
                     GovernedModelUsageSupport.Unavailable),
                 [],
                 ["provider-inference"]);
+            var sourceRevisionHash = CustomLoopTraceContentHash.Compute($"browser-model-profile-source.v1\n{metadata.ContentHash}");
             return new ModelProfileRuntimeProvider(
                 new MetadataSource(
                     descriptor.Id,
                     metadata,
-                    CustomLoopTraceContentHash.Compute($"browser-model-profile-source.v1\n{metadata.ContentHash}")),
+                    sourceRevisionHash),
                 new AdapterRegistry(
                     metadata.ContentHash,
                     CustomLoopTraceContentHash.Compute($"browser-model-profile-registry.v1\n{metadata.ContentHash}"),
                     spec.Ready),
-                _ => IneligibleResolver.Instance);
+                admissionAdapterRegistry => new BrowserExactModelProfileResolver(metadata, sourceRevisionHash, admissionAdapterRegistry));
         }
 
         private static string RequiredOption(string[] args, string name)
@@ -198,20 +199,5 @@ namespace EmbodySense.E2EBrowserHost
             }
         }
 
-        private sealed class IneligibleResolver : IExactModelProfileInferenceClientResolver
-        {
-            public static IneligibleResolver Instance { get; } = new();
-
-            public Task<ExactModelProfileInferenceClientResolution> ResolveAsync(
-                ExactModelProfileInferenceClientRequest request,
-                CancellationToken cancellationToken = default)
-            {
-                ArgumentNullException.ThrowIfNull(request);
-                cancellationToken.ThrowIfCancellationRequested();
-                return Task.FromResult(new ExactModelProfileInferenceClientResolution(
-                    ExactModelProfileInferenceClientResolutionStatus.Ineligible,
-                    null));
-            }
-        }
     }
 }

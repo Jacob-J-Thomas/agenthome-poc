@@ -344,6 +344,7 @@ public sealed class ConfiguredModelProfileRegistryTests
             : new HashSet<string>(StringComparer.Ordinal);
 
         var resolution = await resolver.ResolveAsync(request);
+        Assert.Equal(ExactModelProfileInferenceClientResolutionStatus.Resolved, resolution.Status);
         await using var lease = Assert.IsAssignableFrom<IExactModelProfileInferenceClientLease>(resolution.Lease);
         var snapshot = Assert.Single(Directory.GetDirectories(snapshotRoot), path => !priorSnapshots.Contains(path));
         Assert.True(File.Exists(Path.Combine(snapshot, "package.json")));
@@ -368,7 +369,17 @@ public sealed class ConfiguredModelProfileRegistryTests
         await File.WriteAllTextAsync(Path.Combine(packageRoot, "package.json"), "{\"name\":\"@openai/codex\",\"private\":true}\n");
         Directory.CreateDirectory(Path.Combine(packageRoot, "bin"));
         await File.WriteAllTextAsync(Path.Combine(packageRoot, "bin", "codex.js"), "require('../vendor/host-platform/codex-runtime.js');\n");
-        await File.WriteAllTextAsync(Path.Combine(vendorDirectory, "codex-runtime.js"), "process.exit(0);\n");
+        await File.WriteAllTextAsync(Path.Combine(vendorDirectory, "codex-runtime.js"), """
+            const readline = require("node:readline");
+            const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+
+            input.on("line", line => {
+              const message = JSON.parse(line);
+              if (message.method === "initialize") {
+                process.stdout.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
+              }
+            });
+            """);
         var options = Options(workspace, shim);
         var registry = new ConfiguredModelProfileRegistry(options, RuntimeStatus(shim, options.Model!, "codex-cli Windows npm shim"));
         var request = await ConfiguredResolverRequestAsync(registry);
@@ -384,6 +395,7 @@ public sealed class ConfiguredModelProfileRegistryTests
             : new HashSet<string>(StringComparer.Ordinal);
 
         var resolution = await resolver.ResolveAsync(request);
+        Assert.Equal(ExactModelProfileInferenceClientResolutionStatus.Resolved, resolution.Status);
         await using var lease = Assert.IsAssignableFrom<IExactModelProfileInferenceClientLease>(resolution.Lease);
         var snapshotRoot = Assert.Single(Directory.GetDirectories(snapshotsDirectory), path => !priorSnapshots.Contains(path));
 
