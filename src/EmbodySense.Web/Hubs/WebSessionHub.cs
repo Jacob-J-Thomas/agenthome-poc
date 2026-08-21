@@ -95,11 +95,12 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     /// </returns>
     public async Task<IReadOnlyList<WebTranscriptMessage>?> GetCurrentTranscript()
     {
+        var connectionAborted = Context.ConnectionAborted;
         try
         {
-            return await _host.GetCurrentTranscriptAsync(Context.ConnectionAborted);
+            return await _host.GetCurrentTranscriptAsync(connectionAborted);
         }
-        catch (OperationCanceledException) when (Context.ConnectionAborted.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (connectionAborted.IsCancellationRequested && exception.CancellationToken == connectionAborted)
         {
             return null;
         }
