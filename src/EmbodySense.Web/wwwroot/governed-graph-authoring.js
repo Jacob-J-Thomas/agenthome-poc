@@ -81,6 +81,18 @@ export function clientShapeErrors(graph) {
     errors.push(
       error("revision-id-invalid", "graph", graph?.graphId, "revisionId"),
     );
+  if (
+    graph?.defaultModelRoutingPolicy !== undefined &&
+    !isRoutingPolicyIntent(graph.defaultModelRoutingPolicy)
+  )
+    errors.push(
+      error(
+        "model-routing-default-invalid",
+        "graph",
+        graph?.graphId,
+        "defaultModelRoutingPolicy",
+      ),
+    );
   const ids = new Set();
   for (const [index, node] of (graph?.nodes ?? []).entries()) {
     if (!identifier.test(node?.id ?? ""))
@@ -121,8 +133,9 @@ export function createGraphCandidate({
   purpose,
   role,
   displayName,
+  defaultModelRoutingPolicy,
 }) {
-  return {
+  const graph = {
     schemaVersion: 1,
     graphId,
     revisionId,
@@ -150,11 +163,14 @@ export function createGraphCandidate({
       nodes: [],
     },
   };
+  const routing = routingPolicyIntent(defaultModelRoutingPolicy);
+  if (routing) graph.defaultModelRoutingPolicy = routing;
+  return graph;
 }
 
 export function candidateFromGraph(graph) {
   if (!graph) return null;
-  return {
+  const candidate = {
     schemaVersion: graph.schemaVersion,
     graphId: graph.graphId,
     revisionId: graph.revisionId,
@@ -170,6 +186,136 @@ export function candidateFromGraph(graph) {
     outputContract: clone(graph.outputContract),
     displayMetadata: clone(graph.displayMetadata),
   };
+  const routing = routingPolicyIntent(graph.defaultModelRoutingPolicy);
+  if (routing) candidate.defaultModelRoutingPolicy = routing;
+  return candidate;
+}
+
+export function exactRoutingPolicyIntent(
+  template,
+  profileId,
+  fallbackProfileIds = [],
+) {
+  if (!isCapabilityId(profileId) || !isRoutingPolicyIntent(template))
+    return null;
+  if (!canonicalProfileOrder(fallbackProfileIds, profileId)) return null;
+  const policy = routingPolicyIntent(template);
+  policy.selector = {
+    kind: "exact",
+    exactProfileId: profileId,
+    permittedInheritedProfileIds: [],
+  };
+  policy.fallbackProfileIds = [...fallbackProfileIds];
+  return policy;
+}
+
+export function inheritedRoutingPolicyIntent(
+  template,
+  permittedProfileIds,
+  fallbackProfileIds = [],
+) {
+  if (
+    !isRoutingPolicyIntent(template) ||
+    !canonicalProfileSet(permittedProfileIds) ||
+    permittedProfileIds.length === 0 ||
+    !canonicalProfileOrder(fallbackProfileIds) ||
+    fallbackProfileIds.some((id) => permittedProfileIds.includes(id))
+  )
+    return null;
+  const policy = routingPolicyIntent(template);
+  policy.selector = {
+    kind: "inherit",
+    exactProfileId: null,
+    permittedInheritedProfileIds: [...permittedProfileIds],
+  };
+  policy.fallbackProfileIds = [...fallbackProfileIds];
+  return policy;
+}
+
+export function updateOrderedProfileSelection(
+  previousOrder,
+  selectedProfileIds,
+  excludedProfileId = null,
+) {
+  if (
+    !canonicalProfileOrder(previousOrder) ||
+    !canonicalProfileOrder(selectedProfileIds) ||
+    (excludedProfileId !== null && !isCapabilityId(excludedProfileId))
+  )
+    return null;
+  const selectedValues = selectedProfileIds.filter(
+    (profileId) => profileId !== excludedProfileId,
+  );
+  const selected = new Set(selectedValues);
+  const retained = previousOrder.filter(
+    (profileId) => profileId !== excludedProfileId && selected.has(profileId),
+  );
+  const retainedSet = new Set(retained);
+  return [
+    ...retained,
+    ...selectedValues.filter((profileId) => !retainedSet.has(profileId)),
+  ];
+}
+
+export function moveOrderedProfileSelection(values, profileId, offset) {
+  if (
+    !canonicalProfileOrder(values) ||
+    !isCapabilityId(profileId) ||
+    (offset !== -1 && offset !== 1)
+  )
+    return null;
+  const current = values.indexOf(profileId);
+  const target = current + offset;
+  if (current < 0 || target < 0 || target >= values.length) return [...values];
+  const moved = [...values];
+  [moved[current], moved[target]] = [moved[target], moved[current]];
+  return moved;
+}
+
+export function configureGraphModelRouting(graph, policy) {
+  if (!graph || !isRoutingPolicyIntent(policy)) return null;
+  const previousProfileIds = allRoutingProfileIds(graph);
+  return reconcileRoutingAuthority(
+    { ...graph, defaultModelRoutingPolicy: routingPolicyIntent(policy) },
+    previousProfileIds,
+  );
+}
+
+export function configureInferenceModelRouting(
+  graph,
+  nodeId,
+  policy,
+  authoredInputDataClasses = undefined,
+) {
+  const node = graph?.nodes?.find((item) => item.id === nodeId);
+  if (
+    !node ||
+    String(node.descriptor?.kind ?? "").toLowerCase() !== "inference" ||
+    (policy !== null && !isRoutingPolicyIntent(policy)) ||
+    (authoredInputDataClasses !== undefined &&
+      !canonicalDataClasses(authoredInputDataClasses))
+  )
+    return null;
+  const previousProfileIds = allRoutingProfileIds(graph);
+  return reconcileRoutingAuthority(
+    {
+      ...graph,
+      nodes: graph.nodes.map((item) =>
+        item.id === nodeId
+          ? {
+              ...item,
+              modelRoutingPolicy:
+                policy === null ? null : routingPolicyIntent(policy),
+              authoredInputDataClasses:
+                authoredInputDataClasses === undefined
+                  ? clone(item.authoredInputDataClasses ?? null)
+                  : clone(authoredInputDataClasses),
+            }
+          : item,
+      ),
+    },
+    previousProfileIds,
+  );
 }
 
 export function addCatalogNode(graph, contractItem, nodeId, canvasX, canvasY) {
@@ -198,7 +344,14 @@ export function addCatalogNode(graph, contractItem, nodeId, canvasX, canvasY) {
       required: port.required,
     };
   });
-  const requiredCapabilities = [...(contractItem.requiredCapabilityIds ?? [])];
+  const isInference =
+    String(contractItem.descriptor.kind).toLowerCase() === "inference";
+  const requiredCapabilities = [
+    ...(contractItem.requiredCapabilityIds ?? []),
+    ...(isInference ? routingProfileIds(graph.defaultModelRoutingPolicy) : []),
+  ]
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .sort();
   const parameters = Object.fromEntries(
     (contractItem.parameters ?? []).map((parameter) => [
       parameter.id,
@@ -211,6 +364,9 @@ export function addCatalogNode(graph, contractItem, nodeId, canvasX, canvasY) {
     ports,
     authorityCeiling: { capabilityIds: requiredCapabilities },
     parameters,
+    ...(isInference
+      ? { modelRoutingPolicy: null, authoredInputDataClasses: null }
+      : {}),
   };
   const nodes = [...(graph.nodes ?? []), node];
   const terminal = contractItem.isLegalTerminal;
@@ -255,34 +411,38 @@ export function addCatalogNode(graph, contractItem, nodeId, canvasX, canvasY) {
 
 export function removeGraphNode(graph, nodeId) {
   if (!graph?.nodes?.some((item) => item.id === nodeId)) return null;
+  const previousProfileIds = allRoutingProfileIds(graph);
   const nodes = graph.nodes.filter((item) => item.id !== nodeId);
   const terminalNodeIds = (graph.terminalNodeIds ?? []).filter(
     (item) => item !== nodeId,
   );
-  return {
-    ...graph,
-    entryNodeId: graph.entryNodeId === nodeId ? null : graph.entryNodeId,
-    terminalNodeIds,
-    nodes,
-    controlEdges: (graph.controlEdges ?? []).filter(
-      (item) => item.fromNodeId !== nodeId && item.toNodeId !== nodeId,
-    ),
-    bindings: (graph.bindings ?? []).filter(
-      (item) => item.fromNodeId !== nodeId && item.toNodeId !== nodeId,
-    ),
-    outputContract: {
-      ...(graph.outputContract ?? {}),
-      outputs: (graph.outputContract?.outputs ?? []).filter(
-        (item) => item.sourceNodeId !== nodeId,
+  return reconcileRoutingAuthority(
+    {
+      ...graph,
+      entryNodeId: graph.entryNodeId === nodeId ? null : graph.entryNodeId,
+      terminalNodeIds,
+      nodes,
+      controlEdges: (graph.controlEdges ?? []).filter(
+        (item) => item.fromNodeId !== nodeId && item.toNodeId !== nodeId,
       ),
-    },
-    displayMetadata: {
-      ...(graph.displayMetadata ?? {}),
-      nodes: (graph.displayMetadata?.nodes ?? []).filter(
-        (item) => item.nodeId !== nodeId,
+      bindings: (graph.bindings ?? []).filter(
+        (item) => item.fromNodeId !== nodeId && item.toNodeId !== nodeId,
       ),
+      outputContract: {
+        ...(graph.outputContract ?? {}),
+        outputs: (graph.outputContract?.outputs ?? []).filter(
+          (item) => item.sourceNodeId !== nodeId,
+        ),
+      },
+      displayMetadata: {
+        ...(graph.displayMetadata ?? {}),
+        nodes: (graph.displayMetadata?.nodes ?? []).filter(
+          (item) => item.nodeId !== nodeId,
+        ),
+      },
     },
-  };
+    previousProfileIds,
+  );
 }
 
 export function connectControl(
@@ -498,4 +658,131 @@ function uniqueId(seed, existing) {
 
 function clone(value) {
   return value == null ? value : structuredClone(value);
+}
+
+function routingPolicyIntent(value) {
+  if (!isRoutingPolicyIntent(value)) return null;
+  return stripDerivedHashes(clone(value));
+}
+
+function stripDerivedHashes(value) {
+  if (Array.isArray(value)) return value.map(stripDerivedHashes);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "contentHash")
+      .map(([key, item]) => [key, stripDerivedHashes(item)]),
+  );
+}
+
+function isRoutingPolicyIntent(value) {
+  if (!value || typeof value !== "object" || !value.requirements) return false;
+  const kind = String(value.selector?.kind ?? "").toLowerCase();
+  const exactProfileId = value.selector?.exactProfileId ?? null;
+  const permitted = value.selector?.permittedInheritedProfileIds ?? [];
+  const fallbacks = value.fallbackProfileIds ?? [];
+  return kind === "exact"
+    ? isCapabilityId(exactProfileId) &&
+        Array.isArray(permitted) &&
+        permitted.length === 0 &&
+        canonicalProfileOrder(fallbacks, exactProfileId)
+    : kind === "inherit" &&
+        exactProfileId === null &&
+        Array.isArray(permitted) &&
+        permitted.length > 0 &&
+        canonicalProfileOrder(permitted) &&
+        canonicalProfileOrder(fallbacks) &&
+        fallbacks.every((id) => !permitted.includes(id));
+}
+
+function canonicalProfileOrder(values, excluded = null) {
+  if (!Array.isArray(values) || values.some((value) => !isCapabilityId(value)))
+    return false;
+  if (excluded !== null && values.includes(excluded)) return false;
+  return new Set(values).size === values.length;
+}
+
+function canonicalProfileSet(values) {
+  return (
+    canonicalProfileOrder(values) &&
+    values.every((value, index) => index === 0 || values[index - 1] < value)
+  );
+}
+
+function isCapabilityId(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 2 &&
+    value.length <= 256 &&
+    /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\/[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/.test(
+      value,
+    )
+  );
+}
+
+function canonicalDataClasses(values) {
+  return (
+    values === null ||
+    (Array.isArray(values) &&
+      values.every(
+        (value) =>
+          typeof value === "string" &&
+          /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(value),
+      ) &&
+      values.every((value, index) => index === 0 || values[index - 1] < value))
+  );
+}
+
+function routingProfileIds(policy) {
+  if (!isRoutingPolicyIntent(policy)) return [];
+  const selectorIds =
+    policy.selector.kind === "exact"
+      ? [policy.selector.exactProfileId]
+      : policy.selector.permittedInheritedProfileIds;
+  return [...new Set([...selectorIds, ...policy.fallbackProfileIds])].sort();
+}
+
+function allRoutingProfileIds(graph) {
+  return new Set([
+    ...routingProfileIds(graph?.defaultModelRoutingPolicy),
+    ...(graph?.nodes ?? []).flatMap((node) =>
+      routingProfileIds(node?.modelRoutingPolicy),
+    ),
+  ]);
+}
+
+function reconcileRoutingAuthority(graph, previousProfileIds) {
+  const currentProfileIds = [...allRoutingProfileIds(graph)].sort();
+  const graphCapabilities = [
+    ...(graph.authorityCeiling?.capabilityIds ?? []).filter(
+      (id) => !previousProfileIds.has(id),
+    ),
+    ...currentProfileIds,
+  ];
+  return {
+    ...graph,
+    authorityCeiling: {
+      ...(graph.authorityCeiling ?? {}),
+      capabilityIds: [...new Set(graphCapabilities)].sort(),
+    },
+    nodes: (graph.nodes ?? []).map((node) => {
+      if (String(node.descriptor?.kind ?? "").toLowerCase() !== "inference")
+        return node;
+      const effectivePolicy =
+        node.modelRoutingPolicy ?? graph.defaultModelRoutingPolicy;
+      const capabilities = [
+        ...(node.authorityCeiling?.capabilityIds ?? []).filter(
+          (id) => !previousProfileIds.has(id),
+        ),
+        ...routingProfileIds(effectivePolicy),
+      ];
+      return {
+        ...node,
+        authorityCeiling: {
+          ...(node.authorityCeiling ?? {}),
+          capabilityIds: [...new Set(capabilities)].sort(),
+        },
+      };
+    }),
+  };
 }

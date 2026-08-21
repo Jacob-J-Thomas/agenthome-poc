@@ -61,6 +61,7 @@ public sealed class GovernedLoopAdmissionBoundsTests
             exact.GrantDependencyEvidenceHash,
             exact.EffectiveAuthority,
             exact.CapabilityAdmission,
+            exact.ModelRoutingAdmission,
             [.. exact.References, GovernedLoopAdmissionTestFixture.Reference(supportedKinds[^1], 'f')],
             exact.EvaluatedAtUtc,
             string.Empty);

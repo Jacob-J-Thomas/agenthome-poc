@@ -99,7 +99,8 @@ internal sealed class ScheduleCurrentEvidenceTestContext :
                 [
                     new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Start.", 0, 0),
                     new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 100, 0),
-                ]));
+                ]),
+            EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
         var graph = Assert.IsType<GovernedLoopGraphDefinition>(GovernedLoopGraphNormalizer.Normalize(candidate).Graph);
         var revisionArtifact = GovernedLoopRevisionArtifactFactory.Create(
             1,

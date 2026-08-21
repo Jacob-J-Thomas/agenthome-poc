@@ -614,6 +614,31 @@
                           ><span>Exact active role</span
                           ><select id="governedGraphRole"></select
                         ></label>
+                        <label
+                          ><span>Default routing mode</span
+                          ><select id="governedGraphModelRoutingMode">
+                            <option value="exact">Exact profile</option>
+                            <option value="inherit">
+                              Configured default within permitted set
+                            </option>
+                          </select></label
+                        >
+                        <label
+                          ><span>Primary or permitted model profile</span
+                          ><select id="governedGraphModelProfile"></select
+                        ></label>
+                        <label
+                          ><span>Ordered fallback profiles</span
+                          ><select
+                            id="governedGraphFallbackProfiles"
+                            multiple
+                          ></select>
+                          <ol
+                            id="governedGraphFallbackOrder"
+                            class="governed-model-fallback-order"
+                            aria-label="Selected fallback order"
+                          ></ol
+                        ></label>
                         <label class="governed-graph-purpose"
                           ><span>Purpose</span
                           ><input

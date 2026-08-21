@@ -3,6 +3,8 @@ import {
   candidateFromGraph,
   clientShapeErrors,
   compatibleBindings,
+  configureGraphModelRouting,
+  configureInferenceModelRouting,
   configureNodeParameter,
   connectBinding,
   connectControl,
@@ -11,10 +13,14 @@ import {
   currentGraph,
   descriptorKey,
   executableDescriptors,
+  exactRoutingPolicyIntent,
+  inheritedRoutingPolicyIntent,
   indexServerErrors,
   layoutOnlyMove,
   mutationInput,
+  moveOrderedProfileSelection,
   removeGraphNode,
+  updateOrderedProfileSelection,
 } from "./governed-graph-authoring.js";
 
 const selectionKeyPrefix = "embodysense.governed-graph-selection.v1";
@@ -60,6 +66,9 @@ export function createGovernedGraphWorkspace({
   let selectionKey = null;
   let pendingMutationKey = null;
   let pendingMutation = null;
+  let routingPreview = null;
+  let routingPreviewGeneration = 0;
+  let graphFallbackOrder = [];
 
   bindEvents();
 
@@ -87,6 +96,9 @@ export function createGovernedGraphWorkspace({
       errors = [];
       outcome = "";
       dirty = false;
+      routingPreview = null;
+      routingPreviewGeneration++;
+      graphFallbackOrder = [];
       pendingMutation = restorePendingMutation();
       elements.graphId.value = "";
       restoreSelection();
@@ -136,7 +148,32 @@ export function createGovernedGraphWorkspace({
     elements.revisionId.addEventListener("input", updateIdentity);
     elements.displayName.addEventListener("input", updateIdentity);
     elements.purpose.addEventListener("input", updateIdentity);
-    elements.role.addEventListener("change", updateIdentity);
+    elements.role.addEventListener("change", () => {
+      updateIdentity();
+      void refreshRoutingPreview();
+    });
+    elements.modelProfile.addEventListener("change", () => {
+      graphFallbackOrder =
+        updateOrderedProfileSelection(
+          graphFallbackOrder,
+          selectedOptionValues(elements.fallbackProfiles),
+          elements.modelProfile.value,
+        ) ?? [];
+      updateGraphModelProfile();
+    });
+    elements.modelRoutingMode.addEventListener(
+      "change",
+      updateGraphModelProfile,
+    );
+    elements.fallbackProfiles.addEventListener("change", () => {
+      graphFallbackOrder =
+        updateOrderedProfileSelection(
+          graphFallbackOrder,
+          selectedOptionValues(elements.fallbackProfiles),
+          elements.modelProfile.value,
+        ) ?? [];
+      updateGraphModelProfile();
+    });
     elements.addControlButton.addEventListener("click", addControlEdge);
     elements.addBindingButton.addEventListener("click", addTypedBinding);
     elements.connectionFrom.addEventListener("change", renderConnections);
@@ -156,6 +193,7 @@ export function createGovernedGraphWorkspace({
     } finally {
       inFlight = false;
       render();
+      if (graph) void refreshRoutingPreview();
     }
   }
 
@@ -175,6 +213,7 @@ export function createGovernedGraphWorkspace({
       purpose: elements.purpose.value.trim() || "Execute one governed graph.",
       role,
       displayName: elements.displayName.value.trim(),
+      defaultModelRoutingPolicy: selectedGraphRoutingPolicy(),
     });
     aggregate = null;
     selectedNodeId = null;
@@ -234,6 +273,7 @@ export function createGovernedGraphWorkspace({
     } finally {
       inFlight = false;
       render();
+      if (graph) void refreshRoutingPreview();
     }
   }
 
@@ -360,6 +400,7 @@ export function createGovernedGraphWorkspace({
     } finally {
       inFlight = false;
       render();
+      if (graph) void refreshRoutingPreview();
     }
   }
 
@@ -399,6 +440,8 @@ export function createGovernedGraphWorkspace({
     errors = [];
     outcome = `${humanize(contractItem.descriptor.kind)} node added from the exact server descriptor.`;
     render();
+    if (String(contractItem.descriptor.kind).toLowerCase() === "inference")
+      void refreshRoutingPreview();
   }
 
   function removeSelectedNode() {
@@ -483,6 +526,104 @@ export function createGovernedGraphWorkspace({
     );
   }
 
+  function selectedProfile() {
+    return (
+      (catalog?.modelProfiles?.profiles ?? []).find(
+        (item) =>
+          item.profileId === elements.modelProfile.value &&
+          item.availabilityReason === "ready" &&
+          item.recommendedExactPolicy,
+      ) ?? null
+    );
+  }
+
+  function selectedFallbackProfileIds(select = elements.fallbackProfiles) {
+    if (select === elements.fallbackProfiles) return [...graphFallbackOrder];
+    return selectedOptionValues(select);
+  }
+
+  function selectedGraphRoutingPolicy() {
+    const profile = selectedProfile();
+    if (!profile) return null;
+    const fallbacks = selectedFallbackProfileIds();
+    return elements.modelRoutingMode.value === "inherit"
+      ? inheritedRoutingPolicyIntent(
+          profile.recommendedExactPolicy,
+          [profile.profileId],
+          fallbacks,
+        )
+      : exactRoutingPolicyIntent(
+          profile.recommendedExactPolicy,
+          profile.profileId,
+          fallbacks,
+        );
+  }
+
+  function selectValues(select, values) {
+    const selected = new Set(values ?? []);
+    for (const option of select?.children ?? [])
+      option.selected = !option.disabled && selected.has(option.value);
+  }
+
+  function updateGraphModelProfile() {
+    if (!graph || pendingMutation) return;
+    const profile = selectedProfile();
+    const policy = selectedGraphRoutingPolicy();
+    const next = policy ? configureGraphModelRouting(graph, policy) : null;
+    if (!next) return;
+    graph = next;
+    dirty = true;
+    errors = [];
+    outcome = `${elements.modelRoutingMode.value === "inherit" ? "Configured-default routing bounded to" : "Exact default model profile set to"} ${profile.profileId}${selectedFallbackProfileIds().length ? ` with ${selectedFallbackProfileIds().length} ordered fallback candidate${selectedFallbackProfileIds().length === 1 ? "" : "s"}` : ""}; server admission remains authoritative and #339 executes only the admitted primary.`;
+    render();
+    void refreshRoutingPreview();
+  }
+
+  async function refreshRoutingPreview() {
+    const node = graph?.nodes?.find((item) => item.id === selectedNodeId);
+    const isInference =
+      String(node?.descriptor?.kind ?? "").toLowerCase() === "inference";
+    const policy = isInference
+      ? (node.modelRoutingPolicy ?? graph?.defaultModelRoutingPolicy)
+      : graph?.defaultModelRoutingPolicy;
+    const role = selectedRole();
+    const generation = ++routingPreviewGeneration;
+    if (!policy || !role) {
+      routingPreview = null;
+      renderInspector();
+      return;
+    }
+    routingPreview = {
+      status: "loading",
+      reason: "Server is recomputing exact current profile evidence.",
+    };
+    renderInspector();
+    try {
+      const response = await requestJson("/api/model-profiles/preview", {
+        method: "POST",
+        body: JSON.stringify({
+          policy,
+          roleId: role.roleId,
+          nodeTypeId: isInference
+            ? node.descriptor.typeId
+            : "provider-inference",
+          authoredInputDataClasses: isInference
+            ? (node.authoredInputDataClasses ?? null)
+            : null,
+        }),
+      });
+      if (generation !== routingPreviewGeneration) return;
+      routingPreview = response;
+    } catch (error) {
+      if (generation !== routingPreviewGeneration) return;
+      routingPreview = error.payload ?? {
+        status: "unavailable",
+        reason: "The server-owned routing preview is unavailable.",
+      };
+    }
+    renderInspector();
+  }
+
   function syncFieldsFromGraph() {
     if (!graph) return;
     elements.graphId.value = graph.graphId ?? "";
@@ -491,10 +632,20 @@ export function createGovernedGraphWorkspace({
     elements.purpose.value = graph.purpose ?? "";
     if (graph.owningRole)
       elements.role.value = `${graph.owningRole.identity.roleId}:${graph.owningRole.identity.revision}:${graph.owningRole.contentHash}`;
+    const selector = graph.defaultModelRoutingPolicy?.selector;
+    elements.modelRoutingMode.value = selector?.kind ?? "exact";
+    const selectedId =
+      selector?.exactProfileId ?? selector?.permittedInheritedProfileIds?.[0];
+    if (selectedId) elements.modelProfile.value = selectedId;
+    graphFallbackOrder = [
+      ...(graph.defaultModelRoutingPolicy?.fallbackProfileIds ?? []),
+    ];
+    selectValues(elements.fallbackProfiles, graphFallbackOrder);
   }
 
   function render() {
     renderRoles();
+    renderModelProfiles();
     renderCatalog();
     renderCanvas();
     renderConnections();
@@ -553,8 +704,14 @@ export function createGovernedGraphWorkspace({
       elements.displayName,
       elements.purpose,
       elements.role,
+      elements.modelRoutingMode,
+      elements.modelProfile,
+      elements.fallbackProfiles,
     ])
       field.disabled = inFlight || Boolean(pendingMutation);
+    for (const button of elements.fallbackOrder.querySelectorAll?.("button") ??
+      [])
+      button.disabled = inFlight || Boolean(pendingMutation);
     elements.lifecycle.textContent = aggregate?.lifecycle
       ? `${humanize(aggregate.lifecycle.status)} · lifecycle v${aggregate.lifecycle.lifecycleVersion} · ${aggregate.artifacts?.length ?? 0} immutable revision artifact${aggregate.artifacts?.length === 1 ? "" : "s"}`
       : graph
@@ -574,6 +731,59 @@ export function createGovernedGraphWorkspace({
     }
     if ([...elements.role.children].some((item) => item.value === previous))
       elements.role.value = previous;
+  }
+
+  function renderModelProfiles() {
+    const previous =
+      graph?.defaultModelRoutingPolicy?.selector?.exactProfileId ??
+      graph?.defaultModelRoutingPolicy?.selector
+        ?.permittedInheritedProfileIds?.[0] ??
+      elements.modelProfile.value;
+    const selectableProfileIds = new Set();
+    elements.modelProfile.replaceChildren();
+    elements.fallbackProfiles.replaceChildren();
+    for (const profile of catalog?.modelProfiles?.profiles ?? []) {
+      const option = document.createElement("option");
+      option.value = profile.profileId;
+      option.textContent = `${profile.metadata?.modelId ?? profile.profileId} · ${profile.availabilityReason}${profile.profileId === catalog?.modelProfiles?.defaultProfileId ? " · configured default" : ""}`;
+      option.disabled =
+        profile.availabilityReason !== "ready" ||
+        !profile.recommendedExactPolicy;
+      if (!option.disabled) selectableProfileIds.add(profile.profileId);
+      elements.modelProfile.append(option);
+      const fallback = document.createElement("option");
+      fallback.value = profile.profileId;
+      fallback.textContent = `${profile.metadata?.modelId ?? profile.profileId} · ${profile.availabilityReason}`;
+      fallback.disabled = option.disabled;
+      elements.fallbackProfiles.append(fallback);
+    }
+    if (
+      [...elements.modelProfile.children].some(
+        (item) => item.value === previous && !item.disabled,
+      )
+    )
+      elements.modelProfile.value = previous;
+    for (const option of elements.fallbackProfiles.children)
+      option.disabled =
+        !selectableProfileIds.has(option.value) ||
+        option.value === elements.modelProfile.value;
+    selectValues(elements.fallbackProfiles, graphFallbackOrder);
+    renderOrderedFallbackList(
+      elements.fallbackOrder,
+      graphFallbackOrder,
+      (profileId, offset) => {
+        const moved = moveOrderedProfileSelection(
+          graphFallbackOrder,
+          profileId,
+          offset,
+        );
+        if (!moved) return;
+        graphFallbackOrder = moved;
+        selectValues(elements.fallbackProfiles, graphFallbackOrder);
+        updateGraphModelProfile();
+      },
+      document,
+    );
   }
 
   function renderCatalog() {
@@ -611,6 +821,8 @@ export function createGovernedGraphWorkspace({
         selectedNodeId = item.id;
         renderCanvas();
         renderInspector();
+        if (String(item.descriptor.kind).toLowerCase() === "inference")
+          void refreshRoutingPreview();
       });
       elements.canvas.append(card);
     }
@@ -694,6 +906,14 @@ export function createGovernedGraphWorkspace({
     const incomingBindings = (graph.bindings ?? []).filter(
       (item) => item.toNodeId === node.id,
     );
+    const effectiveRouting =
+      node.modelRoutingPolicy ?? graph.defaultModelRoutingPolicy;
+    const effectivePrimaryId =
+      effectiveRouting?.selector?.exactProfileId ??
+      effectiveRouting?.selector?.permittedInheritedProfileIds?.[0];
+    const effectiveProfile = (catalog?.modelProfiles?.profiles ?? []).find(
+      (profile) => profile.profileId === effectivePrimaryId,
+    );
     elements.inspector.append(
       fact(
         "Effective role",
@@ -701,9 +921,31 @@ export function createGovernedGraphWorkspace({
       ),
       fact(
         "Model",
-        runtime.runtimeModel
-          ? `${runtime.runtimeModel.provider} · ${runtime.runtimeModel.model || "provider default"}`
-          : "Resolved at admission",
+        node.modelRoutingPolicy?.selector?.exactProfileId ??
+          graph.defaultModelRoutingPolicy?.selector?.exactProfileId ??
+          (runtime.runtimeModel
+            ? "Legacy display projection only"
+            : "Unavailable"),
+      ),
+      fact(
+        "Model profile evidence",
+        routingPreview?.status === "eligible" && routingPreview.primary
+          ? `Eligible · ${routingPreview.primary.capability.descriptorIdentity.id} · pin ${routingPreview.primary.contentHash} · config ${routingPreview.primary.metadata.configurationHash} · ${effectiveRouting?.selector?.kind ?? "unknown"} selector · ${(routingPreview.fallbacks ?? []).length} currently eligible fallback${(routingPreview.fallbacks ?? []).length === 1 ? "" : "s"}`
+          : `${humanize(routingPreview?.status ?? "unavailable")} · ${routingPreview?.reason ?? "Server preview has not proved current eligibility."}`,
+      ),
+      fact(
+        "Model privacy and budget preview",
+        routingPreview?.primary?.metadata
+          ? `${humanize(routingPreview.primary.metadata.privacy?.locality)} locality · ${humanize(routingPreview.primary.metadata.privacy?.egress)} egress · ${(routingPreview.primary.metadata.privacy?.acceptedDataClasses ?? []).join(", ") || "no accepted data class"} · context ≥ ${routingPreview.requirements?.minimumContextTokens ?? "unknown"} · output ≥ ${routingPreview.requirements?.minimumOutputTokens ?? "unknown"} · capabilities ${(routingPreview.requirements?.requiredCapabilities ?? []).map(humanize).join(", ") || "none"} · ${formatBudget(routingPreview.requirements?.budget)} · usage ${formatUsageSupport(routingPreview.primary.metadata.usageSupport)} · policy ${routingPreview.policyHash} · runtime admission still required`
+          : effectiveProfile?.metadata
+            ? `${humanize(effectiveProfile.metadata.privacy?.locality)} locality · ${humanize(effectiveProfile.metadata.privacy?.egress)} egress · usage ${formatUsageSupport(effectiveProfile.metadata.usageSupport)} · catalog-only evidence; runtime admission still required`
+            : "Unavailable",
+      ),
+      fact(
+        "Ordered model fallback candidates",
+        (effectiveRouting?.fallbackProfileIds ?? []).length
+          ? effectiveRouting.fallbackProfileIds.join(" → ")
+          : "None",
       ),
       fact(
         "Governed tools and capabilities",
@@ -755,6 +997,9 @@ export function createGovernedGraphWorkspace({
     elements.inspector.append(parameterHeading);
     for (const parameter of contractItem?.parameters ?? [])
       elements.inspector.append(parameterField(parameter, node));
+
+    if (String(node.descriptor.kind).toLowerCase() === "inference")
+      elements.inspector.append(modelRoutingField(node));
 
     const position = graph.displayMetadata?.nodes?.find(
       (item) => item.nodeId === node.id,
@@ -835,6 +1080,101 @@ export function createGovernedGraphWorkspace({
     });
     label.append(title, input);
     return label;
+  }
+
+  function modelRoutingField(node) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "governed-graph-field";
+    const label = document.createElement("label");
+    const title = document.createElement("span");
+    title.textContent = "Model routing override";
+    const select = document.createElement("select");
+    const fallbackLabel = document.createElement("label");
+    const fallbackTitle = document.createElement("span");
+    fallbackTitle.textContent = "Ordered override fallbacks";
+    const fallbacks = document.createElement("select");
+    fallbacks.multiple = true;
+    const inherited = document.createElement("option");
+    inherited.value = "";
+    inherited.textContent = "Use graph default";
+    select.append(inherited);
+    for (const profile of catalog?.modelProfiles?.profiles ?? []) {
+      const option = document.createElement("option");
+      option.value = profile.profileId;
+      option.textContent = `${profile.metadata?.modelId ?? profile.profileId} · ${profile.availabilityReason}`;
+      option.disabled =
+        profile.availabilityReason !== "ready" ||
+        !profile.recommendedExactPolicy;
+      select.append(option);
+      const fallback = document.createElement("option");
+      fallback.value = profile.profileId;
+      fallback.textContent = option.textContent;
+      fallback.disabled = option.disabled;
+      fallbacks.append(fallback);
+    }
+    select.value = node.modelRoutingPolicy?.selector?.exactProfileId ?? "";
+    for (const option of fallbacks.children)
+      option.disabled = option.disabled || option.value === select.value;
+    let fallbackOrder = [
+      ...(node.modelRoutingPolicy?.fallbackProfileIds ?? []),
+    ];
+    selectValues(fallbacks, fallbackOrder);
+    select.disabled = inFlight || Boolean(pendingMutation);
+    fallbacks.disabled = select.disabled || !select.value;
+    const fallbackOrderList = document.createElement("ol");
+    fallbackOrderList.className = "governed-model-fallback-order";
+    const update = (nextFallbackOrder = fallbackOrder) => {
+      const profile = (catalog?.modelProfiles?.profiles ?? []).find(
+        (item) => item.profileId === select.value,
+      );
+      fallbackOrder =
+        updateOrderedProfileSelection(
+          fallbackOrder,
+          nextFallbackOrder,
+          profile?.profileId ?? null,
+        ) ?? [];
+      selectValues(fallbacks, fallbackOrder);
+      const policy = profile
+        ? exactRoutingPolicyIntent(
+            profile.recommendedExactPolicy,
+            profile.profileId,
+            fallbackOrder,
+          )
+        : null;
+      const next = configureInferenceModelRouting(graph, node.id, policy);
+      if (!next) return;
+      graph = next;
+      dirty = true;
+      errors = [];
+      outcome = profile
+        ? `Inference node ${node.id} pinned to ${profile.profileId} with ${fallbackOrder.length} ordered fallback candidate${fallbackOrder.length === 1 ? "" : "s"}; #339 still executes only the admitted primary.`
+        : `Inference node ${node.id} now uses the graph default model policy.`;
+      render();
+      void refreshRoutingPreview();
+    };
+    select.addEventListener("change", () =>
+      update(selectedOptionValues(fallbacks)),
+    );
+    fallbacks.addEventListener("change", () =>
+      update(selectedOptionValues(fallbacks)),
+    );
+    renderOrderedFallbackList(
+      fallbackOrderList,
+      fallbackOrder,
+      (profileId, offset) => {
+        const moved = moveOrderedProfileSelection(
+          fallbackOrder,
+          profileId,
+          offset,
+        );
+        if (moved) update(moved);
+      },
+      document,
+    );
+    label.append(title, select);
+    fallbackLabel.append(fallbackTitle, fallbacks, fallbackOrderList);
+    wrapper.append(label, fallbackLabel);
+    return wrapper;
   }
 
   function renderErrors() {
@@ -1007,6 +1347,10 @@ function bindElements(document) {
     notice: document.getElementById("governedGraphNotice"),
     publishButton: document.getElementById("governedGraphPublishButton"),
     purpose: document.getElementById("governedGraphPurpose"),
+    modelProfile: document.getElementById("governedGraphModelProfile"),
+    modelRoutingMode: document.getElementById("governedGraphModelRoutingMode"),
+    fallbackProfiles: document.getElementById("governedGraphFallbackProfiles"),
+    fallbackOrder: document.getElementById("governedGraphFallbackOrder"),
     refreshButton: document.getElementById("governedGraphRefreshButton"),
     revisionId: document.getElementById("governedGraphRevisionId"),
     role: document.getElementById("governedGraphRole"),
@@ -1024,4 +1368,79 @@ function humanize(value) {
     .replaceAll("-", " ")
     .replaceAll("_", " ")
     .replace(/^./, (character) => character.toUpperCase());
+}
+
+function selectedOptionValues(select) {
+  return [...(select?.children ?? [])]
+    .filter((option) => option.selected && !option.disabled)
+    .map((option) => option.value);
+}
+
+function renderOrderedFallbackList(container, values, move, document) {
+  container.replaceChildren();
+  if (!values.length) {
+    const empty = document.createElement("li");
+    empty.textContent = "No fallback profile";
+    container.append(empty);
+    return;
+  }
+  values.forEach((profileId, index) => {
+    const item = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = `${index + 1}. ${profileId}`;
+    const earlier = document.createElement("button");
+    earlier.type = "button";
+    earlier.textContent = "Earlier";
+    earlier.disabled = index === 0;
+    earlier.addEventListener("click", () => move(profileId, -1));
+    const later = document.createElement("button");
+    later.type = "button";
+    later.textContent = "Later";
+    later.disabled = index === values.length - 1;
+    later.addEventListener("click", () => move(profileId, 1));
+    item.append(label, earlier, later);
+    container.append(item);
+  });
+}
+
+function formatBudget(budget) {
+  if (!budget) return "budget unavailable";
+  return [
+    ["attempt", budget.perAttempt],
+    ["node", budget.perNodeSeries],
+    ["run", budget.perRun],
+  ]
+    .map(([scope, ceiling]) => `${scope} ${formatCeiling(ceiling)}`)
+    .join(" · ");
+}
+
+function formatCeiling(ceiling) {
+  if (!ceiling) return "unavailable";
+  const token = (name, value) =>
+    `${name} ${value?.isBounded ? `≤${value.maximum}` : "unbounded"}`;
+  const monetary = ceiling.monetaryCost?.isBounded
+    ? `cost ≤${ceiling.monetaryCost.maximumMicros} ${ceiling.monetaryCost.currency}µ`
+    : "cost unbounded";
+  return [
+    token("input", ceiling.inputTokens),
+    token("output", ceiling.outputTokens),
+    token("cached", ceiling.cachedTokens),
+    token("total", ceiling.totalTokens),
+    monetary,
+  ].join(", ");
+}
+
+function formatUsageSupport(support) {
+  if (!support) return "support unavailable";
+  return [
+    "inputTokens",
+    "outputTokens",
+    "cachedTokens",
+    "totalTokens",
+    "monetaryCost",
+  ]
+    .map(
+      (dimension) => `${humanize(dimension)} ${humanize(support[dimension])}`,
+    )
+    .join(", ");
 }

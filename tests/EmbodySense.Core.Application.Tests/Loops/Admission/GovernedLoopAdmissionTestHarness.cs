@@ -3,6 +3,8 @@ using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
+using EmbodySense.Core.Application.Inference.Profiles;
+using EmbodySense.Core.Application.Inference.Profiles.Models;
 using EmbodySense.Core.Application.Loops.Admission;
 using EmbodySense.Core.Application.Loops.Admission.Models;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
@@ -16,6 +18,7 @@ using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -29,6 +32,7 @@ internal sealed class GovernedLoopAdmissionTestHarness :
     IAuthorityGrantRoleSource,
     IAuthorityGrantResolver,
     ICapabilityAdmissionService,
+    IGovernedModelRoutingAdmissionService,
     ICapabilityAuthorityTransaction,
     IGovernedLoopAdmissionRunIdentityGenerator
 {
@@ -203,6 +207,7 @@ internal sealed class GovernedLoopAdmissionTestHarness :
             this,
             this,
             this,
+            this,
             new GovernedLoopAdmissionTestTimeProvider(AuthorityGrantApplicationTestFixture.Now.AddMinutes(1)));
 
     public Task<GovernedLoopAdmissionStoreReadResult> ReadByOperationAsync(string workspaceId, string operationId, CancellationToken cancellationToken = default)
@@ -283,6 +288,29 @@ internal sealed class GovernedLoopAdmissionTestHarness :
         IReadOnlyCollection<CapabilityId> allowedCapabilityIds,
         CancellationToken cancellationToken = default)
         => throw new NotSupportedException();
+
+    public Task<GovernedModelRoutingAdmissionResult> AdmitAsync(
+        GovernedModelRoutingAdmissionRequest? request,
+        CancellationToken cancellationToken = default)
+    {
+        MutableRead(cancellationToken);
+        if (request is null || request.Nodes.Count != 0)
+        {
+            return Task.FromResult(new GovernedModelRoutingAdmissionResult(GovernedModelRoutingAdmissionStatus.Unavailable, null));
+        }
+
+        var seed = request.Seed;
+        var snapshot = GovernedLoopAdmissionContractHash.CreateEmptyModelRoutingAdmission(
+            seed.Intent,
+            seed.Binding,
+            seed.GrantProfile,
+            seed.GrantBoundary,
+            seed.GrantDependencyEvidenceHash,
+            seed.EffectiveAuthority,
+            seed.CapabilityAdmission,
+            seed.EvaluatedAtUtc);
+        return Task.FromResult(new GovernedModelRoutingAdmissionResult(GovernedModelRoutingAdmissionStatus.Admitted, snapshot));
+    }
 
     public async Task<TResult> ExecuteAsync<TResult>(Func<CancellationToken, Task<TResult>> operation, CancellationToken cancellationToken = default)
     {

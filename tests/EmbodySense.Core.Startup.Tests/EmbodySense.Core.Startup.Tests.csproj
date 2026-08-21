@@ -23,6 +23,7 @@
     <Compile Include="..\Shared\TestCapabilityAdmissionFactory.cs" Link="Support\TestCapabilityAdmissionFactory.cs" />
     <Compile Include="..\Shared\TestCapabilityAdmissionService.cs" Link="Support\TestCapabilityAdmissionService.cs" />
     <Compile Include="..\EmbodySense.Core.Application.Tests\Governance\Authority\Grants\AuthorityGrantApplicationTestFixture.cs" Link="Support\AuthorityGrantApplicationTestFixture.cs" />
+    <Compile Include="..\EmbodySense.Core.Application.Tests\GovernedModelProfileApplicationTestFixture.cs" Link="Support\GovernedModelProfileApplicationTestFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Application.Tests\Loops\Execution\Effects\GovernedLoopEffectAttemptTestFixture.cs" Link="Support\GovernedLoopEffectAttemptTestFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\TriggerDeliveryTestData.cs" Link="Support\TriggerDeliveryTestData.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\Triggers\Schedules\ScheduleContractTestData.cs" Link="Support\ScheduleContractTestData.cs" />

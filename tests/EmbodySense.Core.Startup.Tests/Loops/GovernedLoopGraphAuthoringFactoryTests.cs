@@ -31,6 +31,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const string ModelProfileCapabilityId = "org.embodysense/model-profile/codex";
     private const string WorkspaceReadCapabilityId = "org.embodysense/workspace-read";
     private static readonly DateTimeOffset _now = DateTimeOffset.Parse("2026-08-10T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
     private static readonly string _workspaceId = "workspace-sha256:" + new string('a', ContextualRoleLimits.Sha256HexCharacters);
@@ -189,7 +190,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
 
         Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, first.Status);
         Assert.Equal(first.GraphValidationEvidenceHash, second.GraphValidationEvidenceHash);
-        Assert.Equal("b6f244ddc946b7de712d0420b6f7598d6410763a3fccc0eb6f58ff6e553e134f", first.GraphValidationEvidenceHash);
+        Assert.Equal("2e6a3f24bbaee6d59eb0ea3ba012533526fb465568537372dcb20f4550ec5678", first.GraphValidationEvidenceHash);
     }
 
     [Fact]
@@ -611,7 +612,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
             RolePin(),
             "trigger",
             ["exit"],
-            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceReadCapabilityId]),
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceReadCapabilityId]),
             schemas.Cast<GovernedLoopValueSchemaDefinition?>().ToArray(),
             nodes.Cast<GovernedLoopNodeDefinition?>().ToArray(),
             edges.Cast<GovernedLoopControlEdgeDefinition?>().ToArray(),
@@ -620,7 +621,8 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
             new GovernedLoopDisplayMetadata(
                 graphId,
                 "Catalog composition test.",
-                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Exact catalog node.", index * 100, 0)).ToArray()));
+                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Exact catalog node.", index * 100, 0)).ToArray()),
+            EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
 
     private static GovernedLoopGraphCandidate Candidate()
         => new(
@@ -631,7 +633,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
             RolePin(),
             "trigger",
             ["exit"],
-            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceReadCapabilityId]),
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceReadCapabilityId]),
             [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
             Nodes(),
             [
@@ -651,13 +653,14 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
                     new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Start.", 0, 0),
                     new GovernedLoopNodeDisplayMetadata("infer", "Inference", "Answer.", 100, 0),
                     new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 200, 0),
-                ]));
+                ]),
+            EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
 
     private static GovernedLoopNodeDefinition[] Nodes()
         =>
         [
             new("trigger", new(GovernedLoopNodeKind.Trigger, "manual-trigger", 1), [Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>()),
-            new("infer", new(GovernedLoopNodeKind.Inference, "provider-inference", 1), [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]), new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
+            new("infer", new(GovernedLoopNodeKind.Inference, "provider-inference", 1), [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId, ModelProfileCapabilityId]), new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
             new("exit", new(GovernedLoopNodeKind.Exit, "success-exit", 1), [Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]), new Dictionary<string, string>()),
         ];
 
@@ -672,7 +675,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
         => candidate with
         {
             AuthorityCeiling = GovernedLoopAuthorityCeiling.Create(
-                [ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
+                [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId]),
         };
 
     private static GovernedLoopGraphRevisionArtifact Artifact(GovernedLoopGraphCandidate candidate)
@@ -776,7 +779,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
                 ContextualRoleInstructionSourceKind.RoleArtifact,
                 "researcher-source",
                 ContextualRoleInstructionClassification.RoleInstruction),
-            new ContextualRolePolicyMaxima(ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceReadCapabilityId)));
+            new ContextualRolePolicyMaxima(ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceReadCapabilityId)));
         return ContextualRoleRevisionContentHash.Apply(role);
     }
 

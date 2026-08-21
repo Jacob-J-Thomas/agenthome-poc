@@ -30,6 +30,29 @@ public static class FakeCodexExecutable
             function completeTurn(threadId, turnId, text) {
               write({ method: "item/agentMessage/delta", params: { threadId, turnId, delta: text } });
               write({
+                method: "thread/tokenUsage/updated",
+                params: {
+                  threadId,
+                  turnId,
+                  tokenUsage: {
+                    last: {
+                      inputTokens: 1,
+                      cachedInputTokens: 0,
+                      outputTokens: 1,
+                      reasoningOutputTokens: 0,
+                      totalTokens: 2
+                    },
+                    total: {
+                      inputTokens: 1,
+                      cachedInputTokens: 0,
+                      outputTokens: 1,
+                      reasoningOutputTokens: 0,
+                      totalTokens: 2
+                    }
+                  }
+                }
+              });
+              write({
                 method: "turn/completed",
                 params: {
                   threadId,
@@ -81,7 +104,16 @@ public static class FakeCodexExecutable
                   break;
                 case "thread/start": {
                   const threadId = `thread-browser-${++threadNumber}`;
-                  write({ id: message.id, result: { thread: { id: threadId } } });
+                  const model = String(message.params?.model ?? "");
+                  const modelProvider = String(message.params?.modelProvider ?? "");
+                  write({
+                    id: message.id,
+                    result: {
+                      model,
+                      modelProvider,
+                      thread: { id: threadId, modelProvider }
+                    }
+                  });
                   break;
                 }
                 case "turn/start": {

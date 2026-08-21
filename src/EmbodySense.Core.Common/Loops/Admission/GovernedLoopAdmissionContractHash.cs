@@ -9,6 +9,8 @@ using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Inference.Profiles;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Revisions;
@@ -55,6 +57,7 @@ public static class GovernedLoopAdmissionContractHash
         Append(canonical, evidence.GrantDependencyEvidenceHash);
         Append(canonical, ComputeAuthorityCeilingReferenceHash(evidence.EffectiveAuthority));
         Append(canonical, ComputeCapabilityAdmissionReferenceHash(evidence.CapabilityAdmission));
+        Append(canonical, evidence.ModelRoutingAdmission.ContentHash);
         AppendReferences(canonical, evidence.References);
         Append(canonical, evidence.EvaluatedAtUtc);
         return Digest(canonical);
@@ -89,6 +92,12 @@ public static class GovernedLoopAdmissionContractHash
         if (rejection.CapabilityDenial is not null)
         {
             Append(canonical, ComputeCapabilityDenialProofHash(rejection.CapabilityDenial));
+        }
+
+        Append(canonical, rejection.ModelRoutingDenial is not null);
+        if (rejection.ModelRoutingDenial is not null)
+        {
+            Append(canonical, ComputeModelRoutingDenialProofHash(rejection.ModelRoutingDenial));
         }
 
         AppendReferences(canonical, rejection.References);
@@ -159,7 +168,8 @@ public static class GovernedLoopAdmissionContractHash
     public static IReadOnlyList<GovernedLoopAdmissionEvidenceReference> CreateEvidenceReferences(
         GovernedLoopAdmissionIntent intent,
         AuthorityCeiling effectiveAuthority,
-        CapabilityAdmissionSnapshot capabilityAdmission)
+        CapabilityAdmissionSnapshot capabilityAdmission,
+        GovernedModelRoutingAdmissionSnapshot modelRoutingAdmission)
     {
         RequireValid(GovernedLoopAdmissionValidator.ValidateForHash(intent), nameof(intent));
         return Array.AsReadOnly(new[]
@@ -170,8 +180,90 @@ public static class GovernedLoopAdmissionContractHash
             new GovernedLoopAdmissionEvidenceReference(GovernedLoopAdmissionEvidenceKind.GraphArtifact, ReferenceDigest("governed-loop-admission-graph-artifact-reference-v1", intent.GraphArtifactHash)),
             new GovernedLoopAdmissionEvidenceReference(GovernedLoopAdmissionEvidenceKind.GraphLayout, ReferenceDigest("governed-loop-admission-graph-layout-reference-v1", intent.GraphLayoutHash)),
             new GovernedLoopAdmissionEvidenceReference(GovernedLoopAdmissionEvidenceKind.EffectiveAuthority, ComputeAuthorityCeilingReferenceHash(effectiveAuthority)),
-            new GovernedLoopAdmissionEvidenceReference(GovernedLoopAdmissionEvidenceKind.CapabilityAdmission, ComputeCapabilityAdmissionReferenceHash(capabilityAdmission))
+            new GovernedLoopAdmissionEvidenceReference(GovernedLoopAdmissionEvidenceKind.CapabilityAdmission, ComputeCapabilityAdmissionReferenceHash(capabilityAdmission)),
+            new GovernedLoopAdmissionEvidenceReference(GovernedLoopAdmissionEvidenceKind.ModelRoutingAdmission, RequireModelRoutingReferenceHash(modelRoutingAdmission))
         });
+    }
+
+    /// <summary>Computes a canonical non-circular reference for one exact execution binding.</summary>
+    public static string ComputeExecutionBindingReferenceHash(GovernedLoopExecutionBinding binding)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        if (!GovernedLoopExecutionValidator.Validate(binding).IsValid)
+        {
+            throw new ArgumentException("Execution binding must be exact and canonical.", nameof(binding));
+        }
+
+        var canonical = Begin("governed-loop-admission-execution-binding-reference-v1");
+        AppendBinding(canonical, binding);
+        return Digest(canonical);
+    }
+
+    /// <summary>Computes the complete non-circular authority reference used while routing is resolved before the final receipt.</summary>
+    public static string ComputeAdmissionAuthorityReferenceHash(
+        AuthorityGrantProfilePin grantProfile,
+        AuthorityGrantBoundary grantBoundary,
+        string grantDependencyEvidenceHash,
+        AuthorityCeiling effectiveAuthority)
+    {
+        if (grantProfile?.Reference?.ProfileId is null
+            || grantProfile.Reference.Revision is null
+            || grantProfile.ContentHash is null
+            || !AuthorityGrantHash.IsCanonical(grantProfile.ContentHash.Value)
+            || grantBoundary is null
+            || grantBoundary.EffectiveAtUtc == default
+            || grantBoundary.EffectiveAtUtc.Offset != TimeSpan.Zero
+            || grantBoundary.ExpiresAtUtc is { } expiry && (expiry.Offset != TimeSpan.Zero || expiry <= grantBoundary.EffectiveAtUtc)
+            || !Enum.IsDefined(grantBoundary.CompletionConstraint)
+            || grantBoundary.CompletionConstraint == AuthorityGrantCompletionConstraintKind.Unknown
+            || !IsCanonicalHash(grantDependencyEvidenceHash)
+            || !AuthorityProfileValidator.ValidateCeiling(effectiveAuthority).IsValid)
+        {
+            throw new ArgumentException("Authority admission evidence must be exact, complete, and canonical.");
+        }
+
+        var canonical = Begin("governed-loop-admission-authority-reference-v1");
+        AppendGrantProfile(canonical, grantProfile);
+        AppendGrantBoundary(canonical, grantBoundary);
+        Append(canonical, grantDependencyEvidenceHash);
+        Append(canonical, ComputeAuthorityCeilingReferenceHash(effectiveAuthority));
+        return Digest(canonical);
+    }
+
+    /// <summary>Creates explicit canonical empty-routing evidence for an admission with no reachable Inference nodes.</summary>
+    public static GovernedModelRoutingAdmissionSnapshot CreateEmptyModelRoutingAdmission(
+        GovernedLoopAdmissionIntent intent,
+        GovernedLoopExecutionBinding binding,
+        AuthorityGrantProfilePin grantProfile,
+        AuthorityGrantBoundary grantBoundary,
+        string grantDependencyEvidenceHash,
+        AuthorityCeiling effectiveAuthority,
+        CapabilityAdmissionSnapshot capabilityAdmission,
+        DateTimeOffset evaluatedAtUtc)
+    {
+        RequireValid(GovernedLoopAdmissionValidator.ValidateForHash(intent), nameof(intent));
+        return GovernedModelRoutingAdmissionSnapshot.Create(
+            1,
+            intent.WorkspaceId,
+            intent.OperationId,
+            ComputeIntentHash(intent),
+            ComputeExecutionBindingReferenceHash(binding),
+            binding.RunId,
+            binding.Revision.GraphId,
+            binding.Revision.RevisionId,
+            binding.Revision.ExecutableHash,
+            binding.ExecutionGeneration,
+            intent.Role.Identity.RoleId,
+            intent.Role.Identity.Revision,
+            intent.Role.ContentHash,
+            ComputeCapabilityAdmissionReferenceHash(capabilityAdmission),
+            ComputeAdmissionAuthorityReferenceHash(grantProfile, grantBoundary, grantDependencyEvidenceHash, effectiveAuthority),
+            null,
+            null,
+            null,
+            null,
+            evaluatedAtUtc,
+            []);
     }
 
     /// <summary>Creates the exact canonical evidence-reference set for one definitive rejection.</summary>
@@ -179,13 +271,15 @@ public static class GovernedLoopAdmissionContractHash
     /// <param name="failureCode">The supported definitive failure classification.</param>
     /// <param name="authorityDenial">The structured authority proof required only for authority denial.</param>
     /// <param name="capabilityDenial">The structured capability proof required only for capability-policy denial.</param>
+    /// <param name="modelRoutingDenial">The structured routing proof required only for model-routing denial.</param>
     /// <returns>A defensively wrapped, canonically ordered reference set whose hashes are derived only from structured evidence.</returns>
     /// <exception cref="ArgumentException">Thrown when the intent, failure classification, or proof composition is invalid.</exception>
     public static IReadOnlyList<GovernedLoopAdmissionEvidenceReference> CreateRejectionEvidenceReferences(
         GovernedLoopAdmissionIntent intent,
         GovernedLoopAdmissionFailureCode failureCode,
         GovernedLoopAdmissionAuthorityDenialProof? authorityDenial = null,
-        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial = null)
+        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial = null,
+        GovernedLoopAdmissionModelRoutingDenialProof? modelRoutingDenial = null)
     {
         RequireValid(GovernedLoopAdmissionValidator.ValidateForHash(intent), nameof(intent));
         if (!Enum.IsDefined(failureCode) || failureCode == GovernedLoopAdmissionFailureCode.None)
@@ -194,12 +288,12 @@ public static class GovernedLoopAdmissionContractHash
         }
 
         RequireValid(
-            GovernedLoopAdmissionValidator.ValidateRejectionProofsForHash(failureCode, authorityDenial, capabilityDenial),
+            GovernedLoopAdmissionValidator.ValidateRejectionProofsForHash(failureCode, authorityDenial, capabilityDenial, modelRoutingDenial),
             nameof(failureCode));
         var references = GovernedLoopAdmissionValidator.RequiredRejectionEvidenceKinds(failureCode)
             .Select(kind => new GovernedLoopAdmissionEvidenceReference(
                 kind,
-                ComputeRejectionEvidenceReferenceHash(intent, failureCode, kind, authorityDenial, capabilityDenial)))
+                ComputeRejectionEvidenceReferenceHash(intent, failureCode, kind, authorityDenial, capabilityDenial, modelRoutingDenial)))
             .ToArray();
         return Array.AsReadOnly(references);
     }
@@ -287,6 +381,16 @@ public static class GovernedLoopAdmissionContractHash
         return Digest(canonical);
     }
 
+    private static string RequireModelRoutingReferenceHash(GovernedModelRoutingAdmissionSnapshot modelRoutingAdmission)
+    {
+        if (!GovernedModelContractValidator.IsValid(modelRoutingAdmission))
+        {
+            throw new ArgumentException("Model-routing admission snapshot must be exact, canonical, and bounded.", nameof(modelRoutingAdmission));
+        }
+
+        return modelRoutingAdmission.ContentHash;
+    }
+
     internal static bool IsCanonicalHash(string? value)
         => value?.Length == GovernedLoopAdmissionLimits.Sha256HexCharacters
             && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
@@ -296,7 +400,8 @@ public static class GovernedLoopAdmissionContractHash
         GovernedLoopAdmissionFailureCode failureCode,
         GovernedLoopAdmissionEvidenceKind kind,
         GovernedLoopAdmissionAuthorityDenialProof? authorityDenial,
-        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial)
+        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial,
+        GovernedLoopAdmissionModelRoutingDenialProof? modelRoutingDenial)
         => kind switch
         {
             GovernedLoopAdmissionEvidenceKind.ContextualRoleRevision => ComputeContextualRoleReferenceHash(intent.Role),
@@ -307,6 +412,9 @@ public static class GovernedLoopAdmissionContractHash
             GovernedLoopAdmissionEvidenceKind.EffectiveAuthority when failureCode == GovernedLoopAdmissionFailureCode.AuthorityDenied => ComputeAuthorityCeilingReferenceHash(authorityDenial!.EffectiveCeiling),
             GovernedLoopAdmissionEvidenceKind.EffectiveAuthority when failureCode == GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied => ComputeAuthorityCeilingReferenceHash(capabilityDenial!.EffectiveAuthority),
             GovernedLoopAdmissionEvidenceKind.CapabilityAdmission when failureCode == GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied => ComputeCapabilityDenialProofHash(capabilityDenial!),
+            GovernedLoopAdmissionEvidenceKind.EffectiveAuthority when failureCode == GovernedLoopAdmissionFailureCode.ModelRoutingDenied => modelRoutingDenial!.EffectiveAuthorityReferenceHash,
+            GovernedLoopAdmissionEvidenceKind.CapabilityAdmission when failureCode == GovernedLoopAdmissionFailureCode.ModelRoutingDenied => modelRoutingDenial!.CapabilityAdmissionReferenceHash,
+            GovernedLoopAdmissionEvidenceKind.ModelRoutingAdmission when failureCode == GovernedLoopAdmissionFailureCode.ModelRoutingDenied => ComputeModelRoutingDenialProofHash(modelRoutingDenial!),
             _ => throw new ArgumentException("The rejection evidence kind is not supported by the failure classification.", nameof(kind))
         };
 
@@ -348,6 +456,32 @@ public static class GovernedLoopAdmissionContractHash
             Append(canonical, (int)violation.Reason);
         }
 
+        Append(canonical, proof.EvaluatedAtUtc);
+        return Digest(canonical);
+    }
+
+    private static string ComputeModelRoutingDenialProofHash(GovernedLoopAdmissionModelRoutingDenialProof proof)
+    {
+        RequireValid(
+            GovernedLoopAdmissionValidator.ValidateRejectionProofsForHash(
+                GovernedLoopAdmissionFailureCode.ModelRoutingDenied,
+                null,
+                null,
+                proof),
+            nameof(proof));
+        var canonical = Begin("governed-loop-admission-model-routing-denial-proof-v1");
+        Append(canonical, proof.SchemaVersion);
+        Append(canonical, proof.NodeId);
+        Append(canonical, proof.NodeTypeId);
+        Append(canonical, proof.PolicyHash);
+        Append(canonical, proof.CandidateProfileId is not null);
+        if (proof.CandidateProfileId is not null)
+        {
+            Append(canonical, proof.CandidateProfileId.Value);
+        }
+        Append(canonical, (int)proof.Reason);
+        Append(canonical, proof.EffectiveAuthorityReferenceHash);
+        Append(canonical, proof.CapabilityAdmissionReferenceHash);
         Append(canonical, proof.EvaluatedAtUtc);
         return Digest(canonical);
     }

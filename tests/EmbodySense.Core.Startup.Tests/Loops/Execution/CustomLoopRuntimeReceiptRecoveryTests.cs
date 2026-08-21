@@ -370,10 +370,12 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
 
     private static AgentRuntimeFactory CreateRuntimeFactory(TestWorkspace workspace)
     {
+        var executablePath = workspace.File("unused-codex.cmd");
+        File.WriteAllText(executablePath, "exact unused receipt-recovery provider fixture");
         var status = new CodexRuntimeStatus(
             CodexRuntimeCompatibility.Compatible,
-            workspace.File("unused-codex.cmd"),
-            workspace.File("unused-codex.cmd"),
+            executablePath,
+            executablePath,
             "codex-cli test",
             "test-model",
             "controlled test",

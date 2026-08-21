@@ -157,6 +157,12 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
         }
     }
 
+    /// <summary>Starts the configured local provider process without opening a provider thread or dispatching inference.</summary>
+    internal Task PrepareProviderAsync(CancellationToken cancellationToken = default)
+        => _innerClient is CodexAppServerInferenceClient codex
+            ? codex.PrepareAsync(cancellationToken)
+            : Task.CompletedTask;
+
     /// <summary>
     /// Resets provider conversation state when the selected provider supports reset semantics.
     /// </summary>

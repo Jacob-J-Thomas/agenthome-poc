@@ -22,7 +22,8 @@ internal static class GovernedLoopGraphCandidateProjection
             graph.ControlEdges.Cast<GovernedLoopControlEdgeDefinition?>().ToArray(),
             graph.Bindings.Cast<GovernedLoopBindingDefinition?>().ToArray(),
             graph.OutputContract,
-            graph.DisplayMetadata);
+            graph.DisplayMetadata,
+            graph.DefaultModelRoutingPolicy);
     }
 
     internal static GovernedLoopGraphCandidate CopyAsRevision(

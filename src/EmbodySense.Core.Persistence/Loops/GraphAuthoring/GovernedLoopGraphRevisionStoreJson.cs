@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Inference.Profiles;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -120,7 +121,8 @@ internal static class GovernedLoopGraphRevisionStoreJson
             Required(graphJson.ControlEdges, "control edges").Select(ControlEdge),
             Required(graphJson.Bindings, "bindings").Select(Binding),
             OutputContract(graphJson.OutputContract),
-            Layout(layoutJson));
+            Layout(layoutJson),
+            RequiredRoutingPolicy(graphJson.DefaultModelRoutingPolicy, "loop-default model-routing policy"));
         var layoutHash = GovernedLoopGraphRevisionContractHash.ComputeLayoutHash(graph);
         var payloadHash = ComputePayloadHash(graph);
         if (!string.Equals(graph.ExecutableHash, json.ExecutableHash, StringComparison.Ordinal)
@@ -222,12 +224,15 @@ internal static class GovernedLoopGraphRevisionStoreJson
                 node.Descriptor.Version,
                 node.AuthorityCeiling.CapabilityIds.ToArray(),
                 node.Parameters,
-                node.Ports.Select(port => new PortJson(port.Id, PortDirection(port.Direction), BindingKind(port.BindingKind), port.ValueSchemaId, port.Required)).ToArray())).ToArray(),
+                node.Ports.Select(port => new PortJson(port.Id, PortDirection(port.Direction), BindingKind(port.BindingKind), port.ValueSchemaId, port.Required)).ToArray(),
+                node.ModelRoutingPolicy,
+                node.AuthoredInputDataClasses?.ToArray())).ToArray(),
             graph.ControlEdges.Select(edge => new ControlEdgeJson(edge.Id, edge.FromNodeId, edge.ToNodeId, ControlCondition(edge.Condition))).ToArray(),
             graph.Bindings.Select(binding => new BindingJson(binding.Id, BindingKind(binding.Kind), binding.FromNodeId, binding.FromPortId, binding.ToNodeId, binding.ToPortId)).ToArray(),
             new OutputContractJson(
                 graph.OutputContract.Summary,
-                graph.OutputContract.Outputs.Select(output => new OutputJson(output.Id, output.ValueSchemaId, output.SourceNodeId, output.SourcePortId, output.Required)).ToArray()));
+                graph.OutputContract.Outputs.Select(output => new OutputJson(output.Id, output.ValueSchemaId, output.SourceNodeId, output.SourcePortId, output.Required)).ToArray()),
+            graph.DefaultModelRoutingPolicy);
 
     private static ContextualRoleRevisionPin OwningRole(ContextualRoleRevisionPinJson? owningRole)
     {
@@ -271,7 +276,9 @@ internal static class GovernedLoopGraphRevisionStoreJson
                 Required(port.ValueSchemaId, "port value schema"),
                 port.Required)).ToArray(),
             GovernedLoopAuthorityCeiling.Create(Required(node.AuthorityCeiling, "node authority ceiling")),
-            Required(node.Parameters, "node parameters"));
+            Required(node.Parameters, "node parameters"),
+            node.ModelRoutingPolicy is null ? null : RequiredRoutingPolicy(node.ModelRoutingPolicy, "node model-routing policy"),
+            node.AuthoredInputDataClasses);
 
     private static GovernedLoopControlEdgeDefinition ControlEdge(ControlEdgeJson edge)
         => new(
@@ -411,6 +418,13 @@ internal static class GovernedLoopGraphRevisionStoreJson
 
     private static IReadOnlyDictionary<string, string> Required(IReadOnlyDictionary<string, string>? value, string name)
         => value ?? throw new FormatException($"The governed-loop {name} map is missing.");
+
+    private static EmbodySense.Core.Common.Inference.Profiles.Models.GovernedModelRoutingPolicy RequiredRoutingPolicy(
+        EmbodySense.Core.Common.Inference.Profiles.Models.GovernedModelRoutingPolicy? value,
+        string name)
+        => GovernedModelContractValidator.IsValid(value)
+            ? value!
+            : throw new FormatException($"The governed-loop {name} is missing or invalid.");
 
     private static GovernedLoopNodeKind NodeKind(string value) => value switch
     {

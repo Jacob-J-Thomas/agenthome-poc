@@ -29,6 +29,7 @@ public static class GovernedLoopExecutableHash
         writer.WriteString("roleId", graph.OwningRole.Identity.RoleId);
         writer.WriteEndObject();
         WriteStrings(writer, "terminalNodeIds", graph.TerminalNodeIds);
+        writer.WriteString("defaultModelRoutingPolicyHash", graph.DefaultModelRoutingPolicy.ContentHash);
         WriteAuthority(writer, graph.AuthorityCeiling);
         WriteSchemas(writer, graph.ValueSchemas);
         WriteNodes(writer, graph.Nodes);
@@ -69,6 +70,21 @@ public static class GovernedLoopExecutableHash
             writer.WriteString("kind", ToCanonical(node.Descriptor.Kind));
             writer.WriteString("typeId", node.Descriptor.TypeId);
             writer.WriteNumber("descriptorVersion", node.Descriptor.Version);
+            writer.WriteString("modelRoutingPolicyHash", node.ModelRoutingPolicy?.ContentHash);
+            writer.WritePropertyName("authoredInputDataClasses");
+            if (node.AuthoredInputDataClasses is null)
+            {
+                writer.WriteNullValue();
+            }
+            else
+            {
+                writer.WriteStartArray();
+                foreach (var dataClass in node.AuthoredInputDataClasses)
+                {
+                    writer.WriteStringValue(dataClass.Value);
+                }
+                writer.WriteEndArray();
+            }
             WriteAuthority(writer, node.AuthorityCeiling);
             writer.WritePropertyName("parameters");
             writer.WriteStartObject();

@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
@@ -18,4 +19,5 @@ public sealed record GovernedLoopGraphCandidate(
     IReadOnlyList<GovernedLoopControlEdgeDefinition?>? ControlEdges,
     IReadOnlyList<GovernedLoopBindingDefinition?>? Bindings,
     GovernedLoopOutputContract? OutputContract,
-    GovernedLoopDisplayMetadata? DisplayMetadata);
+    GovernedLoopDisplayMetadata? DisplayMetadata,
+    GovernedModelRoutingPolicy? DefaultModelRoutingPolicy);

@@ -17,7 +17,12 @@ public static class TestCapabilityAdmissionFactory
             var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(dependency.CapabilityId.Value))).ToLowerInvariant();
             _ = CapabilityDescriptorHash.TryParse("sha256:" + digest, out var descriptorHash, out _);
             var implementationId = dependency.CapabilityId.Value[(dependency.CapabilityId.Value.IndexOf('/') + 1)..];
-            var kind = implementationId == "workspace-command" ? CapabilityKind.Actuator : CapabilityKind.GraphNode;
+            var kind = implementationId switch
+            {
+                "workspace-command" => CapabilityKind.Actuator,
+                _ when implementationId.StartsWith("model-profile/", StringComparison.Ordinal) => CapabilityKind.ModelProfile,
+                _ => CapabilityKind.GraphNode,
+            };
             return new CapabilityAdmissionPin(
                 new CapabilityDescriptorIdentity(dependency.CapabilityId, version!, descriptorHash!),
                 kind,

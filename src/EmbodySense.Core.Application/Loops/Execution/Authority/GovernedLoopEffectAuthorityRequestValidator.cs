@@ -10,6 +10,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Execution.Authority;
 using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Revisions;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Authority;
 
@@ -63,7 +64,7 @@ internal static class GovernedLoopEffectAuthorityRequestValidator
         }
 
         var admitted = request.AdmissionReceipt.Evidence;
-        if (!BoundaryMatchesNode(request.BoundaryKind, node, request.RequiredCapabilityPins)
+        if (!BoundaryMatchesNode(request.BoundaryKind, node, admitted.ModelRoutingAdmission, request.RequiredCapabilityPins)
             || !TargetFingerprintMatchesBoundary(request.BoundaryKind, request.TargetFingerprint)
             || !IsEqualOrNarrow(request.RequiredAuthority, admitted.EffectiveAuthority)
             || !PinsExactlyDescribeRequiredAuthority(request.RequiredCapabilityPins, request.RequiredAuthority.Capabilities)
@@ -79,12 +80,13 @@ internal static class GovernedLoopEffectAuthorityRequestValidator
     private static bool BoundaryMatchesNode(
         GovernedLoopEffectBoundaryKind boundaryKind,
         EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeDefinition node,
+        GovernedModelRoutingAdmissionSnapshot routingAdmission,
         IReadOnlyList<CapabilityAdmissionPin> pins)
     {
         return boundaryKind switch
         {
             GovernedLoopEffectBoundaryKind.ProviderTransport => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference)
-                && RequiresProviderCapabilities(node.AuthorityCeiling.CapabilityIds, pins),
+                && RequiresProviderCapabilities(node.Id, node.AuthorityCeiling.CapabilityIds, routingAdmission, pins),
             GovernedLoopEffectBoundaryKind.WorkspaceToolIntake or GovernedLoopEffectBoundaryKind.WorkspaceActuation => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference)
                 && RequiresOnly(pins, WorkspaceCommandCapabilityId),
             GovernedLoopEffectBoundaryKind.ConversationPublication => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit)
@@ -96,20 +98,35 @@ internal static class GovernedLoopEffectAuthorityRequestValidator
     }
 
     private static bool RequiresProviderCapabilities(
+        string nodeId,
         IReadOnlyList<string> nodeCapabilities,
+        GovernedModelRoutingAdmissionSnapshot routingAdmission,
         IReadOnlyList<CapabilityAdmissionPin> pins)
     {
-        var toolEnabled = nodeCapabilities.Contains(WorkspaceCommandCapabilityId, StringComparer.Ordinal);
-        if (!nodeCapabilities.Contains(ModelInferenceCapabilityId, StringComparer.Ordinal)
-            || nodeCapabilities.Any(value => !string.Equals(value, ModelInferenceCapabilityId, StringComparison.Ordinal)
-                && !string.Equals(value, WorkspaceCommandCapabilityId, StringComparison.Ordinal)))
+        var routing = routingAdmission.Entries.SingleOrDefault(entry => string.Equals(entry.NodeId, nodeId, StringComparison.Ordinal));
+        if (routing is null)
         {
             return false;
         }
 
-        var required = toolEnabled
-            ? new[] { ModelInferenceCapabilityId, WorkspaceCommandCapabilityId }
-            : [ModelInferenceCapabilityId];
+        var toolEnabled = nodeCapabilities.Contains(WorkspaceCommandCapabilityId, StringComparer.Ordinal);
+        var routedProfiles = routing.Fallbacks
+            .Prepend(routing.Primary)
+            .Select(profile => profile.Capability.DescriptorIdentity.Id.Value)
+            .ToHashSet(StringComparer.Ordinal);
+        if (!nodeCapabilities.Contains(ModelInferenceCapabilityId, StringComparer.Ordinal)
+            || !nodeCapabilities.ToHashSet(StringComparer.Ordinal).IsSupersetOf(routedProfiles)
+            || nodeCapabilities.Any(value => !string.Equals(value, ModelInferenceCapabilityId, StringComparison.Ordinal)
+                && !string.Equals(value, WorkspaceCommandCapabilityId, StringComparison.Ordinal)
+                && !routedProfiles.Contains(value)))
+        {
+            return false;
+        }
+
+        var required = new[] { ModelInferenceCapabilityId, routing.Primary.Capability.DescriptorIdentity.Id.Value }
+            .Concat(toolEnabled ? [WorkspaceCommandCapabilityId] : [])
+            .Order(StringComparer.Ordinal)
+            .ToArray();
         return pins.Count == required.Length
             && pins.Select(pin => pin.DescriptorIdentity.Id.Value).ToHashSet(StringComparer.Ordinal).SetEquals(required);
     }

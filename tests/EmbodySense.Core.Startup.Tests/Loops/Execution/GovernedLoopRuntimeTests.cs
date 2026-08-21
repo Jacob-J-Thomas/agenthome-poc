@@ -3,12 +3,16 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Governance.Authority.Models;
 using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Application.Inference;
+using EmbodySense.Core.Application.Inference.Profiles;
+using EmbodySense.Core.Application.Inference.Profiles.Models;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation;
@@ -33,6 +37,8 @@ using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
@@ -61,10 +67,13 @@ using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
 using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Core.Persistence.Memory;
+using EmbodySense.Core.Persistence.Inference.Profiles;
 using EmbodySense.Core.Persistence.Triggers;
 using EmbodySense.Core.Persistence.Triggers.Schedules;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Governance;
+using EmbodySense.Core.Startup.Inference;
+using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep;
@@ -94,9 +103,214 @@ internal static class GovernedLoopRuntimeTests
     private const string WaitHostHolderReadyPath = "EMBODYSENSE_WAIT_HOST_HOLDER_READY_PATH";
     private const string WaitHostHolderReleasePath = "EMBODYSENSE_WAIT_HOST_HOLDER_RELEASE_PATH";
     private const string WaitHostHolderWorkspace = "EMBODYSENSE_WAIT_HOST_HOLDER_WORKSPACE";
+    private const string ModelCrashBoundary = "EMBODYSENSE_MODEL_CRASH_BOUNDARY";
+    private const string ModelCrashChildMode = "EMBODYSENSE_MODEL_CRASH_CHILD";
+    private const string ModelCrashCodexPath = "EMBODYSENSE_MODEL_CRASH_CODEX_PATH";
+    private const string ModelCrashInputPath = "EMBODYSENSE_MODEL_CRASH_INPUT_PATH";
+    private const string ModelCrashMarkerPath = "EMBODYSENSE_MODEL_CRASH_MARKER_PATH";
+    private const string ModelCrashTrustRoot = "EMBODYSENSE_MODEL_CRASH_TRUST_ROOT";
+    private const string ModelCrashWorkspace = "EMBODYSENSE_MODEL_CRASH_WORKSPACE";
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    private const string ConfiguredModelProfileCapabilityId = "org.embodysense/model-profile/codex";
+    private const string ModelProfileCapabilityId = "org.example/model-profile/exact-bounded-test";
     private const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
+
+    internal static async Task Model_attempt_crash_windows_are_durable_and_never_redispatch_across_external_restart()
+    {
+        if (string.Equals(Environment.GetEnvironmentVariable(ModelCrashChildMode), "1", StringComparison.Ordinal))
+        {
+            await RunModelCrashChildAsync();
+            return;
+        }
+
+        var scenarios = new[]
+        {
+            (GovernedModelPrimaryExecutionBoundary.BeforeReservation, (GovernedModelUsageLedgerPhase?)null, 0, 0),
+            (GovernedModelPrimaryExecutionBoundary.ReservationRetained, GovernedModelUsageLedgerPhase.ReservationCommitted, 0, 1),
+            (GovernedModelPrimaryExecutionBoundary.ProviderTransportCommitted, GovernedModelUsageLedgerPhase.DispatchBoundaryReached, 1, 2),
+            (GovernedModelPrimaryExecutionBoundary.ProviderResponseReceived, GovernedModelUsageLedgerPhase.DispatchBoundaryReached, 1, 2),
+            (GovernedModelPrimaryExecutionBoundary.UsageRetained, GovernedModelUsageLedgerPhase.UsageObserved, 1, 3),
+        };
+
+        foreach (var (boundary, expectedPhase, expectedProviderAttempts, expectedLedgerEntries) in scenarios)
+        {
+            using var fixture = await GovernedRuntimeFixture.CreateAsync();
+            var input = fixture.Input(
+                $"invoke-model-crash-{boundary.ToString().ToLowerInvariant()}",
+                $"prove the exact {boundary} restart boundary");
+            var inputPath = Path.Combine(fixture.Paths.RootPath, $"model-crash-{boundary}.json");
+            var markerPath = Path.Combine(fixture.Paths.RootPath, $"model-crash-{boundary}.marker");
+            await File.WriteAllTextAsync(inputPath, JsonSerializer.Serialize(ModelCrashInvocation.From(input)));
+
+            using var child = StartModelCrashChild(fixture, inputPath, markerPath, boundary);
+            await WaitForModelCrashBoundaryAsync(child, markerPath, boundary);
+            child.Kill(entireProcessTree: true);
+            await child.WaitForExitAsync();
+            Assert.NotEqual(0, child.ExitCode);
+            var snapshotRoot = Path.Combine(Path.GetTempPath(), "embodysense-model-profile-snapshots");
+            var orphanedSnapshots = Directory.Exists(snapshotRoot)
+                ? Directory.GetDirectories(snapshotRoot)
+                    .Where(directory => File.Exists(Path.Combine(directory, Path.GetFileName(fixture.CodexPath))))
+                    .ToArray()
+                : Array.Empty<string>();
+            Assert.Empty(orphanedSnapshots);
+
+            using var store = new CustomLoopRunStore(fixture.Paths);
+            var interrupted = Assert.Single(await store.ListRecentAsync(10));
+            Assert.Equal(CustomLoopRunStatus.Running, interrupted.Status);
+            Assert.Equal(expectedProviderAttempts, fixture.ProviderAttempts);
+            var interruptedRecord = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(interrupted.Id));
+            var route = Assert.Single(interruptedRecord.SequentialAdapterBinding!.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries);
+            Assert.Empty(route.Fallbacks);
+
+            var trust = new FileCapabilityCatalogTrustProvider(fixture.TrustRootPath);
+            var workspaceId = CapabilityWorkspaceScopeId.Create(fixture.Paths.RootPath);
+            var ledger = await new GovernedModelUsageLedgerStore(fixture.Paths, trust)
+                .ReadRunAsync(workspaceId, interrupted.Id);
+            if (expectedPhase is null)
+            {
+                Assert.Equal(GovernedModelUsageLedgerReadStatus.NotFound, ledger.Status);
+                Assert.Empty(ledger.Entries);
+            }
+            else
+            {
+                Assert.Equal(GovernedModelUsageLedgerReadStatus.Found, ledger.Status);
+                Assert.Equal(expectedPhase, ledger.Entries[^1].Phase);
+                Assert.Equal(expectedLedgerEntries, ledger.Entries.Count);
+                var reservation = Assert.Single(ledger.Entries, entry => entry.Phase == GovernedModelUsageLedgerPhase.ReservationCommitted).Reservation;
+                Assert.NotNull(reservation);
+                Assert.All(ledger.Entries, entry =>
+                {
+                    Assert.Equal(route.Primary.ContentHash, entry.Identity.ProfilePinHash);
+                    Assert.Equal(route.Requirements.Budget.ContentHash, entry.Identity.BudgetPolicyHash);
+                    Assert.Equal(reservation!.ContentHash, entry.Reservation?.ContentHash);
+                    Assert.DoesNotContain(entry.Phase, new[]
+                    {
+                        GovernedModelUsageLedgerPhase.DispatchProvedNotStarted,
+                        GovernedModelUsageLedgerPhase.Reconciled,
+                    });
+                });
+                if (expectedPhase == GovernedModelUsageLedgerPhase.UsageObserved)
+                {
+                    Assert.Equal(GovernedModelUsageEvidenceStatus.Authoritative, ledger.Entries[^1].Usage?.InputTokens.Status);
+                    Assert.Equal(1, ledger.Entries[^1].Usage?.InputTokens.Value);
+                    Assert.Equal(1, ledger.Entries[^1].Usage?.OutputTokens.Value);
+                }
+            }
+
+            await using var restarted = await fixture.CreateRuntimeAsync(preserveCurrentConversation: true);
+            Assert.All(orphanedSnapshots, directory => Assert.False(Directory.Exists(directory)));
+            var recovered = Assert.IsType<LoopRunSnapshot>(await restarted.GetCustomLoopRunAsync(interrupted.Id));
+            Assert.Equal(CustomLoopRunStatus.NeedsReview.ToString(), recovered.Status);
+            Assert.Equal("recovery_open_attempt", recovered.FailureCode);
+            Assert.Equal(expectedProviderAttempts, fixture.ProviderAttempts);
+            if (expectedPhase is null)
+            {
+                Assert.Equal("NotFound", recovered.ModelUsage?.Status);
+            }
+            else
+            {
+                Assert.Equal(expectedPhase.ToString(), Assert.Single(recovered.ModelUsage!.Attempts).Phase);
+            }
+
+            var replay = await restarted.InvokeGovernedLoopAsync(input);
+            Assert.False(replay.WasDispatched);
+            Assert.Equal(interrupted.Id, replay.Run?.Id);
+            Assert.Equal(CustomLoopRunStatus.NeedsReview.ToString(), replay.Run?.Status);
+            Assert.Equal(expectedProviderAttempts, fixture.ProviderAttempts);
+        }
+    }
+
+    private static async Task RunModelCrashChildAsync()
+    {
+        var workspace = Environment.GetEnvironmentVariable(ModelCrashWorkspace);
+        var trustRoot = Environment.GetEnvironmentVariable(ModelCrashTrustRoot);
+        var codexPath = Environment.GetEnvironmentVariable(ModelCrashCodexPath);
+        var inputPath = Environment.GetEnvironmentVariable(ModelCrashInputPath);
+        var markerPath = Environment.GetEnvironmentVariable(ModelCrashMarkerPath);
+        var boundaryValue = Environment.GetEnvironmentVariable(ModelCrashBoundary);
+        Assert.False(string.IsNullOrWhiteSpace(workspace));
+        Assert.False(string.IsNullOrWhiteSpace(trustRoot));
+        Assert.False(string.IsNullOrWhiteSpace(codexPath));
+        Assert.False(string.IsNullOrWhiteSpace(inputPath));
+        Assert.False(string.IsNullOrWhiteSpace(markerPath));
+        Assert.True(Enum.TryParse<GovernedModelPrimaryExecutionBoundary>(boundaryValue, out var boundary));
+        var serialized = await File.ReadAllTextAsync(inputPath!);
+        var input = Assert.IsType<ModelCrashInvocation>(JsonSerializer.Deserialize<ModelCrashInvocation>(serialized)).ToInput();
+        var observer = new BlockingModelExecutionBoundaryObserver(boundary, markerPath!);
+        var testProvider = await GovernedRuntimeFixture.CreateExactTestProviderAsync(workspace!);
+
+        await using var runtime = await AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+                new RejectingApprovalPrompt(),
+                trustRoot!,
+                governedModelExecutionObserver: observer,
+                additionalModelProfileProviders: [testProvider])
+            .CreateAsync(
+                "test-model",
+                workspace!,
+                codexPath,
+                "read-only",
+                AgentRuntimeSurface.Cli,
+                preserveCurrentConversation: true);
+        _ = await runtime.InvokeGovernedLoopAsync(input);
+        throw new Xunit.Sdk.XunitException($"The model execution crossed {boundary} without the external process being stopped.");
+    }
+
+    private static Process StartModelCrashChild(
+        GovernedRuntimeFixture fixture,
+        string inputPath,
+        string markerPath,
+        GovernedModelPrimaryExecutionBoundary boundary)
+    {
+        var startInfo = new ProcessStartInfo("dotnet")
+        {
+            WorkingDirectory = fixture.Paths.RootPath,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+            startInfo,
+            typeof(GovernedLoopRuntimeTests).Assembly.Location,
+            $"{typeof(GovernedLoopRuntimeTestsModels).FullName}.{nameof(GovernedLoopRuntimeTestsModels.Model_attempt_crash_windows_are_durable_and_never_redispatch_across_external_restart)}");
+        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
+        startInfo.Environment[ModelCrashChildMode] = "1";
+        startInfo.Environment[ModelCrashWorkspace] = fixture.Paths.RootPath;
+        startInfo.Environment[ModelCrashTrustRoot] = fixture.TrustRootPath;
+        startInfo.Environment[ModelCrashCodexPath] = fixture.CodexPath;
+        startInfo.Environment[ModelCrashInputPath] = inputPath;
+        startInfo.Environment[ModelCrashMarkerPath] = markerPath;
+        startInfo.Environment[ModelCrashBoundary] = boundary.ToString();
+        return Process.Start(startInfo)
+            ?? throw new InvalidOperationException("The external governed model crash host did not start.");
+    }
+
+    private static async Task WaitForModelCrashBoundaryAsync(
+        Process child,
+        string markerPath,
+        GovernedModelPrimaryExecutionBoundary boundary)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(20);
+        while (!File.Exists(markerPath) && DateTimeOffset.UtcNow < deadline)
+        {
+            if (child.HasExited)
+            {
+                throw new Xunit.Sdk.XunitException(
+                    $"The external model host exited before {boundary}.{Environment.NewLine}{await child.StandardError.ReadToEndAsync()}{Environment.NewLine}{await child.StandardOutput.ReadToEndAsync()}");
+            }
+            await Task.Delay(25);
+        }
+        if (!File.Exists(markerPath))
+        {
+            if (!child.HasExited)
+            {
+                child.Kill(entireProcessTree: true);
+            }
+            throw new Xunit.Sdk.XunitException($"The external model host did not reach {boundary} within 20 seconds.");
+        }
+    }
 
     internal static async Task Production_runtime_parks_and_wakes_a_canonical_wait_after_restart()
     {
@@ -440,6 +654,7 @@ internal static class GovernedLoopRuntimeTests
         var generation = (await store.GetSnapshotAsync(workerNow)).Generation;
         var authorizer = new ExactTriggerAuthorizer();
         string runId;
+        string terminalUsageEntryHash;
         await using (var runtime = await fixture.CreateRuntimeAsync())
         {
             var worker = runtime.CreateTriggerWorkerRuntime(authorizer, new FixedTriggerTimeProvider(workerNow));
@@ -459,6 +674,31 @@ internal static class GovernedLoopRuntimeTests
             Assert.Null(run.InvokingConversation);
             Assert.Equal("schedule-trigger", run.Frontier!.Nodes[0].TypeId);
             Assert.Equal(run.GovernedAdmissionRequestHash, entry.GovernedAdmissionRequestHash);
+            var routing = Assert.Single(run.ModelRoutingAdmission!.Entries);
+            var providerOutcome = Assert.Single(run.Events, item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved.ToString());
+            var modelEvidence = Assert.IsType<GovernedModelAttemptExecutionEvidence>(providerOutcome.ModelExecutionEvidence);
+            Assert.Equal(routing.Primary.Capability.DescriptorIdentity.Id, modelEvidence.ProfileId);
+            Assert.Equal(routing.Primary.ContentHash, modelEvidence.ProfilePinHash);
+            Assert.Equal(routing.Primary.Metadata.ConfigurationHash, modelEvidence.ConfigurationHash);
+            Assert.Equal(routing.Primary.Metadata.ProviderId, providerOutcome.Provider);
+            Assert.Equal(routing.Primary.Metadata.ModelId, providerOutcome.Model);
+            Assert.Equal(GovernedModelUsageLedgerPhase.Reconciled, modelEvidence.TerminalUsagePhase);
+            var usageProjection = Assert.IsType<LoopRunModelUsageSnapshot>(run.ModelUsage);
+            Assert.Equal("Found", usageProjection.Status);
+            var attemptUsage = Assert.Single(usageProjection.Attempts);
+            Assert.Equal("Reconciled", attemptUsage.Phase);
+            Assert.Equal(routing.Primary.ContentHash, attemptUsage.ProfilePinHash);
+            Assert.False(attemptUsage.ReservationOutstanding);
+            Assert.False(attemptUsage.UsageUnknown);
+            Assert.Equal(GovernedModelUsageEvidenceStatus.Authoritative, attemptUsage.Usage!.InputTokens.Status);
+            Assert.Equal(1, attemptUsage.Usage.InputTokens.Value);
+            Assert.Equal(1, attemptUsage.Usage.OutputTokens.Value);
+            Assert.Equal(2, attemptUsage.Usage.TotalTokens.Value);
+            Assert.Equal("Authoritative", usageProjection.Run!.InputTokens.Status);
+            Assert.Equal(1, usageProjection.Run.InputTokens.AuthoritativeValue);
+            Assert.Equal(1, usageProjection.Run.UsageUnavailableAttemptCount); // Monetary usage remains explicitly unavailable.
+            Assert.Equal(0, usageProjection.Run.OutstandingReservationAttemptCount);
+            terminalUsageEntryHash = attemptUsage.LatestEntryHash;
             Assert.Equal(1, fixture.ProviderAttempts);
             Assert.Equal(1, authorizer.Reads);
         }
@@ -495,6 +735,7 @@ internal static class GovernedLoopRuntimeTests
             var empty = await emptyWorker.RunOnceAsync(new TriggerWorkerSelectionInput("worker-2", emptyGeneration, workerNow.AddMinutes(1), TimeSpan.FromSeconds(30), [], 2));
 
             Assert.Equal(CustomLoopRunStatus.Completed.ToString(), replay.Status);
+            Assert.Equal(terminalUsageEntryHash, Assert.Single(replay.ModelUsage!.Attempts).LatestEntryHash);
             Assert.Equal("Empty", empty.SelectionStatus);
             Assert.Null(empty.Entry);
             Assert.Equal(1, fixture.ProviderAttempts);
@@ -1126,6 +1367,23 @@ internal static class GovernedLoopRuntimeTests
         }
     }
 
+    internal static async Task Public_runtime_marks_the_unforwardable_configured_profile_unavailable_before_provider_dispatch()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(useConfiguredModelProfile: true);
+        var input = fixture.Input("invoke-unforwardable-output-ceiling", "do not dispatch an unenforceable bounded model request");
+
+        await using (var runtime = await fixture.CreateRuntimeAsync())
+        {
+            var unavailable = await runtime.InvokeGovernedLoopAsync(input);
+
+            Assert.Equal("Unavailable", unavailable.Status);
+            Assert.Equal("Unavailable", unavailable.AdmissionStatus);
+            Assert.False(unavailable.WasDispatched);
+            Assert.Null(unavailable.Run);
+            Assert.Equal(0, fixture.ProviderAttempts);
+        }
+    }
+
     internal static async Task First_bound_completion_replays_after_restart_and_rejects_a_second_run_without_provider_dispatch()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(
@@ -1138,7 +1396,9 @@ internal static class GovernedLoopRuntimeTests
             var replayed = await runtime.InvokeGovernedLoopAsync(firstInput);
 
             Assert.True(string.Equals("Executed", completed.Status, StringComparison.Ordinal), completed.Detail);
-            Assert.Equal("Completed", completed.ExecutionStatus);
+            Assert.True(
+                string.Equals("Completed", completed.ExecutionStatus, StringComparison.Ordinal),
+                $"{completed.Detail} Run failure: {completed.Run?.FailureCode}/{completed.Run?.FailureDetail}");
             Assert.Equal(CustomLoopRunStatus.Completed.ToString(), completed.Run?.Status);
             Assert.True(completed.WasDispatched);
             Assert.Equal("Terminal", replayed.Status);
@@ -2178,6 +2438,77 @@ internal static class GovernedLoopRuntimeTests
         }
     }
 
+    private sealed record ModelCrashInvocation(
+        string OperationId,
+        int PublicationSchemaVersion,
+        string GraphId,
+        string RevisionId,
+        string ExecutableHash,
+        string PublicationOperationId,
+        string ValidationEvidenceHash,
+        string GrantId,
+        int GrantRevision,
+        string GrantContentHash,
+        string InvocationPrompt)
+    {
+        internal static ModelCrashInvocation From(GovernedLoopRunInvocationInput input)
+            => new(
+                input.OperationId,
+                input.Publication.SchemaVersion,
+                input.Publication.Revision.GraphId,
+                input.Publication.Revision.RevisionId,
+                input.Publication.Revision.ExecutableHash,
+                input.Publication.PublicationOperationId,
+                input.Publication.ValidationEvidenceHash,
+                input.AuthorityGrant.GrantId.Value,
+                input.AuthorityGrant.Revision.Value,
+                input.AuthorityGrant.ContentHash,
+                input.InvocationPrompt);
+
+        internal GovernedLoopRunInvocationInput ToInput()
+        {
+            if (!AuthorityGrantId.TryParse(GrantId, out var grantId, out _)
+                || !AuthorityGrantRevision.TryParse(
+                    GrantRevision.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    out var grantRevision,
+                    out _))
+            {
+                throw new InvalidOperationException("The external model crash input did not contain a canonical grant reference.");
+            }
+            var publication = new GovernedLoopRevisionPublicationPin(
+                PublicationSchemaVersion,
+                GovernedLoopRevisionReference.Create(
+                    GovernedLoopRevisionReference.CurrentSchemaVersion,
+                    GraphId,
+                    RevisionId,
+                    ExecutableHash),
+                PublicationOperationId,
+                ValidationEvidenceHash);
+            return new GovernedLoopRunInvocationInput(
+                OperationId,
+                publication,
+                new AuthorityGrantReference(grantId!, grantRevision!, GrantContentHash),
+                InvocationPrompt);
+        }
+    }
+
+    private sealed class BlockingModelExecutionBoundaryObserver(
+        GovernedModelPrimaryExecutionBoundary target,
+        string markerPath) : IGovernedModelPrimaryExecutionBoundaryObserver
+    {
+        public async ValueTask ObserveAsync(
+            GovernedModelPrimaryExecutionBoundary boundary,
+            CancellationToken cancellationToken = default)
+        {
+            if (boundary != target)
+            {
+                return;
+            }
+            await File.WriteAllTextAsync(markerPath, boundary.ToString(), cancellationToken);
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+    }
+
     private sealed class GovernedRuntimeFixture : IDisposable
     {
         private const string OwnerActorId = "governed-test-owner";
@@ -2187,6 +2518,7 @@ internal static class GovernedLoopRuntimeTests
         private readonly string _providerStartedPath;
         private readonly string _providerReleasePath;
         private readonly string _codexPath;
+        private readonly ModelProfileRuntimeProvider? _additionalModelProfileProvider;
 
         private GovernedRuntimeFixture(
             TestWorkspace workspace,
@@ -2194,7 +2526,8 @@ internal static class GovernedLoopRuntimeTests
             AuthorityGrantReference grant,
             AuthorityGrantReference? restrictedGrant,
             string codexPath,
-            DateTimeOffset? waitDeadlineUtc)
+            DateTimeOffset? waitDeadlineUtc,
+            ModelProfileRuntimeProvider? additionalModelProfileProvider)
         {
             _workspace = workspace;
             Publication = publication;
@@ -2202,6 +2535,7 @@ internal static class GovernedLoopRuntimeTests
             RestrictedGrant = restrictedGrant;
             _codexPath = codexPath;
             WaitDeadlineUtc = waitDeadlineUtc;
+            _additionalModelProfileProvider = additionalModelProfileProvider;
             Paths = new WorkspacePaths(workspace.RootPath);
             _providerCounterPath = workspace.File("governed-provider-attempts.txt");
             _providerStartedPath = workspace.File("governed-provider-started.marker");
@@ -2227,6 +2561,9 @@ internal static class GovernedLoopRuntimeTests
                 ? int.Parse(File.ReadAllText(_providerCounterPath), System.Globalization.CultureInfo.InvariantCulture)
                 : 0;
 
+        internal static async Task<ModelProfileRuntimeProvider> CreateExactTestProviderAsync(string workspacePath)
+            => (await TestExactModelProfile.CreateAsync(workspacePath)).Provider;
+
         public static async Task<GovernedRuntimeFixture> CreateAsync(
             bool includeRestrictedGrant = false,
             bool pauseProvider = false,
@@ -2235,7 +2572,8 @@ internal static class GovernedLoopRuntimeTests
             AuthorityGrantCompletionConstraintKind completionConstraint = AuthorityGrantCompletionConstraintKind.None,
             int failFirstAttempts = 0,
             bool scheduleTrigger = false,
-            TimeSpan? waitDelay = null)
+            TimeSpan? waitDelay = null,
+            bool useConfiguredModelProfile = false)
         {
             Assert.InRange(inferenceSteps, 1, 2);
             Assert.InRange(failFirstAttempts, 0, 2);
@@ -2249,8 +2587,15 @@ internal static class GovernedLoopRuntimeTests
             {
                 await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
                 var paths = new WorkspacePaths(workspace.RootPath);
-                var role = await CreateRoleAsync(paths, scheduleTrigger);
                 var codexPath = await CreateCodexExecutableAsync(workspace, pauseProvider, failFirstAttempts);
+                var testProfile = useConfiguredModelProfile ? null : await TestExactModelProfile.CreateAsync(workspace.RootPath);
+                if (testProfile is not null)
+                {
+                    await InstallModelProfileAsync(paths, workspace.ServerStatePath, testProfile.Descriptor);
+                }
+
+                var modelProfileCapabilityId = testProfile?.Descriptor.Id.Value ?? ConfiguredModelProfileCapabilityId;
+                var role = await CreateRoleAsync(paths, scheduleTrigger, modelProfileCapabilityId);
                 var waitDeadlineUtc = waitDelay is { } exactDelay
                     ? DateTimeOffset.UtcNow.Add(exactDelay)
                     : (DateTimeOffset?)null;
@@ -2260,17 +2605,19 @@ internal static class GovernedLoopRuntimeTests
                     role,
                     inferenceSteps,
                     scheduleTrigger,
-                    waitDeadlineUtc);
+                    waitDeadlineUtc,
+                    modelProfileCapabilityId);
                 var grant = await CreateGrantAsync(
                     workspace,
                     paths,
                     role,
                     publication,
                     "governed-full-grant",
-                    FullCeiling(scheduleTrigger),
+                    FullCeiling(scheduleTrigger, testProfile?.Descriptor),
                     scheduleTrigger,
                     grantLifetime,
-                    completionConstraint);
+                    completionConstraint,
+                    modelProfileCapabilityId);
                 var restricted = includeRestrictedGrant
                     ? await CreateGrantAsync(
                         workspace,
@@ -2281,9 +2628,10 @@ internal static class GovernedLoopRuntimeTests
                         EmptyCeiling(),
                         scheduleTrigger,
                         null,
-                        AuthorityGrantCompletionConstraintKind.None)
+                        AuthorityGrantCompletionConstraintKind.None,
+                        modelProfileCapabilityId)
                     : null;
-                return new GovernedRuntimeFixture(workspace, publication, grant, restricted, codexPath, waitDeadlineUtc);
+                return new GovernedRuntimeFixture(workspace, publication, grant, restricted, codexPath, waitDeadlineUtc, testProfile?.Provider);
             }
             catch
             {
@@ -2298,11 +2646,15 @@ internal static class GovernedLoopRuntimeTests
             AuthorityGrantReference? grant = null)
             => new(operationId, Publication, grant ?? Grant, prompt);
 
-        public Task<AgentRuntime> CreateRuntimeAsync(bool preserveCurrentConversation = false)
+        public Task<AgentRuntime> CreateRuntimeAsync(
+            bool preserveCurrentConversation = false,
+            IGovernedModelPrimaryExecutionBoundaryObserver? governedModelExecutionObserver = null)
             => AgentRuntimeFactory.ForFileCapabilityTrustRoot(
                     new RejectingApprovalPrompt(),
                     _workspace.ServerStatePath,
-                    CompatibleRuntimeStatus())
+                    CompatibleRuntimeStatus(),
+                    governedModelExecutionObserver: governedModelExecutionObserver,
+                    additionalModelProfileProviders: _additionalModelProfileProvider is null ? null : [_additionalModelProfileProvider])
                 .CreateAsync(
                     "test-model",
                     _workspace.RootPath,
@@ -2410,7 +2762,311 @@ internal static class GovernedLoopRuntimeTests
                 "controlled test",
                 "The exact fake app-server and provider path remains exercised; redundant compatibility probes are covered separately.");
 
-        private static async Task<ContextualRoleRevision> CreateRoleAsync(WorkspacePaths paths, bool scheduleTrigger)
+        private static async Task InstallModelProfileAsync(WorkspacePaths paths, string trustRootPath, CapabilityDescriptor descriptor)
+        {
+            var service = new CapabilityCatalogService(new CapabilityCatalogStore(paths, new FileCapabilityCatalogTrustProvider(trustRootPath)));
+            var read = await service.ReadAsync(null, 1);
+            Assert.Equal(CapabilityCatalogReadStatus.Available, read.Status);
+            var revision = Assert.IsType<long>(read.Page?.CatalogRevision);
+            revision = RequireApplied(await service.DeclareAsync(descriptor, revision, "declare-exact-bounded-test-profile"));
+            revision = RequireApplied(await service.InstallAsync(descriptor.Id, revision, "install-exact-bounded-test-profile"));
+            revision = RequireApplied(await service.VerifyAsync(descriptor.Id, revision, "verify-exact-bounded-test-profile"));
+            revision = RequireApplied(await service.EnableAsync(descriptor.Id, revision, "enable-exact-bounded-test-profile"));
+            _ = RequireApplied(await service.MarkHealthyAsync(descriptor.Id, revision, "healthy-exact-bounded-test-profile"));
+
+            static long RequireApplied(CapabilityCatalogMutationResult result)
+            {
+                Assert.Equal(CapabilityCatalogMutationStatus.Applied, result.Status);
+                return Assert.IsType<long>(result.CatalogRevision);
+            }
+        }
+
+        private sealed class TestExactModelProfile
+        {
+            internal static CapabilityDescriptor TemplateDescriptor { get; } = CreateDescriptor();
+
+            private TestExactModelProfile(ModelProfileRuntimeProvider provider)
+            {
+                Provider = provider;
+            }
+
+            internal CapabilityDescriptor Descriptor => TemplateDescriptor;
+
+            internal ModelProfileRuntimeProvider Provider { get; }
+
+            internal static Task<TestExactModelProfile> CreateAsync(string workspacePath)
+            {
+                Assert.True(CapabilityDescriptorIdentity.TryCreate(TemplateDescriptor, out var identity, out _));
+                Assert.True(CapabilityDataClass.TryParse("sensitive", out var sensitive, out _));
+                var metadata = GovernedModelProfileMetadata.Create(
+                    1,
+                    identity!,
+                    "openai",
+                    "governed-runtime-test-exact-adapter",
+                    "test-model",
+                    "v1",
+                    1,
+                    CustomLoopTraceContentHash.Compute("governed-runtime-test-profile.v1\n" + TemplateDescriptor.Id.Value),
+                    "Test-only exact bounded adapter for generic governed-runtime success behavior.",
+                    [GovernedModelModality.Text],
+                    [GovernedModelCapability.ToolCalling, GovernedModelCapability.Streaming],
+                    1,
+                    1,
+                    GovernedModelPrivacyPosture.Create(
+                        1,
+                        GovernedModelLocality.Remote,
+                        CapabilityEgressMode.Unrestricted,
+                        [],
+                        [sensitive!],
+                        [],
+                        GovernedModelRetentionPosture.Indefinite,
+                        GovernedModelTrainingPosture.Allowed),
+                    GovernedModelUsageSupportPolicy.Create(
+                        GovernedModelUsageSupport.AuthoritativeAndHardBoundedAtDispatch,
+                        GovernedModelUsageSupport.AuthoritativeAndHardBoundedAtDispatch,
+                        GovernedModelUsageSupport.AuthoritativeAndHardBoundedAtDispatch,
+                        GovernedModelUsageSupport.AuthoritativeAndHardBoundedAtDispatch,
+                        GovernedModelUsageSupport.Unavailable),
+                    [],
+                    ["provider-inference"]);
+                var sourceRevisionHash = CustomLoopTraceContentHash.Compute("governed-runtime-test-profile-source.v1\n" + metadata.ContentHash);
+                var registryRevisionHash = CustomLoopTraceContentHash.Compute("governed-runtime-test-profile-registry.v1\n" + metadata.ContentHash);
+                var control = TestExactProviderControl.Read(workspacePath);
+                var source = new TestExactMetadataSource(TemplateDescriptor.Id, metadata, sourceRevisionHash);
+                var adapter = new TestExactAdapterRegistry(metadata.ContentHash, registryRevisionHash);
+                return Task.FromResult(new TestExactModelProfile(new ModelProfileRuntimeProvider(
+                    source,
+                    adapter,
+                    admissionAdapterRegistry => new TestExactModelProfileResolver(
+                        metadata,
+                        sourceRevisionHash,
+                        admissionAdapterRegistry,
+                        control))));
+            }
+
+            private static CapabilityDescriptor CreateDescriptor()
+            {
+                var template = BuiltInCapabilityCatalog.Descriptors.Single(item => item.Id.Value == ConfiguredModelProfileCapabilityId);
+                Assert.True(CapabilityId.TryParse(ModelProfileCapabilityId, out var id, out _));
+                Assert.True(CapabilityProviderId.TryParse("org.example", out var providerId, out _));
+                return template with
+                {
+                    Id = id!,
+                    Implementation = new CapabilityImplementationIdentity(providerId!, "model-profile/exact-bounded-test"),
+                    Provenance = new CapabilityProvenance(CapabilityProvenanceKind.BuiltIn, "https://example.invalid/governed-runtime/exact-bounded-test", "test-v1", null),
+                    Purpose = "Test-only exact bounded model profile."
+                };
+            }
+        }
+
+        private sealed class TestExactMetadataSource(
+            CapabilityId profileId,
+            GovernedModelProfileMetadata metadata,
+            string sourceRevisionHash) : IModelProfileMetadataSource
+        {
+            public Task<ModelProfileSourceReadResult> ReadAsync(CapabilityId requestedProfileId, CancellationToken cancellationToken = default)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Task.FromResult(requestedProfileId.Equals(profileId)
+                    ? new ModelProfileSourceReadResult(ModelProfileSourceReadStatus.Found, metadata, sourceRevisionHash)
+                    : new ModelProfileSourceReadResult(ModelProfileSourceReadStatus.NotFound, null, null));
+            }
+        }
+
+        private sealed class TestExactAdapterRegistry(string metadataHash, string registryRevisionHash) : IModelProfileAdapterRegistry
+        {
+            public Task<ModelProfileAdapterPosture> ReadPostureAsync(GovernedModelProfileMetadata metadata, CancellationToken cancellationToken = default)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Task.FromResult(new ModelProfileAdapterPosture(
+                    string.Equals(metadata.ContentHash, metadataHash, StringComparison.Ordinal)
+                        ? ModelProfileAdapterPostureStatus.Ready
+                        : ModelProfileAdapterPostureStatus.Unregistered,
+                    metadata.ContentHash,
+                    registryRevisionHash));
+            }
+        }
+
+        private sealed class TestExactModelProfileResolver(
+            GovernedModelProfileMetadata metadata,
+            string sourceRevisionHash,
+            IModelProfileAdapterRegistry admissionAdapterRegistry,
+            TestExactProviderControl control) : IExactModelProfileInferenceClientResolver
+        {
+            public async Task<ExactModelProfileInferenceClientResolution> ResolveAsync(
+                ExactModelProfileInferenceClientRequest request,
+                CancellationToken cancellationToken = default)
+            {
+                ArgumentNullException.ThrowIfNull(request);
+                cancellationToken.ThrowIfCancellationRequested();
+                var posture = await admissionAdapterRegistry.ReadPostureAsync(request.Primary.Metadata, cancellationToken);
+                if (!string.Equals(request.Primary.Metadata.ContentHash, metadata.ContentHash, StringComparison.Ordinal)
+                    || !string.Equals(request.Primary.ProfileSourceRevisionHash, sourceRevisionHash, StringComparison.Ordinal)
+                    || posture.Status != ModelProfileAdapterPostureStatus.Ready
+                    || !string.Equals(request.Primary.AdapterRegistryRevisionHash, posture.RegistryRevisionHash, StringComparison.Ordinal))
+                {
+                    return new ExactModelProfileInferenceClientResolution(ExactModelProfileInferenceClientResolutionStatus.Ineligible, null);
+                }
+
+                var acknowledgement = new ExactModelProfileEnforcementAcknowledgement(
+                    request.Primary.ContentHash,
+                    request.AttemptIdentity.ContentHash,
+                    request.Reservation.ContentHash,
+                    request.BudgetPolicy.ContentHash,
+                    request.RoutingAdmissionHash,
+                    request.AdmissionReceiptHash,
+                    request.AuthorityEvidenceHash,
+                    request.DataPostureEvidenceHash,
+                    request.Primary.Metadata.ProviderId,
+                    LlmInferenceSurface.OpenAiCodex,
+                    request.ProviderAttemptId,
+                    request.ProviderCorrelationId,
+                    CustomLoopTraceContentHash.Compute("governed-runtime-test-enforcement.v1\n" + request.ProviderCorrelationId));
+                return new ExactModelProfileInferenceClientResolution(
+                    ExactModelProfileInferenceClientResolutionStatus.Resolved,
+                    new TestExactModelProfileLease(request.Primary, acknowledgement, control));
+            }
+        }
+
+        private sealed class TestExactModelProfileLease(
+            GovernedModelProfilePin primary,
+            ExactModelProfileEnforcementAcknowledgement acknowledgement,
+            TestExactProviderControl control) : IExactModelProfileInferenceClientLease
+        {
+            public string ProfilePinHash => primary.ContentHash;
+            public string ConfigurationHash => primary.Metadata.ConfigurationHash;
+            public ExactModelProfileEnforcementAcknowledgement Enforcement => acknowledgement;
+            public ILlmInferenceClient Client { get; } = new TestExactOutputBoundClient(control);
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+
+        private sealed class TestExactOutputBoundClient(TestExactProviderControl control) : ILlmInferenceClient
+        {
+            public Task<LlmInferenceResponse> GenerateAsync(LlmInferenceRequest request, Func<string, CancellationToken, Task>? responseChunkHandler = null, CancellationToken cancellationToken = default)
+                => GenerateCoreAsync(request, responseChunkHandler, cancellationToken, null);
+
+            public Task<LlmInferenceResponse> GenerateAsync(
+                LlmInferenceRequest request,
+                Func<string, CancellationToken, Task>? responseChunkHandler,
+                CancellationToken cancellationToken,
+                InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
+                => GenerateCoreAsync(request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary);
+
+            private async Task<LlmInferenceResponse> GenerateCoreAsync(
+                LlmInferenceRequest request,
+                Func<string, CancellationToken, Task>? responseChunkHandler,
+                CancellationToken cancellationToken,
+                InferenceProviderTransportCommitBoundary? providerTransportCommitBoundary)
+            {
+                ArgumentNullException.ThrowIfNull(request);
+                if (request.Options.MaxOutputTokenCount != 1)
+                {
+                    throw new LlmInferenceTerminalFailureException("The test-only exact adapter requires the governed one-token output ceiling.");
+                }
+
+                var attemptNumber = providerTransportCommitBoundary is null
+                    ? control.RecordDispatch()
+                    : await CommitDispatchAsync(providerTransportCommitBoundary, cancellationToken);
+                if (attemptNumber <= control.FailFirstAttempts)
+                {
+                    throw new LlmInferenceTerminalFailureException("Planned governed provider failure.");
+                }
+
+                await control.WaitForReleaseAsync(cancellationToken);
+                const string Output = "governed response: exactly one bounded output token";
+                if (responseChunkHandler is not null)
+                {
+                    await responseChunkHandler(Output, cancellationToken);
+                }
+
+                return new LlmInferenceResponse(
+                    Output,
+                    LlmInferenceSurface.OpenAiCodex,
+                    LlmInferenceUsageEvidence.Create(
+                        1,
+                        "governed-runtime-test-exact-provider",
+                        "v1",
+                        GovernedModelUsageMeasurement.Authoritative(1),
+                        GovernedModelUsageMeasurement.Authoritative(1),
+                        GovernedModelUsageMeasurement.Authoritative(0),
+                        GovernedModelUsageMeasurement.Authoritative(2),
+                        GovernedModelMonetaryUsageMeasurement.Unavailable),
+                    "test-model",
+                    "governed-test-response-" + attemptNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    "openai");
+            }
+
+            private async Task<int> CommitDispatchAsync(
+                InferenceProviderTransportCommitBoundary providerTransportCommitBoundary,
+                CancellationToken cancellationToken)
+            {
+                var attemptNumber = 0;
+                await providerTransportCommitBoundary(
+                    _ =>
+                    {
+                        attemptNumber = control.RecordDispatch();
+                        return Task.CompletedTask;
+                    },
+                    cancellationToken);
+                return attemptNumber;
+            }
+        }
+
+        private sealed class TestExactProviderControl(string workspacePath, bool pauseProvider, int failFirstAttempts)
+        {
+            private const string ConfigurationFileName = "governed-test-exact-provider.config";
+            private const string CounterFileName = "governed-provider-attempts.txt";
+            private const string StartedFileName = "governed-provider-started.marker";
+            private const string ReleaseFileName = "governed-provider-release.marker";
+
+            public int FailFirstAttempts { get; } = failFirstAttempts;
+
+            public static TestExactProviderControl Read(string workspacePath)
+            {
+                var configurationPath = Path.Combine(workspacePath, ConfigurationFileName);
+                var settings = File.ReadAllLines(configurationPath);
+                if (settings.Length != 2
+                    || !bool.TryParse(settings[0], out var pauseProvider)
+                    || !int.TryParse(settings[1], System.Globalization.CultureInfo.InvariantCulture, out var failFirstAttempts))
+                {
+                    throw new InvalidOperationException("The test-only exact provider configuration is invalid.");
+                }
+
+                return new TestExactProviderControl(workspacePath, pauseProvider, failFirstAttempts);
+            }
+
+            public int RecordDispatch()
+            {
+                var counterPath = Path.Combine(workspacePath, CounterFileName);
+                var existing = File.Exists(counterPath)
+                    ? int.Parse(File.ReadAllText(counterPath), System.Globalization.CultureInfo.InvariantCulture)
+                    : 0;
+                var next = checked(existing + 1);
+                File.WriteAllText(counterPath, next.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                return next;
+            }
+
+            public async Task WaitForReleaseAsync(CancellationToken cancellationToken)
+            {
+                if (!pauseProvider || File.Exists(Path.Combine(workspacePath, ReleaseFileName)))
+                {
+                    return;
+                }
+
+                File.WriteAllText(Path.Combine(workspacePath, StartedFileName), "started");
+                while (!File.Exists(Path.Combine(workspacePath, ReleaseFileName)))
+                {
+                    await Task.Delay(20, cancellationToken);
+                }
+            }
+
+            public static Task WriteConfigurationAsync(TestWorkspace workspace, bool pauseProvider, int failFirstAttempts)
+                => File.WriteAllLinesAsync(
+                    workspace.File(ConfigurationFileName),
+                    [pauseProvider.ToString(System.Globalization.CultureInfo.InvariantCulture), failFirstAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture)]);
+        }
+
+        private static async Task<ContextualRoleRevision> CreateRoleAsync(WorkspacePaths paths, bool scheduleTrigger, string modelProfileCapabilityId)
         {
             var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
             var revision = ContextualRoleRevisionContentHash.Apply(new ContextualRoleRevision(
@@ -2428,8 +3084,8 @@ internal static class GovernedLoopRuntimeTests
                     ContextualRoleInstructionClassification.RoleInstruction),
                 new ContextualRolePolicyMaxima(
                     scheduleTrigger
-                        ? ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId)
-                        : ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId))));
+                        ? ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId, modelProfileCapabilityId, ScheduleTriggerCapabilityId)
+                        : ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId, modelProfileCapabilityId))));
             var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(
                 "create-governed-helper-role",
                 string.Empty,
@@ -2451,13 +3107,15 @@ internal static class GovernedLoopRuntimeTests
             ContextualRoleRevision role,
             int inferenceSteps,
             bool scheduleTrigger,
-            DateTimeOffset? waitDeadlineUtc)
+            DateTimeOffset? waitDeadlineUtc,
+            string modelProfileCapabilityId)
         {
             var candidate = Candidate(
                 new ContextualRoleRevisionPin(role.Identity, role.ContentHash),
                 inferenceSteps,
                 scheduleTrigger,
-                waitDeadlineUtc);
+                waitDeadlineUtc,
+                modelProfileCapabilityId);
             var normalized = GovernedLoopGraphNormalizer.Normalize(candidate);
             Assert.True(normalized.IsValid);
             var revision = normalized.Graph!.RevisionReference;
@@ -2537,7 +3195,8 @@ internal static class GovernedLoopRuntimeTests
             AuthorityCeiling requestedCeiling,
             bool scheduleTrigger,
             TimeSpan? grantLifetime,
-            AuthorityGrantCompletionConstraintKind completionConstraint)
+            AuthorityGrantCompletionConstraintKind completionConstraint,
+            string modelProfileCapabilityId)
         {
             var trust = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
             var store = new AuthorityProfileStore(paths, trust);
@@ -2555,7 +3214,9 @@ internal static class GovernedLoopRuntimeTests
                     new AuthorityProvenance(Actor(), AuthorityProvenanceKind.UserDeclaration),
                     _now.AddMinutes(-5),
                     _now.AddDays(1),
-                    FullCeiling(scheduleTrigger),
+                    FullCeiling(
+                        scheduleTrigger,
+                        modelProfileCapabilityId == ConfiguredModelProfileCapabilityId ? null : TestExactModelProfile.TemplateDescriptor),
                     []);
                 var created = await store.MutateAsync(new AuthorityProfileMutation(
                     AuthorityProfileMutationKind.Create,
@@ -2677,7 +3338,8 @@ internal static class GovernedLoopRuntimeTests
             ContextualRoleRevisionPin role,
             int inferenceSteps,
             bool scheduleTrigger,
-            DateTimeOffset? waitDeadlineUtc)
+            DateTimeOffset? waitDeadlineUtc,
+            string modelProfileCapabilityId)
         {
             var nodes = new List<GovernedLoopNodeDefinition>
             {
@@ -2703,7 +3365,7 @@ internal static class GovernedLoopRuntimeTests
                     nodeId,
                     new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
                     [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
-                    GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
+                    GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId, modelProfileCapabilityId]),
                     new Dictionary<string, string> { ["instruction"] = $"Answer bounded inference step {index}." }));
                 controlEdges.Add(new GovernedLoopControlEdgeDefinition(
                     index == 1 ? "trigger-to-inference" : $"inference-{index - 1}-to-inference-{index}",
@@ -2760,8 +3422,8 @@ internal static class GovernedLoopRuntimeTests
                 ["exit"],
                 GovernedLoopAuthorityCeiling.Create(
                     scheduleTrigger
-                        ? [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId]
-                        : [ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
+                        ? [ConversationTurnCapabilityId, ModelInferenceCapabilityId, modelProfileCapabilityId, ScheduleTriggerCapabilityId]
+                        : [ConversationTurnCapabilityId, ModelInferenceCapabilityId, modelProfileCapabilityId]),
                 [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
                 nodes,
                 controlEdges,
@@ -2769,7 +3431,40 @@ internal static class GovernedLoopRuntimeTests
                 new GovernedLoopOutputContract(
                     "Return the bounded result.",
                     [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
-                new GovernedLoopDisplayMetadata("Governed sequential loop", "Public Startup composition test.", display));
+                new GovernedLoopDisplayMetadata("Governed sequential loop", "Public Startup composition test.", display),
+                RuntimeRoutingPolicy(modelProfileCapabilityId));
+        }
+
+        private static GovernedModelRoutingPolicy RuntimeRoutingPolicy(string modelProfileCapabilityId)
+        {
+            Assert.True(CapabilityId.TryParse(modelProfileCapabilityId, out var profileId, out _));
+            var unbounded = GovernedModelUsageCeiling.Create(
+                GovernedModelUsageLimit.Unbounded,
+                GovernedModelUsageLimit.Unbounded,
+                GovernedModelUsageLimit.Unbounded,
+                GovernedModelUsageLimit.Unbounded,
+                GovernedModelMonetaryLimit.Unbounded);
+            var privacy = GovernedModelPrivacyRequirement.Create(
+                1,
+                localOnly: false,
+                CapabilityEgressMode.Unrestricted,
+                [],
+                [SensitiveDataClass()],
+                [],
+                GovernedModelRetentionPosture.Indefinite,
+                GovernedModelTrainingPosture.Allowed);
+            return GovernedModelRoutingPolicy.Create(
+                1,
+                GovernedModelRoutingSelector.Exact(profileId!),
+                [],
+                GovernedModelProfileRequirements.Create(
+                    1,
+                    [GovernedModelModality.Text],
+                    [],
+                    1,
+                    1,
+                    privacy,
+                    GovernedModelBudgetPolicy.Create(1, unbounded, unbounded, unbounded)));
         }
 
         private static GovernedLoopPortDefinition Port(
@@ -2829,15 +3524,17 @@ internal static class GovernedLoopRuntimeTests
             return new GovernedLoopNodeCatalogSnapshot(true, "governed-runtime-catalog", descriptors);
         }
 
-        private static AuthorityCeiling FullCeiling(bool scheduleTrigger = false)
+        private static AuthorityCeiling FullCeiling(bool scheduleTrigger = false, CapabilityDescriptor? additionalModelProfile = null)
             => new(
                 BuiltInCapabilityCatalog.Descriptors
                     .Where(item => item.Id.Value is ConversationTurnCapabilityId or ModelInferenceCapabilityId
+                        || additionalModelProfile is null && item.Id.Value == ConfiguredModelProfileCapabilityId
                         || scheduleTrigger && item.Id.Value == ScheduleTriggerCapabilityId)
+                    .Concat(additionalModelProfile is null ? [] : [additionalModelProfile])
                     .Select(CreateCapabilityIdentity)
                     .OrderBy(item => item.Id.Value, StringComparer.Ordinal)
                     .ToArray(),
-                [],
+                [SensitiveDataClass()],
                 1,
                 CapabilitySideEffectClass.None,
                 scheduleTrigger,
@@ -2846,6 +3543,12 @@ internal static class GovernedLoopRuntimeTests
 
         private static AuthorityCeiling EmptyCeiling()
             => new([], [], 0, CapabilitySideEffectClass.None, false, false, false);
+
+        private static CapabilityDataClass SensitiveDataClass()
+        {
+            Assert.True(CapabilityDataClass.TryParse("sensitive", out var value, out _));
+            return value!;
+        }
 
         private static CapabilityDescriptorIdentity CreateCapabilityIdentity(CapabilityDescriptor descriptor)
         {
@@ -2895,12 +3598,15 @@ internal static class GovernedLoopRuntimeTests
             bool pauseProvider,
             int failFirstAttempts)
         {
-            var scriptPath = workspace.File("fake-governed-codex.js");
-            var commandPath = workspace.File(OperatingSystem.IsWindows() ? "fake-governed-codex.cmd" : "fake-governed-codex");
+            var runtimeDirectory = workspace.File("governed-codex-runtime");
+            Directory.CreateDirectory(runtimeDirectory);
+            var scriptPath = Path.Combine(runtimeDirectory, "fake-governed-codex.js");
+            var commandPath = Path.Combine(runtimeDirectory, OperatingSystem.IsWindows() ? "fake-governed-codex.cmd" : "fake-governed-codex");
             var counterPath = System.Text.Json.JsonSerializer.Serialize(workspace.File("governed-provider-attempts.txt"));
             var startedPath = System.Text.Json.JsonSerializer.Serialize(workspace.File("governed-provider-started.marker"));
             var releasePath = System.Text.Json.JsonSerializer.Serialize(workspace.File("governed-provider-release.marker"));
             var pauseEveryTurn = pauseProvider ? "true" : "false";
+            await TestExactProviderControl.WriteConfigurationAsync(workspace, pauseProvider, failFirstAttempts);
             await File.WriteAllTextAsync(scriptPath, $$"""
                 const fs = require("node:fs");
                 const readline = require("node:readline");
@@ -2925,6 +3631,17 @@ internal static class GovernedLoopRuntimeTests
 
                 function complete(threadId, turnId, text) {
                   write({ method: "item/agentMessage/delta", params: { threadId, turnId, delta: text } });
+                  write({
+                    method: "thread/tokenUsage/updated",
+                    params: {
+                      threadId,
+                      turnId,
+                      tokenUsage: {
+                        last: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: 2 },
+                        total: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: 2 }
+                      }
+                    }
+                  });
                   write({
                     method: "turn/completed",
                     params: { threadId, turnId, turn: { id: turnId, status: "completed", items: [{ type: "agentMessage", phase: "final_answer", text }] } }
@@ -2958,7 +3675,9 @@ internal static class GovernedLoopRuntimeTests
                       break;
                     case "thread/start": {
                       const threadId = `thread-governed-${++threadNumber}`;
-                      write({ id: message.id, result: { thread: { id: threadId } } });
+                      const model = String(message.params?.model ?? "");
+                      const modelProvider = String(message.params?.modelProvider ?? "");
+                      write({ id: message.id, result: { model, modelProvider, thread: { id: threadId, modelProvider } } });
                       break;
                     }
                     case "turn/start": {
@@ -2999,12 +3718,11 @@ internal static class GovernedLoopRuntimeTests
             }
             else
             {
-                var escaped = scriptPath
-                    .Replace("\\", "\\\\", StringComparison.Ordinal)
-                    .Replace("\"", "\\\"", StringComparison.Ordinal)
-                    .Replace("$", "\\$", StringComparison.Ordinal)
-                    .Replace("`", "\\`", StringComparison.Ordinal);
-                await File.WriteAllTextAsync(commandPath, $"#!/bin/sh\nexec node \"{escaped}\" \"$@\"\n");
+                await File.WriteAllTextAsync(commandPath, """
+                    #!/bin/sh
+                    SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+                    exec node "$SCRIPT_DIR/fake-governed-codex.js" "$@"
+                    """);
                 File.SetUnixFileMode(
                     commandPath,
                     UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);

@@ -99,6 +99,20 @@ internal static class CodexRuntimeProbeHost
                     var nextCursor = nextOffset < configuration.AdvertisedModels.Length ? nextOffset.ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
                     await WriteAsync(new { id, result = new { data = page.Select(model => new { id = model, model }).ToArray(), nextCursor } });
                     break;
+
+                case "thread/start":
+                    if (configuration.LegacyThreadStartShape)
+                    {
+                        await WriteAsync(new { id, result = new { thread = new { id = "thread-probe" } } });
+                        break;
+                    }
+
+                    var requestedModel = root.GetProperty("params").TryGetProperty("model", out var modelElement)
+                        ? modelElement.GetString()
+                        : configuration.AdvertisedModels.FirstOrDefault() ?? "externally-configured";
+                    var requestedProvider = root.GetProperty("params").GetProperty("modelProvider").GetString() ?? string.Empty;
+                    await WriteAsync(new { id, result = new { model = requestedModel, modelProvider = requestedProvider, thread = new { id = "thread-probe", modelProvider = requestedProvider } } });
+                    break;
             }
         }
 
@@ -161,5 +175,6 @@ internal static class CodexRuntimeProbeHost
         int VersionDelayMilliseconds,
         int ProtocolStageDelayMilliseconds,
         string? ProtocolStageMarkerPath,
-        int ModelPageSize);
+        int ModelPageSize,
+        bool LegacyThreadStartShape);
 }

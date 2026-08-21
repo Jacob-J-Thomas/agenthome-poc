@@ -3,6 +3,8 @@ using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
@@ -22,6 +24,7 @@ internal static class GovernedLoopSequentialApplicationTestFixture
 {
     internal const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     internal const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    internal const string ModelProfileCapabilityId = "org.embodysense/model-profile/codex";
     internal const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
     internal const string WorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
 
@@ -77,10 +80,10 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             authorityCeiling: GovernedLoopAuthorityCeiling.Create(
                 (allowWorkspaceTools, scheduleTrigger) switch
                 {
-                    (true, true) => [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId, WorkspaceCommandCapabilityId],
-                    (true, false) => [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId],
-                    (false, true) => [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId],
-                    _ => [ConversationTurnCapabilityId, ModelInferenceCapabilityId],
+                    (true, true) => [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, ScheduleTriggerCapabilityId, WorkspaceCommandCapabilityId],
+                    (true, false) => [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceCommandCapabilityId],
+                    (false, true) => [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, ScheduleTriggerCapabilityId],
+                    _ => [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId],
                 }));
     }
 
@@ -193,7 +196,7 @@ internal static class GovernedLoopSequentialApplicationTestFixture
         owningRole ??= new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("sequential-role", 1), Hash('a'));
         valueSchemas ??= [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)];
         outputContract ??= new GovernedLoopOutputContract("Return the exact bounded result.", [new GovernedLoopOutputDefinition("result", "text", terminalNodeIds[0], "published-result", true)]);
-        authorityCeiling ??= GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId]);
+        authorityCeiling ??= GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId]);
         var graph = GovernedLoopGraphDefinition.Create(
             1,
             "sequential-loop",
@@ -211,7 +214,8 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             new GovernedLoopDisplayMetadata(
                 "Sequential loop",
                 "Display metadata is not execution order.",
-                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()));
+                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()),
+            GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
         var revision = GovernedLoopRevisionArtifactFactory.Create(1, graph.RevisionReference, null, null, "create-sequential", "user-owner", Now);
         return GovernedLoopGraphRevisionArtifactFactory.Create(1, revision, graph);
     }
@@ -223,7 +227,10 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             descriptor == GovernedLoopSequentialNodeDescriptors.SuccessExit
                 ? [Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)]
                 : [],
-            GovernedLoopAuthorityCeiling.Create([]),
+            GovernedLoopAuthorityCeiling.Create(
+                descriptor == GovernedLoopSequentialNodeDescriptors.ProviderInference
+                    ? [ModelInferenceCapabilityId, ModelProfileCapabilityId]
+                    : []),
             new Dictionary<string, string>());
 
     internal static GovernedLoopNodeDefinition Trigger(string id, bool scheduled = false)
@@ -250,8 +257,8 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             ],
             GovernedLoopAuthorityCeiling.Create(
                 allowWorkspaceTools
-                    ? [ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]
-                    : [ModelInferenceCapabilityId]),
+                    ? [ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceCommandCapabilityId]
+                    : [ModelInferenceCapabilityId, ModelProfileCapabilityId]),
             new Dictionary<string, string> { ["instruction"] = instruction });
 
     internal static GovernedLoopNodeDefinition Exit(string id)
@@ -310,20 +317,24 @@ internal static class GovernedLoopSequentialApplicationTestFixture
             "test",
             graphArtifactHash,
             graphLayoutHash);
-        var capabilityAdmission = TestCapabilityAdmissionFactory.Create(LoopCapabilityRequirements.CreateDefaultConversationManifest(), Now) with { WorkspaceScopeId = workspaceId };
+        var capabilityAdmission = CapabilityAdmission(artifact, workspaceId);
         var effectiveAuthority = AuthorityCeilingIntersection.EmptyCeiling();
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            GovernedLoopAdmissionEvidence.CurrentSchemaVersion,
-            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
-            execution,
-            new AuthorityGrantProfilePin(new AuthorityProfileReference(profileId!, profileRevision!), profileHash!),
-            new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
-            Hash('9'),
-            effectiveAuthority,
-            capabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilityAdmission),
-            Now,
-            string.Empty));
+        var grantProfile = new AuthorityGrantProfilePin(new AuthorityProfileReference(profileId!, profileRevision!), profileHash!);
+        var grantBoundary = new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None);
+        var inferenceNodes = artifact.Graph.Nodes.Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference).Select(node => node.Id).ToArray();
+        var evidence = inferenceNodes.Length == 0
+            ? GovernedModelProfileApplicationTestFixture.EmptyRoutingEvidence(intent, execution, grantProfile, grantBoundary, Hash('9'), effectiveAuthority, capabilityAdmission, Now)
+            : GovernedModelProfileApplicationTestFixture.RoutingEvidenceForInference(
+                intent,
+                execution,
+                grantProfile,
+                grantBoundary,
+                Hash('9'),
+                effectiveAuthority,
+                capabilityAdmission,
+                Now,
+                nodeId: inferenceNodes[0],
+                nodeIds: inferenceNodes);
         return GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
             GovernedLoopAdmissionReceipt.CurrentSchemaVersion,
             intent,
@@ -341,4 +352,24 @@ internal static class GovernedLoopSequentialApplicationTestFixture
         => new(id, direction, kind, schemaId, required);
 
     internal static string Hash(char value) => new(value, 64);
+
+    private static CapabilityAdmissionSnapshot CapabilityAdmission(GovernedLoopGraphRevisionArtifact artifact, string workspaceId)
+    {
+        Assert.True(CapabilityId.TryParse("org.embodysense/loop-" + artifact.ArtifactHash[..32], out var subject, out _));
+        Assert.True(CapabilityVersionRange.TryParse("*", out var versions, out _));
+        Assert.True(CapabilityIntegrityDigest.TryParse("sha256:" + artifact.ArtifactHash, out var checksum, out _));
+        var required = artifact.Graph.AuthorityCeiling.CapabilityIds.Select(value =>
+        {
+            Assert.True(CapabilityId.TryParse(value, out var id, out _));
+            return new CapabilityDependency(id!, versions!);
+        }).ToArray();
+        var manifest = new CapabilityDependencyManifest(
+            CapabilityDependencyManifest.CurrentSchemaVersion,
+            CapabilityDependencyManifestKind.LoopPackage,
+            subject!,
+            required,
+            [],
+            new CapabilityDependencyArtifactMetadata(checksum, null));
+        return TestCapabilityAdmissionFactory.Create(manifest, Now) with { WorkspaceScopeId = workspaceId };
+    }
 }

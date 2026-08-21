@@ -1299,7 +1299,9 @@ public sealed class AgentRuntimeFactoryTests
                   break;
                 case "thread/start":
                   developerInstructions = String(message.params?.developerInstructions ?? "");
-                  write({ id: message.id, result: { thread: { id: threadId } } });
+                  const model = String(message.params?.model ?? "");
+                  const modelProvider = String(message.params?.modelProvider ?? "");
+                  write({ id: message.id, result: { model, modelProvider, thread: { id: threadId, modelProvider } } });
                   break;
                 case "turn/start": {
                   if (turnStartMarkerPath) {
@@ -1437,7 +1439,8 @@ public sealed class AgentRuntimeFactoryTests
                 [
                     new GovernedLoopNodeDisplayMetadata(trigger.Id, "Trigger", "Start.", 0, 0),
                     new GovernedLoopNodeDisplayMetadata(exit.Id, "Exit", "Publish.", 200, 0),
-                ]));
+                ]),
+            EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
     }
 
     private static async Task<AgentRuntime> CreateRuntimeWithLiveDiscoveryAsync(TestWorkspace workspace)

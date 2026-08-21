@@ -321,6 +321,146 @@ test("governed graph lifecycle conflicts rehydrate the current graph before anot
   );
 });
 
+test("loaded governed graph restores a non-first primary before deriving ordered fallback state", async () => {
+  const modelA = "org.example/model-a";
+  const modelB = "org.example/model-b";
+  const modelC = "org.example/model-c";
+  const modelUnavailable = "org.example/model-unavailable";
+  const profiles = [modelA, modelB, modelC].map((profileId) => ({
+    profileId,
+    availabilityReason: "ready",
+    metadata: { modelId: profileId.slice(profileId.lastIndexOf("/") + 1) },
+    recommendedExactPolicy: {
+      selector: {
+        kind: "exact",
+        exactProfileId: profileId,
+        permittedInheritedProfileIds: [],
+      },
+      fallbackProfileIds: [],
+      requirements: {},
+    },
+  }));
+  profiles.push({
+    profileId: modelUnavailable,
+    availabilityReason: "adapter-unavailable",
+    metadata: { modelId: "model-unavailable" },
+    recommendedExactPolicy: null,
+  });
+
+  const graph = {
+    schemaVersion: 1,
+    graphId: "loaded-routing-graph",
+    revisionId: "revision-1",
+    purpose: "Preserve exact loaded routing.",
+    owningRole: {
+      identity: { roleId: "researcher", revision: 1 },
+      contentHash: "2".repeat(64),
+    },
+    entryNodeId: null,
+    terminalNodeIds: [],
+    authorityCeiling: {
+      capabilityIds: [modelA, modelB, modelC],
+    },
+    valueSchemas: [],
+    nodes: [],
+    controlEdges: [],
+    bindings: [],
+    outputContract: { summary: "No outputs.", outputs: [] },
+    displayMetadata: {
+      displayName: "Loaded routing graph",
+      description: "Preserve exact loaded routing.",
+      nodes: [],
+    },
+    defaultModelRoutingPolicy: {
+      selector: {
+        kind: "exact",
+        exactProfileId: modelB,
+        permittedInheritedProfileIds: [],
+      },
+      fallbackProfileIds: [modelC, modelA],
+      requirements: {},
+    },
+    executableHash: "e".repeat(64),
+    revisionReference: {
+      schemaVersion: 1,
+      graphId: "loaded-routing-graph",
+      revisionId: "revision-1",
+      executableHash: "e".repeat(64),
+    },
+  };
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: {
+      ...createGovernedGraphCatalog(),
+      modelProfiles: {
+        status: "available",
+        defaultProfileId: modelA,
+        profiles,
+      },
+    },
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=loaded-routing-graph",
+    () => ({
+      status: 200,
+      body: {
+        status: "available",
+        storeGeneration: 1,
+        lifecycle: {
+          graphId: graph.graphId,
+          status: "draft",
+          lifecycleVersion: 1,
+          draftRevision: graph.revisionReference,
+          publishedRevision: null,
+        },
+        artifacts: [{ graph }],
+      },
+    }),
+  );
+  server.on("POST", "/api/model-profiles/preview", () => ({
+    status: 200,
+    body: { status: "ineligible", reason: "No executable node selected." },
+  }));
+
+  const app = await loadLoopBuilder({ server });
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = graph.graphId;
+  await app.elements.governedGraphId.input();
+  await app.elements.governedGraphLoadButton.click();
+
+  assert.equal(app.elements.governedGraphModelProfile.value, modelB);
+  const fallbackOptions = Object.fromEntries(
+    app.elements.governedGraphFallbackProfiles.children.map((option) => [
+      option.value,
+      { disabled: option.disabled, selected: option.selected },
+    ]),
+  );
+  assert.deepEqual(fallbackOptions[modelA], {
+    disabled: false,
+    selected: true,
+  });
+  assert.deepEqual(fallbackOptions[modelB], {
+    disabled: true,
+    selected: false,
+  });
+  assert.deepEqual(fallbackOptions[modelC], {
+    disabled: false,
+    selected: true,
+  });
+  assert.deepEqual(fallbackOptions[modelUnavailable], {
+    disabled: true,
+    selected: false,
+  });
+  assert.deepEqual(
+    findByTag(app.elements.governedGraphFallbackOrder, "span").map(
+      (item) => item.textContent,
+    ),
+    [`1. ${modelC}`, `2. ${modelA}`],
+  );
+});
+
 test("governed graph reconnect retries the exact retained mutation after an ambiguous transport", async () => {
   const server = new FakeFetchServer(createCatalog());
   const sessionStorage = new FakeStorage();
@@ -3862,11 +4002,20 @@ test("Runs projects durable timeline and context evidence from the authenticated
   );
   assert.match(
     app.elements.inspectorContent.textContent,
-    /Provider usage and costUnavailable/,
+    /Provider usage and cost1 governed attempt · 1 unavailable usage · 0 unknown bounded/,
   );
   assert.match(
     app.elements.inspectorContent.textContent,
-    /does not report token usage or cost; no estimate is fabricated/,
+    /Input tokens: unavailable/,
+  );
+  assert.match(
+    app.elements.inspectorContent.textContent,
+    /Attempt attempt-model-1/,
+  );
+  assert.match(app.elements.inspectorContent.textContent, /profile pin p{64}/);
+  assert.match(
+    app.elements.inspectorContent.textContent,
+    /source codex-app-server\/v1/,
   );
   assert.match(
     app.elements.inspectorContent.textContent,
@@ -9713,6 +9862,7 @@ function createRunSnapshot() {
     completedAtUtc: "2026-07-16T12:00:02Z",
     surface: "web",
     model: { provider: "codex", model: "test-model" },
+    modelUsage: createModelUsageSnapshot(),
     admissionOperationId: "op-run-test",
     admissionActor: "embodysense.web",
     admissionRequestHash: "a".repeat(64),
@@ -9836,6 +9986,69 @@ function createRunSnapshot() {
     finalOutput: "Exact bounded output",
     failureCode: null,
     failureDetail: null,
+  };
+}
+
+function createModelUsageSnapshot() {
+  const unavailableMeasurement = { status: 1, value: 0 };
+  const unavailableUsage = {
+    schemaVersion: 1,
+    sourceId: "codex-app-server",
+    sourceContractVersion: "v1",
+    inputTokens: unavailableMeasurement,
+    outputTokens: unavailableMeasurement,
+    cachedTokens: unavailableMeasurement,
+    totalTokens: unavailableMeasurement,
+    monetaryCost: { status: 1, currency: null, micros: 0 },
+    contentHash: "u".repeat(64),
+  };
+  const unavailableDimension = {
+    status: "Unavailable",
+    authoritativeValue: null,
+    outstandingBoundedReservation: 0,
+  };
+  const aggregate = {
+    scope: "Run",
+    nodeId: null,
+    attemptCount: 1,
+    usageUnavailableAttemptCount: 1,
+    usageUnknownAttemptCount: 0,
+    outstandingReservationAttemptCount: 0,
+    inputTokens: unavailableDimension,
+    outputTokens: unavailableDimension,
+    cachedTokens: unavailableDimension,
+    totalTokens: unavailableDimension,
+    monetaryCosts: [],
+  };
+  return {
+    status: "Found",
+    workspaceLedgerGeneration: 4,
+    attempts: [
+      {
+        nodeId: "step-research",
+        planOrdinal: 0,
+        activationOrdinal: 0,
+        visitOrdinal: 1,
+        attemptOperationId: "attempt-model-1",
+        attemptNumber: 1,
+        profilePinHash: "p".repeat(64),
+        budgetPolicyHash: "b".repeat(64),
+        phase: "Reconciled",
+        generation: 4,
+        reservationEntryHash: "r".repeat(64),
+        latestEntryHash: "l".repeat(64),
+        reservation: {},
+        usage: unavailableUsage,
+        used: {},
+        released: {},
+        usageUnknown: false,
+        reservationOutstanding: false,
+      },
+    ],
+    run: aggregate,
+    nodeSeries: [
+      { ...aggregate, scope: "NodeSeries", nodeId: "step-research" },
+    ],
   };
 }
 
