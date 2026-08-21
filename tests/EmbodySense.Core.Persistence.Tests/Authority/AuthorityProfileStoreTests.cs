@@ -18,6 +18,8 @@ namespace EmbodySense.Core.Persistence.Tests.Authority;
 
 public sealed class AuthorityProfileStoreTests : IDisposable
 {
+    // See https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422: covered Windows verification can delay entry into the injected durability barrier.
+    private static readonly TimeSpan _durabilityBarrierEntryTimeout = TimeSpan.FromSeconds(60);
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, false) } };
     private static readonly JsonSerializerOptions _canonicalDocumentJsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -554,7 +556,7 @@ public sealed class AuthorityProfileStoreTests : IDisposable
         var store = new AuthorityProfileStore(paths, _trustProvider, durabilityBarrier: barrier);
 
         var mutation = store.MutateAsync(Transition(profile.ProfileId, 1, AuthorityProfileStatus.Suspended, "transition-behind-barrier"));
-        await barrier.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        await barrier.Entered.WaitAsync(_durabilityBarrierEntryTimeout);
 
         Assert.False(mutation.IsCompleted);
         barrier.Release();
@@ -573,7 +575,7 @@ public sealed class AuthorityProfileStoreTests : IDisposable
         var store = new AuthorityProfileStore(paths, _trustProvider, durabilityBarrier: barrier);
 
         var mutation = store.MutateAsync(Transition(profile.ProfileId, 1, AuthorityProfileStatus.Suspended, "transition-with-rename-failure"));
-        await barrier.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        await barrier.Entered.WaitAsync(_durabilityBarrierEntryTimeout);
         Assert.False(mutation.IsCompleted);
         barrier.Release();
         var failed = await mutation;
