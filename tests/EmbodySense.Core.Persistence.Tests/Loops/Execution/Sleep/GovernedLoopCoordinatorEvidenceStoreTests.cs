@@ -132,7 +132,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var options = new GovernedLoopCoordinatorEvidenceStoreOptions
         {
-            MaxEvidenceItemsPerCoordinator = 8,
+            MaxEvidenceItemsPerCoordinator = 10,
             MaxDurabilityArtifacts = 1
         };
         var store = new GovernedLoopCoordinatorEvidenceStore(paths, options);
@@ -170,6 +170,33 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
                 $"Heartbeat sequence {sequence} returned {renewed.Status} instead of Renewed.");
             latest = next;
         }
+
+        var stopping = GovernedLoopSleepContractTestFixture.Lifecycle(
+            GovernedLoopCoordinatorStatus.Stopping,
+            3,
+            acquisition.ProposedOwnership,
+            latest.RecordedAtUtc.AddSeconds(1));
+        Assert.Equal(
+            GovernedLoopCoordinatorLifecycleMutationStatus.Appended,
+            (await store.AppendLifecycleAsync(new(
+                acquisition.ProposedOwnership,
+                acquisition.ProposedOwnership.ContentHash,
+                running.LifecycleVersion,
+                running.ContentHash,
+                stopping)))!.Status);
+        var stopped = GovernedLoopSleepContractTestFixture.Lifecycle(
+            GovernedLoopCoordinatorStatus.Stopped,
+            4,
+            acquisition.ProposedOwnership,
+            stopping.UpdatedAtUtc.AddSeconds(1));
+        Assert.Equal(
+            GovernedLoopCoordinatorLifecycleMutationStatus.Appended,
+            (await store.AppendLifecycleAsync(new(
+                acquisition.ProposedOwnership,
+                acquisition.ProposedOwnership.ContentHash,
+                stopping.LifecycleVersion,
+                stopping.ContentHash,
+                stopped)))!.Status);
 
         var restarted = new GovernedLoopCoordinatorEvidenceStore(paths, options);
         var read = await restarted.ReadAsync(acquisition.ProposedOwnership.CoordinatorId);
@@ -732,7 +759,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
             {
                 var lifecycles = (JsonArray)entry["lifecycles"]!;
                 var clone = lifecycles[0]!.DeepClone();
-                for (var index = 0; index < 6; index++)
+                for (var index = 0; index < 8; index++)
                 {
                     lifecycles.Add(clone.DeepClone());
                 }
@@ -741,7 +768,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
 
         var bounded = new GovernedLoopCoordinatorEvidenceStore(paths, new GovernedLoopCoordinatorEvidenceStoreOptions
         {
-            MaxEvidenceItemsPerCoordinator = 8,
+            MaxEvidenceItemsPerCoordinator = 10,
         });
         Assert.Equal(
             GovernedLoopCoordinatorReadStatus.Corrupt,
@@ -890,7 +917,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
             GovernedLoopCoordinatorFailureMutationStatus.Corrupt,
             (await store.AppendFailureAsync(failure with { ExpectedOwnershipHash = "bad" }))!.Status);
         Assert.Throws<ArgumentOutOfRangeException>(() => new GovernedLoopCoordinatorEvidenceStore(paths, new GovernedLoopCoordinatorEvidenceStoreOptions { MaxCoordinators = 0 }));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new GovernedLoopCoordinatorEvidenceStore(paths, new GovernedLoopCoordinatorEvidenceStoreOptions { MaxEvidenceItemsPerCoordinator = 7 }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new GovernedLoopCoordinatorEvidenceStore(paths, new GovernedLoopCoordinatorEvidenceStoreOptions { MaxEvidenceItemsPerCoordinator = 9 }));
         Assert.Throws<ArgumentOutOfRangeException>(() => new GovernedLoopCoordinatorEvidenceStore(paths, new GovernedLoopCoordinatorEvidenceStoreOptions { MaxCatalogUtf8Bytes = 0 }));
         Assert.Throws<ArgumentOutOfRangeException>(() => new GovernedLoopCoordinatorEvidenceStore(paths, new GovernedLoopCoordinatorEvidenceStoreOptions { MaxDurabilityArtifacts = 0 }));
     }
@@ -1015,7 +1042,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
         var boundedPaths = new WorkspacePaths(boundedWorkspace.RootPath);
         var boundedStore = new GovernedLoopCoordinatorEvidenceStore(boundedPaths, new GovernedLoopCoordinatorEvidenceStoreOptions
         {
-            MaxEvidenceItemsPerCoordinator = 8,
+            MaxEvidenceItemsPerCoordinator = 10,
         });
         var boundedInitial = Acquisition();
         await boundedStore.TryAcquireAsync(boundedInitial);
@@ -1023,6 +1050,32 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
         Assert.Equal(GovernedLoopCoordinatorLifecycleMutationStatus.Appended, (await boundedStore.AppendLifecycleAsync(boundedLifecycle))!.Status);
         Assert.Equal(GovernedLoopCoordinatorFailureMutationStatus.Appended, (await boundedStore.AppendFailureAsync(boundedFailure))!.Status);
         Assert.Equal(GovernedLoopCoordinatorHeartbeatMutationStatus.Renewed, (await boundedStore.RenewHeartbeatAsync(boundedHeartbeat))!.Status);
+        var boundedFailure2 = GovernedLoopSleepContractTestFixture.Failure(
+            2,
+            boundedInitial.ProposedOwnership,
+            occurredAtUtc: boundedFailure.ProposedFailure.OccurredAtUtc.AddSeconds(1));
+        Assert.Equal(
+            GovernedLoopCoordinatorFailureMutationStatus.Appended,
+            (await boundedStore.AppendFailureAsync(new(
+                boundedInitial.ProposedOwnership,
+                boundedInitial.ProposedOwnership.ContentHash,
+                GovernedLoopCoordinatorPriorFailureExpectation.Existing,
+                boundedFailure.ProposedFailure.FailureSequence,
+                boundedFailure.ProposedFailure.ContentHash,
+                boundedFailure2)))!.Status);
+        var boundedFailure3 = GovernedLoopSleepContractTestFixture.Failure(
+            3,
+            boundedInitial.ProposedOwnership,
+            occurredAtUtc: boundedFailure2.OccurredAtUtc.AddSeconds(1));
+        Assert.Equal(
+            GovernedLoopCoordinatorFailureMutationStatus.Appended,
+            (await boundedStore.AppendFailureAsync(new(
+                boundedInitial.ProposedOwnership,
+                boundedInitial.ProposedOwnership.ContentHash,
+                GovernedLoopCoordinatorPriorFailureExpectation.Existing,
+                boundedFailure2.FailureSequence,
+                boundedFailure2.ContentHash,
+                boundedFailure3)))!.Status);
         var boundedSuccessor = GovernedLoopSleepContractTestFixture.Ownership(
             ownerId: "process-owner-2",
             ownershipEpoch: 2,
@@ -1057,7 +1110,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
             nextLifecycle.ContentHash,
             stopped));
         var overflowFailure = GovernedLoopSleepContractTestFixture.Failure(
-            2,
+            4,
             boundedInitial.ProposedOwnership,
             occurredAtUtc: stopped.UpdatedAtUtc.AddSeconds(1));
 
@@ -1069,8 +1122,8 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
                 boundedInitial.ProposedOwnership,
                 boundedInitial.ProposedOwnership.ContentHash,
                 GovernedLoopCoordinatorPriorFailureExpectation.Existing,
-                boundedFailure.ProposedFailure.FailureSequence,
-                boundedFailure.ProposedFailure.ContentHash,
+                boundedFailure3.FailureSequence,
+                boundedFailure3.ContentHash,
                 overflowFailure)))!.Status);
     }
 

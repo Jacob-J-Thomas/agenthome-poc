@@ -668,7 +668,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
             throw new ArgumentOutOfRangeException(nameof(options), "The coordinator count bound is outside the supported range.");
         }
 
-        if (options.MaxEvidenceItemsPerCoordinator is < 8 or > MaximumConfiguredEvidenceItems)
+        if (options.MaxEvidenceItemsPerCoordinator is < 10 or > MaximumConfiguredEvidenceItems)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "The coordinator evidence bound is outside the supported range.");
         }
