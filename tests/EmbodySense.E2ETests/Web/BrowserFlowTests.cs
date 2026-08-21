@@ -470,6 +470,7 @@ public sealed class BrowserFlowTests
     [InstalledBrowserFact]
     public async Task Browser_authors_publishes_and_executes_an_exact_governed_command_action()
     {
+        const string BrowserProfileId = "org.example/model-profile/browser-command";
         using var workspace = new TestWorkspace();
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
         var capabilityTrustRoot = Path.Combine(workspace.ServerStatePath, "browser-command-capability-catalog");
@@ -478,7 +479,15 @@ public sealed class BrowserFlowTests
         var commandAction = await CreateBrowserCommandActionRegistrationAsync();
         var registration = commandAction.Registration;
         await InstallBrowserCommandActionAsync(paths, capabilityTrustRoot, registration);
-        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths, [registration.Template.Capability.Id.Value]);
+        var browserProfile = new BrowserModelProfileSpec(
+            BrowserProfileId,
+            "browser-command",
+            "Test-only exact bounded browser command model profile.",
+            "gpt-test",
+            true);
+        var browserProfileDescriptor = BrowserProfileWebHost.CreateDescriptor(browserProfile);
+        await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [browserProfileDescriptor]);
+        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths, [registration.Template.Capability.Id.Value, browserProfileDescriptor.Id.Value]);
         var commandNodeId = CommandActionNodeDescriptors.For(registration.Template).TypeId;
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(
             workspace.RootPath,
@@ -486,7 +495,7 @@ public sealed class BrowserFlowTests
             codexExecutable,
             "gpt-test",
             capabilityTrustRoot,
-            [],
+            [browserProfile],
             [commandAction.Spec]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
 
@@ -504,6 +513,8 @@ public sealed class BrowserFlowTests
             await SetValueAsync(browser, "#governedGraphRevisionId", "revision-1");
             await SetValueAsync(browser, "#governedGraphDisplayName", "Browser command graph");
             await SetValueAsync(browser, "#governedGraphPurpose", "Execute one exact server-registered command Action.");
+            await SetValueAsync(browser, "#governedGraphModelRoutingMode", "exact", "change");
+            await SetValueAsync(browser, "#governedGraphModelProfile", BrowserProfileId, "change");
             await ClickAsync(browser, "#governedGraphNewButton");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "manual-trigger");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "Command Action · command/browser-json-echo v1");
