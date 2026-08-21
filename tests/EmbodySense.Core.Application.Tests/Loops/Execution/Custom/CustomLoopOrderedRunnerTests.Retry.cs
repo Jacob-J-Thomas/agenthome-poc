@@ -867,6 +867,78 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Empty(store.ValidationFailures);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Retry_action_deadline_expiry_rejects_before_cancellation_ignoring_executor(bool commandAction)
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => RetryActionArtifact(role, commandAction));
+        var store = new FakeRunStore(context.Run);
+        var time = new StubGovernedLoopSleepTimeProvider(_now);
+        var sleepStore = new InMemoryGovernedLoopSleepStore();
+        var sleepPosture = new CanonicalWaitPosturePort(store, context.Anchor.AdapterBinding.AdmissionReceipt.Intent.Publication, time);
+        var continuationRelay = new GovernedLoopWaitContinuationRelay();
+        var sleep = new GovernedLoopSleepService(
+            sleepStore,
+            sleepPosture,
+            continuationRelay,
+            new StubGovernedLoopAuthenticatedWakeVerificationPort(),
+            time);
+        var orderedResume = new BoundRetryOrderedResumePort();
+        var retry = new GovernedLoopRetryExecutionService(store, sleep, new CanonicalRetryPosturePort(time), orderedResume);
+        var retryRelay = new GovernedLoopRetryNodeExecutionRelay();
+        retryRelay.Bind(retry);
+        continuationRelay.BindRetry(retry);
+        var action = new CancellationIgnoringRetryActionExecutor(commandAction);
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var runtime = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(
+                store,
+                new QueueExecutor(Result("unused provider output")),
+                timeProvider: time,
+                retryNodeExecutor: retryRelay,
+                workspaceActionExecutor: commandAction ? null : action,
+                commandActionExecutor: commandAction ? action : null),
+            evidence,
+            evidence);
+        orderedResume.Bind(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact), runtime);
+
+        var parked = await runtime.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            GovernedLoopSequentialOrderedRunRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+        var scheduled = Assert.IsType<GovernedLoopRetryState>(store.Current.Events.Last(item => item.RetryState is not null).RetryState);
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+
+        time.UtcNow = scheduled.NextRetryAtUtc!.Value;
+        var actionNodeId = commandAction ? "command-action" : "workspace-action";
+        store.BeforeUpdate = (candidate, _) =>
+        {
+            if (candidate.Events.Skip(store.Current.Events.Length).Any(item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted && string.Equals(item.StepId, actionNodeId, StringComparison.Ordinal)))
+            {
+                time.UtcNow = scheduled.Identity.DeadlineUtc;
+            }
+        };
+        var wake = await sleep.WakeAsync(new GovernedLoopWakeRequest(
+            scheduled.WakeCheckpointId!,
+            scheduled.WakeCheckpointHash!,
+            null));
+
+        Assert.Equal(GovernedLoopWakeResultStatus.Committed, wake.Status);
+        Assert.Equal(CustomLoopRunStatus.Failed, store.Current.Status);
+        Assert.Equal("retry_deadline_exceeded", store.Current.FailureCode);
+        Assert.Equal(1, action.RequestCount);
+        var rejection = Assert.Single(store.Current.Events, item => item.FailureEvidence?.FailureClass == GovernedLoopFailureClass.Exhaustion && item.StepId == actionNodeId);
+        Assert.Equal(GovernedLoopFailureEffectCertainty.NotApplicable, rejection.FailureEvidence?.EffectCertainty);
+        Assert.Equal(CustomLoopSequentialNodeDisposition.Rejected, rejection.SequentialNodeEvidence?.Disposition);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+        Assert.Empty(store.ValidationFailures);
+    }
+
     private static GovernedLoopGraphRevisionArtifact RetryArtifact(ContextualRoleRevisionPin owningRole)
         => RetryArtifact(owningRole, 2);
 

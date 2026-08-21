@@ -2064,6 +2064,20 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             run = persistedStart.Run!;
         }
 
+        if (RetryDeadlineReached(run, sequentialNode))
+        {
+            return await RejectSequentialNodeBeforeProviderAsync(
+                run,
+                actor,
+                sequentialNode,
+                node.NodeId,
+                isExit: false,
+                "retry_deadline_exceeded",
+                "The immutable retry-series deadline elapsed before the command Action request could start.",
+                dispatchStartAlreadyRetained: true,
+                reconcileRetainedDispatchStartAudit: false);
+        }
+
         GovernedLoopCommandActionExecutionResult result;
         using var actionToken = CreateAttemptToken(run, cancellationToken, sequentialNode);
         try
@@ -2346,6 +2360,20 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return persistedStart;
             }
             run = persistedStart.Run!;
+        }
+
+        if (RetryDeadlineReached(run, sequentialNode))
+        {
+            return await RejectSequentialNodeBeforeProviderAsync(
+                run,
+                actor,
+                sequentialNode,
+                node.NodeId,
+                isExit: false,
+                "retry_deadline_exceeded",
+                "The immutable retry-series deadline elapsed before the workspace Action request could start.",
+                dispatchStartAlreadyRetained: true,
+                reconcileRetainedDispatchStartAudit: false);
         }
 
         GovernedLoopWorkspaceActionExecutionResult result;
@@ -7279,7 +7307,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         string? failureCode,
         string detail,
         CustomLoopRunStatus terminalStatus = CustomLoopRunStatus.Failed,
-        bool dispatchStartAlreadyRetained = false)
+        bool dispatchStartAlreadyRetained = false,
+        bool reconcileRetainedDispatchStartAudit = true)
     {
         var attempt = sequentialNode.Attempt;
         var iteration = sequentialNode.Activation.CycleIteration ?? run.Checkpoint.Iteration;
@@ -7289,7 +7318,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var correlation = NewCorrelationId(isExit ? "exit-rejection" : "attempt-rejection");
         var now = Now(run);
         var events = new List<CustomLoopRunEvent>();
-        if (dispatchStartAlreadyRetained)
+        if (dispatchStartAlreadyRetained && reconcileRetainedDispatchStartAudit)
         {
             var startAuditFailure = await ReconcileWaitNodeStartAuditAsync(
                 run,
