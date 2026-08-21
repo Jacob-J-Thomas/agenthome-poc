@@ -31,6 +31,7 @@ $persistenceEnvironmentCollectionPath = Join-Path $repoRoot "tests\EmbodySense.C
 $persistenceCapabilityCatalogTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Capabilities\FileCapabilityCatalogTrustProviderTests.cs"
 $startupRuntimeCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\LoopRuntimeIntegrationCollection.cs"
 $powerShellExecutable = (Get-Process -Id $PID).Path
+$functionalChildTimeoutSeconds = 30
 $assertionCount = 0
 
 function Assert-True {
@@ -61,6 +62,7 @@ function Invoke-ExpectedFailure {
 $noOpWasRejected = $false
 try { $null = Invoke-ExpectedFailure -ExpectedMessage "never emitted" -Action { } } catch { $noOpWasRejected = $_.Exception.Message -ceq "Expected the action to fail, but it completed successfully." }
 Assert-True -Condition $noOpWasRejected -Message "The negative-test helper must reject a successful action instead of catching its own sentinel."
+Assert-True -Condition ($functionalChildTimeoutSeconds -eq 30) -Message "Functional child probes must retain Windows startup headroom without weakening the independent one-second timeout proof."
 
 . $phaseScriptPath
 . $tempScriptPath
@@ -121,12 +123,14 @@ if ($First -cne "value with spaces" -or $Second -cne 'quote"value' -or $Third -c
     $successArguments = @("-NoProfile")
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) { $successArguments += @("-ExecutionPolicy", "Bypass") }
     $successArguments += @("-File", $argumentProbePath, "value with spaces", 'quote"value', 'trailing\')
-    $successOutput = @(Invoke-VerificationPhase -Name "argument-integrity" -FileName $powerShellExecutable -Arguments $successArguments -TimeoutSeconds 10 -WorkingDirectory $repoRoot) -join [Environment]::NewLine
+    # Hosted Windows may take more than ten seconds to start a fresh PowerShell child while the required build overlaps this contract.
+    # The outer 90-second contract bound still contains both functional probes plus the independent one-second timeout proof.
+    $successOutput = @(Invoke-VerificationPhase -Name "argument-integrity" -FileName $powerShellExecutable -Arguments $successArguments -TimeoutSeconds $functionalChildTimeoutSeconds -WorkingDirectory $repoRoot) -join [Environment]::NewLine
     Assert-Contains -Actual $successOutput -Expected "VERIFY_PHASE_START name=argument-integrity" -Message "Successful phases must announce their start."
     Assert-Contains -Actual $successOutput -Expected "VERIFY_PHASE_COMPLETE name=argument-integrity" -Message "Successful phases must announce elapsed completion."
 
     $failureMessage = Invoke-ExpectedFailure -ExpectedMessage "exited with code 23" -Action {
-        Invoke-VerificationPhase -Name "nonzero-exit" -FileName $powerShellExecutable -Arguments @("-NoProfile", "-Command", "exit 23") -TimeoutSeconds 10 -WorkingDirectory $repoRoot
+        Invoke-VerificationPhase -Name "nonzero-exit" -FileName $powerShellExecutable -Arguments @("-NoProfile", "-Command", "exit 23") -TimeoutSeconds $functionalChildTimeoutSeconds -WorkingDirectory $repoRoot
     }
     Assert-Contains -Actual $failureMessage -Expected "Last completed phase: 'argument-integrity'" -Message "Nonzero diagnostics must preserve the last completed phase."
 
