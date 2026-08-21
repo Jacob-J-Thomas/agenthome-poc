@@ -610,22 +610,28 @@ public sealed class BrowserFlowTests
     [InstalledBrowserFact]
     public async Task Browser_authors_executes_and_inspects_one_explicit_fail_terminal()
     {
+        const string BrowserProfileId = "org.example/model-profile/browser-fail";
         using var workspace = new TestWorkspace();
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
         var capabilityTrustRoot = Path.Combine(workspace.ServerStatePath, "browser-fail-capability-catalog");
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(capabilityTrustRoot).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
-        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths);
-        var serverEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT"] = capabilityTrustRoot,
-        };
-        await using var app = await ExternalWebApplicationProcess.StartAsync(
+        var browserProfile = new BrowserModelProfileSpec(
+            BrowserProfileId,
+            "browser-fail",
+            "Test-only exact bounded browser failure model profile.",
+            "gpt-test",
+            true);
+        var browserProfileDescriptor = BrowserProfileWebHost.CreateDescriptor(browserProfile);
+        await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [browserProfileDescriptor]);
+        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths, [browserProfileDescriptor.Id.Value]);
+        await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(
             workspace.RootPath,
             GetFreePort(),
             codexExecutable,
             "gpt-test",
-            serverEnvironment);
+            capabilityTrustRoot,
+            [browserProfile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
 
         try
@@ -635,17 +641,23 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
             await ClickAsync(browser, "#governedGraphTab");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphCatalog').textContent.includes('manual-trigger') && document.getElementById('governedGraphCatalog').textContent.includes('fail-terminal')");
+            await browser.WaitForExpressionAsync($"document.getElementById('governedGraphModelProfile').textContent.includes('gpt-test') && [...document.getElementById('governedGraphModelProfile').options].some((option) => option.value === '{BrowserProfileId}' && !option.disabled)");
             await SetValueAsync(browser, "#governedGraphRole", $"{authoringRole.Identity.RoleId}:{authoringRole.Identity.Revision}:{authoringRole.ContentHash}", "change");
+            await SetValueAsync(browser, "#governedGraphModelRoutingMode", "exact", "change");
             await SetValueAsync(browser, "#governedGraphId", "browser-explicit-fail-graph");
             await SetValueAsync(browser, "#governedGraphRevisionId", "revision-1");
             await SetValueAsync(browser, "#governedGraphDisplayName", "Browser explicit failure graph");
             await SetValueAsync(browser, "#governedGraphPurpose", "Retain one exact agent-selected failure through the public browser boundary.");
             await ClickAsync(browser, "#governedGraphNewButton");
+            await SetValueAsync(browser, "#governedGraphModelProfile", BrowserProfileId, "change");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "manual-trigger");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "provider-inference");
             await SetValueAsync(browser, "#governedGraphInspector input:not([type='number'])", "Return the exact browser-explicit-fail decision token.");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphInspector').textContent.includes('Model profile evidence') && !document.getElementById('governedGraphInspector').textContent.includes('Loading')");
+            var failModelInspector = await browser.EvaluateStringAsync("document.getElementById('governedGraphInspector').textContent");
+            Assert.Contains("Eligible", failModelInspector, StringComparison.Ordinal);
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "model-decision-condition");
-            await browser.EvaluateAsync("(() => { const set = (id, value) => { const label = [...document.querySelectorAll('#governedGraphInspector label')].find((item) => item.querySelector('span')?.textContent?.startsWith(id)); const input = label?.querySelector('input'); if (!input) throw new Error(`Condition parameter ${id} was not rendered.`); input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })); }; set('true-decision', 'select-fail'); set('false-decision', 'continue'); })()");
+            await browser.EvaluateAsync("(() => { const set = (id, value) => { const label = [...document.querySelectorAll('#governedGraphInspector label')].find((item) => item.querySelector('span')?.textContent?.startsWith(id)); const input = label?.querySelector('input'); if (!input) throw new Error(`Condition parameter ${id} was not rendered.`); input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })); }; set('true-decision', 'browser exact bounded response'); set('false-decision', 'continue'); })()");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "fail-terminal");
             await browser.EvaluateAsync("(() => { const set = (id, value) => { const label = [...document.querySelectorAll('#governedGraphInspector label')].find((item) => item.querySelector('span')?.textContent?.startsWith(id)); const input = label?.querySelector('input'); if (!input) throw new Error(`Fail parameter ${id} was not rendered.`); input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })); }; set('code', 'agent-selected-stop'); set('explanation', 'Stop at the admitted explicit failure.'); })()");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "success-exit");
@@ -657,7 +669,7 @@ public sealed class BrowserFlowTests
             await AddGovernedGraphBindingAsync(browser, "manual-trigger", "provider-inference", "Context · invocation-context → invocation-context");
             await AddGovernedGraphBindingAsync(browser, "provider-inference", "model-decision-condition", "Data · result → decision");
             await AddGovernedGraphBindingAsync(browser, "provider-inference", "success-exit", "Data · result → result");
-            await browser.WaitForExpressionAsync("!document.getElementById('governedGraphSaveButton').disabled");
+            await browser.WaitForExpressionAsync($"!document.getElementById('governedGraphSaveButton').disabled && document.getElementById('governedGraphModelProfile').value === '{BrowserProfileId}'");
             await ClickAsync(browser, "#governedGraphSaveButton");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Draft') && document.getElementById('governedGraphNotice').textContent.includes('Committed')");
             await ClickAsync(browser, "#governedGraphPublishButton");
@@ -665,7 +677,7 @@ public sealed class BrowserFlowTests
 
             var lifecycle = await new GovernedLoopRevisionLifecycleStore(paths, new FileCapabilityCatalogTrustProvider(capabilityTrustRoot)).ReadGraphAsync("browser-explicit-fail-graph");
             var publication = Assert.IsType<GovernedLoopRevisionPublicationPin>(lifecycle.Snapshot?.Head.PublishedRevision);
-            var grant = await CreateBrowserFailGrantAsync(paths, capabilityTrustRoot, authoringRole, publication);
+            var grant = await CreateBrowserFailGrantAsync(paths, capabilityTrustRoot, authoringRole, publication, browserProfileDescriptor);
             var invocation = new GovernedLoopRunInvocationTransportInput(
                 "invoke-browser-explicit-fail",
                 new GovernedLoopRevisionPublicationInput(
@@ -1164,15 +1176,16 @@ public sealed class BrowserFlowTests
         WorkspacePaths paths,
         string capabilityTrustRoot,
         ContextualRoleRevisionPin role,
-        GovernedLoopRevisionPublicationPin publication)
+        GovernedLoopRevisionPublicationPin publication,
+        CapabilityDescriptor browserProfileDescriptor)
     {
         Assert.True(AuthorityActorId.TryParse("browser-e2e", out var actor, out _));
         Assert.True(AuthorityPurpose.TryParse("Execute one exact explicit Fail terminal.", out var purpose, out _));
         Assert.True(AuthorityProfileId.TryParse("browser-fail-profile", out var profileId, out _));
         Assert.True(AuthorityProfileRevision.TryParse("1", out var profileRevision, out _));
         var capabilities = BuiltInCapabilityCatalog.Descriptors
-            .Where(item => item.Id.Value is "org.embodysense/conversation-turn" or "org.embodysense/model-inference"
-                || string.Equals(item.Id.Value, BuiltInCapabilityCatalog.CodexModelProfileCapabilityId, StringComparison.Ordinal))
+            .Where(item => item.Id.Value is "org.embodysense/conversation-turn" or "org.embodysense/model-inference")
+            .Append(browserProfileDescriptor)
             .Select(item =>
             {
                 Assert.True(CapabilityDescriptorIdentity.TryCreate(item, out var identity, out _));

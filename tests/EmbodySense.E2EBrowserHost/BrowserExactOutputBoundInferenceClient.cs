@@ -5,22 +5,27 @@ using EmbodySense.Core.Common.Inference.Profiles.Models;
 
 namespace EmbodySense.E2EBrowserHost;
 
-internal sealed class BrowserExactOutputBoundInferenceClient : ILlmInferenceClient
+internal sealed class BrowserExactOutputBoundInferenceClient(string modelId) : ILlmInferenceClient
 {
+    private readonly string _modelId = !string.IsNullOrWhiteSpace(modelId)
+        ? modelId
+        : throw new ArgumentException("The browser E2E exact adapter model identifier is required.", nameof(modelId));
+
     public Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
         CancellationToken cancellationToken = default)
-        => GenerateCoreAsync(request, responseChunkHandler, cancellationToken);
+        => GenerateCoreAsync(_modelId, request, responseChunkHandler, cancellationToken);
 
     public Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler,
         CancellationToken cancellationToken,
         InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
-        => GenerateCoreAsync(request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary);
+        => GenerateCoreAsync(_modelId, request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary);
 
     private static async Task<LlmInferenceResponse> GenerateCoreAsync(
+        string modelId,
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler,
         CancellationToken cancellationToken,
@@ -56,7 +61,7 @@ internal sealed class BrowserExactOutputBoundInferenceClient : ILlmInferenceClie
                 GovernedModelUsageMeasurement.Authoritative(0),
                 GovernedModelUsageMeasurement.Authoritative(2),
                 GovernedModelMonetaryUsageMeasurement.Unavailable),
-            "browser-e2e-model",
+            modelId,
             "browser-e2e-response",
             "openai");
     }

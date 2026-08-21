@@ -15,7 +15,7 @@ internal sealed class BrowserExactModelProfileLease(
 
     public ExactModelProfileEnforcementAcknowledgement Enforcement => acknowledgement;
 
-    public ILlmInferenceClient Client { get; } = new BrowserExactOutputBoundInferenceClient();
+    public ILlmInferenceClient Client { get; } = new BrowserExactOutputBoundInferenceClient(primary.Metadata.ModelId);
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
