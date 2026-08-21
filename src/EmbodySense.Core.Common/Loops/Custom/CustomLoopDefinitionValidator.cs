@@ -13,6 +13,16 @@ public static class CustomLoopDefinitionValidator
     /// <param name="definition">The definition.</param>
     /// <returns>The custom loop validation result.</returns>
     public static CustomLoopValidationResult Validate(CustomLoopDefinition? definition)
+        => ValidateCore(definition, allowEmptyInferenceProjection: false);
+
+    /// <summary>Validates the compatibility definition embedded in an authenticated canonical sequential run.</summary>
+    /// <param name="definition">The projected compatibility definition.</param>
+    /// <returns>The custom loop validation result.</returns>
+    /// <remarks>This narrow path permits zero legacy inference steps because the canonical graph and durable frontier remain the execution authority. Ordinary custom-loop definitions still require at least one inference step.</remarks>
+    public static CustomLoopValidationResult ValidateSequentialProjection(CustomLoopDefinition? definition)
+        => ValidateCore(definition, allowEmptyInferenceProjection: true);
+
+    private static CustomLoopValidationResult ValidateCore(CustomLoopDefinition? definition, bool allowEmptyInferenceProjection)
     {
         var errors = new List<CustomLoopValidationError>();
         if (definition is null)
@@ -26,7 +36,7 @@ public static class CustomLoopDefinitionValidator
         ValidateText(definition.Description, "description_required", "description_too_long", "description", CustomLoopLimits.MaxDescriptionCharacters, required: false, errors);
         ValidateTrigger(definition.TriggerPolicy, errors);
         ValidateContextDefaults(definition.ContextDefaults, errors);
-        ValidateInferenceSteps(definition.InferenceSteps, errors);
+        ValidateInferenceSteps(definition.InferenceSteps, allowEmptyInferenceProjection, errors);
         ValidateToolAssignments(definition.ToolAssignments, errors);
         ValidateCapabilityRequirements(definition, errors);
         ValidateExit(definition.ExitPolicy, errors);
@@ -126,7 +136,7 @@ public static class CustomLoopDefinitionValidator
         ValidateResolvedContextPolicy(defaults.Exit, "contextDefaults.exit", errors);
     }
 
-    private static void ValidateInferenceSteps(CustomLoopInferenceStep[]? steps, List<CustomLoopValidationError> errors)
+    private static void ValidateInferenceSteps(CustomLoopInferenceStep[]? steps, bool allowEmptyInferenceProjection, List<CustomLoopValidationError> errors)
     {
         if (steps is null)
         {
@@ -134,7 +144,8 @@ public static class CustomLoopDefinitionValidator
             return;
         }
 
-        if (steps.Length < CustomLoopLimits.MinInferenceSteps || steps.Length > CustomLoopLimits.MaxInferenceSteps)
+        if (steps.Length > CustomLoopLimits.MaxInferenceSteps
+            || steps.Length < CustomLoopLimits.MinInferenceSteps && !(allowEmptyInferenceProjection && steps.Length == 0))
         {
             Add(errors, "inference_step_count_out_of_range", "inferenceSteps", $"Inference step count must be between {CustomLoopLimits.MinInferenceSteps} and {CustomLoopLimits.MaxInferenceSteps}.");
         }

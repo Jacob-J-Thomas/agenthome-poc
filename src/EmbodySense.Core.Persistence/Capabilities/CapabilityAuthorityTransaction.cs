@@ -124,4 +124,25 @@ public sealed class CapabilityAuthorityTransaction : ICapabilityAuthorityTransac
         }
     }
 
+    /// <inheritdoc />
+    public async Task<TResult?> ExecuteWithValidatedAuthorityAsync<TResult>(
+        Func<CancellationToken, Task<bool>> validator,
+        Func<CancellationToken, Task<TResult>> operation,
+        CancellationToken cancellationToken = default)
+        where TResult : class
+    {
+        ArgumentNullException.ThrowIfNull(validator);
+        ArgumentNullException.ThrowIfNull(operation);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_ambientTransaction.Value?.ContainsActive(_identity) == true)
+        {
+            return await validator(cancellationToken).ConfigureAwait(false)
+                ? await operation(cancellationToken).ConfigureAwait(false)
+                : null;
+        }
+
+        await using var lease = await AcquireValidatedLeaseAsync(validator, cancellationToken).ConfigureAwait(false);
+        return lease is null ? null : await operation(cancellationToken).ConfigureAwait(false);
+    }
+
 }

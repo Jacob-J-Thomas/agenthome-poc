@@ -9,6 +9,9 @@ namespace EmbodySense.Core.Application.Loops.GraphValidation.Models;
 /// <param name="MinimumInteger">The inclusive integer minimum when <paramref name="ValueKind"/> is <see cref="GovernedLoopParameterValueKind.Integer"/>.</param>
 /// <param name="MaximumInteger">The inclusive integer maximum when <paramref name="ValueKind"/> is <see cref="GovernedLoopParameterValueKind.Integer"/>.</param>
 /// <param name="AllowedValues">The exact ordinal allowed values when <paramref name="ValueKind"/> is <see cref="GovernedLoopParameterValueKind.Enumeration"/>.</param>
+/// <param name="MaximumUtf8Bytes">An optional inclusive UTF-8 byte ceiling in addition to the character ceiling.</param>
+/// <param name="AllowLeadingOption">Whether a value beginning with a hyphen is admitted.</param>
+/// <param name="AllowResponseFileReference">Whether a value beginning with an at sign is admitted.</param>
 public sealed record GovernedLoopCatalogParameterContract(
     string Id,
     GovernedLoopParameterValueKind ValueKind,
@@ -17,4 +20,7 @@ public sealed record GovernedLoopCatalogParameterContract(
     int MaximumCharacters,
     long? MinimumInteger,
     long? MaximumInteger,
-    IReadOnlyList<string> AllowedValues);
+    IReadOnlyList<string> AllowedValues,
+    int? MaximumUtf8Bytes = null,
+    bool AllowLeadingOption = true,
+    bool AllowResponseFileReference = true);

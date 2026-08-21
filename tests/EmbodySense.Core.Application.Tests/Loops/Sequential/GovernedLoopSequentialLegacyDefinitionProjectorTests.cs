@@ -261,6 +261,7 @@ public sealed class GovernedLoopSequentialLegacyDefinitionProjectorTests
             invocation.ContentHash,
             artifact.ArtifactHash,
             artifact.LayoutHash,
+            [],
             string.Empty));
     }
 
@@ -294,6 +295,7 @@ public sealed class GovernedLoopSequentialLegacyDefinitionProjectorTests
             binding.InvocationPayloadHash,
             binding.GraphArtifactHash,
             binding.GraphLayoutHash,
+            binding.CommandActionCapabilityIds,
             string.Empty));
     }
 

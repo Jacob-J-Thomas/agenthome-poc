@@ -99,7 +99,13 @@ public sealed class CapabilitiesController : ControllerBase
             return WorkspaceNotInitialized();
         }
 
-        return Project(await _capabilities.ConfirmAsync(input, cancellationToken));
+        var response = await _capabilities.ConfirmAsync(input, cancellationToken);
+        if (response.IsCommitted)
+        {
+            await _host.InvalidateRuntimeAfterCapabilityLifecycleMutationAsync();
+        }
+
+        return Project(response);
     }
 
     private ActionResult<CapabilityPostureCatalogResponse> Project(CapabilityPostureCatalogResponse response)

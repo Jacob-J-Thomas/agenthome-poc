@@ -5,6 +5,7 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
@@ -213,6 +214,12 @@ public sealed class GovernedLoopSequentialInvocationCoordinator
             request.InvocationSnapshot.ContentHash,
             artifact.ArtifactHash,
             artifact.LayoutHash,
+            artifact.Graph.Nodes
+                .Where(node => CommandActionNodeDescriptors.IsCommandAction(node.Descriptor))
+                .SelectMany(node => node.AuthorityCeiling.CapabilityIds)
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)
+                .ToArray(),
             string.Empty));
         var materialization = await _materializer.MaterializeAsync(
             new GovernedLoopSequentialMaterializationRequest(

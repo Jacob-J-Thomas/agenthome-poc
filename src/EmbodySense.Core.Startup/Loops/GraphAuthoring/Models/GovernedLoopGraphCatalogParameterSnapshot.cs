@@ -9,4 +9,7 @@ public sealed record GovernedLoopGraphCatalogParameterSnapshot(
     int MaximumCharacters,
     long? MinimumInteger,
     long? MaximumInteger,
-    IReadOnlyList<string> AllowedValues);
+    IReadOnlyList<string> AllowedValues,
+    int? MaximumUtf8Bytes,
+    bool AllowLeadingOption,
+    bool AllowResponseFileReference);

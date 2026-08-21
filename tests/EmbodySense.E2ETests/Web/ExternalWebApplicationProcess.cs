@@ -52,7 +52,8 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
         string codexExecutablePath,
         string model,
         string capabilityTrustRoot,
-        IReadOnlyList<BrowserModelProfileSpec> profiles)
+        IReadOnlyList<BrowserModelProfileSpec> profiles,
+        IReadOnlyList<BrowserCommandActionSpec>? commandActions = null)
     {
         var hostAssemblyPath = typeof(BrowserProfileWebHost).Assembly.Location;
         if (!File.Exists(hostAssemblyPath))
@@ -69,6 +70,11 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
         {
             additionalArguments.Add("--additional-model-profile");
             additionalArguments.Add(BrowserProfileWebHost.Serialize(profile));
+        }
+        foreach (var commandAction in commandActions ?? [])
+        {
+            additionalArguments.Add("--command-action-registration");
+            additionalArguments.Add(BrowserProfileWebHost.Serialize(commandAction));
         }
 
         var runtimeConfigPath = Path.Combine(AppContext.BaseDirectory, "EmbodySense.E2ETests.runtimeconfig.json");

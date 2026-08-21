@@ -7,6 +7,10 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
+using EmbodySense.Core.Application.CommandActions.Models;
+using EmbodySense.Core.Application.CommandActions;
+using EmbodySense.Core.Common.CommandActions;
+using EmbodySense.Core.Common.CommandActions.Models;
 
 namespace EmbodySense.Core.Startup.Loops;
 
@@ -25,7 +29,24 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         Array.AsReadOnly(new[] { GovernedLoopControlCondition.Success });
     private static readonly GovernedLoopValueKindSet _textKind =
         GovernedLoopValueKindSet.Create([GovernedLoopValueKind.Text]);
-    private static readonly GovernedLoopNodeCatalogSnapshot _snapshot = CreateSnapshot();
+    private readonly GovernedLoopNodeCatalogSnapshot _snapshot;
+
+    internal BuiltInGovernedLoopNodeCatalog() : this(Array.Empty<CommandActionRegistration>(), null)
+    {
+    }
+
+    internal BuiltInGovernedLoopNodeCatalog(
+        IEnumerable<CommandActionRegistration> commandActions,
+        Func<CommandActionRegistration, bool>? isCommandActionExecutable = null)
+    {
+        ArgumentNullException.ThrowIfNull(commandActions);
+        var registrations = commandActions.Take(257).ToArray();
+        if (registrations.Length > 256)
+        {
+            throw new ArgumentException("The finite command Action catalog is too large.", nameof(commandActions));
+        }
+        _snapshot = CreateSnapshot(registrations, isCommandActionExecutable);
+    }
 
     /// <inheritdoc />
     public Task<GovernedLoopNodeCatalogSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
@@ -34,15 +55,27 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         return Task.FromResult(_snapshot);
     }
 
-    private static GovernedLoopNodeCatalogSnapshot CreateSnapshot()
+    private static GovernedLoopNodeCatalogSnapshot CreateSnapshot(
+        IReadOnlyList<CommandActionRegistration> commandActions,
+        Func<CommandActionRegistration, bool>? isCommandActionExecutable)
     {
+        var graphCompatibleCommandActions = commandActions
+            .Select(registration => new
+            {
+                Registration = registration,
+                IsCompatible = CommandActionGraphProjectionContract.TryGetPayloadCharacters(registration, out var payloadCharacters),
+                PayloadCharacters = payloadCharacters,
+            })
+            .Where(candidate => candidate.IsCompatible)
+            .ToArray();
         var descriptors = BaselineDescriptors()
             .Concat(GovernedLoopPureNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopTopologyNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopWaitNodeCatalogContract.Descriptors)
+            .Concat(graphCompatibleCommandActions.Select(candidate => CommandAction(candidate.Registration, candidate.PayloadCharacters, isCommandActionExecutable?.Invoke(candidate.Registration) == true)))
             .OrderBy(DescriptorKey, StringComparer.Ordinal)
             .ToArray();
-        if (descriptors.Length != 24
+        if (descriptors.Length != 24 + graphCompatibleCommandActions.Length
             || descriptors.Select(item => item.Descriptor).Distinct().Count() != descriptors.Length
             || descriptors.Any(item => !GovernedLoopSequentialNodeDescriptors.IsSupported(item.Descriptor)))
         {
@@ -191,6 +224,61 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                 PayloadCharacters: CustomLoopLimits.MaxGraphParameterValueCharacters,
                 EvidenceItems: CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation,
                 ResourceUnits: 1));
+
+    private static GovernedLoopNodeCatalogDescriptor CommandAction(CommandActionRegistration registration, int payloadCharacters, bool isolationAvailable)
+    {
+        if (CommandActionRegistrationContract.Validate(registration) is { } reasonCode)
+        {
+            throw new ArgumentException(reasonCode, nameof(registration));
+        }
+        var template = registration.Template;
+        return new GovernedLoopNodeCatalogDescriptor(
+            CommandActionNodeDescriptors.For(template),
+            IsAdvertised: true,
+            IsExecutable: isolationAvailable && !template.RequiresCredentialChannel,
+            IsLegalEntry: false,
+            IsLegalTerminal: false,
+            _success,
+            _success,
+            GovernedLoopJoinPolicy.None,
+            MinimumIncomingControlEdges: 1,
+            AllowsCycle: false,
+            CycleIterationBudgetParameterId: null,
+            CycleTimeBudgetMillisecondsParameterId: null,
+            Array.AsReadOnly(new[]
+            {
+                Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+            }),
+            Array.AsReadOnly(template.Slots.Select(Parameter).OrderBy(item => item.Id, StringComparer.Ordinal).ToArray()),
+            Array.AsReadOnly(new[] { template.Capability.Id.Value }),
+            new GovernedLoopNodeResourceBudget(
+                Attempts: 1,
+                PayloadCharacters: payloadCharacters,
+                EvidenceItems: CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation,
+                ResourceUnits: 1));
+    }
+
+    private static GovernedLoopCatalogParameterContract Parameter(CommandActionSlotDefinition slot)
+        => new(
+            slot.Name,
+            slot.Kind switch
+            {
+                CommandActionSlotKind.Identifier => GovernedLoopParameterValueKind.CapabilityPath,
+                CommandActionSlotKind.Integer => GovernedLoopParameterValueKind.Integer,
+                CommandActionSlotKind.Enumeration => GovernedLoopParameterValueKind.Enumeration,
+                CommandActionSlotKind.WorkspaceRelativeTarget => GovernedLoopParameterValueKind.WorkspaceRelativeTarget,
+                CommandActionSlotKind.BoundedJson => GovernedLoopParameterValueKind.Json,
+                _ => GovernedLoopParameterValueKind.Text,
+            },
+            Required: true,
+            MinimumCharacters: slot.Kind == CommandActionSlotKind.BoundedText ? 0 : 1,
+            MaximumCharacters: Math.Min(slot.MaxUtf8Bytes, CustomLoopLimits.MaxGraphParameterValueCharacters),
+            slot.MinimumInteger,
+            slot.MaximumInteger,
+            Array.AsReadOnly(slot.EnumerationValues.ToArray()),
+            slot.MaxUtf8Bytes,
+            slot.AllowLeadingOption,
+            AllowResponseFileReference: false);
 
     private static GovernedLoopCatalogPortContract Port(
         string id,

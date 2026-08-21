@@ -1,5 +1,8 @@
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Application.Tests.CommandActions;
+using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
@@ -9,6 +12,88 @@ namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 
 public sealed class GovernedLoopSequentialPlanBuilderTests
 {
+    [Fact]
+    public void Exact_hash_pinned_command_action_builds_with_one_narrow_capability_and_safe_parameters()
+    {
+        var registration = CommandActionApplicationTestData.Registration();
+        var artifact = GovernedLoopSequentialApplicationTestFixture.CommandActionArtifact(registration);
+
+        var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, result.Status);
+        Assert.Equal(
+            [
+                GovernedLoopSequentialNodeDescriptors.ManualTrigger,
+                GovernedLoopSequentialNodeDescriptors.ProviderInference,
+                CommandActionNodeDescriptors.For(registration.Template),
+                GovernedLoopSequentialNodeDescriptors.SuccessExit,
+            ],
+            result.Plan!.Nodes.Select(node => node.Descriptor));
+        var action = artifact.Graph.Nodes.Single(node => node.Id == "command-action");
+        Assert.Equal([registration.Template.Capability.Id.Value], action.AuthorityCeiling.CapabilityIds);
+        Assert.Equal("literal ; $(data)", action.Parameters["value"]);
+    }
+
+    [Fact]
+    public void Exact_hash_pinned_command_action_is_an_executable_graph_without_an_inference_node()
+    {
+        var registration = CommandActionApplicationTestData.Registration();
+        var artifact = GovernedLoopSequentialApplicationTestFixture.CommandActionOnlyArtifact(registration);
+
+        var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, result.Status);
+        Assert.Equal(
+            [
+                GovernedLoopSequentialNodeDescriptors.ManualTrigger,
+                CommandActionNodeDescriptors.For(registration.Template),
+                GovernedLoopSequentialNodeDescriptors.SuccessExit,
+            ],
+            result.Plan!.Nodes.Select(node => node.Descriptor));
+        Assert.Equal(
+            [GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, registration.Template.Capability.Id.Value],
+            artifact.Graph.AuthorityCeiling.CapabilityIds);
+        var projection = GovernedLoopSequentialLegacyDefinitionProjector.ProjectPrepared(
+            "operation-command-only",
+            GovernedLoopSequentialApplicationTestFixture.InvocationSnapshot(artifact),
+            result.Plan,
+            artifact);
+        Assert.Equal(GovernedLoopSequentialLegacyDefinitionProjectionStatus.Ready, projection.Status);
+        Assert.Empty(projection.Definition!.InferenceSteps);
+        Assert.False(CustomLoopDefinitionValidator.Validate(projection.Definition).IsValid);
+    }
+
+    [Fact]
+    public void Command_action_descriptor_authority_and_unsafe_parameter_substitutions_fail_closed()
+    {
+        var registration = CommandActionApplicationTestData.Registration();
+        var source = GovernedLoopSequentialApplicationTestFixture.CommandActionArtifact(registration).Graph;
+        var action = source.Nodes.Single(node => node.Id == "command-action");
+        var wrongDescriptor = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == action.Id
+                ? node with { Descriptor = node.Descriptor with { TypeId = "command-" + new string('0', 63) } }
+                : node).ToArray());
+        var missingAuthority = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == action.Id
+                ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([]) }
+                : node).ToArray());
+        var responseFile = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == action.Id
+                ? node with { Parameters = new Dictionary<string, string> { ["value"] = "@response" } }
+                : node).ToArray());
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedDescriptor, GovernedLoopSequentialPlanBuilder.Build(wrongDescriptor).Status);
+        var authorityResult = GovernedLoopSequentialPlanBuilder.Build(missingAuthority);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, authorityResult.Status);
+        Assert.Equal("$.graph.authorityCeiling", authorityResult.FailurePath);
+        var parameterResult = GovernedLoopSequentialPlanBuilder.Build(responseFile);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, parameterResult.Status);
+        Assert.Equal("$.graph.nodes", parameterResult.FailurePath);
+    }
+
     [Fact]
     public void Exact_workspace_action_builds_without_granting_inference_workspace_tools()
     {
@@ -57,12 +142,15 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
                 ? node with { Parameters = new Dictionary<string, string>(node.Parameters) { ["forged"] = "before-forged" } }
                 : node).ToArray());
 
-        Assert.All(new[] { wrongDescriptor, missingAuthority, callerEvidence }, artifact =>
+        Assert.All(new[] { wrongDescriptor, callerEvidence }, artifact =>
         {
             var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
             Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, result.Status);
             Assert.Equal("$.graph.nodes", result.FailurePath);
         });
+        var authorityResult = GovernedLoopSequentialPlanBuilder.Build(missingAuthority);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, authorityResult.Status);
+        Assert.Equal("$.graph.authorityCeiling", authorityResult.FailurePath);
     }
 
     [Theory]

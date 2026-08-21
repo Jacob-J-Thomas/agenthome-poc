@@ -299,6 +299,7 @@ public sealed class ScheduleRunOverlapAdapterTests
             invocation.ContentHash,
             fixture.Artifact.ArtifactHash,
             fixture.Artifact.LayoutHash,
+            [],
             string.Empty));
         var planResult = GovernedLoopSequentialPlanBuilder.Build(fixture.Artifact);
         var plan = Assert.IsType<GovernedLoopSequentialPlan>(planResult.Plan);

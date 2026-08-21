@@ -5,32 +5,50 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Capabilities.Models;
+using EmbodySense.Core.Application.CommandActions.Models;
 using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.ContextualRoles.Models;
+using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
+using EmbodySense.Core.Application.Governance.Authority.Models;
 using EmbodySense.Core.Application.Inference.Profiles;
 using EmbodySense.Core.Application.Inference.Profiles.Models;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants;
+using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.Authority.Models;
+using EmbodySense.Core.Common.CommandActions;
+using EmbodySense.Core.Common.CommandActions.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Effects;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.Authority;
+using EmbodySense.Core.Persistence.CommandActions;
 using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.E2EBrowserHost;
@@ -450,6 +468,141 @@ public sealed class BrowserFlowTests
     }
 
     [InstalledBrowserFact]
+    public async Task Browser_authors_publishes_and_executes_an_exact_governed_command_action()
+    {
+        const string BrowserProfileId = "org.example/model-profile/browser-command";
+        using var workspace = new TestWorkspace();
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var capabilityTrustRoot = Path.Combine(workspace.ServerStatePath, "browser-command-capability-catalog");
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(capabilityTrustRoot).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var commandAction = await CreateBrowserCommandActionRegistrationAsync();
+        var registration = commandAction.Registration;
+        await InstallBrowserCommandActionAsync(paths, capabilityTrustRoot, registration);
+        var browserProfile = new BrowserModelProfileSpec(
+            BrowserProfileId,
+            "browser-command",
+            "Test-only exact bounded browser command model profile.",
+            "gpt-test",
+            true);
+        var browserProfileDescriptor = BrowserProfileWebHost.CreateDescriptor(browserProfile);
+        await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [browserProfileDescriptor]);
+        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths, [registration.Template.Capability.Id.Value, browserProfileDescriptor.Id.Value]);
+        var commandNodeId = CommandActionNodeDescriptors.For(registration.Template).TypeId;
+        await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(
+            workspace.RootPath,
+            GetFreePort(),
+            codexExecutable,
+            "gpt-test",
+            capabilityTrustRoot,
+            [browserProfile],
+            [commandAction.Spec]);
+        await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
+
+        try
+        {
+            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
+            await ClickAsync(browser, "#governedGraphTab");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphCatalog').textContent.includes('Command Action · command/browser-json-echo v1')");
+            Assert.True(await browser.EvaluateBooleanAsync("[...document.querySelectorAll('#governedGraphCatalog button')].some((button) => button.textContent.includes('command/browser-json-echo') && !button.disabled)"));
+
+            await SetValueAsync(browser, "#governedGraphRole", $"{authoringRole.Identity.RoleId}:{authoringRole.Identity.Revision}:{authoringRole.ContentHash}", "change");
+            await SetValueAsync(browser, "#governedGraphId", "browser-command-graph");
+            await SetValueAsync(browser, "#governedGraphRevisionId", "revision-1");
+            await SetValueAsync(browser, "#governedGraphDisplayName", "Browser command graph");
+            await SetValueAsync(browser, "#governedGraphPurpose", "Execute one exact server-registered command Action.");
+            await SetValueAsync(browser, "#governedGraphModelRoutingMode", "exact", "change");
+            await SetValueAsync(browser, "#governedGraphModelProfile", BrowserProfileId, "change");
+            await ClickAsync(browser, "#governedGraphNewButton");
+            await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "manual-trigger");
+            await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "Command Action · command/browser-json-echo v1");
+            await SetValueAsync(browser, "#governedGraphInspector input:not([type='number'])", "{\"status\":\"ok\"}");
+            var commandInspector = await browser.EvaluateStringAsync("document.getElementById('governedGraphInspector').textContent");
+            Assert.Contains(registration.Template.ContentHash, commandInspector, StringComparison.Ordinal);
+            Assert.Contains("Credentials not required", commandInspector, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Denied network", commandInspector, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(paths.CapabilityArtifactsPath, commandInspector, StringComparison.Ordinal);
+            await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "success-exit");
+
+            await AddGovernedGraphControlAsync(browser, "manual-trigger", commandNodeId, "Always");
+            await AddGovernedGraphControlAsync(browser, commandNodeId, "success-exit", "Success");
+            await AddGovernedGraphBindingAsync(browser, commandNodeId, "success-exit", "Data · result → result");
+
+            await browser.WaitForExpressionAsync("!document.getElementById('governedGraphSaveButton').disabled");
+            await ClickAsync(browser, "#governedGraphSaveButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Draft') && document.getElementById('governedGraphNotice').textContent.includes('Committed')");
+            await ClickAsync(browser, "#governedGraphPublishButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Published') && document.getElementById('governedGraphNotice').textContent.includes('Committed')");
+
+            var lifecycle = await new GovernedLoopRevisionLifecycleStore(paths, new FileCapabilityCatalogTrustProvider(capabilityTrustRoot)).ReadGraphAsync("browser-command-graph");
+            var publication = Assert.IsType<GovernedLoopRevisionPublicationPin>(lifecycle.Snapshot?.Head.PublishedRevision);
+            var grant = await CreateBrowserCommandGrantAsync(paths, capabilityTrustRoot, authoringRole, publication, registration);
+            var invocation = new GovernedLoopRunInvocationTransportInput(
+                "invoke-browser-command-action",
+                new GovernedLoopRevisionPublicationInput(
+                    publication.SchemaVersion,
+                    publication.Revision.SchemaVersion,
+                    publication.Revision.GraphId,
+                    publication.Revision.RevisionId,
+                    publication.Revision.ExecutableHash,
+                    publication.PublicationOperationId,
+                    publication.ValidationEvidenceHash),
+                new GovernedLoopAuthorityGrantInput(grant.GrantId.Value, grant.Revision.Value, grant.ContentHash),
+                "Run the exact browser command Action.");
+            var invocationJson = JsonSerializer.Serialize(invocation, _jsonOptions);
+            var responseJson = await InvokeGovernedLoopFromBrowserAsync(browser, invocationJson);
+            var response = Assert.IsType<GovernedLoopRunInvocationTransportResponse>(JsonSerializer.Deserialize<GovernedLoopRunInvocationTransportResponse>(responseJson, _jsonOptions));
+            var outcomeDirectory = Path.Combine(paths.AgentPath, "loops", "execution", "command-actions", "outcomes");
+            var retainedOutcome = Directory.Exists(outcomeDirectory)
+                ? string.Join(Environment.NewLine, Directory.EnumerateFiles(outcomeDirectory, "*.json").Select(File.ReadAllText))
+                : "No command outcome evidence was retained.";
+
+            Assert.True(response.Status is not null, responseJson);
+            Assert.True(string.Equals("Executed", response.Status, StringComparison.Ordinal), responseJson);
+            Assert.Equal("Admitted", response.AdmissionStatus);
+            Assert.True(string.Equals("Completed", response.ExecutionStatus, StringComparison.Ordinal), responseJson + Environment.NewLine + retainedOutcome);
+            Assert.False(response.WasDispatched);
+            Assert.Equal(CustomLoopRunStatus.Completed.ToString(), response.Run?.Status);
+            Assert.True(CommandActionResultContract.TryParse(response.Run?.FinalOutput, out var result));
+            Assert.Equal(CommandActionResultOutcome.Succeeded, result!.Outcome);
+            Assert.DoesNotContain("\"status\":\"ok\"", responseJson, StringComparison.Ordinal);
+            Assert.DoesNotContain(paths.CapabilityArtifactsPath, responseJson, StringComparison.Ordinal);
+            Assert.DoesNotContain(workspace.RootPath, responseJson, StringComparison.Ordinal);
+
+            var outcome = Assert.IsType<CommandActionOutcomeEvidence>(await new CommandActionEvidenceStore(paths).ReadOutcomeAsync(result.OutcomeEvidenceId));
+            Assert.Equal(CommandActionOutcomeKind.Succeeded, outcome.Outcome);
+            Assert.True(GovernedActuatorInputContract.TryCanonicalize(outcome.RetainedStandardOutput, out _, out _));
+            Assert.DoesNotContain("{\"status\":\"ok\"}", outcome.RetainedStandardOutput, StringComparison.Ordinal);
+            Assert.True(outcome.RedactionSummary.ReplacementCount >= 1);
+            Assert.DoesNotContain(paths.CapabilityArtifactsPath, JsonSerializer.Serialize(outcome, _jsonOptions), StringComparison.Ordinal);
+            var replayJson = await InvokeGovernedLoopFromBrowserAsync(browser, invocationJson);
+            var replay = Assert.IsType<GovernedLoopRunInvocationTransportResponse>(JsonSerializer.Deserialize<GovernedLoopRunInvocationTransportResponse>(replayJson, _jsonOptions));
+            Assert.Equal("Terminal", replay.Status);
+            Assert.Equal("Replayed", replay.AdmissionStatus);
+            Assert.Equal(response.Run?.Id, replay.Run?.Id);
+            Assert.False(replay.WasDispatched);
+            Assert.Single(Directory.EnumerateFiles(outcomeDirectory, "*.json"));
+
+            await browser.ReloadAsync();
+            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop') && !document.getElementById('governedGraphTab').disabled");
+            await ClickAsync(browser, "#governedGraphTab");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Published') && document.querySelectorAll('#governedGraphCanvas .governed-graph-node').length === 3");
+            Assert.Contains("command-", await browser.EvaluateStringAsync("document.getElementById('governedGraphCanvas').textContent"), StringComparison.Ordinal);
+            app.AssertHealthy();
+            await browser.AssertHealthyAsync();
+        }
+        catch
+        {
+            await WriteFailureDiagnosticsAsync(nameof(Browser_authors_publishes_and_executes_an_exact_governed_command_action), browser, app);
+            throw;
+        }
+    }
+
+    [InstalledBrowserFact]
     public async Task Browser_preserves_server_owned_profile_fallback_order_override_conflicts_and_safe_text()
     {
         const string PrimaryProfileId = "org.example/model-profile/primary";
@@ -833,6 +986,167 @@ public sealed class BrowserFlowTests
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         return port;
+    }
+
+    private static async Task<(CommandActionRegistration Registration, BrowserCommandActionSpec Spec)> CreateBrowserCommandActionRegistrationAsync()
+    {
+        var executable = await ReadBrowserCommandExecutableAsync();
+        var spec = new BrowserCommandActionSpec(CapabilityIntegrityDigest.Compute(executable.Content).Value, executable.EntryPoint);
+        return (BrowserProfileWebHost.CreateCommandActionRegistration(spec), spec);
+    }
+
+    private static async Task InstallBrowserCommandActionAsync(
+        WorkspacePaths paths,
+        string capabilityTrustRoot,
+        CommandActionRegistration registration)
+    {
+        var catalogTrust = new FileCapabilityCatalogTrustProvider(capabilityTrustRoot);
+        var catalog = new CapabilityCatalogService(new CapabilityCatalogStore(paths, catalogTrust));
+        var revision = Assert.IsType<long>((await catalog.ReadAsync(null, 1)).Page?.CatalogRevision);
+        revision = RequireApplied(await catalog.DeclareAsync(registration.Manifest.Descriptor, revision, "declare-browser-command"));
+        revision = RequireApplied(await catalog.InstallAsync(registration.Manifest.Descriptor.Id, revision, "install-browser-command"));
+        revision = RequireApplied(await catalog.VerifyAsync(registration.Manifest.Descriptor.Id, revision, "verify-browser-command"));
+        revision = RequireApplied(await catalog.EnableAsync(registration.Manifest.Descriptor.Id, revision, "enable-browser-command"));
+        _ = RequireApplied(await catalog.MarkHealthyAsync(registration.Manifest.Descriptor.Id, revision, "healthy-browser-command"));
+
+        var artifactStore = new CapabilityArtifactStore(
+            paths,
+            new FileCapabilityArtifactStateTrustProvider(capabilityTrustRoot),
+            BrowserCapabilityArtifactVerifier.Instance);
+        var executable = await ReadBrowserCommandExecutableAsync();
+        var stage = new CapabilityArtifactStageRequest(
+            registration.Manifest,
+            new CapabilityArtifactContent(executable.Content),
+            new CapabilityArtifactTrustDecision(CapabilityArtifactTrustStatus.Verified, "browser-e2e-policy", "Verified."));
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await artifactStore.StageAsync(stage)).Status);
+        if (!OperatingSystem.IsWindows())
+        {
+            var stagedExecutable = Path.Combine(
+                paths.CapabilityArtifactsPath,
+                "staged",
+                registration.Manifest.Checksum.Value["sha256:".Length..],
+                registration.Manifest.EntryPoint);
+            File.SetUnixFileMode(stagedExecutable, File.GetUnixFileMode(stagedExecutable) | UnixFileMode.UserExecute);
+        }
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await artifactStore.ActivateAsync(new CapabilityArtifactActivationRequest(registration.Manifest, 0, "activate-browser-command"))).Status);
+
+        static long RequireApplied(CapabilityCatalogMutationResult result)
+        {
+            Assert.Equal(CapabilityCatalogMutationStatus.Applied, result.Status);
+            return Assert.IsType<long>(result.CatalogRevision);
+        }
+    }
+
+    private static async Task<(byte[] Content, string EntryPoint)> ReadBrowserCommandExecutableAsync()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "findstr.exe");
+            return (await File.ReadAllBytesAsync(path), "findstr.exe");
+        }
+
+        return (Encoding.UTF8.GetBytes("#!/bin/sh\nIFS= read -r value\nprintf '%s' \"$value\"\n"), "browser-json-echo");
+    }
+
+    private static async Task<AuthorityGrantReference> CreateBrowserCommandGrantAsync(
+        WorkspacePaths paths,
+        string capabilityTrustRoot,
+        ContextualRoleRevisionPin role,
+        GovernedLoopRevisionPublicationPin publication,
+        CommandActionRegistration registration)
+    {
+        Assert.True(AuthorityActorId.TryParse("browser-e2e", out var actor, out _));
+        Assert.True(AuthorityPurpose.TryParse("Execute one exact browser command Action.", out var purpose, out _));
+        Assert.True(AuthorityProfileId.TryParse("browser-command-profile", out var profileId, out _));
+        Assert.True(AuthorityProfileRevision.TryParse("1", out var profileRevision, out _));
+        var conversation = BuiltInCapabilityCatalog.Descriptors.Single(item => item.Id.Value == "org.embodysense/conversation-turn");
+        Assert.True(CapabilityDescriptorIdentity.TryCreate(conversation, out var conversationIdentity, out _));
+        var ceiling = new AuthorityCeiling(
+            new[] { conversationIdentity!, registration.Template.Capability }.OrderBy(item => item.Id.Value, StringComparer.Ordinal).ToArray(),
+            [],
+            2,
+            CapabilitySideEffectClass.LocalReversible,
+            false,
+            true,
+            false);
+        var store = new AuthorityProfileStore(paths, new FileCapabilityCatalogTrustProvider(capabilityTrustRoot));
+        var now = DateTimeOffset.UtcNow;
+        var profile = new AuthorityProfile(
+            AuthorityProfile.CurrentSchemaVersion,
+            profileId!,
+            profileRevision!,
+            AuthorityProfileStatus.Active,
+            purpose!,
+            new AuthorityProvenance(actor!, AuthorityProvenanceKind.UserDeclaration),
+            now.AddMinutes(-1),
+            now.AddHours(1),
+            ceiling,
+            []);
+        var profileResult = await store.MutateAsync(new AuthorityProfileMutation(
+            AuthorityProfileMutationKind.Create,
+            "create-browser-command-profile",
+            0,
+            profile,
+            null,
+            null,
+            actor!,
+            purpose!));
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, profileResult.Status);
+        var profileRecord = Assert.IsType<AuthorityProfileRecord>(profileResult.Record);
+        var binding = new AuthorityGrantBinding(
+            new AuthorityGrantProfilePin(
+                new AuthorityProfileReference(profileRecord.ProfileId, profileRecord.CurrentProfile.Revision),
+                profileRecord.CurrentHash),
+            role,
+            publication);
+        Assert.True(AuthorityGrantId.TryParse("browser-command-grant", out var grantId, out _));
+        Assert.True(AuthorityGrantRevision.TryParse("1", out var grantRevision, out _));
+        var grant = AuthorityGrantHash.Apply(new AuthorityGrant(
+            AuthorityGrantContractLimits.CurrentSchemaVersion,
+            grantId!,
+            grantRevision!,
+            null,
+            null,
+            AuthorityGrantLifecycleStatus.Active,
+            binding,
+            ceiling,
+            new AuthorityGrantBoundary(now.AddMinutes(-1), now.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
+            actor!,
+            purpose!,
+            now,
+            string.Empty));
+        var requestHash = Sha256("browser-command-grant-request");
+        var observed = await store.ReadForMutationAsync(grant.GrantId, "create-browser-command-grant", requestHash);
+        var reference = new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);
+        var evidence = new AuthorityGrantOperationEvidence(
+            AuthorityGrantContractLimits.CurrentSchemaVersion,
+            "create-browser-command-grant",
+            requestHash,
+            AuthorityGrantOperationKind.Create,
+            AuthorityGrantOperationOutcome.Committed,
+            AuthorityGrantOperationFailureCode.None,
+            grant.GrantId,
+            0,
+            reference,
+            actor!,
+            purpose!,
+            Sha256("browser-command-authority"),
+            Sha256("browser-command-dependencies"),
+            now);
+        Assert.Equal(AuthorityGrantStoreCommitStatus.Committed, (await store.CommitAsync(new AuthorityGrantStoreMutation(observed.StoreGeneration, grant, evidence))).Status);
+        return reference;
+    }
+
+    private static string Sha256(string value)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    private static async Task<string> InvokeGovernedLoopFromBrowserAsync(HeadlessBrowserSession browser, string invocationJson)
+    {
+        await browser.EvaluateAsync("(() => { const state = window.__browserGovernedInvocation = { completed: false, error: null, result: null }; void (async () => { try { state.result = await (await window.embodySenseSession.getHub()).invoke('InvokeGovernedLoop', " + invocationJson + "); } catch (error) { state.error = String(error?.message ?? error); } finally { state.completed = true; } })(); return true; })()");
+        await browser.WaitForExpressionAsync("window.__browserGovernedInvocation?.completed === true");
+        var error = await browser.EvaluateStringAsync("window.__browserGovernedInvocation.error ?? ''");
+        Assert.True(error.Length == 0, error);
+        return await browser.EvaluateStringAsync("JSON.stringify(window.__browserGovernedInvocation.result)");
     }
 
     private static async Task<CapabilityId> InstallBrowserLifecycleCapabilityAsync(string workspaceRoot)

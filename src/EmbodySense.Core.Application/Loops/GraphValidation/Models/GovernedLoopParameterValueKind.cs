@@ -18,5 +18,11 @@ public enum GovernedLoopParameterValueKind
     /// <summary>A canonical finite IEEE-754 JSON number without negative zero.</summary>
     Number = 6,
     /// <summary>A bounded canonical RFC 6901 JSON pointer, including the empty root pointer.</summary>
-    JsonPointer = 7
+    JsonPointer = 7,
+    /// <summary>A canonical portable workspace-relative file target.</summary>
+    WorkspaceRelativeTarget = 8,
+    /// <summary>Bounded canonical JSON.</summary>
+    Json = 9,
+    /// <summary>A canonical lowercase slash-delimited capability path.</summary>
+    CapabilityPath = 10
 }

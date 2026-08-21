@@ -12,7 +12,6 @@ import {
   createGraphCandidate,
   currentGraph,
   descriptorKey,
-  executableDescriptors,
   exactRoutingPolicyIntent,
   inheritedRoutingPolicyIntent,
   indexServerErrors,
@@ -119,6 +118,7 @@ export function createGovernedGraphWorkspace({
     },
     async refresh() {
       if (!active) return;
+      // Follow-up: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/470 tracks making restored graph selection hydration conclusive across session reloads.
       await refreshCatalog();
       if (pendingMutation) {
         outcome =
@@ -788,13 +788,28 @@ export function createGovernedGraphWorkspace({
 
   function renderCatalog() {
     elements.catalog.replaceChildren();
-    for (const item of executableDescriptors(catalog)) {
+    const descriptors = [...(catalog?.nodeDescriptors ?? [])]
+      .filter(
+        (item) =>
+          item.isAdvertised && (item.isExecutable || item.commandAction),
+      )
+      .sort((left, right) =>
+        descriptorKey(left.descriptor).localeCompare(
+          descriptorKey(right.descriptor),
+        ),
+      );
+    for (const item of descriptors) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = `governed-node-palette-item kind-${item.descriptor.kind}`;
-      button.disabled = inFlight || Boolean(pendingMutation);
-      button.textContent = `${humanize(item.descriptor.kind)} · ${item.descriptor.typeId}`;
-      button.title = `${descriptorKey(item.descriptor)} · ${item.parameters.length} typed parameters`;
+      button.disabled =
+        inFlight || Boolean(pendingMutation) || !item.isExecutable;
+      button.textContent = item.commandAction
+        ? `Command Action · ${item.commandAction.templateId} v${item.commandAction.templateVersion}${item.isExecutable ? "" : ` · ${humanize(item.commandAction.availability)}`}`
+        : `${humanize(item.descriptor.kind)} · ${item.descriptor.typeId}`;
+      button.title = item.commandAction
+        ? `${descriptorKey(item.descriptor)} · ${item.parameters.length} typed parameters · ${item.commandAction.maxExecutionMilliseconds} ms execution · ${item.commandAction.maxOutputBytes} output bytes · ${item.commandAction.maxConcurrency} concurrent`
+        : `${descriptorKey(item.descriptor)} · ${item.parameters.length} typed parameters`;
       button.addEventListener("click", () => addNode(item));
       elements.catalog.append(button);
     }
@@ -992,6 +1007,23 @@ export function createGovernedGraphWorkspace({
           .join(", ") || "No declared terminal output",
       ),
     );
+    if (contractItem?.commandAction) {
+      const command = contractItem.commandAction;
+      elements.inspector.append(
+        fact(
+          "Command template",
+          `${command.templateId} v${command.templateVersion} · ${command.templateHash}`,
+        ),
+        fact(
+          "Command availability",
+          `${humanize(command.availability)} · credentials ${command.requiresCredentialChannel ? "required but unavailable until the shared one-shot channel exists" : "not required"}`,
+        ),
+        fact(
+          "Command isolation limits",
+          `${humanize(command.workingDirectory)} working scope · ${humanize(command.network)} network · ${command.maxExecutionMilliseconds} ms execution · ${command.maxTerminationMilliseconds} ms termination · ${formatBytes(command.maxMemoryBytes)} memory · ${formatBytes(command.maxOutputBytes)} output · ${command.maxConcurrency} concurrent · process tree ${command.requiresProcessTreeTermination ? "must be proved terminal" : "not required"}`,
+        ),
+      );
+    }
     const parameterHeading = document.createElement("h4");
     parameterHeading.textContent = "Typed server parameters";
     elements.inspector.append(parameterHeading);
@@ -1401,6 +1433,20 @@ function renderOrderedFallbackList(container, values, move, document) {
     item.append(label, earlier, later);
     container.append(item);
   });
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "Unknown size";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB"];
+  let size = bytes / 1024;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index++;
+  }
+  return `${size >= 10 ? size.toFixed(1) : size.toFixed(2)} ${units[index]}`;
 }
 
 function formatBudget(budget) {

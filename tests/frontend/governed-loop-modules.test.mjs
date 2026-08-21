@@ -251,7 +251,7 @@ test("graph mutations use only catalog contracts and lifecycle evidence and neve
             required: true,
           },
           {
-            id: "published",
+            id: "published-result",
             direction: "output",
             bindingKind: "data",
             allowedValueKinds: ["text"],
@@ -298,6 +298,15 @@ test("graph mutations use only catalog contracts and lifecycle evidence and neve
   assert.equal(Object.hasOwn(input, "authorityEvidenceHash"), false);
   assert.deepEqual(graph.authorityCeiling.capabilityIds, [
     "org.embodysense/conversation-turn",
+  ]);
+  assert.deepEqual(graph.outputContract.outputs, [
+    {
+      id: "result",
+      valueSchemaId: "value-text",
+      sourceNodeId: "exit",
+      sourcePortId: "published-result",
+      required: true,
+    },
   ]);
 
   const withoutExit = removeGraphNode(graph, "exit");

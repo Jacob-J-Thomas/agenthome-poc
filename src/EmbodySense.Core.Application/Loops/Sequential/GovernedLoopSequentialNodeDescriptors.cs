@@ -3,6 +3,7 @@ using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Common.LocalWorkspace.Actions;
+using EmbodySense.Core.Common.CommandActions;
 
 namespace EmbodySense.Core.Application.Loops.Sequential;
 
@@ -88,6 +89,7 @@ public static class GovernedLoopSequentialNodeDescriptors
                 || Equals(descriptor, ScheduleTrigger)
                 || Equals(descriptor, ProviderInference)
                 || IsWorkspaceAction(descriptor)
+                || IsCommandAction(descriptor)
                 || Equals(descriptor, SuccessExit)
                 || IsWait(descriptor)
                 || IsTopology(descriptor)
@@ -107,6 +109,14 @@ public static class GovernedLoopSequentialNodeDescriptors
     /// <summary>Gets whether a descriptor exactly names one schema-1 governed workspace Action.</summary>
     public static bool IsWorkspaceAction(GovernedLoopNodeDescriptor? descriptor)
         => WorkspaceActionNodeDescriptors.TryResolve(descriptor, out _);
+
+    /// <summary>Gets whether a descriptor exactly names one hash-pinned structured command Action.</summary>
+    public static bool IsCommandAction(GovernedLoopNodeDescriptor? descriptor)
+        => CommandActionNodeDescriptors.IsCommandAction(descriptor);
+
+    /// <summary>Gets whether a descriptor names a restart-safe canonical actuator Action.</summary>
+    public static bool IsRecoverableAction(GovernedLoopNodeDescriptor? descriptor)
+        => IsWorkspaceAction(descriptor) || IsCommandAction(descriptor);
 
     /// <summary>Gets whether a descriptor exactly names one supported deterministic Condition or Join.</summary>
     public static bool IsTopology(GovernedLoopNodeDescriptor? descriptor)

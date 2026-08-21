@@ -35,6 +35,9 @@ public static class GovernedLoopSequentialContractLimits
     /// <summary>Gets the maximum stable operation or run-anchor identifier length.</summary>
     public const int MaxIdentifierCharacters = 128;
 
+    /// <summary>Gets the maximum distinct server-registered command capabilities pinned by one graph hand-off.</summary>
+    public const int MaxCommandActionCapabilities = 256;
+
     /// <summary>Gets the maximum structured validation errors returned by one call.</summary>
     public const int MaxValidationErrors = 64;
 
