@@ -178,10 +178,22 @@ test("graph module keeps layout separate, permits only cataloged connectors, and
       path: "controlEdges[0].condition",
       message: "The condition is not advertised by the source descriptor.",
     },
+    {
+      code: "control-edge.target.invalid",
+      elementKind: "control-edge",
+      elementId: "edge-1",
+      path: "controlEdges[0].targetNodeId",
+      message: "The target node is unavailable.",
+    },
   ]);
+  assert.equal(indexed.get("control-edge:edge-1").length, 2);
   assert.equal(
     indexed.get("control-edge:edge-1")[0].path,
     "controlEdges[0].condition",
+  );
+  assert.equal(
+    indexed.get("control-edge:edge-1")[1].path,
+    "controlEdges[0].targetNodeId",
   );
 });
 
