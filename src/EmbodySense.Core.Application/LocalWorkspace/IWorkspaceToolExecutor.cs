@@ -33,29 +33,4 @@ public interface IWorkspaceToolExecutor
     /// <returns>The bounded matches and audit metadata.</returns>
     Task<LocalWorkspaceResult> SearchAsync(string resolvedPath, string? pattern, CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Appends content to a canonical file, creating it when absent.
-    /// </summary>
-    /// <param name="resolvedPath">The resolved path.</param>
-    /// <param name="content">The content.</param>
-    /// <param name="cancellationToken">The token used to cancel the operation.</param>
-    /// <returns>The mutation summary and audit metadata.</returns>
-    Task<LocalWorkspaceResult> AppendAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Replaces a canonical file's content, creating it when absent.
-    /// </summary>
-    /// <param name="resolvedPath">The resolved path.</param>
-    /// <param name="content">The content.</param>
-    /// <param name="cancellationToken">The token used to cancel the operation.</param>
-    /// <returns>The mutation summary and audit metadata.</returns>
-    Task<LocalWorkspaceResult> WriteAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Deletes a canonical file or directory.
-    /// </summary>
-    /// <param name="resolvedPath">The resolved path.</param>
-    /// <param name="cancellationToken">The token used to cancel the operation.</param>
-    /// <returns>The mutation summary and audit metadata.</returns>
-    Task<LocalWorkspaceResult> DeleteAsync(string resolvedPath, CancellationToken cancellationToken = default);
 }

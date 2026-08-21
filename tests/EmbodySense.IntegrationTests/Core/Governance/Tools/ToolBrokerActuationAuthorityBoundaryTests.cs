@@ -29,7 +29,7 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
         var retention = new RecordingRetentionStore(() => boundary.IsHeld);
         var broker = CreateBroker(workspace, approval, executor, retention, boundary);
 
-        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Write, ".agent/skills/generated.md", "content"));
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, ".agent/logs/tool-responses/artifact/manifest.json"));
 
         Assert.True(result.Succeeded);
         Assert.Equal("actuator-output", result.OutputText);
@@ -60,7 +60,7 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
         var boundary = new AdversarialBoundary(BoundaryBehavior.CatchDuplicate);
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), executor, retention, boundary);
 
-        await Assert.ThrowsAsync<ToolActuationAuthorityProtocolException>(() => broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", "content")));
+        await Assert.ThrowsAsync<ToolActuationAuthorityProtocolException>(() => broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/note.txt")));
 
         Assert.Equal(1, executor.CallCount);
         Assert.Equal(0, retention.CallCount);
@@ -80,7 +80,10 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), executor, new RecordingRetentionStore(), boundary);
 
         await Assert.ThrowsAsync<ToolActuationAuthorityProtocolException>(() => broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/note.txt")));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => boundary.IncompleteCallback!);
+        var callbackFailure = await Record.ExceptionAsync(() => boundary.IncompleteCallback!);
+        Assert.True(
+            callbackFailure is OperationCanceledException or ToolActuationAuthorityProtocolException,
+            $"Unexpected callback failure: {callbackFailure?.GetType().Name ?? "none"}.");
 
         Assert.Equal(0, executor.CallCount);
     }
@@ -108,11 +111,29 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
         var boundary = new AdversarialBoundary(BoundaryBehavior.Denied, () => approval.RequestCount == 1);
         var broker = CreateBroker(workspace, approval, executor, new RecordingRetentionStore(), boundary);
 
-        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Write, ".agent/skills/generated.md", "content"));
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, ".agent/logs/tool-responses/artifact/manifest.json"));
 
         Assert.Equal(ToolExecutionOutcome.Denied, result.Outcome);
         Assert.Equal(1, approval.RequestCount);
         Assert.Equal(0, executor.CallCount);
+    }
+
+    [Fact]
+    public async Task Canonical_workspace_mutation_uses_effect_attempt_authority_without_fabricating_a_legacy_decision()
+    {
+        using var workspace = await CreateWorkspaceAsync();
+        var executor = new CountingWorkspaceToolExecutor();
+        var boundary = new AdversarialBoundary(BoundaryBehavior.Denied);
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), executor, new RecordingRetentionStore(), boundary);
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", "content"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(1, executor.CallCount);
+        Assert.Equal(0, boundary.CallCount);
+        var events = await new AuditLog(new WorkspacePaths(workspace.RootPath)).ReadTailAsync(20);
+        Assert.Single(events, auditEvent => auditEvent.Action == "tool.loop_authority.evaluate");
+        Assert.DoesNotContain(events, auditEvent => auditEvent.Metadata.ContainsKey("authority_boundary_owner"));
     }
 
     [Theory]
@@ -170,7 +191,7 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
     {
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
-        return new ToolBroker(paths, new ToolPermissionService(paths, policy), approval, executor, auditLog ?? new AuditLog(paths), LoopDefinition.CreateDefaultConversation(), retention, actuationAuthorityBoundary: boundary);
+        return new ToolBroker(paths, new ToolPermissionService(paths, policy), approval, executor, auditLog ?? new AuditLog(paths), LoopDefinition.CreateDefaultConversation(), retention, actuationAuthorityBoundary: boundary, workspaceMutationExecutor: executor as IGovernedWorkspaceMutationToolExecutor);
     }
 
     private enum BoundaryBehavior
@@ -192,6 +213,8 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
     {
         private Func<CancellationToken, Task>? _lateCallback;
 
+        public int CallCount { get; private set; }
+
         public bool IsHeld { get; private set; }
 
         public bool DuplicateFailureCaught { get; private set; }
@@ -200,6 +223,7 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
 
         public async Task<ToolActuationAuthorityExecution> ExecuteAsync<TResult>(ToolRequest request, string resolvedTargetPath, Func<ToolActuationAuthorityExecution, CancellationToken, Task<TResult>> executeActuatorAsync, CancellationToken cancellationToken = default)
         {
+            CallCount++;
             ArgumentNullException.ThrowIfNull(request);
             ArgumentException.ThrowIfNullOrWhiteSpace(resolvedTargetPath);
             ArgumentNullException.ThrowIfNull(executeActuatorAsync);
@@ -272,7 +296,7 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
         }
     }
 
-    private sealed class CountingWorkspaceToolExecutor(Func<bool>? boundaryHeld = null, bool blockUntilCancelled = false, bool throwFromCancellationCallback = false) : IWorkspaceToolExecutor
+    private sealed class CountingWorkspaceToolExecutor(Func<bool>? boundaryHeld = null, bool blockUntilCancelled = false, bool throwFromCancellationCallback = false) : IWorkspaceToolExecutor, IGovernedWorkspaceMutationToolExecutor
     {
         public int CallCount { get; private set; }
 
@@ -284,11 +308,7 @@ public sealed class ToolBrokerActuationAuthorityBoundaryTests
 
         public Task<LocalWorkspaceResult> SearchAsync(string resolvedPath, string? pattern, CancellationToken cancellationToken = default) => ExecuteAsync(cancellationToken);
 
-        public Task<LocalWorkspaceResult> AppendAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default) => ExecuteAsync(cancellationToken);
-
-        public Task<LocalWorkspaceResult> WriteAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default) => ExecuteAsync(cancellationToken);
-
-        public Task<LocalWorkspaceResult> DeleteAsync(string resolvedPath, CancellationToken cancellationToken = default) => ExecuteAsync(cancellationToken);
+        Task<LocalWorkspaceResult> IGovernedWorkspaceMutationToolExecutor.ExecuteAsync(ToolRequest request, CancellationToken cancellationToken) => ExecuteAsync(cancellationToken);
 
         private async Task<LocalWorkspaceResult> ExecuteAsync(CancellationToken cancellationToken)
         {

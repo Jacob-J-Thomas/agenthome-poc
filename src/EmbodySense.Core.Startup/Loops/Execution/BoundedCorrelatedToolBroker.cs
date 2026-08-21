@@ -452,7 +452,8 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         await RecordAuthorityAsync(requestId, request, authority, resolvedTarget, requestOrdinal, AuditSchema.Outcomes.Denied, detail, scope, limit, cancellationToken);
         var governance = new ToolGovernanceEvidence(ToolAuthorityDecision.Denied, detail, null, null, null, null, ToolApprovalDecision.NotEvaluated, null, null);
         await _observer.ObserveDecisionAsync(requestId, request, resolvedTarget, governance, cancellationToken);
-        var result = new ToolResult(ToolExecutionOutcome.Denied, $"denied: governed {scope} tool-request limit reached.", requestId, resolvedTarget, request, governance);
+        var result = WorkspaceMutationEvidenceProjection.ProjectResult(
+            new ToolResult(ToolExecutionOutcome.Denied, $"denied: governed {scope} tool-request limit reached.", requestId, resolvedTarget, request, governance));
         result = await RetainAsync(result, requestOrdinal, cancellationToken);
         await _observer.ObserveOutcomeAsync(result, cancellationToken);
         await _observer.RecordReturnedAsync(result, cancellationToken);
@@ -474,7 +475,8 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         await RecordAuthorityAsync(requestId, request, authority, resolvedTarget, requestOrdinal, AuditSchema.Outcomes.Denied, detail, null, null, cancellationToken);
         var governance = new ToolGovernanceEvidence(ToolAuthorityDecision.Denied, detail, null, null, null, null, ToolApprovalDecision.NotEvaluated, null, null);
         await _observer.ObserveDecisionAsync(requestId, request, resolvedTarget, governance, cancellationToken);
-        var result = new ToolResult(ToolExecutionOutcome.Denied, $"denied: {detail}", requestId, resolvedTarget, request, governance);
+        var result = WorkspaceMutationEvidenceProjection.ProjectResult(
+            new ToolResult(ToolExecutionOutcome.Denied, $"denied: {detail}", requestId, resolvedTarget, request, governance));
         result = await RetainAsync(result, requestOrdinal, cancellationToken);
         await _observer.ObserveOutcomeAsync(result, cancellationToken);
         await _observer.RecordReturnedAsync(result, cancellationToken);
@@ -483,12 +485,15 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
 
     private Task RecordAuthorityAsync(string? requestId, ToolRequest request, CustomLoopToolAuthoritySnapshot authority, string resolvedTarget, int requestOrdinal, string outcome, string detail, string? limitScope, int? limit, CancellationToken cancellationToken)
     {
+        var mutation = WorkspaceMutationEvidenceProjection.IsMutation(request.Command);
+        var evidenceTarget = WorkspaceMutationEvidenceProjection.ProjectResolvedTarget(request, resolvedTarget);
+        var evidenceRequest = WorkspaceMutationEvidenceProjection.ProjectRequest(request);
         var metadata = new Dictionary<string, object?>
         {
             ["request_id"] = requestId,
             ["command"] = ToolCommandFormatter.Format(request.Command),
-            ["target_path"] = request.TargetPath,
-            ["resolved_path"] = resolvedTarget,
+            ["target_path"] = evidenceRequest.TargetPath,
+            ["resolved_path"] = evidenceTarget,
             ["run_id"] = _attempt.RunId,
             ["loop_id"] = _attempt.LoopId,
             ["role_id"] = _attempt.RoleId,
@@ -512,9 +517,9 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         return _auditLog.AppendAsync(AuditEvent.Create(
             AuditSchema.Actors.Tool,
             AuditSchema.Actions.ToolLoopAuthorityEvaluate,
-            resolvedTarget,
+            evidenceTarget,
             outcome,
-            detail,
+            mutation ? $"Governed workspace mutation authority outcome: {outcome}." : detail,
             metadata), cancellationToken);
     }
 

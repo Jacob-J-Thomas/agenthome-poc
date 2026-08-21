@@ -1,6 +1,8 @@
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Common.Governance.Permissions;
+using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Clients.LocalWorkspace;
@@ -44,5 +46,11 @@ internal sealed class ReloadingToolPermissionService : IToolPermissionService
     public ToolPermissionCheck Evaluate(ToolRequest request)
     {
         return new ToolPermissionService(_paths, _policyStore.Load(_paths)).Evaluate(request);
+    }
+
+    /// <inheritdoc />
+    public ToolPermissionCheck EvaluateExactFileMutation(ToolRequest request, FileSystemOperation operation)
+    {
+        return new ToolPermissionService(_paths, _policyStore.Load(_paths)).EvaluateExactFileMutation(request, operation);
     }
 }

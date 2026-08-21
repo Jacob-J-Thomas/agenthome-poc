@@ -5,6 +5,8 @@ using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
+using EmbodySense.Core.Common.LocalWorkspace.Actions;
+using EmbodySense.Core.Common.Loops.Execution.Effects;
 
 namespace EmbodySense.Core.Startup.Loops;
 
@@ -14,6 +16,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
     private const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
+    private const string WorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
     private const int ProviderTransportResourceUnitsPerActivation = 1;
     private const string SourceEvidenceId = "built-in-governed-loop-node-catalog-schema-1-v1";
     private static readonly IReadOnlyList<GovernedLoopControlCondition> _always =
@@ -39,7 +42,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             .Concat(GovernedLoopWaitNodeCatalogContract.Descriptors)
             .OrderBy(DescriptorKey, StringComparer.Ordinal)
             .ToArray();
-        if (descriptors.Length != 21
+        if (descriptors.Length != 24
             || descriptors.Select(item => item.Descriptor).Distinct().Count() != descriptors.Length
             || descriptors.Any(item => !GovernedLoopSequentialNodeDescriptors.IsSupported(item.Descriptor)))
         {
@@ -126,6 +129,9 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                 ActivationBudget(
                     CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation,
                     ProviderTransportResourceUnitsPerActivation)),
+            WorkspaceAction(WorkspaceActionNodeDescriptors.Append),
+            WorkspaceAction(WorkspaceActionNodeDescriptors.Write),
+            WorkspaceAction(WorkspaceActionNodeDescriptors.Delete),
             new GovernedLoopNodeCatalogDescriptor(
                 GovernedLoopSequentialNodeDescriptors.SuccessExit,
                 IsAdvertised: true,
@@ -148,6 +154,43 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                 Array.AsReadOnly(new[] { ConversationTurnCapabilityId }),
                 ActivationBudget(CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation)),
         });
+
+    private static GovernedLoopNodeCatalogDescriptor WorkspaceAction(GovernedLoopNodeDescriptor descriptor)
+        => new(
+            descriptor,
+            IsAdvertised: true,
+            IsExecutable: true,
+            IsLegalEntry: false,
+            IsLegalTerminal: false,
+            _success,
+            _success,
+            GovernedLoopJoinPolicy.None,
+            MinimumIncomingControlEdges: 1,
+            AllowsCycle: false,
+            CycleIterationBudgetParameterId: null,
+            CycleTimeBudgetMillisecondsParameterId: null,
+            Array.AsReadOnly(new[]
+            {
+                Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data),
+            }),
+            Array.AsReadOnly(new[]
+            {
+                new GovernedLoopCatalogParameterContract(
+                    "input",
+                    GovernedLoopParameterValueKind.Text,
+                    Required: true,
+                    MinimumCharacters: 1,
+                    MaximumCharacters: CustomLoopLimits.MaxGraphParameterValueCharacters,
+                    MinimumInteger: null,
+                    MaximumInteger: null,
+                    Array.Empty<string>()),
+            }),
+            Array.AsReadOnly(new[] { WorkspaceCommandCapabilityId }),
+            new GovernedLoopNodeResourceBudget(
+                Attempts: 1,
+                PayloadCharacters: CustomLoopLimits.MaxGraphParameterValueCharacters,
+                EvidenceItems: CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation,
+                ResourceUnits: 1));
 
     private static GovernedLoopCatalogPortContract Port(
         string id,

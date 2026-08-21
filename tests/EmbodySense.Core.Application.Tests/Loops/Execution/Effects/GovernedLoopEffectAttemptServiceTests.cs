@@ -30,10 +30,11 @@ public sealed class GovernedLoopEffectAttemptServiceTests
         var operation = new StubOperation(fixture.Descriptor, Preparation(fixture));
         var catalog = new StubCatalog(fixture, operation);
         var authority = new StubAuthorityBoundary();
-        operation.Execute = async (_, boundary, token) =>
+        operation.Execute = async (invocation, boundary, token) =>
         {
             Assert.Equal(GovernedLoopEffectPhase.IntentPrepared, store.Current?.Payload.Phase);
             Assert.NotNull(store.Current?.DispatchAuthorityEvidenceHash);
+            Assert.Equal("before-alpha", invocation.BeforeEvidenceId);
             var outcome = await boundary.CrossAsync(_ => Task.FromResult(new GovernedActuatorExternalOutcome(GovernedLoopEffectOutcome.Succeeded, "outcome-alpha", "after-alpha")), token);
             return new GovernedActuatorAdapterResult(GovernedActuatorAdapterStatus.OutcomeObserved, outcome);
         };
@@ -49,6 +50,50 @@ public sealed class GovernedLoopEffectAttemptServiceTests
         Assert.Equal(1, operation.ExecuteCalls);
         Assert.Equal(1, authority.Calls);
         Assert.Equal(4, store.ExchangeCalls);
+    }
+
+    [Fact]
+    public async Task Expired_preparation_is_refreshed_once_before_any_intent_is_published()
+    {
+        var fixture = GovernedLoopEffectAttemptTestFixture.Create();
+        var store = new InMemoryEffectAttemptStore();
+        var operation = new StubOperation(fixture.Descriptor, Preparation(fixture));
+        operation.PreparationClaims.Enqueue(false);
+        operation.PreparationClaims.Enqueue(true);
+        operation.Execute = async (_, boundary, token) =>
+        {
+            var outcome = await boundary.CrossAsync(
+                _ => Task.FromResult(new GovernedActuatorExternalOutcome(GovernedLoopEffectOutcome.Succeeded, "outcome-alpha", "after-alpha")),
+                token);
+            return new GovernedActuatorAdapterResult(GovernedActuatorAdapterStatus.OutcomeObserved, outcome);
+        };
+
+        var result = await Service(new StubCatalog(fixture, operation), store, new StubAuthorityBoundary()).ExecuteAsync(fixture.Request);
+
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.Committed, result.Status);
+        Assert.Equal(2, operation.PrepareCalls);
+        Assert.Equal(2, operation.PreparationClaimCalls);
+        Assert.Equal(2, store.BeginCalls);
+        Assert.Equal(1, operation.ExecuteCalls);
+    }
+
+    [Fact]
+    public async Task Preparation_validator_fails_closed_when_frozen_store_has_no_atomic_claim_capability()
+    {
+        var fixture = GovernedLoopEffectAttemptTestFixture.Create();
+        var inner = new InMemoryEffectAttemptStore();
+        var store = new LegacyOnlyEffectAttemptStore(inner);
+        var operation = new StubOperation(fixture.Descriptor, Preparation(fixture));
+        var authority = new StubAuthorityBoundary();
+
+        var result = await Service(new StubCatalog(fixture, operation), store, authority).ExecuteAsync(fixture.Request);
+
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.EvidenceUnavailable, result.Status);
+        Assert.Equal(1, operation.PrepareCalls);
+        Assert.Equal(0, operation.PreparationClaimCalls);
+        Assert.Equal(0, inner.BeginCalls);
+        Assert.Equal(0, authority.Calls);
+        Assert.Equal(0, operation.ExecuteCalls);
     }
 
     [Fact]
@@ -190,7 +235,7 @@ public sealed class GovernedLoopEffectAttemptServiceTests
     [InlineData(GovernedLoopEffectPhase.DispatchNotStarted, GovernedLoopEffectAttemptExecutionStatus.DispatchNotStarted)]
     [InlineData(GovernedLoopEffectPhase.DispatchBoundaryReached, GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired)]
     [InlineData(GovernedLoopEffectPhase.OutcomeObserved, GovernedLoopEffectAttemptExecutionStatus.Committed)]
-    public async Task Restart_recovers_before_catalog_and_never_redispatches(
+    public async Task Restart_recovers_without_redispatch_and_terminal_phases_bypass_catalog(
         GovernedLoopEffectPhase phase,
         GovernedLoopEffectAttemptExecutionStatus expected)
     {
@@ -205,11 +250,53 @@ public sealed class GovernedLoopEffectAttemptServiceTests
         var result = await Service(unavailable, store, authority).ExecuteAsync(fixture.Request);
 
         Assert.Equal(expected, result.Status);
-        Assert.Equal(0, unavailable.ResolveCalls);
+        Assert.Equal(phase == GovernedLoopEffectPhase.DispatchBoundaryReached ? 1 : 0, unavailable.ResolveCalls);
         Assert.Equal(0, operation.PrepareCalls);
         Assert.Equal(0, operation.ExecuteCalls);
         Assert.Equal(0, authority.Calls);
         Assert.True(result.Attempt?.Payload.Phase is GovernedLoopEffectPhase.Committed or GovernedLoopEffectPhase.DispatchNotStarted or GovernedLoopEffectPhase.ReconciliationRequired);
+    }
+
+    [Fact]
+    public async Task Restart_adopts_exact_probed_outcome_and_commits_once_without_redispatch()
+    {
+        var fixture = GovernedLoopEffectAttemptTestFixture.Create();
+        Assert.True(GovernedActuatorInputContract.TryCanonicalize(fixture.Request.InputJson, out var input, out _));
+        var crossed = ToPhase(
+            GovernedLoopEffectAttemptTestFixture.Prepare(fixture.Request, fixture.Descriptor, input!),
+            GovernedLoopEffectPhase.DispatchBoundaryReached);
+        var store = new InMemoryEffectAttemptStore { Current = crossed };
+        var operation = new StubOperation(fixture.Descriptor, Preparation(fixture))
+        {
+            Probe = invocation =>
+            {
+                Assert.Equal(crossed.BeforeEvidenceId, invocation.BeforeEvidenceId);
+                Assert.Equal(crossed.TargetFingerprint, invocation.TargetFingerprint);
+                Assert.Equal(crossed.PreconditionEvidenceHash, invocation.PreconditionEvidenceHash);
+                return new GovernedActuatorProbeResult(
+                    GovernedActuatorProbePosture.OutcomeObserved,
+                    new GovernedActuatorExternalOutcome(
+                        GovernedLoopEffectOutcome.Succeeded,
+                        "outcome-recovered",
+                        "after-recovered"));
+            },
+        };
+        var catalog = new StubCatalog(fixture, operation);
+        var authority = new StubAuthorityBoundary();
+
+        var recovered = await Service(catalog, store, authority).ExecuteAsync(fixture.Request);
+        var replayed = await Service(catalog, store, authority).ExecuteAsync(fixture.Request);
+
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.Committed, recovered.Status);
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.Replayed, replayed.Status);
+        Assert.Equal(GovernedLoopEffectPhase.Committed, store.Current?.Payload.Phase);
+        Assert.Equal("outcome-recovered", store.Current?.Payload.OutcomeEvidenceId);
+        Assert.Equal("after-recovered", store.Current?.AfterEvidenceId);
+        Assert.Equal(1, operation.ProbeCalls);
+        Assert.Equal(0, operation.PrepareCalls);
+        Assert.Equal(0, operation.ExecuteCalls);
+        Assert.Equal(0, authority.Calls);
+        Assert.Equal(1, catalog.ResolveCalls);
     }
 
     [Fact]
@@ -1315,7 +1402,28 @@ public sealed class GovernedLoopEffectAttemptServiceTests
         }
     }
 
-    private sealed class StubOperation(GovernedActuatorOperationDescriptor descriptor, GovernedActuatorPreparationEvidence preparation) : IGovernedActuatorOperation
+    private sealed class LegacyOnlyEffectAttemptStore(InMemoryEffectAttemptStore inner) : IGovernedLoopEffectAttemptStore
+    {
+        public Task<GovernedLoopEffectAttemptStoreResult> ResumeAsync(
+            string operationId,
+            long effectGeneration,
+            CancellationToken cancellationToken = default)
+            => inner.ResumeAsync(operationId, effectGeneration, cancellationToken);
+
+        public Task<GovernedLoopEffectAttemptStoreResult> BeginAsync(
+            GovernedLoopEffectAttempt prepared,
+            CancellationToken cancellationToken = default)
+            => inner.BeginAsync(prepared, cancellationToken);
+
+        public Task<GovernedLoopEffectAttemptStoreResult> CompareExchangeAsync(
+            string expectedContentHash,
+            GovernedLoopEffectAttempt replacement,
+            IGovernedLoopEffectAttemptLease lease,
+            CancellationToken cancellationToken = default)
+            => inner.CompareExchangeAsync(expectedContentHash, replacement, lease, cancellationToken);
+    }
+
+    private sealed class StubOperation(GovernedActuatorOperationDescriptor descriptor, GovernedActuatorPreparationEvidence preparation) : IGovernedActuatorOperation, IGovernedActuatorOutcomeProbe, IGovernedActuatorPreparationValidator
     {
         internal Func<GovernedActuatorInvocation, IGovernedActuatorDispatchBoundary, CancellationToken, Task<GovernedActuatorAdapterResult>>? Execute { get; set; }
         internal string PrepareMode { get; set; } = "ok";
@@ -1323,8 +1431,12 @@ public sealed class GovernedLoopEffectAttemptServiceTests
         internal string? ValidationFailure { get; set; }
         internal CancellationTokenSource? CancelSource { get; set; }
         internal Action? BeforePrepare { get; set; }
+        internal Func<GovernedActuatorInvocation, GovernedActuatorProbeResult>? Probe { get; set; }
         internal int PrepareCalls { get; private set; }
         internal int ExecuteCalls { get; private set; }
+        internal int ProbeCalls { get; private set; }
+        internal int PreparationClaimCalls { get; private set; }
+        internal Queue<bool> PreparationClaims { get; } = [];
         public GovernedActuatorOperationDescriptor Descriptor { get; } = descriptor;
         public string? ValidateInput(GovernedActuatorInputEvidence input) => ValidationFailure;
         public Task<GovernedActuatorPreparationEvidence?> PrepareAsync(GovernedActuatorInputEvidence input, CancellationToken cancellationToken = default)
@@ -1361,6 +1473,19 @@ public sealed class GovernedLoopEffectAttemptServiceTests
                 throw new InvalidOperationException("The cancelling boundary callback unexpectedly returned.");
             }
             return new(GovernedActuatorAdapterStatus.DispatchNotStarted, null);
+        }
+        public Task<bool> IsPreparationCurrentAsync(GovernedActuatorInputEvidence input, GovernedActuatorPreparationEvidence candidate, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            PreparationClaimCalls++;
+            return Task.FromResult(PreparationClaims.Count == 0 || PreparationClaims.Dequeue());
+        }
+        public Task<GovernedActuatorProbeResult> ProbeAsync(GovernedActuatorInvocation invocation, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ProbeCalls++;
+            return Task.FromResult(Probe?.Invoke(invocation)
+                ?? new GovernedActuatorProbeResult(GovernedActuatorProbePosture.Indeterminate, null));
         }
         private Task<GovernedActuatorPreparationEvidence?> Cancel()
         {

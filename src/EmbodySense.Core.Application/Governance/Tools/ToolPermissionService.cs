@@ -73,6 +73,46 @@ public sealed class ToolPermissionService : IToolPermissionService
         return new ToolPermissionCheck(resolvedPath, permissionTargetPath, operation, evaluation, _policyHash);
     }
 
+    /// <inheritdoc />
+    public ToolPermissionCheck EvaluateExactFileMutation(ToolRequest request, FileSystemOperation operation)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.TargetPath);
+        if (request.Command is not (ToolCommand.Append or ToolCommand.Write or ToolCommand.Delete)
+            || operation is not (FileSystemOperation.Create or FileSystemOperation.Append or FileSystemOperation.Modify or FileSystemOperation.Delete))
+        {
+            throw new ArgumentException("An exact file-mutation permission check requires a workspace mutation command and operation class.", nameof(request));
+        }
+
+        var resolvedPath = ResolveTargetPath(request.TargetPath);
+        var permissionTargetPath = Path.GetDirectoryName(resolvedPath) ?? resolvedPath;
+        if (!FileSystemPathComparer.IsWithinOrEqual(resolvedPath, _workspaceRootPath))
+        {
+            return new ToolPermissionCheck(
+                resolvedPath,
+                permissionTargetPath,
+                operation,
+                PermissionEvaluation.Denied(_workspaceRootPath, ToolPermissionDetails.OutsideWorkspaceRoot),
+                _policyHash);
+        }
+        if (PathUsesReparsePoint(resolvedPath))
+        {
+            return new ToolPermissionCheck(
+                resolvedPath,
+                permissionTargetPath,
+                operation,
+                PermissionEvaluation.Denied(_workspaceRootPath, ToolPermissionDetails.ReparsePointPath),
+                _policyHash);
+        }
+
+        return new ToolPermissionCheck(
+            resolvedPath,
+            permissionTargetPath,
+            operation,
+            _policy.EvaluateDirectory(permissionTargetPath, operation),
+            _policyHash);
+    }
+
     private static string ComputePolicyHash(IDirectoryPermissionPolicy policy)
     {
         var canonical = new StringBuilder();

@@ -12,7 +12,7 @@ public static class EmbodySenseDeveloperInstructions
     /// <summary>
     /// Version identity for the fixed governed app-server instruction contract.
     /// </summary>
-    public const string CurrentVersion = "codex-app-server-governance-v1";
+    public const string CurrentVersion = "codex-app-server-governance-v2";
 
     /// <summary>
     /// Creates the fixed governance instructions for the commands assigned to a model turn.
@@ -42,6 +42,10 @@ public static class EmbodySenseDeveloperInstructions
             builder.AppendLine();
             builder.AppendLine($"The active EmbodySense loop assigned these workspace command capabilities to this turn: {string.Join(", ", commands.Select(ToolCommandFormatter.Format))}.");
             builder.AppendLine("For assigned workspace actions, use only the `embodysense.command` dynamic tool. It enforces loop capability filtering, `.agent/permissions.json`, approval routing, and audit logging. Do not request unassigned workspace commands, and do not claim a workspace action succeeded until the corresponding EmbodySense tool result says it succeeded.");
+            if (commands.Any(command => command is ToolCommand.Append or ToolCommand.Write or ToolCommand.Delete))
+            {
+                builder.AppendLine("Append, write, and delete accept only the tool's closed schema-1 `input` object. Set `scopeId` to `workspace`, make `target` exactly match `path`, select one optimistic precondition, and use bounded ordered `segments` (empty only for delete). Do not send legacy raw mutation content, absolute/private/wildcard/recursive targets, or secret values; credential references remain value-free and may fail closed when no trusted lease bridge is available.");
+            }
         }
 
         return builder.ToString().TrimEnd();

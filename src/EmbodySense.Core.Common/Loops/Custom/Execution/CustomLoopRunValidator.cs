@@ -16,6 +16,7 @@ using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using System.Text;
 using System.Text.Json;
 
@@ -836,6 +837,7 @@ public static class CustomLoopRunValidator
             .ToArray();
         return runningNodes.Length > 0
             && runningNodes.All(node => HasRestartSafePureRunningAttempt(run, node)
+                || HasRestartSafeWorkspaceActionRunningAttempt(run, node)
                 || HasAuthenticatedTerminalRunningAttempt(run, node));
     }
 
@@ -857,6 +859,27 @@ public static class CustomLoopRunValidator
             {
                 TraceReservationUtf8Bytes: CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
             })
+            .Take(2)
+            .ToArray();
+        return starts.Length == 1;
+    }
+
+    private static bool HasRestartSafeWorkspaceActionRunningAttempt(CustomLoopRunRecord run, GovernedLoopNodeExecutionEvidence node)
+    {
+        if (node is not
+            {
+                Status: GovernedLoopNodeExecutionStatus.Running,
+                Attempt: not null,
+                AttemptOperationId: not null,
+                Descriptor.Kind: GovernedLoopNodeKind.Action,
+            }
+            || !WorkspaceActionNodeDescriptors.TryResolve(node.Descriptor, out _))
+        {
+            return false;
+        }
+
+        var starts = ExactRunningAttemptStarts(run, node)
+            .Where(item => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes)
             .Take(2)
             .ToArray();
         return starts.Length == 1;
@@ -959,6 +982,9 @@ public static class CustomLoopRunValidator
         var binding = run.SequentialAdapterBinding!;
         var capabilityAdmission = run.CapabilityAdmission;
         var toolAssignments = run.AdmittedDefinition?.ToolAssignments;
+        var hasWorkspaceCommandAdmission = capabilityAdmission.Evidence.Any(item => item.SubjectId.Equals(capabilityAdmission.Requirements.SubjectId)
+            && string.Equals(item.Outcome, "Selected", StringComparison.Ordinal)
+            && string.Equals(item.SelectedIdentity?.Id.Value, "org.embodysense/workspace-command", StringComparison.Ordinal));
         string[] expectedRootIdentities;
         var scheduled = run.SequentialInvocationSnapshot?.TriggerOrigin is not null;
         if (toolAssignments is { Length: 0 })
@@ -977,6 +1003,10 @@ public static class CustomLoopRunValidator
         {
             Add(errors, "sequential_tool_assignment_mismatch", "admittedDefinition.toolAssignments", "Canonical sequential execution supports either no tools or exactly the ordered List, Read, and Search assignment catalog.");
             return;
+        }
+        if (hasWorkspaceCommandAdmission && !expectedRootIdentities.Contains("org.embodysense/workspace-command", StringComparer.Ordinal))
+        {
+            expectedRootIdentities = [.. expectedRootIdentities, "org.embodysense/workspace-command"];
         }
         var routedProfileIds = binding.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries
             .SelectMany(entry => entry.Fallbacks.Prepend(entry.Primary))
@@ -1001,7 +1031,7 @@ public static class CustomLoopRunValidator
             .ToArray();
         if (!selectedRootIdentities.SequenceEqual(expectedRootIdentities, StringComparer.Ordinal))
         {
-            Add(errors, "sequential_capability_identity_mismatch", "capabilityAdmission.evidence", "Canonical sequential execution requires exactly the sorted roots derived from its trigger origin and closed tool-free or List/Read/Search assignment shape.");
+            Add(errors, "sequential_capability_identity_mismatch", "capabilityAdmission.evidence", $"Canonical sequential execution requires exactly the sorted roots derived from its trigger origin, closed inference-tool shape, and exact workspace Action descriptors (expected `{string.Join(',', expectedRootIdentities)}`; observed `{string.Join(',', selectedRootIdentities)}`).");
         }
     }
 
@@ -1795,6 +1825,7 @@ public static class CustomLoopRunValidator
             var isPureNode = IsPureNodeEvent(run, item);
             var isTopologyNode = IsTopologyNodeEvent(run, item);
             var isWaitNode = IsWaitNodeEvent(run, item);
+            var isWorkspaceAction = IsWorkspaceActionEvent(run, item);
             var hasValidPureEventShape = item.Kind switch
             {
                 CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
@@ -1848,6 +1879,25 @@ public static class CustomLoopRunValidator
                     || !hasValidWaitShape)
                 {
                     Add(errors, "sequential_wait_node_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential Wait evidence must identify its exact activation and use the canonical start, completion, or failure envelope.");
+                }
+
+                return;
+            }
+
+            if (isWorkspaceAction)
+            {
+                var hasValidActionShape = item.Kind switch
+                {
+                    CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
+                    CustomLoopRunEventKind.NodeAttemptCompleted => item.CanonicalOutput is not null && WorkspaceActionResultContract.TryParse(item.CanonicalOutput, out _),
+                    CustomLoopRunEventKind.NodeAttemptFailed => HasPriorSequentialDispatch(run.Events, eventIndex, evidence, CustomLoopRunEventKind.NodeAttemptStarted),
+                    _ => false,
+                };
+                if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal)
+                    || item.Iteration != (evidence.CycleIteration ?? 1)
+                    || !hasValidActionShape)
+                {
+                    Add(errors, "sequential_workspace_action_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential workspace Action evidence must identify its exact activation and use the canonical reserved start, value-free completion, or failure envelope.");
                 }
 
                 return;
@@ -1941,7 +1991,7 @@ public static class CustomLoopRunValidator
     private static void ValidateTraceReservation(CustomLoopRunEvent item, string field, CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
     {
         var startsAttempt = item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted;
-        var expectedReservation = IsPureNodeEvent(run, item) || IsTopologyNodeEvent(run, item)
+        var expectedReservation = IsPureNodeEvent(run, item) || IsTopologyNodeEvent(run, item) || IsWorkspaceActionEvent(run, item)
             ? CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes
             : CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes;
         if (startsAttempt && item.TraceReservationUtf8Bytes != expectedReservation)
@@ -1984,6 +2034,17 @@ public static class CustomLoopRunValidator
         }
 
         return run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal)?.Descriptor.Kind == GovernedLoopNodeKind.Wait;
+    }
+
+    private static bool IsWorkspaceActionEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        if (item.SequentialNodeEvidence is not { ActivationOrdinal: var activationOrdinal })
+        {
+            return false;
+        }
+
+        var descriptor = run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal)?.Descriptor;
+        return WorkspaceActionNodeDescriptors.TryResolve(descriptor, out _);
     }
 
     private static bool ToolPhaseMatchesEventKind(CustomLoopToolEvidencePhase phase, CustomLoopRunEventKind kind)
@@ -2372,9 +2433,9 @@ public static class CustomLoopRunValidator
         ValidateArtifactId(output.StepId, $"{field}.stepId", errors);
         if (run.AdmittedDefinition?.InferenceSteps is { } steps
             && !steps.Any(step => string.Equals(step.Id, output.StepId, StringComparison.Ordinal))
-            && !HasCompletedPureNodeOutcome(run, output.StepId))
+            && !HasCompletedRetainedNodeOutcome(run, output.StepId))
         {
-            Add(errors, "unknown_retained_step", $"{field}.stepId", "Retained output step id must exist in the admitted legacy definition or identify an exact completed pure node in the pinned sequential frontier.");
+            Add(errors, "unknown_retained_step", $"{field}.stepId", "Retained output step id must exist in the admitted legacy definition or identify an exact completed retained-output node in the pinned sequential frontier.");
         }
 
         if (output.Iteration < 1 || output.Iteration > run.Checkpoint.Iteration)
@@ -2386,7 +2447,7 @@ public static class CustomLoopRunValidator
         ValidateContentHash(output.Content, output.ContentHash, $"{field}.contentHash", errors);
     }
 
-    private static bool HasCompletedPureNodeOutcome(CustomLoopRunRecord run, string stepId)
+    private static bool HasCompletedRetainedNodeOutcome(CustomLoopRunRecord run, string stepId)
     {
         if (run.SequentialAdapterBinding is null || run.Frontier is null)
         {
@@ -2396,7 +2457,6 @@ public static class CustomLoopRunValidator
         return run.Events?.Any(item => item is
         {
             Kind: CustomLoopRunEventKind.NodeAttemptCompleted,
-            PureNodeOutcomeJson: not null,
             SequentialNodeEvidence:
             {
                 Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
@@ -2408,7 +2468,11 @@ public static class CustomLoopRunValidator
             && run.Frontier.Payload.Nodes.ElementAtOrDefault(evidence.ActivationOrdinal) is { } activation
             && activation.ActivationOrdinal == evidence.ActivationOrdinal
             && activation.VisitOrdinal == evidence.VisitOrdinal
-            && activation.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate
+            && (activation.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate
+                && item.PureNodeOutcomeJson is not null
+                || activation.Descriptor.Kind == GovernedLoopNodeKind.Action
+                && item.CanonicalOutput is not null
+                && WorkspaceActionResultContract.TryParse(item.CanonicalOutput, out _))
             && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
             && CustomLoopSequentialOutcomeArtifactHash.Matches(item)) == true;
     }

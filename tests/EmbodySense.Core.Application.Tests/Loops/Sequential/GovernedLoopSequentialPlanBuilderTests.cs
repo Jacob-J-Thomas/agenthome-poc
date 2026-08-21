@@ -3,11 +3,68 @@ using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
+using EmbodySense.Core.Common.LocalWorkspace.Actions.Models;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 
 public sealed class GovernedLoopSequentialPlanBuilderTests
 {
+    [Fact]
+    public void Exact_workspace_action_builds_without_granting_inference_workspace_tools()
+    {
+        var artifact = GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact();
+
+        var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, result.Status);
+        Assert.Equal(
+            [
+                GovernedLoopSequentialNodeDescriptors.ManualTrigger,
+                GovernedLoopSequentialNodeDescriptors.ProviderInference,
+                GovernedLoopSequentialNodeDescriptors.WorkspaceWrite,
+                GovernedLoopSequentialNodeDescriptors.SuccessExit,
+            ],
+            result.Plan!.Nodes.Select(node => node.Descriptor));
+        var inference = artifact.Graph.Nodes.Single(node => node.Id == "infer");
+        Assert.DoesNotContain(GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId, inference.AuthorityCeiling.CapabilityIds);
+        var projection = GovernedLoopSequentialLegacyDefinitionProjector.ProjectPrepared(
+            "operation-action",
+            GovernedLoopSequentialApplicationTestFixture.InvocationSnapshot(artifact),
+            result.Plan,
+            artifact);
+        Assert.Equal(GovernedLoopSequentialLegacyDefinitionProjectionStatus.Ready, projection.Status);
+        Assert.Empty(projection.Definition!.ToolAssignments);
+    }
+
+    [Fact]
+    public void Workspace_action_descriptor_input_and_authority_substitutions_fail_closed()
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact().Graph;
+        var action = source.Nodes.Single(node => node.Id == "workspace-action");
+        var wrongDescriptor = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == action.Id
+                ? node with { Descriptor = GovernedLoopSequentialNodeDescriptors.WorkspaceDelete }
+                : node).ToArray());
+        var missingAuthority = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == action.Id
+                ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([]) }
+                : node).ToArray());
+        var callerEvidence = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            source,
+            nodes: source.Nodes.Select(node => node.Id == action.Id
+                ? node with { Parameters = new Dictionary<string, string>(node.Parameters) { ["forged"] = "before-forged" } }
+                : node).ToArray());
+
+        Assert.All(new[] { wrongDescriptor, missingAuthority, callerEvidence }, artifact =>
+        {
+            var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
+            Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, result.Status);
+            Assert.Equal("$.graph.nodes", result.FailurePath);
+        });
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(5)]

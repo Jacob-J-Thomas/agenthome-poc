@@ -47,7 +47,7 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
     {
         try
         {
-            return await ExecuteCoreAsync(request, cancellationToken).ConfigureAwait(false);
+            return await ExecuteCoreAsync(request, allowPreparationRefresh: true, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -64,6 +64,7 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
 
     private async Task<GovernedLoopEffectAttemptExecutionResult> ExecuteCoreAsync(
         GovernedLoopEffectAttemptRequest request,
+        bool allowPreparationRefresh,
         CancellationToken cancellationToken)
     {
         if (!IsStructurallyValid(request))
@@ -122,7 +123,13 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
             return Result(GovernedLoopEffectAttemptExecutionStatus.InvalidRequest, null, "The exact effect intent could not be constructed canonically.");
         }
 
-        var begun = await BeginAsync(prepared, cancellationToken).ConfigureAwait(false);
+        var begun = await BeginAsync(preparation, prepared, cancellationToken).ConfigureAwait(false);
+        if (begun.Status == GovernedLoopEffectAttemptStoreStatus.PreparationExpired)
+        {
+            return allowPreparationRefresh
+                ? await ExecuteCoreAsync(request, allowPreparationRefresh: false, cancellationToken).ConfigureAwait(false)
+                : Result(GovernedLoopEffectAttemptExecutionStatus.EvidenceUnavailable, null, "The server-derived preparation expired before intent publication.");
+        }
         return await ContinueBegunAsync(request, preparation, prepared, begun, cancellationToken).ConfigureAwait(false);
     }
 
@@ -185,7 +192,7 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
         }
         if (current.Payload.Phase == GovernedLoopEffectPhase.DispatchBoundaryReached)
         {
-            return await RequireReconciliationAsync(current, lease, cancellationToken).ConfigureAwait(false);
+            return await ProbeCrossedAsync(request, input, current, lease, cancellationToken).ConfigureAwait(false);
         }
         if (current.Payload.Phase != GovernedLoopEffectPhase.IntentPrepared)
         {
@@ -270,7 +277,7 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
                 && begun.Attempt.DispatchAuthorityEvidenceHash is not null)
         {
             return begun.Attempt.Payload.Phase == GovernedLoopEffectPhase.DispatchBoundaryReached
-                ? await RequireReconciliationAsync(begun.Attempt, lease, cancellationToken).ConfigureAwait(false)
+                ? await ProbeCrossedAsync(request, preparation.Input, begun.Attempt, lease, cancellationToken).ConfigureAwait(false)
                 : await MarkPriorAuthorityAmbiguousAsync(begun.Attempt, begun.Attempt.DispatchAuthorityEvidenceHash, lease, cancellationToken).ConfigureAwait(false);
         }
         return begun.Attempt.Payload.Phase == GovernedLoopEffectPhase.IntentPrepared
@@ -337,7 +344,8 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
                         request.EffectGeneration,
                         preparation.Input,
                         preparation.Evidence.TargetFingerprint,
-                        preparation.Evidence.PreconditionEvidenceHash);
+                        preparation.Evidence.PreconditionEvidenceHash,
+                        preparation.Evidence.BeforeEvidenceId);
                     try
                     {
                         return await preparation.Operation.ExecuteAsync(invocation, boundary, authorityToken).ConfigureAwait(false);
@@ -452,6 +460,73 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
             return await RequireReconciliationAsync(current, lease, CancellationToken.None).ConfigureAwait(false);
         }
         return await CommitObservedAsync(stored.Attempt, lease, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<GovernedLoopEffectAttemptExecutionResult> ProbeCrossedAsync(
+        GovernedLoopEffectAttemptRequest request,
+        GovernedActuatorInputEvidence input,
+        GovernedLoopEffectAttempt current,
+        IGovernedLoopEffectAttemptLease lease,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var exact = await ResolveAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!IsCoherentCatalogResolution(exact, request)
+                || exact.Status != GovernedActuatorCatalogResolutionStatus.Active
+                || exact.Descriptor is null
+                || exact.Operation is not IGovernedActuatorOutcomeProbe probe
+                || !string.Equals(exact.Descriptor.ContentHash, current.OperationDescriptorHash, StringComparison.Ordinal))
+            {
+                return await RequireReconciliationAsync(current, lease, cancellationToken).ConfigureAwait(false);
+            }
+
+            var invocation = new GovernedActuatorInvocation(
+                exact.Descriptor,
+                request.EffectId,
+                request.IdempotencyOperationId,
+                request.EffectGeneration,
+                input,
+                current.TargetFingerprint,
+                current.PreconditionEvidenceHash,
+                current.BeforeEvidenceId);
+            var result = await probe.ProbeAsync(invocation, cancellationToken).ConfigureAwait(false);
+            if (result.Posture != GovernedActuatorProbePosture.OutcomeObserved
+                || result.Outcome is null)
+            {
+                return await RequireReconciliationAsync(current, lease, cancellationToken).ConfigureAwait(false);
+            }
+            if (!TryGetUtcNow(current.Payload.UpdatedAtUtc, out var observedAtUtc))
+            {
+                return Result(
+                    GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired,
+                    current,
+                    "The external outcome was proved by retained evidence, but trusted time was unavailable to adopt it.");
+            }
+            var observed = GovernedLoopEffectAttemptContract.Advance(
+                current,
+                GovernedLoopEffectPhase.OutcomeObserved,
+                result.Outcome.Outcome,
+                GovernedLoopEffectEvidenceStatus.Complete,
+                result.Outcome.OutcomeEvidenceId,
+                result.Outcome.AfterEvidenceId,
+                observedAtUtc);
+            var stored = await ExchangeAsync(current.ContentHash, observed, lease, cancellationToken).ConfigureAwait(false);
+            if (stored.Status is not (GovernedLoopEffectAttemptStoreStatus.Created or GovernedLoopEffectAttemptStoreStatus.Replayed)
+                || stored.Attempt is null)
+            {
+                return await RequireReconciliationAsync(current, lease, CancellationToken.None).ConfigureAwait(false);
+            }
+            return await CommitObservedAsync(stored.Attempt, lease, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return await RequireReconciliationAsync(current, lease, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            return await RequireReconciliationAsync(current, lease, CancellationToken.None).ConfigureAwait(false);
+        }
     }
 
     private async Task<GovernedLoopEffectAttemptExecutionResult> CommitObservedAsync(
@@ -900,12 +975,26 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
     }
 
     private async Task<GovernedLoopEffectAttemptStoreResult> BeginAsync(
+        GovernedActuatorDispatchPreparation preparation,
         GovernedLoopEffectAttempt prepared,
         CancellationToken cancellationToken)
     {
         try
         {
-            return await _store.BeginAsync(prepared, cancellationToken).ConfigureAwait(false)
+            if (preparation.Operation is not IGovernedActuatorPreparationValidator validator)
+            {
+                return await _store.BeginAsync(prepared, cancellationToken).ConfigureAwait(false)
+                    ?? new GovernedLoopEffectAttemptStoreResult(GovernedLoopEffectAttemptStoreStatus.Unavailable);
+            }
+            if (_store is not IGovernedLoopEffectAttemptPreparationClaimStore claimStore)
+            {
+                return new GovernedLoopEffectAttemptStoreResult(GovernedLoopEffectAttemptStoreStatus.Unavailable);
+            }
+            return await claimStore.BeginWithPreparationClaimAsync(
+                    prepared,
+                    token => validator.IsPreparationCurrentAsync(preparation.Input, preparation.Evidence, token),
+                    cancellationToken)
+                .ConfigureAwait(false)
                 ?? new GovernedLoopEffectAttemptStoreResult(GovernedLoopEffectAttemptStoreStatus.Unavailable);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

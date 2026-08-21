@@ -9,59 +9,6 @@ namespace EmbodySense.Core.Clients.Tests.LocalWorkspace;
 public sealed class LocalWorkspaceClientTests
 {
     [Fact]
-    public async Task AppendAsync_routes_the_exact_target_commit_through_the_mutation_boundary()
-    {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var target = workspace.File("workspace", "shared", "note.txt");
-        var boundary = new RecordingWorkspaceMutationCommitBoundary();
-        var client = new LocalWorkspaceClient(paths, boundary);
-
-        await client.AppendAsync(target, "one");
-        await client.AppendAsync(target, " two");
-
-        Assert.Equal("one two", await File.ReadAllTextAsync(target));
-        Assert.Collection(boundary.AffectedPaths, paths => Assert.Equal([target], paths), paths => Assert.Equal([target], paths));
-    }
-
-    [Fact]
-    public async Task WriteAsync_routes_the_exact_target_commit_through_the_mutation_boundary()
-    {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var target = workspace.File("workspace", "shared", "note.txt");
-        var boundary = new RecordingWorkspaceMutationCommitBoundary();
-        var client = new LocalWorkspaceClient(paths, boundary);
-
-        await client.WriteAsync(target, "replacement");
-
-        Assert.Equal("replacement", await File.ReadAllTextAsync(target));
-        Assert.Equal([target], Assert.Single(boundary.AffectedPaths));
-    }
-
-    [Fact]
-    public async Task DeleteAsync_routes_the_exact_file_and_directory_commits_through_the_mutation_boundary()
-    {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var file = workspace.File("workspace", "shared", "note.txt");
-        var directory = workspace.File("workspace", "generated");
-        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-        Directory.CreateDirectory(directory);
-        await File.WriteAllTextAsync(file, "delete");
-        await File.WriteAllTextAsync(Path.Combine(directory, "child.txt"), "delete");
-        var boundary = new RecordingWorkspaceMutationCommitBoundary();
-        var client = new LocalWorkspaceClient(paths, boundary);
-
-        await client.DeleteAsync(file);
-        await client.DeleteAsync(directory);
-
-        Assert.False(File.Exists(file));
-        Assert.False(Directory.Exists(directory));
-        Assert.Collection(boundary.AffectedPaths, paths => Assert.Equal([file], paths), paths => Assert.Equal([directory], paths));
-    }
-
-    [Fact]
     public async Task ListAsync_orders_directories_before_files()
     {
         using var workspace = new TestWorkspace();
@@ -70,7 +17,7 @@ public sealed class LocalWorkspaceClientTests
         Directory.CreateDirectory(workspace.File("workspace", "shared", "notes"));
         await File.WriteAllTextAsync(Path.Combine(target, "b.txt"), "file");
 
-        var result = await new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).ListAsync(target);
+        var result = await new LocalWorkspaceClient(paths).ListAsync(target);
 
         Assert.Equal("notes" + Path.DirectorySeparatorChar + Environment.NewLine + "b.txt", result.Text);
         Assert.Equal(2, result.Metadata["entry_count"]);
@@ -88,7 +35,7 @@ public sealed class LocalWorkspaceClientTests
             await File.WriteAllTextAsync(Path.Combine(target, $"note-{index:000}.txt"), "file");
         }
 
-        var result = await new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).ListAsync(target);
+        var result = await new LocalWorkspaceClient(paths).ListAsync(target);
 
         Assert.Contains("note-001.txt", result.Text, StringComparison.Ordinal);
         Assert.Contains("note-500.txt", result.Text, StringComparison.Ordinal);
@@ -108,7 +55,7 @@ public sealed class LocalWorkspaceClientTests
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         await File.WriteAllTextAsync(file, "alpha" + Environment.NewLine + "needle");
 
-        var result = await new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).SearchAsync(file, "needle");
+        var result = await new LocalWorkspaceClient(paths).SearchAsync(file, "needle");
 
         Assert.Contains("workspace" + Path.DirectorySeparatorChar + "shared" + Path.DirectorySeparatorChar + "note.txt:2: needle", result.Text);
         Assert.Equal(1, result.Metadata["match_count"]);
@@ -123,7 +70,7 @@ public sealed class LocalWorkspaceClientTests
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         await File.WriteAllTextAsync(file, new string('a', 121_000));
 
-        var result = await new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).ReadAsync(file);
+        var result = await new LocalWorkspaceClient(paths).ReadAsync(file);
 
         Assert.Contains("[truncated after", result.Text);
         Assert.Equal(true, result.Metadata["truncated"]);
@@ -138,7 +85,7 @@ public sealed class LocalWorkspaceClientTests
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         await File.WriteAllTextAsync(file, new string('a', 119_999) + "\U0001F600" + "tail");
 
-        var result = await new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).ReadAsync(file);
+        var result = await new LocalWorkspaceClient(paths).ReadAsync(file);
 
         _ = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetBytes(result.Text);
         Assert.DoesNotContain("\uD83D", result.Text, StringComparison.Ordinal);
@@ -155,7 +102,7 @@ public sealed class LocalWorkspaceClientTests
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         await File.WriteAllBytesAsync(file, [65, 0, 66]);
 
-        var exception = await Assert.ThrowsAsync<IOException>(() => new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).ReadAsync(file));
+        var exception = await Assert.ThrowsAsync<IOException>(() => new LocalWorkspaceClient(paths).ReadAsync(file));
 
         Assert.Contains("binary", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -169,7 +116,7 @@ public sealed class LocalWorkspaceClientTests
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         await File.WriteAllLinesAsync(file, Enumerable.Range(1, 220).Select(index => $"needle {index}"));
 
-        var result = await new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).SearchAsync(file, "needle");
+        var result = await new LocalWorkspaceClient(paths).SearchAsync(file, "needle");
 
         Assert.Contains("[truncated after", result.Text);
         Assert.Equal(200, result.Metadata["match_count"]);
@@ -185,7 +132,7 @@ public sealed class LocalWorkspaceClientTests
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         await File.WriteAllBytesAsync(file, new byte[1_048_577]);
 
-        var result = await new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).SearchAsync(workspace.File("workspace", "shared"), "needle");
+        var result = await new LocalWorkspaceClient(paths).SearchAsync(workspace.File("workspace", "shared"), "needle");
 
         Assert.Contains("(no matches)", result.Text);
         Assert.Equal(1, result.Metadata["skipped_large_files"]);
@@ -203,7 +150,7 @@ public sealed class LocalWorkspaceClientTests
         await File.WriteAllTextAsync(note, "needle remains searchable");
         using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
 
-        var result = await new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).SearchAsync(workspace.RootPath, "needle");
+        var result = await new LocalWorkspaceClient(paths).SearchAsync(workspace.RootPath, "needle");
 
         Assert.Contains("workspace" + Path.DirectorySeparatorChar + "shared" + Path.DirectorySeparatorChar + "note.txt:1: needle remains searchable", result.Text);
         Assert.Equal(1, result.Metadata["skipped_internal_files"]);
@@ -222,7 +169,7 @@ public sealed class LocalWorkspaceClientTests
             await File.WriteAllTextAsync(Path.Combine(directory, $"note-{index:000}.txt"), "alpha");
         }
 
-        var result = await new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).SearchAsync(directory, "needle");
+        var result = await new LocalWorkspaceClient(paths).SearchAsync(directory, "needle");
 
         Assert.Contains("[truncated after 500 files", result.Text);
         Assert.Equal(500, result.Metadata["files_scanned"]);
@@ -238,7 +185,7 @@ public sealed class LocalWorkspaceClientTests
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         await File.WriteAllTextAsync(file, "needle " + new string('x', 600));
 
-        var result = await new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).SearchAsync(file, "needle");
+        var result = await new LocalWorkspaceClient(paths).SearchAsync(file, "needle");
 
         Assert.Contains("[line truncated]", result.Text);
         Assert.Equal(1, result.Metadata["match_count"]);
@@ -253,7 +200,7 @@ public sealed class LocalWorkspaceClientTests
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         await File.WriteAllTextAsync(file, "needle " + new string('x', 492) + "\U0001F600" + "tail");
 
-        var result = await new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).SearchAsync(file, "needle");
+        var result = await new LocalWorkspaceClient(paths).SearchAsync(file, "needle");
 
         _ = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetBytes(result.Text);
         Assert.DoesNotContain("\uD83D", result.Text, StringComparison.Ordinal);
@@ -269,7 +216,7 @@ public sealed class LocalWorkspaceClientTests
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         await File.WriteAllLinesAsync(file, Enumerable.Range(1, 220).Select(index => $"needle {index} " + new string('x', 600)));
 
-        var result = await new LocalWorkspaceClient(paths, new ImmediateWorkspaceMutationCommitBoundary()).SearchAsync(file, "needle");
+        var result = await new LocalWorkspaceClient(paths).SearchAsync(file, "needle");
 
         Assert.True(result.Text.Length < ToolResultRetentionLimits.MaxOutputCharacters);
         Assert.EndsWith("[search output truncated to 120000 characters]", result.Text, StringComparison.Ordinal);

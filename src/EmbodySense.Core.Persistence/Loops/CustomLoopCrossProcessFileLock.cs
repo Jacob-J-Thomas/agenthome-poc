@@ -16,16 +16,23 @@ internal static class CustomLoopCrossProcessFileLock
     public static bool TryAcquire(FileStream ownership)
     {
         ArgumentNullException.ThrowIfNull(ownership);
+        return TryAcquire(ownership.SafeFileHandle);
+    }
+
+    /// <summary>Attempts to acquire an exclusive advisory lock on one retained native handle.</summary>
+    public static bool TryAcquire(SafeFileHandle ownership)
+    {
+        ArgumentNullException.ThrowIfNull(ownership);
         if (OperatingSystem.IsWindows())
         {
             var overlapped = new Overlapped();
-            return LockFileEx(ownership.SafeFileHandle, LockFileExclusive | LockFileFailImmediately, 0, 1, 0, ref overlapped);
+            return LockFileEx(ownership, LockFileExclusive | LockFileFailImmediately, 0, 1, 0, ref overlapped);
         }
 
         if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
         {
             const int ExclusiveNonblocking = 2 | 4;
-            var descriptor = ownership.SafeFileHandle.DangerousGetHandle().ToInt32();
+            var descriptor = ownership.DangerousGetHandle().ToInt32();
             return Flock(descriptor, ExclusiveNonblocking) == 0;
         }
 
