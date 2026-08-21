@@ -20,8 +20,8 @@ internal sealed class BrowserExactModelProfileResolver(
         cancellationToken.ThrowIfCancellationRequested();
         if (!string.Equals(request.Primary.Metadata.ContentHash, metadata.ContentHash, StringComparison.Ordinal)
             || !string.Equals(request.Primary.ProfileSourceRevisionHash, sourceRevisionHash, StringComparison.Ordinal)
-            || !request.Reservation.OutputTokens.IsBounded
-            || request.Reservation.OutputTokens.Maximum != metadata.MaximumOutputTokens)
+            || request.Reservation.OutputTokens is { IsBounded: true } output
+                && output.Maximum != metadata.MaximumOutputTokens)
         {
             return new ExactModelProfileInferenceClientResolution(ExactModelProfileInferenceClientResolutionStatus.Ineligible, null);
         }
