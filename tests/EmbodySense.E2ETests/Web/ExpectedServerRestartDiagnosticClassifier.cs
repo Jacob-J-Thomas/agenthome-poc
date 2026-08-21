@@ -25,17 +25,21 @@ internal static class ExpectedServerRestartDiagnosticClassifier
         string? source,
         string? text,
         string? url,
+        string? correlatedRequestUrl,
         string targetAuthority)
     {
         if ((!expectedServerRestart && !beganDuringOutage)
             || !string.Equals(source, "network", StringComparison.Ordinal)
-            || !ContainsTargetAuthority(text, targetAuthority) && !ContainsTargetAuthority(url, targetAuthority))
+            || !ContainsTargetAuthority(text, targetAuthority)
+                && !ContainsTargetAuthority(url, targetAuthority)
+                && !ContainsTargetAuthority(correlatedRequestUrl, targetAuthority))
         {
             return false;
         }
 
         var isConnectionReset = text?.Contains("ERR_CONNECTION_RESET", StringComparison.OrdinalIgnoreCase) == true;
-        var expectedRoute = IsExpectedServerRestartUrl(url, targetAuthority);
+        var expectedRoute = IsExpectedServerRestartUrl(url, targetAuthority)
+            || IsExpectedServerRestartUrl(correlatedRequestUrl, targetAuthority);
         var expected = text?.Contains("401 (Unauthorized)", StringComparison.OrdinalIgnoreCase) == true
             || (text?.Contains("WebSocket", StringComparison.OrdinalIgnoreCase) == true || expectedRoute)
             && (text?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true

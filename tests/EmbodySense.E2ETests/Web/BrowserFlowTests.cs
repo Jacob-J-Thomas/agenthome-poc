@@ -53,12 +53,16 @@ public sealed class BrowserFlowTests
     {
         const string TargetAuthority = "127.0.0.1:5001";
 
-        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://127.0.0.1:5001/hubs/session", TargetAuthority));
-        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/api/session", TargetAuthority));
-        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/", TargetAuthority));
-        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://example.test/hubs/session", TargetAuthority));
-        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "console", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://127.0.0.1:5001/hubs/session", TargetAuthority));
-        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "500 (Internal Server Error)", "https://127.0.0.1:5001/api/session", TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://127.0.0.1:5001/hubs/session", null, TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/api/session", null, TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/", null, TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://example.test/hubs/session", null, TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "console", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://127.0.0.1:5001/hubs/session", null, TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "500 (Internal Server Error)", "https://127.0.0.1:5001/api/session", null, TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", null, "ws://127.0.0.1:5001/hubs/session", TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/", "https://127.0.0.1:5001/api/session", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", null, "https://127.0.0.1:5001/api/loops", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", null, "ws://example.test/hubs/session", TargetAuthority));
     }
 
     [InstalledBrowserFact]
@@ -1513,7 +1517,11 @@ public sealed class BrowserFlowTests
             var source = entry.TryGetProperty("source", out var sourceValue) ? sourceValue.GetString() : null;
             var text = entry.TryGetProperty("text", out var textValue) ? textValue.GetString() : null;
             var url = entry.TryGetProperty("url", out var urlValue) ? urlValue.GetString() : null;
-            if (!string.Equals(source, "network", StringComparison.Ordinal) || !ContainsTargetAuthority(text) && !ContainsTargetAuthority(url))
+            var correlatedRequestUrl = requestId is not null && _requestUrls.TryGetValue(requestId, out var capturedRequestUrl)
+                ? capturedRequestUrl
+                : null;
+            if (!string.Equals(source, "network", StringComparison.Ordinal)
+                || !ContainsTargetAuthority(text) && !ContainsTargetAuthority(url) && !ContainsTargetAuthority(correlatedRequestUrl))
             {
                 return false;
             }
@@ -1524,6 +1532,7 @@ public sealed class BrowserFlowTests
                 source,
                 text,
                 url,
+                correlatedRequestUrl,
                 _targetAuthority);
             if (expected && requestId is not null)
             {
