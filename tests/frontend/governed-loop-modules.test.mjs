@@ -8,6 +8,7 @@ import {
   compatibleBindings,
   configureGraphModelRouting,
   configureInferenceModelRouting,
+  configureNodeRetryPolicy,
   configureNodeParameter,
   connectBinding,
   connectControl,
@@ -21,6 +22,7 @@ import {
   mutationInput,
   moveOrderedProfileSelection,
   removeGraphNode,
+  selectHydratedNodeId,
   updateOrderedProfileSelection,
 } from "../../src/EmbodySense.Web/wwwroot/governed-graph-authoring.js";
 import { projectFrontier } from "../../src/EmbodySense.Web/wwwroot/frontier-projection.js";
@@ -464,6 +466,17 @@ test("durable graph hydration follows the exact lifecycle head and strips derive
   assert.equal(Object.hasOwn(candidate, "revisionReference"), false);
 });
 
+test("authoritative graph hydration preserves a still-valid node selection", () => {
+  const nodes = [{ id: "fail-terminal" }, { id: "provider-inference" }];
+
+  assert.equal(
+    selectHydratedNodeId(nodes, "provider-inference"),
+    "provider-inference",
+  );
+  assert.equal(selectHydratedNodeId(nodes, "removed-node"), "fail-terminal");
+  assert.equal(selectHydratedNodeId([], "provider-inference"), null);
+});
+
 test("graph model routing keeps only typed authoring intent and scopes node overrides to Inference", () => {
   const graph = createGraphCandidate({
     graphId: "graph-1",
@@ -570,6 +583,80 @@ test("graph model routing keeps only typed authoring intent and scopes node over
     clientShapeErrors({ ...graph, defaultModelRoutingPolicy: null }).some(
       (item) => item.code === "model-routing-default-invalid",
     ),
+  );
+});
+
+test("retry authoring accepts only exact server-authenticated policies on fallible nodes", () => {
+  const policy = {
+    schemaVersion: 1,
+    policyId: "retry-infer",
+    nodeId: "infer",
+    failureClasses: ["RetryableNoEffect"],
+    serverCodes: [],
+    maximumAttempts: 3,
+    perAttemptTimeoutMilliseconds: 1000,
+    maximumElapsedMilliseconds: 10000,
+    backoffStrategy: "Fixed",
+    initialDelayMilliseconds: 250,
+    maximumDelayMilliseconds: 250,
+    jitterStrategy: "None",
+    maximumJitterMilliseconds: 0,
+    maximumTokens: null,
+    maximumToolCalls: null,
+    maximumCostMicrounits: null,
+    maximumCostCurrency: null,
+    maximumResourceUnits: null,
+    contentHash: hash,
+  };
+  const graph = {
+    graphId: "graph-1",
+    revisionId: "revision-1",
+    nodes: [
+      {
+        id: "trigger",
+        descriptor: { kind: "trigger", typeId: "manual-trigger", version: 1 },
+      },
+      {
+        id: "infer",
+        descriptor: {
+          kind: "inference",
+          typeId: "provider-inference",
+          version: 1,
+        },
+      },
+    ],
+  };
+
+  const configured = configureNodeRetryPolicy(graph, "infer", policy);
+  assert.deepEqual(configured.nodes[1].retryPolicy, policy);
+  assert.notEqual(configured.nodes[1].retryPolicy, policy);
+  assert.equal(
+    configureNodeRetryPolicy(graph, "trigger", {
+      ...policy,
+      nodeId: "trigger",
+    }),
+    null,
+  );
+  assert.equal(
+    configureNodeRetryPolicy(graph, "infer", {
+      ...policy,
+      contentHash: "caller-authored",
+    }),
+    null,
+  );
+  assert.equal(clientShapeErrors(configured).length, 0);
+  assert.equal(
+    clientShapeErrors({
+      ...configured,
+      nodes: [
+        { ...configured.nodes[1], retryPolicy: { ...policy, nodeId: "other" } },
+      ],
+    }).some((item) => item.code === "node-retry-policy-invalid"),
+    true,
+  );
+  assert.equal(
+    configureNodeRetryPolicy(configured, "infer", null).nodes[1].retryPolicy,
+    null,
   );
 });
 

@@ -3,12 +3,72 @@ using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Common.Tests;
 
 public sealed class GovernedLoopGraphNormalizerTests
 {
+    [Fact]
+    public void Normalize_authenticates_retry_policy_scope_and_includes_it_in_executable_identity()
+    {
+        var baseline = GovernedLoopGraphNormalizer.Normalize(Candidate());
+        var policy = GovernedLoopRetryContract.CreatePolicy(
+            "retry-infer",
+            "infer",
+            [GovernedLoopFailureClass.DispatchProvedNotStarted],
+            [],
+            3,
+            1_000,
+            10_000,
+            GovernedLoopRetryBackoffStrategy.Fixed,
+            250,
+            250,
+            GovernedLoopRetryJitterStrategy.None,
+            0);
+        var nodes = GovernedLoopGraphTestFixture.Nodes();
+        nodes[1] = new GovernedLoopNodeDefinition(
+            nodes[1].Id,
+            nodes[1].Descriptor,
+            nodes[1].Ports,
+            nodes[1].AuthorityCeiling,
+            nodes[1].Parameters,
+            nodes[1].ModelRoutingPolicy,
+            nodes[1].AuthoredInputDataClasses,
+            policy);
+
+        var valid = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: nodes));
+        nodes[0] = new GovernedLoopNodeDefinition(
+            nodes[0].Id,
+            nodes[0].Descriptor,
+            nodes[0].Ports,
+            nodes[0].AuthorityCeiling,
+            nodes[0].Parameters,
+            nodes[0].ModelRoutingPolicy,
+            nodes[0].AuthoredInputDataClasses,
+            GovernedLoopRetryContract.CreatePolicy(
+                "retry-trigger",
+                "trigger",
+                [GovernedLoopFailureClass.DispatchProvedNotStarted],
+                [],
+                2,
+                1_000,
+                10_000,
+                GovernedLoopRetryBackoffStrategy.None,
+                0,
+                0,
+                GovernedLoopRetryJitterStrategy.None,
+                0));
+        var invalid = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: nodes));
+
+        Assert.True(valid.IsValid);
+        Assert.NotEqual(baseline.Graph!.ExecutableHash, valid.Graph!.ExecutableHash);
+        Assert.Contains(invalid.Errors, error => error.Code == "node.retry-policy.invalid" && error.Element.Id == "trigger");
+    }
+
     [Fact]
     public void Normalize_rejects_model_routing_outside_authority_and_malformed_authored_classes_with_structured_errors()
     {

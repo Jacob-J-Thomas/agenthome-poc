@@ -5,6 +5,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Inference.Profiles;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Graph;
 
@@ -317,10 +318,18 @@ public sealed class GovernedLoopGraphDefinition
                 ValidateAuthoredInputDataClasses(node.AuthoredInputDataClasses, node.Id, nameof(nodes));
             }
 
+            if (node.RetryPolicy is not null
+                && (!GovernedLoopRetryContract.IsValid(node.RetryPolicy)
+                    || !string.Equals(node.RetryPolicy.NodeId, node.Id, StringComparison.Ordinal)
+                    || node.Descriptor.Kind is GovernedLoopNodeKind.Trigger or GovernedLoopNodeKind.Wait or GovernedLoopNodeKind.HumanReview or GovernedLoopNodeKind.HumanInput or GovernedLoopNodeKind.Exit or GovernedLoopNodeKind.Fail))
+            {
+                throw new ArgumentException($"Node `{node.Id}` has an invalid or inapplicable retry policy.", nameof(nodes));
+            }
+
             canonical.Add(node with
             {
                 Ports = Array.AsReadOnly(ports.OrderBy(port => port.Id, StringComparer.Ordinal).ToArray()),
-                Parameters = new ReadOnlyDictionary<string, string>(parameters)
+                Parameters = new ReadOnlyDictionary<string, string>(parameters),
             });
         }
 

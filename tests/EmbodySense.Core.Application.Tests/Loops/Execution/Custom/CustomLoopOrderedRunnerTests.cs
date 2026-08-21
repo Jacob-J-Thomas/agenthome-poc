@@ -27,6 +27,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
+using EmbodySense.Core.Application.Loops.Retry;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Actions;
 using EmbodySense.Core.Application.Loops.Sequential.Actions.Models;
@@ -7007,6 +7008,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
         GovernedLoopFirstBoundRunCompletionBoundary? firstBoundRunCompletionBoundary = null,
         bool composeFirstBoundRunCompletionBoundary = true,
         IGovernedLoopWaitNodeExecutor? waitNodeExecutor = null,
+        IGovernedLoopRetryNodeExecutor? retryNodeExecutor = null,
         IGovernedLoopWorkspaceActionExecutor? workspaceActionExecutor = null,
         IGovernedLoopCommandActionExecutor? commandActionExecutor = null,
         IGovernedLoopFailureClassifier? failureClassifier = null)
@@ -7028,6 +7030,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
                     timeProvider ?? new FixedTimeProvider(_now))
                 : null,
             waitNodeExecutor: waitNodeExecutor,
+            retryNodeExecutor: retryNodeExecutor,
             workspaceActionExecutor: workspaceActionExecutor,
             commandActionExecutor: commandActionExecutor,
             failureClassifier: failureClassifier);

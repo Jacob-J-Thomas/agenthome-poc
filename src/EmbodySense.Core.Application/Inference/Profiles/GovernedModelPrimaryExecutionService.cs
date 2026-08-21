@@ -96,11 +96,18 @@ public sealed class GovernedModelPrimaryExecutionService : IGovernedModelPrimary
         }
 
         var node = matchingNodes[0];
+        if (!GovernedModelBudgetPolicy.TryRestrictPerAttempt(node.Requirements.Budget, request.Admission.RetryUsageCeiling, out var effectiveBudget))
+        {
+            return ResultWithNotStartedProof(
+                admitted,
+                GovernedModelAttemptAdmissionStatus.Invalid,
+                await ProveNotStartedAsync(admitted.ReservationEntry).ConfigureAwait(false));
+        }
         var resolverRequest = new ExactModelProfileInferenceClientRequest(
             admitted.Primary,
             identity,
             admitted.ReservationEntry.Reservation!,
-            node.Requirements.Budget,
+            effectiveBudget!,
             request.Admission.RoutingAdmission.ContentHash,
             request.Admission.AdmissionReceipt.ContentHash,
             identity.AuthorityEvidenceHash,

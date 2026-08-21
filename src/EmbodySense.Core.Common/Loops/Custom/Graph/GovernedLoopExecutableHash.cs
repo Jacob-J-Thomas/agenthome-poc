@@ -71,6 +71,10 @@ public static class GovernedLoopExecutableHash
             writer.WriteString("typeId", node.Descriptor.TypeId);
             writer.WriteNumber("descriptorVersion", node.Descriptor.Version);
             writer.WriteString("modelRoutingPolicyHash", node.ModelRoutingPolicy?.ContentHash);
+            if (node.RetryPolicy is { } retryPolicy)
+            {
+                writer.WriteString("retryPolicyHash", retryPolicy.ContentHash);
+            }
             writer.WritePropertyName("authoredInputDataClasses");
             if (node.AuthoredInputDataClasses is null)
             {

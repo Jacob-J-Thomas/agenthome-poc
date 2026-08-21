@@ -670,6 +670,38 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_denies_tool_dispatches_after_the_remaining_retry_tool_ceiling()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "bounded");
+        var results = new List<ToolResult>();
+        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        {
+            Assert.NotNull(broker);
+            results.Add(await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken));
+            Assert.Empty(broker.AvailableCommands);
+            results.Add(await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken));
+            return Response();
+        });
+        var request = CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]) with
+        {
+            RetryDispatchBudget = new CustomLoopRetryDispatchBudget(null, 1, null, null),
+        };
+
+        var result = await executor.ExecuteAsync(request);
+
+        Assert.Equal(2, result.ToolRequestsConsumed);
+        Assert.Collection(
+            results,
+            item => Assert.Equal(ToolExecutionOutcome.Succeeded, item.Outcome),
+            item => Assert.Equal(ToolExecutionOutcome.Denied, item.Outcome));
+        var events = await new AuditLog(paths).ReadTailAsync(100);
+        Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolExecute);
+        Assert.Contains(events, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "limit_scope") == "retry");
+    }
+
+    [Fact]
     public async Task ExecuteAsync_derives_stable_missing_tool_correlation_and_distinct_exact_intake_and_actuation_operations()
     {
         using var workspace = new TestWorkspace();

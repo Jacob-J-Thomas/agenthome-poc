@@ -16,4 +16,8 @@ public sealed record GovernedModelAttemptAdmissionRequest(
     int VisitOrdinal,
     string AttemptOperationId,
     int AttemptNumber,
-    string RequestedPrimaryPinHash);
+    string RequestedPrimaryPinHash)
+{
+    /// <summary>Gets the optional retry-derived per-attempt ceiling that narrows the admitted model reservation before transport.</summary>
+    public GovernedModelUsageCeiling? RetryUsageCeiling { get; init; }
+}

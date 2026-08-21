@@ -10,6 +10,9 @@ using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Startup.ContextualRoles;
@@ -100,7 +103,69 @@ public sealed class GovernedLoopGraphAuthoringFacade
             catalog?.SourceEvidenceId ?? string.Empty,
             Array.AsReadOnly(descriptors),
             roles,
-            modelProfiles);
+            modelProfiles,
+            RetryPolicyCatalog());
+    }
+
+    /// <summary>Canonicalizes bounded retry authoring intent and previews its finite maximum reach without granting admission.</summary>
+    /// <param name="input">The untrusted authoring values selected from the server catalog.</param>
+    /// <returns>The exact hash-authenticated policy and its conservative finite preview, or an invalid result.</returns>
+    public GovernedLoopRetryPolicyPreviewResponse PreviewRetryPolicy(GovernedLoopRetryPolicyPreviewInput? input)
+    {
+        if (input is null
+            || !TryParseFailureClasses(input.FailureClasses, out var failureClasses)
+            || !TryParseBackoff(input.BackoffStrategy, out var backoff)
+            || !TryParseJitter(input.JitterStrategy, out var jitter))
+        {
+            return InvalidRetryPreview("retry-policy-authoring-invalid");
+        }
+
+        try
+        {
+            var policy = GovernedLoopRetryContract.CreatePolicy(
+                input.PolicyId,
+                input.NodeId,
+                failureClasses!,
+                input.ServerCodes,
+                input.MaximumAttempts,
+                input.PerAttemptTimeoutMilliseconds,
+                input.MaximumElapsedMilliseconds,
+                backoff,
+                input.InitialDelayMilliseconds,
+                input.MaximumDelayMilliseconds,
+                jitter,
+                input.MaximumJitterMilliseconds,
+                input.MaximumTokens,
+                input.MaximumToolCalls,
+                input.MaximumCostMicrounits,
+                input.MaximumCostCurrency,
+                input.MaximumResourceUnits);
+            var maximumBackoff = MaximumBackoff(policy);
+            var maximumAttemptExecution = checked(policy.PerAttemptTimeoutMilliseconds * policy.MaximumAttempts);
+            var maximumReachableElapsed = Math.Min(
+                policy.MaximumElapsedMilliseconds,
+                checked(maximumBackoff + maximumAttemptExecution));
+            return new GovernedLoopRetryPolicyPreviewResponse(
+                "valid",
+                "Server canonicalization proves only finite authored bounds; runtime failure classification, current authority, usage, deadline, and dependency admission remain required.",
+                policy,
+                new GovernedLoopRetryPolicyPreviewSnapshot(
+                    policy.MaximumAttempts,
+                    policy.MaximumAttempts - 1,
+                    maximumBackoff,
+                    maximumAttemptExecution,
+                    maximumReachableElapsed,
+                    policy.MaximumTokens,
+                    policy.MaximumToolCalls,
+                    policy.MaximumCostMicrounits,
+                    policy.MaximumCostCurrency,
+                    policy.MaximumResourceUnits,
+                    true));
+        }
+        catch (Exception exception) when (exception is ArgumentException or ArithmeticException)
+        {
+            return InvalidRetryPreview("retry-policy-bounds-invalid");
+        }
     }
 
     /// <summary>Reads one exact graph aggregate without selecting a revision for the caller.</summary>
@@ -403,4 +468,108 @@ public sealed class GovernedLoopGraphAuthoringFacade
 
     private static string Token<T>(T value) where T : struct, Enum
         => JsonNamingPolicy.KebabCaseLower.ConvertName(value.ToString());
+
+    private static GovernedLoopRetryPolicyCatalogSnapshot RetryPolicyCatalog()
+        => new(
+            Enum.GetValues<GovernedLoopFailureClass>()
+                .Where(value => value is GovernedLoopFailureClass.DependencyUnavailableBeforeDispatch
+                    or GovernedLoopFailureClass.DispatchProvedNotStarted
+                    or GovernedLoopFailureClass.RetryableNoEffect
+                    or GovernedLoopFailureClass.TimeoutCancellationNoEffect)
+                .Select(Token)
+                .ToArray(),
+            [Token(GovernedLoopRetryBackoffStrategy.None), Token(GovernedLoopRetryBackoffStrategy.Fixed), Token(GovernedLoopRetryBackoffStrategy.Exponential)],
+            [Token(GovernedLoopRetryJitterStrategy.None), Token(GovernedLoopRetryJitterStrategy.DeterministicBounded)],
+            GovernedLoopRetryContractLimits.MaximumAttempts,
+            GovernedLoopRetryContractLimits.MaximumPerAttemptTimeoutMilliseconds,
+            GovernedLoopRetryContractLimits.MaximumElapsedMilliseconds,
+            GovernedLoopRetryContractLimits.MaximumDelayMilliseconds,
+            GovernedLoopRetryContractLimits.MaximumServerCodes,
+            GovernedLoopRetryContractLimits.MaximumTokens,
+            GovernedLoopRetryContractLimits.MaximumToolCalls,
+            GovernedLoopRetryContractLimits.MaximumCostMicrounits,
+            GovernedLoopRetryContractLimits.MaximumResourceUnits);
+
+    private static GovernedLoopRetryPolicyPreviewResponse InvalidRetryPreview(string reason)
+        => new("invalid", reason, null, null);
+
+    private static bool TryParseFailureClasses(
+        IReadOnlyList<string>? values,
+        out IReadOnlyList<GovernedLoopFailureClass>? failureClasses)
+    {
+        failureClasses = null;
+        if (values is null)
+        {
+            return false;
+        }
+
+        var parsed = new List<GovernedLoopFailureClass>(values.Count);
+        foreach (var value in values)
+        {
+            var failureClass = value switch
+            {
+                "dependency-unavailable-before-dispatch" => GovernedLoopFailureClass.DependencyUnavailableBeforeDispatch,
+                "dispatch-proved-not-started" => GovernedLoopFailureClass.DispatchProvedNotStarted,
+                "retryable-no-effect" => GovernedLoopFailureClass.RetryableNoEffect,
+                "timeout-cancellation-no-effect" => GovernedLoopFailureClass.TimeoutCancellationNoEffect,
+                _ => GovernedLoopFailureClass.Unknown,
+            };
+            if (failureClass == GovernedLoopFailureClass.Unknown)
+            {
+                return false;
+            }
+            parsed.Add(failureClass);
+        }
+        failureClasses = parsed;
+        return true;
+    }
+
+    private static bool TryParseBackoff(string? value, out GovernedLoopRetryBackoffStrategy strategy)
+    {
+        strategy = value switch
+        {
+            "none" => GovernedLoopRetryBackoffStrategy.None,
+            "fixed" => GovernedLoopRetryBackoffStrategy.Fixed,
+            "exponential" => GovernedLoopRetryBackoffStrategy.Exponential,
+            _ => GovernedLoopRetryBackoffStrategy.Unknown,
+        };
+        return strategy != GovernedLoopRetryBackoffStrategy.Unknown;
+    }
+
+    private static bool TryParseJitter(string? value, out GovernedLoopRetryJitterStrategy strategy)
+    {
+        strategy = value switch
+        {
+            "none" => GovernedLoopRetryJitterStrategy.None,
+            "deterministic-bounded" => GovernedLoopRetryJitterStrategy.DeterministicBounded,
+            _ => GovernedLoopRetryJitterStrategy.Unknown,
+        };
+        return strategy != GovernedLoopRetryJitterStrategy.Unknown;
+    }
+
+    private static long MaximumBackoff(GovernedLoopRetryPolicy policy)
+    {
+        var total = 0L;
+        var exponential = policy.InitialDelayMilliseconds;
+        for (var attempt = 2; attempt <= policy.MaximumAttempts; attempt++)
+        {
+            var baseDelay = policy.BackoffStrategy switch
+            {
+                GovernedLoopRetryBackoffStrategy.None => 0,
+                GovernedLoopRetryBackoffStrategy.Fixed => policy.InitialDelayMilliseconds,
+                _ => Math.Min(exponential, policy.MaximumDelayMilliseconds),
+            };
+            var withJitter = policy.JitterStrategy == GovernedLoopRetryJitterStrategy.DeterministicBounded
+                ? Math.Min(policy.MaximumDelayMilliseconds, checked(baseDelay + policy.MaximumJitterMilliseconds))
+                : baseDelay;
+            total = checked(total + withJitter);
+            if (policy.BackoffStrategy == GovernedLoopRetryBackoffStrategy.Exponential)
+            {
+                exponential = exponential > policy.MaximumDelayMilliseconds / 2
+                    ? policy.MaximumDelayMilliseconds
+                    : Math.Min(checked(exponential * 2), policy.MaximumDelayMilliseconds);
+            }
+        }
+        return total;
+    }
 }

@@ -1521,6 +1521,13 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             GovernedAdmissionRequestHash = run.SequentialAdapterBinding?.AdmissionRequestHash,
             ModelRoutingAdmission = run.SequentialAdapterBinding?.AdmissionReceipt.Evidence.ModelRoutingAdmission,
             ModelUsage = modelUsage,
+            RetrySeries = run.Events.Select(item => item.RetryState)
+                .Where(state => state is not null)
+                .GroupBy(state => state!.Identity.SeriesId, StringComparer.Ordinal)
+                .Select(group => Map(group.OrderByDescending(state => state!.StateVersion).ThenByDescending(state => state!.RecordedAtUtc).First()!))
+                .OrderBy(state => state.ActivationOrdinal)
+                .ThenBy(state => state.VisitOrdinal)
+                .ToArray(),
             ConversationPublicationDispositions = LoopRunConversationPublicationDispositionProjector.Project(run)
         };
     }
@@ -1672,8 +1679,40 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
                 runEvent.FailureEvidence.SafeDetail,
                 runEvent.FailureEvidence.ObservedAtUtc,
                 runEvent.FailureEvidence.ContentHash),
+            RetryState = runEvent.RetryState is null ? null : Map(runEvent.RetryState),
         };
     }
+
+    private static LoopRunRetryStateSnapshot Map(EmbodySense.Core.Common.Loops.Execution.Retry.Models.GovernedLoopRetryState state)
+        => new(
+            state.Identity.SeriesId,
+            state.Identity.PolicyId,
+            state.Identity.PolicyHash,
+            state.Identity.NodeId,
+            state.Identity.ActivationOrdinal,
+            state.Identity.VisitOrdinal,
+            state.StateVersion,
+            state.Disposition.ToString(),
+            state.CurrentAttempt,
+            state.CurrentAttemptOperationId,
+            state.NextAttempt,
+            state.AttemptOperationId,
+            new LoopRunRetryBudgetSnapshot(
+                state.Budget.Attempts,
+                state.Budget.Tokens,
+                state.Budget.ToolCalls,
+                state.Budget.CostMicrounits,
+                state.Budget.CostCurrency,
+                state.Budget.ResourceUnits),
+            state.Identity.StartedAtUtc,
+            state.Identity.DeadlineUtc,
+            state.NextRetryAtUtc,
+            state.WakeCheckpointId,
+            state.WakeCheckpointHash,
+            state.FailureEvidenceId,
+            state.FailureEvidenceHash,
+            state.RecordedAtUtc,
+            state.ContentHash);
 
     private static LoopRunToolAuthoritySnapshot Map(CustomLoopToolAuthoritySnapshot authority)
     {
