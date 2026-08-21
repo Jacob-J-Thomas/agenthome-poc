@@ -175,10 +175,10 @@
       <root>
         <mxCell id="c0" />
         <mxCell id="c1" parent="c0" />
-        <mxCell id="c-title" value="EmbodySense current implementation: Web custom-loop MVP + canonical governed graph runtime" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" vertex="1" parent="c1">
+        <mxCell id="c-title" value="EmbodySense current implementation: Web governed-graph authoring + canonical runtime" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" vertex="1" parent="c1">
           <mxGeometry x="50" y="25" width="1100" height="40" as="geometry" />
         </mxCell>
-        <mxCell id="c-subtitle" value="The Web builder remains an ordered-loop surface. Separately published canonical graphs execute a closed schema-1 Condition / Join / bounded-cycle catalog through the same durable frontier; exact time schedules enter through durable queue delivery and retain overlap policy to atomic run admission, while schedules and wakes can run through one explicitly owned local background-runtime lifetime without alternate identity." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#4A5568" vertex="1" parent="c1">
+        <mxCell id="c-subtitle" value="The authenticated Web surface authors exact immutable governed graphs from the server catalog, projects their durable frontier, and controls schedules, deliveries, wakes, and runs only through shared Startup facades. Layout and browser state never become runtime truth." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#4A5568" vertex="1" parent="c1">
           <mxGeometry x="50" y="70" width="1500" height="32" as="geometry" />
         </mxCell>
 

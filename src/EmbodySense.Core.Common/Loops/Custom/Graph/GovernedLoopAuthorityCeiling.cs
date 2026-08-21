@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Text.Json.Serialization;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Custom;
 
@@ -6,6 +7,7 @@ namespace EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 /// <summary>Represents a non-granting maximum set of authority capability identifiers.</summary>
 /// <remarks>The ceiling can only constrain authority granted elsewhere. Possession of this value grants nothing.</remarks>
+[JsonConverter(typeof(GovernedLoopAuthorityCeilingJsonConverter))]
 public sealed record GovernedLoopAuthorityCeiling
 {
     private GovernedLoopAuthorityCeiling(string[] capabilityIds)

@@ -270,8 +270,38 @@ public sealed class ContextualRoleCatalogFacadeTests
         Assert.Empty(nullCatalog.Roles);
     }
 
+    [Fact]
+    public async Task Complete_catalog_aggregation_keeps_later_bounded_role_choices()
+    {
+        var roles = Enumerable.Range(1, 125).Select(RoleSnapshot).ToArray();
+        var source = new PagedContextualRoleCatalogFacade(roles);
+
+        var result = await ContextualRoleCatalogAggregator.ReadAsync(source);
+
+        Assert.Equal("available", result.Status);
+        Assert.Equal(125, result.Roles.Count);
+        Assert.Null(result.NextCursor);
+        Assert.Equal([null, "role-100"], source.ObservedCursors);
+    }
+
+    [Fact]
+    public async Task Complete_catalog_aggregation_fails_closed_on_a_nonprogressing_cursor()
+    {
+        var source = new PagedContextualRoleCatalogFacade([RoleSnapshot(1)], repeatCursor: true);
+
+        var result = await ContextualRoleCatalogAggregator.ReadAsync(source);
+
+        Assert.Equal("ambiguous", result.Status);
+        Assert.Empty(result.Roles);
+    }
+
     private static ContextualRoleInspectionInput Input(ContextualRoleRevision revision)
         => new(revision.Identity.RoleId, revision.Identity.Revision, revision.ContentHash);
+
+    private static ContextualRoleSnapshot RoleSnapshot(int index)
+        => new(
+            $"role-{index:000}", 1, new string('a', 63) + index % 10, $"Role {index}", "Own one governed graph.",
+            "published", "active", "actor-1", _now, _now, _now, "workspace-role-markdown", "role", "ready", true, true, [], [], true, false);
 
     private static async Task CreateAsync(WorkspacePaths paths, ContextualRoleRevision revision)
     {

@@ -31,6 +31,7 @@ internal static class WorkspaceDefaults
             paths.ArchivedConversationMemoryPath,
             paths.LoopsPath,
             paths.LoopDefinitionsPath,
+            paths.GovernedLoopRevisionsPath,
             paths.LoopRunsPath,
             paths.TasksPath,
             paths.LogsPath,

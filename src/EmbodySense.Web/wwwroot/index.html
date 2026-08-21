@@ -6,7 +6,7 @@
     <title>EmbodySense</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css?v=shared-loop-builder-v3" />
-    <link rel="stylesheet" href="/loop-builder.css?v=shared-loop-builder-v3" />
+    <link rel="stylesheet" href="/loop-builder.css?v=governed-graph-v4" />
   </head>
   <body>
     <div id="appShell" class="app-shell">
@@ -428,6 +428,16 @@
                     Builder
                   </button>
                   <button
+                    id="governedGraphTab"
+                    class="workspace-tab"
+                    role="tab"
+                    aria-selected="false"
+                    aria-controls="governedGraphView"
+                    type="button"
+                  >
+                    Governed graph
+                  </button>
+                  <button
                     id="runsTab"
                     class="workspace-tab"
                     role="tab"
@@ -518,6 +528,176 @@
                     </div>
 
                     <div
+                      id="governedGraphView"
+                      class="governed-graph-view"
+                      role="tabpanel"
+                      aria-labelledby="governedGraphTab"
+                      hidden
+                    >
+                      <header class="governed-graph-header">
+                        <div>
+                          <p class="eyebrow">Canonical schema-1 authoring</p>
+                          <h2>Governed graph workspace</h2>
+                          <p id="governedGraphLifecycle">No graph loaded</p>
+                        </div>
+                        <div class="governed-graph-actions">
+                          <button id="governedGraphNewButton" type="button">
+                            New local draft
+                          </button>
+                          <button
+                            id="governedGraphLoadButton"
+                            class="secondary-button"
+                            type="button"
+                          >
+                            Load
+                          </button>
+                          <button
+                            id="governedGraphRefreshButton"
+                            class="secondary-button"
+                            type="button"
+                          >
+                            Refresh durable
+                          </button>
+                          <button
+                            id="governedGraphSaveButton"
+                            class="primary-button"
+                            type="button"
+                          >
+                            Save draft
+                          </button>
+                          <button
+                            id="governedGraphPublishButton"
+                            class="primary-button"
+                            type="button"
+                          >
+                            Publish exact draft
+                          </button>
+                          <button
+                            id="governedGraphDisableButton"
+                            class="secondary-button"
+                            type="button"
+                          >
+                            Disable publication
+                          </button>
+                          <button
+                            id="governedGraphArchiveButton"
+                            class="danger-button"
+                            type="button"
+                          >
+                            Archive publication
+                          </button>
+                        </div>
+                      </header>
+                      <div class="governed-graph-identity">
+                        <label
+                          ><span>Graph ID</span
+                          ><input
+                            id="governedGraphId"
+                            autocomplete="off"
+                            placeholder="research-loop"
+                        /></label>
+                        <label
+                          ><span>Revision ID</span
+                          ><input
+                            id="governedGraphRevisionId"
+                            autocomplete="off"
+                            placeholder="revision-1"
+                        /></label>
+                        <label
+                          ><span>Display name</span
+                          ><input
+                            id="governedGraphDisplayName"
+                            autocomplete="off"
+                            placeholder="Research loop"
+                        /></label>
+                        <label
+                          ><span>Exact active role</span
+                          ><select id="governedGraphRole"></select
+                        ></label>
+                        <label class="governed-graph-purpose"
+                          ><span>Purpose</span
+                          ><input
+                            id="governedGraphPurpose"
+                            autocomplete="off"
+                            placeholder="Execute one bounded governed graph."
+                        /></label>
+                      </div>
+                      <div
+                        id="governedGraphNotice"
+                        class="governed-graph-notice"
+                        role="status"
+                        aria-live="polite"
+                      ></div>
+                      <div class="governed-graph-workspace">
+                        <aside class="governed-node-palette">
+                          <strong>Executable server catalog</strong>
+                          <p>
+                            Schedule Trigger and Wait configuration comes from
+                            these exact typed descriptors.
+                          </p>
+                          <div id="governedGraphCatalog"></div>
+                        </aside>
+                        <section class="governed-graph-stage">
+                          <div class="governed-graph-connector-editor">
+                            <label
+                              ><span>From</span
+                              ><select id="governedGraphConnectionFrom"></select
+                            ></label>
+                            <label
+                              ><span>To</span
+                              ><select id="governedGraphConnectionTo"></select
+                            ></label>
+                            <label
+                              ><span>Control outcome</span
+                              ><select
+                                id="governedGraphControlCondition"
+                              ></select
+                            ></label>
+                            <button
+                              id="governedGraphAddControlButton"
+                              type="button"
+                            >
+                              Connect control
+                            </button>
+                            <label
+                              ><span>Typed port pair</span
+                              ><select id="governedGraphBindingChoice"></select
+                            ></label>
+                            <button
+                              id="governedGraphAddBindingButton"
+                              type="button"
+                            >
+                              Connect binding
+                            </button>
+                          </div>
+                          <p
+                            id="governedGraphConnections"
+                            class="governed-graph-connections"
+                          >
+                            No local graph
+                          </p>
+                          <div
+                            id="governedGraphCanvas"
+                            class="governed-graph-canvas"
+                            aria-label="Governed graph canvas"
+                          ></div>
+                        </section>
+                        <aside
+                          id="governedGraphInspector"
+                          class="governed-graph-inspector"
+                        >
+                          Select a governed graph node to inspect its exact
+                          contract.
+                        </aside>
+                      </div>
+                      <div
+                        id="governedGraphErrors"
+                        class="governed-graph-errors"
+                        aria-live="polite"
+                      ></div>
+                    </div>
+
+                    <div
                       id="runsView"
                       class="runs-view"
                       role="tabpanel"
@@ -553,6 +733,37 @@
                           </div>
                           <div id="runActions" class="run-actions"></div>
                         </div>
+                        <section
+                          id="operationalPosture"
+                          class="operational-posture"
+                          aria-label="Governed loop operational posture"
+                        >
+                          <header class="operational-posture-header">
+                            <div>
+                              <strong>Runtime posture</strong>
+                              <span id="operationalPostureObservedAt"
+                                >Loading authoritative evidence</span
+                              >
+                            </div>
+                            <button
+                              id="refreshOperationalPostureButton"
+                              class="secondary-button compact-button"
+                              type="button"
+                            >
+                              Refresh
+                            </button>
+                          </header>
+                          <div
+                            id="operationalPostureNotice"
+                            class="operational-posture-notice"
+                            role="status"
+                            aria-live="polite"
+                          ></div>
+                          <div
+                            id="operationalPostureContent"
+                            class="operational-posture-content"
+                          ></div>
+                        </section>
                         <div
                           id="runNotice"
                           class="run-notice"
@@ -755,9 +966,6 @@
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
     <script src="/app.js?v=shared-loop-builder-v3" type="module"></script>
-    <script
-      src="/loop-builder.js?v=shared-loop-builder-v3"
-      type="module"
-    ></script>
+    <script src="/loop-builder.js?v=governed-graph-v4" type="module"></script>
   </body>
 </html>

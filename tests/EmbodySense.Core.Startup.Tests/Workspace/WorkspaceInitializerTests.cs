@@ -388,6 +388,7 @@ public sealed class WorkspaceInitializerTests
         Assert.True(Directory.Exists(workspace.File("private")));
         Assert.True(Directory.Exists(workspace.File(".agent", "loops")));
         Assert.True(Directory.Exists(workspace.File(".agent", "loops", "definitions")));
+        Assert.True(Directory.Exists(workspace.File(".agent", "loops", "revisions")));
         Assert.True(Directory.Exists(workspace.File(".agent", "loops", "runs")));
         Assert.True(Directory.Exists(workspace.File(".agent", "logs", "tool-responses")));
     }

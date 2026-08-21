@@ -22,7 +22,12 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
 
     public string BaseUrl { get; }
 
-    public static async Task<ExternalWebApplicationProcess> StartAsync(string workspaceRoot, int port, string codexExecutablePath, string model)
+    public static async Task<ExternalWebApplicationProcess> StartAsync(
+        string workspaceRoot,
+        int port,
+        string codexExecutablePath,
+        string model,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var webAssemblyPath = Path.Combine(AppContext.BaseDirectory, "EmbodySense.Web.dll");
         if (!File.Exists(webAssemblyPath))
@@ -32,7 +37,7 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
 
         var output = new ProcessOutputBuffer();
         var error = new ProcessOutputBuffer();
-        var process = Process.Start(new ProcessStartInfo
+        var startInfo = new ProcessStartInfo
         {
             FileName = "dotnet",
             WorkingDirectory = Path.GetDirectoryName(webAssemblyPath)!,
@@ -52,7 +57,13 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
                 "--codex-path",
                 codexExecutablePath
             }
-        }) ?? throw new InvalidOperationException("External Web process did not start.");
+        };
+        foreach (var item in environment ?? new Dictionary<string, string>())
+        {
+            startInfo.Environment[item.Key] = item.Value;
+        }
+
+        var process = Process.Start(startInfo) ?? throw new InvalidOperationException("External Web process did not start.");
         process.OutputDataReceived += (_, args) => output.Append(args.Data);
         process.ErrorDataReceived += (_, args) => error.Append(args.Data);
         process.BeginOutputReadLine();

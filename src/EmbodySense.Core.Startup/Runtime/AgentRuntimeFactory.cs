@@ -13,6 +13,7 @@ using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
+using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Posture;
@@ -49,10 +50,13 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Inference;
+using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Loops.Posture;
+using EmbodySense.Core.Startup.Loops.GraphAuthoring;
+using EmbodySense.Core.Startup.ContextualRoles;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 
@@ -538,6 +542,17 @@ public sealed class AgentRuntimeFactory
                 runtimeSurface.Id,
                 operationalPosture,
                 operationalControls);
+            var graphCatalog = new BuiltInGovernedLoopNodeCatalog();
+            var graphAuthority = new GovernedLoopAuthoritySnapshotProvider(governedRoleSource);
+            var graphAuthoringFacade = new GovernedLoopGraphAuthoringFacade(
+                workspaceId,
+                actor,
+                runtimeSurface.Id,
+                governedGraphStore,
+                graphCatalog,
+                graphAuthority,
+                capabilityAuthority,
+                new ContextualRoleCatalogFacade(paths.RootPath));
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);
             var customLoops = new CustomLoopRuntimeFacade(
                 customDefinitionStore,
@@ -588,6 +603,7 @@ public sealed class AgentRuntimeFactory
                 governedLoops,
                 scheduleDeliveryProvenance,
                 operationalFacade,
+                graphAuthoringFacade,
                 defaultConversationReviews,
                 codexRuntimeStatus,
                 governedWaitRuntimeHost,

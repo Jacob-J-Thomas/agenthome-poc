@@ -9,14 +9,19 @@ using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Capabilities.Models;
+using EmbodySense.Core.Application.ContextualRoles;
+using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Capabilities;
@@ -315,6 +320,93 @@ public sealed class BrowserFlowTests
             {
                 await app.DisposeAsync();
             }
+        }
+    }
+
+    [InstalledBrowserFact]
+    public async Task Browser_authors_publishes_and_reloads_a_server_cataloged_schedule_graph()
+    {
+        using var workspace = new TestWorkspace();
+        using var serverAccount = new BrowserServerAccountDirectory(workspace.ServerStatePath);
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var serverAccountHome = serverAccount.RootPath;
+        var localApplicationData = OperatingSystem.IsMacOS()
+            ? Path.Combine(serverAccountHome, "Library", "Application Support")
+            : Path.Combine(serverAccountHome, "local-data");
+        var capabilityTrustRoot = Path.Combine(localApplicationData, "EmbodySense", "server-state", "capability-catalog");
+        Directory.CreateDirectory(localApplicationData);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(capabilityTrustRoot).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths);
+        var serverEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["CFFIXED_USER_HOME"] = serverAccountHome,
+            ["LOCALAPPDATA"] = localApplicationData,
+            ["XDG_DATA_HOME"] = localApplicationData,
+        };
+        await using var app = await ExternalWebApplicationProcess.StartAsync(
+            workspace.RootPath,
+            GetFreePort(),
+            codexExecutable,
+            "gpt-test",
+            serverEnvironment);
+        await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
+
+        try
+        {
+            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await browser.WaitForExpressionAsync("document.getElementById('configContent').textContent.includes('compatible-test')");
+            await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
+            await ClickAsync(browser, "#governedGraphTab");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphCatalog').textContent.includes('schedule-trigger') && document.getElementById('governedGraphCatalog').textContent.includes('provider-inference') && document.getElementById('governedGraphCatalog').textContent.includes('success-exit')");
+
+            await SetValueAsync(
+                browser,
+                "#governedGraphRole",
+                $"{authoringRole.Identity.RoleId}:{authoringRole.Identity.Revision}:{authoringRole.ContentHash}",
+                "change");
+            await SetValueAsync(browser, "#governedGraphId", "browser-scheduled-graph");
+            await SetValueAsync(browser, "#governedGraphRevisionId", "revision-1");
+            await SetValueAsync(browser, "#governedGraphDisplayName", "Browser scheduled graph");
+            await SetValueAsync(browser, "#governedGraphPurpose", "Publish one server-cataloged scheduled graph.");
+            await ClickAsync(browser, "#governedGraphNewButton");
+            await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "schedule-trigger");
+            await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "provider-inference");
+            await SetValueAsync(browser, "#governedGraphInspector input:not([type='number'])", "Return the exact scheduled request.");
+            await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "success-exit");
+
+            await AddGovernedGraphControlAsync(browser, "schedule-trigger", "provider-inference", "Always");
+            await AddGovernedGraphBindingAsync(browser, "schedule-trigger", "provider-inference", "Data · request → request");
+            await AddGovernedGraphBindingAsync(browser, "schedule-trigger", "provider-inference", "Context · invocation-context → invocation-context");
+            await AddGovernedGraphControlAsync(browser, "provider-inference", "success-exit", "Success");
+            await AddGovernedGraphBindingAsync(browser, "provider-inference", "success-exit", "Data · result → result");
+
+            await browser.WaitForExpressionAsync("!document.getElementById('governedGraphSaveButton').disabled");
+            await ClickAsync(browser, "#governedGraphSaveButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Draft') && document.getElementById('governedGraphNotice').textContent.includes('Committed')");
+            await browser.WaitForExpressionAsync("!document.getElementById('governedGraphPublishButton').disabled");
+            await ClickAsync(browser, "#governedGraphPublishButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Published') && document.getElementById('governedGraphNotice').textContent.includes('Committed')");
+            Assert.Contains("schedule-trigger", await browser.EvaluateStringAsync("document.getElementById('governedGraphCanvas').textContent"), StringComparison.Ordinal);
+            await ClickButtonByTextAsync(browser, "#governedGraphCanvas button", "schedule-trigger");
+            Assert.Contains("org.embodysense/triggers/time", await browser.EvaluateStringAsync("document.getElementById('governedGraphInspector').textContent"), StringComparison.Ordinal);
+
+            await browser.ReloadAsync();
+            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop') && !document.getElementById('governedGraphTab').disabled");
+            await ClickAsync(browser, "#governedGraphTab");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Published') && document.querySelectorAll('#governedGraphCanvas .governed-graph-node').length === 3");
+            Assert.Equal("browser-scheduled-graph", await browser.EvaluateStringAsync("document.getElementById('governedGraphId').value"));
+            Assert.Contains("1 immutable revision artifact", await browser.EvaluateStringAsync("document.getElementById('governedGraphLifecycle').textContent"), StringComparison.Ordinal);
+            app.AssertHealthy();
+            await browser.AssertHealthyAsync();
+        }
+        catch
+        {
+            await WriteFailureDiagnosticsAsync(nameof(Browser_authors_publishes_and_reloads_a_server_cataloged_schedule_graph), browser, app);
+            throw;
         }
     }
 
@@ -627,6 +719,31 @@ public sealed class BrowserFlowTests
         await browser.EvaluateWithUserGestureAsync("(() => { const button = [...document.querySelectorAll(" + jsonSelector + ")].find((candidate) => candidate.textContent.includes(" + jsonText + ")); if (!button) throw new Error('Button was not rendered: ' + " + jsonText + "); button.click(); })()");
     }
 
+    private static async Task AddGovernedGraphControlAsync(
+        HeadlessBrowserSession browser,
+        string fromNodeId,
+        string toNodeId,
+        string outcome)
+    {
+        await SetValueAsync(browser, "#governedGraphConnectionFrom", fromNodeId, "change");
+        await SetValueAsync(browser, "#governedGraphConnectionTo", toNodeId, "change");
+        await SetValueAsync(browser, "#governedGraphControlCondition", outcome.ToLowerInvariant(), "change");
+        await ClickAsync(browser, "#governedGraphAddControlButton");
+    }
+
+    private static async Task AddGovernedGraphBindingAsync(
+        HeadlessBrowserSession browser,
+        string fromNodeId,
+        string toNodeId,
+        string bindingText)
+    {
+        await SetValueAsync(browser, "#governedGraphConnectionFrom", fromNodeId, "change");
+        await SetValueAsync(browser, "#governedGraphConnectionTo", toNodeId, "change");
+        var jsonText = JsonSerializer.Serialize(bindingText);
+        await browser.EvaluateAsync("(() => { const select = document.getElementById('governedGraphBindingChoice'); const option = [...select.options].find((candidate) => candidate.textContent.includes(" + jsonText + ")); if (!option) throw new Error('Typed binding was not rendered: ' + " + jsonText + "); select.value = option.value; select.dispatchEvent(new Event('change', { bubbles: true })); })()");
+        await ClickAsync(browser, "#governedGraphAddBindingButton");
+    }
+
     private static async Task ClickAsync(HeadlessBrowserSession browser, string selector)
     {
         var jsonSelector = JsonSerializer.Serialize(selector);
@@ -639,6 +756,43 @@ public sealed class BrowserFlowTests
         var jsonValue = JsonSerializer.Serialize(value);
         var jsonEventName = JsonSerializer.Serialize(eventName);
         await browser.EvaluateAsync("(() => { const element = document.querySelector(" + jsonSelector + "); if (!element) throw new Error('Element was not rendered: ' + " + jsonSelector + "); element.value = " + jsonValue + "; element.dispatchEvent(new Event(" + jsonEventName + ", { bubbles: true })); })()");
+    }
+
+    private static async Task<ContextualRoleRevisionPin> CreateScheduleGraphAuthoringRoleAsync(WorkspacePaths paths)
+    {
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var revision = ContextualRoleRevisionContentHash.Apply(new ContextualRoleRevision(
+            ContextualRoleLimits.SchemaVersion,
+            new ContextualRoleRevisionIdentity("schedule-graph-author", 1),
+            string.Empty,
+            "Schedule graph author",
+            "Author one bounded scheduled inference graph through the installed-browser journey.",
+            ContextualRoleStatus.Published,
+            new ContextualRoleProvenance("browser-e2e", DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch),
+            new ContextualRoleWorkspaceApplicability(ImmutableArray.Create(workspaceId)),
+            new ContextualRoleInstructionSourceReference(
+                ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown,
+                "role",
+                ContextualRoleInstructionClassification.RoleInstruction),
+            new ContextualRolePolicyMaxima(ImmutableArray.Create(
+                "org.embodysense/conversation-turn",
+                "org.embodysense/model-inference",
+                "org.embodysense/triggers/time"))));
+        var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(
+            "create-schedule-graph-author",
+            string.Empty,
+            ContextualRoleRevisionMutationKind.Create,
+            revision.Identity.RoleId,
+            "browser-e2e",
+            revision,
+            null,
+            DateTimeOffset.UnixEpoch));
+        using var store = new ContextualRoleRevisionStore(paths, workspaceId);
+        var result = await store.MutateAsync(request);
+        Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, result.Status);
+        var persisted = Assert.IsType<ContextualRoleRevision>(result.Revision);
+        Assert.Equal(revision.ContentHash, persisted.ContentHash);
+        return new ContextualRoleRevisionPin(persisted.Identity, persisted.ContentHash);
     }
 
     private static async Task<string> ReadConversationEvidenceAsync(TestWorkspace workspace)
@@ -678,6 +832,33 @@ public sealed class BrowserFlowTests
         public Task<CapabilityArtifactTrustDecision> VerifyAsync(CapabilityArtifactManifest manifest, CapabilityIntegrityDigest actualDigest, CancellationToken cancellationToken = default)
         {
             return Task.FromResult(new CapabilityArtifactTrustDecision(CapabilityArtifactTrustStatus.Verified, "browser-e2e-policy", "Verified."));
+        }
+    }
+
+    private sealed class BrowserServerAccountDirectory : IDisposable
+    {
+        public BrowserServerAccountDirectory(string fallbackRoot)
+        {
+            RootPath = OperatingSystem.IsMacOS()
+                ? Path.Combine(AppContext.BaseDirectory, "browser-server-accounts", Guid.NewGuid().ToString("N"))
+                : Path.Combine(fallbackRoot, "account-home");
+            Directory.CreateDirectory(RootPath);
+        }
+
+        public string RootPath { get; }
+
+        public void Dispose()
+        {
+            try
+            {
+                if (Directory.Exists(RootPath))
+                {
+                    Directory.Delete(RootPath, recursive: true);
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+            }
         }
     }
 
