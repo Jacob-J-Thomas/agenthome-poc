@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Application.Loops.Wait;
+namespace EmbodySense.Core.Application.Loops.Wait.Models;
 
 internal enum RunMutationStatus
 {
