@@ -14,7 +14,8 @@ public sealed class CapabilityScalarJsonConverterFactory : JsonConverterFactory
             || typeToConvert == typeof(CapabilityVersion)
             || typeToConvert == typeof(CapabilityVersionRange)
             || typeToConvert == typeof(CapabilityDescriptorHash)
-            || typeToConvert == typeof(CapabilityIntegrityDigest);
+            || typeToConvert == typeof(CapabilityIntegrityDigest)
+            || typeToConvert == typeof(CapabilityDataClass);
     }
 
     /// <inheritdoc />

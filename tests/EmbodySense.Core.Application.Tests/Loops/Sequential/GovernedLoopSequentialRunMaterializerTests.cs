@@ -15,6 +15,7 @@ using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Sequential;
@@ -46,7 +47,7 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
 
         var result = await materializer.MaterializeAsync(context.Request);
 
-        Assert.Equal(GovernedLoopSequentialMaterializationStatus.Ready, result.Status);
+        Assert.True(result.Status == GovernedLoopSequentialMaterializationStatus.Ready, result.Detail);
         Assert.True(result.IsReady());
         var run = Assert.IsType<CustomLoopRunRecord>(result.Run);
         Assert.Equal(context.Receipt.Evidence.Binding.RunId, run.Id);
@@ -97,7 +98,7 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
         Assert.True(result.IsReady());
         var run = Assert.IsType<CustomLoopRunRecord>(result.Run);
         Assert.Equal(
-            ["org.embodysense/conversation-turn", "org.embodysense/model-inference", "org.embodysense/workspace-command"],
+            ["org.embodysense/conversation-turn", "org.embodysense/model-inference", "org.embodysense/model-profile/codex", "org.embodysense/workspace-command"],
             run.CapabilityAdmission.Evidence
                 .Where(item => string.Equals(item.Outcome, "Selected", StringComparison.Ordinal))
                 .Select(item => item.SelectedIdentity?.Id.Value)
@@ -492,21 +493,25 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
             "run-sequential",
             publication.Revision,
             1);
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            GovernedLoopAdmissionEvidence.CurrentSchemaVersion,
-            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+        var grantBoundary = new AuthorityGrantBoundary(
+            _admittedAtUtc.AddHours(-1),
+            _admittedAtUtc.AddHours(1),
+            seedReceipt.Evidence.GrantBoundary.CompletionConstraint);
+        var inferenceNodes = artifact.Graph.Nodes
+            .Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference)
+            .Select(node => node.Id)
+            .ToArray();
+        var evidence = GovernedModelProfileApplicationTestFixture.RoutingEvidenceForInference(
+            intent,
             execution,
             seedReceipt.Evidence.GrantProfile,
-            new AuthorityGrantBoundary(
-                _admittedAtUtc.AddHours(-1),
-                _admittedAtUtc.AddHours(1),
-                seedReceipt.Evidence.GrantBoundary.CompletionConstraint),
+            grantBoundary,
             seedReceipt.Evidence.GrantDependencyEvidenceHash,
             seedReceipt.Evidence.EffectiveAuthority,
             capabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, seedReceipt.Evidence.EffectiveAuthority, capabilityAdmission),
             _admittedAtUtc,
-            string.Empty));
+            nodeId: inferenceNodes[0],
+            nodeIds: inferenceNodes);
         var receiptDraft = new GovernedLoopAdmissionReceipt(
             GovernedLoopAdmissionReceipt.CurrentSchemaVersion,
             intent,

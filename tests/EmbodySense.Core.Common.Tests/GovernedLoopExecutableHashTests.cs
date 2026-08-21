@@ -1,5 +1,7 @@
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 
 namespace EmbodySense.Core.Common.Tests;
 
@@ -8,7 +10,7 @@ public sealed class GovernedLoopExecutableHashTests
     [Fact]
     public void Canonical_schema_one_hash_is_pinned()
     {
-        Assert.Equal("29387ab65d7ff51d19a84d517021c45fe74fd1c035f68209bee1f7257badc5b4", GovernedLoopGraphTestFixture.Create().ExecutableHash);
+        Assert.Equal("6275b7fd96c7aa2c5b7859600b7e1bc7ab3114366fa5573a058f4bf198bd59f3", GovernedLoopGraphTestFixture.Create().ExecutableHash);
     }
 
     [Fact]
@@ -94,6 +96,30 @@ public sealed class GovernedLoopExecutableHashTests
         Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(purpose: "Perform a different governed purpose.").ExecutableHash);
         Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopGraphTestFixture.ModelInferenceCapability]), nodes: nodes.Select(node => node.Id == "infer" ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([GovernedLoopGraphTestFixture.ModelInferenceCapability]) } : node)).ExecutableHash);
         Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(nodes: nodes).ExecutableHash);
+    }
+
+    [Fact]
+    public void Typed_model_policy_and_authored_input_classification_change_executable_identity()
+    {
+        var expected = GovernedLoopGraphTestFixture.Create().ExecutableHash;
+        Assert.True(CapabilityDataClass.TryParse("public", out var publicData, out _));
+        var classifiedNodes = GovernedLoopGraphTestFixture.Nodes();
+        classifiedNodes[1] = new GovernedLoopNodeDefinition(
+            classifiedNodes[1].Id,
+            classifiedNodes[1].Descriptor,
+            classifiedNodes[1].Ports,
+            classifiedNodes[1].AuthorityCeiling,
+            classifiedNodes[1].Parameters,
+            classifiedNodes[1].ModelRoutingPolicy,
+            [publicData!]);
+        var inheritedPolicy = GovernedModelRoutingPolicy.Create(
+            1,
+            GovernedModelRoutingSelector.Inherit([GovernedLoopGraphTestFixture.DefaultModelRoutingPolicy().Selector.ExactProfileId!]),
+            [],
+            GovernedLoopGraphTestFixture.DefaultModelRoutingPolicy().Requirements);
+
+        Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(nodes: classifiedNodes).ExecutableHash);
+        Assert.NotEqual(expected, GovernedLoopGraphTestFixture.Create(defaultModelRoutingPolicy: inheritedPolicy).ExecutableHash);
     }
 
     [Fact]

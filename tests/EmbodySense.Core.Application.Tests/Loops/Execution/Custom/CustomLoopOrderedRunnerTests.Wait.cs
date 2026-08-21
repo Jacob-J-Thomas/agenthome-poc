@@ -996,8 +996,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
         var clockFailure = await CreateWaitRuntimeAsync();
         await clockFailure.RunToParkAsync();
-        clockFailure.SleepStore.OnCreate = (_, _) => clockFailure.Time.ThrowOnCall = clockFailure.Time.CallCount + 1;
-        Assert.Equal(GovernedLoopWakeResultStatus.Unavailable, (await clockFailure.WakeAsync()).Status);
+        clockFailure.SleepStore.OnCreate = (_, _) => clockFailure.Time.ThrowOnCall = clockFailure.Time.CallCount + 2;
+        Assert.Equal(GovernedLoopWakeResultStatus.AmbiguousAttempt, (await clockFailure.WakeAsync()).Status);
         Assert.Null(Assert.Single(clockFailure.Store.Current.WaitEvidence).ContinuationEvidence);
 
         var ineligible = await CreateWaitRuntimeAsync();
@@ -1283,6 +1283,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 [
                     GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId,
                     GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId,
+                    GovernedLoopSequentialApplicationTestFixture.ModelProfileCapabilityId,
                 ]));
     }
 

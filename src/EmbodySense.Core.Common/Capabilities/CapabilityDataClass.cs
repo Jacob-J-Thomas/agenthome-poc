@@ -1,10 +1,12 @@
 using EmbodySense.Core.Common.Capabilities.Models;
+using System.Text.Json.Serialization;
 
 namespace EmbodySense.Core.Common.Capabilities;
 
 /// <summary>
 /// Names one stable data classification required by a capability.
 /// </summary>
+[JsonConverter(typeof(CapabilityScalarJsonConverterFactory))]
 public sealed class CapabilityDataClass : IEquatable<CapabilityDataClass>, IComparable<CapabilityDataClass>
 {
     private CapabilityDataClass(string value)

@@ -160,7 +160,8 @@ public sealed class GovernedLoopAdmissionCapabilitySnapshotTests
         var reorderedReferences = GovernedLoopAdmissionContractHash.CreateEvidenceReferences(
             intent,
             evidence.EffectiveAuthority,
-            reordered);
+            reordered,
+            evidence.ModelRoutingAdmission);
         var reorderedEvidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
             evidence.SchemaVersion,
             evidence.IntentHash,
@@ -170,6 +171,7 @@ public sealed class GovernedLoopAdmissionCapabilitySnapshotTests
             evidence.GrantDependencyEvidenceHash,
             evidence.EffectiveAuthority,
             reordered,
+            evidence.ModelRoutingAdmission,
             reorderedReferences,
             evidence.EvaluatedAtUtc,
             string.Empty));
@@ -193,6 +195,7 @@ public sealed class GovernedLoopAdmissionCapabilitySnapshotTests
             validEvidence.GrantDependencyEvidenceHash,
             validEvidence.EffectiveAuthority,
             capabilityAdmission,
+            validEvidence.ModelRoutingAdmission,
             validEvidence.References,
             validEvidence.EvaluatedAtUtc,
             validEvidence.ContentHash);

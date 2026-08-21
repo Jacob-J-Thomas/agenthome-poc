@@ -2265,6 +2265,32 @@
   margin-top: 8px;
 }
 
+.governed-model-fallback-order {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.governed-model-fallback-order li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.governed-model-fallback-order li span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.governed-model-fallback-order button {
+  padding: 3px 6px;
+  font-size: 9px;
+}
+
 .governed-graph-errors {
   display: grid;
   gap: 6px;

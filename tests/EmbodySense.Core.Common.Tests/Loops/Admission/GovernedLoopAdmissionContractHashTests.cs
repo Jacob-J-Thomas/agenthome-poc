@@ -205,7 +205,8 @@ public sealed class GovernedLoopAdmissionContractHashTests
         Assert.Throws<ArgumentException>(() => GovernedLoopAdmissionContractHash.CreateEvidenceReferences(
             intent with { Publication = null! },
             GovernedLoopAdmissionTestFixture.EffectiveAuthority(),
-            GovernedLoopAdmissionTestFixture.CapabilityAdmission()));
+            GovernedLoopAdmissionTestFixture.CapabilityAdmission(),
+            GovernedLoopAdmissionTestFixture.Evidence().ModelRoutingAdmission));
     }
 
     [Fact]
@@ -287,6 +288,7 @@ public sealed class GovernedLoopAdmissionContractHashTests
             grantDependencyEvidenceHash ?? value.GrantDependencyEvidenceHash,
             effectiveAuthority ?? value.EffectiveAuthority,
             capabilityAdmission ?? value.CapabilityAdmission,
+            value.ModelRoutingAdmission,
             references ?? value.References,
             evaluatedAtUtc ?? value.EvaluatedAtUtc,
             string.Empty);

@@ -4,6 +4,7 @@ using System.Text;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
@@ -543,12 +544,20 @@ public static class GovernedLoopSequentialPlanBuilder
 
         var scheduleEntry = Equals(planNodes[0].Descriptor, GovernedLoopSequentialNodeDescriptors.ScheduleTrigger);
         var hasInference = planNodes.Any(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference));
-        var inferenceCapabilities = scheduleEntry
-            ? new[] { ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId }
-            : [ConversationTurnCapabilityId, ModelInferenceCapabilityId];
-        var toolEnabledCapabilities = scheduleEntry
-            ? new[] { ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId, WorkspaceCommandCapabilityId }
-            : [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId];
+        var routedProfileIds = graph.Nodes
+            .Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference)
+            .SelectMany(node => CandidateProfileIds(node.ModelRoutingPolicy ?? graph.DefaultModelRoutingPolicy))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var inferenceCapabilities = new[] { ConversationTurnCapabilityId, ModelInferenceCapabilityId }
+            .Concat(scheduleEntry ? [ScheduleTriggerCapabilityId] : [])
+            .Concat(routedProfileIds)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var toolEnabledCapabilities = inferenceCapabilities
+            .Append(WorkspaceCommandCapabilityId)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
         var noInferenceCapabilities = scheduleEntry
             ? new[] { ConversationTurnCapabilityId, ScheduleTriggerCapabilityId }
             : [ConversationTurnCapabilityId];
@@ -571,7 +580,7 @@ public static class GovernedLoopSequentialPlanBuilder
             var exact = planNode.Descriptor.Kind switch
             {
                 GovernedLoopNodeKind.Trigger => IsExactTrigger(node, schemaById),
-                GovernedLoopNodeKind.Inference => IsExactInference(node, schemaById, allowsWorkspaceTools, topology.ComponentByNodeId[node.Id].IsCyclic),
+                GovernedLoopNodeKind.Inference => IsExactInference(node, schemaById, graph.DefaultModelRoutingPolicy, allowsWorkspaceTools, topology.ComponentByNodeId[node.Id].IsCyclic),
                 GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate => IsExactPureNode(node, schemaById),
                 GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Join => IsExactTopologyNode(node, schemaById),
                 GovernedLoopNodeKind.Wait => IsExactWaitNode(node),
@@ -652,12 +661,14 @@ public static class GovernedLoopSequentialPlanBuilder
     private static bool IsExactInference(
         GovernedLoopNodeDefinition node,
         IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas,
+        GovernedModelRoutingPolicy defaultModelRoutingPolicy,
         bool allowsWorkspaceTools,
         bool isCyclic)
         => node.AuthorityCeiling.CapabilityIds.SequenceEqual(
-                allowsWorkspaceTools
-                    ? [ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]
-                    : [ModelInferenceCapabilityId],
+                new[] { ModelInferenceCapabilityId }
+                    .Concat(CandidateProfileIds(node.ModelRoutingPolicy ?? defaultModelRoutingPolicy))
+                    .Concat(allowsWorkspaceTools ? [WorkspaceCommandCapabilityId] : [])
+                    .Order(StringComparer.Ordinal),
                 StringComparer.Ordinal)
             && node.Parameters.Count == (isCyclic ? 3 : 1)
             && node.Parameters.TryGetValue("instruction", out var instruction)
@@ -669,6 +680,16 @@ public static class GovernedLoopSequentialPlanBuilder
                 ("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, GovernedLoopValueKind.Text),
                 ("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context, GovernedLoopValueKind.Text),
                 ("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, GovernedLoopValueKind.Text));
+
+    private static IReadOnlyList<string> CandidateProfileIds(GovernedModelRoutingPolicy policy)
+        => (policy.Selector.Kind == GovernedModelSelectorKind.Exact
+                ? new[] { policy.Selector.ExactProfileId! }
+                : policy.Selector.PermittedInheritedProfileIds)
+            .Concat(policy.FallbackProfileIds)
+            .Select(value => value.Value)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
 
     private static bool IsExactExit(
         GovernedLoopNodeDefinition node,

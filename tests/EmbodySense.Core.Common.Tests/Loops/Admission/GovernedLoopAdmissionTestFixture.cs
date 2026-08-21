@@ -9,6 +9,7 @@ using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Tests.Authority.Grants;
 using EmbodySense.Tests.Support;
 
@@ -75,6 +76,7 @@ internal static class GovernedLoopAdmissionTestFixture
         string? grantDependencyEvidenceHash = null,
         AuthorityCeiling? effectiveAuthority = null,
         CapabilityAdmissionSnapshot? capabilityAdmission = null,
+        GovernedModelRoutingAdmissionSnapshot? modelRoutingAdmission = null,
         IReadOnlyList<GovernedLoopAdmissionEvidenceReference>? references = null,
         DateTimeOffset? evaluatedAtUtc = null,
         string? intentHash = null,
@@ -84,16 +86,30 @@ internal static class GovernedLoopAdmissionTestFixture
         var exactGrant = AuthorityGrantTestFixture.Grant();
         var authority = effectiveAuthority ?? EffectiveAuthority();
         var capabilities = capabilityAdmission ?? CapabilityAdmission() with { WorkspaceScopeId = exactIntent.WorkspaceId };
-        var exactReferences = references ?? GovernedLoopAdmissionContractHash.CreateEvidenceReferences(exactIntent, authority, capabilities);
+        var exactBinding = binding ?? GovernedLoopExecutionBinding.Create(1, "run-1", exactIntent.Publication.Revision, 1);
+        var exactProfile = grantProfile ?? exactGrant.Binding.Profile;
+        var exactBoundary = grantBoundary ?? exactGrant.Boundary;
+        var exactDependencyHash = grantDependencyEvidenceHash ?? Hash('9');
+        var exactRouting = modelRoutingAdmission ?? GovernedLoopAdmissionContractHash.CreateEmptyModelRoutingAdmission(
+            exactIntent,
+            exactBinding,
+            exactProfile,
+            exactBoundary,
+            exactDependencyHash,
+            authority,
+            capabilities,
+            evaluatedAtUtc ?? EvaluatedAtUtc);
+        var exactReferences = references ?? GovernedLoopAdmissionContractHash.CreateEvidenceReferences(exactIntent, authority, capabilities, exactRouting);
         var candidate = new GovernedLoopAdmissionEvidence(
             GovernedLoopAdmissionLimits.CurrentSchemaVersion,
             intentHash ?? GovernedLoopAdmissionContractHash.ComputeIntentHash(exactIntent),
-            binding ?? GovernedLoopExecutionBinding.Create(1, "run-1", exactIntent.Publication.Revision, 1),
-            grantProfile ?? exactGrant.Binding.Profile,
-            grantBoundary ?? exactGrant.Boundary,
-            grantDependencyEvidenceHash ?? Hash('9'),
+            exactBinding,
+            exactProfile,
+            exactBoundary,
+            exactDependencyHash,
             authority,
             capabilities,
+            exactRouting,
             exactReferences,
             evaluatedAtUtc ?? EvaluatedAtUtc,
             string.Empty);
@@ -121,6 +137,7 @@ internal static class GovernedLoopAdmissionTestFixture
         GovernedLoopAdmissionFailureCode failureCode = GovernedLoopAdmissionFailureCode.RoleInactive,
         GovernedLoopAdmissionAuthorityDenialProof? authorityDenial = null,
         GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial = null,
+        GovernedLoopAdmissionModelRoutingDenialProof? modelRoutingDenial = null,
         IReadOnlyList<GovernedLoopAdmissionEvidenceReference>? references = null,
         DateTimeOffset? rejectedAtUtc = null,
         bool applyHash = true)
@@ -133,12 +150,16 @@ internal static class GovernedLoopAdmissionTestFixture
         var exactCapabilityDenial = failureCode == GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied
             ? capabilityDenial ?? CapabilityDenialProof(evaluatedAtUtc: rejectedAt)
             : capabilityDenial;
+        var exactModelRoutingDenial = failureCode == GovernedLoopAdmissionFailureCode.ModelRoutingDenied
+            ? modelRoutingDenial ?? ModelRoutingDenialProof(exactIntent, rejectedAt)
+            : modelRoutingDenial;
         var exactReferences = references ?? (Enum.IsDefined(failureCode) && failureCode != GovernedLoopAdmissionFailureCode.None
             ? GovernedLoopAdmissionContractHash.CreateRejectionEvidenceReferences(
                 exactIntent,
                 failureCode,
                 exactAuthorityDenial,
-                exactCapabilityDenial)
+                exactCapabilityDenial,
+                exactModelRoutingDenial)
             : [RoleReference(exactIntent)]);
         var candidate = new GovernedLoopAdmissionRejection(
             GovernedLoopAdmissionLimits.CurrentSchemaVersion,
@@ -148,7 +169,8 @@ internal static class GovernedLoopAdmissionTestFixture
             exactCapabilityDenial,
             exactReferences,
             rejectedAt,
-            string.Empty);
+            string.Empty,
+            exactModelRoutingDenial);
         return applyHash ? GovernedLoopAdmissionContractHash.Apply(candidate) : candidate;
     }
 
@@ -241,6 +263,24 @@ internal static class GovernedLoopAdmissionTestFixture
             requirementsHash!.Value,
             authority,
             exactViolations,
+            evaluatedAtUtc ?? RecordedAtUtc);
+    }
+
+    internal static GovernedLoopAdmissionModelRoutingDenialProof ModelRoutingDenialProof(
+        GovernedLoopAdmissionIntent? intent = null,
+        DateTimeOffset? evaluatedAtUtc = null)
+    {
+        var exactIntent = intent ?? Intent();
+        var capabilities = CapabilityAdmission() with { WorkspaceScopeId = exactIntent.WorkspaceId };
+        return new GovernedLoopAdmissionModelRoutingDenialProof(
+            GovernedLoopAdmissionLimits.CurrentSchemaVersion,
+            "inference",
+            "provider-inference",
+            Hash('4'),
+            null,
+            GovernedLoopAdmissionModelRoutingDenialReason.DefaultNotConfigured,
+            GovernedLoopAdmissionContractHash.ComputeAuthorityCeilingReferenceHash(EffectiveAuthority()),
+            GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(capabilities),
             evaluatedAtUtc ?? RecordedAtUtc);
     }
 }

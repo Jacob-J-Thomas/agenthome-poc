@@ -58,4 +58,16 @@ public sealed record CustomLoopInferenceAttemptRequest(
 
     /// <summary>Gets the exact immutable graph artifact whose node ceiling governs this attempt.</summary>
     public GovernedLoopGraphRevisionArtifact? GraphArtifact { get; init; }
+
+    /// <summary>Gets the exact zero-based admitted-plan coordinate for a canonical attempt, or -1 for legacy dispatch.</summary>
+    public int PlanOrdinal { get; init; } = -1;
+
+    /// <summary>Gets the exact zero-based durable activation coordinate for a canonical attempt, or -1 for legacy dispatch.</summary>
+    public int ActivationOrdinal { get; init; } = -1;
+
+    /// <summary>Gets the exact positive node visit coordinate for a canonical attempt, or zero for legacy dispatch.</summary>
+    public int VisitOrdinal { get; init; }
+
+    /// <summary>Gets the server-owned exact frontier attempt operation for canonical dispatch.</summary>
+    public string? AttemptOperationId { get; init; }
 }

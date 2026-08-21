@@ -210,18 +210,16 @@ public sealed class GovernedLoopSequentialBindingResolverTests
             artifact.RevisionArtifact.Revision,
             seed.Receipt.Evidence.Binding.ExecutionGeneration);
         var capabilityAdmission = CapabilityAdmission(artifact, intent.WorkspaceId);
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new EmbodySense.Core.Common.Loops.Admission.Models.GovernedLoopAdmissionEvidence(
-            seed.Receipt.Evidence.SchemaVersion,
-            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+        var evidence = GovernedModelProfileApplicationTestFixture.RoutingEvidenceForInference(
+            intent,
             execution,
             seed.Receipt.Evidence.GrantProfile,
             seed.Receipt.Evidence.GrantBoundary,
             seed.Receipt.Evidence.GrantDependencyEvidenceHash,
             seed.Receipt.Evidence.EffectiveAuthority,
             capabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, seed.Receipt.Evidence.EffectiveAuthority, capabilityAdmission),
             seed.Receipt.Evidence.EvaluatedAtUtc,
-            string.Empty));
+            nodeId: "infer");
         var receipt = GovernedLoopAdmissionContractHash.Apply(seed.Receipt with
         {
             Intent = intent,

@@ -35,6 +35,7 @@ using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Authority.Grants.Models;
@@ -1638,6 +1639,20 @@ public sealed partial class CustomLoopOrderedRunnerTests
         var governance = Assert.Single(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ToolGovernanceDecided).ToolEvidence!.Governance!;
         Assert.Equal(ToolApprovalDecision.Approved, governance.ApprovalDecision);
         Assert.Equal("user-approver", governance.ApprovalDecisionBy);
+        var admittedPrimary = Assert.Single(
+            context.Evidence.AdapterBinding.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries,
+            item => string.Equals(item.NodeId, request.StepId, StringComparison.Ordinal)).Primary;
+        var observed = Assert.Single(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved);
+        var completed = Assert.Single(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted);
+        var modelEvidence = Assert.IsType<GovernedModelAttemptExecutionEvidence>(observed.ModelExecutionEvidence);
+        Assert.Equal(admittedPrimary.Capability.DescriptorIdentity.Id, modelEvidence.ProfileId);
+        Assert.Equal(admittedPrimary.ContentHash, modelEvidence.ProfilePinHash);
+        Assert.Equal(admittedPrimary.Metadata.ConfigurationHash, modelEvidence.ConfigurationHash);
+        Assert.Equal(admittedPrimary.Metadata.ProviderId, observed.Provider);
+        Assert.Equal(admittedPrimary.Metadata.ModelId, observed.Model);
+        Assert.Equal(modelEvidence.ContentHash, completed.ModelExecutionEvidence?.ContentHash);
+        Assert.NotEqual(context.Run.ModelSnapshot.Provider, observed.Provider);
+        Assert.NotEqual(context.Run.ModelSnapshot.Model, observed.Model);
     }
 
     [Fact]
@@ -6525,18 +6540,19 @@ public sealed partial class CustomLoopOrderedRunnerTests
             false,
             true,
             false);
-        var admissionEvidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            1,
-            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+        var admissionEvidence = GovernedModelProfileApplicationTestFixture.RoutingEvidenceForInference(
+            intent,
             execution,
             seedReceipt.Evidence.GrantProfile,
             seedReceipt.Evidence.GrantBoundary,
             seedReceipt.Evidence.GrantDependencyEvidenceHash,
             effectiveAuthority,
             capabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilityAdmission),
             GovernedLoopSequentialApplicationTestFixture.Now,
-            string.Empty));
+            nodeIds: artifact.Graph.Nodes
+                .Where(node => node.Descriptor == GovernedLoopSequentialNodeDescriptors.ProviderInference)
+                .Select(node => node.Id)
+                .ToArray());
         var receipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
             1,
             intent,
@@ -6963,7 +6979,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
     private static CustomLoopInferenceAttemptResult Result(string output, int toolCalls = 0)
     {
-        return new CustomLoopInferenceAttemptResult(output, "provider", "model", $"response-{Guid.NewGuid():N}", toolCalls);
+        return new CustomLoopInferenceAttemptResult(output, "__admitted-profile__", null, $"response-{Guid.NewGuid():N}", toolCalls);
     }
 
     private static GovernedLoopEffectAuthorityStoppedException DefinitiveEffectAuthorityDeny(
@@ -6978,8 +6994,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
         var graphNode = context.Artifact.Graph.Nodes.Single(node => string.Equals(node.Id, inferenceNode.NodeId, StringComparison.Ordinal));
         var requiresWorkspace = graphNode.AuthorityCeiling.CapabilityIds.Contains("org.embodysense/workspace-command", StringComparer.Ordinal);
         var requiredCapabilityIds = requiresWorkspace
-            ? new[] { "org.embodysense/model-inference", "org.embodysense/workspace-command" }
-            : ["org.embodysense/model-inference"];
+            ? new[] { "org.embodysense/model-inference", "org.embodysense/model-profile/codex", "org.embodysense/workspace-command" }
+            : ["org.embodysense/model-inference", "org.embodysense/model-profile/codex"];
         var requiredPins = requiredCapabilityIds.Select(capabilityId => receipt.Evidence.CapabilityAdmission.Pins.Single(
             pin => string.Equals(pin.DescriptorIdentity.Id.Value, capabilityId, StringComparison.Ordinal))).ToArray();
         var requiredAuthority = new AuthorityCeiling(
@@ -7531,7 +7547,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
             if (!validation.IsValid)
             {
                 ValidationFailures.AddRange(validation.Errors);
-                throw new FormatException("Candidate run failed validation.");
+                throw new FormatException($"Candidate run failed validation: {string.Join(" | ", validation.Errors)}");
             }
             Current = run;
             Writes.Add(run);
@@ -7603,7 +7619,52 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 await AfterExecute(request);
             }
 
-            return (CustomLoopInferenceAttemptResult)outcome;
+            var result = (CustomLoopInferenceAttemptResult)outcome;
+            if (result.ModelExecutionEvidence is null
+                && request.AdmissionReceipt is not null
+                && request.AttemptOperationId is not null)
+            {
+                var entries = request.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries
+                    .Where(entry => string.Equals(entry.NodeId, request.StepId, StringComparison.Ordinal))
+                    .Take(2)
+                    .ToArray();
+                if (entries.Length == 1)
+                {
+                    var primary = entries[0].Primary;
+                    var usage = LlmInferenceUsageEvidence.Unavailable("test-provider", "v1");
+                    var reservationHash = CustomLoopTraceContentHash.Compute($"model-reservation\n{request.AttemptOperationId}\n{primary.ContentHash}");
+                    var terminalHash = CustomLoopTraceContentHash.Compute($"model-reconciled\n{request.AttemptOperationId}\n{usage.ContentHash}");
+                    result = result with
+                    {
+                        Provider = string.Equals(result.Provider, "__admitted-profile__", StringComparison.Ordinal)
+                            ? primary.Metadata.ProviderId
+                            : result.Provider,
+                        Model = string.Equals(result.Provider, "__admitted-profile__", StringComparison.Ordinal)
+                            ? primary.Metadata.ModelId
+                            : result.Model,
+                        ModelExecutionEvidence = GovernedModelAttemptExecutionEvidence.Create(
+                            1,
+                            primary.Capability.DescriptorIdentity.Id,
+                            primary.ContentHash,
+                            primary.Metadata.ConfigurationHash,
+                            primary.Metadata.ProviderId,
+                            primary.Metadata.AdapterId,
+                            primary.Metadata.ModelId,
+                            LlmInferenceSurface.OpenAiCodex,
+                            reservationHash,
+                            terminalHash,
+                            GovernedModelUsageLedgerPhase.Reconciled,
+                            usage,
+                            true),
+                    };
+                }
+            }
+            else if (string.Equals(result.Provider, "__admitted-profile__", StringComparison.Ordinal))
+            {
+                result = result with { Provider = request.ModelSnapshot.Provider, Model = request.ModelSnapshot.Model };
+            }
+
+            return result;
         }
     }
 

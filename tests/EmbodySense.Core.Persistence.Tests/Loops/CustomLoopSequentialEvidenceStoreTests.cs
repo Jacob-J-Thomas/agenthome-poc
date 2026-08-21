@@ -11,6 +11,7 @@ using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Custom;
@@ -30,6 +31,7 @@ using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Tests.Authority.Grants;
+using EmbodySense.Core.Common.Tests;
 using EmbodySense.Core.Common.Tests.Loops.Admission;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
@@ -43,6 +45,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
     private const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
+    private const string ModelProfileCapabilityId = "org.embodysense/model-profile/codex";
     private static readonly DateTimeOffset _timestamp = new(2026, 8, 10, 11, 0, 0, TimeSpan.Zero);
 
     [Fact]
@@ -876,17 +879,31 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         var execution = GovernedLoopExecutionBinding.Create(1, $"run-{identity}", graph.RevisionReference, 1);
         var capabilityAdmission = SequentialCapabilityAdmission(artifact.ArtifactHash, scheduleTrigger);
         var effectiveAuthority = GovernedLoopAdmissionTestFixture.EffectiveAuthority();
+        var grantBoundary = new AuthorityGrantBoundary(_timestamp.AddMinutes(-1), _timestamp.AddHours(1), AuthorityGrantCompletionConstraintKind.None);
+        var grantDependencyEvidenceHash = Hash('9');
+        var evaluatedAtUtc = _timestamp.AddMinutes(1);
+        var modelRoutingAdmission = ModelRoutingAdmission(
+            graph,
+            intent,
+            execution,
+            grant.Binding.Profile,
+            grantBoundary,
+            grantDependencyEvidenceHash,
+            effectiveAuthority,
+            capabilityAdmission,
+            evaluatedAtUtc);
         var admissionEvidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
             1,
             GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
             execution,
             grant.Binding.Profile,
-            new AuthorityGrantBoundary(_timestamp.AddMinutes(-1), _timestamp.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
-            Hash('9'),
+            grantBoundary,
+            grantDependencyEvidenceHash,
             effectiveAuthority,
             capabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilityAdmission),
-            _timestamp.AddMinutes(1),
+            modelRoutingAdmission,
+            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilityAdmission, modelRoutingAdmission),
+            evaluatedAtUtc,
             string.Empty));
         var receipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
             1,
@@ -907,9 +924,16 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             artifact.ArtifactHash,
             artifact.LayoutHash,
             string.Empty));
+        var planResult = GovernedLoopSequentialPlanBuilder.Build(artifact);
+        Assert.True(
+            planResult.Status == GovernedLoopSequentialPlanBuildStatus.Ready,
+            $"The canonical persistence graph was rejected with `{planResult.Status}` at `{planResult.FailurePath}`.");
         var anchorResult = GovernedLoopSequentialRunAnchorGuard.Create(binding, request, receipt, invocation, artifact);
+        Assert.True(
+            anchorResult.Status == GovernedLoopSequentialRunAnchorStatus.Ready,
+            $"The canonical persistence fixture was rejected with `{anchorResult.Status}`.");
         var anchor = Assert.IsType<GovernedLoopSequentialRunAnchor>(anchorResult.Anchor);
-        var plan = Assert.IsType<GovernedLoopSequentialPlan>(GovernedLoopSequentialPlanBuilder.Build(artifact).Plan);
+        var plan = Assert.IsType<GovernedLoopSequentialPlan>(planResult.Plan);
 
         var definition = CustomLoopDefinition.CreateSeed("sequential-loop", "default-role", "step-1", "create-loop", _timestamp);
         var admitted = WithEvidence(
@@ -1485,7 +1509,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
                 "step-1",
                 GovernedLoopSequentialNodeDescriptors.ProviderInference,
                 [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
-                GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
+                GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId, ModelProfileCapabilityId]),
                 new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
             new GovernedLoopNodeDefinition(
                 "exit",
@@ -1514,8 +1538,8 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             "trigger",
             ["exit"],
             GovernedLoopAuthorityCeiling.Create(scheduleTrigger
-                ? [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ScheduleTriggerCapabilityId]
-                : [ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
+                ? [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, ScheduleTriggerCapabilityId]
+                : [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId]),
             [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
             nodes,
             edges,
@@ -1524,7 +1548,8 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             new GovernedLoopDisplayMetadata(
                 "Sequential loop",
                 "Display metadata is not execution order.",
-                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()));
+                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()),
+            DefaultModelRoutingPolicy());
     }
 
     private static GovernedLoopGraphDefinition WaitGraph()
@@ -1542,7 +1567,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
                 "step-1",
                 GovernedLoopSequentialNodeDescriptors.ProviderInference,
                 [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
-                GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
+                GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId, ModelProfileCapabilityId]),
                 new Dictionary<string, string> { ["instruction"] = "Answer safely before waiting." }),
             new GovernedLoopNodeDefinition(
                 "wait-1",
@@ -1570,7 +1595,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             role,
             "trigger",
             ["exit"],
-            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId]),
             [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
             nodes,
             [
@@ -1587,7 +1612,8 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             new GovernedLoopDisplayMetadata(
                 "Wait loop",
                 "Display metadata is not execution order.",
-                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()));
+                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()),
+            DefaultModelRoutingPolicy());
     }
 
     private static CapabilityAdmissionSnapshot SequentialCapabilityAdmission(string graphArtifactHash, bool scheduleTrigger = false)
@@ -1596,6 +1622,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         Assert.True(CapabilityId.TryParse(ConversationTurnCapabilityId, out var conversationTurn, out _));
         Assert.True(CapabilityId.TryParse(ModelInferenceCapabilityId, out var modelInference, out _));
         Assert.True(CapabilityId.TryParse(ScheduleTriggerCapabilityId, out var scheduleTriggerCapability, out _));
+        Assert.True(CapabilityId.TryParse(ModelProfileCapabilityId, out var modelProfile, out _));
         Assert.True(CapabilityVersionRange.TryParse("*", out var versions, out _));
         Assert.True(CapabilityIntegrityDigest.TryParse("sha256:" + graphArtifactHash, out var checksum, out _));
         var requirements = new CapabilityDependencyManifest(
@@ -1603,15 +1630,122 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             CapabilityDependencyManifestKind.LoopPackage,
             subject!,
             scheduleTrigger
-                ? [new CapabilityDependency(conversationTurn!, versions!), new CapabilityDependency(modelInference!, versions!), new CapabilityDependency(scheduleTriggerCapability!, versions!)]
-                : [new CapabilityDependency(conversationTurn!, versions!), new CapabilityDependency(modelInference!, versions!)],
+                ? [new CapabilityDependency(conversationTurn!, versions!), new CapabilityDependency(modelInference!, versions!), new CapabilityDependency(modelProfile!, versions!), new CapabilityDependency(scheduleTriggerCapability!, versions!)]
+                : [new CapabilityDependency(conversationTurn!, versions!), new CapabilityDependency(modelInference!, versions!), new CapabilityDependency(modelProfile!, versions!)],
             [],
             new CapabilityDependencyArtifactMetadata(checksum, null));
-        return TestCapabilityAdmissionFactory.Create(requirements, _timestamp);
+        var admission = TestCapabilityAdmissionFactory.Create(requirements, _timestamp);
+        return admission;
+    }
+
+    private static GovernedModelRoutingAdmissionSnapshot ModelRoutingAdmission(
+        GovernedLoopGraphDefinition graph,
+        GovernedLoopAdmissionIntent intent,
+        GovernedLoopExecutionBinding execution,
+        AuthorityGrantProfilePin grantProfile,
+        AuthorityGrantBoundary grantBoundary,
+        string grantDependencyEvidenceHash,
+        EmbodySense.Core.Common.Authority.Models.AuthorityCeiling effectiveAuthority,
+        CapabilityAdmissionSnapshot capabilityAdmission,
+        DateTimeOffset evaluatedAtUtc)
+    {
+        var capabilityPin = capabilityAdmission.Pins.Single(pin =>
+            string.Equals(pin.DescriptorIdentity.Id.Value, ModelProfileCapabilityId, StringComparison.Ordinal));
+        Assert.Equal(CapabilityKind.ModelProfile, capabilityPin.Kind);
+        Assert.True(CapabilityDataClass.TryParse("public", out var publicData, out var dataClassError), dataClassError?.Message);
+        var privacy = GovernedModelPrivacyPosture.Create(
+            1,
+            GovernedModelLocality.LocalProcess,
+            CapabilityEgressMode.None,
+            [],
+            [publicData!],
+            ["local"],
+            GovernedModelRetentionPosture.None,
+            GovernedModelTrainingPosture.Prohibited);
+        var usageSupport = GovernedModelUsageSupportPolicy.Create(
+            GovernedModelUsageSupport.Unavailable,
+            GovernedModelUsageSupport.Unavailable,
+            GovernedModelUsageSupport.Unavailable,
+            GovernedModelUsageSupport.Unavailable,
+            GovernedModelUsageSupport.Unavailable);
+        var metadata = GovernedModelProfileMetadata.Create(
+            1,
+            capabilityPin.DescriptorIdentity,
+            "org.embodysense",
+            "provider-inference",
+            "test-model",
+            "local",
+            1,
+            Hash('6'),
+            "Exact test model profile for the sequential persistence fixture.",
+            [GovernedModelModality.Text],
+            [],
+            8_000,
+            512,
+            privacy,
+            usageSupport,
+            [graph.OwningRole.Identity.RoleId],
+            ["provider-inference"]);
+        var adapterRegistryRevisionHash = Hash('5');
+        var profile = GovernedModelProfilePin.Create(
+            capabilityPin,
+            metadata,
+            Hash('4'),
+            adapterRegistryRevisionHash);
+        var policy = graph.DefaultModelRoutingPolicy;
+        Assert.Equal(capabilityPin.DescriptorIdentity.Id, policy.Selector.ExactProfileId);
+        var node = graph.Nodes.Single(candidate => string.Equals(candidate.Id, "step-1", StringComparison.Ordinal));
+        var entry = GovernedModelRoutingAdmissionEntry.Create(
+            1,
+            node.Id,
+            node.Descriptor.TypeId,
+            policy.ContentHash,
+            policy.Requirements,
+            false,
+            [],
+            profile,
+            []);
+        return GovernedModelRoutingAdmissionSnapshot.Create(
+            1,
+            intent.WorkspaceId,
+            intent.OperationId,
+            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+            GovernedLoopAdmissionContractHash.ComputeExecutionBindingReferenceHash(execution),
+            execution.RunId,
+            execution.Revision.GraphId,
+            execution.Revision.RevisionId,
+            execution.Revision.ExecutableHash,
+            execution.ExecutionGeneration,
+            intent.Role.Identity.RoleId,
+            intent.Role.Identity.Revision,
+            intent.Role.ContentHash,
+            GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(capabilityAdmission),
+            GovernedLoopAdmissionContractHash.ComputeAdmissionAuthorityReferenceHash(
+                grantProfile,
+                grantBoundary,
+                grantDependencyEvidenceHash,
+                effectiveAuthority),
+            1,
+            null,
+            null,
+            adapterRegistryRevisionHash,
+            evaluatedAtUtc,
+            [entry]);
     }
 
     private static GovernedLoopPortDefinition Port(string id, GovernedLoopPortDirection direction, GovernedLoopBindingKind kind)
         => new(id, direction, kind, "text", true);
+
+    private static GovernedModelRoutingPolicy DefaultModelRoutingPolicy()
+    {
+        var source = GovernedLoopGraphTestFixture.DefaultModelRoutingPolicy();
+        Assert.True(CapabilityId.TryParse(ModelProfileCapabilityId, out var profileId, out _));
+        return GovernedModelRoutingPolicy.Create(
+            1,
+            GovernedModelRoutingSelector.Exact(profileId!),
+            source.FallbackProfileIds,
+            source.Requirements);
+    }
 
     private static CustomLoopRunEvent Event(
         long sequence,

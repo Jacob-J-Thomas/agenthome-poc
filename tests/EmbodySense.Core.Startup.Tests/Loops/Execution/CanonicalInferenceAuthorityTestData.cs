@@ -29,6 +29,7 @@ internal static class CanonicalInferenceAuthorityTestData
 {
     internal const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     internal const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    internal const string ModelProfileCapabilityId = "org.embodysense/model-profile/codex";
     internal const string WorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
     internal static readonly DateTimeOffset Now = new(2026, 8, 11, 12, 0, 0, TimeSpan.Zero);
 
@@ -78,18 +79,15 @@ internal static class CanonicalInferenceAuthorityTestData
             "test",
             artifact.ArtifactHash,
             artifact.LayoutHash);
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            GovernedLoopAdmissionEvidence.CurrentSchemaVersion,
-            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+        var evidence = EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.RoutingEvidenceForInference(
+            intent,
             execution,
             profilePin,
             new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
             Hash('3'),
             effectiveAuthority,
             capabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilityAdmission),
-            Now,
-            string.Empty));
+            Now);
         var receipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
             GovernedLoopAdmissionReceipt.CurrentSchemaVersion,
             intent,
@@ -118,7 +116,11 @@ internal static class CanonicalInferenceAuthorityTestData
             CapabilityAdmission = capabilityAdmission,
             AdmissionReceipt = receipt,
             ExecutionBinding = execution,
-            GraphArtifact = artifact
+            GraphArtifact = artifact,
+            PlanOrdinal = 1,
+            ActivationOrdinal = 1,
+            VisitOrdinal = 1,
+            AttemptOperationId = $"attempt-operation-{attempt}"
         };
     }
 
@@ -176,11 +178,11 @@ internal static class CanonicalInferenceAuthorityTestData
             new ContextualRoleRevisionIdentity(roleId, 1),
             Hash('b'));
         var graphCapabilities = allowTools
-            ? new[] { ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId }
-            : [ConversationTurnCapabilityId, ModelInferenceCapabilityId];
+            ? new[] { ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceCommandCapabilityId }
+            : [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId];
         var nodeCapabilities = allowTools
-            ? new[] { ModelInferenceCapabilityId, WorkspaceCommandCapabilityId }
-            : [ModelInferenceCapabilityId];
+            ? new[] { ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceCommandCapabilityId }
+            : [ModelInferenceCapabilityId, ModelProfileCapabilityId];
         var nodes = new[]
         {
             new GovernedLoopNodeDefinition(
@@ -238,7 +240,8 @@ internal static class CanonicalInferenceAuthorityTestData
             new GovernedLoopDisplayMetadata(
                 "Canonical inference test",
                 "Display metadata is not execution order.",
-                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()));
+                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()),
+            EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
         var revision = GovernedLoopRevisionArtifactFactory.Create(
             1,
             graph.RevisionReference,
@@ -264,8 +267,8 @@ internal static class CanonicalInferenceAuthorityTestData
         Assert.True(CapabilityId.TryParse("org.embodysense/canonical-inference-test", out var subject, out _));
         Assert.True(CapabilityVersionRange.TryParse("[1.0.0,2.0.0)", out var range, out _));
         var ids = allowTools
-            ? new[] { ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId }
-            : [ConversationTurnCapabilityId, ModelInferenceCapabilityId];
+            ? new[] { ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceCommandCapabilityId }
+            : [ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId];
         return new CapabilityDependencyManifest(
             CapabilityDependencyManifest.CurrentSchemaVersion,
             CapabilityDependencyManifestKind.LoopPackage,

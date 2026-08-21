@@ -6,15 +6,21 @@ import {
   candidateFromGraph,
   clientShapeErrors,
   compatibleBindings,
+  configureGraphModelRouting,
+  configureInferenceModelRouting,
   connectBinding,
   connectControl,
   connectorDecision,
   createGraphCandidate,
   currentGraph,
+  exactRoutingPolicyIntent,
+  inheritedRoutingPolicyIntent,
   indexServerErrors,
   layoutOnlyMove,
   mutationInput,
+  moveOrderedProfileSelection,
   removeGraphNode,
+  updateOrderedProfileSelection,
 } from "../../src/EmbodySense.Web/wwwroot/governed-graph-authoring.js";
 import { projectFrontier } from "../../src/EmbodySense.Web/wwwroot/frontier-projection.js";
 import {
@@ -25,6 +31,20 @@ import {
 } from "../../src/EmbodySense.Web/wwwroot/operational-posture.js";
 
 const hash = "a".repeat(64);
+const defaultRoutingPolicy = {
+  selector: {
+    kind: "exact",
+    exactProfileId: "org.example/model-a",
+    permittedInheritedProfileIds: [],
+    contentHash: "b".repeat(64),
+  },
+  fallbackProfileIds: [],
+  requirements: {
+    requiredModalities: ["text"],
+    contentHash: "c".repeat(64),
+  },
+  contentHash: "d".repeat(64),
+};
 
 test("operational controls require their own exact advertised evidence even when another source is backpressured", () => {
   const response = {
@@ -145,6 +165,7 @@ test("graph module keeps layout separate, permits only cataloged connectors, and
   const graph = {
     graphId: "graph-1",
     revisionId: "revision-1",
+    defaultModelRoutingPolicy: defaultRoutingPolicy,
     nodes: [
       { id: "trigger", descriptor: catalog.nodeDescriptors[0].descriptor },
       { id: "exit", descriptor: catalog.nodeDescriptors[1].descriptor },
@@ -260,6 +281,7 @@ test("graph mutations use only catalog contracts and lifecycle evidence and neve
     purpose: "Test one graph.",
     role,
     displayName: "Graph",
+    defaultModelRoutingPolicy: defaultRoutingPolicy,
   });
   graph = addCatalogNode(graph, catalog.nodeDescriptors[0], "trigger", 0, 0);
   graph = addCatalogNode(graph, catalog.nodeDescriptors[1], "exit", 200, 0);
@@ -304,6 +326,7 @@ test("durable graph hydration follows the exact lifecycle head and strips derive
       purpose: "Hydrate.",
       role: { roleId: "role-1", revision: 1, contentHash: "c".repeat(64) },
       displayName: "Hydrate",
+      defaultModelRoutingPolicy: defaultRoutingPolicy,
     }),
     executableHash: hash,
     revisionReference: {
@@ -325,4 +348,213 @@ test("durable graph hydration follows the exact lifecycle head and strips derive
   assert.equal(hydrated, graph);
   assert.equal(Object.hasOwn(candidate, "executableHash"), false);
   assert.equal(Object.hasOwn(candidate, "revisionReference"), false);
+});
+
+test("graph model routing keeps only typed authoring intent and scopes node overrides to Inference", () => {
+  const graph = createGraphCandidate({
+    graphId: "graph-1",
+    revisionId: "revision-1",
+    purpose: "Route one inference.",
+    role: { roleId: "role-1", revision: 1, contentHash: hash },
+    displayName: "Routing",
+    defaultModelRoutingPolicy: defaultRoutingPolicy,
+  });
+  assert.equal(
+    graph.defaultModelRoutingPolicy.selector.exactProfileId,
+    "org.example/model-a",
+  );
+  assert.equal(
+    Object.hasOwn(graph.defaultModelRoutingPolicy, "contentHash"),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(graph.defaultModelRoutingPolicy.requirements, "contentHash"),
+    false,
+  );
+
+  const exact = exactRoutingPolicyIntent(
+    defaultRoutingPolicy,
+    "org.example/model-b",
+    ["org.example/model-c"],
+  );
+  const inherited = inheritedRoutingPolicyIntent(
+    defaultRoutingPolicy,
+    ["org.example/model-a", "org.example/model-b"],
+    ["org.example/model-c"],
+  );
+  assert.deepEqual(exact.selector, {
+    kind: "exact",
+    exactProfileId: "org.example/model-b",
+    permittedInheritedProfileIds: [],
+  });
+  assert.equal(inherited.selector.kind, "inherit");
+  assert.equal(
+    inheritedRoutingPolicyIntent(defaultRoutingPolicy, [
+      "org.example/model-b",
+      "org.example/model-a",
+    ]),
+    null,
+  );
+  assert.equal(
+    exactRoutingPolicyIntent(defaultRoutingPolicy, "org.example/model-b", [
+      "org.example/model-b",
+    ]),
+    null,
+  );
+
+  const routed = configureGraphModelRouting(graph, exact);
+  assert.deepEqual(routed.authorityCeiling.capabilityIds, [
+    "org.example/model-b",
+    "org.example/model-c",
+  ]);
+  const inference = {
+    id: "infer",
+    descriptor: { kind: "inference", typeId: "provider-inference", version: 1 },
+    ports: [],
+    authorityCeiling: { capabilityIds: ["org.example/model-b"] },
+    parameters: {},
+    modelRoutingPolicy: null,
+    authoredInputDataClasses: null,
+  };
+  const withInference = { ...routed, nodes: [inference] };
+  const overridden = configureInferenceModelRouting(
+    withInference,
+    "infer",
+    inherited,
+    ["public"],
+  );
+  assert.equal(overridden.nodes[0].modelRoutingPolicy.selector.kind, "inherit");
+  assert.deepEqual(overridden.nodes[0].authoredInputDataClasses, ["public"]);
+  assert.deepEqual(overridden.authorityCeiling.capabilityIds, [
+    "org.example/model-a",
+    "org.example/model-b",
+    "org.example/model-c",
+  ]);
+  assert.deepEqual(overridden.nodes[0].authorityCeiling.capabilityIds, [
+    "org.example/model-a",
+    "org.example/model-b",
+    "org.example/model-c",
+  ]);
+  assert.equal(
+    configureInferenceModelRouting(
+      {
+        ...routed,
+        nodes: [
+          {
+            ...inference,
+            descriptor: { ...inference.descriptor, kind: "transform" },
+          },
+        ],
+      },
+      "infer",
+      inherited,
+    ),
+    null,
+  );
+  assert.equal(clientShapeErrors(graph).length, 0);
+  assert.ok(
+    clientShapeErrors({ ...graph, defaultModelRoutingPolicy: null }).some(
+      (item) => item.code === "model-routing-default-invalid",
+    ),
+  );
+});
+
+test("new graph routing remains optional and profile authority follows effective exact and fallback policies", () => {
+  let graph = createGraphCandidate({
+    graphId: "graph-1",
+    revisionId: "revision-1",
+    purpose: "Route one inference.",
+    role: { roleId: "role-1", revision: 1, contentHash: hash },
+    displayName: "Routing",
+  });
+  assert.equal(Object.hasOwn(graph, "defaultModelRoutingPolicy"), false);
+  assert.deepEqual(clientShapeErrors(graph), []);
+
+  const inferenceContract = {
+    descriptor: {
+      kind: "inference",
+      typeId: "provider-inference",
+      version: 1,
+    },
+    isAdvertised: true,
+    isExecutable: true,
+    isLegalEntry: false,
+    isLegalTerminal: false,
+    ports: [],
+    parameters: [],
+    requiredCapabilityIds: ["org.embodysense/model-inference"],
+  };
+  graph = configureGraphModelRouting(graph, defaultRoutingPolicy);
+  graph = addCatalogNode(graph, inferenceContract, "infer", 0, 0);
+  assert.deepEqual(graph.nodes[0].authorityCeiling.capabilityIds, [
+    "org.embodysense/model-inference",
+    "org.example/model-a",
+  ]);
+  assert.deepEqual(graph.authorityCeiling.capabilityIds, [
+    "org.embodysense/model-inference",
+    "org.example/model-a",
+  ]);
+
+  const override = exactRoutingPolicyIntent(
+    defaultRoutingPolicy,
+    "org.example/model-b",
+    ["org.example/model-c"],
+  );
+  graph = configureInferenceModelRouting(graph, "infer", override);
+  assert.deepEqual(graph.nodes[0].authorityCeiling.capabilityIds, [
+    "org.embodysense/model-inference",
+    "org.example/model-b",
+    "org.example/model-c",
+  ]);
+  assert.deepEqual(graph.authorityCeiling.capabilityIds, [
+    "org.embodysense/model-inference",
+    "org.example/model-a",
+    "org.example/model-b",
+    "org.example/model-c",
+  ]);
+
+  graph = configureInferenceModelRouting(graph, "infer", null);
+  assert.deepEqual(graph.nodes[0].authorityCeiling.capabilityIds, [
+    "org.embodysense/model-inference",
+    "org.example/model-a",
+  ]);
+  assert.deepEqual(graph.authorityCeiling.capabilityIds, [
+    "org.embodysense/model-inference",
+    "org.example/model-a",
+  ]);
+});
+
+test("fallback selection preserves authored order and supports explicit bounded reordering", () => {
+  const original = ["org.example/model-c", "org.example/model-b"];
+  assert.deepEqual(
+    updateOrderedProfileSelection(original, [
+      "org.example/model-a",
+      "org.example/model-b",
+      "org.example/model-c",
+    ]),
+    ["org.example/model-c", "org.example/model-b", "org.example/model-a"],
+  );
+  assert.deepEqual(
+    updateOrderedProfileSelection(original, [
+      "org.example/model-a",
+      "org.example/model-c",
+    ]),
+    ["org.example/model-c", "org.example/model-a"],
+  );
+  assert.deepEqual(
+    moveOrderedProfileSelection(original, "org.example/model-b", -1),
+    ["org.example/model-b", "org.example/model-c"],
+  );
+  assert.deepEqual(
+    moveOrderedProfileSelection(original, "org.example/model-c", -1),
+    original,
+  );
+  assert.deepEqual(
+    updateOrderedProfileSelection(
+      original,
+      ["org.example/model-c"],
+      "org.example/model-c",
+    ),
+    [],
+  );
 });

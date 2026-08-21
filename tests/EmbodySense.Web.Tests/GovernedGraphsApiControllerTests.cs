@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.Json;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Services;
@@ -78,13 +79,21 @@ public sealed class GovernedGraphsApiControllerTests
             Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, beforeInitialization.StatusCode);
             Assert.Equal(HttpStatusCode.OK, initialized.StatusCode);
-            Assert.Equal(HttpStatusCode.OK, catalog.StatusCode);
+            Assert.True(catalog.StatusCode == HttpStatusCode.OK, catalogJson);
             Assert.True(catalog.Headers.CacheControl?.NoStore == true);
             Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
             using var missingDocument = JsonDocument.Parse(missingJson);
             Assert.Equal("not-found", missingDocument.RootElement.GetProperty("status").GetString());
             using var document = JsonDocument.Parse(catalogJson);
             Assert.Equal("available", document.RootElement.GetProperty("status").GetString());
+            var modelProfiles = document.RootElement.GetProperty("modelProfiles");
+            Assert.Equal("available", modelProfiles.GetProperty("status").GetString());
+            Assert.Equal(JsonValueKind.Null, modelProfiles.GetProperty("defaultProfileId").ValueKind);
+            var modelProfile = Assert.Single(modelProfiles.GetProperty("profiles").EnumerateArray());
+            Assert.Equal("org.embodysense/model-profile/codex", modelProfile.GetProperty("profileId").GetString());
+            Assert.Equal("adapterunavailable", modelProfile.GetProperty("availabilityReason").GetString());
+            Assert.Equal(JsonValueKind.Null, modelProfile.GetProperty("recommendedExactPolicy").ValueKind);
+            Assert.Equal(JsonValueKind.Null, modelProfile.GetProperty("exactProfilePin").ValueKind);
             var descriptors = document.RootElement.GetProperty("nodeDescriptors").EnumerateArray().ToArray();
             Assert.Contains(descriptors, descriptor => descriptor.GetProperty("descriptor").GetProperty("kind").GetString() == "trigger");
             Assert.Contains(descriptors, descriptor => descriptor.GetProperty("descriptor").GetProperty("kind").GetString() == "wait");
@@ -156,11 +165,16 @@ public sealed class GovernedGraphsApiControllerTests
         };
         options = WebRunOptions.FromArguments(arguments);
         var builder = Program.CreateBuilder(arguments, options);
+        var approvalCoordinator = new WebApprovalCoordinator();
         builder.Services.AddSingleton(new WebAgentRuntimeHost(
             options,
-            new WebApprovalCoordinator(),
+            approvalCoordinator,
             WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath),
-            workspace.ServerStatePath));
+            conversationPublicationObserver: null,
+            runtimeStatus => AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+                approvalCoordinator,
+                workspace.ServerStatePath,
+                runtimeStatus)));
         var app = builder.Build();
         Program.ConfigurePipeline(app);
         return app;

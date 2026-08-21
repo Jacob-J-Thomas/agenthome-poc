@@ -23,6 +23,7 @@ using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Common.Tests;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
 using EmbodySense.Core.Persistence.Loops.GraphAuthoring.Models;
@@ -34,7 +35,7 @@ namespace EmbodySense.Core.Persistence.Tests.Loops.GraphAuthoring;
 
 public sealed class GovernedLoopGraphRevisionStoreTests
 {
-    private const string ModelInferenceCapabilityId = "org.embodysense/model/inference";
+    private const string ModelInferenceCapabilityId = GovernedLoopGraphTestFixture.ModelInferenceCapability;
     private const string HashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string HashB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private const string HashC = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -1535,7 +1536,8 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             graph.ControlEdges,
             graph.Bindings,
             graph.OutputContract,
-            graph.DisplayMetadata);
+            graph.DisplayMetadata,
+            graph.DefaultModelRoutingPolicy);
 
     private static GovernedLoopRevisionLifecycleRequest CreateRequest(
         string operationId,
@@ -1606,7 +1608,8 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             new GovernedLoopOutputContract(
                 "Return the answer.",
                 [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
-            display ?? Display("Graph one", 100, 200));
+            display ?? Display("Graph one", 100, 200),
+            GovernedLoopGraphTestFixture.DefaultModelRoutingPolicy());
 
     private static GovernedLoopGraphDefinition GraphWithEveryClosedEnum()
     {
@@ -1681,7 +1684,8 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             new GovernedLoopOutputContract(
                 "Return the result.",
                 [new GovernedLoopOutputDefinition("result", "text", "exit", "published", true)]),
-            new GovernedLoopDisplayMetadata("All enums", "Every closed discriminator.", display));
+            new GovernedLoopDisplayMetadata("All enums", "Every closed discriminator.", display),
+            GovernedLoopGraphTestFixture.DefaultModelRoutingPolicy());
     }
 
     private static ContextualRoleRevisionPin Role(

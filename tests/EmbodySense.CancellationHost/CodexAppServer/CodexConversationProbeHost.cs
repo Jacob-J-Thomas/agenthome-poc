@@ -122,8 +122,10 @@ internal static class CodexConversationProbeHost
                     break;
 
                 case "thread/start":
+                    var model = root.GetProperty("params").GetProperty("model").GetString() ?? string.Empty;
+                    var modelProvider = root.GetProperty("params").GetProperty("modelProvider").GetString() ?? string.Empty;
                     await TraceAsync(validated, instanceId, "thread-start", new { requestId = id, threadId = ThreadId });
-                    await WriteAsync(new { id, result = new { thread = new { id = ThreadId } } });
+                    await WriteAsync(new { id, result = new { model, modelProvider, thread = new { id = ThreadId, modelProvider } } });
                     break;
 
                 case "turn/start":

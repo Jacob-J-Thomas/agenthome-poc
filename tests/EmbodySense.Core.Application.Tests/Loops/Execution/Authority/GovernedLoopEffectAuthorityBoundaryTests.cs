@@ -21,7 +21,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         var grant = new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution };
         var capabilities = new StubEffectCapabilityAdmissionService
         {
-            Result = new CapabilityRevalidationResult(true, [fixture.RequiredPin], "The required pin is current.", CapabilityRevalidationStatus.Active),
+            Result = new CapabilityRevalidationResult(true, fixture.Request.RequiredCapabilityPins, "The required pins are current.", CapabilityRevalidationStatus.Active),
         };
         var evidence = new RecordingEffectAuthorityEvidenceStore();
         var transaction = new RecordingEffectAuthorityTransaction();
@@ -59,7 +59,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
             new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
             new StubEffectCapabilityAdmissionService
             {
-                Result = new CapabilityRevalidationResult(true, [fixture.RequiredPin], "The required pin is current.", CapabilityRevalidationStatus.Active),
+                Result = new CapabilityRevalidationResult(true, fixture.Request.RequiredCapabilityPins, "The required pins are current.", CapabilityRevalidationStatus.Active),
             },
             evidence);
         string? callbackHash = null;
@@ -87,7 +87,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         var grant = new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution };
         var capabilities = new StubEffectCapabilityAdmissionService
         {
-            Result = new CapabilityRevalidationResult(true, [fixture.RequiredPin], "The required pin is current.", CapabilityRevalidationStatus.Active),
+            Result = new CapabilityRevalidationResult(true, fixture.Request.RequiredCapabilityPins, "The required pins are current.", CapabilityRevalidationStatus.Active),
         };
         var evidence = new RecordingEffectAuthorityEvidenceStore();
         evidence.Statuses.Enqueue(GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended);
@@ -265,7 +265,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         {
             Result = new CapabilityRevalidationResult(
                 false,
-                [fixture.RequiredPin],
+                fixture.Request.RequiredCapabilityPins,
                 "An unrelated admitted workspace capability is inactive.",
                 status),
         };
@@ -282,7 +282,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         Assert.True(EmbodySense.Core.Common.Authority.Grants.AuthorityCeilingSubset.IsEqual(
             fixture.Request.RequiredAuthority,
             result.Decision!.EffectiveAuthority));
-        Assert.Equal(fixture.RequiredPin, Assert.Single(result.Decision!.CurrentAuthority!.CapabilityPins));
+        Assert.Equal(fixture.Request.RequiredCapabilityPins, result.Decision!.CurrentAuthority!.CapabilityPins);
         Assert.Empty(result.Decision.CurrentAuthority.ObservedCapabilityPins);
     }
 
@@ -303,7 +303,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         {
             Result = new CapabilityRevalidationResult(
                 false,
-                [fixture.RequiredPin],
+                fixture.Request.RequiredCapabilityPins,
                 "An unrelated admitted workspace capability drifted.",
                 CapabilityRevalidationStatus.PinDrifted,
                 [driftedPin]),
@@ -342,7 +342,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         Assert.True(result.CommitInvoked);
         Assert.Equal(GovernedLoopEffectAuthorityDisposition.Direct, result.Decision?.Disposition);
         Assert.Equal(GovernedLoopEffectAuthorityReason.ActiveNarrowed, result.Decision?.Reason);
-        Assert.Equal(fixture.RequiredPin, Assert.Single(result.Decision!.CurrentAuthority!.CapabilityPins));
+        Assert.Equal(fixture.Request.RequiredCapabilityPins, result.Decision!.CurrentAuthority!.CapabilityPins);
     }
 
     [Fact]
@@ -410,8 +410,8 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         {
             Result = new CapabilityRevalidationResult(
                 true,
-                [fixture.RequiredPin],
-                "The required capability pin remains current, but target authority was narrowed.",
+                fixture.Request.RequiredCapabilityPins,
+                "The required capability pins remain current, but target authority was narrowed.",
                 CapabilityRevalidationStatus.Active),
         };
         var commits = 0;
@@ -495,7 +495,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         };
         var capabilities = new StubEffectCapabilityAdmissionService
         {
-            Result = new CapabilityRevalidationResult(true, [fixture.RequiredPin], "Current.", CapabilityRevalidationStatus.Active),
+            Result = new CapabilityRevalidationResult(true, fixture.Request.RequiredCapabilityPins, "Current.", CapabilityRevalidationStatus.Active),
         };
         var commits = 0;
 
@@ -525,7 +525,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         };
         var capabilities = new StubEffectCapabilityAdmissionService
         {
-            Result = new CapabilityRevalidationResult(true, [fixture.RequiredPin], "Current.", CapabilityRevalidationStatus.Active),
+            Result = new CapabilityRevalidationResult(true, fixture.Request.RequiredCapabilityPins, "Current.", CapabilityRevalidationStatus.Active),
         };
         var commits = 0;
 
@@ -582,7 +582,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         var unavailableEvidence = new RecordingEffectAuthorityEvidenceStore { Status = GovernedLoopEffectAuthorityEvidenceStoreStatus.Unavailable };
         var directCapabilities = new StubEffectCapabilityAdmissionService
         {
-            Result = new CapabilityRevalidationResult(true, [fixture.RequiredPin], "Current.", CapabilityRevalidationStatus.Active),
+            Result = new CapabilityRevalidationResult(true, fixture.Request.RequiredCapabilityPins, "Current.", CapabilityRevalidationStatus.Active),
         };
         var rejectedEvidence = await Boundary(
             new StubEffectAuthorityGrantResolver { Resolution = fixture.Resolution },
@@ -603,7 +603,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         var fixture = GovernedLoopEffectAuthorityTestFixture.Create();
         var capabilities = new StubEffectCapabilityAdmissionService
         {
-            Result = new CapabilityRevalidationResult(false, [fixture.RequiredPin], "Contradictory test posture.", CapabilityRevalidationStatus.Active),
+            Result = new CapabilityRevalidationResult(false, fixture.Request.RequiredCapabilityPins, "Contradictory test posture.", CapabilityRevalidationStatus.Active),
         };
 
         var result = await Boundary(
@@ -792,6 +792,7 @@ public sealed class GovernedLoopEffectAuthorityBoundaryTests
         Assert.Equal(
             [
                 GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId,
+                GovernedLoopSequentialApplicationTestFixture.ModelProfileCapabilityId,
                 GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId,
             ],
             fixture.Request.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity.Id.Value));

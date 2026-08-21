@@ -11,6 +11,7 @@ using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Startup.ContextualRoles;
+using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
 
 namespace EmbodySense.Core.Startup.Loops.GraphAuthoring;
@@ -29,6 +30,7 @@ public sealed class GovernedLoopGraphAuthoringFacade
     private readonly ICapabilityAuthorityTransaction _authorityTransaction;
     private readonly IGovernedLoopNodeCatalog _catalog;
     private readonly IContextualRoleCatalogFacade _roles;
+    private readonly IModelProfileCatalogFacade _modelProfiles;
     private readonly IGovernedLoopGraphRevisionStore _store;
     private readonly string _surfaceId;
     private readonly string _workspaceId;
@@ -41,7 +43,8 @@ public sealed class GovernedLoopGraphAuthoringFacade
         IGovernedLoopNodeCatalog catalog,
         IGovernedLoopAuthoritySnapshotProvider authority,
         ICapabilityAuthorityTransaction authorityTransaction,
-        IContextualRoleCatalogFacade roles)
+        IContextualRoleCatalogFacade roles,
+        IModelProfileCatalogFacade modelProfiles)
     {
         if (!AuthorityActorId.TryParse(actorId, out var parsedActor, out _))
         {
@@ -55,6 +58,7 @@ public sealed class GovernedLoopGraphAuthoringFacade
         _authority = authority ?? throw new ArgumentNullException(nameof(authority));
         _authorityTransaction = authorityTransaction ?? throw new ArgumentNullException(nameof(authorityTransaction));
         _roles = roles ?? throw new ArgumentNullException(nameof(roles));
+        _modelProfiles = modelProfiles ?? throw new ArgumentNullException(nameof(modelProfiles));
         _actorId = parsedActor!;
     }
 
@@ -78,9 +82,11 @@ public sealed class GovernedLoopGraphAuthoringFacade
         }
 
         var roles = await ContextualRoleCatalogAggregator.ReadAsync(_roles, cancellationToken).ConfigureAwait(false);
+        var modelProfiles = await _modelProfiles.ReadAsync(null, 50, cancellationToken).ConfigureAwait(false);
         var available = catalog is { IsAvailable: true }
             && catalog.Descriptors is not null
-            && string.Equals(roles.Status, "available", StringComparison.Ordinal);
+            && string.Equals(roles.Status, "available", StringComparison.Ordinal)
+            && string.Equals(modelProfiles.Status, "available", StringComparison.Ordinal);
         var descriptors = available
             ? catalog!.Descriptors!.Select(Map).ToArray()
             : Array.Empty<GovernedLoopGraphCatalogNodeSnapshot>();
@@ -88,7 +94,8 @@ public sealed class GovernedLoopGraphAuthoringFacade
             available ? "available" : "unavailable",
             catalog?.SourceEvidenceId ?? string.Empty,
             Array.AsReadOnly(descriptors),
-            roles);
+            roles,
+            modelProfiles);
     }
 
     /// <summary>Reads one exact graph aggregate without selecting a revision for the caller.</summary>

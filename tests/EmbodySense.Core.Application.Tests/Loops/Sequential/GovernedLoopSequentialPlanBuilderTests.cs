@@ -40,7 +40,7 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
         Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, result.Status);
         Assert.Equal(GovernedLoopSequentialNodeDescriptors.ScheduleTrigger, result.Plan!.Nodes[0].Descriptor);
         Assert.Equal(
-            [GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.ScheduleTriggerCapabilityId],
+            [GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelProfileCapabilityId, GovernedLoopSequentialApplicationTestFixture.ScheduleTriggerCapabilityId],
             artifact.Graph.AuthorityCeiling.CapabilityIds);
         var missingNodeAuthority = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             artifact.Graph,
@@ -60,19 +60,19 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
 
         Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, result.Status);
         Assert.Equal(
-            [GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId],
+            [GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelProfileCapabilityId, GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId],
             artifact.Graph.AuthorityCeiling.CapabilityIds);
         Assert.All(
             artifact.Graph.Nodes.Where(node => node.Descriptor == GovernedLoopSequentialNodeDescriptors.ProviderInference),
             node => Assert.Equal(
-                [GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId],
+                [GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelProfileCapabilityId, GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId],
                 node.AuthorityCeiling.CapabilityIds));
 
         var firstInference = artifact.Graph.Nodes.Single(node => node.Id == "infer-01");
         var missingNodeAssignment = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             artifact.Graph,
             nodes: artifact.Graph.Nodes.Select(node => node.Id == firstInference.Id
-                ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId]) }
+                ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelProfileCapabilityId]) }
                 : node).ToArray());
 
         Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedContract, GovernedLoopSequentialPlanBuilder.Build(missingNodeAssignment).Status);
@@ -298,13 +298,13 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
         var emptyInstruction = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
             nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { Parameters = new Dictionary<string, string> { ["instruction"] = string.Empty } } : node).ToArray());
-        var missingAuthority = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+        Assert.Throws<ArgumentException>(() => GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
-            nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([]) } : node).ToArray());
-        var substitutedAuthority = GovernedLoopSequentialApplicationTestFixture.Rebuild(
+            nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([]) } : node).ToArray()));
+        Assert.Throws<ArgumentException>(() => GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
             nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId]) } : node).ToArray(),
-            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId]));
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId])));
         var missingContextPort = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
             nodes: source.Nodes.Select(node => node.Id == inference.Id ? node with { Ports = node.Ports.Where(port => port.Id != "invocation-context").ToArray() } : node).ToArray(),
@@ -326,7 +326,7 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
                 ? node with { AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId]) }
                 : node).ToArray());
 
-        foreach (var artifact in new[] { missingInstruction, emptyInstruction, missingAuthority, substitutedAuthority, missingContextPort, extraPort, missingPublicationAuthority, substitutedPublicationAuthority })
+        foreach (var artifact in new[] { missingInstruction, emptyInstruction, missingContextPort, extraPort, missingPublicationAuthority, substitutedPublicationAuthority })
         {
             var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
 
@@ -343,7 +343,7 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
         var artifact = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
             authorityCeiling: GovernedLoopAuthorityCeiling.Create(
-                [GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, "org.embodysense/workspace-read"]));
+                [GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId, GovernedLoopSequentialApplicationTestFixture.ModelProfileCapabilityId, "org.embodysense/workspace-read"]));
 
         var result = GovernedLoopSequentialPlanBuilder.Build(artifact);
 
@@ -456,10 +456,11 @@ public sealed class GovernedLoopSequentialPlanBuilderTests
     public void Entry_terminal_and_inference_outcome_substitutions_fail_at_the_structural_boundary()
     {
         var source = GovernedLoopSequentialApplicationTestFixture.LinearArtifact().Graph;
+        var inferenceAuthority = source.Nodes.Single(node => node.Id == "infer-01").AuthorityCeiling;
         var invalidEntry = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,
             nodes: source.Nodes.Select(node => node.Id == source.EntryNodeId
-                ? node with { Descriptor = GovernedLoopSequentialNodeDescriptors.ProviderInference }
+                ? node with { Descriptor = GovernedLoopSequentialNodeDescriptors.ProviderInference, AuthorityCeiling = inferenceAuthority }
                 : node).ToArray());
         var invalidTerminal = GovernedLoopSequentialApplicationTestFixture.Rebuild(
             source,

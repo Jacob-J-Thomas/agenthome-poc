@@ -414,21 +414,15 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
             context.Artifact.ArtifactHash,
             context.Receipt.Intent.WorkspaceId,
             [GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId]);
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            context.Receipt.Evidence.SchemaVersion,
-            context.Receipt.Evidence.IntentHash,
+        var evidence = GovernedModelProfileApplicationTestFixture.EmptyRoutingEvidence(
+            context.Receipt.Intent,
             context.Receipt.Evidence.Binding,
             context.Receipt.Evidence.GrantProfile,
             context.Receipt.Evidence.GrantBoundary,
             context.Receipt.Evidence.GrantDependencyEvidenceHash,
             context.Receipt.Evidence.EffectiveAuthority,
             substitutedCapability,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(
-                context.Receipt.Intent,
-                context.Receipt.Evidence.EffectiveAuthority,
-                substitutedCapability),
-            context.Receipt.Evidence.EvaluatedAtUtc,
-            string.Empty));
+            context.Receipt.Evidence.EvaluatedAtUtc);
         var receipt = GovernedLoopAdmissionContractHash.Apply(context.Receipt with
         {
             Evidence = evidence,
@@ -749,7 +743,8 @@ public sealed class GovernedLoopSequentialInvocationCoordinatorTests
             new GovernedLoopDisplayMetadata(
                 graph.DisplayMetadata.DisplayName,
                 "Changed display-only metadata must still change full artifact identity.",
-                graph.DisplayMetadata.Nodes));
+                graph.DisplayMetadata.Nodes),
+            graph.DefaultModelRoutingPolicy);
         return GovernedLoopGraphRevisionArtifactFactory.Create(
             GovernedLoopGraphRevisionArtifact.CurrentSchemaVersion,
             artifact.RevisionArtifact,

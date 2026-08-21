@@ -66,7 +66,9 @@ public sealed class ConsoleAgentRuntimeHostTests
                   break;
                 case "thread/start":
                   developerInstructions = String(message.params?.developerInstructions ?? "");
-                  write({ id: message.id, result: { thread: { id: threadId } } });
+                  const model = String(message.params?.model ?? "");
+                  const modelProvider = String(message.params?.modelProvider ?? "");
+                  write({ id: message.id, result: { model, modelProvider, thread: { id: threadId, modelProvider } } });
                   break;
                 case "turn/start": {
                   const turnId = "turn-test";
