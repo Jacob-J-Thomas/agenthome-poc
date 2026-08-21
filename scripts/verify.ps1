@@ -3,6 +3,8 @@ param(
     [switch]$SkipRestore,
     [switch]$RunBrowserE2E,
     [switch]$BrowserE2EOnly,
+    [ValidateSet("Full", "Solution", "StaticContracts")]
+    [string]$VerificationComponent = "Full",
     [ValidateRange(1, 8)]
     [int]$MaximumTestWorkers = [Math]::Min(8, [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount * 1.5))),
     [ValidateSet("PullRequest", "Stress")]
@@ -62,6 +64,14 @@ Reset-VerificationParallelPhaseState
 
 if ($BrowserE2EOnly -and -not $RunBrowserE2E) {
     throw "-BrowserE2EOnly requires -RunBrowserE2E."
+}
+
+if ($VerificationComponent -ne "Full" -and ($VerificationTier -ne "PullRequest" -or $RunBrowserE2E -or $BrowserE2EOnly)) {
+    throw "A non-Full verification component is valid only for the complete PullRequest verification tier."
+}
+
+if ($VerificationComponent -eq "StaticContracts" -and -not $runningOnWindows) {
+    throw "The StaticContracts verification component is reserved for the hosted Windows verifier."
 }
 
 if ($VerificationTier -eq "Stress" -and ($RunBrowserE2E -or $BrowserE2EOnly)) {
@@ -241,6 +251,86 @@ function Add-TestExecutionPhase {
     Add-ProfiledRequiredGatePhase -Name "tests-$($Lane.Name)" -FileName "dotnet" -Arguments $arguments -TimeoutSeconds $testLaneTimeoutSeconds -OutputPath (Join-Path $verificationLogsPath "$($Lane.Name).log") -CoverageSearchRoot $(if ($SkipCoverage) { $null } else { $Lane.ResultsPath }) -TrxPath (Join-Path $Lane.ResultsPath $trxName) -Environment $Lane.Environment
 }
 
+function Invoke-StaticVerificationContracts {
+    $contractScripts = @(
+        "verify-sdk-diagnostics.tests.ps1",
+        "verify-preflight-overlap.tests.ps1",
+        "verify-coverage.tests.ps1",
+        "verify-bounded-phases.tests.ps1",
+        "verify-parallel.tests.ps1",
+        "verify-test-inventory.tests.ps1",
+        "verify-watchdog.tests.ps1",
+        "verify-promotion-fan-in.tests.ps1"
+    )
+
+    Write-Output "VERIFY_STATIC_CONTRACT_PLAN contracts=$($contractScripts -join ',') execution=serial timeout_seconds=120"
+    foreach ($contractScript in $contractScripts) {
+        $contractArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $testsPath "scripts\$contractScript"))
+        Invoke-VerificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log")
+    }
+
+    $frontendArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "verify-frontend.ps1"), "-RepositoryRoot", $repoRoot, "-LogsPath", $verificationLogsPath)
+    Invoke-VerificationPhase -Name "frontend-preflight" -FileName $powerShellExecutable -Arguments $frontendArguments -TimeoutSeconds 590 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "frontend-preflight.log")
+
+    Invoke-VerificationPhase -Name "restore-static" -FileName "dotnet" -Arguments @("restore", "EmbodySense.sln", "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds 300 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "restore-static.log")
+    Invoke-VerificationPhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -TimeoutSeconds 240 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "format-whitespace.log")
+    Invoke-VerificationPhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -TimeoutSeconds 240 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "format-naming-style.log")
+    Invoke-VerificationPhase -Name "git-diff-check" -FileName "git" -Arguments @("diff", "--check") -TimeoutSeconds 60 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "git-diff-check.log")
+    $script:LastCompletedVerificationPhase = "static-contracts"
+}
+
+function Write-VerificationComponentEvidence {
+    param(
+        [Parameter(Mandatory = $true)] [ValidateSet("solution", "static-contracts")] [string]$Component,
+        [Parameter(Mandatory = $true)] [string[]]$ManifestPaths,
+        [int]$LaneCount = 0,
+        [bool]$InventoryComplete = $false,
+        [bool]$CoverageComplete = $false,
+        [int]$StaticContractCount = 0,
+        [bool]$FrontendComplete = $false,
+        [bool]$FormatComplete = $false,
+        [bool]$DiffComplete = $false
+    )
+
+    $evidencePath = Join-Path $verificationResultsPath "verification-component-evidence.json"
+    $manifestPath = Join-Path $verificationResultsPath "verification-component-manifest.json"
+    $rootFullPath = [IO.Path]::GetFullPath($verificationResultsPath)
+    $manifestEntries = [Collections.Generic.List[object]]::new()
+    foreach ($candidatePath in $ManifestPaths) {
+        $fullPath = [IO.Path]::GetFullPath($candidatePath)
+        if (-not $fullPath.StartsWith($rootFullPath + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            throw "Component evidence path is missing or outside VerificationResults: $fullPath"
+        }
+        $file = Get-Item -LiteralPath $fullPath
+        $relativePath = [IO.Path]::GetRelativePath($rootFullPath, $fullPath).Replace([IO.Path]::DirectorySeparatorChar, "/")
+        if (@($manifestEntries | Where-Object { $_.path -ceq $relativePath }).Count -ne 0) {
+            throw "Component evidence manifest contains a duplicate path: $relativePath"
+        }
+        $manifestEntries.Add([ordered]@{ path = $relativePath; length = $file.Length; sha256 = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant() })
+    }
+
+    $evidence = [ordered]@{
+        schemaVersion = 1
+        component = $Component
+        repositoryHead = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
+        githubRunId = $env:GITHUB_RUN_ID
+        githubRunAttempt = $env:GITHUB_RUN_ATTEMPT
+        laneCount = $LaneCount
+        inventoryComplete = $InventoryComplete
+        coverageComplete = $CoverageComplete
+        staticContractCount = $StaticContractCount
+        frontendComplete = $FrontendComplete
+        formatComplete = $FormatComplete
+        diffComplete = $DiffComplete
+        manifestSha256 = ""
+    }
+    [IO.File]::WriteAllText($evidencePath, ($evidence | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    $manifest = [ordered]@{ schemaVersion = 1; files = @($manifestEntries | Sort-Object path) }
+    [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    $evidence.manifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText($evidencePath, ($evidence | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+}
+
 Push-Location $repoRoot
 try {
     & (Join-Path $PSScriptRoot "verify-sdk.ps1") -GlobalJsonPath (Join-Path $repoRoot "global.json") -RepositoryRoot $repoRoot
@@ -274,7 +364,7 @@ try {
     $buildArguments += if ($VerificationTier -eq "Stress") { $persistenceTestProjectPath } elseif ($BrowserE2EOnly) { $e2eProjectPath } else { "EmbodySense.sln" }
     $buildArguments += @("-c", $Configuration, "/p:RestoreIgnoreFailedSources=true")
 
-    $normalPullRequestVerification = $VerificationTier -eq "PullRequest" -and -not $BrowserE2EOnly
+    $normalPullRequestVerification = $VerificationComponent -eq "Full" -and $VerificationTier -eq "PullRequest" -and -not $BrowserE2EOnly
     if ($normalPullRequestVerification) {
         $contractScripts = @(
             "verify-preflight-overlap.tests.ps1",
@@ -282,22 +372,18 @@ try {
             "verify-bounded-phases.tests.ps1",
             "verify-parallel.tests.ps1",
             "verify-test-inventory.tests.ps1",
-            "verify-watchdog.tests.ps1"
+            "verify-watchdog.tests.ps1",
+            "verify-promotion-fan-in.tests.ps1"
         )
         if ($runningOnWindows) {
             $contractScripts = @("verify-sdk-diagnostics.tests.ps1") + $contractScripts
         }
-        $preflightNestedProcessContractScripts = @(
-            "verify-preflight-overlap.tests.ps1",
-            "verify-parallel.tests.ps1"
-        )
-        if ($runningOnWindows) {
-            $preflightNestedProcessContractScripts = @("verify-sdk-diagnostics.tests.ps1") + $preflightNestedProcessContractScripts
-        }
+        $preflightNestedProcessContractScripts = @(Get-VerificationPreflightNestedProcessContractScripts -RunningOnWindows:$runningOnWindows)
         $preflightBuildOverlapContractScripts = @(
             "verify-bounded-phases.tests.ps1",
             "verify-test-inventory.tests.ps1",
-            "verify-watchdog.tests.ps1"
+            "verify-watchdog.tests.ps1",
+            "verify-promotion-fan-in.tests.ps1"
         )
         Assert-VerificationPreflightContractClassification -ContractScripts $contractScripts -CoverageContractScript "verify-coverage.tests.ps1" -NestedProcessContractScripts $preflightNestedProcessContractScripts -OrdinaryContractScripts $preflightBuildOverlapContractScripts
         $preflightMaximumWorkers = [Math]::Min(4, $hardwareBoundedResourceCapacity)
@@ -321,7 +407,7 @@ try {
                 $contractArguments += @("-ExecutionPolicy", "Bypass")
             }
             $contractArguments += @("-File", (Join-Path $testsPath "scripts\$contractScript"))
-            # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422 tracks the broader bounded Windows verifier contention; only this source-heavy contract receives the measured headroom.
+            # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422 tracks the broader bounded Windows verifier contention; only this source-heavy contract receives the measured ordinary-contract headroom.
             $contractTimeoutSeconds = if ($contractScript -ceq "verify-watchdog.tests.ps1") { 120 } else { 90 }
             Add-VerificationParallelPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($contractScript))" -FileName $powerShellExecutable -Arguments $contractArguments -TimeoutSeconds $contractTimeoutSeconds -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "$contractScript.log") -EstimatedDurationSeconds 35 -Weight 1 -ResourceClass "Ordinary"
         }
@@ -357,6 +443,29 @@ try {
         Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers | Out-Null
         Reset-VerificationParallelPhaseState
         $script:LastCompletedVerificationPhase = "pull-request-preflight"
+    }
+    elseif ($VerificationComponent -eq "StaticContracts") {
+        Invoke-StaticVerificationContracts
+        $staticManifestPaths = @(
+            (Join-Path $verificationLogsPath "verify-sdk-diagnostics.tests.ps1.log"),
+            (Join-Path $verificationLogsPath "verify-preflight-overlap.tests.ps1.log"),
+            (Join-Path $verificationLogsPath "verify-coverage.tests.ps1.log"),
+            (Join-Path $verificationLogsPath "verify-bounded-phases.tests.ps1.log"),
+            (Join-Path $verificationLogsPath "verify-parallel.tests.ps1.log"),
+            (Join-Path $verificationLogsPath "verify-test-inventory.tests.ps1.log"),
+            (Join-Path $verificationLogsPath "verify-watchdog.tests.ps1.log"),
+            (Join-Path $verificationLogsPath "verify-promotion-fan-in.tests.ps1.log"),
+            (Join-Path $verificationLogsPath "frontend-preflight.log"),
+            (Join-Path $verificationLogsPath "restore-static.log"),
+            (Join-Path $verificationLogsPath "format-whitespace.log"),
+            (Join-Path $verificationLogsPath "format-naming-style.log"),
+            (Join-Path $verificationLogsPath "git-diff-check.log")
+        )
+        Write-VerificationComponentEvidence -Component "static-contracts" -ManifestPaths $staticManifestPaths -StaticContractCount 8 -FrontendComplete $true -FormatComplete $true -DiffComplete $true
+        $verificationStopwatch.Stop()
+        $elapsedText = $verificationStopwatch.Elapsed.TotalSeconds.ToString("0.###", [Globalization.CultureInfo]::InvariantCulture)
+        Write-Output "VERIFY_COMPLETE schema_version=1 component=static-contracts status=passed elapsed_seconds=$elapsedText"
+        return
     }
     else {
         Invoke-CheckedNativePhase -Name "build-$($VerificationTier.ToLowerInvariant())" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900
@@ -423,16 +532,19 @@ try {
     Invoke-CheckedNativePhase -Name "test-partition-reconciliation" -FileName $powerShellExecutable -Arguments $partitionArguments -TimeoutSeconds 120
 
     $coverageStartedUtc = [DateTime]::UtcNow
-    Add-ProfiledRequiredGatePhase -Name "git-diff-check" -FileName "git" -Arguments @("diff", "--check") -TimeoutSeconds 60 -OutputPath (Join-Path $verificationLogsPath "git-diff-check.log")
-    Add-ProfiledRequiredGatePhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-whitespace.log")
-    Add-ProfiledRequiredGatePhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-naming-style.log")
+    if ($VerificationComponent -ne "Solution") {
+        Add-ProfiledRequiredGatePhase -Name "git-diff-check" -FileName "git" -Arguments @("diff", "--check") -TimeoutSeconds 60 -OutputPath (Join-Path $verificationLogsPath "git-diff-check.log")
+        Add-ProfiledRequiredGatePhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-whitespace.log")
+        Add-ProfiledRequiredGatePhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-naming-style.log")
+    }
     foreach ($isolation in $isolations) {
         foreach ($lane in $isolation.Lanes) {
             Add-TestExecutionPhase -Isolation $isolation -Lane $lane
         }
     }
 
-    Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases)
+    $excludedRequiredGateNames = if ($VerificationComponent -eq "Solution") { @("git-diff-check", "format-whitespace", "format-naming-style") } else { @() }
+    Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases) -ExcludedNames $excludedRequiredGateNames
     Write-Output "VERIFY_PARALLEL_PLAN kind=required-gates phases=$($script:VerificationParallelPhases.Count) maximum_workers=$requiredGateMaximumWorkers maximum_resource_capacity=$requiredGateResourceCapacity maximum_process_heavy=$effectiveRequiredGateMaximumProcessHeavyWorkers maximum_cpu_bound=$effectiveRequiredGateMaximumCpuBoundWorkers scheduling=singleton-class-backlog-priority-lpt coverage=$(-not $SkipCoverage)"
     $gateResults = @(Invoke-VerificationParallelPhases -MaximumWorkers $requiredGateMaximumWorkers -MaximumResourceCapacity $requiredGateResourceCapacity -MaximumProcessHeavyWorkers $effectiveRequiredGateMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers $effectiveRequiredGateMaximumCpuBoundWorkers)
     $testResults = @($gateResults | Where-Object { $_.Name.StartsWith("tests-", [StringComparison]::Ordinal) })
@@ -471,6 +583,24 @@ finally {
     }
 }
 
+$solutionManifestPaths = @(
+    (Join-Path $verificationResultsPath "required-test-lanes.json"),
+    (Join-Path $verificationResultsPath "required-test-partition.json"),
+    (Join-Path $verificationResultsPath "required-execution-tests.json"),
+    (Join-Path $verificationResultsPath "required-test-report.json"),
+    (Join-Path $verificationResultsPath "coverage-manifest.json"),
+    (Join-Path $verificationResultsPath "coverage-summary.json")
+)
+if ($VerificationComponent -eq "Solution") {
+    $solutionManifestPaths += @($testResults | ForEach-Object { $_.TrxPath })
+    Write-VerificationComponentEvidence -Component "solution" -ManifestPaths $solutionManifestPaths -LaneCount $testResults.Count -InventoryComplete $true -CoverageComplete $true
+}
+
 $verificationStopwatch.Stop()
 $elapsedText = $verificationStopwatch.Elapsed.TotalSeconds.ToString("0.###", [Globalization.CultureInfo]::InvariantCulture)
-Write-Output "VERIFY_COMPLETE schema_version=1 status=passed elapsed_seconds=$elapsedText"
+if ($VerificationComponent -eq "Solution") {
+    Write-Output "VERIFY_COMPLETE schema_version=1 component=solution status=passed elapsed_seconds=$elapsedText"
+}
+else {
+    Write-Output "VERIFY_COMPLETE schema_version=1 status=passed elapsed_seconds=$elapsedText"
+}

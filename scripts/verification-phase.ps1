@@ -70,7 +70,9 @@ function Invoke-VerificationPhase {
         [ValidateRange(1, 86400)]
         [int]$TimeoutSeconds,
 
-        [string]$WorkingDirectory
+        [string]$WorkingDirectory,
+
+        [string]$OutputPath
     )
 
     $startedAtUtc = [DateTimeOffset]::UtcNow
@@ -82,13 +84,23 @@ function Invoke-VerificationPhase {
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     $processStarted = $false
+    $standardOutputTask = $null
+    $standardErrorTask = $null
     try {
+        if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+            $process.StartInfo.RedirectStandardOutput = $true
+            $process.StartInfo.RedirectStandardError = $true
+        }
         try {
             if (-not $process.Start()) {
                 throw "The process API returned false."
             }
 
             $processStarted = $true
+            if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+                $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+                $standardErrorTask = $process.StandardError.ReadToEndAsync()
+            }
         }
         catch {
             throw "Verification phase '$Name' could not start '$FileName'. Last completed phase: '$script:LastCompletedVerificationPhase'. $($_.Exception.Message)"
@@ -96,12 +108,23 @@ function Invoke-VerificationPhase {
 
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             Stop-VerificationProcessTree $process
+            $process.WaitForExit()
+            if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+                $outputDirectory = Split-Path -Parent $OutputPath
+                New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+                [IO.File]::WriteAllText($OutputPath, $standardOutputTask.GetAwaiter().GetResult() + $standardErrorTask.GetAwaiter().GetResult(), [Text.UTF8Encoding]::new($false))
+            }
             $stopwatch.Stop()
             Write-Output "VERIFY_CHILD_TIMEOUT name=$Name timeout_seconds=$TimeoutSeconds elapsed_seconds=$([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3))"
             throw "Verification phase '$Name' timed out after $TimeoutSeconds seconds (elapsed $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) seconds). Last completed phase: '$script:LastCompletedVerificationPhase'."
         }
 
         $process.WaitForExit()
+        if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+            $outputDirectory = Split-Path -Parent $OutputPath
+            New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+            [IO.File]::WriteAllText($OutputPath, $standardOutputTask.GetAwaiter().GetResult() + $standardErrorTask.GetAwaiter().GetResult(), [Text.UTF8Encoding]::new($false))
+        }
         $stopwatch.Stop()
         if ($process.ExitCode -ne 0) {
             throw "Verification phase '$Name' exited with code $($process.ExitCode) after $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)) seconds. Last completed phase: '$script:LastCompletedVerificationPhase'."

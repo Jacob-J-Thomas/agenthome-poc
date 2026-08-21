@@ -371,7 +371,8 @@ try {
             "verify-parallel.tests.ps1",
             "verify-preflight-overlap.tests.ps1",
             "verify-test-inventory.tests.ps1",
-            "verify-watchdog.tests.ps1"
+            "verify-watchdog.tests.ps1",
+            "verify-promotion-fan-in.tests.ps1"
         )
         if ($runningOnWindows) {
             $contractScripts += "verify-sdk-diagnostics.tests.ps1"
