@@ -274,7 +274,7 @@ public static class CredentialContractJson
 
     private static EvidenceDto ToDto(CredentialUseEvidence value)
     {
-        return new EvidenceDto(value.SchemaVersion, value.EvidenceId.Value, value.ReferenceId.Value, value.BindingHash.Value, value.ProofId.Value, value.RunId.Value, ToDto(value.UsedScope), Time(value.UsedAtUtc), Outcome(value.Outcome), value.RedactionApplied);
+        return new EvidenceDto(value.SchemaVersion, value.EvidenceId.Value, value.ReferenceId.Value, value.BindingHash.Value, value.ProofId.Value, value.RunId.Value, ToDto(value.UsedScope), Time(value.UsedAtUtc), Outcome(value.Outcome), value.RedactionApplied, value.Lease);
     }
 
     private static bool TryBuild(ReferenceDto dto, out CredentialReference? value, out CredentialContractValidationResult validation)
@@ -359,7 +359,7 @@ public static class CredentialContractJson
             return false;
         }
 
-        value = new CredentialUseEvidence(dto.SchemaVersion, evidenceId!, referenceId!, bindingHash!, proofId!, runId!, scope!, usedAt, outcome, dto.RedactionApplied);
+        value = new CredentialUseEvidence(dto.SchemaVersion, evidenceId!, referenceId!, bindingHash!, proofId!, runId!, scope!, usedAt, outcome, dto.RedactionApplied, dto.Lease);
         validation = CredentialContractValidator.Validate(value);
         return validation.IsValid;
     }

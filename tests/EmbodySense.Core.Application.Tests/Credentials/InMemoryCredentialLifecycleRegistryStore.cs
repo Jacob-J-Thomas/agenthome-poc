@@ -1,6 +1,7 @@
 using EmbodySense.Core.Application.Credentials;
 using EmbodySense.Core.Application.Credentials.Models;
 using EmbodySense.Core.Common.Credentials;
+using EmbodySense.Core.Common.Credentials.Leases.Models;
 using EmbodySense.Core.Common.Credentials.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 
@@ -107,6 +108,9 @@ internal sealed class InMemoryCredentialLifecycleRegistryStore : ICredentialRegi
         _evidence.Add(evidence);
         return ValueTask.FromResult(CredentialEvidenceWriteResult.Success());
     }
+
+    public ValueTask<CredentialEvidenceWriteResult> ReserveAsync(CredentialLeaseIntent intent, CancellationToken cancellationToken)
+        => ValueTask.FromResult(_available ? CredentialEvidenceWriteResult.Success() : CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Unavailable)));
 
     internal void MakeUnavailable() => _available = false;
 

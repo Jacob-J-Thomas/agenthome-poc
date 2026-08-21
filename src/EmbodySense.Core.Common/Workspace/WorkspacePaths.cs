@@ -218,6 +218,9 @@ public sealed class WorkspacePaths
     /// <summary>Gets the crash-safe governed-loop effect-attempt evidence path.</summary>
     public string GovernedLoopEffectAttemptsPath => Path.Combine(LoopsPath, "execution", "effect-attempts");
 
+    /// <summary>Gets the crash-safe, value-free credential lease-attempt evidence path.</summary>
+    public string CredentialLeaseAttemptsPath => Path.Combine(CredentialRegistryPath, "lease-attempts");
+
     /// <summary>
     /// Gets the durable default-conversation turn protocol path.
     /// </summary>

@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Credentials.Leases;
+
 namespace EmbodySense.Core.Common.Credentials.Models;
 
 /// <summary>Records bounded, value-free evidence of one trusted credential use.</summary>
@@ -11,7 +13,8 @@ public sealed record CredentialUseEvidence(
     CredentialScope UsedScope,
     DateTimeOffset UsedAtUtc,
     CredentialUseOutcome Outcome,
-    bool RedactionApplied)
+    bool RedactionApplied,
+    CredentialLeaseUseEvidence? Lease = null)
 {
     /// <summary>Gets the only supported experimental schema version.</summary>
     public const int CurrentSchemaVersion = 1;

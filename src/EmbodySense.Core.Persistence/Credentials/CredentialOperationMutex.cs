@@ -28,8 +28,10 @@ internal sealed class CredentialOperationMutex : IDisposable
                 return false;
             }
 
-            var waitResult = WaitHandle.WaitAny([mutex, cancellationToken.WaitHandle], _acquisitionTimeout);
-            if (waitResult != 0)
+            var acquired = OperatingSystem.IsWindows()
+                ? WaitHandle.WaitAny([mutex, cancellationToken.WaitHandle], _acquisitionTimeout) == 0
+                : WaitPortable(mutex, cancellationToken);
+            if (!acquired)
             {
                 mutex.Dispose();
                 return false;
@@ -53,6 +55,22 @@ internal sealed class CredentialOperationMutex : IDisposable
             mutex?.Dispose();
             return false;
         }
+    }
+
+    private static bool WaitPortable(Mutex mutex, CancellationToken cancellationToken)
+    {
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        while (started.Elapsed < _acquisitionTimeout)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var remaining = _acquisitionTimeout - started.Elapsed;
+            if (mutex.WaitOne(remaining < TimeSpan.FromMilliseconds(25) ? remaining : TimeSpan.FromMilliseconds(25)))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static Mutex? CreateMutex(string name)
