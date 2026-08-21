@@ -2717,8 +2717,7 @@ public sealed class CustomLoopRunStore :
     private async Task<RunArtifact> ReadArtifactAsync(RunArtifactLocation location, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(location.Path, mustExist: true);
-        // #475: restart and monitor readers must share write access with atomic trace replacement.
-        await using var stream = new FileStream(location.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = new FileStream(location.Path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
             throw new FormatException($"Custom loop run `{location.Path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
@@ -2806,7 +2805,7 @@ public sealed class CustomLoopRunStore :
     private async Task<byte[]> ReadBoundedArtifactAsync(string path, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(path, mustExist: true);
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
             throw new FormatException($"Custom loop run `{path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
@@ -2820,7 +2819,7 @@ public sealed class CustomLoopRunStore :
     private async Task<string> ComputeBoundedArtifactHashAsync(string path, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(path, mustExist: true);
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
             throw new FormatException($"Custom loop run `{path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
@@ -3464,7 +3463,7 @@ public sealed class CustomLoopRunStore :
     private async Task<byte[]> ReadBoundedJsonArtifactAsync(string root, string path, int maximumBytes, string label, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(root, path, mustExist: true);
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         if (stream.Length <= 0 || stream.Length > maximumBytes)
         {
             throw new FormatException($"{label} `{path}` must contain between 1 and {maximumBytes} UTF-8 bytes.");
@@ -3557,7 +3556,15 @@ public sealed class CustomLoopRunStore :
             attempt++;
             try
             {
-                File.Move(sourcePath, destinationPath, overwrite);
+                if (overwrite && File.Exists(destinationPath))
+                {
+                    // #475: File.Replace atomically swaps an open delete-shared destination without granting readers in-place write access.
+                    File.Replace(sourcePath, destinationPath, destinationBackupFileName: null);
+                }
+                else
+                {
+                    File.Move(sourcePath, destinationPath, overwrite);
+                }
                 return;
             }
             catch (Exception exception) when (attempt < MaximumAtomicMoveAttempts && IsTransientWindowsFileAccess(exception))
