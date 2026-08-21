@@ -598,12 +598,33 @@ public sealed class GovernedLoopSequentialContractTests
     {
         var exactOperationId = operationId ?? source.AdmissionOperationId;
         var intent = source.AdmissionReceipt.Intent with { OperationId = exactOperationId };
-        var evidence = GovernedLoopAdmissionContractHash.Apply(source.AdmissionReceipt.Evidence with
-        {
-            IntentHash = GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
-            Binding = execution,
-            ContentHash = string.Empty,
-        });
+        var sourceEvidence = source.AdmissionReceipt.Evidence;
+        var routing = GovernedLoopAdmissionContractHash.CreateEmptyModelRoutingAdmission(
+            intent,
+            execution,
+            sourceEvidence.GrantProfile,
+            sourceEvidence.GrantBoundary,
+            sourceEvidence.GrantDependencyEvidenceHash,
+            sourceEvidence.EffectiveAuthority,
+            sourceEvidence.CapabilityAdmission,
+            sourceEvidence.EvaluatedAtUtc);
+        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
+            sourceEvidence.SchemaVersion,
+            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+            execution,
+            sourceEvidence.GrantProfile,
+            sourceEvidence.GrantBoundary,
+            sourceEvidence.GrantDependencyEvidenceHash,
+            sourceEvidence.EffectiveAuthority,
+            sourceEvidence.CapabilityAdmission,
+            routing,
+            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(
+                intent,
+                sourceEvidence.EffectiveAuthority,
+                sourceEvidence.CapabilityAdmission,
+                routing),
+            sourceEvidence.EvaluatedAtUtc,
+            string.Empty));
         var receipt = GovernedLoopAdmissionContractHash.Apply(source.AdmissionReceipt with
         {
             Intent = intent,

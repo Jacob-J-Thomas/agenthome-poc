@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using System.Text.Json.Serialization;
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
@@ -66,4 +67,9 @@ public sealed record CustomLoopRunEvent(
     /// <remarks>The JSON property is required even when null so schema-1 run artifacts cannot silently omit this evidence plane.</remarks>
     [JsonRequired]
     public string? WaitContinuationEvidenceHash { get; init; }
+
+    /// <summary>Gets exact reconciled model-profile, reservation, and usage evidence for a completed provider attempt.</summary>
+    /// <remarks>The JSON property is required even when null so schema-1 artifacts cannot silently omit this evidence plane.</remarks>
+    [JsonRequired]
+    public GovernedModelAttemptExecutionEvidence? ModelExecutionEvidence { get; init; }
 }

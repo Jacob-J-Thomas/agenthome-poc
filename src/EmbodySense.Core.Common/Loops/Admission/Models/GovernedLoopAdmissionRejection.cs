@@ -9,6 +9,7 @@ namespace EmbodySense.Core.Common.Loops.Admission.Models;
 /// <param name="References">The exact bounded evidence supporting the rejection.</param>
 /// <param name="RejectedAtUtc">The trusted UTC rejection time.</param>
 /// <param name="ContentHash">The canonical hash over the complete rejection except this field.</param>
+/// <param name="ModelRoutingDenial">The exact structured model-routing denial proof, only for model-routing denial.</param>
 public sealed record GovernedLoopAdmissionRejection(
     int SchemaVersion,
     GovernedLoopAdmissionIntent Intent,
@@ -17,7 +18,8 @@ public sealed record GovernedLoopAdmissionRejection(
     GovernedLoopAdmissionCapabilityDenialProof? CapabilityDenial,
     IReadOnlyList<GovernedLoopAdmissionEvidenceReference> References,
     DateTimeOffset RejectedAtUtc,
-    string ContentHash)
+    string ContentHash,
+    GovernedLoopAdmissionModelRoutingDenialProof? ModelRoutingDenial = null)
 {
     /// <summary>Gets the only supported experimental rejection schema version.</summary>
     public const int CurrentSchemaVersion = GovernedLoopAdmissionLimits.CurrentSchemaVersion;
@@ -27,6 +29,9 @@ public sealed record GovernedLoopAdmissionRejection(
 
     /// <summary>Gets the defensively copied capability denial proof when this is a capability-policy rejection.</summary>
     public GovernedLoopAdmissionCapabilityDenialProof? CapabilityDenial { get; } = CapabilityDenial is null ? null : GovernedLoopAdmissionContractCopy.Copy(CapabilityDenial);
+
+    /// <summary>Gets the defensively copied model-routing denial proof when this is a routing-policy rejection.</summary>
+    public GovernedLoopAdmissionModelRoutingDenialProof? ModelRoutingDenial { get; } = ModelRoutingDenial is null ? null : ModelRoutingDenial with { };
 
     /// <summary>Gets the defensively copied bounded evidence references.</summary>
     public IReadOnlyList<GovernedLoopAdmissionEvidenceReference> References { get; } = GovernedLoopAdmissionContractCopy.Copy(References);

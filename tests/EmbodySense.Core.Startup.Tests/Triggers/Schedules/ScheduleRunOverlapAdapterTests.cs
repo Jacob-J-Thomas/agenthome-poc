@@ -14,6 +14,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Triggers;
@@ -266,21 +267,21 @@ public sealed class ScheduleRunOverlapAdapterTests
             seedEvidence.EffectiveAuthority.AllowsRecurrence,
             seedEvidence.EffectiveAuthority.AllowsExternalPublication,
             seedEvidence.EffectiveAuthority.AllowsIrreversibleAction);
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            seedEvidence.SchemaVersion,
-            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+        var inferenceNodeIds = fixture.Artifact.Graph.Nodes
+            .Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference)
+            .Select(node => node.Id)
+            .ToArray();
+        var evidence = EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.RoutingEvidenceForInference(
+            intent,
             seedEvidence.Binding,
             seedEvidence.GrantProfile,
             seedEvidence.GrantBoundary,
             seedEvidence.GrantDependencyEvidenceHash,
             effectiveAuthority,
             capabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(
-                intent,
-                effectiveAuthority,
-                capabilityAdmission),
             seedEvidence.EvaluatedAtUtc,
-            string.Empty));
+            nodeId: Assert.Single(inferenceNodeIds),
+            nodeIds: inferenceNodeIds);
         var receipt = GovernedLoopAdmissionContractHash.Apply(fixture.Receipt with
         {
             Intent = intent,

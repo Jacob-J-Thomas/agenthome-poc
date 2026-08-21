@@ -135,7 +135,8 @@ $declaredRequiredGateNames = [Collections.Generic.List[string]]::new()
 $declaredRequiredGateNames.Add("format-naming-style")
 $declaredRequiredGateNames.Add("format-whitespace")
 $declaredRequiredGateNames.Add("git-diff-check")
-$testProjects = @(Get-ChildItem -Path (Join-Path $repoRoot "tests") -Recurse -Filter "*.csproj" | Where-Object { $_.Name -ne "EmbodySense.CancellationHost.csproj" -and $_.Name -ne "EmbodySense.Tests.Support.csproj" } | Sort-Object FullName)
+$testProjects = @(Get-ChildItem -Path (Join-Path $repoRoot "tests") -Recurse -Filter "*.csproj" | Where-Object { $_.Name -ne "EmbodySense.CancellationHost.csproj" -and $_.Name -ne "EmbodySense.E2EBrowserHost.csproj" -and $_.Name -ne "EmbodySense.Tests.Support.csproj" } | Sort-Object FullName)
+Assert-True -Condition ($testProjects.Name -cnotcontains "EmbodySense.E2EBrowserHost.csproj") -Message "The external browser host must not become a discovered test or coverage lane."
 foreach ($testProject in $testProjects) {
     foreach ($lane in @(Get-VerificationTestProjectLanes -TestProject $testProject)) {
         $declaredRequiredGateNames.Add("tests-$($testProject.BaseName)-$($lane.Name)")

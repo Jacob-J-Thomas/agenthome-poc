@@ -262,7 +262,7 @@ public sealed class DefaultConversationLoopRunnerTests
     [Fact]
     public async Task RunTurnAsync_retains_an_observed_response_for_review_when_completion_audit_fails()
     {
-        var response = new LlmInferenceResponse("observed answer", LlmInferenceSurface.OpenAiCodex, ProviderResponseId: "provider-turn-2");
+        var response = new LlmInferenceResponse("observed answer", LlmInferenceSurface.OpenAiCodex, EmbodySense.Core.Common.Inference.Profiles.Models.LlmInferenceUsageEvidence.Unavailable("test", "v1"), ProviderResponseId: "provider-turn-2");
         var client = new RecordingInferenceClient("unused")
         {
             Failure = new LlmInferenceObservedResponseException("completion audit failed after provider success", response, new IOException("audit unavailable"))
@@ -293,7 +293,7 @@ public sealed class DefaultConversationLoopRunnerTests
     [Fact]
     public async Task RunTurnAsync_persists_an_empty_observed_audit_failure_as_conclusive_failure()
     {
-        var response = new LlmInferenceResponse(string.Empty, LlmInferenceSurface.OpenAiCodex, ProviderResponseId: "provider-empty-audit-1");
+        var response = new LlmInferenceResponse(string.Empty, LlmInferenceSurface.OpenAiCodex, EmbodySense.Core.Common.Inference.Profiles.Models.LlmInferenceUsageEvidence.Unavailable("test", "v1"), ProviderResponseId: "provider-empty-audit-1");
         var client = new RecordingInferenceClient("unused")
         {
             Failure = new LlmInferenceObservedResponseException("completion audit failed after provider success", response, new IOException("audit unavailable"))
@@ -347,7 +347,7 @@ public sealed class DefaultConversationLoopRunnerTests
     [Fact]
     public async Task RunTurnAsync_preserves_an_empty_observed_response_as_a_conclusive_failure_when_completion_audit_fails()
     {
-        var response = new LlmInferenceResponse("", LlmInferenceSurface.OpenAiCodex, ProviderResponseId: "provider-turn-empty");
+        var response = new LlmInferenceResponse("", LlmInferenceSurface.OpenAiCodex, EmbodySense.Core.Common.Inference.Profiles.Models.LlmInferenceUsageEvidence.Unavailable("test", "v1"), ProviderResponseId: "provider-turn-empty");
         var client = new RecordingInferenceClient("unused")
         {
             Failure = new LlmInferenceObservedResponseException("completion audit failed", response, new IOException("audit unavailable"))
@@ -1018,7 +1018,7 @@ public sealed class DefaultConversationLoopRunnerTests
             }
 
             AfterGenerate?.Invoke();
-            return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex, ProviderResponseId: ProviderResponseId);
+            return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex, EmbodySense.Core.Common.Inference.Profiles.Models.LlmInferenceUsageEvidence.Unavailable("test", "v1"), ProviderResponseId: ProviderResponseId);
         }
 
         public async Task<LlmInferenceResponse> GenerateAsync(
@@ -1062,7 +1062,7 @@ public sealed class DefaultConversationLoopRunnerTests
             Func<string, CancellationToken, Task>? responseChunkHandler = null,
             CancellationToken cancellationToken = default)
         {
-            return Task.FromResult(new LlmInferenceResponse("unused", LlmInferenceSurface.OpenAiCodex));
+            return Task.FromResult(new LlmInferenceResponse("unused", LlmInferenceSurface.OpenAiCodex, EmbodySense.Core.Common.Inference.Profiles.Models.LlmInferenceUsageEvidence.Unavailable("test", "v1")));
         }
     }
 
@@ -1139,7 +1139,7 @@ public sealed class DefaultConversationLoopRunnerTests
         {
             Started.TrySetResult();
             await Release.Task.WaitAsync(cancellationToken);
-            return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex);
+            return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex, EmbodySense.Core.Common.Inference.Profiles.Models.LlmInferenceUsageEvidence.Unavailable("test", "v1"));
         }
 
         public async Task<LlmInferenceResponse> GenerateAsync(

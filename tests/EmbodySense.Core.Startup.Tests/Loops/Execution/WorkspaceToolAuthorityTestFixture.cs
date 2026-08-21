@@ -62,18 +62,15 @@ internal static class WorkspaceToolAuthorityTestFixture
             true,
             true,
             true);
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            GovernedLoopAdmissionEvidence.CurrentSchemaVersion,
-            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+        var evidence = EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.EmptyRoutingEvidence(
+            intent,
             binding,
             new AuthorityGrantProfilePin(new AuthorityProfileReference(profileId!, profileRevision!), profileHash!),
             new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
             Hash('4'),
             effectiveAuthority,
             capabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilityAdmission),
-            Now,
-            string.Empty));
+            Now);
         var receipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
             GovernedLoopAdmissionReceipt.CurrentSchemaVersion,
             intent,
@@ -118,7 +115,7 @@ internal static class WorkspaceToolAuthorityTestFixture
                 NodeId,
                 GovernedLoopSequentialNodeDescriptors.ProviderInference,
                 [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
-                GovernedLoopAuthorityCeiling.Create(["org.embodysense/model-inference", WorkspaceCommandCapabilityId]),
+                GovernedLoopAuthorityCeiling.Create(["org.embodysense/model-inference", "org.embodysense/model-profile/codex", WorkspaceCommandCapabilityId]),
                 new Dictionary<string, string> { ["instruction"] = "Read only the exact bounded workspace target." }),
             new GovernedLoopNodeDefinition(
                 "exit",
@@ -135,7 +132,7 @@ internal static class WorkspaceToolAuthorityTestFixture
             owningRole,
             "trigger",
             ["exit"],
-            GovernedLoopAuthorityCeiling.Create(["org.embodysense/conversation-turn", "org.embodysense/model-inference", WorkspaceCommandCapabilityId]),
+            GovernedLoopAuthorityCeiling.Create(["org.embodysense/conversation-turn", "org.embodysense/model-inference", "org.embodysense/model-profile/codex", WorkspaceCommandCapabilityId]),
             [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
             nodes,
             [
@@ -151,7 +148,8 @@ internal static class WorkspaceToolAuthorityTestFixture
             new GovernedLoopDisplayMetadata(
                 "Workspace tool loop",
                 "Test-only exact authority fixture.",
-                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()));
+                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()),
+            EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
         var revision = GovernedLoopRevisionArtifactFactory.Create(1, graph.RevisionReference, null, null, "create-workspace-tool", "user-owner", Now.AddHours(-2));
         return GovernedLoopGraphRevisionArtifactFactory.Create(1, revision, graph);
     }
@@ -167,6 +165,7 @@ internal static class WorkspaceToolAuthorityTestFixture
             [
                 new CapabilityDependency(Capability("org.embodysense/conversation-turn"), range!),
                 new CapabilityDependency(Capability("org.embodysense/model-inference"), range!),
+                new CapabilityDependency(Capability("org.embodysense/model-profile/codex"), range!),
                 new CapabilityDependency(Capability(WorkspaceCommandCapabilityId), range!),
             ],
             [],

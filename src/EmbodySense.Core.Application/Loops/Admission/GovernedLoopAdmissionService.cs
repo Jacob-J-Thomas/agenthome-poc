@@ -3,6 +3,8 @@ using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
+using EmbodySense.Core.Application.Inference.Profiles;
+using EmbodySense.Core.Application.Inference.Profiles.Models;
 using EmbodySense.Core.Application.Loops.Admission.Models;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
@@ -15,9 +17,12 @@ using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Inference.Profiles;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -36,6 +41,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
     private readonly IAuthorityGrantResolver _grantResolver;
     private readonly ICapabilityAdmissionService _capabilityAdmissionService;
     private readonly ICapabilityAuthorityTransaction _authorityTransaction;
+    private readonly IGovernedModelRoutingAdmissionService _modelRoutingAdmissionService;
     private readonly IGovernedLoopAdmissionRunIdentityGenerator _runIdentityGenerator;
     private readonly TimeProvider _timeProvider;
 
@@ -48,6 +54,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         IAuthorityGrantRoleSource roleSource,
         IAuthorityGrantResolver grantResolver,
         ICapabilityAdmissionService capabilityAdmissionService,
+        IGovernedModelRoutingAdmissionService modelRoutingAdmissionService,
         ICapabilityAuthorityTransaction authorityTransaction,
         IGovernedLoopAdmissionRunIdentityGenerator runIdentityGenerator,
         TimeProvider? timeProvider = null)
@@ -64,6 +71,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         _roleSource = roleSource ?? throw new ArgumentNullException(nameof(roleSource));
         _grantResolver = grantResolver ?? throw new ArgumentNullException(nameof(grantResolver));
         _capabilityAdmissionService = capabilityAdmissionService ?? throw new ArgumentNullException(nameof(capabilityAdmissionService));
+        _modelRoutingAdmissionService = modelRoutingAdmissionService ?? throw new ArgumentNullException(nameof(modelRoutingAdmissionService));
         _authorityTransaction = authorityTransaction ?? throw new ArgumentNullException(nameof(authorityTransaction));
         _runIdentityGenerator = runIdentityGenerator ?? throw new ArgumentNullException(nameof(runIdentityGenerator));
         _timeProvider = timeProvider ?? TimeProvider.System;
@@ -395,6 +403,42 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         GovernedLoopAdmissionTerminalOutcome outcome;
         try
         {
+            var routingNodes = ReachableInferenceNodes(artifact.Graph);
+            var routingSeed = new GovernedModelRoutingAdmissionSeed(
+                intent,
+                executionBinding,
+                grant.Grant.Binding.Profile,
+                grant.Grant.Boundary,
+                grant.DependencyEvidenceHash,
+                effectiveAuthority,
+                capabilitySnapshot,
+                evaluatedAtUtc);
+            var routingResult = await _modelRoutingAdmissionService.AdmitAsync(
+                new GovernedModelRoutingAdmissionRequest(routingSeed, routingNodes),
+                cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsValidRoutingResult(routingResult, routingSeed, routingNodes))
+            {
+                return Result(GovernedLoopAdmissionStatus.Ambiguous, request);
+            }
+            if (routingResult.Status == GovernedModelRoutingAdmissionStatus.Unavailable)
+            {
+                return Result(GovernedLoopAdmissionStatus.Unavailable, request);
+            }
+            if (routingResult.Status == GovernedModelRoutingAdmissionStatus.Ineligible)
+            {
+                return await CommitDefinitiveFailureAtAsync(
+                    request,
+                    intent,
+                    GovernedLoopAdmissionFailureCode.ModelRoutingDenied,
+                    authorityDenial: null,
+                    capabilityDenial: null,
+                    modelRoutingDenial: routingResult.DenialProof,
+                    rejectedAtUtc: evaluatedAtUtc,
+                    storeGeneration,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            var modelRoutingAdmission = routingResult.Snapshot!;
             var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
                 GovernedLoopAdmissionEvidence.CurrentSchemaVersion,
                 GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
@@ -404,7 +448,8 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                 grant.DependencyEvidenceHash,
                 effectiveAuthority,
                 capabilitySnapshot,
-                GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilitySnapshot),
+                modelRoutingAdmission,
+                GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilitySnapshot, modelRoutingAdmission),
                 evaluatedAtUtc,
                 string.Empty));
             var receipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
@@ -940,6 +985,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
             GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied,
             authorityDenial: null,
             capabilityDenial: proof,
+            modelRoutingDenial: null,
             rejectedAtUtc,
             storeGeneration,
             cancellationToken).ConfigureAwait(false);
@@ -978,6 +1024,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
             failureCode,
             authorityDenial: null,
             capabilityDenial: null,
+            modelRoutingDenial: null,
             rejectedAtUtc,
             storeGeneration,
             cancellationToken).ConfigureAwait(false);
@@ -989,6 +1036,7 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         GovernedLoopAdmissionFailureCode failureCode,
         GovernedLoopAdmissionAuthorityDenialProof? authorityDenial,
         GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial,
+        GovernedLoopAdmissionModelRoutingDenialProof? modelRoutingDenial,
         DateTimeOffset rejectedAtUtc,
         long storeGeneration,
         CancellationToken cancellationToken)
@@ -1000,7 +1048,8 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                 intent,
                 failureCode,
                 authorityDenial,
-                capabilityDenial);
+                capabilityDenial,
+                modelRoutingDenial);
             var rejection = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionRejection(
                 GovernedLoopAdmissionRejection.CurrentSchemaVersion,
                 intent,
@@ -1009,7 +1058,8 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
                 capabilityDenial,
                 references,
                 rejectedAtUtc,
-                string.Empty));
+                string.Empty,
+                modelRoutingDenial));
             outcome = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionTerminalOutcome(
                 GovernedLoopAdmissionTerminalOutcome.CurrentSchemaVersion,
                 intent,
@@ -1464,6 +1514,162 @@ public sealed class GovernedLoopAdmissionService : IGovernedLoopAdmissionService
         {
             return false;
         }
+    }
+
+    private static IReadOnlyList<GovernedModelRoutingNodeAdmissionRequest> ReachableInferenceNodes(GovernedLoopGraphDefinition graph)
+    {
+        var nodes = graph.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
+        var outgoing = graph.ControlEdges
+            .GroupBy(edge => edge.FromNodeId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Select(edge => edge.ToNodeId).Distinct(StringComparer.Ordinal).ToArray(), StringComparer.Ordinal);
+        var reachable = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new Queue<string>();
+        pending.Enqueue(graph.EntryNodeId);
+        while (pending.Count > 0)
+        {
+            var nodeId = pending.Dequeue();
+            if (!reachable.Add(nodeId) || !outgoing.TryGetValue(nodeId, out var targets))
+            {
+                continue;
+            }
+            foreach (var target in targets)
+            {
+                pending.Enqueue(target);
+            }
+        }
+
+        return Array.AsReadOnly(reachable
+            .Select(nodeId => nodes[nodeId])
+            .Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference)
+            .OrderBy(node => node.Id, StringComparer.Ordinal)
+            .Select(node => new GovernedModelRoutingNodeAdmissionRequest(
+                node.Id,
+                node.Descriptor.TypeId,
+                node.ModelRoutingPolicy ?? graph.DefaultModelRoutingPolicy,
+                node.AuthoredInputDataClasses))
+            .ToArray());
+    }
+
+    private static bool IsValidRoutingResult(
+        GovernedModelRoutingAdmissionResult? result,
+        GovernedModelRoutingAdmissionSeed seed,
+        IReadOnlyList<GovernedModelRoutingNodeAdmissionRequest> requestedNodes)
+    {
+        try
+        {
+            if (result is null || !Enum.IsDefined(result.Status))
+            {
+                return false;
+            }
+
+            if (result.Status == GovernedModelRoutingAdmissionStatus.Unavailable)
+            {
+                return result.Snapshot is null && result.DenialProof is null;
+            }
+
+            if (result.Status == GovernedModelRoutingAdmissionStatus.Ineligible)
+            {
+                var proof = result.DenialProof;
+                return result.Snapshot is null
+                    && GovernedLoopAdmissionValidator.Validate(proof).IsValid
+                    && proof!.EvaluatedAtUtc == seed.EvaluatedAtUtc
+                    && string.Equals(proof.EffectiveAuthorityReferenceHash, GovernedLoopAdmissionContractHash.ComputeAuthorityCeilingReferenceHash(seed.EffectiveAuthority), StringComparison.Ordinal)
+                    && string.Equals(proof.CapabilityAdmissionReferenceHash, GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(seed.CapabilityAdmission), StringComparison.Ordinal)
+                    && requestedNodes.Any(node => string.Equals(node.NodeId, proof.NodeId, StringComparison.Ordinal)
+                        && string.Equals(node.NodeTypeId, proof.NodeTypeId, StringComparison.Ordinal)
+                        && string.Equals(node.Policy.ContentHash, proof.PolicyHash, StringComparison.Ordinal)
+                        && IsExactRoutingDenial(node.Policy, proof));
+            }
+
+            if (result.Status != GovernedModelRoutingAdmissionStatus.Admitted
+                || result.DenialProof is not null
+                || !GovernedModelContractValidator.IsValid(result.Snapshot))
+            {
+                return false;
+            }
+
+            var snapshot = result.Snapshot!;
+            var admittedPins = seed.CapabilityAdmission.Pins.ToDictionary(pin => pin.DescriptorIdentity.Id.Value, StringComparer.Ordinal);
+            var expectedEntries = requestedNodes.Select(node =>
+            {
+                var candidateIds = node.Policy.ResolveCandidateOrder(snapshot.ResolvedDefaultProfileId);
+                return (Node: node, CandidateIds: candidateIds);
+            }).ToArray();
+            if (expectedEntries.Any(item => item.CandidateIds.Count == 0)
+                || snapshot.Entries.Count != expectedEntries.Length)
+            {
+                return false;
+            }
+
+            var exactEntryBindings = snapshot.Entries.Zip(expectedEntries).All(pair =>
+            {
+                var entry = pair.First;
+                var requested = pair.Second.Node;
+                var expectedIds = pair.Second.CandidateIds;
+                var pins = new[] { entry.Primary }.Concat(entry.Fallbacks).ToArray();
+                return string.Equals(entry.NodeId, requested.NodeId, StringComparison.Ordinal)
+                    && string.Equals(entry.NodeTypeId, requested.NodeTypeId, StringComparison.Ordinal)
+                    && string.Equals(entry.PolicyHash, requested.Policy.ContentHash, StringComparison.Ordinal)
+                    && string.Equals(entry.Requirements.ContentHash, requested.Policy.Requirements.ContentHash, StringComparison.Ordinal)
+                    && entry.HasAuthoredInputClassification == (requested.AuthoredInputDataClasses is not null)
+                    && entry.AuthoredInputDataClasses.SequenceEqual(requested.AuthoredInputDataClasses ?? Array.Empty<CapabilityDataClass>())
+                    && pins.Select(pin => pin.Capability.DescriptorIdentity.Id).SequenceEqual(expectedIds)
+                    && pins.All(pin => admittedPins.TryGetValue(pin.Capability.DescriptorIdentity.Id.Value, out var admittedPin)
+                        && string.Equals(CapabilityAdmissionPinHash.Compute(pin.Capability), CapabilityAdmissionPinHash.Compute(admittedPin), StringComparison.Ordinal)
+                        && string.Equals(pin.AdapterRegistryRevisionHash, snapshot.AdapterRegistryRevisionHash, StringComparison.Ordinal)
+                        && requested.Policy.Requirements.StaticallySatisfiedBy(pin.Metadata, seed.Intent.Role.Identity.RoleId, requested.NodeTypeId)
+                        && (requested.AuthoredInputDataClasses is null
+                            || requested.Policy.Requirements.SatisfiedBy(pin.Metadata, requested.AuthoredInputDataClasses, seed.Intent.Role.Identity.RoleId, requested.NodeTypeId)));
+            });
+
+            return exactEntryBindings
+                && string.Equals(snapshot.WorkspaceId, seed.Intent.WorkspaceId, StringComparison.Ordinal)
+                && string.Equals(snapshot.AdmissionOperationId, seed.Intent.OperationId, StringComparison.Ordinal)
+                && string.Equals(snapshot.AdmissionIntentHash, GovernedLoopAdmissionContractHash.ComputeIntentHash(seed.Intent), StringComparison.Ordinal)
+                && string.Equals(snapshot.ExecutionBindingReferenceHash, GovernedLoopAdmissionContractHash.ComputeExecutionBindingReferenceHash(seed.Binding), StringComparison.Ordinal)
+                && string.Equals(snapshot.RunId, seed.Binding.RunId, StringComparison.Ordinal)
+                && string.Equals(snapshot.GraphId, seed.Binding.Revision.GraphId, StringComparison.Ordinal)
+                && string.Equals(snapshot.GraphRevisionId, seed.Binding.Revision.RevisionId, StringComparison.Ordinal)
+                && string.Equals(snapshot.GraphExecutableHash, seed.Binding.Revision.ExecutableHash, StringComparison.Ordinal)
+                && snapshot.ExecutionGeneration == seed.Binding.ExecutionGeneration
+                && string.Equals(snapshot.OwningRoleId, seed.Intent.Role.Identity.RoleId, StringComparison.Ordinal)
+                && snapshot.OwningRoleRevision == seed.Intent.Role.Identity.Revision
+                && string.Equals(snapshot.OwningRoleContentHash, seed.Intent.Role.ContentHash, StringComparison.Ordinal)
+                && string.Equals(snapshot.CapabilityAdmissionReferenceHash, GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(seed.CapabilityAdmission), StringComparison.Ordinal)
+                && string.Equals(snapshot.AuthorityAdmissionReferenceHash, GovernedLoopAdmissionContractHash.ComputeAdmissionAuthorityReferenceHash(seed.GrantProfile, seed.GrantBoundary, seed.GrantDependencyEvidenceHash, seed.EffectiveAuthority), StringComparison.Ordinal)
+                && snapshot.EvaluatedAtUtc == seed.EvaluatedAtUtc
+                && (snapshot.ResolvedDefaultProfileId is null) == requestedNodes.All(node => node.Policy.Selector.Kind != GovernedModelSelectorKind.Inherit)
+                && (snapshot.DefaultSourceRevisionHash is null) == requestedNodes.All(node => node.Policy.Selector.Kind != GovernedModelSelectorKind.Inherit)
+                && (snapshot.AdapterRegistryRevisionHash is null) == (requestedNodes.Count == 0);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsExactRoutingDenial(
+        GovernedModelRoutingPolicy policy,
+        GovernedLoopAdmissionModelRoutingDenialProof proof)
+    {
+        if (proof.Reason == GovernedLoopAdmissionModelRoutingDenialReason.DefaultNotConfigured)
+        {
+            return proof.CandidateProfileId is null
+                && policy.Selector.Kind == GovernedModelSelectorKind.Inherit;
+        }
+
+        if (proof.CandidateProfileId is null)
+        {
+            return false;
+        }
+
+        var permittedCandidates = policy.Selector.Kind switch
+        {
+            GovernedModelSelectorKind.Exact => new[] { policy.Selector.ExactProfileId! }.Concat(policy.FallbackProfileIds),
+            GovernedModelSelectorKind.Inherit => policy.Selector.PermittedInheritedProfileIds.Concat(policy.FallbackProfileIds),
+            _ => Array.Empty<CapabilityId>()
+        };
+        return permittedCandidates.Contains(proof.CandidateProfileId);
     }
 
     private static bool IsTrustedUtc(DateTimeOffset value) => value != default && value.Offset == TimeSpan.Zero;

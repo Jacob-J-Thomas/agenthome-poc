@@ -9,9 +9,12 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.TraceRetention;
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
+using EmbodySense.Core.Persistence.Inference.Profiles;
+using EmbodySense.Core.Startup.Inference.Profiles;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
@@ -30,6 +33,8 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
     private readonly CustomLoopRunStore _runStore;
     private readonly CustomLoopInvocationOperationStore _invocationOperationStore;
     private readonly CustomLoopControlOperationStore _controlOperationStore;
+    private readonly GovernedModelUsageLedgerStore _modelUsageLedger;
+    private readonly string _workspaceId;
     private readonly CustomLoopRecoveryService? _recovery;
     private readonly CustomLoopTraceRetentionService? _retention;
     private readonly string? _actor;
@@ -56,6 +61,8 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         _runStore = new CustomLoopRunStore(_paths);
         _invocationOperationStore = new CustomLoopInvocationOperationStore(_paths);
         _controlOperationStore = new CustomLoopControlOperationStore(_paths);
+        _modelUsageLedger = new GovernedModelUsageLedgerStore(_paths);
+        _workspaceId = CapabilityWorkspaceScopeId.Create(_paths.RootPath);
         _actor = authenticatedActor;
         _surface = authenticatedSurface;
         var audit = authenticatedActor is null ? null : new AuditLog(_paths);
@@ -145,7 +152,12 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         return await ReadEvidenceAsync(async () =>
         {
             var run = await _runStore.GetAsync(runId, cancellationToken);
-            return run is null ? null : CustomLoopRuntimeFacade.Map(run);
+            if (run is null)
+            {
+                return null;
+            }
+            var usage = await _modelUsageLedger.ReadRunAsync(_workspaceId, run.Id, cancellationToken);
+            return CustomLoopRuntimeFacade.Map(run, ModelUsageRunProjector.Project(usage, _workspaceId, run.Id));
         });
     }
 

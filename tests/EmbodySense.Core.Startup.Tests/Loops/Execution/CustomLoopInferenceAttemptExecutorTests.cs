@@ -10,6 +10,8 @@ using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Inference;
+using EmbodySense.Core.Application.Inference.Profiles;
+using EmbodySense.Core.Application.Inference.Profiles.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
@@ -19,6 +21,7 @@ using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -116,7 +119,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(CanonicalInferenceAuthorityTestData.ProviderOperationId(request), authorityRequest.EffectOperationId);
         Assert.Equal(GovernedLoopEffectBoundaryKind.ProviderTransport, authorityRequest.BoundaryKind);
         Assert.Equal(
-            [CanonicalInferenceAuthorityTestData.ModelInferenceCapabilityId],
+            [CanonicalInferenceAuthorityTestData.ModelInferenceCapabilityId, CanonicalInferenceAuthorityTestData.ModelProfileCapabilityId],
             authorityRequest.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity.Id.Value));
         Assert.Equal(authorityRequest.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity), authorityRequest.RequiredAuthority.Capabilities);
         Assert.Equal(0, authorityRequest.RequiredAuthority.MaxTargetCount);
@@ -124,6 +127,97 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(1, boundary.CommitInvocations);
         Assert.Equal(1, transportWrites);
         Assert.Equal(1, providerStarts);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_canonical_profile_service_owns_primary_dispatch_without_legacy_model_or_effect_transport()
+    {
+        using var workspace = new TestWorkspace();
+        var primary = new RecordingModelPrimaryExecutionService();
+        var effectBoundary = new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.Direct);
+        var factoryCalls = 0;
+        var providerStarts = 0;
+        var executor = new CustomLoopInferenceAttemptExecutor(
+            CreateOptions(workspace),
+            (IToolApprovalPrompt)new RecordingApprovalPrompt(),
+            new TestAuthorityProvider(),
+            new NullEvidenceSink(),
+            new TestCapabilityAdmissionService(),
+            (_, _) =>
+            {
+                factoryCalls++;
+                throw new InvalidOperationException("The legacy model-snapshot client must not be constructed.");
+            },
+            capabilityAuthorityTransaction: null,
+            effectAuthorityBoundary: effectBoundary,
+            modelPrimaryExecution: primary);
+        var request = CreateRequest() with
+        {
+            ModelSnapshot = new CustomLoopModelSnapshot("caller-selected-provider", "caller-selected-model"),
+        };
+
+        var result = await executor.ExecuteAsync(request, providerRequestStarted: () => providerStarts++);
+
+        Assert.Equal("profile-result", result.OutputText);
+        Assert.Equal("pinned-model", result.Model);
+        Assert.Equal("openai", result.Provider);
+        Assert.NotNull(result.ModelExecutionEvidence);
+        Assert.Equal(0, factoryCalls);
+        Assert.Equal(1, providerStarts);
+        Assert.Single(effectBoundary.Requests);
+        Assert.Equal(1, effectBoundary.CommitInvocations);
+        var observed = Assert.IsType<GovernedModelPrimaryExecutionRequest>(primary.Request);
+        Assert.Equal(request.RunId, observed.Admission.RunId);
+        Assert.Equal(request.StepId, observed.Admission.NodeId);
+        Assert.Equal(request.PlanOrdinal, observed.Admission.PlanOrdinal);
+        Assert.Equal(request.ActivationOrdinal, observed.Admission.ActivationOrdinal);
+        Assert.Equal(request.VisitOrdinal, observed.Admission.VisitOrdinal);
+        Assert.Equal(request.AttemptOperationId, observed.Admission.AttemptOperationId);
+        var routedPrimary = request.AdmissionReceipt!.Evidence.ModelRoutingAdmission.Entries.Single().Primary;
+        Assert.Equal(routedPrimary.ContentHash, observed.Admission.RequestedPrimaryPinHash);
+        Assert.Equal("caller-selected-model", request.ModelSnapshot.Model);
+        Assert.Equal("caller-selected-provider", request.ModelSnapshot.Provider);
+    }
+
+    [Theory]
+    [InlineData(EffectBoundaryBehavior.Deny, GovernedLoopEffectAuthorityExecutionStatus.Decided, GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended)]
+    [InlineData(EffectBoundaryBehavior.Pause, GovernedLoopEffectAuthorityExecutionStatus.Decided, GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended)]
+    [InlineData(EffectBoundaryBehavior.Ambiguous, GovernedLoopEffectAuthorityExecutionStatus.EvidenceRejected, GovernedLoopEffectAuthorityEvidenceStoreStatus.Ambiguous)]
+    public async Task ExecuteAsync_canonical_profile_service_never_crosses_rejected_or_unavailable_effect_authority(
+        EffectBoundaryBehavior behavior,
+        GovernedLoopEffectAuthorityExecutionStatus expectedStatus,
+        GovernedLoopEffectAuthorityEvidenceStoreStatus expectedEvidence)
+    {
+        using var workspace = new TestWorkspace();
+        var primary = new RecordingModelPrimaryExecutionService();
+        var effectBoundary = new RecordingEffectAuthorityBoundary(behavior);
+        var providerStarts = 0;
+        var legacyFactoryCalls = 0;
+        var executor = new CustomLoopInferenceAttemptExecutor(
+            CreateOptions(workspace),
+            (IToolApprovalPrompt)new RecordingApprovalPrompt(),
+            new TestAuthorityProvider(),
+            new NullEvidenceSink(),
+            new TestCapabilityAdmissionService(),
+            (_, _) =>
+            {
+                legacyFactoryCalls++;
+                throw new InvalidOperationException("The legacy model transport must remain unreachable.");
+            },
+            capabilityAuthorityTransaction: null,
+            effectAuthorityBoundary: effectBoundary,
+            modelPrimaryExecution: primary);
+
+        var exception = await Assert.ThrowsAsync<GovernedLoopEffectAuthorityStoppedException>(() =>
+            executor.ExecuteAsync(CreateRequest(), providerRequestStarted: () => providerStarts++));
+
+        Assert.Equal(expectedStatus, exception.ExecutionStatus);
+        Assert.Equal(expectedEvidence, exception.EvidenceStatus);
+        Assert.NotNull(primary.Request);
+        Assert.Single(effectBoundary.Requests);
+        Assert.Equal(0, effectBoundary.CommitInvocations);
+        Assert.Equal(0, providerStarts);
+        Assert.Equal(0, legacyFactoryCalls);
     }
 
     [Fact]
@@ -144,6 +238,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(
             [
                 CanonicalInferenceAuthorityTestData.ModelInferenceCapabilityId,
+                CanonicalInferenceAuthorityTestData.ModelProfileCapabilityId,
                 CanonicalInferenceAuthorityTestData.WorkspaceCommandCapabilityId,
             ],
             authorityRequest.RequiredCapabilityPins.Select(pin => pin.DescriptorIdentity.Id.Value));
@@ -1309,7 +1404,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var executor = CreateInjectedExecutor(
             options,
             new RecordingApprovalPrompt(),
-            (_, broker) => new AsyncFakeInferenceClient(broker, (_, _, _) => Task.FromResult(new LlmInferenceResponse("azure", LlmInferenceSurface.AzureAiFoundry))));
+            (_, broker) => new AsyncFakeInferenceClient(broker, (_, _, _) => Task.FromResult(new LlmInferenceResponse("azure", LlmInferenceSurface.AzureAiFoundry, EmbodySense.Core.Common.Inference.Profiles.Models.LlmInferenceUsageEvidence.Unavailable("test", "v1")))));
         var request = CreateRequest() with { ModelSnapshot = new CustomLoopModelSnapshot("azure-ai-foundry", "pinned") };
 
         var result = await executor.ExecuteAsync(request);
@@ -1342,6 +1437,23 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var available = await executor.IsAvailableAsync(new CustomLoopModelSnapshot(admittedProvider, admittedModel));
 
         Assert.Equal(expected, available);
+    }
+
+    [Fact]
+    public async Task Canonical_profile_availability_does_not_treat_the_legacy_display_model_as_routing_truth()
+    {
+        using var workspace = new TestWorkspace();
+        var executor = new CustomLoopInferenceAttemptExecutor(
+            CreateOptions(workspace),
+            (IToolApprovalPrompt)new RecordingApprovalPrompt(),
+            new TestAuthorityProvider(),
+            new NullEvidenceSink(),
+            new TestCapabilityAdmissionService(),
+            effectAuthorityBoundary: new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.Direct),
+            modelPrimaryExecution: new RecordingModelPrimaryExecutionService());
+
+        Assert.True(await executor.IsAvailableAsync(new CustomLoopModelSnapshot("openai", "stale-display-model")));
+        Assert.True(await executor.IsAvailableAsync(new CustomLoopModelSnapshot("azure-ai-foundry", "stale-display-model")));
     }
 
     [Fact]
@@ -1506,7 +1618,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
 
     private static LlmInferenceResponse Response(string output = "done", string? model = "pinned-model", string? responseId = "response-1")
     {
-        return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex, model, responseId);
+        return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex, EmbodySense.Core.Common.Inference.Profiles.Models.LlmInferenceUsageEvidence.Unavailable("test", "v1"), model, responseId);
     }
 
     private static async Task<WorkspacePaths> InitializeWorkspaceAsync(TestWorkspace workspace)
@@ -1583,6 +1695,92 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(sourceGovernance.ApprovalDecision.ToString(), projectedGovernance.ApprovalDecision);
         Assert.Equal(sourceGovernance.ApprovalDecisionBy, projectedGovernance.ApprovalDecisionBy);
         Assert.Equal(sourceGovernance.ApprovalDetail, projectedGovernance.ApprovalDetail);
+    }
+
+    private sealed class RecordingModelPrimaryExecutionService : IGovernedModelPrimaryExecutionService
+    {
+        internal GovernedModelPrimaryExecutionRequest? Request { get; private set; }
+
+        public async Task<GovernedModelPrimaryExecutionResult> ExecuteAsync(
+            GovernedModelPrimaryExecutionRequest? request,
+            InferenceProviderTransportCommitBoundary providerAuthorityBoundary,
+            Func<string, CancellationToken, Task>? responseChunkHandler = null,
+            Action? providerRequestStarted = null,
+            CancellationToken cancellationToken = default)
+        {
+            Request = request;
+            var admission = Assert.IsType<GovernedModelAttemptAdmissionRequest>(request?.Admission);
+            var routing = Assert.Single(admission.RoutingAdmission.Entries, entry => string.Equals(entry.NodeId, admission.NodeId, StringComparison.Ordinal));
+            var usage = LlmInferenceUsageEvidence.Unavailable("test", "v1");
+            var identity = GovernedModelUsageLedgerIdentity.Create(
+                1,
+                admission.RoutingAdmission.WorkspaceId,
+                admission.RunId,
+                admission.RoutingAdmission.GraphId,
+                admission.RoutingAdmission.GraphRevisionId,
+                admission.RoutingAdmission.GraphExecutableHash,
+                admission.ExecutionGeneration,
+                admission.AdmissionReceipt.ContentHash,
+                admission.RoutingAdmission.ContentHash,
+                new string('8', 64),
+                new string('9', 64),
+                admission.NodeId,
+                admission.PlanOrdinal,
+                admission.ActivationOrdinal,
+                admission.VisitOrdinal,
+                admission.AttemptOperationId,
+                admission.AttemptNumber,
+                routing.Primary.ContentHash,
+                routing.Requirements.Budget.ContentHash);
+            var reservation = GovernedModelUsageLedgerEntry.Create(
+                1,
+                identity,
+                1,
+                GovernedModelUsageLedgerPhase.ReservationCommitted,
+                routing.Requirements.Budget.PerAttempt,
+                null,
+                null,
+                null,
+                false,
+                routing.Primary.ContentHash,
+                null,
+                CanonicalInferenceAuthorityTestData.Now);
+            var terminal = GovernedModelUsageLedgerEntry.Create(
+                1,
+                identity,
+                4,
+                GovernedModelUsageLedgerPhase.Reconciled,
+                routing.Requirements.Budget.PerAttempt,
+                usage,
+                GovernedModelUsageVector.Zero,
+                GovernedModelUsageVector.Zero,
+                true,
+                new string('7', 64),
+                reservation.ContentHash,
+                CanonicalInferenceAuthorityTestData.Now.AddSeconds(1));
+            await providerAuthorityBoundary(
+                _ =>
+                {
+                    providerRequestStarted?.Invoke();
+                    return Task.CompletedTask;
+                },
+                cancellationToken);
+            return new GovernedModelPrimaryExecutionResult(
+                GovernedModelAttemptAdmissionStatus.Reserved,
+                new LlmInferenceResponse(
+                    "profile-result",
+                    LlmInferenceSurface.OpenAiCodex,
+                    usage,
+                    routing.Primary.Metadata.ModelId,
+                    "profile-response",
+                    routing.Primary.Metadata.ProviderId),
+                GovernedModelUsageTransitionStatus.Applied,
+                GovernedModelUsageTransitionStatus.Applied,
+                GovernedModelUsageTransitionStatus.Applied,
+                routing.Primary,
+                reservation,
+                terminal);
+        }
     }
 
     private sealed class RecordingApprovalPrompt(bool approved = false, Action? beforeDecision = null) : IAgentToolApprovalPrompt, IToolApprovalPrompt

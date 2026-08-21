@@ -168,6 +168,15 @@ internal sealed class AuthorityDelegationServiceTestHarness :
     {
         var grantReference = new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);
         var intent = Receipt.Intent with { AuthorityGrant = grantReference };
+        var modelRouting = GovernedLoopAdmissionContractHash.CreateEmptyModelRoutingAdmission(
+            intent,
+            Receipt.Evidence.Binding,
+            grant.Binding.Profile,
+            grant.Boundary,
+            Receipt.Evidence.GrantDependencyEvidenceHash,
+            grant.RequestedCeiling,
+            Receipt.Evidence.CapabilityAdmission,
+            Receipt.Evidence.EvaluatedAtUtc);
         var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
             Receipt.Evidence.SchemaVersion,
             GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
@@ -177,10 +186,12 @@ internal sealed class AuthorityDelegationServiceTestHarness :
             Receipt.Evidence.GrantDependencyEvidenceHash,
             grant.RequestedCeiling,
             Receipt.Evidence.CapabilityAdmission,
+            modelRouting,
             GovernedLoopAdmissionContractHash.CreateEvidenceReferences(
                 intent,
                 grant.RequestedCeiling,
-                Receipt.Evidence.CapabilityAdmission),
+                Receipt.Evidence.CapabilityAdmission,
+                modelRouting),
             Receipt.Evidence.EvaluatedAtUtc,
             string.Empty));
         Receipt = GovernedLoopAdmissionContractHash.Apply(Receipt with

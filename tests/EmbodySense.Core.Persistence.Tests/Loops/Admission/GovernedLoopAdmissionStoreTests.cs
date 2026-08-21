@@ -462,6 +462,7 @@ public sealed class GovernedLoopAdmissionStoreTests
             originalEvidence.GrantDependencyEvidenceHash,
             originalEvidence.EffectiveAuthority,
             capabilityAdmission,
+            originalEvidence.ModelRoutingAdmission,
             originalEvidence.References,
             originalEvidence.EvaluatedAtUtc,
             originalEvidence.ContentHash);

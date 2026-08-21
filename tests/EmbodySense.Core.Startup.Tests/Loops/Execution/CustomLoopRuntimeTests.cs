@@ -1519,7 +1519,9 @@ internal static class CustomLoopRuntimeTests
                   });
                   break;
                 case "thread/start":
-                  write({ id: message.id, result: { thread: { id: threadId } } });
+                  const model = String(message.params?.model ?? "");
+                  const modelProvider = String(message.params?.modelProvider ?? "");
+                  write({ id: message.id, result: { model, modelProvider, thread: { id: threadId, modelProvider } } });
                   break;
                 case "turn/start": {
                   const turnId = "turn-test";
@@ -1633,7 +1635,9 @@ internal static class CustomLoopRuntimeTests
                   break;
                 case "thread/start": {
                   const threadId = `thread-custom-${++threadNumber}`;
-                  write({ id: message.id, result: { thread: { id: threadId } } });
+                  const model = String(message.params?.model ?? "");
+                  const modelProvider = String(message.params?.modelProvider ?? "");
+                  write({ id: message.id, result: { model, modelProvider, thread: { id: threadId, modelProvider } } });
                   break;
                 }
                 case "turn/start": {

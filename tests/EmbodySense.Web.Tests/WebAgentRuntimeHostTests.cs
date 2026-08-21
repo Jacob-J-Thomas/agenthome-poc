@@ -1008,7 +1008,9 @@ public sealed class WebAgentRuntimeHostTests
                   write({ id: message.id, result: { data: ["test-model", "gpt-test"].map((model) => ({ id: model, model })) } });
                   break;
                 case "thread/start":
-                  write({ id: message.id, result: { thread: { id: threadId } } });
+                  const model = String(message.params?.model ?? "");
+                  const modelProvider = String(message.params?.modelProvider ?? "");
+                  write({ id: message.id, result: { model, modelProvider, thread: { id: threadId, modelProvider } } });
                   break;
                 case "turn/start": {
                   const turnId = `turn-${instanceId}`;

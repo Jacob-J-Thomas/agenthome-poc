@@ -63,7 +63,7 @@ public sealed class GovernedLoopPureNodeOutcomeTests
         Assert.Equal(["binding-left", "binding-right"], outcome!.Inputs.Select(value => value.BindingId));
         Assert.Throws<NotSupportedException>(() => ((IList<GovernedLoopTypedBindingValue>)outcome.Inputs).Add(item.Inputs[0]));
         Assert.Throws<NotSupportedException>(() => ((IList<GovernedLoopTypedNodeOutput>)outcome.Outputs).Add(item.Output));
-        Assert.Equal("8362088cbdc5198961f28743e381462754073c94a0cb20abaa351defeab2ae1d", outcome.ContentHash);
+        Assert.Equal("6f6a28438f48a0254b3d42524e20b6c3aaf7317c9b3ae8fca8a06605777ab3c1", outcome.ContentHash);
         Assert.False(GovernedLoopPureNodeOutcomeHash.Matches(outcome, new string('A', 64)));
         Assert.False(GovernedLoopPureNodeOutcomeHash.Matches(null, outcome.ContentHash));
         Assert.Throws<ArgumentNullException>(() => GovernedLoopPureNodeOutcomeHash.Compute(null!));
@@ -443,7 +443,8 @@ public sealed class GovernedLoopPureNodeOutcomeTests
                 new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Admit exact inputs."),
                 new GovernedLoopNodeDisplayMetadata("pure", "Pure", "Execute deterministically."),
                 new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Return the result.")
-            ]));
+            ]),
+            GovernedLoopGraphTestFixture.DefaultModelRoutingPolicy());
     }
 
     private static IReadOnlyDictionary<string, string> OperatorParameters(string typeId)

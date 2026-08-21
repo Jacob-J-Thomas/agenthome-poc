@@ -25,5 +25,8 @@ public enum GovernedLoopAdmissionEvidenceKind
     EffectiveAuthority = 6,
 
     /// <summary>The exact capability-resolution snapshot proof.</summary>
-    CapabilityAdmission = 7
+    CapabilityAdmission = 7,
+
+    /// <summary>The exact deterministic model-routing admission snapshot proof, including explicit empty routing.</summary>
+    ModelRoutingAdmission = 8
 }

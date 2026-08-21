@@ -61,6 +61,7 @@ public sealed class GovernedLoopAdmissionContractTests
             evidence.GrantDependencyEvidenceHash,
             evidence.EffectiveAuthority,
             evidence.CapabilityAdmission,
+            evidence.ModelRoutingAdmission,
             evidence.References,
             evidence.EvaluatedAtUtc,
             evidence.ContentHash);
@@ -370,6 +371,7 @@ public sealed class GovernedLoopAdmissionContractTests
             omitGrantDependencyEvidenceHash ? null! : grantDependencyEvidenceHash ?? value.GrantDependencyEvidenceHash,
             omitEffectiveAuthority ? null! : effectiveAuthority ?? value.EffectiveAuthority,
             omitCapabilityAdmission ? null! : capabilityAdmission ?? value.CapabilityAdmission,
+            value.ModelRoutingAdmission,
             omitReferences ? null! : references ?? value.References,
             evaluatedAtUtc ?? value.EvaluatedAtUtc,
             omitContentHash ? null! : contentHash ?? value.ContentHash);

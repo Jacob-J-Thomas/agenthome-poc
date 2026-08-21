@@ -23,22 +23,9 @@ internal static class GovernedLoopAdmissionCapabilityGuard
             return false;
         }
 
-        return snapshot.Pins.All(IsValidPin)
+        return snapshot.Pins.All(CapabilityAdmissionPinValidator.IsValid)
             && snapshot.Evidence.All(IsValidEvidence)
             && CapabilityAdmissionSnapshotValidator.Validate(snapshot) is null;
-    }
-
-    private static bool IsValidPin(CapabilityAdmissionPin? pin)
-    {
-        return pin?.DescriptorIdentity is { Id: not null, Version: not null, Hash: not null }
-            && Enum.IsDefined(pin.Kind)
-            && pin.Kind != CapabilityKind.Unknown
-            && pin.Implementation?.ProviderId is not null
-            && CapabilityIdentifierRules.IsPath(pin.Implementation.ImplementationId, CapabilityContractLimits.MaxImplementationIdCharacters)
-            && IsValidProvenance(pin.Provenance)
-            && IsValidArtifact(pin.Artifact)
-            && !string.IsNullOrWhiteSpace(pin.SafeDescription)
-            && CapabilityTextRules.IsSafeNormalized(pin.SafeDescription, CapabilityContractLimits.MaxPurposeCharacters, allowEmpty: false);
     }
 
     private static bool IsValidEvidence(CapabilityAdmissionEvidence? evidence)
@@ -51,41 +38,4 @@ internal static class GovernedLoopAdmissionCapabilityGuard
             && evidence.SelectedIdentity is not { Hash: null };
     }
 
-    private static bool IsValidProvenance(CapabilityProvenance? provenance)
-    {
-        if (provenance is null
-            || !Enum.IsDefined(provenance.Kind)
-            || provenance.Kind == CapabilityProvenanceKind.Unknown
-            || !IsSafeSourceUri(provenance.SourceUri)
-            || provenance.SourceRevision is not null && !IsSafeSourceRevision(provenance.SourceRevision))
-        {
-            return false;
-        }
-
-        return provenance.Kind != CapabilityProvenanceKind.RemoteArtifact || provenance.Integrity is not null;
-    }
-
-    private static bool IsValidArtifact(CapabilityDependencyArtifactMetadata? artifact)
-        => artifact is not null
-            && (artifact.Signature is null
-                || CapabilityTextRules.IsSafeAsciiToken(artifact.Signature, CapabilityContractLimits.MaxArtifactSignatureCharacters));
-
-    private static bool IsSafeSourceUri(string? value)
-    {
-        if (!CapabilityTextRules.IsSafeAsciiToken(value, CapabilityContractLimits.MaxSourceUriCharacters)
-            || !Uri.TryCreate(value, UriKind.Absolute, out var uri)
-            || !string.IsNullOrEmpty(uri.UserInfo)
-            || !string.IsNullOrEmpty(uri.Query)
-            || !string.IsNullOrEmpty(uri.Fragment)
-            || uri.Scheme is not "https" and not "file" and not "pkg" and not "urn")
-        {
-            return false;
-        }
-
-        return string.Equals(uri.AbsoluteUri, value, StringComparison.Ordinal);
-    }
-
-    private static bool IsSafeSourceRevision(string value)
-        => value.Length is >= 1 and <= CapabilityContractLimits.MaxSourceRevisionCharacters
-            && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-' or '/' or '@');
 }

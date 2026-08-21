@@ -199,6 +199,13 @@ $script:QualificationTestMappings = @(
 
 $script:QualificationLinkedTestMappings = @(
     [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Common.Tests/GovernedLoopGraphTestFixture.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
         Path = "tests/EmbodySense.Core.Common.Tests/Authority/Grants/AuthorityGrantTestFixture.cs"
         TestProjects = @(
             "tests/EmbodySense.Core.Common.Tests/EmbodySense.Core.Common.Tests.csproj",
@@ -251,6 +258,13 @@ $script:QualificationLinkedTestMappings = @(
     },
     [pscustomobject]@{
         Path = "tests/EmbodySense.Core.Application.Tests/Governance/Authority/Grants/AuthorityGrantApplicationTestFixture.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Application.Tests/GovernedModelProfileApplicationTestFixture.cs"
         TestProjects = @(
             "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
             "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
@@ -1103,6 +1117,16 @@ function Get-QualificationPlan {
                 [void]$filteredTestNamespaces.Remove($testProject)
                 [void]$filteredTestClasses.Remove($testProject)
             }
+            $classified = $true
+        }
+
+        if ($path.StartsWith("tests/EmbodySense.E2EBrowserHost/", [StringComparison]::Ordinal)) {
+            $requiresBuild = $true
+            $e2eTestProject = "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj"
+            [void]$testProjects.Add($e2eTestProject)
+            [void]$unfilteredTestProjects.Add($e2eTestProject)
+            [void]$filteredTestNamespaces.Remove($e2eTestProject)
+            [void]$filteredTestClasses.Remove($e2eTestProject)
             $classified = $true
         }
 
