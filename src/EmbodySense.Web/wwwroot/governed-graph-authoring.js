@@ -628,7 +628,13 @@ function outputContractForTerminal(current, node) {
   const outputs = (node.ports ?? [])
     .filter((port) => port.direction === "output")
     .map((port) => ({
-      id: `${node.id}-${port.id}`,
+      id:
+        node.descriptor?.kind === "exit" &&
+        node.descriptor?.typeId === "success-exit" &&
+        node.descriptor?.version === 1 &&
+        port.id === "published-result"
+          ? "result"
+          : `${node.id}-${port.id}`,
       valueSchemaId: port.valueSchemaId,
       sourceNodeId: node.id,
       sourcePortId: port.id,

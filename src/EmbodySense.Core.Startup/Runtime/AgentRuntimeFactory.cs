@@ -4,6 +4,7 @@ using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Context;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.CommandActions;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Loops;
@@ -82,6 +83,7 @@ public sealed class AgentRuntimeFactory
     private readonly IAgentRuntimeAuthenticatedWakeVerifier? _authenticatedWakeVerifier;
     private readonly IGovernedModelPrimaryExecutionBoundaryObserver? _governedModelExecutionObserver;
     private readonly IReadOnlyList<ModelProfileRuntimeProvider> _additionalModelProfileProviders;
+    private readonly CommandActionRuntimeProvider? _commandActionRuntimeProvider;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="AgentRuntimeFactory"/> type.
@@ -132,7 +134,8 @@ public sealed class AgentRuntimeFactory
         CodexRuntimeStatus? codexRuntimeStatus = null,
         IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver = null,
         IGovernedModelPrimaryExecutionBoundaryObserver? governedModelExecutionObserver = null,
-        IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null)
+        IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null,
+        CommandActionRuntimeProvider? commandActionRuntimeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         ArgumentException.ThrowIfNullOrWhiteSpace(trustRootPath);
@@ -142,7 +145,8 @@ public sealed class AgentRuntimeFactory
             codexRuntimeStatus,
             new FileCapabilityCatalogTrustProvider(trustRootPath),
             governedModelExecutionObserver,
-            additionalModelProfileProviders);
+            additionalModelProfileProviders,
+            commandActionRuntimeProvider: commandActionRuntimeProvider);
     }
 
     /// <summary>Returns an equivalent factory that composes one explicit surface-owned authenticated-event verifier.</summary>
@@ -158,7 +162,25 @@ public sealed class AgentRuntimeFactory
             _capabilityTrustProvider,
             _governedModelExecutionObserver,
             _additionalModelProfileProviders,
-            verifier);
+            verifier,
+            _commandActionRuntimeProvider);
+    }
+
+    /// <summary>Returns an equivalent factory with one explicit server-owned structured command Action provider.</summary>
+    /// <param name="provider">The finite template, artifact resolver, and pre-launch isolation composition.</param>
+    /// <returns>A factory preserving this instance's approval, runtime, observers, trust root, and wake verifier.</returns>
+    public AgentRuntimeFactory WithCommandActionRuntimeProvider(CommandActionRuntimeProvider provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            _governedModelExecutionObserver,
+            _additionalModelProfileProviders,
+            _authenticatedWakeVerifier,
+            provider);
     }
 
     internal AgentRuntimeFactory(
@@ -168,7 +190,8 @@ public sealed class AgentRuntimeFactory
         ICapabilityCatalogTrustProvider? capabilityTrustProvider = null,
         IGovernedModelPrimaryExecutionBoundaryObserver? governedModelExecutionObserver = null,
         IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null,
-        IAgentRuntimeAuthenticatedWakeVerifier? authenticatedWakeVerifier = null)
+        IAgentRuntimeAuthenticatedWakeVerifier? authenticatedWakeVerifier = null,
+        CommandActionRuntimeProvider? commandActionRuntimeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         if (codexRuntimeStatus is not null && codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
@@ -195,6 +218,7 @@ public sealed class AgentRuntimeFactory
             throw new ArgumentException("Choose no more than thirty-one non-null additional model-profile providers.", nameof(additionalModelProfileProviders));
         }
         _additionalModelProfileProviders = Array.AsReadOnly(additionalProviders);
+        _commandActionRuntimeProvider = commandActionRuntimeProvider;
     }
 
     /// <summary>
@@ -475,6 +499,26 @@ public sealed class AgentRuntimeFactory
                 governedWorkspaceActionRegistry,
                 governedEffectAuthority);
             var governedWorkspaceActionExecutor = new GovernedLoopWorkspaceActionExecutor(governedWorkspaceActionFacade);
+            GovernedLoopCommandActionExecutor? governedCommandActionExecutor = null;
+            CommandActionRegistrationRegistry? governedCommandActionRegistrations = null;
+            ICommandActionNativeHost? governedCommandActionNativeHost = null;
+            if (_commandActionRuntimeProvider is { } commandActionRuntime)
+            {
+                var commandActions = GovernedCommandActionFactory.Create(
+                    paths,
+                    commandActionRuntime.Registrations,
+                    commandActionRuntime.ArtifactResolver,
+                    commandActionRuntime.IsolationBoundary);
+                var commandActionFacade = GovernedLoopEffectAttemptFactory.Create(
+                    paths,
+                    _capabilityTrustProvider,
+                    capabilityAuthority,
+                    commandActions.Operations,
+                    governedEffectAuthority);
+                governedCommandActionRegistrations = commandActions.Registrations;
+                governedCommandActionNativeHost = commandActions.NativeHost;
+                governedCommandActionExecutor = new GovernedLoopCommandActionExecutor(commandActionFacade, commandActions.Registrations);
+            }
             var governedModelUsageLedger = new EmbodySense.Core.Persistence.Inference.Profiles.GovernedModelUsageLedgerStore(
                 paths,
                 _capabilityTrustProvider,
@@ -531,7 +575,8 @@ public sealed class AgentRuntimeFactory
                 conversationPublicationAuthorityBoundaryProvider: governedPublicationAuthority,
                 firstBoundRunCompletionBoundary: governedRunCompletion,
                 waitNodeExecutor: governedWaitNodeRelay,
-                workspaceActionExecutor: governedWorkspaceActionExecutor);
+                workspaceActionExecutor: governedWorkspaceActionExecutor,
+                commandActionExecutor: governedCommandActionExecutor);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,
@@ -626,7 +671,21 @@ public sealed class AgentRuntimeFactory
                 runtimeSurface.Id,
                 operationalPosture,
                 operationalControls);
-            var graphCatalog = new BuiltInGovernedLoopNodeCatalog();
+            var executableCommandActions = new HashSet<string>(StringComparer.Ordinal);
+            if (governedCommandActionRegistrations is not null && governedCommandActionNativeHost is not null)
+            {
+                foreach (var registration in governedCommandActionRegistrations.Registrations)
+                {
+                    var availability = await governedCommandActionNativeHost.CheckExecutableAvailabilityAsync(registration, cancellationToken).ConfigureAwait(false);
+                    if (availability.Status == EmbodySense.Core.Application.Capabilities.Models.CapabilityExecutableAvailabilityStatus.Available)
+                    {
+                        executableCommandActions.Add(registration.Template.ContentHash);
+                    }
+                }
+            }
+            var graphCatalog = new BuiltInGovernedLoopNodeCatalog(
+                governedCommandActionRegistrations?.Registrations ?? [],
+                registration => executableCommandActions.Contains(registration.Template.ContentHash));
             var graphAuthority = new GovernedLoopAuthoritySnapshotProvider(governedRoleSource);
             var graphAuthoringFacade = new GovernedLoopGraphAuthoringFacade(
                 workspaceId,
@@ -637,7 +696,8 @@ public sealed class AgentRuntimeFactory
                 graphAuthority,
                 capabilityAuthority,
                 new ContextualRoleCatalogFacade(paths.RootPath),
-                modelProfileCatalogFacade);
+                modelProfileCatalogFacade,
+                governedCommandActionRegistrations);
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);
             var customLoops = new CustomLoopRuntimeFacade(
                 customDefinitionStore,

@@ -237,6 +237,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
             seed.AdapterBinding.InvocationPayloadHash,
             artifact.ArtifactHash,
             artifact.LayoutHash,
+            [],
             string.Empty));
         var request = new GovernedLoopSequentialMaterializationRequest(
             GovernedLoopSequentialMaterializationRequest.CurrentSchemaVersion,

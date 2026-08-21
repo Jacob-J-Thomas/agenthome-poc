@@ -923,6 +923,7 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             invocation.ContentHash,
             artifact.ArtifactHash,
             artifact.LayoutHash,
+            [],
             string.Empty));
         var planResult = GovernedLoopSequentialPlanBuilder.Build(artifact);
         Assert.True(

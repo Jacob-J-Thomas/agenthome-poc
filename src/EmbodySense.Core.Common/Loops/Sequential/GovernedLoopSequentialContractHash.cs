@@ -80,6 +80,11 @@ public static class GovernedLoopSequentialContractHash
         Append(canonical, binding.InvocationPayloadHash);
         Append(canonical, binding.GraphArtifactHash);
         Append(canonical, binding.GraphLayoutHash);
+        Append(canonical, binding.CommandActionCapabilityIds.Count);
+        foreach (var capabilityId in binding.CommandActionCapabilityIds)
+        {
+            Append(canonical, capabilityId);
+        }
         return Digest(Encoding.UTF8.GetBytes(canonical.ToString()));
     }
 

@@ -531,6 +531,7 @@ public sealed class GovernedLoopSequentialRunMaterializerTests
             invocation.ContentHash,
             artifact.ArtifactHash,
             artifact.LayoutHash,
+            [],
             string.Empty));
         var plan = Assert.IsType<GovernedLoopSequentialPlan>(GovernedLoopSequentialPlanBuilder.Build(artifact).Plan);
         return new TestContext(

@@ -39,6 +39,13 @@ internal sealed class CapabilityExecutableArtifactLease : ICapabilityExecutableA
         return authorityLease is null ? null : new CapabilityExecutableLaunchFence(authorityLease);
     }
 
+    public Task<TResult?> ExecuteWithLaunchFenceAsync<TResult>(Func<CancellationToken, Task<TResult>> operation, CancellationToken cancellationToken = default)
+        where TResult : class
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        return _authorityTransaction.ExecuteWithValidatedAuthorityAsync(_launchValidator, operation, cancellationToken);
+    }
+
     public ValueTask DisposeAsync()
     {
         _executable?.Dispose();

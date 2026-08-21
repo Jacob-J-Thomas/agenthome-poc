@@ -1,15 +1,22 @@
 using System.Text.Json;
+using EmbodySense.Core.Application.Capabilities.Models;
+using EmbodySense.Core.Application.CommandActions.Models;
 using EmbodySense.Core.Application.Inference.Profiles;
 using EmbodySense.Core.Application.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.CommandActions;
+using EmbodySense.Core.Common.CommandActions.Models;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Loops.Execution.Effects;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.E2EBrowserHost;
 using EmbodySense.Web;
 using EmbodySense.Web.Services;
@@ -38,8 +45,22 @@ namespace EmbodySense.E2EBrowserHost
                 .Select(value => JsonSerializer.Deserialize<BrowserModelProfileSpec>(value, _jsonOptions)
                     ?? throw new ArgumentException("An additional browser model-profile specification was empty."))
                 .ToArray();
+            var commandActions = OptionValues(args, "--command-action-registration")
+                .Select(value => JsonSerializer.Deserialize<BrowserCommandActionSpec>(value, _jsonOptions)
+                    ?? throw new ArgumentException("A browser command Action specification was empty."))
+                .Select(CreateCommandActionRegistration)
+                .ToArray();
             var providers = specs.Select(CreateRuntimeProvider).ToArray();
             var options = WebRunOptions.FromArguments(args);
+            var commandActionProvider = commandActions.Length == 0
+                ? null
+                : new CommandActionRuntimeProvider(
+                    commandActions,
+                    new CapabilityArtifactStore(
+                        new WorkspacePaths(options.WorkingDirectory),
+                        new FileCapabilityArtifactStateTrustProvider(capabilityTrustRoot),
+                        BrowserCommandActionArtifactTrustVerifier.Instance),
+                    BrowserCommandActionProcessIsolationBoundary.Instance);
             var builder = EmbodySense.Web.Program.CreateBuilder(args, options);
             builder.Services.RemoveAll<WebAgentRuntimeHost>();
             builder.Services.AddSingleton(provider =>
@@ -56,7 +77,8 @@ namespace EmbodySense.E2EBrowserHost
                         capabilityTrustRoot,
                         status,
                         publication,
-                        additionalModelProfileProviders: providers));
+                        additionalModelProfileProviders: providers,
+                        commandActionRuntimeProvider: commandActionProvider));
             });
             await using var application = builder.Build();
             EmbodySense.Web.Program.ConfigurePipeline(application);
@@ -90,6 +112,82 @@ namespace EmbodySense.E2EBrowserHost
 
         public static string Serialize(BrowserModelProfileSpec spec)
             => JsonSerializer.Serialize(spec, _jsonOptions);
+
+        public static string Serialize(BrowserCommandActionSpec spec)
+            => JsonSerializer.Serialize(spec, _jsonOptions);
+
+        public static CommandActionRegistration CreateCommandActionRegistration(BrowserCommandActionSpec spec)
+        {
+            ArgumentNullException.ThrowIfNull(spec);
+            if (!CapabilityIntegrityDigest.TryParse(spec.ArtifactDigest, out var digest, out _)
+                || string.IsNullOrWhiteSpace(spec.EntryPoint)
+                || Path.GetFileName(spec.EntryPoint) != spec.EntryPoint)
+            {
+                throw new ArgumentException("The browser command Action specification is invalid.", nameof(spec));
+            }
+            if (!CapabilityId.TryParse("org.example/command/browser-json-echo", out var capabilityId, out _)
+                || !CapabilityProviderId.TryParse("org.example", out var providerId, out _)
+                || !CapabilityVersion.TryParse("1.0.0", out var version, out _)
+                || !CapabilityVersionRange.TryParse("*", out var versionRange, out _)
+                || !CapabilityJsonSchema.TryCreate($"{{\"$schema\":\"{CapabilityJsonSchema.Draft202012Dialect}\",\"type\":\"object\"}}", out var schema, out _))
+            {
+                throw new InvalidOperationException("The fixed browser command Action identity is invalid.");
+            }
+            const string SourceUri = "file:///browser-e2e/command-action";
+            var implementation = new CapabilityImplementationIdentity(providerId!, "command/browser-json-echo");
+            var descriptor = new CapabilityDescriptor(
+                1,
+                capabilityId!,
+                CapabilityKind.Actuator,
+                version!,
+                implementation,
+                new CapabilityProvenance(CapabilityProvenanceKind.LocalSource, SourceUri, "rev-1", digest),
+                new CapabilityCompatibility(versionRange!, [CapabilityHostRuntime.Platform]),
+                "Process one bounded JSON value through the controlled installed-browser command boundary.",
+                schema!,
+                schema!,
+                new CapabilityResourceLimits(5_000, 128_000_000, 16_384, 1),
+                CapabilitySideEffectClass.LocalReversible,
+                new CapabilityAccessRequirements([], CapabilityEgressMode.None, [], []));
+            var manifest = new CapabilityArtifactManifest(
+                1,
+                descriptor,
+                new CapabilityArtifactSourceReference(CapabilityArtifactSourceKind.Local, SourceUri, "rev-1", CapabilityArtifactUpdatePolicy.Pinned),
+                digest!,
+                null,
+                CapabilityHostRuntime.Platform,
+                spec.EntryPoint,
+                []);
+            if (!CapabilityDescriptorIdentity.TryCreate(descriptor, out var identity, out var validation) || !validation.IsValid)
+            {
+                throw new InvalidOperationException("The fixed browser command Action descriptor is invalid.");
+            }
+            var arguments = OperatingSystem.IsWindows()
+                ? new[]
+                {
+                    new CommandActionArgumentPart(CommandActionArgumentPartKind.Fixed, "/r"),
+                    new CommandActionArgumentPart(CommandActionArgumentPartKind.Fixed, ".*"),
+                }
+                : [];
+            var template = CommandActionTemplateContract.Create(
+                1,
+                identity!,
+                implementation,
+                digest!,
+                1,
+                "command/browser-json-echo",
+                1,
+                [new CommandActionSlotDefinition("input", CommandActionSlotKind.BoundedJson, 512, null, null, [], false)],
+                arguments,
+                [],
+                CommandActionSecondaryGrammarPolicy.None,
+                CommandActionStandardInputKind.SlotJson,
+                "input",
+                CommandActionOutputKind.Json,
+                new CommandActionIsolationPolicy(CommandActionWorkingDirectoryKind.ArtifactRoot, CommandActionNetworkPolicy.Denied, 5_000, 2_000, 128_000_000, 16_384, 1, true),
+                false);
+            return new CommandActionRegistration(template, manifest);
+        }
 
         private static ModelProfileRuntimeProvider CreateRuntimeProvider(BrowserModelProfileSpec spec)
         {

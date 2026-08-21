@@ -6,6 +6,8 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.LocalWorkspace.Actions;
+using EmbodySense.Core.Common.CommandActions;
+using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
@@ -66,8 +68,11 @@ public static class GovernedLoopSequentialPlanBuilder
 
         var planNodes = BuildPlanNodes(graph, topology);
         var inferenceCount = planNodes.Count(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference));
+        var hasExecutableNode = inferenceCount >= CustomLoopLimits.MinInferenceSteps
+            || planNodes.Any(node => GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor)
+                || GovernedLoopSequentialNodeDescriptors.IsRecoverableAction(node.Descriptor));
         if (inferenceCount > CustomLoopLimits.MaxInferenceSteps
-            || inferenceCount < CustomLoopLimits.MinInferenceSteps && !planNodes.Any(node => GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor)))
+            || !hasExecutableNode)
         {
             return Failure(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, "$.graph.nodes");
         }
@@ -545,7 +550,12 @@ public static class GovernedLoopSequentialPlanBuilder
 
         var scheduleEntry = Equals(planNodes[0].Descriptor, GovernedLoopSequentialNodeDescriptors.ScheduleTrigger);
         var hasInference = planNodes.Any(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference));
-        var hasWorkspaceAction = planNodes.Any(node => GovernedLoopSequentialNodeDescriptors.IsWorkspaceAction(node.Descriptor));
+        var actionCapabilityIds = graph.Nodes
+            .Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Action)
+            .SelectMany(node => node.AuthorityCeiling.CapabilityIds)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
         var routedProfileIds = graph.Nodes
             .Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference)
             .SelectMany(node => CandidateProfileIds(node.ModelRoutingPolicy ?? graph.DefaultModelRoutingPolicy))
@@ -559,12 +569,16 @@ public static class GovernedLoopSequentialPlanBuilder
         var inferenceAllowsWorkspaceTools = graph.Nodes.Any(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference
             && node.AuthorityCeiling.CapabilityIds.Contains(WorkspaceCommandCapabilityId, StringComparer.Ordinal));
         var expectedCapabilities = inferenceCapabilities
-            .Concat(hasWorkspaceAction || inferenceAllowsWorkspaceTools ? [WorkspaceCommandCapabilityId] : [])
+            .Concat(inferenceAllowsWorkspaceTools ? [WorkspaceCommandCapabilityId] : [])
+            .Concat(actionCapabilityIds)
             .Order(StringComparer.Ordinal)
             .ToArray();
-        var noInferenceCapabilities = scheduleEntry
-            ? new[] { ConversationTurnCapabilityId, ScheduleTriggerCapabilityId }
-            : [ConversationTurnCapabilityId];
+        var noInferenceCapabilities = new[] { ConversationTurnCapabilityId }
+            .Concat(scheduleEntry ? [ScheduleTriggerCapabilityId] : [])
+            .Concat(actionCapabilityIds)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
         if ((!hasInference
                 && !graph.AuthorityCeiling.CapabilityIds.SequenceEqual(noInferenceCapabilities, StringComparer.Ordinal))
             || (hasInference
@@ -582,7 +596,7 @@ public static class GovernedLoopSequentialPlanBuilder
             {
                 GovernedLoopNodeKind.Trigger => IsExactTrigger(node, schemaById),
                 GovernedLoopNodeKind.Inference => IsExactInference(node, schemaById, graph.DefaultModelRoutingPolicy, inferenceAllowsWorkspaceTools, topology.ComponentByNodeId[node.Id].IsCyclic),
-                GovernedLoopNodeKind.Action => IsExactWorkspaceAction(node, schemaById),
+                GovernedLoopNodeKind.Action => IsExactWorkspaceAction(node, schemaById) || IsExactCommandAction(node, schemaById),
                 GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate => IsExactPureNode(node, schemaById),
                 GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Join => IsExactTopologyNode(node, schemaById),
                 GovernedLoopNodeKind.Wait => IsExactWaitNode(node),
@@ -721,6 +735,25 @@ public static class GovernedLoopSequentialPlanBuilder
         return HasExactPortSet(node, schemas,
             ("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, GovernedLoopValueKind.Text));
     }
+
+    private static bool IsExactCommandAction(
+        GovernedLoopNodeDefinition node,
+        IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas)
+        => CommandActionNodeDescriptors.IsCommandAction(node.Descriptor)
+            && node.AuthorityCeiling.CapabilityIds.Count == 1
+            && CapabilityId.TryParse(node.AuthorityCeiling.CapabilityIds[0], out _, out _)
+            && node.ModelRoutingPolicy is null
+            && node.AuthoredInputDataClasses is null
+            && node.Parameters.Count <= CommandActionContractLimits.MaxSlots
+            && node.Parameters.All(parameter =>
+                CommandActionTemplateContract.IsSlotName(parameter.Key)
+                && !parameter.Value.StartsWith('@')
+                && CommandActionTemplateContract.IsSafeLiteralToken(
+                    parameter.Value,
+                    CommandActionContractLimits.MaxValueUtf8Bytes,
+                    allowEmpty: true))
+            && HasExactPortSet(node, schemas,
+                ("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, GovernedLoopValueKind.Text));
 
     private static bool IsExactPureNode(
         GovernedLoopNodeDefinition node,

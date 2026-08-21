@@ -183,6 +183,18 @@ public sealed class CustomLoopDefinitionTests
     }
 
     [Fact]
+    public void Only_the_canonical_sequential_projection_path_accepts_zero_legacy_inference_steps()
+    {
+        var definition = CustomLoopDefinitionContentHash.Apply(ValidDefinition() with { InferenceSteps = [] });
+
+        var ordinary = CustomLoopDefinitionValidator.Validate(definition);
+        var sequential = CustomLoopDefinitionValidator.ValidateSequentialProjection(definition);
+
+        Assert.Contains(ordinary.Errors, error => error.Code == "inference_step_count_out_of_range");
+        Assert.True(sequential.IsValid);
+    }
+
+    [Fact]
     public void Null_definition_is_a_structured_validation_rejection()
     {
         var result = CustomLoopDefinitionValidator.Validate(null);

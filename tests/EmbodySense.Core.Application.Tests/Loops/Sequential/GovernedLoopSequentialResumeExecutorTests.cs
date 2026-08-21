@@ -378,6 +378,7 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
             invocation.ContentHash,
             artifact.ArtifactHash,
             artifact.LayoutHash,
+            [],
             string.Empty));
         Assert.True(GovernedLoopAdmissionValidator.Validate(outcome).IsValid);
         store.StoreReadResult = new GovernedLoopAdmissionStoreReadResult(GovernedLoopAdmissionStoreReadStatus.Found, 2, outcome);
