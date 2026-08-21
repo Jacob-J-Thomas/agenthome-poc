@@ -84,11 +84,6 @@ public sealed class AuthorityDelegationEnvelopeService : IAuthorityDelegationEnv
             operation.AddWaiter();
         }
 
-        if (ownsOperation)
-        {
-            _ = ExecuteCreateOperationAsync(operation);
-        }
-
         var waiterReleased = 0;
         using var cancellationRegistration = cancellationToken.Register(() =>
         {
@@ -97,6 +92,12 @@ public sealed class AuthorityDelegationEnvelopeService : IAuthorityDelegationEnv
                 operation.ReleaseWaiter();
             }
         });
+
+        // Register the public cancellation boundary before owner execution; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/482.
+        if (ownsOperation)
+        {
+            _ = ExecuteCreateOperationAsync(operation);
+        }
 
         try
         {
@@ -253,6 +254,7 @@ public sealed class AuthorityDelegationEnvelopeService : IAuthorityDelegationEnv
         }
 
         var origin = await _originResolver.ResolveForCreationAsync(request, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (!TryAdvanceTrustedTime(ref observedAtUtc))
         {
             return Result(AuthorityDelegationServiceStatus.Unavailable);
@@ -270,6 +272,7 @@ public sealed class AuthorityDelegationEnvelopeService : IAuthorityDelegationEnv
         }
 
         var target = await _targetResolver.ResolveAsync(request.Target, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (!TryAdvanceTrustedTime(ref observedAtUtc))
         {
             return Result(AuthorityDelegationServiceStatus.Unavailable);

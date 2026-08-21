@@ -23,16 +23,24 @@ public sealed class AuthorityDelegationConcurrencyAndFailureTests
     public async Task CreateAsync_ReturnsCreatedWhenHostileTransactionCompletesBeforeCallerCancellation()
     {
         var harness = await AuthorityDelegationServiceTestHarness.CreateAsync();
+        var service = harness.CreateService();
         using var cancellation = new CancellationTokenSource();
         harness.TransactionCallback = (operation, _) => operation(CancellationToken.None);
 
-        var result = await harness.CreateService().CreateAsync(harness.Request, cancellation.Token);
+        var result = await service.CreateAsync(harness.Request, cancellation.Token);
 
         cancellation.Cancel();
+        var replay = await service.CreateAsync(harness.Request);
+
         Assert.Equal(AuthorityDelegationServiceStatus.Created, result.Status);
         Assert.NotNull(result.Envelope);
+        Assert.Equal(AuthorityDelegationServiceStatus.Replayed, replay.Status);
+        Assert.Equal(result.Envelope, replay.Envelope);
         Assert.Equal(1, harness.GrantCount);
         Assert.Equal(1, harness.OriginCount);
+        Assert.Equal(1, harness.TargetCount);
+        Assert.Equal(1, harness.CompletionCount);
+        Assert.Equal(1, harness.TransactionCount);
     }
 
     [Fact]
@@ -198,51 +206,53 @@ public sealed class AuthorityDelegationConcurrencyAndFailureTests
 
         Assert.Equal(1, harness.GrantCount);
         Assert.Equal(0, harness.OriginCount);
+        Assert.Equal(0, harness.TargetCount);
+        Assert.Equal(0, harness.CompletionCount);
     }
 
     [Fact]
-    public async Task CreateAsync_PropagatesCancellationAndReplaysWhenCommitWinsBeforeWaiterAttachment()
+    public async Task CreateAsync_PropagatesCancellationAfterTargetStartedAndRetriesAsCreated()
     {
         var harness = await AuthorityDelegationServiceTestHarness.CreateAsync();
         var service = harness.CreateService();
         using var cancellation = new CancellationTokenSource();
-        var committed = new TaskCompletionSource<AuthorityDelegationServiceResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        harness.GrantCallback = (_, _) =>
+        var targetStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseTarget = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var transactionFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.TargetCallback = async (_, _) =>
         {
-            cancellation.Cancel();
-            return Task.FromResult(harness.GrantResolution);
+            targetStarted.TrySetResult();
+            await releaseTarget.Task;
+            return harness.TargetResolution;
         };
         harness.TransactionCallback = async (operation, _) =>
         {
-            var result = await operation(CancellationToken.None);
-            committed.TrySetResult(result);
-            return result;
+            try
+            {
+                return await operation(CancellationToken.None);
+            }
+            finally
+            {
+                transactionFinished.TrySetResult();
+            }
         };
 
-        var previousContext = SynchronizationContext.Current;
-        Task<AuthorityDelegationServiceResult> creation;
-        try
-        {
-            SynchronizationContext.SetSynchronizationContext(new InlineSynchronizationContext());
-            creation = service.CreateAsync(harness.Request, cancellation.Token);
-        }
-        finally
-        {
-            SynchronizationContext.SetSynchronizationContext(previousContext);
-        }
+        var creation = service.CreateAsync(harness.Request, cancellation.Token);
+        await targetStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        releaseTarget.TrySetResult();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => creation);
-        var committedResult = await committed.Task;
-        var committedEnvelope = Assert.IsType<AuthorityDelegationEnvelope>(committedResult.Envelope);
-        var replay = await service.CreateAsync(harness.Request);
+        await transactionFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var retry = await service.CreateAsync(harness.Request);
 
-        Assert.Equal(AuthorityDelegationServiceStatus.Replayed, replay.Status);
-        Assert.Equal(committedEnvelope, replay.Envelope);
-        Assert.Equal(1, harness.GrantCount);
-        Assert.Equal(1, harness.OriginCount);
-        Assert.Equal(1, harness.TargetCount);
+        Assert.Equal(AuthorityDelegationServiceStatus.Created, retry.Status);
+        Assert.NotNull(retry.Envelope);
+        Assert.Equal(2, harness.GrantCount);
+        Assert.Equal(2, harness.OriginCount);
+        Assert.Equal(2, harness.TargetCount);
         Assert.Equal(1, harness.CompletionCount);
-        Assert.Equal(1, harness.TransactionCount);
+        Assert.Equal(2, harness.TransactionCount);
     }
 
     [Fact]
