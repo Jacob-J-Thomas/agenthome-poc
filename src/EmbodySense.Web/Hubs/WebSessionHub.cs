@@ -100,7 +100,7 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
         {
             return await _host.GetCurrentTranscriptAsync(connectionAborted);
         }
-        catch (OperationCanceledException exception) when (connectionAborted.IsCancellationRequested && exception.CancellationToken == connectionAborted)
+        catch (OperationCanceledException) when (connectionAborted.IsCancellationRequested)
         {
             return null;
         }
