@@ -102,7 +102,7 @@ export function indexServerErrors(errors) {
     const kind = item.elementKind ?? item.element?.kind ?? "graph";
     const id = item.elementId ?? item.element?.id ?? "";
     const key = `${kind}:${id}`;
-    const values = indexed.get(key) ?? [];
+    const values = [...(indexed.get(key) ?? [])];
     values.push(
       Object.freeze({
         code: item.code,
