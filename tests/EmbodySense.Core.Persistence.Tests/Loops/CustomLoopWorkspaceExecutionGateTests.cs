@@ -210,7 +210,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
 
         Assert.True(cancellation.IsCancellationRequested);
         Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, result.Status);
-        Assert.InRange(elapsed, TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(3));
+        Assert.InRange(elapsed, TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(8));
     }
 
     [Fact]

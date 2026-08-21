@@ -314,7 +314,11 @@ internal static class GovernedLoopRuntimeTests
                 $"{exception.Message} Coordinator read={failedCoordinator?.Status}, lifecycle={failedCoordinator?.Snapshot?.LatestLifecycle.Status}, heartbeat={failedCoordinator?.Snapshot?.LatestHeartbeat.HeartbeatSequence}, failure={failedCoordinator?.Snapshot?.LatestFailureSequence}/{failedCoordinator?.Snapshot?.LatestFailureHash}; wake={wake?.Status}/{wake?.Evidence?.Disposition}/{wake?.Evidence?.DispositionEvidenceReference}; candidates={candidates?.WakeStatus}/{candidates?.WakeCandidates.Count}; run/frontier/node={current?.Status}/{frontier?.Status}/{waitNode?.Status}; now/deadline={DateTimeOffset.UtcNow:O}/{checkpoint?.WakeDeadlineUtc:O}.");
         }
 
-        Assert.NotNull(Assert.Single(completed.WaitEvidence).ContinuationEvidence);
+        var continuation = Assert.IsType<GovernedLoopWaitContinuationEvidence>(Assert.Single(completed.WaitEvidence).ContinuationEvidence);
+        await WaitForCommittedWakeAsync(
+            new GovernedLoopSleepStore(paths),
+            continuation.PreparedWakeEvidence.Identity.WakeId,
+            TimeSpan.FromSeconds(30));
     }
 
     private static Process StartWaitRestartChild(GovernedRuntimeFixture fixture, string runId)
@@ -1590,6 +1594,28 @@ internal static class GovernedLoopRuntimeTests
         var current = await store.GetAsync(runId);
         throw new Xunit.Sdk.XunitException(
             $"Canonical run {runId} did not reach {status} within the test deadline; current={current?.Status}, failure={current?.FailureCode}/{current?.FailureDetail}.");
+    }
+
+    private static async Task<GovernedLoopWakeEvidence> WaitForCommittedWakeAsync(
+        GovernedLoopSleepStore store,
+        string wakeId,
+        TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        GovernedLoopWakeEvidenceReadResult? read = null;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            read = await store.ReadWakeAsync(wakeId);
+            if (read?.Evidence?.Disposition == GovernedLoopWakeDisposition.Committed)
+            {
+                return read.Evidence;
+            }
+
+            await Task.Delay(20);
+        }
+
+        throw new Xunit.Sdk.XunitException(
+            $"Wake {wakeId} did not reach Committed within the test deadline; read={read?.Status}, disposition={read?.Evidence?.Disposition}.");
     }
 
     private static async Task AssertNoToolExecutionAsync(WorkspacePaths paths)
