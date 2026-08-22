@@ -15,6 +15,7 @@ using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
+using EmbodySense.Core.Application.Loops.Diagnostics;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Models;
@@ -8878,6 +8879,14 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private static string SafeExceptionClass(Exception exception)
     {
+        if (CustomLoopRunPersistenceDiagnostic.Find(exception) is { } persistence)
+        {
+            var native = persistence.NativeErrorCode is { } errorCode
+                ? $"{persistence.NativeErrorKind}:{errorCode}"
+                : persistence.NativeErrorKind.ToString();
+            return $"{exception.GetType().Name} ({persistence.Stage}, {native})";
+        }
+
         return exception.GetType().Name;
     }
 

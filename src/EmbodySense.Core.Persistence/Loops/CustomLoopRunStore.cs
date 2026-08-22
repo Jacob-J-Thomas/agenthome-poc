@@ -1,10 +1,12 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops.Diagnostics;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -50,10 +52,11 @@ public sealed class CustomLoopRunStore :
     private const string DiscoveryIndexPendingFileName = ".custom-loop-run-index.pending";
     private const string ScheduleAdmissionRetirementFileName = ".schedule-admission-retirements.json";
     private const int MaximumScheduleAdmissionInterruptedWriteArtifacts = 32;
-    private const int MaximumAtomicMoveAttempts = 41;
     private const int MaximumArtifactReadReconciliationAttempts = 3;
     private static readonly byte[] _discoveryIndexPendingContent = "pending\n"u8.ToArray();
     private static readonly TimeSpan _atomicMoveRetryDelay = TimeSpan.FromMilliseconds(50);
+    private static readonly TimeSpan _auxiliaryAtomicMoveContentionTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan _canonicalAtomicMoveContentionTimeout = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan _discoveryIndexMaintenanceTimeout = TimeSpan.FromSeconds(30);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _processMutationGates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
@@ -1752,7 +1755,7 @@ public sealed class CustomLoopRunStore :
         if (!validation.IsValid)
         {
             var details = string.Join(" ", validation.Errors.Select(error => $"{error.Field}: {error.Message}"));
-            throw new FormatException($"Custom loop terminal integrity-warning append is invalid. {details}");
+            ThrowValidationFailure($"Custom loop terminal integrity-warning append is invalid. {details}");
         }
 
         var candidate = current with
@@ -1823,7 +1826,7 @@ public sealed class CustomLoopRunStore :
         if (!validation.IsValid)
         {
             var details = string.Join(" ", validation.Errors.Select(error => $"{error.Field}: {error.Message}"));
-            throw new FormatException($"Custom loop run update is invalid. {details}");
+            ThrowValidationFailure($"Custom loop run update is invalid. {details}");
         }
 
         var serialized = SerializeBounded(run);
@@ -1992,26 +1995,34 @@ public sealed class CustomLoopRunStore :
 
     private async Task<CustomLoopRunDiscoveryIndex?> ReadDiscoveryIndexAsync(CancellationToken cancellationToken)
     {
-        if (!File.Exists(_discoveryIndexPath))
-        {
-            return null;
-        }
-
-        var content = await ReadBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPath, CustomLoopLimits.MaxRunDiscoveryIndexUtf8Bytes, "Custom loop run discovery index", cancellationToken);
-        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(content, _jsonOptions.MaxDepth, "Custom loop run discovery index", _discoveryIndexPath);
         try
         {
-            using var document = JsonDocument.Parse(content, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
-            RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
-            ThrowIfDiscoveryIndexSchemaVersionIsUnsupported(document.RootElement);
-            RequireCompleteContract(document.RootElement, typeof(CustomLoopRunDiscoveryIndex), "$");
-            var index = JsonSerializer.Deserialize<CustomLoopRunDiscoveryIndex>(content, _jsonOptions) ?? throw new FormatException("The custom loop run discovery index was empty.");
-            ValidateDiscoveryIndex(index);
-            return index;
+            if (!File.Exists(_discoveryIndexPath))
+            {
+                return null;
+            }
+
+            var content = await ReadBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPath, CustomLoopLimits.MaxRunDiscoveryIndexUtf8Bytes, "Custom loop run discovery index", cancellationToken);
+            CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(content, _jsonOptions.MaxDepth, "Custom loop run discovery index", _discoveryIndexPath);
+            try
+            {
+                using var document = JsonDocument.Parse(content, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
+                RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
+                ThrowIfDiscoveryIndexSchemaVersionIsUnsupported(document.RootElement);
+                RequireCompleteContract(document.RootElement, typeof(CustomLoopRunDiscoveryIndex), "$");
+                var index = JsonSerializer.Deserialize<CustomLoopRunDiscoveryIndex>(content, _jsonOptions) ?? throw new FormatException("The custom loop run discovery index was empty.");
+                ValidateDiscoveryIndex(index);
+                return index;
+            }
+            catch (JsonException exception)
+            {
+                throw new FormatException("The custom loop run discovery index contains invalid JSON, unknown fields, missing fields, or unsupported enum values.", exception);
+            }
         }
-        catch (JsonException exception)
+        catch (Exception exception)
         {
-            throw new FormatException("The custom loop run discovery index contains invalid JSON, unknown fields, missing fields, or unsupported enum values.", exception);
+            AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Index);
+            throw;
         }
     }
 
@@ -2085,17 +2096,25 @@ public sealed class CustomLoopRunStore :
 
     private async Task WriteDiscoveryIndexAsync(CustomLoopRunDiscoveryIndex index, CancellationToken cancellationToken)
     {
-        var content = CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(index, _jsonOptions, "Custom loop run discovery index", _discoveryIndexPath);
-        if (content.Length + 1 > CustomLoopLimits.MaxRunDiscoveryIndexUtf8Bytes)
+        try
         {
-            throw new FormatException($"The custom loop run discovery index exceeds {CustomLoopLimits.MaxRunDiscoveryIndexUtf8Bytes} UTF-8 bytes.");
-        }
+            var content = CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(index, _jsonOptions, "Custom loop run discovery index", _discoveryIndexPath);
+            if (content.Length + 1 > CustomLoopLimits.MaxRunDiscoveryIndexUtf8Bytes)
+            {
+                throw new FormatException($"The custom loop run discovery index exceeds {CustomLoopLimits.MaxRunDiscoveryIndexUtf8Bytes} UTF-8 bytes.");
+            }
 
-        var terminated = new byte[content.Length + 1];
-        content.CopyTo(terminated, 0);
-        terminated[^1] = (byte)'\n';
-        await WriteBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPath, terminated, overwrite: File.Exists(_discoveryIndexPath), cancellationToken);
-        CacheDiscoveryIndex(index, GetDiscoveryIndexFingerprint());
+            var terminated = new byte[content.Length + 1];
+            content.CopyTo(terminated, 0);
+            terminated[^1] = (byte)'\n';
+            await WriteBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPath, terminated, overwrite: File.Exists(_discoveryIndexPath), cancellationToken, CustomLoopRunPersistenceDiagnosticStage.Index);
+            CacheDiscoveryIndex(index, GetDiscoveryIndexFingerprint());
+        }
+        catch (Exception exception)
+        {
+            AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Index);
+            throw;
+        }
     }
 
     private DiscoveryIndexFileFingerprint? GetDiscoveryIndexFingerprint()
@@ -2466,7 +2485,7 @@ public sealed class CustomLoopRunStore :
             return;
         }
 
-        await WriteBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPendingPath, _discoveryIndexPendingContent, overwrite: false, cancellationToken);
+        await WriteBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPendingPath, _discoveryIndexPendingContent, overwrite: false, cancellationToken, CustomLoopRunPersistenceDiagnosticStage.Pending);
     }
 
     private void DeleteDiscoveryIndexPendingMarker()
@@ -2724,36 +2743,72 @@ public sealed class CustomLoopRunStore :
 
     private async Task<RunArtifact> ReadArtifactAsync(RunArtifactLocation location, CancellationToken cancellationToken)
     {
-        EnsureSafeArtifactPath(location.Path, mustExist: true);
-        if (_artifactReadObserver is not null)
+        try
         {
-            await _artifactReadObserver(CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen, location.Path, cancellationToken).ConfigureAwait(false);
-        }
+            EnsureSafeArtifactPath(location.Path, mustExist: true);
+            if (_artifactReadObserver is not null)
+            {
+                await _artifactReadObserver(CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen, location.Path, cancellationToken).ConfigureAwait(false);
+            }
 
-        // Repository-owned writers are fenced and atomically replace sibling staging files. Direct in-place external
-        // writers require separate stable-snapshot hardening; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/490.
-        await using var stream = OpenSharedArtifactReadStream(location.Path);
-        if (_artifactReadObserver is not null)
+            // Repository-owned writers are fenced and atomically replace sibling staging files. Direct in-place external
+            // writers require separate stable-snapshot hardening; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/490.
+            await using var stream = OpenSharedArtifactReadStream(location.Path);
+            if (_artifactReadObserver is not null)
+            {
+                await _artifactReadObserver(CustomLoopRunReadBoundary.AfterCanonicalArtifactReadOpen, location.Path, cancellationToken).ConfigureAwait(false);
+            }
+
+            return await ReadArtifactContentAsync(location, stream, cancellationToken);
+        }
+        catch (Exception exception)
         {
-            await _artifactReadObserver(CustomLoopRunReadBoundary.AfterCanonicalArtifactReadOpen, location.Path, cancellationToken).ConfigureAwait(false);
+            AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Read);
+            throw;
         }
-
-        return await ReadArtifactContentAsync(location, stream, cancellationToken);
     }
 
     private async Task<RunArtifact> ReadArtifactContentAsync(RunArtifactLocation location, FileStream stream, CancellationToken cancellationToken)
     {
-        if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
+        long contentLength;
+        try
         {
-            throw new FormatException($"Custom loop run `{location.Path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
+            contentLength = stream.Length;
+        }
+        catch (Exception exception)
+        {
+            AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Read);
+            throw;
         }
 
-        var length = checked((int)stream.Length);
+        if (contentLength <= 0 || contentLength > CustomLoopLimits.MaxRunTraceUtf8Bytes)
+        {
+            ThrowValidationFailure($"Custom loop run `{location.Path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
+        }
+
+        var length = checked((int)contentLength);
         var rented = ArrayPool<byte>.Shared.Rent(length);
         try
         {
-            await stream.ReadExactlyAsync(rented.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
-            return ReadArtifact(location, rented.AsMemory(0, length));
+            try
+            {
+                await stream.ReadExactlyAsync(rented.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Read);
+                throw;
+            }
+
+            try
+            {
+                return ReadArtifact(location, rented.AsMemory(0, length));
+            }
+            catch (Exception exception)
+            {
+                AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Validate);
+                throw;
+            }
         }
         finally
         {
@@ -2860,8 +2915,22 @@ public sealed class CustomLoopRunStore :
                 await ReconcileArtifactReadMissAsync(lastPath, cancellationToken);
                 continue;
             }
+            catch (Exception exception)
+            {
+                AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Read);
+                throw;
+            }
 
-            await ObserveArtifactReadBoundaryAsync(CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen, location.Path, cancellationToken);
+            try
+            {
+                await ObserveArtifactReadBoundaryAsync(CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen, location.Path, cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Read);
+                throw;
+            }
+
             FileStream stream;
             try
             {
@@ -2877,11 +2946,24 @@ public sealed class CustomLoopRunStore :
                 await ReconcileArtifactReadMissAsync(lastPath, cancellationToken);
                 continue;
             }
+            catch (Exception exception)
+            {
+                AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Read);
+                throw;
+            }
 
             await using (stream)
             {
-                await ObserveArtifactReadBoundaryAsync(CustomLoopRunReadBoundary.AfterCanonicalArtifactReadOpen, location.Path, cancellationToken);
-                return await ReadArtifactContentAsync(location, stream, cancellationToken);
+                try
+                {
+                    await ObserveArtifactReadBoundaryAsync(CustomLoopRunReadBoundary.AfterCanonicalArtifactReadOpen, location.Path, cancellationToken);
+                    return await ReadArtifactContentAsync(location, stream, cancellationToken);
+                }
+                catch (Exception exception)
+                {
+                    AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Read);
+                    throw;
+                }
             }
         }
 
@@ -3579,7 +3661,13 @@ public sealed class CustomLoopRunStore :
         return content;
     }
 
-    private async Task WriteBoundedJsonArtifactAsync(string root, string path, byte[] content, bool overwrite, CancellationToken cancellationToken)
+    private async Task WriteBoundedJsonArtifactAsync(
+        string root,
+        string path,
+        byte[] content,
+        bool overwrite,
+        CancellationToken cancellationToken,
+        CustomLoopRunPersistenceDiagnosticStage diagnosticStage = CustomLoopRunPersistenceDiagnosticStage.Unknown)
     {
         EnsureSafeArtifactPath(root, path, mustExist: overwrite);
         var directory = Path.GetDirectoryName(path)!;
@@ -3597,7 +3685,7 @@ public sealed class CustomLoopRunStore :
 
             EnsureSafeDirectory(directory, create: false);
             EnsureSafeArtifactPath(root, temporaryPath, mustExist: true);
-            await MoveAtomicallyWithRetryAsync(temporaryPath, path, overwrite, cancellationToken);
+            await MoveAtomicallyWithRetryAsync(temporaryPath, path, overwrite, diagnosticStage, _auxiliaryAtomicMoveContentionTimeout, cancellationToken);
         }
         finally
         {
@@ -3610,9 +3698,37 @@ public sealed class CustomLoopRunStore :
 
     private async Task WriteArtifactAsync(string path, byte[] content, CustomLoopRunSummary summary, bool overwrite, CancellationToken cancellationToken)
     {
-        var index = await ReadCleanDiscoveryIndexAsync(cancellationToken);
-        await MarkDiscoveryIndexPendingAsync(cancellationToken);
-        await WriteArtifactContentAsync(path, content, overwrite, cancellationToken);
+        CustomLoopRunDiscoveryIndex? index;
+        try
+        {
+            index = await ReadCleanDiscoveryIndexAsync(cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Index);
+            throw;
+        }
+
+        try
+        {
+            await MarkDiscoveryIndexPendingAsync(cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Pending);
+            throw;
+        }
+
+        try
+        {
+            await WriteArtifactContentAsync(path, content, overwrite, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.CanonicalReplace);
+            throw;
+        }
+
         using var maintenanceCancellation = new CancellationTokenSource(_discoveryIndexMaintenanceTimeout);
         try
         {
@@ -3642,7 +3758,7 @@ public sealed class CustomLoopRunStore :
 
             EnsureSafeDirectory(directory, create: false);
             EnsureSafeArtifactPath(temporaryPath, mustExist: true);
-            await MoveAtomicallyWithRetryAsync(temporaryPath, path, overwrite, cancellationToken);
+            await MoveAtomicallyWithRetryAsync(temporaryPath, path, overwrite, CustomLoopRunPersistenceDiagnosticStage.CanonicalReplace, _canonicalAtomicMoveContentionTimeout, cancellationToken);
         }
         finally
         {
@@ -3653,12 +3769,33 @@ public sealed class CustomLoopRunStore :
         }
     }
 
-    private static async Task MoveAtomicallyWithRetryAsync(string sourcePath, string destinationPath, bool overwrite, CancellationToken cancellationToken)
+    private static async Task MoveAtomicallyWithRetryAsync(
+        string sourcePath,
+        string destinationPath,
+        bool overwrite,
+        CustomLoopRunPersistenceDiagnosticStage diagnosticStage,
+        TimeSpan contentionTimeout,
+        CancellationToken cancellationToken)
     {
-        var attempt = 0;
+        // A restrictive Windows reader may briefly prevent a sibling staging file from replacing the canonical trace; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/475.
+        // The owned deadline keeps that recovery bounded while preserving the fail-closed boundary after it expires.
+        using var contentionDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        contentionDeadline.CancelAfter(contentionTimeout);
+        Exception? lastTransientException = null;
         while (true)
         {
-            attempt++;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (contentionDeadline.IsCancellationRequested)
+            {
+                if (lastTransientException is not null)
+                {
+                    AttachPersistenceDiagnostic(lastTransientException, diagnosticStage);
+                    throw lastTransientException;
+                }
+
+                throw new OperationCanceledException(contentionDeadline.Token);
+            }
+
             try
             {
                 if (overwrite && File.Exists(destinationPath))
@@ -3672,9 +3809,26 @@ public sealed class CustomLoopRunStore :
                 }
                 return;
             }
-            catch (Exception exception) when (attempt < MaximumAtomicMoveAttempts && IsTransientWindowsFileAccess(exception))
+            catch (Exception exception) when (IsTransientWindowsFileAccess(exception))
             {
-                await Task.Delay(_atomicMoveRetryDelay, cancellationToken);
+                lastTransientException = exception;
+                if (contentionDeadline.IsCancellationRequested)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    AttachPersistenceDiagnostic(exception, diagnosticStage);
+                    throw;
+                }
+
+                try
+                {
+                    await Task.Delay(_atomicMoveRetryDelay, contentionDeadline.Token);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    AttachPersistenceDiagnostic(exception, diagnosticStage);
+                    ExceptionDispatchInfo.Capture(exception).Throw();
+                    throw;
+                }
             }
         }
     }
@@ -3686,18 +3840,13 @@ public sealed class CustomLoopRunStore :
             return false;
         }
 
-        if (exception is UnauthorizedAccessException)
-        {
-            return true;
-        }
-
-        if (exception is not IOException ioException)
+        if (exception is not IOException and not UnauthorizedAccessException)
         {
             return false;
         }
 
-        var errorCode = ioException.HResult & 0xFFFF;
-        return errorCode is 5 or 32 or 33;
+        var errorCode = exception.HResult & 0xFFFF;
+        return errorCode is 5 or 32 or 33 or 1175;
     }
 
     private string GetRunPath(string loopId, string runId)
@@ -3868,12 +4017,61 @@ public sealed class CustomLoopRunStore :
 
     private static void ValidateCanonicalRun(CustomLoopRunRecord? run)
     {
+        try
+        {
+            ValidateCanonicalRunCore(run);
+        }
+        catch (Exception exception)
+        {
+            AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Validate);
+            throw;
+        }
+    }
+
+    private static void ValidateCanonicalRunCore(CustomLoopRunRecord? run)
+    {
         var validation = CustomLoopRunValidator.Validate(run);
         if (!validation.IsValid)
         {
             var details = string.Join(" ", validation.Errors.Select(error => $"{error.Field}: {error.Message}"));
-            throw new FormatException($"Custom loop run is invalid. {details}");
+            ThrowValidationFailure($"Custom loop run is invalid. {details}");
         }
+    }
+
+    private static void ThrowValidationFailure(string message)
+    {
+        var exception = new FormatException(message);
+        AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Validate);
+        throw exception;
+    }
+
+    private static void AttachPersistenceDiagnostic(Exception exception, CustomLoopRunPersistenceDiagnosticStage stage)
+    {
+        if (CustomLoopRunPersistenceDiagnostic.Find(exception) is not null)
+        {
+            return;
+        }
+
+        var (errorKind, errorCode) = FindNativeError(exception);
+        exception.Data[CustomLoopRunPersistenceDiagnostic.ExceptionDataKey] = new CustomLoopRunPersistenceDiagnostic(stage, errorKind, errorCode);
+    }
+
+    private static (CustomLoopRunPersistenceNativeErrorKind ErrorKind, long? ErrorCode) FindNativeError(Exception exception)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return (CustomLoopRunPersistenceNativeErrorKind.None, null);
+        }
+
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is IOException or UnauthorizedAccessException)
+            {
+                return (CustomLoopRunPersistenceNativeErrorKind.Win32, current.HResult & 0xFFFF);
+            }
+        }
+
+        return (CustomLoopRunPersistenceNativeErrorKind.None, null);
     }
 
     private static GovernedLoopSequentialNodeEvidenceReceipt ToApplicationReceipt(CustomLoopSequentialNodeEvidence evidence)

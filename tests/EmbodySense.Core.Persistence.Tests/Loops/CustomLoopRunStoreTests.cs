@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops.Diagnostics;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Posture.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention.Models;
@@ -708,8 +709,43 @@ public sealed class CustomLoopRunStoreTests
         };
 
         using var store = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: observeRead);
-        await Assert.ThrowsAsync<FileNotFoundException>(() => store.GetAsync(run.Id));
+        var exception = await Assert.ThrowsAsync<FileNotFoundException>(() => store.GetAsync(run.Id));
+
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Read, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
         Assert.Equal(1, beforeOpenCalls);
+    }
+
+    [Fact]
+    public async Task Public_reads_classify_stream_access_as_read_and_content_validation_as_validate()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun();
+        await WriteDirectAsync(paths, run);
+        Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> rejectRead = (boundary, _, _) =>
+        {
+            if (boundary == CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen)
+            {
+                throw new IOException("The stream could not be opened.");
+            }
+
+            return ValueTask.CompletedTask;
+        };
+
+        using (var rejectedStore = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: rejectRead))
+        {
+            var readException = await Assert.ThrowsAsync<IOException>(() => rejectedStore.GetAsync(run.Id));
+            Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Read, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(readException)).Stage);
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var cancellationException = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new CustomLoopRunStore(paths).GetAsync(run.Id, cancellation.Token));
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Read, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(cancellationException)).Stage);
+
+        await WriteRawAsync(paths, run.LoopId, run.Id, "{invalid");
+        var validationException = await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync(run.Id));
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Validate, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(validationException)).Stage);
     }
 
     [Fact]
@@ -766,6 +802,195 @@ public sealed class CustomLoopRunStoreTests
 
         Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
         Assert.Equal(CustomLoopRunStatus.Running, (await store.GetAsync(admitted.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task Windows_atomic_replace_waits_past_the_legacy_budget_then_preserves_old_and_new_canonical_snapshots()
+    {
+        // FileShare enforcement is Windows-specific; other platforms cannot exercise this contract.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun();
+        await store.CreateAsync(admitted);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        var artifactDirectory = Path.GetDirectoryName(artifactPath)!;
+        var stagingPattern = $".{Path.GetFileName(artifactPath)}.*.tmp";
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        Task<CustomLoopRunStoreResult>? updateTask = null;
+
+        try
+        {
+            using (var externalReader = new FileStream(artifactPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                var oldSnapshot = new byte[checked((int)externalReader.Length)];
+                await externalReader.ReadExactlyAsync(oldSnapshot);
+                Assert.Equal(CustomLoopRunStatus.Admitted, CustomLoopRunArtifactSerializer.Deserialize(oldSnapshot).Status);
+
+                updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
+                var wait = Stopwatch.StartNew();
+                while (!Directory.EnumerateFiles(artifactDirectory, stagingPattern).Any())
+                {
+                    Assert.False(updateTask.IsCompleted, "The atomic update did not reach its staged replacement boundary within the bounded wait.");
+                    Assert.True(wait.Elapsed < TimeSpan.FromSeconds(10), "The atomic update did not reach its staged replacement boundary within the bounded wait.");
+                    await Task.Delay(TimeSpan.FromMilliseconds(15));
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(2_250));
+                Assert.False(updateTask.IsCompleted, "The atomic update did not retain its retry ownership beyond the legacy two-second window.");
+            }
+
+            var result = await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+        }
+        finally
+        {
+            if (updateTask is not null && !updateTask.IsCompleted)
+            {
+                await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            else if (updateTask?.IsFaulted == true)
+            {
+                _ = updateTask.Exception;
+            }
+        }
+
+        Assert.Equal(CustomLoopRunStatus.Running, (await store.GetAsync(admitted.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task Windows_atomic_replace_deadline_fails_closed_with_a_path_free_canonical_replace_diagnostic()
+    {
+        // FileShare enforcement is Windows-specific; other platforms cannot exercise this contract.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun();
+        await store.CreateAsync(admitted);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        var artifactDirectory = Path.GetDirectoryName(artifactPath)!;
+        var stagingPattern = $".{Path.GetFileName(artifactPath)}.*.tmp";
+        var oldSnapshot = await File.ReadAllBytesAsync(artifactPath);
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+
+        using var externalReader = new FileStream(artifactPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
+        var wait = Stopwatch.StartNew();
+        while (!Directory.EnumerateFiles(artifactDirectory, stagingPattern).Any())
+        {
+            Assert.False(updateTask.IsCompleted, "The atomic update did not reach its staged replacement boundary within the bounded wait.");
+            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(10), "The atomic update did not reach its staged replacement boundary within the bounded wait.");
+            await Task.Delay(TimeSpan.FromMilliseconds(15));
+        }
+
+        var replacementWindow = Stopwatch.StartNew();
+        var exception = await Assert.ThrowsAnyAsync<IOException>(async () => await updateTask.WaitAsync(TimeSpan.FromSeconds(9)));
+        var diagnostic = Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception));
+
+        Assert.InRange(replacementWindow.Elapsed, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(8));
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalReplace, diagnostic.Stage);
+        Assert.Equal(CustomLoopRunPersistenceNativeErrorKind.Win32, diagnostic.NativeErrorKind);
+        Assert.True(diagnostic.NativeErrorCode is 5 or 32 or 33 or 1175);
+        Assert.Equal(oldSnapshot, await File.ReadAllBytesAsync(artifactPath));
+        Assert.Equal(CustomLoopRunStatus.Admitted, (await store.GetAsync(admitted.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task Windows_atomic_replace_caller_cancellation_before_the_next_retry_keeps_the_canonical_snapshot()
+    {
+        // FileShare enforcement is Windows-specific; other platforms cannot exercise this contract.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun();
+        await store.CreateAsync(admitted);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        var artifactDirectory = Path.GetDirectoryName(artifactPath)!;
+        var stagingPattern = $".{Path.GetFileName(artifactPath)}.*.tmp";
+        var oldSnapshot = await File.ReadAllBytesAsync(artifactPath);
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        using var cancellation = new CancellationTokenSource();
+        Task<CustomLoopRunStoreResult>? updateTask = null;
+
+        try
+        {
+            using (var externalReader = new FileStream(artifactPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                updateTask = store.UpdateAsync(running, admitted.LifecycleVersion, cancellation.Token);
+                var wait = Stopwatch.StartNew();
+                while (!Directory.EnumerateFiles(artifactDirectory, stagingPattern).Any())
+                {
+                    Assert.False(updateTask.IsCompleted, "The atomic update did not reach its staged replacement boundary within the bounded wait.");
+                    Assert.True(wait.Elapsed < TimeSpan.FromSeconds(10), "The atomic update did not reach its staged replacement boundary within the bounded wait.");
+                    await Task.Delay(TimeSpan.FromMilliseconds(15));
+                }
+
+                cancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await updateTask.WaitAsync(TimeSpan.FromSeconds(2)));
+            }
+        }
+        finally
+        {
+            if (updateTask is not null && !updateTask.IsCompleted)
+            {
+                await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            else if (updateTask?.IsFaulted == true)
+            {
+                _ = updateTask.Exception;
+            }
+        }
+
+        Assert.Equal(oldSnapshot, await File.ReadAllBytesAsync(artifactPath));
+        Assert.Equal(CustomLoopRunStatus.Admitted, (await store.GetAsync(admitted.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task Windows_derived_index_replacement_retains_the_legacy_contention_budget()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        await store.CreateAsync(CreateRun());
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var pendingPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending");
+
+        using (var restrictiveReader = new WindowsFileLock(indexPath, workspace.RootPath))
+        {
+            var replacementWindow = Stopwatch.StartNew();
+            var result = await store.CreateAsync(CreateRun("loop-derived-index", "run-derived-index", "invoke-derived-index")).WaitAsync(TimeSpan.FromSeconds(4));
+
+            Assert.Equal(CustomLoopRunStoreStatus.Created, result.Status);
+            Assert.InRange(replacementWindow.Elapsed, TimeSpan.FromMilliseconds(1500), TimeSpan.FromMilliseconds(3500));
+            Assert.True(File.Exists(pendingPath));
+        }
+
+        Assert.Equal(CustomLoopRunStatus.Admitted, (await store.GetAsync("run-derived-index"))!.Status);
+        var repaired = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
+        Assert.Equal(2, repaired.Items.Count);
+        Assert.Contains(repaired.Items, item => item.LoopId == "loop-alpha" && item.Id == "run-alpha");
+        Assert.Contains(repaired.Items, item => item.LoopId == "loop-derived-index" && item.Id == "run-derived-index");
+        Assert.False(File.Exists(pendingPath));
     }
 
     [Fact]

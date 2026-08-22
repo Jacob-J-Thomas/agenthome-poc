@@ -99,6 +99,19 @@ public sealed class ModelSourceLayoutTests
     }
 
     [Fact]
+    public void Behavior_bearing_persistence_diagnostic_resides_outside_models()
+    {
+        var root = FindRepositoryRoot();
+        var sourceRoot = Path.Combine(root, "src");
+        var diagnosticPath = Path.Combine(sourceRoot, "EmbodySense.Core.Application", "Loops", "Diagnostics", "CustomLoopRunPersistenceDiagnostic.cs");
+
+        Assert.True(File.Exists(diagnosticPath));
+        Assert.False(IsModelFile(sourceRoot, diagnosticPath));
+        Assert.True(HasExpectedNamespace(sourceRoot, diagnosticPath));
+        Assert.Contains("CustomLoopRunPersistenceDiagnostic", FindTopLevelBehaviorBearingTypeNames(File.ReadAllText(diagnosticPath)));
+    }
+
+    [Fact]
     public void Model_files_do_not_own_comparer_behavior()
     {
         var root = FindRepositoryRoot();
