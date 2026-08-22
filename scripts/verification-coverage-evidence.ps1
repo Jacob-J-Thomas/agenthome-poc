@@ -596,7 +596,7 @@ public static class VerificationCoverageParallelProcessor
         }
 
         var itemResults = new VerificationCoverageParallelItemResult[ordered.Length];
-        var merged = new SortedDictionary<string, SortedDictionary<string, SortedDictionary<int, int>>>(StringComparer.Ordinal);
+        var merged = new Dictionary<string, Dictionary<string, Dictionary<int, int>>>(StringComparer.Ordinal);
         Parallel.ForEach(
             ordered,
             new ParallelOptions { MaxDegreeOfParallelism = maximumWorkers },
@@ -626,9 +626,9 @@ public static class VerificationCoverageParallelProcessor
         }
 
         var lines = new List<VerificationCoverageParallelLine>();
-        foreach (var package in merged)
-        foreach (var file in package.Value)
-        foreach (var line in file.Value)
+        foreach (var package in merged.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+        foreach (var file in package.Value.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+        foreach (var line in file.Value.OrderBy(entry => entry.Key))
         {
             lines.Add(new VerificationCoverageParallelLine
             {
@@ -643,28 +643,28 @@ public static class VerificationCoverageParallelProcessor
         {
             Snapshots = itemResults.Select(result => result.Snapshot).ToArray(),
             Lines = lines.ToArray(),
-            Packages = merged.Keys.ToArray()
+            Packages = merged.Keys.OrderBy(key => key, StringComparer.Ordinal).ToArray()
         };
     }
 
     private static void Merge(
         Dictionary<string, Dictionary<string, Dictionary<int, int>>> source,
-        SortedDictionary<string, SortedDictionary<string, SortedDictionary<int, int>>> destination)
+        Dictionary<string, Dictionary<string, Dictionary<int, int>>> destination)
     {
         foreach (var package in source)
         {
-            SortedDictionary<string, SortedDictionary<int, int>> packageFiles;
+            Dictionary<string, Dictionary<int, int>> packageFiles;
             if (!destination.TryGetValue(package.Key, out packageFiles))
             {
-                packageFiles = new SortedDictionary<string, SortedDictionary<int, int>>(StringComparer.Ordinal);
+                packageFiles = new Dictionary<string, Dictionary<int, int>>(StringComparer.Ordinal);
                 destination.Add(package.Key, packageFiles);
             }
             foreach (var file in package.Value)
             {
-                SortedDictionary<int, int> fileLines;
+                Dictionary<int, int> fileLines;
                 if (!packageFiles.TryGetValue(file.Key, out fileLines))
                 {
-                    fileLines = new SortedDictionary<int, int>();
+                    fileLines = new Dictionary<int, int>();
                     packageFiles.Add(file.Key, fileLines);
                 }
                 foreach (var line in file.Value)
@@ -746,59 +746,164 @@ public static class VerificationCoverageParallelProcessor
         Dictionary<string, Dictionary<string, Dictionary<int, int>>> destination)
     {
         var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null };
-        var document = new XmlDocument { XmlResolver = null };
         try
         {
             using (var stream = new MemoryStream(bytes, false))
             using (var reader = XmlReader.Create(stream, settings))
             {
-                document.Load(reader);
+                if (reader.MoveToContent() != XmlNodeType.Element || !string.Equals(reader.LocalName, "coverage", StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(string.Format(CultureInfo.InvariantCulture, "{0} has an invalid document root: {1}", item.Description, item.Path));
+                }
+
+                ReadCoverage(reader, item, repositoryRoot, sourceProjectDirectories, destination);
+                while (reader.Read()) { }
             }
         }
-        catch (Exception exception)
+        catch (XmlException exception)
         {
             throw new InvalidDataException(string.Format(CultureInfo.InvariantCulture, "{0} is malformed XML: {1}. {2}", item.Description, item.Path, exception.Message), exception);
         }
-        if (document.DocumentElement == null || !string.Equals(document.DocumentElement.LocalName, "coverage", StringComparison.Ordinal))
+    }
+
+    private static void ReadCoverage(
+        XmlReader reader,
+        VerificationCoverageParallelWorkItem item,
+        string repositoryRoot,
+        Dictionary<string, string> sourceProjectDirectories,
+        Dictionary<string, Dictionary<string, Dictionary<int, int>>> destination)
+    {
+        var coverageDepth = reader.Depth;
+        if (reader.IsEmptyElement) return;
+        while (reader.Read())
         {
-            throw new InvalidDataException(string.Format(CultureInfo.InvariantCulture, "{0} has an invalid document root: {1}", item.Description, item.Path));
+            if (reader.NodeType == XmlNodeType.Element && reader.Depth == coverageDepth + 1 && reader.NamespaceURI.Length == 0 && reader.LocalName == "packages")
+            {
+                ReadPackages(reader, item, repositoryRoot, sourceProjectDirectories, destination);
+            }
+            else if (reader.NodeType == XmlNodeType.EndElement && reader.Depth == coverageDepth) return;
+        }
+    }
+
+    private static void ReadPackages(
+        XmlReader reader,
+        VerificationCoverageParallelWorkItem item,
+        string repositoryRoot,
+        Dictionary<string, string> sourceProjectDirectories,
+        Dictionary<string, Dictionary<string, Dictionary<int, int>>> destination)
+    {
+        var packagesDepth = reader.Depth;
+        if (reader.IsEmptyElement) return;
+        while (reader.Read())
+        {
+            if (reader.NodeType == XmlNodeType.Element && reader.Depth == packagesDepth + 1 && reader.NamespaceURI.Length == 0 && reader.LocalName == "package")
+            {
+                ReadPackage(reader, item, repositoryRoot, sourceProjectDirectories, destination);
+            }
+            else if (reader.NodeType == XmlNodeType.EndElement && reader.Depth == packagesDepth) return;
+        }
+    }
+
+    private static void ReadPackage(
+        XmlReader reader,
+        VerificationCoverageParallelWorkItem item,
+        string repositoryRoot,
+        Dictionary<string, string> sourceProjectDirectories,
+        Dictionary<string, Dictionary<string, Dictionary<int, int>>> destination)
+    {
+        var packageName = reader.GetAttribute("name") ?? "";
+        Dictionary<string, Dictionary<int, int>> packageFiles;
+        if (!sourceProjectDirectories.ContainsKey(packageName)) return;
+        if (!destination.TryGetValue(packageName, out packageFiles))
+        {
+            packageFiles = new Dictionary<string, Dictionary<int, int>>(StringComparer.Ordinal);
+            destination.Add(packageName, packageFiles);
         }
 
-        var packages = document.DocumentElement.SelectNodes("packages/package");
-        if (packages == null) return;
-        foreach (XmlNode package in packages)
+        var packageDepth = reader.Depth;
+        if (reader.IsEmptyElement) return;
+        while (reader.Read())
         {
-            var packageName = package.Attributes != null && package.Attributes["name"] != null ? package.Attributes["name"].Value : "";
-            if (!sourceProjectDirectories.ContainsKey(packageName)) continue;
-            Dictionary<string, Dictionary<int, int>> packageFiles;
-            if (!destination.TryGetValue(packageName, out packageFiles))
+            if (reader.NodeType == XmlNodeType.Element && reader.Depth == packageDepth + 1 && reader.NamespaceURI.Length == 0 && reader.LocalName == "classes")
             {
-                packageFiles = new Dictionary<string, Dictionary<int, int>>(StringComparer.Ordinal);
-                destination.Add(packageName, packageFiles);
+                ReadClasses(reader, item, repositoryRoot, sourceProjectDirectories, packageName, packageFiles);
             }
+            else if (reader.NodeType == XmlNodeType.EndElement && reader.Depth == packageDepth) return;
+        }
+    }
 
-            var classes = package.SelectNodes("classes/class");
-            if (classes == null) continue;
-            foreach (XmlNode coverageClass in classes)
+    private static void ReadClasses(
+        XmlReader reader,
+        VerificationCoverageParallelWorkItem item,
+        string repositoryRoot,
+        Dictionary<string, string> sourceProjectDirectories,
+        string packageName,
+        Dictionary<string, Dictionary<int, int>> packageFiles)
+    {
+        var classesDepth = reader.Depth;
+        if (reader.IsEmptyElement) return;
+        while (reader.Read())
+        {
+            if (reader.NodeType == XmlNodeType.Element && reader.Depth == classesDepth + 1 && reader.NamespaceURI.Length == 0 && reader.LocalName == "class")
             {
-                var classLines = coverageClass.SelectNodes("lines/line");
-                if (classLines == null || classLines.Count == 0) continue;
-                var fileName = coverageClass.Attributes != null && coverageClass.Attributes["filename"] != null ? coverageClass.Attributes["filename"].Value : "";
-                var fileKey = GetFileKey(packageName, fileName, repositoryRoot, sourceProjectDirectories);
-                Dictionary<int, int> fileLines;
-                if (!packageFiles.TryGetValue(fileKey, out fileLines))
-                {
-                    fileLines = new Dictionary<int, int>();
-                    packageFiles.Add(fileKey, fileLines);
-                }
-                foreach (XmlNode line in classLines)
-                {
-                    var lineNumber = int.Parse(line.Attributes != null && line.Attributes["number"] != null ? line.Attributes["number"].Value : "", NumberStyles.Integer, CultureInfo.InvariantCulture);
-                    var hits = int.Parse(line.Attributes != null && line.Attributes["hits"] != null ? line.Attributes["hits"].Value : "", NumberStyles.Integer, CultureInfo.InvariantCulture);
-                    int existingHits;
-                    if (!fileLines.TryGetValue(lineNumber, out existingHits) || hits > existingHits) fileLines[lineNumber] = hits;
-                }
+                ReadClass(reader, item, repositoryRoot, sourceProjectDirectories, packageName, packageFiles);
             }
+            else if (reader.NodeType == XmlNodeType.EndElement && reader.Depth == classesDepth) return;
+        }
+    }
+
+    private static void ReadClass(
+        XmlReader reader,
+        VerificationCoverageParallelWorkItem item,
+        string repositoryRoot,
+        Dictionary<string, string> sourceProjectDirectories,
+        string packageName,
+        Dictionary<string, Dictionary<int, int>> packageFiles)
+    {
+        var fileName = reader.GetAttribute("filename") ?? "";
+        var classDepth = reader.Depth;
+        if (reader.IsEmptyElement) return;
+        while (reader.Read())
+        {
+            if (reader.NodeType == XmlNodeType.Element && reader.Depth == classDepth + 1 && reader.NamespaceURI.Length == 0 && reader.LocalName == "lines")
+            {
+                ReadLines(reader, item, repositoryRoot, sourceProjectDirectories, packageName, fileName, packageFiles);
+            }
+            else if (reader.NodeType == XmlNodeType.EndElement && reader.Depth == classDepth) return;
+        }
+    }
+
+    private static void ReadLines(
+        XmlReader reader,
+        VerificationCoverageParallelWorkItem item,
+        string repositoryRoot,
+        Dictionary<string, string> sourceProjectDirectories,
+        string packageName,
+        string fileName,
+        Dictionary<string, Dictionary<int, int>> packageFiles)
+    {
+        var linesDepth = reader.Depth;
+        Dictionary<int, int> fileLines = null;
+        if (reader.IsEmptyElement) return;
+        while (reader.Read())
+        {
+            if (reader.NodeType == XmlNodeType.Element && reader.Depth == linesDepth + 1 && reader.NamespaceURI.Length == 0 && reader.LocalName == "line")
+            {
+                if (fileLines == null)
+                {
+                    var fileKey = GetFileKey(packageName, fileName, repositoryRoot, sourceProjectDirectories);
+                    if (!packageFiles.TryGetValue(fileKey, out fileLines))
+                    {
+                        fileLines = new Dictionary<int, int>();
+                        packageFiles.Add(fileKey, fileLines);
+                    }
+                }
+                var lineNumber = int.Parse(reader.GetAttribute("number") ?? "", NumberStyles.Integer, CultureInfo.InvariantCulture);
+                var hits = int.Parse(reader.GetAttribute("hits") ?? "", NumberStyles.Integer, CultureInfo.InvariantCulture);
+                int existingHits;
+                if (!fileLines.TryGetValue(lineNumber, out existingHits) || hits > existingHits) fileLines[lineNumber] = hits;
+            }
+            else if (reader.NodeType == XmlNodeType.EndElement && reader.Depth == linesDepth) return;
         }
     }
 
