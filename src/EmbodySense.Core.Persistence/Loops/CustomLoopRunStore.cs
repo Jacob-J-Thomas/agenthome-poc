@@ -50,7 +50,7 @@ public sealed class CustomLoopRunStore :
     private const string DiscoveryIndexPendingFileName = ".custom-loop-run-index.pending";
     private const string ScheduleAdmissionRetirementFileName = ".schedule-admission-retirements.json";
     private const int MaximumScheduleAdmissionInterruptedWriteArtifacts = 32;
-    private const int MaximumAtomicMoveAttempts = 3;
+    private const int MaximumAtomicMoveAttempts = 41;
     private static readonly byte[] _discoveryIndexPendingContent = "pending\n"u8.ToArray();
     private static readonly TimeSpan _atomicMoveRetryDelay = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan _discoveryIndexMaintenanceTimeout = TimeSpan.FromSeconds(30);
@@ -2727,7 +2727,7 @@ public sealed class CustomLoopRunStore :
         var rented = ArrayPool<byte>.Shared.Rent(length);
         try
         {
-            await stream.ReadExactlyAsync(rented.AsMemory(0, length), cancellationToken);
+            await stream.ReadExactlyAsync(rented.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
             return ReadArtifact(location, rented.AsMemory(0, length));
         }
         finally
@@ -2812,7 +2812,7 @@ public sealed class CustomLoopRunStore :
         }
 
         var content = new byte[(int)stream.Length];
-        await stream.ReadExactlyAsync(content, cancellationToken);
+        await stream.ReadExactlyAsync(content, cancellationToken).ConfigureAwait(false);
         return content;
     }
 
@@ -2825,7 +2825,7 @@ public sealed class CustomLoopRunStore :
             throw new FormatException($"Custom loop run `{path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
         }
 
-        var hash = await SHA256.HashDataAsync(stream, cancellationToken);
+        var hash = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
@@ -3470,7 +3470,7 @@ public sealed class CustomLoopRunStore :
         }
 
         var content = new byte[(int)stream.Length];
-        await stream.ReadExactlyAsync(content, cancellationToken);
+        await stream.ReadExactlyAsync(content, cancellationToken).ConfigureAwait(false);
         return content;
     }
 
@@ -3556,7 +3556,15 @@ public sealed class CustomLoopRunStore :
             attempt++;
             try
             {
-                File.Move(sourcePath, destinationPath, overwrite);
+                if (overwrite && File.Exists(destinationPath))
+                {
+                    // #475: bounded readers release Read|Delete handles before consumer continuations; replacement stays atomic without in-place write sharing.
+                    File.Replace(sourcePath, destinationPath, destinationBackupFileName: null);
+                }
+                else
+                {
+                    File.Move(sourcePath, destinationPath, overwrite);
+                }
                 return;
             }
             catch (Exception exception) when (attempt < MaximumAtomicMoveAttempts && IsTransientWindowsFileAccess(exception))

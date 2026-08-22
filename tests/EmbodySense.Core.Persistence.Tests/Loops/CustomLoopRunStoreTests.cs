@@ -532,6 +532,145 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Windows_public_reader_releases_its_handle_before_a_paused_consumer_continuation()
+    {
+        // FileShare enforcement is Windows-specific; other platforms cannot exercise this contract.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun() with { TriggerPrompt = new string('p', CustomLoopLimits.MaxPresetPromptCharacters) };
+        admitted = admitted with { Events = [admitted.Events[0] with { Detail = new string('x', CustomLoopLimits.MaxRunDetailCharacters) }] };
+        admitted = CustomLoopAdmissionRequestHash.Apply(admitted with { AdmissionRequestHash = string.Empty });
+        await store.CreateAsync(admitted);
+        using var reader = new CustomLoopRunStore(paths);
+        using var readCancellation = new CancellationTokenSource();
+        var gated = new QueuedSynchronizationContext();
+        var previous = SynchronizationContext.Current;
+        Task<CustomLoopRunRecord?>? readTask = null;
+        Task<CustomLoopRunStoreResult>? updateTask = null;
+        SynchronizationContext.SetSynchronizationContext(gated);
+        try
+        {
+            readTask = reader.GetAsync(admitted.Id, readCancellation.Token);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previous);
+        }
+
+        try
+        {
+            await gated.WaitForPostAsync(TimeSpan.FromSeconds(10));
+            Assert.False(readTask!.IsCompleted);
+            var running = Advance(admitted, CustomLoopRunStatus.Running);
+            updateTask = Task.Run(() => store.UpdateAsync(running, admitted.LifecycleVersion));
+            var result = await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+            await gated.DrainUntilCompletedAsync(readTask!, TimeSpan.FromSeconds(10));
+            Assert.Equal(admitted.Id, (await readTask)!.Id);
+        }
+        finally
+        {
+            if (readTask is not null && !readTask.IsCompleted)
+            {
+                readCancellation.Cancel();
+            }
+
+            if (readTask is not null)
+            {
+                await gated.DrainUntilCompletedAsync(readTask, TimeSpan.FromSeconds(10));
+                try
+                {
+                    await readTask;
+                }
+                catch (OperationCanceledException) when (readCancellation.IsCancellationRequested)
+                {
+                }
+            }
+
+            if (updateTask is not null)
+            {
+                await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Windows_atomic_replace_converges_after_a_short_external_reader_releases_the_destination()
+    {
+        // FileShare enforcement is Windows-specific; other platforms cannot exercise this contract.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun();
+        await store.CreateAsync(admitted);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        var artifactDirectory = Path.GetDirectoryName(artifactPath)!;
+        var stagingPattern = $".{Path.GetFileName(artifactPath)}.*.tmp";
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        Task<CustomLoopRunStoreResult>? updateTask = null;
+        CustomLoopRunStoreResult result;
+
+        try
+        {
+            await using (var externalReader = new FileStream(artifactPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                updateTask = Task.Run(() => store.UpdateAsync(running, admitted.LifecycleVersion));
+                var wait = Stopwatch.StartNew();
+                while (!Directory.EnumerateFiles(artifactDirectory, stagingPattern).Any())
+                {
+                    Assert.False(updateTask.IsCompleted, "The atomic update exhausted its transient retry budget before the external reader released the destination.");
+                    Assert.True(wait.Elapsed < TimeSpan.FromSeconds(10), "The atomic update did not reach its staged replacement boundary within the bounded wait.");
+                    await Task.Delay(TimeSpan.FromMilliseconds(15));
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(250));
+                Assert.False(updateTask.IsCompleted, "The atomic update exhausted its transient retry budget before the external reader released the destination.");
+            }
+
+            result = await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            if (updateTask is not null && !updateTask.IsCompleted)
+            {
+                await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            else if (updateTask?.IsFaulted == true)
+            {
+                _ = updateTask.Exception;
+            }
+        }
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Running, (await store.GetAsync(admitted.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task Queued_synchronization_context_drains_a_posted_task_until_completion()
+    {
+        var gated = new QueuedSynchronizationContext();
+        var completion = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var post = Task.Run(() => gated.Post(_ => completion.TrySetResult(null), null));
+
+        await gated.DrainUntilCompletedAsync(completion.Task, TimeSpan.FromSeconds(10));
+        await post;
+
+        Assert.True(completion.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
     public async Task Os_exclusive_lock_serializes_mutation_and_cancellation_releases_the_process_gate()
     {
         using var workspace = new TestWorkspace();

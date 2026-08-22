@@ -415,6 +415,9 @@ public sealed class BrowserFlowTests
                 $"{authoringRole.Identity.RoleId}:{authoringRole.Identity.Revision}:{authoringRole.ContentHash}",
                 "change");
             await SetValueAsync(browser, "#governedGraphId", "browser-scheduled-graph");
+            await browser.WaitForExpressionAsync("!document.getElementById('governedGraphLoadButton').disabled");
+            await ClickAsync(browser, "#governedGraphLoadButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphNotice').textContent.includes('No durable governed graph has this ID')");
             await SetValueAsync(browser, "#governedGraphRevisionId", "revision-1");
             await SetValueAsync(browser, "#governedGraphDisplayName", "Browser scheduled graph");
             await SetValueAsync(browser, "#governedGraphPurpose", "Publish one server-cataloged scheduled graph.");
@@ -449,7 +452,7 @@ public sealed class BrowserFlowTests
             Assert.Equal("browser-scheduled-graph", await browser.EvaluateStringAsync("document.getElementById('governedGraphId').value"));
             Assert.Contains("1 immutable revision artifact", await browser.EvaluateStringAsync("document.getElementById('governedGraphLifecycle').textContent"), StringComparison.Ordinal);
             app.AssertHealthy();
-            await browser.AssertHealthyAsync();
+            await browser.AssertHealthyAsync(("/api/governed-graphs/detail?graphId=browser-scheduled-graph", 404));
         }
         catch
         {
@@ -1439,13 +1442,23 @@ public sealed class BrowserFlowTests
             Interlocked.Exchange(ref _expectedServerRestart, 0);
         }
 
-        public async Task AssertHealthyAsync()
+        public async Task AssertHealthyAsync(params (string UrlFragment, int StatusCode)[] expectedHttpFailures)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             _ = await EvaluateAsync("true", timeout.Token);
             Assert.False(_process.HasExited, $"Browser process exited unexpectedly.{Environment.NewLine}{FormatOutput()}");
             Assert.Null(_readerFailure);
-            Assert.Empty(GetDiagnosticsSnapshot());
+            var diagnostics = GetDiagnosticsSnapshot().ToList();
+            foreach (var expected in expectedHttpFailures)
+            {
+                ArgumentException.ThrowIfNullOrWhiteSpace(expected.UrlFragment);
+                Assert.InRange(expected.StatusCode, 400, 599);
+                var removed = diagnostics.RemoveAll(item => item.Contains(expected.UrlFragment, StringComparison.Ordinal)
+                    && (item.Contains($"\"status\":{expected.StatusCode}", StringComparison.Ordinal)
+                        || item.Contains($"status of {expected.StatusCode} (", StringComparison.Ordinal)));
+                Assert.True(removed > 0, $"The expected browser HTTP {expected.StatusCode} failure for `{expected.UrlFragment}` was not observed.");
+            }
+            Assert.Empty(diagnostics);
         }
 
         public async Task WriteDiagnosticsAsync(string directory)
