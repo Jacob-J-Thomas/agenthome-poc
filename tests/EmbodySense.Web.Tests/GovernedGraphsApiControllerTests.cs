@@ -2,7 +2,12 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.Json;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Startup.Capabilities;
+using EmbodySense.Core.Startup.Inference.Profiles.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
@@ -105,6 +110,49 @@ public sealed class GovernedGraphsApiControllerTests
         }
     }
 
+    [Fact]
+    public async Task Model_profile_api_requires_initialization_then_projects_available_and_invalid_public_requests()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = CreateApp(workspace, codexPath, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
+            var jsonOptions = app.Services.GetRequiredService<IOptions<JsonOptions>>().Value.JsonSerializerOptions;
+            var beforeInitialization = await SendAsync(client, HttpMethod.Get, "/api/model-profiles", token);
+            var previewBeforeInitialization = await SendJsonAsync(client, "/api/model-profiles/preview", token, CreateModelProfilePreviewInput(), jsonOptions);
+            var initialized = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token);
+            var available = await SendAsync(client, HttpMethod.Get, "/api/model-profiles?maximumCount=1", token);
+            var invalidPage = await SendAsync(client, HttpMethod.Get, "/api/model-profiles?maximumCount=0", token);
+            var ineligiblePreview = await SendJsonAsync(client, "/api/model-profiles/preview", token, CreateModelProfilePreviewInput(), jsonOptions);
+            var invalidPreview = await SendJsonAsync(client, "/api/model-profiles/preview", token, CreateModelProfilePreviewInput(roleId: string.Empty), jsonOptions);
+
+            Assert.Equal(HttpStatusCode.Conflict, beforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, previewBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, initialized.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, available.StatusCode);
+            Assert.True(available.Headers.CacheControl?.NoStore == true);
+            Assert.Equal(HttpStatusCode.BadRequest, invalidPage.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, ineligiblePreview.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, invalidPreview.StatusCode);
+            using var availableDocument = JsonDocument.Parse(await available.Content.ReadAsStringAsync());
+            Assert.Equal("available", availableDocument.RootElement.GetProperty("status").GetString());
+            Assert.Equal("adapterunavailable", Assert.Single(availableDocument.RootElement.GetProperty("profiles").EnumerateArray()).GetProperty("availabilityReason").GetString());
+            using var ineligiblePreviewDocument = JsonDocument.Parse(await ineligiblePreview.Content.ReadAsStringAsync());
+            Assert.Equal("ineligible", ineligiblePreviewDocument.RootElement.GetProperty("status").GetString());
+            using var invalidPreviewDocument = JsonDocument.Parse(await invalidPreview.Content.ReadAsStringAsync());
+            Assert.Equal("invalid", invalidPreviewDocument.RootElement.GetProperty("status").GetString());
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
 
     [Fact]
     public async Task Graph_mutation_contract_rejects_missing_content_and_caller_supplied_trusted_identity()
@@ -198,6 +246,19 @@ public sealed class GovernedGraphsApiControllerTests
         return await client.SendAsync(request);
     }
 
+    private static async Task<HttpResponseMessage> SendJsonAsync(
+        HttpClient client,
+        string path,
+        string token,
+        object body,
+        JsonSerializerOptions jsonOptions)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, path);
+        request.Headers.Add(WebSessionSecurity.HeaderName, token);
+        request.Content = JsonContent.Create(body, options: jsonOptions);
+        return await client.SendAsync(request);
+    }
+
     private static int GetFreePort()
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -205,5 +266,36 @@ public sealed class GovernedGraphsApiControllerTests
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         return port;
+    }
+
+    private static ModelProfileRoutingPreviewInput CreateModelProfilePreviewInput(IReadOnlyList<string>? authoredInputDataClasses = null, string roleId = "default")
+    {
+        Assert.True(CapabilityId.TryParse(BuiltInCapabilityCatalog.CodexModelProfileCapabilityId, out var profileId, out _));
+        Assert.True(CapabilityDataClass.TryParse("public", out var publicDataClass, out _));
+        var unbounded = GovernedModelUsageCeiling.Create(
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelMonetaryLimit.Unbounded);
+        var privacy = GovernedModelPrivacyRequirement.Create(
+            1,
+            localOnly: false,
+            CapabilityEgressMode.None,
+            [],
+            [publicDataClass!],
+            ["local"],
+            GovernedModelRetentionPosture.None,
+            GovernedModelTrainingPosture.Prohibited);
+        var requirements = GovernedModelProfileRequirements.Create(
+            1,
+            [GovernedModelModality.Text],
+            [],
+            1,
+            1,
+            privacy,
+            GovernedModelBudgetPolicy.Create(1, unbounded, unbounded, unbounded));
+        var policy = GovernedModelRoutingPolicy.Create(1, GovernedModelRoutingSelector.Exact(profileId!), [], requirements);
+        return new ModelProfileRoutingPreviewInput(policy, roleId, "provider-inference", authoredInputDataClasses);
     }
 }
