@@ -26,6 +26,7 @@ using EmbodySense.Core.Common.Triggers.Schedules.Models;
 using EmbodySense.Core.Common.Loops.Posture;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Loops.Models;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
@@ -603,7 +604,7 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
-    public async Task Windows_shared_reader_preserves_old_snapshot_while_atomic_replace_publishes_new_snapshot()
+    public async Task Windows_public_reader_preserves_old_snapshot_while_atomic_replace_publishes_new_snapshot()
     {
         // FileShare enforcement is Windows-specific; other platforms cannot exercise this contract.
         if (!OperatingSystem.IsWindows())
@@ -614,28 +615,101 @@ public sealed class CustomLoopRunStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         using var store = new CustomLoopRunStore(paths);
+        var readerOpened = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReader = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holdFirstReader = 1;
+        Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> observeReader = (boundary, _, _) =>
+        {
+            if (boundary == CustomLoopRunReadBoundary.AfterCanonicalArtifactReadOpen && Interlocked.Exchange(ref holdFirstReader, 0) == 1)
+            {
+                readerOpened.TrySetResult(null);
+                return new ValueTask(releaseReader.Task);
+            }
+
+            return ValueTask.CompletedTask;
+        };
+
+        using var reader = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: observeReader);
         var admitted = CreateRun() with { TriggerPrompt = new string('p', CustomLoopLimits.MaxPresetPromptCharacters) };
         admitted = admitted with { Events = [admitted.Events[0] with { Detail = new string('x', CustomLoopLimits.MaxRunDetailCharacters) }] };
         admitted = CustomLoopAdmissionRequestHash.Apply(admitted with { AdmissionRequestHash = string.Empty });
         await store.CreateAsync(admitted);
-        var path = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
-
-        // Keep the same shared reader policy used by CustomLoopRunStore open across the atomic replacement.
-        await using var heldReader = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        var oldContent = new byte[checked((int)heldReader.Length)];
-        await heldReader.ReadExactlyAsync(oldContent);
-        Assert.Equal(CustomLoopRunStatus.Admitted, CustomLoopRunArtifactSerializer.Deserialize(oldContent).Status);
-
         var running = Advance(admitted, CustomLoopRunStatus.Running);
-        var result = await store.UpdateAsync(running, admitted.LifecycleVersion);
+        var readTask = reader.GetAsync(admitted.Id);
+        Task<CustomLoopRunStoreResult>? updateTask = null;
+        try
+        {
+            await readerOpened.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
+            var result = await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
 
-        Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
-        heldReader.Position = 0;
-        var heldContent = new byte[oldContent.Length];
-        await heldReader.ReadExactlyAsync(heldContent);
-        Assert.Equal(oldContent, heldContent);
-        Assert.Equal(CustomLoopRunStatus.Admitted, CustomLoopRunArtifactSerializer.Deserialize(heldContent).Status);
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+        }
+        finally
+        {
+            releaseReader.TrySetResult(null);
+            await readTask.WaitAsync(TimeSpan.FromSeconds(10));
+            if (updateTask is not null)
+            {
+                await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+        }
+
+        var retained = await readTask;
+        Assert.Equal(CustomLoopRunStatus.Admitted, retained?.Status);
         Assert.Equal(CustomLoopRunStatus.Running, (await store.GetAsync(admitted.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task Get_retries_when_a_canonical_run_disappears_between_enumeration_and_open()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun();
+        await WriteDirectAsync(paths, run);
+        var movedPath = workspace.File("temporarily-moved-run.json");
+        var moved = 1;
+        Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> observeRead = (boundary, path, _) =>
+        {
+            if (boundary == CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen && Interlocked.Exchange(ref moved, 0) == 1)
+            {
+                File.Move(path, movedPath);
+            }
+            else if (boundary == CustomLoopRunReadBoundary.AfterCanonicalArtifactReadMiss)
+            {
+                File.Move(movedPath, path);
+            }
+
+            return ValueTask.CompletedTask;
+        };
+
+        using var store = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: observeRead);
+        AssertRun(run, await store.GetAsync(run.Id));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json")));
+    }
+
+    [Fact]
+    public async Task Get_propagates_reader_observer_file_not_found_without_reconciling_it_as_a_filesystem_miss()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun();
+        await WriteDirectAsync(paths, run);
+        var beforeOpenCalls = 0;
+        Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> observeRead = (boundary, _, _) =>
+        {
+            if (boundary == CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen)
+            {
+                Interlocked.Increment(ref beforeOpenCalls);
+                throw new FileNotFoundException("The observer intentionally rejected this read.");
+            }
+
+            return ValueTask.CompletedTask;
+        };
+
+        using var store = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: observeRead);
+        await Assert.ThrowsAsync<FileNotFoundException>(() => store.GetAsync(run.Id));
+        Assert.Equal(1, beforeOpenCalls);
     }
 
     [Fact]
