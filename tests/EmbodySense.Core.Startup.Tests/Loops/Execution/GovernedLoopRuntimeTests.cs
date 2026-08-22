@@ -398,6 +398,8 @@ internal static class GovernedLoopRuntimeTests
             Assert.True(committed.RecordedAtUtc >= prepared.RecordedAtUtc);
             Assert.True(GovernedLoopWaitContractValidator.ValidateComposition(park, continuation, committed).IsValid);
             Assert.Equal(GovernedLoopFrontierStatus.Completed, completed.Frontier?.Payload.Status);
+            var route = Assert.Single(completed.SequentialAdapterBinding!.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries);
+            Assert.Equal(ModelProfileCapabilityId, route.Primary.Capability.DescriptorIdentity.Id.Value);
         }
 
         Assert.Equal(1, fixture.ProviderAttempts);
@@ -504,10 +506,12 @@ internal static class GovernedLoopRuntimeTests
         Assert.False(string.IsNullOrWhiteSpace(trustRoot));
         Assert.False(string.IsNullOrWhiteSpace(codexPath));
         Assert.False(string.IsNullOrWhiteSpace(runId));
+        var testProvider = await GovernedRuntimeFixture.CreateExactTestProviderAsync(workspace!);
 
         await using var runtime = await AgentRuntimeFactory.ForFileCapabilityTrustRoot(
                 new RejectingApprovalPrompt(),
-                trustRoot!)
+                trustRoot!,
+                additionalModelProfileProviders: [testProvider])
             .CreateAsync(
                 "test-model",
                 workspace!,
