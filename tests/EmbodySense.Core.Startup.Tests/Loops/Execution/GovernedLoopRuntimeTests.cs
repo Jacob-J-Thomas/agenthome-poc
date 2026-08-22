@@ -189,6 +189,40 @@ internal static class GovernedLoopRuntimeTests
         Assert.Equal(1, fixture.ProviderAttempts);
     }
 
+    internal static async Task Primary_host_wakes_one_due_canonical_wait_without_external_restart()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(waitDelay: TimeSpan.FromSeconds(10));
+        string runId;
+
+        await using (var runtime = await fixture.CreateRuntimeAsync())
+        {
+            var waiting = await runtime.InvokeGovernedLoopAsync(
+                fixture.Input("invoke-primary-host-wait", "prove one due canonical wait through the primary host"));
+
+            Assert.True(string.Equals("Executed", waiting.Status, StringComparison.Ordinal), waiting.Detail);
+            Assert.Equal("Waiting", waiting.ExecutionStatus);
+            runId = Assert.IsType<string>(waiting.Run?.Id);
+        }
+
+        await using (var runtime = await fixture.CreateRuntimeAsync(preserveCurrentConversation: true))
+        {
+            var activation = await runtime.StartGovernedWaitBackgroundAsync();
+
+            Assert.True(activation.Available, activation.Detail);
+            using var store = new CustomLoopRunStore(fixture.Paths);
+            var completed = await WaitForRunAsync(store, runId, CustomLoopRunStatus.Completed, TimeSpan.FromSeconds(30));
+            var continuation = Assert.IsType<GovernedLoopWaitContinuationEvidence>(Assert.Single(completed.WaitEvidence).ContinuationEvidence);
+            var wake = await WaitForCommittedWakeAsync(
+                new GovernedLoopSleepStore(fixture.Paths),
+                continuation.PreparedWakeEvidence.Identity.WakeId,
+                TimeSpan.FromSeconds(30));
+
+            Assert.Equal(GovernedLoopWakeDisposition.Committed, wake.Disposition);
+        }
+
+        Assert.Equal(1, fixture.ProviderAttempts);
+    }
+
     internal static async Task Explicit_background_request_activates_once_after_late_workspace_host_reacquisition()
     {
         if (string.Equals(Environment.GetEnvironmentVariable(WaitHostHolderChildMode), "1", StringComparison.Ordinal))
@@ -334,7 +368,9 @@ internal static class GovernedLoopRuntimeTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+        // This primary child proves the external restart behavior while the parent lane collects
+        // its production coverage; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422.
+        Verification.CoverageChildProcessAssembly.AddReportFreeVstestArguments(
             startInfo,
             typeof(GovernedLoopRuntimeTests).Assembly.Location,
             $"{typeof(GovernedLoopRuntimeTestsWait).FullName}.{nameof(GovernedLoopRuntimeTestsWait.Production_runtime_parks_and_wakes_a_canonical_wait_after_restart)}");
@@ -376,7 +412,7 @@ internal static class GovernedLoopRuntimeTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Verification.CoverageChildProcessAssembly.AddCoordinationOnlyVstestArguments(
+        Verification.CoverageChildProcessAssembly.AddReportFreeVstestArguments(
             startInfo,
             typeof(GovernedLoopRuntimeTests).Assembly.Location,
             $"{typeof(GovernedLoopRuntimeTestsWait).FullName}.{nameof(GovernedLoopRuntimeTestsWait.Explicit_background_request_activates_once_after_late_workspace_host_reacquisition)}");
