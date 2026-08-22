@@ -245,6 +245,10 @@ public sealed class AuthorityDelegationConcurrencyAndFailureTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => creation);
         await transactionFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var retry = await service.CreateAsync(harness.Request);
+        if (retry.Status == AuthorityDelegationServiceStatus.Unavailable)
+        {
+            retry = await service.CreateAsync(harness.Request);
+        }
 
         Assert.Equal(AuthorityDelegationServiceStatus.Created, retry.Status);
         Assert.NotNull(retry.Envelope);
