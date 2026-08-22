@@ -574,6 +574,7 @@ public sealed class CustomLoopRunStoreTests
             Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
             await gated.DrainUntilCompletedAsync(readTask!, TimeSpan.FromSeconds(10));
             Assert.Equal(admitted.Id, (await readTask)!.Id);
+            Assert.Equal(CustomLoopRunStatus.Admitted, (await readTask)!.Status);
         }
         finally
         {
@@ -599,6 +600,42 @@ public sealed class CustomLoopRunStoreTests
                 await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
             }
         }
+    }
+
+    [Fact]
+    public async Task Windows_shared_reader_preserves_old_snapshot_while_atomic_replace_publishes_new_snapshot()
+    {
+        // FileShare enforcement is Windows-specific; other platforms cannot exercise this contract.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun() with { TriggerPrompt = new string('p', CustomLoopLimits.MaxPresetPromptCharacters) };
+        admitted = admitted with { Events = [admitted.Events[0] with { Detail = new string('x', CustomLoopLimits.MaxRunDetailCharacters) }] };
+        admitted = CustomLoopAdmissionRequestHash.Apply(admitted with { AdmissionRequestHash = string.Empty });
+        await store.CreateAsync(admitted);
+        var path = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+
+        // Keep the same shared reader policy used by CustomLoopRunStore open across the atomic replacement.
+        await using var heldReader = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var oldContent = new byte[checked((int)heldReader.Length)];
+        await heldReader.ReadExactlyAsync(oldContent);
+        Assert.Equal(CustomLoopRunStatus.Admitted, CustomLoopRunArtifactSerializer.Deserialize(oldContent).Status);
+
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        var result = await store.UpdateAsync(running, admitted.LifecycleVersion);
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+        heldReader.Position = 0;
+        var heldContent = new byte[oldContent.Length];
+        await heldReader.ReadExactlyAsync(heldContent);
+        Assert.Equal(oldContent, heldContent);
+        Assert.Equal(CustomLoopRunStatus.Admitted, CustomLoopRunArtifactSerializer.Deserialize(heldContent).Status);
+        Assert.Equal(CustomLoopRunStatus.Running, (await store.GetAsync(admitted.Id))!.Status);
     }
 
     [Fact]

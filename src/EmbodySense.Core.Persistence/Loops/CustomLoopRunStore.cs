@@ -2717,7 +2717,9 @@ public sealed class CustomLoopRunStore :
     private async Task<RunArtifact> ReadArtifactAsync(RunArtifactLocation location, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(location.Path, mustExist: true);
-        await using var stream = new FileStream(location.Path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        // Restart readers must share the destination with the fenced writer. The writer publishes a sibling staging file
+        // with an atomic replacement, so sharing write access does not permit in-place mutation or expose partial JSON.
+        await using var stream = OpenSharedArtifactReadStream(location.Path);
         if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
             throw new FormatException($"Custom loop run `{location.Path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
@@ -2805,7 +2807,7 @@ public sealed class CustomLoopRunStore :
     private async Task<byte[]> ReadBoundedArtifactAsync(string path, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(path, mustExist: true);
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = OpenSharedArtifactReadStream(path);
         if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
             throw new FormatException($"Custom loop run `{path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
@@ -2819,7 +2821,7 @@ public sealed class CustomLoopRunStore :
     private async Task<string> ComputeBoundedArtifactHashAsync(string path, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(path, mustExist: true);
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = OpenSharedArtifactReadStream(path);
         if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
             throw new FormatException($"Custom loop run `{path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
@@ -2838,6 +2840,11 @@ public sealed class CustomLoopRunStore :
         }
 
         return content;
+    }
+
+    private static FileStream OpenSharedArtifactReadStream(string path)
+    {
+        return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
     }
 
     private static void ValidateReservedTraceCapacity(CustomLoopRunRecord current, CustomLoopRunRecord candidate, long currentUtf8Bytes, long candidateUtf8Bytes)
@@ -3463,7 +3470,7 @@ public sealed class CustomLoopRunStore :
     private async Task<byte[]> ReadBoundedJsonArtifactAsync(string root, string path, int maximumBytes, string label, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(root, path, mustExist: true);
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = OpenSharedArtifactReadStream(path);
         if (stream.Length <= 0 || stream.Length > maximumBytes)
         {
             throw new FormatException($"{label} `{path}` must contain between 1 and {maximumBytes} UTF-8 bytes.");
@@ -3558,7 +3565,7 @@ public sealed class CustomLoopRunStore :
             {
                 if (overwrite && File.Exists(destinationPath))
                 {
-                    // #475: bounded readers release Read|Delete handles before consumer continuations; replacement stays atomic without in-place write sharing.
+                    // #475: bounded readers share the destination with the fenced writer; replacement stays atomic because the writer publishes a sibling staging file.
                     File.Replace(sourcePath, destinationPath, destinationBackupFileName: null);
                 }
                 else
