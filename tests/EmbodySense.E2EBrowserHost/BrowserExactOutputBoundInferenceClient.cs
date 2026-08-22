@@ -7,6 +7,14 @@ namespace EmbodySense.E2EBrowserHost;
 
 internal sealed class BrowserExactOutputBoundInferenceClient : ILlmInferenceClient
 {
+    private readonly string _modelId;
+
+    public BrowserExactOutputBoundInferenceClient(string modelId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelId);
+        _modelId = modelId;
+    }
+
     public Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
@@ -20,7 +28,7 @@ internal sealed class BrowserExactOutputBoundInferenceClient : ILlmInferenceClie
         InferenceProviderTransportCommitBoundary providerTransportCommitBoundary)
         => GenerateCoreAsync(request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary);
 
-    private static async Task<LlmInferenceResponse> GenerateCoreAsync(
+    private async Task<LlmInferenceResponse> GenerateCoreAsync(
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler,
         CancellationToken cancellationToken,
@@ -56,7 +64,7 @@ internal sealed class BrowserExactOutputBoundInferenceClient : ILlmInferenceClie
                 GovernedModelUsageMeasurement.Authoritative(0),
                 GovernedModelUsageMeasurement.Authoritative(2),
                 GovernedModelMonetaryUsageMeasurement.Unavailable),
-            "browser-e2e-model",
+            _modelId,
             "browser-e2e-response",
             "openai");
     }
