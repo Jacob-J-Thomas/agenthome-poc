@@ -196,7 +196,7 @@ Assert-Contains -Actual $parallelScript -Expected '-AvailableResourceClassSlots 
 Assert-Contains -Actual $parallelScript -Expected 'resource-class limits cannot exceed the maximum worker count' -Message "Invalid resource-class concurrency limits must fail closed."
 Assert-Contains -Actual $parallelScript -Expected '$Pending[$index].SchedulingDeferrals -ge 1' -Message "Backfill must reserve a later fitting opportunity for bypassed phases."
 Assert-Contains -Actual $parallelScript -Expected 'VERIFY_CHILD_TIMEOUT name=$($result.Name)' -Message "Parallel timeouts must emit structured watchdog evidence."
-Assert-Contains -Actual $verifyScript -Expected '$testLaneTimeoutSeconds = 480' -Message "Every required lane must fit inside the outer budget."
+Assert-Contains -Actual $verifyScript -Expected '$testLaneTimeoutSeconds = 600' -Message "Every required lane must retain bounded hosted-runner headroom inside the 900-second Solution watchdog."
 Assert-Contains -Actual $verifyScript -Expected 'Get-ProjectCoverageIsolation' -Message "Every test project must execute from isolated exact-build copies."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework' -Message "Every lane must preserve its bin/<Configuration>/<TargetFramework> AppContext suffix."
 Assert-Contains -Actual $verifyScript -Expected 'Copy-VerifiedDirectoryFromManifest -SourceDirectory $pristineDirectory -SourceManifest $pristineManifest -DestinationDirectory $laneDirectory' -Message "Every lane copy must use and verify the already authenticated pristine manifest."
