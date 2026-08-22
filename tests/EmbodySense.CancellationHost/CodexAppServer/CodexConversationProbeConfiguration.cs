@@ -9,4 +9,8 @@ internal sealed record CodexConversationProbeConfiguration(
     bool RequestGovernedTool,
     string? TurnReadyMarkerPath,
     string? TurnReleaseMarkerPath,
-    string? ToolResponsePath);
+    string? ToolResponsePath,
+    string? GovernedToolPromptMarker = null,
+    string? GovernedToolPath = null,
+    string? ProtocolTracePath = null,
+    string? TurnFailurePromptMarker = null);

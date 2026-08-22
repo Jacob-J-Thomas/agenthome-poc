@@ -2,6 +2,39 @@ namespace EmbodySense.Tests.Support;
 
 public static class FakeCodexExecutable
 {
+    public static string ProtocolTracePath(TestWorkspace workspace)
+    {
+        ArgumentNullException.ThrowIfNull(workspace);
+        return workspace.File("fake-codex", "protocol-events.ndjson");
+    }
+
+    public static async Task<string> CreateBrowserApprovalAsync(TestWorkspace workspace)
+    {
+        ArgumentNullException.ThrowIfNull(workspace);
+        var directory = workspace.File("fake-codex");
+        Directory.CreateDirectory(directory);
+        var configuration = new
+        {
+            version = "codex-cli compatible-test",
+            advertisedModels = new[] { "gpt-test" },
+            responsePrefix = "browser response: ",
+            turnFailureMessage = "controlled browser provider failure",
+            turnFailurePromptMarker = "browser-provider-failure",
+            waitForTurnRelease = false,
+            requestGovernedTool = true,
+            turnReadyMarkerPath = (string?)null,
+            turnReleaseMarkerPath = (string?)null,
+            toolResponsePath = workspace.File("fake-codex", "tool-response.json"),
+            governedToolPromptMarker = "browser-approval",
+            governedToolPath = "approval-note.txt",
+            protocolTracePath = ProtocolTracePath(workspace)
+        };
+        await File.WriteAllTextAsync(
+            Path.Combine(directory, "browser-config.json"),
+            System.Text.Json.JsonSerializer.Serialize(configuration, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
+        return await CancellationHostExecutable.CreateAsync(workspace, "fake-codex", "codex-conversation-probe", "browser-config.json", "codex");
+    }
+
     public static async Task<string> CreateCompatibleAsync(TestWorkspace workspace, params string[] advertisedModels)
     {
         ArgumentNullException.ThrowIfNull(workspace);
