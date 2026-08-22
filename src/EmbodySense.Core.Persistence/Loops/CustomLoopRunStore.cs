@@ -2717,8 +2717,8 @@ public sealed class CustomLoopRunStore :
     private async Task<RunArtifact> ReadArtifactAsync(RunArtifactLocation location, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(location.Path, mustExist: true);
-        // Restart readers must share the destination with the fenced writer. The writer publishes a sibling staging file
-        // with an atomic replacement, so sharing write access does not permit in-place mutation or expose partial JSON.
+        // Repository-owned writers are fenced and atomically replace sibling staging files. Direct in-place external
+        // writers require separate stable-snapshot hardening; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/490.
         await using var stream = OpenSharedArtifactReadStream(location.Path);
         if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
