@@ -6,6 +6,8 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Inference.Profiles;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Application.Governance.Tools;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
@@ -23,6 +25,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private const string ClientName = "embodysense";
     private const string ClientTitle = "EmbodySense";
     private const string ClientVersion = "0.1.0";
+    private const string ExpectedModelProvider = "openai";
     private const int MaxProtocolLineCharacters = 1_000_000;
     private static readonly TimeSpan _protocolReadTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan _defaultPostCheckpointWriteDeadline = TimeSpan.FromSeconds(15);
@@ -41,6 +44,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private int _nextRequestId;
     private bool _initialized;
     private string? _threadId;
+    private string? _threadModel;
+    private string? _threadModelProvider;
     private bool _injectedTransportQuarantined;
 
     /// <summary>
@@ -121,6 +126,11 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         return GenerateCoreAsync(request, responseChunkHandler, cancellationToken, providerTransportCommitBoundary);
     }
 
+    /// <summary>Starts and initializes the exact local app-server process without creating a provider thread or sending inference data.</summary>
+    /// <remarks>This lets Startup retain the verified executable-package lease only after all launch-time code has been loaded.</remarks>
+    public Task PrepareAsync(CancellationToken cancellationToken = default)
+        => EnsureInitializedAsync(cancellationToken);
+
     private async Task<LlmInferenceResponse> GenerateCoreAsync(
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler,
@@ -128,6 +138,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         InferenceProviderTransportCommitBoundary? providerTransportCommitBoundary)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ThrowIfBoundedOutputTokenCeilingCannotBeForwarded(request.Options.MaxOutputTokenCount);
 
         try
         {
@@ -160,6 +171,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
             var streamedText = new StringBuilder();
             string? turnId = null;
             string? completedText = null;
+            LlmInferenceUsageEvidence? observedUsage = null;
+            var pendingUsageByTurn = new Dictionary<string, LlmInferenceUsageEvidence>(StringComparer.Ordinal);
             var turnStartResponseReceived = false;
             var turnCompleted = false;
 
@@ -181,6 +194,11 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
                     ThrowIfTurnStartError(message);
                     turnStartResponseReceived = true;
                     turnId = TryGetNestedString(message, "result", "turn", "id") ?? turnId;
+                    if (turnId is not null && pendingUsageByTurn.TryGetValue(turnId, out var pendingUsage))
+                    {
+                        observedUsage = pendingUsage;
+                    }
+                    pendingUsageByTurn.Clear();
                     continue;
                 }
 
@@ -214,14 +232,44 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
                         }
 
                         break;
+
+                    case "thread/tokenUsage/updated":
+                        var usageTurnId = TryGetNestedString(message, "params", "turnId");
+                        if (usageTurnId is not null && IsCurrentTurnNotification(message, turnId))
+                        {
+                            var usage = ReadAuthoritativeTokenUsage(message);
+                            if (turnId is null)
+                            {
+                                if (pendingUsageByTurn.ContainsKey(usageTurnId) || pendingUsageByTurn.Count < 32)
+                                {
+                                    pendingUsageByTurn[usageTurnId] = usage;
+                                }
+                            }
+                            else
+                            {
+                                observedUsage = usage;
+                            }
+                        }
+
+                        break;
+
+                    case "model/rerouted":
+                        if (IsCurrentOrPendingTurnNotification(message, turnId))
+                        {
+                            RejectModelReroute(message);
+                        }
+
+                        break;
                 }
             }
 
             return new LlmInferenceResponse(
                 completedText ?? streamedText.ToString(),
                 LlmInferenceSurface.OpenAiCodex,
-                _options.Model,
-                turnId);
+                observedUsage ?? LlmInferenceUsageEvidence.Unavailable("codex-app-server", "thread-token-usage-v2"),
+                _threadModel,
+                turnId,
+                _threadModelProvider);
         }
         finally
         {
@@ -262,6 +310,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     public void ResetConversation()
     {
         _threadId = null;
+        _threadModel = null;
+        _threadModelProvider = null;
     }
 
     /// <summary>
@@ -273,6 +323,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         var transport = _transport;
         _transport = null;
         _threadId = null;
+        _threadModel = null;
+        _threadModelProvider = null;
         _initialized = false;
         _nextRequestId = 0;
         _requestHandler.SetInferenceCorrelation(null);
@@ -314,8 +366,24 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
             }
 
             ThrowIfError(message);
-            _threadId = TryGetNestedString(message, "result", "thread", "id")
+            var threadId = TryGetNestedString(message, "result", "thread", "id")
                 ?? throw new InvalidOperationException("Codex app-server thread/start response did not include a thread id.");
+            var model = TryGetNestedString(message, "result", "model")
+                ?? throw new InvalidOperationException("Codex app-server thread/start response did not include the exact model.");
+            var modelProvider = TryGetNestedString(message, "result", "modelProvider")
+                ?? throw new InvalidOperationException("Codex app-server thread/start response did not include the exact model provider.");
+            var threadModelProvider = TryGetNestedString(message, "result", "thread", "modelProvider")
+                ?? throw new InvalidOperationException("Codex app-server thread/start response did not bind the thread to one exact model provider.");
+            if (!string.Equals(model, _options.Model, StringComparison.Ordinal)
+                || !string.Equals(modelProvider, ExpectedModelProvider, StringComparison.Ordinal)
+                || !string.Equals(threadModelProvider, ExpectedModelProvider, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Codex app-server selected a model or provider outside the exact admitted configuration.");
+            }
+
+            _threadId = threadId;
+            _threadModel = model;
+            _threadModelProvider = modelProvider;
         }
     }
 
@@ -373,6 +441,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
             ["cwd"] = _runtimeDirectory,
             ["developerInstructions"] = _contextBuilder.CreateDeveloperInstructions(request),
             ["ephemeral"] = true,
+            ["modelProvider"] = ExpectedModelProvider,
+            ["allowProviderModelFallback"] = false,
             ["approvalPolicy"] = CreateGranularApprovalPolicy(),
             ["sandbox"] = NormalizeSandboxMode(_options.CodexSandbox),
             // Native command, file-change, permission, MCP-elicitation, and subagent request surfaces
@@ -535,6 +605,16 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
                 }
             }
         };
+    }
+
+    private static void ThrowIfBoundedOutputTokenCeilingCannotBeForwarded(int? maximumOutputTokens)
+    {
+        if (maximumOutputTokens is null)
+        {
+            return;
+        }
+
+        throw new LlmInferenceTerminalFailureException($"Codex app-server does not support the exact output-token ceiling of {maximumOutputTokens}; the request is rejected before provider dispatch and no substitute is applied.");
     }
 
     private async Task ExecuteProviderTransportCommitBoundaryAsync(
@@ -1033,6 +1113,70 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         return element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
+    }
+
+    private static LlmInferenceUsageEvidence ReadAuthoritativeTokenUsage(JsonElement message)
+    {
+        if (!TryGetNestedElement(message, out var last, "params", "tokenUsage", "last")
+            || !TryGetUsageQuantity(last, "inputTokens", out var inputTokens)
+            || !TryGetUsageQuantity(last, "cachedInputTokens", out var cachedTokens)
+            || !TryGetUsageQuantity(last, "outputTokens", out var outputTokens)
+            || !TryGetUsageQuantity(last, "reasoningOutputTokens", out var reasoningOutputTokens)
+            || !TryGetUsageQuantity(last, "totalTokens", out var totalTokens)
+            || cachedTokens > inputTokens
+            || reasoningOutputTokens > outputTokens
+            || totalTokens != checked(inputTokens + outputTokens)
+            || last.TryGetProperty("cacheWriteInputTokens", out var cacheWrite)
+                && (cacheWrite.ValueKind != JsonValueKind.Number
+                    || !cacheWrite.TryGetInt64(out var cacheWriteTokens)
+                    || cacheWriteTokens < 0
+                    || cacheWriteTokens > GovernedModelContractLimits.MaxTokens))
+        {
+            throw new FormatException("The correlated Codex token-usage notification was malformed or exceeded schema-1 bounds.");
+        }
+
+        return LlmInferenceUsageEvidence.Create(
+            1,
+            "codex-app-server",
+            "thread-token-usage-v2",
+            GovernedModelUsageMeasurement.Authoritative(inputTokens),
+            GovernedModelUsageMeasurement.Authoritative(outputTokens),
+            GovernedModelUsageMeasurement.Authoritative(cachedTokens),
+            GovernedModelUsageMeasurement.Authoritative(totalTokens),
+            GovernedModelMonetaryUsageMeasurement.Unavailable);
+    }
+
+    private bool IsCurrentOrPendingTurnNotification(JsonElement message, string? turnId)
+    {
+        var notificationThreadId = TryGetNestedString(message, "params", "threadId");
+        var notificationTurnId = TryGetNestedString(message, "params", "turnId");
+        return _threadId is not null
+            && string.Equals(notificationThreadId, _threadId, StringComparison.Ordinal)
+            && notificationTurnId is not null
+            && (turnId is null || string.Equals(notificationTurnId, turnId, StringComparison.Ordinal));
+    }
+
+    private void RejectModelReroute(JsonElement message)
+    {
+        var fromModel = TryGetNestedString(message, "params", "fromModel");
+        var toModel = TryGetNestedString(message, "params", "toModel");
+        if (_threadModel is null
+            || !string.Equals(fromModel, _threadModel, StringComparison.Ordinal)
+            || !string.Equals(toModel, _threadModel, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Codex app-server rerouted the current turn outside the exact admitted model.");
+        }
+    }
+
+    private static bool TryGetUsageQuantity(JsonElement usage, string propertyName, out long value)
+    {
+        value = 0;
+        return usage.ValueKind == JsonValueKind.Object
+            && usage.TryGetProperty(propertyName, out var property)
+            && property.ValueKind == JsonValueKind.Number
+            && property.TryGetInt64(out value)
+            && value >= 0
+            && value <= GovernedModelContractLimits.MaxTokens;
     }
 
     private static bool TryGetNestedElement(JsonElement element, out JsonElement value, params string[] path)

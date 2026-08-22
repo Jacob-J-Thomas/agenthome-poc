@@ -7,7 +7,7 @@ using EmbodySense.Core.Common.Inference.Models;
 namespace EmbodySense.Core.Clients.CodexAppServer;
 
 /// <summary>
-/// Discovers and probes a compatible Codex executable without starting a durable inference session.
+/// Discovers and probes a compatible Codex executable without accepting an inference request.
 /// </summary>
 /// <remarks>
 /// An explicit path is authoritative. Otherwise, Windows desktop installations are considered before <c>PATH</c> entries.
@@ -367,6 +367,7 @@ public sealed class CodexRuntimeResolver
                 cursor = AddAdvertisedModels(response, models);
                 if (string.IsNullOrWhiteSpace(configuredModel) || models.Contains(configuredModel))
                 {
+                    await VerifyThreadStartContractAsync(transport, checked(requestId + 1), workingDirectory, configuredModel, cancellationToken);
                     return models.ToArray();
                 }
 
@@ -379,6 +380,7 @@ public sealed class CodexRuntimeResolver
             }
             while (cursor is not null);
 
+            await VerifyThreadStartContractAsync(transport, checked(requestId + 1), workingDirectory, configuredModel, cancellationToken);
             return models.ToArray();
         }
         finally
@@ -391,6 +393,78 @@ public sealed class CodexRuntimeResolver
             {
             }
         }
+    }
+
+    private static async Task VerifyThreadStartContractAsync(ICodexAppServerTransport transport, int requestId, string workingDirectory, string? configuredModel, CancellationToken cancellationToken)
+    {
+        var parameters = new JsonObject
+        {
+            ["cwd"] = workingDirectory,
+            ["developerInstructions"] = "Verify the exact Codex app-server thread binding contract without executing a turn.",
+            ["ephemeral"] = true,
+            ["modelProvider"] = "openai",
+            ["allowProviderModelFallback"] = false,
+            ["approvalPolicy"] = new JsonObject
+            {
+                ["granular"] = new JsonObject
+                {
+                    ["mcp_elicitations"] = false,
+                    ["request_permissions"] = false,
+                    ["rules"] = false,
+                    ["sandbox_approval"] = false,
+                    ["skill_approval"] = false
+                }
+            },
+            ["sandbox"] = "read-only",
+            ["config"] = new JsonObject
+            {
+                ["features"] = new JsonObject
+                {
+                    ["shell_tool"] = false,
+                    ["apply_patch_freeform"] = false
+                }
+            }
+        };
+        if (!string.IsNullOrWhiteSpace(configuredModel))
+        {
+            parameters["model"] = configuredModel;
+        }
+
+        await transport.WriteLineAsync(new JsonObject
+        {
+            ["id"] = requestId,
+            ["method"] = "thread/start",
+            ["params"] = parameters
+        }.ToJsonString(), cancellationToken);
+        var response = await ReadResponseAsync(transport, requestId, cancellationToken);
+        var threadId = TryReadRequiredString(response, "result", "thread", "id");
+        var model = TryReadRequiredString(response, "result", "model");
+        var modelProvider = TryReadRequiredString(response, "result", "modelProvider");
+        var threadModelProvider = TryReadRequiredString(response, "result", "thread", "modelProvider");
+        if (threadId is null || model is null || modelProvider is null || threadModelProvider is null)
+        {
+            throw new InvalidOperationException("Codex app-server thread/start response does not expose the required exact model and provider binding contract.");
+        }
+        if ((!string.IsNullOrWhiteSpace(configuredModel) && !string.Equals(model, configuredModel, StringComparison.Ordinal))
+            || !string.Equals(modelProvider, "openai", StringComparison.Ordinal)
+            || !string.Equals(threadModelProvider, "openai", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Codex app-server thread/start response selected a model or provider outside the probed exact configuration.");
+        }
+    }
+
+    private static string? TryReadRequiredString(JsonElement element, params string[] path)
+    {
+        var current = element;
+        foreach (var segment in path)
+        {
+            if (current.ValueKind != JsonValueKind.Object || !current.TryGetProperty(segment, out current))
+            {
+                return null;
+            }
+        }
+
+        return current.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(current.GetString()) ? current.GetString() : null;
     }
 
     private static async Task<JsonElement> ReadResponseAsync(ICodexAppServerTransport transport, int requestId, CancellationToken cancellationToken)

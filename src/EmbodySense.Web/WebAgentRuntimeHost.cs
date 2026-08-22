@@ -4,6 +4,7 @@ using EmbodySense.Core.Startup.Configuration;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Posture;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Startup.Inference.Profiles.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
@@ -35,6 +36,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private readonly LoopRunInspectionFacade _loopRuns;
     private readonly DefaultConversationRequestReconciliationReader _conversationRequests;
     private readonly IAgentRuntimeConversationPublicationObserver? _conversationPublicationObserver;
+    private readonly Func<CodexRuntimeStatus, AgentRuntimeFactory>? _runtimeFactoryProvider;
     private readonly SemaphoreSlim _runtimeGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
     private readonly SemaphoreSlim _workspaceInitializationGate = new(1, 1);
@@ -58,7 +60,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// <param name="approvalCoordinator">The connection-owned governed approval coordinator.</param>
     /// <exception cref="ArgumentException">The options do not provide a nonblank configured model.</exception>
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
-        : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb(), null, null, null)
+        : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb(), null, null, null, null)
     {
     }
 
@@ -70,7 +72,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// <param name="codexRuntimeStatus">The compatible status bound to the exact configured model and executable request.</param>
     /// <exception cref="ArgumentException">The options or pre-resolved runtime status are incompatible.</exception>
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator, CodexRuntimeStatus codexRuntimeStatus)
-        : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb(), null, codexRuntimeStatus ?? throw new ArgumentNullException(nameof(codexRuntimeStatus)), null)
+        : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb(), null, codexRuntimeStatus ?? throw new ArgumentNullException(nameof(codexRuntimeStatus)), null, null)
     {
     }
 
@@ -82,7 +84,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// <param name="workspaceInitializer">The workspace initializer used by explicit initialization requests.</param>
     /// <exception cref="ArgumentException">The options do not provide a nonblank configured model.</exception>
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator, IWorkspaceInitializer workspaceInitializer)
-        : this(options, approvalCoordinator, workspaceInitializer, null, null, null)
+        : this(options, approvalCoordinator, workspaceInitializer, null, null, null, null)
     {
     }
 
@@ -97,7 +99,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         WebApprovalCoordinator approvalCoordinator,
         IWorkspaceInitializer workspaceInitializer,
         string capabilityTrustRootPath)
-        : this(options, approvalCoordinator, workspaceInitializer, null, null, RequireTrustRootPath(capabilityTrustRootPath))
+        : this(options, approvalCoordinator, workspaceInitializer, null, null, RequireTrustRootPath(capabilityTrustRootPath), null)
     {
     }
 
@@ -116,7 +118,32 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         WebApprovalCoordinator approvalCoordinator,
         IWorkspaceInitializer workspaceInitializer,
         IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver)
-        : this(options, approvalCoordinator, workspaceInitializer, conversationPublicationObserver, null, null)
+        : this(options, approvalCoordinator, workspaceInitializer, conversationPublicationObserver, null, null, null)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a Web host with explicit workspace, publication, and runtime-factory composition dependencies.
+    /// </summary>
+    /// <param name="options">The validated Web host and runtime options.</param>
+    /// <param name="approvalCoordinator">The connection-owned governed approval coordinator.</param>
+    /// <param name="workspaceInitializer">The workspace initializer used by explicit initialization requests.</param>
+    /// <param name="conversationPublicationObserver">The optional durable-conversation publication observer.</param>
+    /// <param name="runtimeFactoryProvider">Creates the runtime factory from the exact compatible runtime status.</param>
+    public WebAgentRuntimeHost(
+        WebRunOptions options,
+        WebApprovalCoordinator approvalCoordinator,
+        IWorkspaceInitializer workspaceInitializer,
+        IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver,
+        Func<CodexRuntimeStatus, AgentRuntimeFactory> runtimeFactoryProvider)
+        : this(
+            options,
+            approvalCoordinator,
+            workspaceInitializer,
+            conversationPublicationObserver,
+            null,
+            null,
+            runtimeFactoryProvider ?? throw new ArgumentNullException(nameof(runtimeFactoryProvider)))
     {
     }
 
@@ -126,7 +153,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         IWorkspaceInitializer workspaceInitializer,
         IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver,
         CodexRuntimeStatus? codexRuntimeStatus,
-        string? capabilityTrustRootPath)
+        string? capabilityTrustRootPath,
+        Func<CodexRuntimeStatus, AgentRuntimeFactory>? runtimeFactoryProvider)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(approvalCoordinator);
@@ -146,6 +174,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         _workspaceInitializer = workspaceInitializer;
         _capabilityTrustRootPath = capabilityTrustRootPath;
         _conversationPublicationObserver = conversationPublicationObserver;
+        _runtimeFactoryProvider = runtimeFactoryProvider;
         _statusReader = new WorkspaceStatusReader();
         _configurationReader = new WorkspaceConfigurationReader();
         _loopRuns = new LoopRunInspectionFacade(options.WorkingDirectory, WorkspaceActors.Web, AgentRuntimeSurface.Web.Id);
@@ -238,6 +267,37 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         try
         {
             return await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync(cancellationToken);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
+    }
+
+    internal async Task<ModelProfileCatalogResponse> ReadModelProfilesAsync(
+        string? startAfterId,
+        int maximumCount,
+        CancellationToken cancellationToken)
+    {
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.ModelProfiles.ReadAsync(startAfterId, maximumCount, cancellationToken);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
+    }
+
+    internal async Task<ModelProfileRoutingPreviewResponse> PreviewModelRoutingAsync(
+        ModelProfileRoutingPreviewInput input,
+        CancellationToken cancellationToken)
+    {
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.ModelProfiles.PreviewAsync(input, cancellationToken);
         }
         finally
         {
@@ -859,15 +919,16 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 throw new CodexRuntimeUnavailableException(codexRuntimeStatus);
             }
 
-            var factory = _capabilityTrustRootPath is null
-                ? _conversationPublicationObserver is null
-                    ? new AgentRuntimeFactory(_approvalCoordinator, codexRuntimeStatus)
-                    : new AgentRuntimeFactory(_approvalCoordinator, _conversationPublicationObserver, codexRuntimeStatus)
-                : AgentRuntimeFactory.ForFileCapabilityTrustRoot(
-                    _approvalCoordinator,
-                    _capabilityTrustRootPath,
-                    codexRuntimeStatus,
-                    _conversationPublicationObserver);
+            var factory = _runtimeFactoryProvider?.Invoke(codexRuntimeStatus)
+                ?? (_capabilityTrustRootPath is null
+                    ? _conversationPublicationObserver is null
+                        ? new AgentRuntimeFactory(_approvalCoordinator, codexRuntimeStatus)
+                        : new AgentRuntimeFactory(_approvalCoordinator, _conversationPublicationObserver, codexRuntimeStatus)
+                    : AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+                        _approvalCoordinator,
+                        _capabilityTrustRootPath,
+                        codexRuntimeStatus,
+                        _conversationPublicationObserver));
             var preserveCurrentConversation = _preserveCurrentConversationOnNextRuntimeCreation;
             _runtime = await factory.CreateAsync(
                 _configuredModel,

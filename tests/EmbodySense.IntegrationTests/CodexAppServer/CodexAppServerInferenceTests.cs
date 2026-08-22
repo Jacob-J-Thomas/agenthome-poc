@@ -2,9 +2,11 @@ using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Loops;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Capabilities;
@@ -88,9 +90,194 @@ public sealed class CodexAppServerInferenceTests
         Assert.Equal("hello world", response.OutputText);
         Assert.True(providerRequestStarted);
         Assert.Equal("turn-1", response.ProviderResponseId);
-        Assert.Contains(transport.Writes, line => JsonDocument.Parse(line).RootElement.GetProperty("method").GetString() == "thread/start");
+        Assert.Equal("gpt-test", response.Model);
+        Assert.Equal("openai", response.ProviderId);
+        var threadStart = transport.Writes.Single(IsThreadStart);
+        using var threadStartDocument = JsonDocument.Parse(threadStart);
+        var threadStartParameters = threadStartDocument.RootElement.GetProperty("params");
+        Assert.Equal("gpt-test", threadStartParameters.GetProperty("model").GetString());
+        Assert.Equal("openai", threadStartParameters.GetProperty("modelProvider").GetString());
+        Assert.False(threadStartParameters.GetProperty("allowProviderModelFallback").GetBoolean());
         Assert.Contains(transport.Writes, line => line.Contains("\"shell_tool\":false", StringComparison.Ordinal));
         Assert.Contains(transport.Writes, line => line.Contains("\"ephemeral\":true", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_an_unforwardable_exact_output_ceiling_before_provider_dispatch()
+    {
+        var transport = new ScriptedAppServerTransport();
+        var client = CreateRawClient(transport);
+        var providerDispatchStarted = false;
+        var request = LlmInferenceRequest.FromUserText("do not silently weaken a governed output ceiling", new LlmInferenceOptions { MaxOutputTokenCount = 1 });
+
+        var error = await Assert.ThrowsAsync<LlmInferenceTerminalFailureException>(() => client.GenerateAsync(
+            request,
+            responseChunkHandler: null,
+            CancellationToken.None,
+            async (commitProviderDispatch, cancellationToken) =>
+            {
+                providerDispatchStarted = true;
+                await commitProviderDispatch(cancellationToken);
+            }));
+
+        Assert.Contains("exact output-token ceiling of 1", error.Message, StringComparison.Ordinal);
+        Assert.Contains("rejected before provider dispatch", error.Message, StringComparison.Ordinal);
+        Assert.Null(error.ProviderResponseId);
+        Assert.False(providerDispatchStarted);
+        Assert.Empty(transport.Writes);
+    }
+
+    [Theory]
+    [InlineData("other-model", "openai", "openai")]
+    [InlineData("gpt-test", "other-provider", "openai")]
+    [InlineData("gpt-test", "openai", "other-provider")]
+    public async Task GenerateAsync_fails_before_turn_dispatch_when_thread_start_does_not_bind_the_admitted_model_and_provider(
+        string model,
+        string modelProvider,
+        string threadModelProvider)
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, JsonSerializer.Serialize(new
+            {
+                model,
+                modelProvider,
+                thread = new { id = "thread-1", modelProvider = threadModelProvider }
+            })));
+        var client = CreateClient(transport);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.GenerateAsync(LlmInferenceRequest.FromUserText("do not dispatch")));
+
+        Assert.Contains("outside the exact admitted configuration", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(transport.Writes, line => JsonDocument.Parse(line).RootElement.TryGetProperty("method", out var method)
+            && method.GetString() == "turn/start");
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_a_current_turn_model_reroute()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("model/rerouted", """{"threadId":"thread-1","turnId":"turn-1","fromModel":"gpt-test","toModel":"other-model","reason":"fallback"}"""));
+        var client = CreateClient(transport);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.GenerateAsync(LlmInferenceRequest.FromUserText("remain exact")));
+
+        Assert.Contains("rerouted", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_retains_only_exact_correlated_authoritative_token_usage()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("thread/tokenUsage/updated", """{"threadId":"thread-1","turnId":"other-turn","tokenUsage":{"last":{"inputTokens":999,"cachedInputTokens":0,"outputTokens":1,"reasoningOutputTokens":0,"totalTokens":1000},"total":{"inputTokens":999,"cachedInputTokens":0,"outputTokens":1,"reasoningOutputTokens":0,"totalTokens":1000}}}"""),
+            Notification("thread/tokenUsage/updated", """{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":12,"cachedInputTokens":3,"outputTokens":5,"reasoningOutputTokens":2,"totalTokens":17},"total":{"inputTokens":112,"cachedInputTokens":13,"outputTokens":25,"reasoningOutputTokens":4,"totalTokens":137}}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport);
+
+        var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("measure this turn"));
+
+        Assert.Equal(GovernedModelUsageEvidenceStatus.Authoritative, response.Usage.InputTokens.Status);
+        Assert.Equal(12, response.Usage.InputTokens.Value);
+        Assert.Equal(3, response.Usage.CachedTokens.Value);
+        Assert.Equal(5, response.Usage.OutputTokens.Value);
+        Assert.Equal(17, response.Usage.TotalTokens.Value);
+        Assert.Equal(GovernedModelUsageEvidenceStatus.Unavailable, response.Usage.MonetaryCost.Status);
+        Assert.Equal("thread-token-usage-v2", response.Usage.SourceContractVersion);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_retains_correlated_usage_that_arrives_before_the_turn_start_response()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Notification("thread/tokenUsage/updated", """{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":7,"cachedInputTokens":2,"outputTokens":3,"reasoningOutputTokens":1,"totalTokens":10},"total":{"inputTokens":7,"cachedInputTokens":2,"outputTokens":3,"reasoningOutputTokens":1,"totalTokens":10}}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport);
+
+        var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("retain early usage"));
+
+        Assert.Equal(7, response.Usage.InputTokens.Value);
+        Assert.Equal(2, response.Usage.CachedTokens.Value);
+        Assert.Equal(3, response.Usage.OutputTokens.Value);
+        Assert.Equal(10, response.Usage.TotalTokens.Value);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_discards_delayed_prior_turn_usage_that_arrives_before_the_current_turn_start_response()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Notification("thread/tokenUsage/updated", """{"threadId":"thread-1","turnId":"turn-prior","tokenUsage":{"last":{"inputTokens":99,"cachedInputTokens":0,"outputTokens":99,"reasoningOutputTokens":0,"totalTokens":198},"total":{"inputTokens":99,"cachedInputTokens":0,"outputTokens":99,"reasoningOutputTokens":0,"totalTokens":198}}}"""),
+            Response(3, """{"turn":{"id":"turn-current","status":"inProgress","items":[]}}"""),
+            Notification("thread/tokenUsage/updated", """{"threadId":"thread-1","turnId":"turn-current","tokenUsage":{"last":{"inputTokens":4,"cachedInputTokens":1,"outputTokens":2,"reasoningOutputTokens":0,"totalTokens":6},"total":{"inputTokens":4,"cachedInputTokens":1,"outputTokens":2,"reasoningOutputTokens":0,"totalTokens":6}}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-current","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport);
+
+        var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("reject stale usage"));
+
+        Assert.Equal(4, response.Usage.InputTokens.Value);
+        Assert.Equal(1, response.Usage.CachedTokens.Value);
+        Assert.Equal(2, response.Usage.OutputTokens.Value);
+        Assert.Equal(6, response.Usage.TotalTokens.Value);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_retains_early_current_usage_when_delayed_prior_usage_arrives_after_it()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Notification("thread/tokenUsage/updated", """{"threadId":"thread-1","turnId":"turn-current","tokenUsage":{"last":{"inputTokens":8,"cachedInputTokens":2,"outputTokens":3,"reasoningOutputTokens":0,"totalTokens":11},"total":{"inputTokens":8,"cachedInputTokens":2,"outputTokens":3,"reasoningOutputTokens":0,"totalTokens":11}}}"""),
+            Notification("thread/tokenUsage/updated", """{"threadId":"thread-1","turnId":"turn-prior","tokenUsage":{"last":{"inputTokens":99,"cachedInputTokens":0,"outputTokens":99,"reasoningOutputTokens":0,"totalTokens":198},"total":{"inputTokens":99,"cachedInputTokens":0,"outputTokens":99,"reasoningOutputTokens":0,"totalTokens":198}}}"""),
+            Response(3, """{"turn":{"id":"turn-current","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-current","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport);
+
+        var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("retain exact early usage"));
+
+        Assert.Equal(8, response.Usage.InputTokens.Value);
+        Assert.Equal(2, response.Usage.CachedTokens.Value);
+        Assert.Equal(3, response.Usage.OutputTokens.Value);
+        Assert.Equal(11, response.Usage.TotalTokens.Value);
+    }
+
+    [Theory]
+    [InlineData("{\"inputTokens\":12,\"cachedInputTokens\":13,\"outputTokens\":5,\"reasoningOutputTokens\":2,\"totalTokens\":17}")]
+    [InlineData("{\"inputTokens\":12,\"cachedInputTokens\":3,\"outputTokens\":5,\"reasoningOutputTokens\":6,\"totalTokens\":17}")]
+    [InlineData("{\"inputTokens\":12,\"cachedInputTokens\":3,\"outputTokens\":5,\"reasoningOutputTokens\":2,\"totalTokens\":18}")]
+    [InlineData("{\"inputTokens\":-1,\"cachedInputTokens\":0,\"outputTokens\":5,\"reasoningOutputTokens\":2,\"totalTokens\":4}")]
+    public async Task GenerateAsync_fails_closed_on_correlated_malformed_token_usage(string lastUsage)
+    {
+        var usageParameters = $$"""
+            {
+              "threadId": "thread-1",
+              "turnId": "turn-1",
+              "tokenUsage": {
+                "last": {{lastUsage}},
+                "total": {{lastUsage}}
+              }
+            }
+            """;
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("thread/tokenUsage/updated", usageParameters),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport);
+
+        await Assert.ThrowsAsync<FormatException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("reject malformed usage")));
     }
 
     [Fact]
@@ -1226,7 +1413,21 @@ public sealed class CodexAppServerInferenceTests
 
     private static string Response(int id, string result)
     {
-        return $$"""{"id":{{id}},"result":{{result}}}""";
+        var resultNode = JsonNode.Parse(result)
+            ?? throw new InvalidOperationException("The scripted result must be valid JSON.");
+        if (resultNode is JsonObject resultObject
+            && resultObject["thread"] is JsonObject threadObject)
+        {
+            resultObject["model"] ??= "gpt-test";
+            resultObject["modelProvider"] ??= "openai";
+            threadObject["modelProvider"] ??= "openai";
+        }
+
+        return new JsonObject
+        {
+            ["id"] = id,
+            ["result"] = resultNode
+        }.ToJsonString();
     }
 
     private static string Notification(string method, string parameters)

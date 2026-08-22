@@ -1,3 +1,6 @@
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
+
 namespace EmbodySense.Core.Persistence.Loops.GraphAuthoring.Models;
 
 internal sealed record NodeJson(
@@ -7,4 +10,6 @@ internal sealed record NodeJson(
     int DescriptorVersion,
     string[]? AuthorityCeiling,
     IReadOnlyDictionary<string, string>? Parameters,
-    PortJson[]? Ports);
+    PortJson[]? Ports,
+    GovernedModelRoutingPolicy? ModelRoutingPolicy,
+    CapabilityDataClass[]? AuthoredInputDataClasses);

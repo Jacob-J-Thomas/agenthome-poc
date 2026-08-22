@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Inference.Profiles.Models;
+
 namespace EmbodySense.Core.Startup.Loops.Execution.Models;
 
 /// <summary>
@@ -45,4 +47,8 @@ public sealed record LoopRunEventSnapshot(
     string? ProviderResponseId,
     string? ExitDecision,
     LoopRunToolAuthoritySnapshot? ToolAuthority,
-    LoopRunToolEvidenceSnapshot? ToolEvidence);
+    LoopRunToolEvidenceSnapshot? ToolEvidence)
+{
+    /// <summary>Gets the exact admitted profile pin and reconciled usage evidence retained for this provider outcome.</summary>
+    public GovernedModelAttemptExecutionEvidence? ModelExecutionEvidence { get; init; }
+}

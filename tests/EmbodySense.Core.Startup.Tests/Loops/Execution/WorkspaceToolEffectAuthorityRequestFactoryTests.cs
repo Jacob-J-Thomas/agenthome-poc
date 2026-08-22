@@ -118,18 +118,15 @@ public sealed class WorkspaceToolEffectAuthorityRequestFactoryTests
             GovernedLoopEffectBoundaryKind.WorkspaceActuation));
 
         var zeroTargetAuthority = fixture.Receipt.Evidence.EffectiveAuthority with { MaxTargetCount = 0 };
-        var narrowedEvidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            fixture.Receipt.Evidence.SchemaVersion,
-            fixture.Receipt.Evidence.IntentHash,
+        var narrowedEvidence = EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.EmptyRoutingEvidence(
+            fixture.Receipt.Intent,
             fixture.Receipt.Evidence.Binding,
             fixture.Receipt.Evidence.GrantProfile,
             fixture.Receipt.Evidence.GrantBoundary,
             fixture.Receipt.Evidence.GrantDependencyEvidenceHash,
             zeroTargetAuthority,
             fixture.Receipt.Evidence.CapabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(fixture.Receipt.Intent, zeroTargetAuthority, fixture.Receipt.Evidence.CapabilityAdmission),
-            fixture.Receipt.Evidence.EvaluatedAtUtc,
-            string.Empty));
+            fixture.Receipt.Evidence.EvaluatedAtUtc);
         var narrowedReceipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
             fixture.Receipt.SchemaVersion,
             fixture.Receipt.Intent,

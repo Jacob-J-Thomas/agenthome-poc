@@ -2,6 +2,9 @@ using System.Collections.ObjectModel;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Inference.Profiles;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
+using EmbodySense.Core.Common.Capabilities;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Graph;
 
@@ -22,7 +25,8 @@ public sealed class GovernedLoopGraphDefinition
         GovernedLoopControlEdgeDefinition[] controlEdges,
         GovernedLoopBindingDefinition[] bindings,
         GovernedLoopOutputContract outputContract,
-        GovernedLoopDisplayMetadata displayMetadata)
+        GovernedLoopDisplayMetadata displayMetadata,
+        GovernedModelRoutingPolicy defaultModelRoutingPolicy)
     {
         GraphId = graphId;
         RevisionId = revisionId;
@@ -37,6 +41,7 @@ public sealed class GovernedLoopGraphDefinition
         Bindings = Array.AsReadOnly(bindings);
         OutputContract = outputContract;
         DisplayMetadata = displayMetadata;
+        DefaultModelRoutingPolicy = defaultModelRoutingPolicy;
         ExecutableHash = GovernedLoopExecutableHash.Compute(this);
         RevisionReference = GovernedLoopRevisionReference.Create(GovernedLoopRevisionReference.CurrentSchemaVersion, GraphId, RevisionId, ExecutableHash);
     }
@@ -86,6 +91,8 @@ public sealed class GovernedLoopGraphDefinition
     /// <summary>Gets display and layout metadata excluded from executable identity.</summary>
     /// <value>The validated display-only metadata.</value>
     public GovernedLoopDisplayMetadata DisplayMetadata { get; }
+    /// <summary>Gets the required typed loop-default model-routing policy.</summary>
+    public GovernedModelRoutingPolicy DefaultModelRoutingPolicy { get; }
     /// <summary>Gets the lowercase SHA-256 digest of executable content.</summary>
     /// <value>A digest excluding graph, revision, display, and layout identity.</value>
     public string ExecutableHash { get; }
@@ -108,6 +115,7 @@ public sealed class GovernedLoopGraphDefinition
     /// <param name="bindings">The explicit data and context bindings.</param>
     /// <param name="outputContract">The successful output contract.</param>
     /// <param name="displayMetadata">The display-only metadata.</param>
+    /// <param name="defaultModelRoutingPolicy">The required typed loop-default model-routing policy.</param>
     /// <returns>A validated, canonical, immutable graph definition.</returns>
     /// <exception cref="ArgumentNullException">Thrown when a required collection or value object is <see langword="null"/>.</exception>
     /// <exception cref="ArgumentException">Thrown when any bounded schema, identity, reference, authority, binding, output, Unicode, or display invariant fails.</exception>
@@ -125,7 +133,8 @@ public sealed class GovernedLoopGraphDefinition
         IEnumerable<GovernedLoopControlEdgeDefinition> controlEdges,
         IEnumerable<GovernedLoopBindingDefinition> bindings,
         GovernedLoopOutputContract outputContract,
-        GovernedLoopDisplayMetadata displayMetadata)
+        GovernedLoopDisplayMetadata displayMetadata,
+        GovernedModelRoutingPolicy defaultModelRoutingPolicy)
     {
         if (schemaVersion != CurrentSchemaVersion)
         {
@@ -138,8 +147,21 @@ public sealed class GovernedLoopGraphDefinition
         GovernedLoopGraphRules.RequireId(entryNodeId, nameof(entryNodeId));
         GovernedLoopGraphRules.RequireText(purpose, nameof(purpose), CustomLoopLimits.MaxDescriptionCharacters, required: true);
         ArgumentNullException.ThrowIfNull(authorityCeiling);
+        if (!GovernedModelContractValidator.IsValid(defaultModelRoutingPolicy))
+        {
+            throw new ArgumentException("A complete typed loop-default model-routing policy is required.", nameof(defaultModelRoutingPolicy));
+        }
         var canonicalSchemas = ValidateSchemas(valueSchemas);
-        var canonicalNodes = ValidateNodes(nodes, authorityCeiling, canonicalSchemas);
+        var canonicalNodes = ValidateNodes(nodes, authorityCeiling, canonicalSchemas, defaultModelRoutingPolicy);
+        if (canonicalNodes
+            .Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference)
+            .Select(node => (node.ModelRoutingPolicy ?? defaultModelRoutingPolicy).Requirements.Budget.PerRun.ContentHash)
+            .Distinct(StringComparer.Ordinal)
+            .Take(2)
+            .Count() > 1)
+        {
+            throw new ArgumentException("Every Inference node in one graph must share one exact run-wide usage ceiling and currency.", nameof(nodes));
+        }
         var nodeById = canonicalNodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
         if (!nodeById.ContainsKey(entryNodeId))
         {
@@ -154,7 +176,7 @@ public sealed class GovernedLoopGraphDefinition
         var canonicalOwningRole = new ContextualRoleRevisionPin(
             new ContextualRoleRevisionIdentity(owningRole.Identity.RoleId, owningRole.Identity.Revision),
             owningRole.ContentHash);
-        return new GovernedLoopGraphDefinition(graphId, revisionId, purpose, canonicalOwningRole, entryNodeId, canonicalTerminals, authorityCeiling, canonicalSchemas, canonicalNodes, canonicalEdges, canonicalBindings, canonicalOutput, canonicalDisplay);
+        return new GovernedLoopGraphDefinition(graphId, revisionId, purpose, canonicalOwningRole, entryNodeId, canonicalTerminals, authorityCeiling, canonicalSchemas, canonicalNodes, canonicalEdges, canonicalBindings, canonicalOutput, canonicalDisplay, defaultModelRoutingPolicy);
     }
 
     private static void RequireOwningRole(ContextualRoleRevisionPin owningRole)
@@ -210,7 +232,7 @@ public sealed class GovernedLoopGraphDefinition
         return values.OrderBy(schema => schema.Id, StringComparer.Ordinal).ToArray();
     }
 
-    private static GovernedLoopNodeDefinition[] ValidateNodes(IEnumerable<GovernedLoopNodeDefinition> nodes, GovernedLoopAuthorityCeiling loopCeiling, IReadOnlyList<GovernedLoopValueSchemaDefinition> schemas)
+    private static GovernedLoopNodeDefinition[] ValidateNodes(IEnumerable<GovernedLoopNodeDefinition> nodes, GovernedLoopAuthorityCeiling loopCeiling, IReadOnlyList<GovernedLoopValueSchemaDefinition> schemas, GovernedModelRoutingPolicy defaultModelRoutingPolicy)
     {
         ArgumentNullException.ThrowIfNull(nodes);
         var values = nodes.ToArray();
@@ -261,11 +283,38 @@ public sealed class GovernedLoopGraphDefinition
             foreach (var parameter in node.Parameters)
             {
                 GovernedLoopGraphRules.RequireId(parameter.Key, nameof(nodes));
+                if (GovernedLoopGraphRules.IsReservedModelRoutingParameter(parameter.Key))
+                {
+                    throw new ArgumentException($"Node `{node.Id}` encodes model routing in the generic parameter map.", nameof(nodes));
+                }
                 GovernedLoopGraphRules.RequireText(parameter.Value, nameof(nodes), CustomLoopLimits.MaxGraphParameterValueCharacters, required: false);
                 if (!parameters.TryAdd(parameter.Key, parameter.Value))
                 {
                     throw new ArgumentException($"Node `{node.Id}` contains duplicate parameter `{parameter.Key}`.", nameof(nodes));
                 }
+            }
+
+            if (node.Descriptor.Kind != GovernedLoopNodeKind.Inference)
+            {
+                if (node.ModelRoutingPolicy is not null || node.AuthoredInputDataClasses is not null)
+                {
+                    throw new ArgumentException($"Only Inference node `{node.Id}` may declare model routing or authored input classification.", nameof(nodes));
+                }
+            }
+            else
+            {
+                if (node.ModelRoutingPolicy is not null && !GovernedModelContractValidator.IsValid(node.ModelRoutingPolicy))
+                {
+                    throw new ArgumentException($"Inference node `{node.Id}` has an invalid routing override.", nameof(nodes));
+                }
+                var effectivePolicy = node.ModelRoutingPolicy ?? defaultModelRoutingPolicy;
+                var profileIds = CandidateProfileIds(effectivePolicy);
+                var nodeCapabilities = node.AuthorityCeiling.CapabilityIds.ToHashSet(StringComparer.Ordinal);
+                if (profileIds.Any(id => !loopCapabilities.Contains(id) || !nodeCapabilities.Contains(id)))
+                {
+                    throw new ArgumentException($"Inference node `{node.Id}` routes a profile outside the loop or node authority ceiling.", nameof(nodes));
+                }
+                ValidateAuthoredInputDataClasses(node.AuthoredInputDataClasses, node.Id, nameof(nodes));
             }
 
             canonical.Add(node with
@@ -276,6 +325,31 @@ public sealed class GovernedLoopGraphDefinition
         }
 
         return canonical.OrderBy(node => node.Id, StringComparer.Ordinal).ToArray();
+    }
+
+    private static IReadOnlyList<string> CandidateProfileIds(GovernedModelRoutingPolicy policy)
+        => (policy.Selector.Kind == GovernedModelSelectorKind.Exact
+                ? new[] { policy.Selector.ExactProfileId! }
+                : policy.Selector.PermittedInheritedProfileIds)
+            .Concat(policy.FallbackProfileIds)
+            .Select(value => value.Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+    private static void ValidateAuthoredInputDataClasses(IReadOnlyList<CapabilityDataClass>? values, string nodeId, string parameterName)
+    {
+        if (values is null)
+        {
+            return;
+        }
+        var canonical = values.Select(value => value?.Value).ToArray();
+        if (canonical.Length > CapabilityContractLimits.MaxDataClasses
+            || canonical.Any(value => !CapabilityDataClass.TryParse(value, out _, out _))
+            || !canonical.SequenceEqual(canonical.Order(StringComparer.Ordinal), StringComparer.Ordinal)
+            || canonical.Distinct(StringComparer.Ordinal).Count() != canonical.Length)
+        {
+            throw new ArgumentException($"Inference node `{nodeId}` has invalid authored input-data classes.", parameterName);
+        }
     }
 
     private static string[] ValidateTerminals(IEnumerable<string> terminalNodeIds, IReadOnlyDictionary<string, GovernedLoopNodeDefinition> nodeById)

@@ -92,6 +92,42 @@ internal static class CoverageChildProcessAssembly
         startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=" + fullyQualifiedTestName);
     }
 
+    internal static void AddExpectedTerminationVstestArguments(
+        ProcessStartInfo startInfo,
+        string currentAssemblyPath,
+        string fullyQualifiedTestName)
+    {
+        ArgumentNullException.ThrowIfNull(startInfo);
+        ArgumentException.ThrowIfNullOrWhiteSpace(currentAssemblyPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fullyQualifiedTestName);
+
+        startInfo.ArgumentList.Add("vstest");
+        var isolatedDirectory = Environment.GetEnvironmentVariable(IsolatedAssemblyDirectoryVariable);
+        if (string.IsNullOrWhiteSpace(isolatedDirectory))
+        {
+            startInfo.ArgumentList.Add(currentAssemblyPath);
+        }
+        else
+        {
+            // An intentionally terminated testhost cannot flush useful hit data. Read the immutable
+            // verifier copy directly; the outer verifier re-hashes it after every child has exited.
+            if (!Directory.Exists(isolatedDirectory))
+            {
+                throw new DirectoryNotFoundException($"The immutable coverage child-process directory is unavailable: `{isolatedDirectory}`.");
+            }
+
+            var isolatedPath = Path.Combine(isolatedDirectory, Path.GetFileName(currentAssemblyPath));
+            if (!File.Exists(isolatedPath))
+            {
+                throw new FileNotFoundException("The immutable coverage child-process assembly is unavailable.", isolatedPath);
+            }
+
+            startInfo.ArgumentList.Add(isolatedPath);
+        }
+
+        startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=" + fullyQualifiedTestName);
+    }
+
     private static void CopyDirectory(string sourceDirectory, string destinationDirectory)
     {
         Directory.CreateDirectory(destinationDirectory);

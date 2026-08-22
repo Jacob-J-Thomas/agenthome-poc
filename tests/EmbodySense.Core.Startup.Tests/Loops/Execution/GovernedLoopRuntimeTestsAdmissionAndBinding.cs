@@ -10,6 +10,9 @@ public sealed class GovernedLoopRuntimeTestsAdmissionAndBinding
     public Task Public_runtime_executes_exact_canonical_inputs_and_terminal_replay_precedes_workspace_busy_and_restart() => GovernedLoopRuntimeTests.Public_runtime_executes_exact_canonical_inputs_and_terminal_replay_precedes_workspace_busy_and_restart();
 
     [Fact]
+    public Task Public_runtime_marks_the_unforwardable_configured_profile_unavailable_before_provider_dispatch() => GovernedLoopRuntimeTests.Public_runtime_marks_the_unforwardable_configured_profile_unavailable_before_provider_dispatch();
+
+    [Fact]
     public Task Definitive_authority_rejection_replays_after_restart_without_materialization_or_provider_work() => GovernedLoopRuntimeTests.Definitive_authority_rejection_replays_after_restart_without_materialization_or_provider_work();
 
     [Fact]

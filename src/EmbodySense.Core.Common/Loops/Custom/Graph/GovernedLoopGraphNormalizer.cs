@@ -4,6 +4,8 @@ using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Inference.Profiles;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Graph;
 
@@ -23,6 +25,10 @@ public static class GovernedLoopGraphNormalizer
         }
 
         ValidateScalars(candidate, errors);
+        if (!GovernedModelContractValidator.IsValid(candidate.DefaultModelRoutingPolicy))
+        {
+            errors.Add("graph.model-routing.default.invalid", GovernedLoopGraphElementKind.Graph, candidate.GraphId, "graph.defaultModelRoutingPolicy", "A complete typed loop-default model-routing policy is required.");
+        }
         ValidateAuthorityCeiling(candidate.AuthorityCeiling, candidate.GraphId, "graph.authorityCeiling", errors);
         var schemas = Snapshot(candidate.ValueSchemas, CustomLoopLimits.MaxGraphValueSchemas, 1, "valueSchemas", GovernedLoopGraphElementKind.ValueSchema, errors);
         var nodes = Snapshot(candidate.Nodes, CustomLoopLimits.MaxGraphNodes, 2, "nodes", GovernedLoopGraphElementKind.Node, errors);
@@ -31,7 +37,8 @@ public static class GovernedLoopGraphNormalizer
         var terminals = Snapshot(candidate.TerminalNodeIds, CustomLoopLimits.MaxGraphNodes - 1, 1, "terminalNodeIds", GovernedLoopGraphElementKind.Graph, errors);
 
         ValidateSchemas(schemas, errors);
-        ValidateNodes(nodes, schemas, candidate.AuthorityCeiling, errors);
+        ValidateNodes(nodes, schemas, candidate.AuthorityCeiling, candidate.DefaultModelRoutingPolicy, errors);
+        ValidateRunWideModelBudget(nodes, candidate.DefaultModelRoutingPolicy, candidate.GraphId, errors);
         ValidateEdges(edges, nodes, errors);
         ValidateBindings(bindings, nodes, edges, candidate.EntryNodeId, errors);
         ValidateTerminalsAndTopology(candidate.EntryNodeId, terminals, nodes, edges, errors);
@@ -45,7 +52,7 @@ public static class GovernedLoopGraphNormalizer
 
         try
         {
-            var graph = GovernedLoopGraphDefinition.Create(candidate.SchemaVersion, candidate.GraphId!, candidate.RevisionId!, candidate.Purpose!, candidate.OwningRole!, candidate.EntryNodeId!, terminals.Cast<string>(), candidate.AuthorityCeiling!, schemas.Cast<GovernedLoopValueSchemaDefinition>(), nodes.Cast<GovernedLoopNodeDefinition>(), edges.Cast<GovernedLoopControlEdgeDefinition>(), bindings.Cast<GovernedLoopBindingDefinition>(), candidate.OutputContract!, candidate.DisplayMetadata!);
+            var graph = GovernedLoopGraphDefinition.Create(candidate.SchemaVersion, candidate.GraphId!, candidate.RevisionId!, candidate.Purpose!, candidate.OwningRole!, candidate.EntryNodeId!, terminals.Cast<string>(), candidate.AuthorityCeiling!, schemas.Cast<GovernedLoopValueSchemaDefinition>(), nodes.Cast<GovernedLoopNodeDefinition>(), edges.Cast<GovernedLoopControlEdgeDefinition>(), bindings.Cast<GovernedLoopBindingDefinition>(), candidate.OutputContract!, candidate.DisplayMetadata!, candidate.DefaultModelRoutingPolicy!);
             return new GovernedLoopGraphNormalizationResult(graph, Array.Empty<GovernedLoopGraphValidationError>());
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
@@ -170,7 +177,12 @@ public static class GovernedLoopGraphNormalizer
         }
     }
 
-    private static void ValidateNodes(IReadOnlyList<GovernedLoopNodeDefinition?> nodes, IReadOnlyList<GovernedLoopValueSchemaDefinition?> schemas, GovernedLoopAuthorityCeiling? loopAuthority, GovernedLoopGraphErrorCollector errors)
+    private static void ValidateNodes(
+        IReadOnlyList<GovernedLoopNodeDefinition?> nodes,
+        IReadOnlyList<GovernedLoopValueSchemaDefinition?> schemas,
+        GovernedLoopAuthorityCeiling? loopAuthority,
+        GovernedModelRoutingPolicy? defaultModelRoutingPolicy,
+        GovernedLoopGraphErrorCollector errors)
     {
         ValidateIdentities(nodes, value => value?.Id, "nodes", GovernedLoopGraphElementKind.Node, errors);
         var schemaIds = schemas.Where(schema => schema is not null && CustomLoopArtifactIdentifier.IsValid(schema.Id)).Select(schema => schema!.Id).ToHashSet(StringComparer.Ordinal);
@@ -216,8 +228,48 @@ public static class GovernedLoopGraphNormalizer
 
             ValidatePorts(node, path, schemaIds, errors);
             ValidateParameters(node, path, errors);
+            if (node.Descriptor?.Kind == GovernedLoopNodeKind.Inference)
+            {
+                if (node.ModelRoutingPolicy is not null && !GovernedModelContractValidator.IsValid(node.ModelRoutingPolicy))
+                {
+                    errors.Add("node.model-routing.override.invalid", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.modelRoutingPolicy", "The Inference routing override must be a complete typed policy.");
+                }
+
+                var effectivePolicy = node.ModelRoutingPolicy ?? defaultModelRoutingPolicy;
+                if (GovernedModelContractValidator.IsValid(effectivePolicy) && node.AuthorityCeiling is not null)
+                {
+                    var nodeCapabilities = node.AuthorityCeiling.CapabilityIds.ToHashSet(StringComparer.Ordinal);
+                    var candidateIds = CandidateProfileIds(effectivePolicy!);
+                    if (candidateIds.Any(id => !loopCapabilities.Contains(id) || !nodeCapabilities.Contains(id)))
+                    {
+                        errors.Add("node.model-routing.authority.invalid", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.modelRoutingPolicy", "Every permitted model profile must remain inside both loop and node authority ceilings.");
+                    }
+                }
+
+                if (node.AuthoredInputDataClasses is { } authoredClasses
+                    && (authoredClasses.Count > CapabilityContractLimits.MaxDataClasses
+                        || authoredClasses.Any(value => value is null || !CapabilityDataClass.TryParse(value.Value, out var parsed, out _) || !value.Equals(parsed))
+                        || !authoredClasses.Select(value => value.Value).SequenceEqual(authoredClasses.Select(value => value.Value).Order(StringComparer.Ordinal), StringComparer.Ordinal)
+                        || authoredClasses.Select(value => value.Value).Distinct(StringComparer.Ordinal).Count() != authoredClasses.Count))
+                {
+                    errors.Add("node.model-routing.input-data-classes.invalid", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.authoredInputDataClasses", "Authored input-data classes must be a bounded canonical ordered set.");
+                }
+            }
+            else if (node.ModelRoutingPolicy is not null || node.AuthoredInputDataClasses is not null)
+            {
+                errors.Add("node.model-routing.kind.invalid", GovernedLoopGraphElementKind.Node, node.Id, path, "Only Inference nodes may declare routing or input classification.");
+            }
         }
     }
+
+    private static IReadOnlyList<string> CandidateProfileIds(GovernedModelRoutingPolicy policy)
+        => (policy.Selector.Kind == GovernedModelSelectorKind.Exact
+                ? new[] { policy.Selector.ExactProfileId! }
+                : policy.Selector.PermittedInheritedProfileIds)
+            .Concat(policy.FallbackProfileIds)
+            .Select(value => value.Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
 
     private static void ValidateAuthorityCeiling(
         GovernedLoopAuthorityCeiling? ceiling,
@@ -242,6 +294,30 @@ public static class GovernedLoopGraphNormalizer
             || !capabilities.SequenceEqual(capabilities.Order(StringComparer.Ordinal), StringComparer.Ordinal))
         {
             errors.Add("authority.capabilities.invalid", GovernedLoopGraphElementKind.Authority, elementId, path, "Authority ceilings require unique canonical lowercase provider/path capability identifiers in ordinal order.");
+        }
+    }
+
+    private static void ValidateRunWideModelBudget(
+        IReadOnlyList<GovernedLoopNodeDefinition?> nodes,
+        EmbodySense.Core.Common.Inference.Profiles.Models.GovernedModelRoutingPolicy? defaultPolicy,
+        string? graphId,
+        GovernedLoopGraphErrorCollector errors)
+    {
+        if (!GovernedModelContractValidator.IsValid(defaultPolicy))
+        {
+            return;
+        }
+
+        var hashes = nodes
+            .Where(node => node?.Descriptor?.Kind == GovernedLoopNodeKind.Inference
+                && (node.ModelRoutingPolicy is null || GovernedModelContractValidator.IsValid(node.ModelRoutingPolicy)))
+            .Select(node => (node!.ModelRoutingPolicy ?? defaultPolicy!).Requirements.Budget.PerRun.ContentHash)
+            .Distinct(StringComparer.Ordinal)
+            .Take(2)
+            .ToArray();
+        if (hashes.Length > 1)
+        {
+            errors.Add("graph.model-routing.run-budget.incompatible", GovernedLoopGraphElementKind.Graph, graphId, "graph.nodes", "Every Inference node must share one exact run-wide usage ceiling and currency.");
         }
     }
 
@@ -303,6 +379,10 @@ public static class GovernedLoopGraphNormalizer
         {
             ValidateId(parameter.Key, "node.parameter-id.invalid", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.parameters[{SafePathId(parameter.Key)}]", errors);
             ValidateText(parameter.Value, false, CustomLoopLimits.MaxGraphParameterValueCharacters, "node.parameter-value.invalid", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.parameters[{SafePathId(parameter.Key)}]", errors);
+            if (GovernedLoopGraphRules.IsReservedModelRoutingParameter(parameter.Key))
+            {
+                errors.Add("node.parameter.model-routing-forbidden", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.parameters[{SafePathId(parameter.Key)}]", "Model routing must use the typed policy field, never generic parameters.");
+            }
         }
     }
 

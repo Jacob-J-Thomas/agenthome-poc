@@ -58,7 +58,7 @@ public sealed class GovernedLoopAdmissionServiceTests
         Assert.Empty(receipt.Evidence.CapabilityAdmission.Requirements.Optional);
         Assert.Empty(receipt.Evidence.CapabilityAdmission.Pins);
         Assert.Empty(receipt.Evidence.CapabilityAdmission.Evidence);
-        Assert.Equal(7, receipt.Evidence.References.Count);
+        Assert.Equal(8, receipt.Evidence.References.Count);
         Assert.Equal(0, harness.CapabilityAdmissionCount);
         Assert.Equal(1, harness.RunIdentityGenerationCount);
         Assert.Equal(1, harness.FenceExecutionCount);
@@ -632,18 +632,15 @@ public sealed class GovernedLoopAdmissionServiceTests
         var receipt = Assert.IsType<GovernedLoopAdmissionReceipt>(source.Receipt);
         var intent = source.Intent with { WorkspaceId = workspaceId };
         var snapshot = receipt.Evidence.CapabilityAdmission with { WorkspaceScopeId = workspaceId };
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            receipt.Evidence.SchemaVersion,
-            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+        var evidence = GovernedModelProfileApplicationTestFixture.EmptyRoutingEvidence(
+            intent,
             receipt.Evidence.Binding,
             receipt.Evidence.GrantProfile,
             receipt.Evidence.GrantBoundary,
             receipt.Evidence.GrantDependencyEvidenceHash,
             receipt.Evidence.EffectiveAuthority,
             snapshot,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, receipt.Evidence.EffectiveAuthority, snapshot),
-            receipt.Evidence.EvaluatedAtUtc,
-            string.Empty));
+            receipt.Evidence.EvaluatedAtUtc);
         var reboundReceipt = GovernedLoopAdmissionContractHash.Apply(receipt with
         {
             Intent = intent,

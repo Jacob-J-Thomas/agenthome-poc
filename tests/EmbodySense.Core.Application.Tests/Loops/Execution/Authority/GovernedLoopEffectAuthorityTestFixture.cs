@@ -32,7 +32,8 @@ internal static class GovernedLoopEffectAuthorityTestFixture
     {
         var artifact = GovernedLoopSequentialApplicationTestFixture.LinearArtifact(allowWorkspaceTools: toolEnabledProvider);
         var requiredIdentity = AuthorityGrantApplicationTestFixture.Capability(GovernedLoopSequentialApplicationTestFixture.ModelInferenceCapabilityId);
-        var admittedIdentities = new List<CapabilityDescriptorIdentity> { requiredIdentity };
+        var profileIdentity = AuthorityGrantApplicationTestFixture.Capability(GovernedLoopSequentialApplicationTestFixture.ModelProfileCapabilityId);
+        var admittedIdentities = new List<CapabilityDescriptorIdentity> { requiredIdentity, profileIdentity };
         if (toolEnabledProvider)
         {
             admittedIdentities.Add(AuthorityGrantApplicationTestFixture.Capability(GovernedLoopSequentialApplicationTestFixture.WorkspaceCommandCapabilityId));
@@ -52,7 +53,7 @@ internal static class GovernedLoopEffectAuthorityTestFixture
             recurrence: includeUnrelatedAuthorityDimensions,
             publication: includeUnrelatedAuthorityDimensions,
             irreversible: includeUnrelatedAuthorityDimensions);
-        var requiredIdentities = toolEnabledProvider ? admittedIdentities.Take(2).ToArray() : [requiredIdentity];
+        var requiredIdentities = toolEnabledProvider ? admittedIdentities.Take(3).ToArray() : [requiredIdentity, profileIdentity];
         var requiredCeiling = AuthorityGrantApplicationTestFixture.Ceiling(
             capabilities: requiredIdentities,
             maxTargets: 1,
@@ -90,7 +91,9 @@ internal static class GovernedLoopEffectAuthorityTestFixture
         Assert.True(CapabilityProviderId.TryParse("org.embodysense", out var provider, out _));
         var pins = admittedIdentities.Select((identity, index) => new CapabilityAdmissionPin(
             identity,
-            CapabilityKind.GraphNode,
+            string.Equals(identity.Id.Value, GovernedLoopSequentialApplicationTestFixture.ModelProfileCapabilityId, StringComparison.Ordinal)
+                ? CapabilityKind.ModelProfile
+                : CapabilityKind.GraphNode,
             new CapabilityImplementationIdentity(provider!, $"effect-authority-test-{index + 1}"),
             new CapabilityProvenance(CapabilityProvenanceKind.BuiltIn, $"https://example.test/effect-authority-{index + 1}", "1", null),
             new CapabilityDependencyArtifactMetadata(null, null),
@@ -113,18 +116,16 @@ internal static class GovernedLoopEffectAuthorityTestFixture
             Now);
         var executionBinding = GovernedLoopExecutionBinding.Create(1, "run-effect-authority", artifact.RevisionArtifact.Revision, 1);
         var dependencyHash = AuthorityGrantApplicationTestFixture.Hash64('4');
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            GovernedLoopAdmissionEvidence.CurrentSchemaVersion,
-            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+        var evidence = GovernedModelProfileApplicationTestFixture.RoutingEvidenceForInference(
+            intent,
             executionBinding,
             profilePin,
             grant.Boundary,
             dependencyHash,
             admittedCeiling,
             snapshot,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, admittedCeiling, snapshot),
             Now,
-            string.Empty));
+            nodeId: "infer-01");
         var receipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
             GovernedLoopAdmissionReceipt.CurrentSchemaVersion,
             intent,

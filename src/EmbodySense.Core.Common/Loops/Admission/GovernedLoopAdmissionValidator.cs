@@ -5,8 +5,10 @@ using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.ContextualRoles;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Inference.Profiles;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions;
 
@@ -15,6 +17,10 @@ namespace EmbodySense.Core.Common.Loops.Admission;
 /// <summary>Validates bounded schema-1 governed-loop admission intent, evidence, and terminal outcomes.</summary>
 public static class GovernedLoopAdmissionValidator
 {
+    /// <summary>Validates one bounded structured model-routing denial proof.</summary>
+    public static GovernedLoopAdmissionValidationResult Validate(GovernedLoopAdmissionModelRoutingDenialProof? proof)
+        => Result(ValidateModelRoutingDenialProofStructure(proof));
+
     /// <summary>Validates one stable immutable admission intent.</summary>
     public static GovernedLoopAdmissionValidationResult Validate(GovernedLoopAdmissionIntent? intent)
         => Result(ValidateIntentStructure(intent));
@@ -87,8 +93,9 @@ public static class GovernedLoopAdmissionValidator
     internal static GovernedLoopAdmissionValidationResult ValidateRejectionProofsForHash(
         GovernedLoopAdmissionFailureCode failureCode,
         GovernedLoopAdmissionAuthorityDenialProof? authorityDenial,
-        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial)
-        => Result(ValidateRejectionProofs(failureCode, authorityDenial, capabilityDenial));
+        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial,
+        GovernedLoopAdmissionModelRoutingDenialProof? modelRoutingDenial = null)
+        => Result(ValidateRejectionProofs(failureCode, authorityDenial, capabilityDenial, modelRoutingDenial));
 
     internal static GovernedLoopAdmissionValidationResult ValidateForHash(GovernedLoopAdmissionTerminalOutcome? outcome)
         => Result(ValidateTerminalOutcomeStructure(outcome));
@@ -185,6 +192,11 @@ public static class GovernedLoopAdmissionValidator
             Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.capabilityAdmission");
         }
 
+        if (!GovernedModelContractValidator.IsValid(evidence.ModelRoutingAdmission))
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEvidence, "$.modelRoutingAdmission");
+        }
+
         ValidateReferences(evidence.References, requireCompleteSet: true, "$.references", errors);
         ValidateUtc(evidence.EvaluatedAtUtc, "$.evaluatedAtUtc", errors);
         return errors;
@@ -239,7 +251,7 @@ public static class GovernedLoopAdmissionValidator
         if (Enum.IsDefined(rejection.FailureCode) && rejection.FailureCode != GovernedLoopAdmissionFailureCode.None)
         {
             ValidateReferences(rejection.References, RequiredRejectionEvidenceKinds(rejection.FailureCode), "$.references", errors);
-            AddNested(errors, ValidateRejectionProofs(rejection.FailureCode, rejection.AuthorityDenial, rejection.CapabilityDenial), "$.proofs");
+            AddNested(errors, ValidateRejectionProofs(rejection.FailureCode, rejection.AuthorityDenial, rejection.CapabilityDenial, rejection.ModelRoutingDenial), "$.proofs");
         }
         else
         {
@@ -258,6 +270,12 @@ public static class GovernedLoopAdmissionValidator
             Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidTimestamp, "$.capabilityDenial.evaluatedAtUtc");
         }
 
+        if (rejection.ModelRoutingDenial is { } modelRoutingDenial
+            && modelRoutingDenial.EvaluatedAtUtc != rejection.RejectedAtUtc)
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidTimestamp, "$.modelRoutingDenial.evaluatedAtUtc");
+        }
+
         if (errors.Count == 0)
         {
             IReadOnlyList<GovernedLoopAdmissionEvidenceReference> expectedReferences;
@@ -267,7 +285,8 @@ public static class GovernedLoopAdmissionValidator
                     rejection.Intent,
                     rejection.FailureCode,
                     rejection.AuthorityDenial,
-                    rejection.CapabilityDenial);
+                    rejection.CapabilityDenial,
+                    rejection.ModelRoutingDenial);
             }
             catch (ArgumentException)
             {
@@ -287,12 +306,16 @@ public static class GovernedLoopAdmissionValidator
     private static List<GovernedLoopAdmissionValidationError> ValidateRejectionProofs(
         GovernedLoopAdmissionFailureCode failureCode,
         GovernedLoopAdmissionAuthorityDenialProof? authorityDenial,
-        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial)
+        GovernedLoopAdmissionCapabilityDenialProof? capabilityDenial,
+        GovernedLoopAdmissionModelRoutingDenialProof? modelRoutingDenial)
     {
         var errors = new List<GovernedLoopAdmissionValidationError>();
         var requiresAuthority = failureCode == GovernedLoopAdmissionFailureCode.AuthorityDenied;
         var requiresCapability = failureCode == GovernedLoopAdmissionFailureCode.CapabilityResolutionDenied;
-        if (requiresAuthority != (authorityDenial is not null) || requiresCapability != (capabilityDenial is not null))
+        var requiresModelRouting = failureCode == GovernedLoopAdmissionFailureCode.ModelRoutingDenied;
+        if (requiresAuthority != (authorityDenial is not null)
+            || requiresCapability != (capabilityDenial is not null)
+            || requiresModelRouting != (modelRoutingDenial is not null))
         {
             Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidComposition, "$");
         }
@@ -305,6 +328,49 @@ public static class GovernedLoopAdmissionValidator
         if (capabilityDenial is not null)
         {
             AddNested(errors, ValidateCapabilityDenialProofStructure(capabilityDenial), "$.capabilityDenial");
+        }
+
+
+        if (modelRoutingDenial is not null)
+        {
+            AddNested(errors, ValidateModelRoutingDenialProofStructure(modelRoutingDenial), "$.modelRoutingDenial");
+        }
+
+        return errors;
+    }
+
+    private static List<GovernedLoopAdmissionValidationError> ValidateModelRoutingDenialProofStructure(GovernedLoopAdmissionModelRoutingDenialProof? proof)
+    {
+        var errors = new List<GovernedLoopAdmissionValidationError>();
+        if (proof is null)
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.Required, "$");
+            return errors;
+        }
+
+        ValidateSchema(proof.SchemaVersion, "$.schemaVersion", errors);
+        if (!CustomLoopArtifactIdentifier.IsValid(proof.NodeId)
+            || !CustomLoopArtifactIdentifier.IsValid(proof.NodeTypeId))
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidIdentity, "$.node");
+        }
+        ValidateHash(proof.PolicyHash, "$.policyHash", errors);
+        ValidateHash(proof.EffectiveAuthorityReferenceHash, "$.effectiveAuthorityReferenceHash", errors);
+        ValidateHash(proof.CapabilityAdmissionReferenceHash, "$.capabilityAdmissionReferenceHash", errors);
+        ValidateUtc(proof.EvaluatedAtUtc, "$.evaluatedAtUtc", errors);
+        if (!Enum.IsDefined(proof.Reason))
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidEnumeration, "$.reason");
+        }
+        if (proof.CandidateProfileId is not null
+            && (!CapabilityId.TryParse(proof.CandidateProfileId.Value, out var parsed, out _) || !proof.CandidateProfileId.Equals(parsed)))
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidIdentity, "$.candidateProfileId");
+        }
+        if (proof.Reason == GovernedLoopAdmissionModelRoutingDenialReason.DefaultNotConfigured && proof.CandidateProfileId is not null
+            || proof.Reason != GovernedLoopAdmissionModelRoutingDenialReason.DefaultNotConfigured && proof.CandidateProfileId is null)
+        {
+            Add(errors, GovernedLoopAdmissionValidationErrorCode.InvalidComposition, "$.candidateProfileId");
         }
 
         return errors;
@@ -469,7 +535,7 @@ public static class GovernedLoopAdmissionValidator
         try
         {
             intentHash = GovernedLoopAdmissionContractHash.ComputeIntentHash(intent);
-            expectedReferences = GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, evidence.EffectiveAuthority, evidence.CapabilityAdmission);
+            expectedReferences = GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, evidence.EffectiveAuthority, evidence.CapabilityAdmission, evidence.ModelRoutingAdmission);
         }
         catch (ArgumentException)
         {
@@ -481,6 +547,21 @@ public static class GovernedLoopAdmissionValidator
             || evidence.Binding is null
             || !SameRevision(evidence.Binding.Revision, intent.Publication.Revision)
             || !string.Equals(evidence.CapabilityAdmission.WorkspaceScopeId, intent.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(evidence.ModelRoutingAdmission.WorkspaceId, intent.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(evidence.ModelRoutingAdmission.AdmissionOperationId, intent.OperationId, StringComparison.Ordinal)
+            || !string.Equals(evidence.ModelRoutingAdmission.AdmissionIntentHash, intentHash, StringComparison.Ordinal)
+            || !string.Equals(evidence.ModelRoutingAdmission.ExecutionBindingReferenceHash, GovernedLoopAdmissionContractHash.ComputeExecutionBindingReferenceHash(evidence.Binding), StringComparison.Ordinal)
+            || !string.Equals(evidence.ModelRoutingAdmission.RunId, evidence.Binding.RunId, StringComparison.Ordinal)
+            || !string.Equals(evidence.ModelRoutingAdmission.GraphId, evidence.Binding.Revision.GraphId, StringComparison.Ordinal)
+            || !string.Equals(evidence.ModelRoutingAdmission.GraphRevisionId, evidence.Binding.Revision.RevisionId, StringComparison.Ordinal)
+            || !string.Equals(evidence.ModelRoutingAdmission.GraphExecutableHash, evidence.Binding.Revision.ExecutableHash, StringComparison.Ordinal)
+            || evidence.ModelRoutingAdmission.ExecutionGeneration != evidence.Binding.ExecutionGeneration
+            || !string.Equals(evidence.ModelRoutingAdmission.OwningRoleId, intent.Role.Identity.RoleId, StringComparison.Ordinal)
+            || evidence.ModelRoutingAdmission.OwningRoleRevision != intent.Role.Identity.Revision
+            || !string.Equals(evidence.ModelRoutingAdmission.OwningRoleContentHash, intent.Role.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(evidence.ModelRoutingAdmission.CapabilityAdmissionReferenceHash, GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(evidence.CapabilityAdmission), StringComparison.Ordinal)
+            || !string.Equals(evidence.ModelRoutingAdmission.AuthorityAdmissionReferenceHash, GovernedLoopAdmissionContractHash.ComputeAdmissionAuthorityReferenceHash(evidence.GrantProfile, evidence.GrantBoundary, evidence.GrantDependencyEvidenceHash, evidence.EffectiveAuthority), StringComparison.Ordinal)
+            || evidence.ModelRoutingAdmission.EvaluatedAtUtc != evidence.EvaluatedAtUtc
             || evidence.CapabilityAdmission.AdmittedAtUtc > evidence.EvaluatedAtUtc
             || evidence.GrantBoundary.EffectiveAtUtc > evidence.EvaluatedAtUtc
             || evidence.GrantBoundary.ExpiresAtUtc is { } expiry && expiry <= evidence.EvaluatedAtUtc)
@@ -576,6 +657,13 @@ public static class GovernedLoopAdmissionValidator
                 GovernedLoopAdmissionEvidenceKind.GraphArtifact,
                 GovernedLoopAdmissionEvidenceKind.EffectiveAuthority,
                 GovernedLoopAdmissionEvidenceKind.CapabilityAdmission
+            ],
+            GovernedLoopAdmissionFailureCode.ModelRoutingDenied =>
+            [
+                GovernedLoopAdmissionEvidenceKind.GraphArtifact,
+                GovernedLoopAdmissionEvidenceKind.EffectiveAuthority,
+                GovernedLoopAdmissionEvidenceKind.CapabilityAdmission,
+                GovernedLoopAdmissionEvidenceKind.ModelRoutingAdmission
             ],
             _ => throw new ArgumentOutOfRangeException(nameof(failureCode))
         };

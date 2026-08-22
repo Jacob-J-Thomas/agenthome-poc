@@ -2046,6 +2046,15 @@ public sealed class CustomLoopRunValidatorTests
     {
         var receipt = binding.AdmissionReceipt;
         var source = receipt.Evidence;
+        var routing = GovernedLoopAdmissionContractHash.CreateEmptyModelRoutingAdmission(
+            receipt.Intent,
+            source.Binding,
+            source.GrantProfile,
+            source.GrantBoundary,
+            source.GrantDependencyEvidenceHash,
+            source.EffectiveAuthority,
+            capabilityAdmission,
+            source.EvaluatedAtUtc);
         var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
             source.SchemaVersion,
             source.IntentHash,
@@ -2055,7 +2064,8 @@ public sealed class CustomLoopRunValidatorTests
             source.GrantDependencyEvidenceHash,
             source.EffectiveAuthority,
             capabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(receipt.Intent, source.EffectiveAuthority, capabilityAdmission),
+            routing,
+            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(receipt.Intent, source.EffectiveAuthority, capabilityAdmission, routing),
             source.EvaluatedAtUtc,
             string.Empty));
         receipt = GovernedLoopAdmissionContractHash.Apply(receipt with { Evidence = evidence, ContentHash = string.Empty });

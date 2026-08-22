@@ -33,7 +33,8 @@ public sealed class GovernedLoopAdmissionRejectionProofTests
                     valid.Intent,
                     valid.FailureCode,
                     valid.AuthorityDenial,
-                    valid.CapabilityDenial));
+                    valid.CapabilityDenial,
+                    valid.ModelRoutingDenial));
 
             if (valid.AuthorityDenial is not null)
             {
@@ -415,7 +416,7 @@ public sealed class GovernedLoopAdmissionRejectionProofTests
     {
         var authority = authorityDenial ?? value.AuthorityDenial;
         var capability = capabilityDenial ?? value.CapabilityDenial;
-        var references = GovernedLoopAdmissionContractHash.CreateRejectionEvidenceReferences(value.Intent, value.FailureCode, authority, capability);
+        var references = GovernedLoopAdmissionContractHash.CreateRejectionEvidenceReferences(value.Intent, value.FailureCode, authority, capability, value.ModelRoutingDenial);
         return GovernedLoopAdmissionContractHash.Apply(NewRejection(
             value,
             authorityDenial: authority,
@@ -441,7 +442,8 @@ public sealed class GovernedLoopAdmissionRejectionProofTests
             omitCapabilityDenial ? null : capabilityDenial ?? value.CapabilityDenial,
             references ?? value.References,
             rejectedAtUtc ?? value.RejectedAtUtc,
-            string.Empty);
+            string.Empty,
+            value.ModelRoutingDenial);
 
     private static AuthorityCeiling WithMaxTargets(AuthorityCeiling value, int maxTargetCount)
         => new(

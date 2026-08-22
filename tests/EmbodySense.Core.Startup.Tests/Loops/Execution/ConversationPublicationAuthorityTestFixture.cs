@@ -25,6 +25,7 @@ internal static class ConversationPublicationAuthorityTestFixture
     internal const string PublicationOperationId = "conversation-publication-1";
     internal const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     internal const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
+    internal const string ModelProfileCapabilityId = "org.embodysense/model-profile/codex";
     internal static readonly DateTimeOffset Now = new(2026, 8, 11, 10, 0, 0, TimeSpan.Zero);
 
     internal static Fixture Create(
@@ -101,18 +102,15 @@ internal static class ConversationPublicationAuthorityTestFixture
         Assert.True(AuthorityProfileId.TryParse("profile-publication", out var profileId, out _));
         Assert.True(AuthorityProfileRevision.TryParse("1", out var profileRevision, out _));
         Assert.True(AuthorityProfileHash.TryParse("sha256:" + Hash('8'), out var profileHash, out _));
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            GovernedLoopAdmissionEvidence.CurrentSchemaVersion,
-            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+        var evidence = EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.EmptyRoutingEvidence(
+            intent,
             binding,
             new AuthorityGrantProfilePin(new AuthorityProfileReference(profileId!, profileRevision!), profileHash!),
             new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
             Hash('4'),
             effectiveAuthority,
             capabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilityAdmission),
-            Now,
-            string.Empty));
+            Now);
         var receipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(
             GovernedLoopAdmissionReceipt.CurrentSchemaVersion,
             intent,
@@ -138,7 +136,7 @@ internal static class ConversationPublicationAuthorityTestFixture
                 InferenceNodeId,
                 GovernedLoopSequentialNodeDescriptors.ProviderInference,
                 [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
-                GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
+                GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId, ModelProfileCapabilityId]),
                 new Dictionary<string, string> { ["instruction"] = "Produce one bounded result." }),
             new GovernedLoopNodeDefinition(
                 NodeId,
@@ -155,7 +153,7 @@ internal static class ConversationPublicationAuthorityTestFixture
             owningRole,
             "trigger",
             [NodeId],
-            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId]),
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId]),
             [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
             nodes,
             [
@@ -171,7 +169,8 @@ internal static class ConversationPublicationAuthorityTestFixture
             new GovernedLoopDisplayMetadata(
                 "Conversation publication loop",
                 "Test-only exact publication-authority fixture.",
-                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()));
+                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()),
+            EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
         var revision = GovernedLoopRevisionArtifactFactory.Create(1, graph.RevisionReference, null, null, $"create-{revisionId}", "user-owner", Now.AddHours(-2));
         return GovernedLoopGraphRevisionArtifactFactory.Create(1, revision, graph);
     }
@@ -187,6 +186,7 @@ internal static class ConversationPublicationAuthorityTestFixture
             [
                 new CapabilityDependency(Capability(ConversationTurnCapabilityId), range!),
                 new CapabilityDependency(Capability(ModelInferenceCapabilityId), range!),
+                new CapabilityDependency(Capability(ModelProfileCapabilityId), range!),
             ],
             [],
             new CapabilityDependencyArtifactMetadata(null, null));

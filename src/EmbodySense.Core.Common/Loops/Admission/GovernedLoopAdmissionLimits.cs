@@ -13,7 +13,7 @@ public static class GovernedLoopAdmissionLimits
     public const int MaxSurfaceCharacters = 64;
 
     /// <summary>Gets the maximum number of exact evidence references retained with one disposition.</summary>
-    public const int MaxEvidenceReferences = 7;
+    public const int MaxEvidenceReferences = 8;
 
     /// <summary>Gets the maximum number of required root capability-policy violations retained in one denial proof.</summary>
     public const int MaxCapabilityDenialViolations = 64;

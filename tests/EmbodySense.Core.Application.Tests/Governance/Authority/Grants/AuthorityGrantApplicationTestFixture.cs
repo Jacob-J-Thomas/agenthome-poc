@@ -303,7 +303,8 @@ internal static class AuthorityGrantApplicationTestFixture
                 [
                     new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Start.", 0, 0),
                     new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 100, 0),
-                ]));
+                ]),
+            GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
         return GovernedLoopGraphNormalizer.Normalize(candidate).Graph!;
     }
 

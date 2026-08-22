@@ -292,6 +292,19 @@ public sealed class CodexRuntimeResolverTests
     }
 
     [Fact]
+    public async Task Legacy_thread_start_shape_reports_probe_failure_before_runtime_admission()
+    {
+        using var workspace = new TestWorkspace();
+        var executable = await CreateFakeExecutableAsync(workspace, "legacy-thread", "codex-cli legacy-thread-test", legacyThreadStartShape: true, advertisedModels: ["gpt-test"]);
+
+        var result = await new CodexRuntimeResolver().ResolveAsync(executable, "gpt-test");
+
+        Assert.Equal(CodexRuntimeResolutionStatus.ProbeFailed, result.Status);
+        Assert.Equal("codex-cli legacy-thread-test", result.Version);
+        Assert.Contains("thread/start response does not expose", result.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Compatible_model_on_a_later_catalog_page_is_accepted()
     {
         if (!OperatingSystem.IsWindows())
@@ -371,6 +384,7 @@ public sealed class CodexRuntimeResolverTests
         int protocolStageDelayMilliseconds = 0,
         string? protocolStageMarkerPath = null,
         int modelPageSize = int.MaxValue,
+        bool legacyThreadStartShape = false,
         params string[] advertisedModels)
     {
         var directory = workspace.File(relativeDirectory);
@@ -387,7 +401,8 @@ public sealed class CodexRuntimeResolverTests
             versionDelayMilliseconds,
             protocolStageDelayMilliseconds,
             protocolStageMarkerPath,
-            modelPageSize
+            modelPageSize,
+            legacyThreadStartShape
         };
         await File.WriteAllTextAsync(configurationPath, JsonSerializer.Serialize(configuration, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         return await CancellationHostExecutable.CreateAsync(workspace, relativeDirectory, "codex-runtime-probe", "probe-config.json", "codex");

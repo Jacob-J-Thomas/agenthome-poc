@@ -22,6 +22,7 @@ namespace EmbodySense.Core.Application.Tests.Loops.GraphAuthoring;
 public sealed class GovernedLoopGraphAuthoringServiceTests
 {
     private const string ModelInferenceCapability = "org.embodysense/model-inference";
+    private const string ModelProfileCapability = "org.embodysense/model-profile/codex";
     private const string WorkspaceReadCapability = "org.embodysense/workspace-read";
     private static readonly DateTimeOffset _now = DateTimeOffset.Parse("2026-08-10T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
 
@@ -559,7 +560,7 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
             owningRole ?? Role(),
             "trigger",
             ["exit"],
-            GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, WorkspaceReadCapability]),
+            GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, ModelProfileCapability, WorkspaceReadCapability]),
             [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
             Nodes(),
             [
@@ -579,7 +580,8 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
                     new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Start.", 0, 0),
                     new GovernedLoopNodeDisplayMetadata("infer", "Inference", "Answer.", 100, 0),
                     new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", 200, 0),
-                ]));
+                ]),
+            GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
 
     private static ContextualRoleRevisionPin Role()
     {
@@ -595,14 +597,14 @@ public sealed class GovernedLoopGraphAuthoringServiceTests
 
     private static ContextualRoleRevision RoleRevision()
         => AuthorityGrantApplicationTestFixture.Role(
-            capabilityIds: [ModelInferenceCapability, WorkspaceReadCapability],
+            capabilityIds: [ModelInferenceCapability, ModelProfileCapability, WorkspaceReadCapability],
             roleId: "researcher");
 
     private static GovernedLoopNodeDefinition[] Nodes()
         =>
         [
             new("trigger", new(GovernedLoopNodeKind.Trigger, "manual-trigger", 1), [Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>()),
-            new("infer", new(GovernedLoopNodeKind.Inference, "provider-inference", 1), [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability]), new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
+            new("infer", new(GovernedLoopNodeKind.Inference, "provider-inference", 1), [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, ModelProfileCapability]), new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
             new("exit", new(GovernedLoopNodeKind.Exit, "success-exit", 1), [Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>()),
         ];
 

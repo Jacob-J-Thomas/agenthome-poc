@@ -10,6 +10,7 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.TraceRetention;
+using EmbodySense.Core.Application.Inference.Profiles;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -17,6 +18,7 @@ using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Triggers;
+using EmbodySense.Core.Startup.Inference.Profiles;
 using System.Text;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
@@ -44,6 +46,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     private readonly string _currentRoleId;
     private readonly CustomLoopModelSnapshot _modelSnapshot;
     private readonly TimeProvider _timeProvider;
+    private readonly IGovernedModelUsageLedger _modelUsageLedger;
+    private readonly string _workspaceId;
     private bool _customExecutionAvailable;
     private bool _customExecutionReacquisitionAllowed;
     private bool _customRecoveryRequired;
@@ -72,6 +76,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     /// <param name="actor">The actor.</param>
     /// <param name="currentRoleId">The current role identifier.</param>
     /// <param name="modelSnapshot">The model snapshot.</param>
+    /// <param name="modelUsageLedger">The authenticated provider-usage ledger used only for safe run inspection.</param>
+    /// <param name="workspaceId">The canonical physical-workspace identity used to scope ledger reads.</param>
     /// <param name="timeProvider">The time provider.</param>
     public CustomLoopRuntimeFacade(
         ICustomLoopDefinitionStore definitionStore,
@@ -94,6 +100,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         string actor,
         string currentRoleId,
         CustomLoopModelSnapshot modelSnapshot,
+        IGovernedModelUsageLedger modelUsageLedger,
+        string workspaceId,
         TimeProvider? timeProvider = null)
     {
         _definitionStore = definitionStore ?? throw new ArgumentNullException(nameof(definitionStore));
@@ -116,6 +124,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         _actor = string.IsNullOrWhiteSpace(actor) ? throw new ArgumentException("Actor is required.", nameof(actor)) : actor;
         _currentRoleId = string.IsNullOrWhiteSpace(currentRoleId) ? throw new ArgumentException("Current role is required.", nameof(currentRoleId)) : currentRoleId;
         _modelSnapshot = modelSnapshot ?? throw new ArgumentNullException(nameof(modelSnapshot));
+        _modelUsageLedger = modelUsageLedger ?? throw new ArgumentNullException(nameof(modelUsageLedger));
+        _workspaceId = string.IsNullOrWhiteSpace(workspaceId) ? throw new ArgumentException("Workspace identity is required.", nameof(workspaceId)) : workspaceId;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -521,7 +531,12 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     public async Task<LoopRunSnapshot?> GetAsync(string runId, CancellationToken cancellationToken)
     {
         var run = await _runStore.GetAsync(runId, cancellationToken);
-        return run is null ? null : Map(run);
+        if (run is null)
+        {
+            return null;
+        }
+        var usage = await _modelUsageLedger.ReadRunAsync(_workspaceId, run.Id, cancellationToken);
+        return Map(run, ModelUsageRunProjector.Project(usage, _workspaceId, run.Id));
     }
 
     /// <summary>
@@ -1469,7 +1484,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             summary.IsDeleted);
     }
 
-    internal static LoopRunSnapshot Map(CustomLoopRunRecord run)
+    internal static LoopRunSnapshot Map(CustomLoopRunRecord run, LoopRunModelUsageSnapshot? modelUsage = null)
     {
         return new LoopRunSnapshot(
             run.SchemaVersion,
@@ -1504,6 +1519,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         {
             Frontier = run.Frontier is null ? null : Map(run.Frontier),
             GovernedAdmissionRequestHash = run.SequentialAdapterBinding?.AdmissionRequestHash,
+            ModelRoutingAdmission = run.SequentialAdapterBinding?.AdmissionReceipt.Evidence.ModelRoutingAdmission,
+            ModelUsage = modelUsage,
             ConversationPublicationDispositions = LoopRunConversationPublicationDispositionProjector.Project(run)
         };
     }
@@ -1625,7 +1642,10 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             runEvent.ProviderResponseId,
             runEvent.ExitDecision?.ToString(),
             runEvent.ToolAuthority is null ? null : Map(runEvent.ToolAuthority),
-            runEvent.ToolEvidence is null ? null : Map(runEvent.ToolEvidence));
+            runEvent.ToolEvidence is null ? null : Map(runEvent.ToolEvidence))
+        {
+            ModelExecutionEvidence = runEvent.ModelExecutionEvidence,
+        };
     }
 
     private static LoopRunToolAuthoritySnapshot Map(CustomLoopToolAuthoritySnapshot authority)

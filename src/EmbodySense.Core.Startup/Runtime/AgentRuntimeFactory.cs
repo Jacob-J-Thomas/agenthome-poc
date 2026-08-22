@@ -22,6 +22,7 @@ using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.Wait;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.LocalWorkspace;
+using EmbodySense.Core.Application.Inference.Profiles;
 using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Common.Capabilities;
@@ -50,6 +51,7 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Inference;
+using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep;
@@ -77,6 +79,8 @@ public sealed class AgentRuntimeFactory
     private readonly CodexRuntimeStatus? _codexRuntimeStatus;
     private readonly ICapabilityCatalogTrustProvider _capabilityTrustProvider;
     private readonly IAgentRuntimeAuthenticatedWakeVerifier? _authenticatedWakeVerifier;
+    private readonly IGovernedModelPrimaryExecutionBoundaryObserver? _governedModelExecutionObserver;
+    private readonly IReadOnlyList<ModelProfileRuntimeProvider> _additionalModelProfileProviders;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="AgentRuntimeFactory"/> type.
@@ -125,11 +129,19 @@ public sealed class AgentRuntimeFactory
         IAgentToolApprovalPrompt approvalPrompt,
         string trustRootPath,
         CodexRuntimeStatus? codexRuntimeStatus = null,
-        IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver = null)
+        IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver = null,
+        IGovernedModelPrimaryExecutionBoundaryObserver? governedModelExecutionObserver = null,
+        IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         ArgumentException.ThrowIfNullOrWhiteSpace(trustRootPath);
-        return new AgentRuntimeFactory(new ToolApprovalPromptAdapter(approvalPrompt), conversationPublicationObserver, codexRuntimeStatus, new FileCapabilityCatalogTrustProvider(trustRootPath));
+        return new AgentRuntimeFactory(
+            new ToolApprovalPromptAdapter(approvalPrompt),
+            conversationPublicationObserver,
+            codexRuntimeStatus,
+            new FileCapabilityCatalogTrustProvider(trustRootPath),
+            governedModelExecutionObserver,
+            additionalModelProfileProviders);
     }
 
     /// <summary>Returns an equivalent factory that composes one explicit surface-owned authenticated-event verifier.</summary>
@@ -143,6 +155,8 @@ public sealed class AgentRuntimeFactory
             _conversationPublicationObserver,
             _codexRuntimeStatus,
             _capabilityTrustProvider,
+            _governedModelExecutionObserver,
+            _additionalModelProfileProviders,
             verifier);
     }
 
@@ -151,6 +165,8 @@ public sealed class AgentRuntimeFactory
         IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver = null,
         CodexRuntimeStatus? codexRuntimeStatus = null,
         ICapabilityCatalogTrustProvider? capabilityTrustProvider = null,
+        IGovernedModelPrimaryExecutionBoundaryObserver? governedModelExecutionObserver = null,
+        IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null,
         IAgentRuntimeAuthenticatedWakeVerifier? authenticatedWakeVerifier = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
@@ -169,6 +185,15 @@ public sealed class AgentRuntimeFactory
         _codexRuntimeStatus = codexRuntimeStatus;
         _capabilityTrustProvider = capabilityTrustProvider ?? FileCapabilityCatalogTrustProvider.CreateDefault();
         _authenticatedWakeVerifier = authenticatedWakeVerifier;
+        _governedModelExecutionObserver = governedModelExecutionObserver;
+        var additionalProviders = (additionalModelProfileProviders ?? [])
+            .Take(33)
+            .ToArray();
+        if (additionalProviders.Length > 31 || additionalProviders.Any(provider => provider is null))
+        {
+            throw new ArgumentException("Choose no more than thirty-one non-null additional model-profile providers.", nameof(additionalModelProfileProviders));
+        }
+        _additionalModelProfileProviders = Array.AsReadOnly(additionalProviders);
     }
 
     /// <summary>
@@ -314,6 +339,32 @@ public sealed class AgentRuntimeFactory
             var loopDefinitionStore = new LoopDefinitionStore(paths, capabilityAuthority);
             var defaultLoop = await loopDefinitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation, cancellationToken) ?? LoopDefinition.CreateDefaultConversation();
             var capabilityAdmission = CapabilityAdmissionFactory.Create(paths, _capabilityTrustProvider, capabilityAuthority);
+            var modelProfileRegistry = new EmbodySense.Core.Startup.Inference.Profiles.ConfiguredModelProfileRegistry(
+                effectiveOptions,
+                codexRuntimeStatus);
+            var modelProfileRuntime = ModelProfileRuntimeComposition.Create(
+                new ModelProfileRuntimeProvider(
+                    modelProfileRegistry,
+                    modelProfileRegistry,
+                    adapters => new ConfiguredModelProfileInferenceClientResolver(
+                        effectiveOptions,
+                        modelProfileRegistry,
+                        adapters)),
+                _additionalModelProfileProviders);
+            var modelProfileMetadata = modelProfileRuntime.MetadataSource;
+            var modelProfileAdapters = modelProfileRuntime.AdapterRegistry;
+            var modelProfileCapabilityCatalog = new CapabilityCatalogStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
+            var modelProfileCatalogFacade = new EmbodySense.Core.Startup.Inference.Profiles.ModelProfileCatalogFacade(
+                new EmbodySense.Core.Application.Inference.Profiles.ModelProfileCatalogService(
+                    modelProfileCapabilityCatalog,
+                    modelProfileMetadata,
+                    modelProfileAdapters),
+                modelProfileRegistry);
+            var modelRoutingAdmission = new EmbodySense.Core.Application.Inference.Profiles.GovernedModelRoutingAdmissionService(
+                modelProfileCapabilityCatalog,
+                modelProfileMetadata,
+                modelProfileRegistry,
+                modelProfileAdapters);
             var conversationTurnStore = new DefaultConversationTurnStore(paths);
             var defaultCapabilityRevalidator = new DefaultConversationCapabilityAuthorityRevalidator(conversationTurnStore, loopDefinitionStore, capabilityAdmission, capabilityAuthority);
             var toolBroker = new ToolBroker(paths, permissionService, _approvalPrompt, workspaceClient, auditLog, defaultLoop, new ToolResultRetentionStore(paths), actuationAuthorityBoundary: defaultCapabilityRevalidator);
@@ -412,6 +463,24 @@ public sealed class AgentRuntimeFactory
                 governedEffectAuthorityEvidence,
                 governedEffectAuthorityEvidence,
                 capabilityAuthority);
+            var governedModelUsageLedger = new EmbodySense.Core.Persistence.Inference.Profiles.GovernedModelUsageLedgerStore(
+                paths,
+                _capabilityTrustProvider,
+                authorityTransaction: capabilityAuthority);
+            var governedModelAttemptAdmission = new EmbodySense.Core.Application.Inference.Profiles.GovernedModelAttemptAdmissionService(
+                modelProfileCapabilityCatalog,
+                modelProfileMetadata,
+                modelProfileAdapters,
+                new EmbodySense.Core.Application.Inference.Profiles.ConservativeModelInferenceDataPostureSource(),
+                new EmbodySense.Core.Application.Inference.Profiles.CurrentGovernedModelAttemptAuthorityRevalidator(
+                    governedGrantResolver,
+                    capabilityAdmission),
+                governedModelUsageLedger);
+            var governedModelPrimaryExecution = new EmbodySense.Core.Application.Inference.Profiles.GovernedModelPrimaryExecutionService(
+                governedModelAttemptAdmission,
+                new EmbodySense.Core.Application.Inference.Profiles.GovernedModelUsageReconciliationService(governedModelUsageLedger),
+                modelProfileRuntime.ClientResolver,
+                _governedModelExecutionObserver);
             var governedPublicationAuthority = new GovernedLoopConversationPublicationAuthorityBoundaryProvider(
                 governedEffectAuthority);
             var governedToolAuthority = new GovernedLoopReadOnlyWorkspaceToolAdapter();
@@ -422,7 +491,8 @@ public sealed class AgentRuntimeFactory
                 customToolEvidence,
                 capabilityAdmission,
                 capabilityAuthorityTransaction: capabilityAuthority,
-                effectAuthorityBoundary: governedEffectAuthority);
+                effectAuthorityBoundary: governedEffectAuthority,
+                modelPrimaryExecution: governedModelPrimaryExecution);
             var governedWaitNodeRelay = new GovernedLoopWaitNodeExecutionRelay();
             var governedWaitContinuationRelay = new GovernedLoopWaitContinuationRelay();
             var governedWaitPosture = new GovernedLoopCanonicalWaitCurrentPostureAdapter(
@@ -458,6 +528,7 @@ public sealed class AgentRuntimeFactory
                 governedRoleSource,
                 governedGrantResolver,
                 capabilityAdmission,
+                modelRoutingAdmission,
                 capabilityAuthority,
                 new GovernedLoopAdmissionRunIdentityGenerator());
             var governedOrderedRuntime = new GovernedLoopSequentialOrderedRuntimeAdapter(
@@ -552,7 +623,8 @@ public sealed class AgentRuntimeFactory
                 graphCatalog,
                 graphAuthority,
                 capabilityAuthority,
-                new ContextualRoleCatalogFacade(paths.RootPath));
+                new ContextualRoleCatalogFacade(paths.RootPath),
+                modelProfileCatalogFacade);
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);
             var customLoops = new CustomLoopRuntimeFacade(
                 customDefinitionStore,
@@ -574,7 +646,9 @@ public sealed class AgentRuntimeFactory
                 runtimeSurface.Id,
                 actor,
                 defaultLoop.RoleId,
-                customModelSnapshot);
+                customModelSnapshot,
+                governedModelUsageLedger,
+                workspaceId);
             var scheduleDeliveryProvenance = new ScheduleStore(paths);
             var governedLoops = new GovernedLoopRuntimeFacade(
                 governedGraphStore,
@@ -604,6 +678,7 @@ public sealed class AgentRuntimeFactory
                 scheduleDeliveryProvenance,
                 operationalFacade,
                 graphAuthoringFacade,
+                modelProfileCatalogFacade,
                 defaultConversationReviews,
                 codexRuntimeStatus,
                 governedWaitRuntimeHost,
