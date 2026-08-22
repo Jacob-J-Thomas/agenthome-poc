@@ -4,7 +4,7 @@ namespace EmbodySense.Core.Startup.Tests.Verification;
 
 internal static class CoverageChildProcessAssembly
 {
-    private const string IsolatedAssemblyDirectoryVariable = "EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY";
+    internal const string IsolatedAssemblyDirectoryVariable = "EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY";
 
     internal static void AddVstestArguments(
         ProcessStartInfo startInfo,
@@ -56,7 +56,7 @@ internal static class CoverageChildProcessAssembly
         startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=" + fullyQualifiedTestName);
     }
 
-    internal static void AddCoordinationOnlyVstestArguments(
+    internal static void AddReportFreeVstestArguments(
         ProcessStartInfo startInfo,
         string currentAssemblyPath,
         string fullyQualifiedTestName)
@@ -73,9 +73,8 @@ internal static class CoverageChildProcessAssembly
         }
         else
         {
-            // This child only holds the cross-process workspace gate while the parent proves the
-            // production behavior. Reuse the verifier's immutable assembly without producing a
-            // redundant coverage report for the coordination process.
+            // This child already has authoritative parent-lane coverage. Reuse the immutable
+            // verifier assembly without redundant collection; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422.
             if (!Directory.Exists(isolatedDirectory))
             {
                 throw new DirectoryNotFoundException($"The immutable coverage child-process directory is unavailable: `{isolatedDirectory}`.");
