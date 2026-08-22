@@ -210,6 +210,165 @@ test("governed graph activation does not read a changed selection after catalog 
   assert.equal(app.elements.governedGraphId.value, "draft-while-loading");
 });
 
+test("an older governed graph 404 cannot clear a same-ID draft after a newer 404", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const olderRead = createDeferred();
+  let olderReadStarted;
+  let reads = 0;
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=same-id-draft",
+    async () => {
+      if (++reads === 1) {
+        olderReadStarted?.();
+        return await olderRead.promise;
+      }
+      return { status: 404, body: { detail: "Graph not found." } };
+    },
+  );
+  const started = new Promise((resolve) => {
+    olderReadStarted = resolve;
+  });
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = "same-id-draft";
+  await app.elements.governedGraphId.input();
+  const olderReading = app.elements.governedGraphLoadButton.click();
+  await started;
+  const statusReadsBeforeRefresh = server.calls.filter(
+    (call) => call.url === "/api/status",
+  ).length;
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+  assert.equal(reads, 2);
+  assert.equal(
+    server.calls.filter((call) => call.url === "/api/status").length,
+    statusReadsBeforeRefresh + 1,
+  );
+  assert.equal(
+    app.elements.governedGraphLifecycle.textContent,
+    "No graph loaded",
+  );
+  app.elements.governedGraphDisplayName.value = "New local draft";
+  await app.elements.governedGraphNewButton.click();
+  olderRead.resolve({
+    status: 404,
+    body: { detail: "Graph not found." },
+  });
+  await olderReading;
+
+  assert.equal(app.elements.governedGraphId.value, "same-id-draft");
+  assert.equal(
+    app.elements.governedGraphLifecycle.textContent,
+    "Local draft · not durable",
+  );
+  assert.match(
+    app.elements.governedGraphNotice.textContent,
+    /local draft created/i,
+  );
+  assert.equal(app.elements.governedGraphLoadButton.disabled, false);
+  assert.equal(app.elements.governedGraphNewButton.disabled, false);
+});
+
+test("an older governed graph success cannot replace a same-ID draft after a newer 404", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const olderRead = createDeferred();
+  let olderReadStarted;
+  let reads = 0;
+  const olderLifecycle = governedGraphLifecycle("published", 9);
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=same-id-draft",
+    async () => {
+      if (++reads === 1) {
+        olderReadStarted?.();
+        return await olderRead.promise;
+      }
+      return { status: 404, body: { detail: "Graph not found." } };
+    },
+  );
+  const started = new Promise((resolve) => {
+    olderReadStarted = resolve;
+  });
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = "same-id-draft";
+  await app.elements.governedGraphId.input();
+  const olderReading = app.elements.governedGraphLoadButton.click();
+  await started;
+  const statusReadsBeforeRefresh = server.calls.filter(
+    (call) => call.url === "/api/status",
+  ).length;
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+  assert.equal(reads, 2);
+  assert.equal(
+    server.calls.filter((call) => call.url === "/api/status").length,
+    statusReadsBeforeRefresh + 1,
+  );
+  app.elements.governedGraphDisplayName.value = "New local draft";
+  await app.elements.governedGraphNewButton.click();
+  olderRead.resolve({
+    status: 200,
+    body: governedGraphRead(
+      olderLifecycle,
+      governedGraphArtifact(olderLifecycle, "Older durable graph"),
+    ),
+  });
+  await olderReading;
+
+  assert.equal(app.elements.governedGraphId.value, "same-id-draft");
+  assert.equal(
+    app.elements.governedGraphLifecycle.textContent,
+    "Local draft · not durable",
+  );
+  assert.doesNotMatch(
+    app.elements.governedGraphInspector.textContent,
+    /Older durable graph/,
+  );
+  assert.match(
+    app.elements.governedGraphNotice.textContent,
+    /local draft created/i,
+  );
+  assert.equal(app.elements.governedGraphLoadButton.disabled, false);
+  assert.equal(app.elements.governedGraphNewButton.disabled, false);
+});
+
+test("the current governed graph 404 still renders the durable absence", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on("GET", "/api/governed-graphs/detail?graphId=missing-graph", () => ({
+    status: 404,
+    body: { detail: "Graph not found." },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = "missing-graph";
+  await app.elements.governedGraphId.input();
+  await app.elements.governedGraphLoadButton.click();
+
+  assert.equal(
+    app.elements.governedGraphLifecycle.textContent,
+    "No graph loaded",
+  );
+  assert.match(
+    app.elements.governedGraphNotice.textContent,
+    /no durable governed graph has this id/i,
+  );
+});
+
 test("governed graph workspace uses the server catalog and submits no caller-owned authority", async () => {
   const server = new FakeFetchServer(createCatalog());
   server.on("GET", "/api/governed-graphs/catalog", () => ({
