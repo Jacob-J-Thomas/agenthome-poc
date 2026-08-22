@@ -60,6 +60,8 @@ export function createGovernedGraphWorkspace({
   let selectionKey = null;
   let pendingMutationKey = null;
   let pendingMutation = null;
+  let graphReadGeneration = 0;
+  let activeGraphReadGeneration = null;
 
   bindEvents();
 
@@ -77,6 +79,7 @@ export function createGovernedGraphWorkspace({
         );
 
       clearLegacyUnscopedStorage();
+      invalidateGraphRead();
       storageScope = nextScope;
       selectionKey = `${selectionKeyPrefix}.${storageScope}`;
       pendingMutationKey = `${pendingMutationKeyPrefix}.${storageScope}`;
@@ -140,7 +143,10 @@ export function createGovernedGraphWorkspace({
     elements.publishButton.addEventListener("click", publishDraft);
     elements.disableButton.addEventListener("click", disablePublication);
     elements.archiveButton.addEventListener("click", archivePublication);
-    elements.graphId.addEventListener("input", render);
+    elements.graphId.addEventListener("input", () => {
+      invalidateGraphRead();
+      render();
+    });
     elements.revisionId.addEventListener("input", updateIdentity);
     elements.displayName.addEventListener("input", updateIdentity);
     elements.purpose.addEventListener("input", updateIdentity);
@@ -184,6 +190,7 @@ export function createGovernedGraphWorkspace({
       role,
       displayName: elements.displayName.value.trim(),
     });
+    invalidateGraphRead();
     aggregate = null;
     selectedNodeId = null;
     errors = clientShapeErrors(graph);
@@ -215,13 +222,15 @@ export function createGovernedGraphWorkspace({
       )
     )
       return;
-    inFlight = true;
+    const readGeneration = beginGraphRead();
     if (!silent) outcome = "Reading immutable graph history…";
     render();
     try {
       const read = await requestJson(
         `/api/governed-graphs/detail?graphId=${encodeURIComponent(graphId)}`,
       );
+      if (!ownsGraphRead(readGeneration, graphId)) return;
+      // Issue #491: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/491 — only the current detail request may replace locally owned graph state.
       aggregate = read;
       graph = candidateFromGraph(currentGraph(read));
       selectedNodeId = graph?.nodes?.[0]?.id ?? null;
@@ -231,6 +240,7 @@ export function createGovernedGraphWorkspace({
       syncFieldsFromGraph();
       rememberSelection();
     } catch (error) {
+      if (!ownsGraphRead(readGeneration, graphId)) return;
       aggregate = null;
       graph = null;
       selectedNodeId = null;
@@ -240,8 +250,11 @@ export function createGovernedGraphWorkspace({
           ? "No durable governed graph has this ID. Start a new local draft to create it."
           : `Graph read unavailable: ${error.message}`;
     } finally {
-      inFlight = false;
-      render();
+      if (activeGraphReadGeneration === readGeneration) {
+        activeGraphReadGeneration = null;
+        inFlight = false;
+        render();
+      }
     }
   }
 
@@ -331,6 +344,7 @@ export function createGovernedGraphWorkspace({
       return;
     }
     pendingMutation = input;
+    invalidateGraphRead();
     inFlight = true;
     outcome = "Submitting exact graph and optimistic lifecycle evidence…";
     errors = [];
@@ -402,6 +416,7 @@ export function createGovernedGraphWorkspace({
     );
     if (!next) return;
     graph = next;
+    invalidateGraphRead();
     selectedNodeId = nodeId;
     dirty = true;
     errors = [];
@@ -414,6 +429,7 @@ export function createGovernedGraphWorkspace({
     const next = removeGraphNode(graph, selectedNodeId);
     if (!next) return;
     graph = next;
+    invalidateGraphRead();
     selectedNodeId = graph.nodes[0]?.id ?? null;
     dirty = true;
     errors = [];
@@ -435,6 +451,7 @@ export function createGovernedGraphWorkspace({
       return;
     }
     graph = next;
+    invalidateGraphRead();
     dirty = true;
     outcome = `Control connector ${from} → ${to} added; server validation remains authoritative.`;
     render();
@@ -453,6 +470,7 @@ export function createGovernedGraphWorkspace({
       return;
     }
     graph = next;
+    invalidateGraphRead();
     dirty = true;
     outcome = `${humanize(binding.kind)} binding ${from}.${binding.fromPortId} → ${to}.${binding.toPortId} added.`;
     render();
@@ -478,6 +496,7 @@ export function createGovernedGraphWorkspace({
         description: elements.purpose.value.trim(),
       },
     };
+    invalidateGraphRead();
     dirty = true;
     renderStatusOnly();
   }
@@ -784,6 +803,7 @@ export function createGovernedGraphWorkspace({
       );
       if (!next) return;
       graph = next;
+      invalidateGraphRead();
       dirty = true;
       outcome =
         "Layout metadata moved without changing executable node or connector content.";
@@ -837,6 +857,7 @@ export function createGovernedGraphWorkspace({
       );
       if (!next) return;
       graph = next;
+      invalidateGraphRead();
       dirty = true;
       errors = [];
       renderStatusOnly();
@@ -920,6 +941,7 @@ export function createGovernedGraphWorkspace({
   }
 
   function restorePendingCandidate() {
+    invalidateGraphRead();
     elements.graphId.value = pendingMutation.graphId;
     graph = pendingMutation.graphCandidate
       ? structuredClone(pendingMutation.graphCandidate)
@@ -991,6 +1013,27 @@ export function createGovernedGraphWorkspace({
     } catch {
       // Legacy schema-1 convenience data is never migrated into a trusted workspace scope.
     }
+  }
+
+  function beginGraphRead() {
+    activeGraphReadGeneration = ++graphReadGeneration;
+    inFlight = true;
+    return activeGraphReadGeneration;
+  }
+
+  function ownsGraphRead(readGeneration, graphId) {
+    return (
+      activeGraphReadGeneration === readGeneration &&
+      elements.graphId.value.trim() === graphId &&
+      !pendingMutation
+    );
+  }
+
+  function invalidateGraphRead() {
+    graphReadGeneration++;
+    if (activeGraphReadGeneration === null) return;
+    activeGraphReadGeneration = null;
+    inFlight = false;
   }
 }
 
