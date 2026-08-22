@@ -55,6 +55,23 @@ function Invoke-ExpectedFailure {
     Assert-Contains -Actual $failureMessage -Expected $ExpectedMessage -Message "Failure diagnostic mismatch."
 }
 
+function Get-CoverageFailureMessage {
+    param([scriptblock]$Action)
+
+    $completed = $false
+    $failureMessage = $null
+    try {
+        & $Action | Out-Null
+        $completed = $true
+    }
+    catch {
+        $failureMessage = $_.Exception.Message
+    }
+
+    if ($completed) { throw "Expected the coverage action to fail, but it completed successfully." }
+    return $failureMessage
+}
+
 $noOpWasRejected = $false
 try { Invoke-ExpectedFailure -ExpectedMessage "never emitted" -Action { } } catch { $noOpWasRejected = $_.Exception.Message -ceq "Expected the action to fail, but it completed successfully." }
 Assert-True -Condition $noOpWasRejected -Message "The negative-test helper must reject a successful action instead of catching its own sentinel."
@@ -614,6 +631,108 @@ try {
     $singleWorkerEvidence = [ordered]@{ snapshots = @($singleWorkerReduction.Snapshots | ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.Sha256)" }); packages = @($singleWorkerReduction.Packages); lines = @($singleWorkerReduction.Lines) } | ConvertTo-Json -Depth 5 -Compress
     $twoWorkerEvidence = [ordered]@{ snapshots = @($twoWorkerReduction.Snapshots | ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.Sha256)" }); packages = @($twoWorkerReduction.Packages); lines = @($twoWorkerReduction.Lines) } | ConvertTo-Json -Depth 5 -Compress
     Assert-True -Condition ($singleWorkerEvidence -ceq $twoWorkerEvidence) -Message "One- and two-worker authenticated reductions must be deterministic and equivalent."
+
+    $complexRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "complex-parity"
+    $complexResultsRoot = Join-Path $complexRepository "tests\Fixture.Tests\TestResults"
+    for ($reportIndex = 0; $reportIndex -lt 4; $reportIndex++) {
+        $oneHits = switch ($reportIndex) {
+            0 { @(1, 0, 1, 1, 1, 1, 1, 1, 1, 0) }
+            1 { @(3, 2, 1, 1, 1, 1, 1, 1, 1, 0) }
+            2 { @(2, 1, 1, 1, 1, 1, 1, 1, 1, 0) }
+            default { @(0, 0, 1, 1, 1, 1, 1, 1, 1, 0) }
+        }
+        $twoHits = switch ($reportIndex) {
+            0 { @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0) }
+            1 { @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0) }
+            2 { @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0) }
+            default { @(0, 0, 1, 1, 1, 1, 1, 1, 1, 0) }
+        }
+        $oneLineList = [Collections.Generic.List[string]]::new()
+        $twoLineList = [Collections.Generic.List[string]]::new()
+        for ($lineNumber = 1; $lineNumber -le 10; $lineNumber++) {
+            $oneLineList.Add("<line number=`"$lineNumber`" hits=`"$($oneHits[$lineNumber - 1])`" />")
+            $twoLineList.Add("<line number=`"$lineNumber`" hits=`"$($twoHits[$lineNumber - 1])`" />")
+        }
+        $oneLines = $oneLineList -join ""
+        $twoLines = $twoLineList -join ""
+        $complexXml = @"
+<?xml version="1.0" encoding="utf-8"?>
+<coverage>
+  <metadata><nested><package name="Fixture.One"><classes><class filename="src/Fixture.One/Nested.cs"><lines><line number="999" hits="999" /></lines></class></classes></package></nested></metadata>
+  <packages>
+    <package name="Ignored.Package"><classes><class filename="src/Ignored/Nope.cs"><lines><line number="1" hits="999" /></lines></class></classes></package>
+    <package name="Fixture.One"><classes>
+      <class name="Empty.One" filename="src/Fixture.One/Empty.cs"><lines /></class>
+      <class name="Primary.One" filename="src/Fixture.One/One.cs"><lines>$oneLines<nested><line number="999" hits="999" /></nested></lines></class>
+    </classes></package>
+    <other><package name="Fixture.Two"><classes><class filename="src/Fixture.Two/Ignored.cs"><lines><line number="999" hits="999" /></lines></class></classes></package></other>
+    <package name="Fixture.Two"><classes>
+      <class name="Empty.Two" filename="src/Fixture.Two/Empty.cs" />
+      <class name="Primary.Two" filename="src/Fixture.Two/Two.cs"><lines>$twoLines</lines></class>
+    </classes></package>
+  </packages>
+</coverage>
+"@
+        $complexReportDirectory = Join-Path $complexResultsRoot ("complex-{0}" -f $reportIndex)
+        New-Item -ItemType Directory -Path $complexReportDirectory -Force | Out-Null
+        $complexReportPath = Join-Path $complexReportDirectory "coverage.cobertura.xml"
+        [IO.File]::WriteAllText($complexReportPath, $complexXml, [Text.UTF8Encoding]::new($false))
+        [IO.File]::SetLastWriteTimeUtc($complexReportPath, $freshWriteTimeUtc)
+    }
+
+    $complexSourceProjects = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    foreach ($packageName in @("Fixture.One", "Fixture.Two")) { $complexSourceProjects.Add($packageName, (Join-Path $complexRepository "src\$packageName")) }
+    $complexFiles = @(Get-ChildItem -LiteralPath $complexResultsRoot -Recurse -Filter "coverage.cobertura.xml" -File | Sort-Object FullName)
+    $complexItems = @($complexFiles | ForEach-Object { [pscustomobject]@{ Path = $_.FullName; Root = $complexResultsRoot; Description = "Complex coverage parity report"; Reduce = $true } })
+    $complexSerial = Invoke-VerificationCoverageWorkers -WorkItems $complexItems -RepositoryRoot $complexRepository -SourceProjectDirectories $complexSourceProjects -MaximumWorkers 1
+    $complexParallel = Invoke-VerificationCoverageWorkers -WorkItems $complexItems -RepositoryRoot $complexRepository -SourceProjectDirectories $complexSourceProjects -MaximumWorkers 2
+    $complexSerialEvidence = [ordered]@{ snapshots = @($complexSerial.Snapshots | ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.Sha256)" }); packages = @($complexSerial.Packages); lines = @($complexSerial.Lines) } | ConvertTo-Json -Depth 5 -Compress
+    $complexParallelEvidence = [ordered]@{ snapshots = @($complexParallel.Snapshots | ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.Sha256)" }); packages = @($complexParallel.Packages); lines = @($complexParallel.Lines) } | ConvertTo-Json -Depth 5 -Compress
+    Assert-True -Condition ($complexSerialEvidence -ceq $complexParallelEvidence) -Message "Complex one- and two-worker reductions must produce byte-identical evidence."
+    Assert-True -Condition (@($complexSerial.Packages).Count -eq 2) -Message "Nested and ignored packages must not enter the observed package set."
+    $complexOneLines = @($complexSerial.Lines | Where-Object { $_.Package -ceq "Fixture.One" -and $_.File.EndsWith("ONE.CS", [StringComparison]::Ordinal) })
+    Assert-True -Condition ($complexOneLines.Count -eq 10) -Message "Empty classes and nested irrelevant lines must not alter direct executable lines."
+    Assert-True -Condition ((@($complexOneLines | Where-Object { $_.Line -eq 1 })[0].Hits -eq 3) -and (@($complexOneLines | Where-Object { $_.Line -eq 2 })[0].Hits -eq 2)) -Message "Duplicate file/line entries must merge by maximum hits."
+    Assert-True -Condition (@($complexSerial.Lines | Where-Object { $_.Line -eq 999 }).Count -eq 0) -Message "Nested irrelevant line elements must be ignored."
+
+    $complexSerialSummaryPath = Join-Path $complexRepository "coverage-summary-serial.json"
+    $complexParallelSummaryPath = Join-Path $complexRepository "coverage-summary-parallel.json"
+    $complexSerialSummaryResult = Invoke-CoverageVerification -RepositoryRoot $complexRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ReportPath $complexSerialSummaryPath -MaximumCoverageWorkers 1
+    $complexParallelSummaryResult = Invoke-CoverageVerification -RepositoryRoot $complexRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ReportPath $complexParallelSummaryPath -MaximumCoverageWorkers 2
+    Assert-True -Condition ($complexSerialSummaryResult.ExitCode -eq 0 -and $complexParallelSummaryResult.ExitCode -eq 0) -Message "Complex serial and parallel summary verification must pass."
+    $complexSerialSummary = Get-Content -LiteralPath $complexSerialSummaryPath -Raw
+    $complexParallelSummary = Get-Content -LiteralPath $complexParallelSummaryPath -Raw
+    Assert-True -Condition ($complexSerialSummary -ceq $complexParallelSummary) -Message "Serial and parallel coverage summaries must be byte-identical."
+    Assert-Contains -Actual $complexSerialSummaryResult.Output -Expected "VERIFY_COVERAGE_REPORT reports=4 packages=2" -Message "Complex summary output must retain exact report and package counts."
+
+    foreach ($failureCase in @(
+        [pscustomobject]@{ Name = "malformed"; Xml = "<coverage><packages>"; Expected = "malformed XML" },
+        [pscustomobject]@{ Name = "invalid-root"; Xml = "<notCoverage />"; Expected = "invalid document root" },
+        [pscustomobject]@{ Name = "invalid-number"; Xml = "<coverage><packages><package name=`"Fixture.One`"><classes><class filename=`"src/Fixture.One/File.cs`"><lines><line number=`"not-a-number`" hits=`"1`" /></lines></class></classes></package></packages></coverage>"; Expected = "not-a-number" }
+    )) {
+        $failureRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name ("fail-closed-{0}" -f $failureCase.Name)
+        $failureResultsRoot = Join-Path $failureRepository "tests\Fixture.Tests\TestResults"
+        for ($failureIndex = 0; $failureIndex -lt 4; $failureIndex++) {
+            $failureDirectory = Join-Path $failureResultsRoot ("failure-{0}" -f $failureIndex)
+            New-Item -ItemType Directory -Path $failureDirectory -Force | Out-Null
+            $failurePath = Join-Path $failureDirectory "coverage.cobertura.xml"
+            [IO.File]::WriteAllText($failurePath, $failureCase.Xml, [Text.UTF8Encoding]::new($false))
+            [IO.File]::SetLastWriteTimeUtc($failurePath, $freshWriteTimeUtc)
+        }
+        $failureSourceProjects = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+        foreach ($packageName in @("Fixture.One", "Fixture.Two")) { $failureSourceProjects.Add($packageName, (Join-Path $failureRepository "src\$packageName")) }
+        $failureFiles = @(Get-ChildItem -LiteralPath $failureResultsRoot -Recurse -Filter "coverage.cobertura.xml" -File | Sort-Object FullName)
+        $failureItems = @($failureFiles | ForEach-Object { [pscustomobject]@{ Path = $_.FullName; Root = $failureResultsRoot; Description = "Fail-closed coverage report"; Reduce = $true } })
+        $serialFailure = Get-CoverageFailureMessage -Action { Invoke-VerificationCoverageWorkers -WorkItems $failureItems -RepositoryRoot $failureRepository -SourceProjectDirectories $failureSourceProjects -MaximumWorkers 1 }
+        $parallelFailure = Get-CoverageFailureMessage -Action { Invoke-VerificationCoverageWorkers -WorkItems $failureItems -RepositoryRoot $failureRepository -SourceProjectDirectories $failureSourceProjects -MaximumWorkers 2 }
+        Assert-Contains -Actual $serialFailure -Expected $failureCase.Expected -Message "$($failureCase.Name) serial failure classification must be preserved."
+        Assert-Contains -Actual $parallelFailure -Expected $failureCase.Expected -Message "$($failureCase.Name) parallel failure classification must be preserved."
+        if ($failureCase.Name -eq "invalid-number") {
+            Assert-NotContains -Actual $serialFailure -Unexpected "malformed XML" -Message "Serial invalid numeric attributes must retain their legacy non-malformed classification."
+            Assert-NotContains -Actual $parallelFailure -Unexpected "malformed XML" -Message "Parallel invalid numeric attributes must retain their legacy non-malformed classification."
+        }
+    }
+
     Invoke-ExpectedFailure -ExpectedMessage "MaximumWorkers" -Action {
         Invoke-VerificationCoverageWorkers -WorkItems $parallelItems -RepositoryRoot $passingRepository -SourceProjectDirectories $parallelSourceProjects -MaximumWorkers 3
     }

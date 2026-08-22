@@ -1333,7 +1333,9 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+        // Exact Windows evidence proved these five ownership workers add no lines beyond the parent
+        // lane, so they omit duplicate child coverage; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422.
+        Verification.CoverageChildProcessAssembly.AddCoordinationOnlyVstestArguments(
             startInfo,
             typeof(GovernedLoopCoordinatorEvidenceStoreTests).Assembly.Location,
             "EmbodySense.Core.Persistence.Tests.Loops.Execution.Sleep.GovernedLoopCoordinatorEvidenceStoreTests.Cross_process_coordinator_store_host");
