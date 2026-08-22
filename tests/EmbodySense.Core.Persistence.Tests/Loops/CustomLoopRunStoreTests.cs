@@ -975,7 +975,8 @@ public sealed class CustomLoopRunStoreTests
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
         var pendingPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending");
 
-        using (var restrictiveReader = new WindowsFileLock(indexPath, workspace.RootPath))
+        // Permit discovery reads while withholding the sharing required to replace the derived index.
+        using (var restrictiveReader = WindowsFileLock.OpenRestrictiveReader(indexPath, workspace.RootPath))
         {
             var replacementWindow = Stopwatch.StartNew();
             var result = await store.CreateAsync(CreateRun("loop-derived-index", "run-derived-index", "invoke-derived-index")).WaitAsync(TimeSpan.FromSeconds(4));

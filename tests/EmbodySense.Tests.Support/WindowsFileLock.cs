@@ -13,6 +13,13 @@ public sealed class WindowsFileLock : IDisposable
     private int _disposed;
 
     public WindowsFileLock(string path, string? coordinationDirectory = null)
+        : this(path, coordinationDirectory, "lock")
+    {
+    }
+
+    public static WindowsFileLock OpenRestrictiveReader(string path, string? coordinationDirectory = null) => new(path, coordinationDirectory, "read");
+
+    private WindowsFileLock(string path, string? coordinationDirectory, string mode)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -28,10 +35,12 @@ public sealed class WindowsFileLock : IDisposable
         _releasePath = Path.Combine(directory, $".{suffix}.release");
         _scriptPath = Path.Combine(directory, $".{suffix}.ps1");
         File.WriteAllText(_scriptPath, """
-            param([string]$lockPath, [string]$readyPath, [string]$releasePath)
-            $stream = [System.IO.FileStream]::new($lockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+            param([string]$lockPath, [string]$readyPath, [string]$releasePath, [string]$mode)
+            $access = if ($mode -eq 'read') { [System.IO.FileAccess]::Read } else { [System.IO.FileAccess]::ReadWrite }
+            $fileMode = if ($mode -eq 'read') { [System.IO.FileMode]::Open } else { [System.IO.FileMode]::OpenOrCreate }
+            $stream = [System.IO.FileStream]::new($lockPath, $fileMode, $access, [System.IO.FileShare]::Read)
             try {
-                $stream.Lock(0, 1)
+                if ($mode -eq 'lock') { $stream.Lock(0, 1) }
                 [System.IO.File]::WriteAllText($readyPath, 'ready')
                 while (-not [System.IO.File]::Exists($releasePath)) { Start-Sleep -Milliseconds 10 }
             }
@@ -54,6 +63,7 @@ public sealed class WindowsFileLock : IDisposable
         start.ArgumentList.Add(path);
         start.ArgumentList.Add(_readyPath);
         start.ArgumentList.Add(_releasePath);
+        start.ArgumentList.Add(mode);
         _process = Process.Start(start) ?? throw new IOException("The test fixture could not start the external workspace-host process.");
         WaitForReady();
     }
