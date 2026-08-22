@@ -51,6 +51,7 @@ public sealed class CustomLoopRunStore :
     private const string ScheduleAdmissionRetirementFileName = ".schedule-admission-retirements.json";
     private const int MaximumScheduleAdmissionInterruptedWriteArtifacts = 32;
     private const int MaximumAtomicMoveAttempts = 41;
+    private const int MaximumArtifactReadReconciliationAttempts = 3;
     private static readonly byte[] _discoveryIndexPendingContent = "pending\n"u8.ToArray();
     private static readonly TimeSpan _atomicMoveRetryDelay = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan _discoveryIndexMaintenanceTimeout = TimeSpan.FromSeconds(30);
@@ -76,6 +77,7 @@ public sealed class CustomLoopRunStore :
     private readonly SemaphoreSlim _processMutationGate;
     private readonly TimeProvider _timeProvider;
     private readonly Func<string, FileSystemWatcher> _monitorWatcherFactory;
+    private readonly Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask>? _artifactReadObserver;
     private readonly object _monitorCacheGate = new();
     private readonly Dictionary<string, long> _monitorArtifactChangeVersions;
     private readonly HashSet<string> _monitorArtifactPaths;
@@ -94,7 +96,24 @@ public sealed class CustomLoopRunStore :
     /// </summary>
     /// <param name="paths">The paths.</param>
     /// <param name="timeProvider">The time provider.</param>
-    public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider = null) : this(paths, timeProvider, static path => new FileSystemWatcher(path))
+    public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider = null) : this(paths, timeProvider, static path => new FileSystemWatcher(path), artifactReadObserver: null)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopRunStore"/> type with an artifact-read lifecycle observer.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="timeProvider">The time provider.</param>
+    /// <param name="artifactReadObserver">
+    /// The non-null observer awaited at each <see cref="CustomLoopRunReadBoundary"/> for a canonical run artifact.
+    /// Each callback is awaited before opening or while the real artifact handle is open, and may run while a
+    /// mutation-held caller retains its synchronization lease; it must not re-enter this store because re-entry can
+    /// deadlock. The cancellation token supplied to the read is forwarded, and observer cancellation or exceptions
+    /// propagate and abort the read.
+    /// Pass the normal two-parameter constructor when no observer is required.
+    /// </param>
+    public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider, Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> artifactReadObserver) : this(paths, timeProvider, static path => new FileSystemWatcher(path), artifactReadObserver ?? throw new ArgumentNullException(nameof(artifactReadObserver)))
     {
     }
 
@@ -107,7 +126,7 @@ public sealed class CustomLoopRunStore :
     {
     }
 
-    private CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider, Func<string, FileSystemWatcher> monitorWatcherFactory)
+    private CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider, Func<string, FileSystemWatcher> monitorWatcherFactory, Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask>? artifactReadObserver = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(monitorWatcherFactory);
@@ -128,6 +147,7 @@ public sealed class CustomLoopRunStore :
         _processMutationGate = _processMutationGates.GetOrAdd(_runsRoot, _ => new SemaphoreSlim(1, 1));
         _timeProvider = timeProvider ?? TimeProvider.System;
         _monitorWatcherFactory = monitorWatcherFactory;
+        _artifactReadObserver = artifactReadObserver;
         _monitorArtifactChangeVersions = new Dictionary<string, long>(PathComparer);
         _monitorArtifactPaths = new HashSet<string>(PathComparer);
     }
@@ -911,20 +931,8 @@ public sealed class CustomLoopRunStore :
     public async Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default)
     {
         var safeRunId = CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
-        var locations = EnumerateArtifactLocations();
-        var matches = locations.Where(location => string.Equals(location.RunId, safeRunId, StringComparison.Ordinal)).ToArray();
-        if (matches.Length > 1)
-        {
-            throw new FormatException($"Custom loop run id `{safeRunId}` exists in more than one loop directory. The persisted state requires review.");
-        }
-
-        if (matches.Length == 0)
-        {
-            return null;
-        }
-
-        var artifact = await ReadArtifactAsync(matches[0], cancellationToken);
-        return artifact.Run;
+        var artifact = await ReadArtifactByRunIdAsync(safeRunId, cancellationToken);
+        return artifact?.Run;
     }
 
     /// <summary>Resolves one exact retained terminal sequential-node receipt from the authoritative run artifacts.</summary>
@@ -2717,7 +2725,24 @@ public sealed class CustomLoopRunStore :
     private async Task<RunArtifact> ReadArtifactAsync(RunArtifactLocation location, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(location.Path, mustExist: true);
-        await using var stream = new FileStream(location.Path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (_artifactReadObserver is not null)
+        {
+            await _artifactReadObserver(CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen, location.Path, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Repository-owned writers are fenced and atomically replace sibling staging files. Direct in-place external
+        // writers require separate stable-snapshot hardening; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/490.
+        await using var stream = OpenSharedArtifactReadStream(location.Path);
+        if (_artifactReadObserver is not null)
+        {
+            await _artifactReadObserver(CustomLoopRunReadBoundary.AfterCanonicalArtifactReadOpen, location.Path, cancellationToken).ConfigureAwait(false);
+        }
+
+        return await ReadArtifactContentAsync(location, stream, cancellationToken);
+    }
+
+    private async Task<RunArtifact> ReadArtifactContentAsync(RunArtifactLocation location, FileStream stream, CancellationToken cancellationToken)
+    {
         if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
             throw new FormatException($"Custom loop run `{location.Path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
@@ -2793,19 +2818,94 @@ public sealed class CustomLoopRunStore :
 
     private async Task<RunArtifact?> ReadArtifactByRunIdAsync(string runId, CancellationToken cancellationToken)
     {
-        var matches = EnumerateArtifactLocations().Where(location => string.Equals(location.RunId, runId, StringComparison.Ordinal)).ToArray();
-        if (matches.Length > 1)
+        string? lastPath = null;
+        for (var attempt = 0; attempt < MaximumArtifactReadReconciliationAttempts; attempt++)
         {
-            throw new FormatException($"Custom loop run id `{runId}` exists in more than one loop directory. The persisted state requires review.");
+            RunArtifactLocation location;
+            try
+            {
+                var matches = EnumerateArtifactLocations().Where(location => string.Equals(location.RunId, runId, StringComparison.Ordinal)).ToArray();
+                if (matches.Length > 1)
+                {
+                    throw new FormatException($"Custom loop run id `{runId}` exists in more than one loop directory. The persisted state requires review.");
+                }
+
+                if (matches.Length == 0)
+                {
+                    if (attempt == 0)
+                    {
+                        return null;
+                    }
+
+                    await ReconcileArtifactReadMissAsync(lastPath, cancellationToken);
+                    if (attempt + 1 < MaximumArtifactReadReconciliationAttempts)
+                    {
+                        continue;
+                    }
+
+                    return null;
+                }
+
+                location = matches[0];
+                lastPath = location.Path;
+                EnsureSafeArtifactPath(location.Path, mustExist: true);
+            }
+            catch (FileNotFoundException) when (attempt + 1 < MaximumArtifactReadReconciliationAttempts)
+            {
+                await ReconcileArtifactReadMissAsync(lastPath, cancellationToken);
+                continue;
+            }
+            catch (DirectoryNotFoundException) when (attempt + 1 < MaximumArtifactReadReconciliationAttempts)
+            {
+                await ReconcileArtifactReadMissAsync(lastPath, cancellationToken);
+                continue;
+            }
+
+            await ObserveArtifactReadBoundaryAsync(CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen, location.Path, cancellationToken);
+            FileStream stream;
+            try
+            {
+                stream = OpenSharedArtifactReadStream(location.Path);
+            }
+            catch (FileNotFoundException) when (attempt + 1 < MaximumArtifactReadReconciliationAttempts)
+            {
+                await ReconcileArtifactReadMissAsync(lastPath, cancellationToken);
+                continue;
+            }
+            catch (DirectoryNotFoundException) when (attempt + 1 < MaximumArtifactReadReconciliationAttempts)
+            {
+                await ReconcileArtifactReadMissAsync(lastPath, cancellationToken);
+                continue;
+            }
+
+            await using (stream)
+            {
+                await ObserveArtifactReadBoundaryAsync(CustomLoopRunReadBoundary.AfterCanonicalArtifactReadOpen, location.Path, cancellationToken);
+                return await ReadArtifactContentAsync(location, stream, cancellationToken);
+            }
         }
 
-        return matches.Length == 0 ? null : await ReadArtifactAsync(matches[0], cancellationToken);
+        return null;
+    }
+
+    private async ValueTask ReconcileArtifactReadMissAsync(string? path, CancellationToken cancellationToken)
+    {
+        await ObserveArtifactReadBoundaryAsync(CustomLoopRunReadBoundary.AfterCanonicalArtifactReadMiss, path, cancellationToken);
+        await Task.Delay(_atomicMoveRetryDelay, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask ObserveArtifactReadBoundaryAsync(CustomLoopRunReadBoundary boundary, string? path, CancellationToken cancellationToken)
+    {
+        if (_artifactReadObserver is not null && path is not null)
+        {
+            await _artifactReadObserver(boundary, path, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private async Task<byte[]> ReadBoundedArtifactAsync(string path, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(path, mustExist: true);
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = OpenSharedArtifactReadStream(path);
         if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
             throw new FormatException($"Custom loop run `{path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
@@ -2819,7 +2919,7 @@ public sealed class CustomLoopRunStore :
     private async Task<string> ComputeBoundedArtifactHashAsync(string path, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(path, mustExist: true);
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = OpenSharedArtifactReadStream(path);
         if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
             throw new FormatException($"Custom loop run `{path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
@@ -2838,6 +2938,11 @@ public sealed class CustomLoopRunStore :
         }
 
         return content;
+    }
+
+    private static FileStream OpenSharedArtifactReadStream(string path)
+    {
+        return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
     }
 
     private static void ValidateReservedTraceCapacity(CustomLoopRunRecord current, CustomLoopRunRecord candidate, long currentUtf8Bytes, long candidateUtf8Bytes)
@@ -3463,7 +3568,7 @@ public sealed class CustomLoopRunStore :
     private async Task<byte[]> ReadBoundedJsonArtifactAsync(string root, string path, int maximumBytes, string label, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(root, path, mustExist: true);
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = OpenSharedArtifactReadStream(path);
         if (stream.Length <= 0 || stream.Length > maximumBytes)
         {
             throw new FormatException($"{label} `{path}` must contain between 1 and {maximumBytes} UTF-8 bytes.");
@@ -3558,7 +3663,7 @@ public sealed class CustomLoopRunStore :
             {
                 if (overwrite && File.Exists(destinationPath))
                 {
-                    // #475: bounded readers release Read|Delete handles before consumer continuations; replacement stays atomic without in-place write sharing.
+                    // #475: bounded readers share the destination with the fenced writer; replacement stays atomic because the writer publishes a sibling staging file.
                     File.Replace(sourcePath, destinationPath, destinationBackupFileName: null);
                 }
                 else
