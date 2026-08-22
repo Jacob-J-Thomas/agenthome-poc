@@ -145,6 +145,51 @@ public sealed class ConfiguredModelProfileRegistryTests
     }
 
     [Fact]
+    public async Task Catalog_facade_projects_one_ready_profile_and_authoritatively_previews_exact_and_inherited_routing()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var executable = workspace.File("codex-runtime-ready-catalog");
+        await File.WriteAllTextAsync(executable, "ready catalog runtime content");
+        var registry = Registry(workspace, executable, "codex-cli ready catalog");
+        var metadataRead = await registry.ReadAsync(ProfileId());
+        var metadata = Assert.IsType<GovernedModelProfileMetadata>(metadataRead.Metadata);
+        var registryRevisionHash = new string('7', 64);
+        var service = new ModelProfileCatalogService(
+            new CapabilityCatalogStore(new WorkspacePaths(workspace.RootPath), new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath)),
+            registry,
+            new FixedAdapterRegistry(new ModelProfileAdapterPosture(ModelProfileAdapterPostureStatus.Ready, metadata.ContentHash, registryRevisionHash)));
+        var facade = new ModelProfileCatalogFacade(service, registry);
+
+        var catalog = await facade.ReadAsync(null, 50);
+
+        Assert.Equal("available", catalog.Status);
+        Assert.Equal(ProfileId().Value, catalog.DefaultProfileId);
+        var profile = Assert.Single(catalog.Profiles);
+        Assert.Equal("ready", profile.AvailabilityReason);
+        Assert.NotNull(profile.ExactProfilePin);
+        Assert.NotNull(profile.RecommendedExactPolicy);
+
+        var exactPolicy = ExactPolicy(metadata);
+        var exact = await facade.PreviewAsync(new ModelProfileRoutingPreviewInput(exactPolicy, "default", "provider-inference", ["sensitive"]));
+        Assert.Equal("eligible", exact.Status);
+        Assert.Equal(exactPolicy.ContentHash, exact.PolicyHash);
+        Assert.Equal(ProfileId().Value, exact.Primary?.Capability.DescriptorIdentity.Id.Value);
+        Assert.Empty(exact.Fallbacks);
+
+        var inheritedPolicy = GovernedModelRoutingPolicy.Create(
+            1,
+            GovernedModelRoutingSelector.Inherit([ProfileId()]),
+            [],
+            exactPolicy.Requirements);
+        var inherited = await facade.PreviewAsync(new ModelProfileRoutingPreviewInput(inheritedPolicy, "default", "provider-inference", ["sensitive"]));
+
+        Assert.Equal("eligible", inherited.Status);
+        Assert.Equal(ProfileId().Value, inherited.ResolvedDefaultProfileId);
+        Assert.Equal(ProfileId().Value, inherited.Primary?.Capability.DescriptorIdentity.Id.Value);
+    }
+
+    [Fact]
     public async Task Composite_sources_support_multiple_distinct_adapters_but_fail_closed_on_duplicate_ownership()
     {
         using var workspace = new TestWorkspace();
