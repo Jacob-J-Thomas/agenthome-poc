@@ -19,6 +19,7 @@ using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Diagnostics;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
@@ -5381,6 +5382,32 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal("post_outcome_persistence_conflict", result.Run.FailureCode);
         Assert.Contains(nameof(IOException), result.Run.FailureDetail, StringComparison.Ordinal);
         Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted);
+    }
+
+    [Fact]
+    public async Task Post_outcome_persistence_diagnostic_retains_only_its_safe_stage_and_native_code()
+    {
+        var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))))
+        {
+            BeforeUpdate = (candidate, _) =>
+            {
+                if (candidate.Events[^1].Kind == CustomLoopRunEventKind.NodeAttemptCompleted)
+                {
+                    var exception = new IOException("The secret path C:\\sensitive\\run.json cannot be replaced.");
+                    exception.Data[CustomLoopRunPersistenceDiagnostic.ExceptionDataKey] = new CustomLoopRunPersistenceDiagnostic(CustomLoopRunPersistenceDiagnosticStage.CanonicalReplace, CustomLoopRunPersistenceNativeErrorKind.Win32, 32);
+                    throw exception;
+                }
+            }
+        };
+
+        var result = await Runner(store, new QueueExecutor(Result("provider outcome may exist"))).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal("post_outcome_persistence_conflict", result.Run!.FailureCode);
+        Assert.Contains("CanonicalReplace", result.Run.FailureDetail, StringComparison.Ordinal);
+        Assert.Contains("Win32:32", result.Run.FailureDetail, StringComparison.Ordinal);
+        Assert.DoesNotContain("sensitive", result.Run.FailureDetail, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("run.json", result.Run.FailureDetail, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

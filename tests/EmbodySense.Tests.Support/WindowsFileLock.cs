@@ -12,14 +12,16 @@ public sealed class WindowsFileLock : IDisposable
     private readonly string _scriptPath;
     private int _disposed;
 
-    public WindowsFileLock(string path)
+    public WindowsFileLock(string path, string? coordinationDirectory = null)
     {
         if (!OperatingSystem.IsWindows())
         {
             throw new PlatformNotSupportedException("Windows file locks are required by this test fixture.");
         }
 
-        var directory = Path.GetDirectoryName(path) ?? throw new ArgumentException("The lock path must have a parent directory.", nameof(path));
+        var lockDirectory = Path.GetDirectoryName(path) ?? throw new ArgumentException("The lock path must have a parent directory.", nameof(path));
+        var directory = coordinationDirectory ?? lockDirectory;
+        Directory.CreateDirectory(lockDirectory);
         Directory.CreateDirectory(directory);
         var suffix = Guid.NewGuid().ToString("N");
         _readyPath = Path.Combine(directory, $".{suffix}.ready");
