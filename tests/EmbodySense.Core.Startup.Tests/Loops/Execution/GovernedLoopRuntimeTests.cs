@@ -164,61 +164,85 @@ internal static class GovernedLoopRuntimeTests
             var route = Assert.Single(interruptedRecord.SequentialAdapterBinding!.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries);
             Assert.Empty(route.Fallbacks);
 
-            var trust = new FileCapabilityCatalogTrustProvider(fixture.TrustRootPath);
-            var workspaceId = CapabilityWorkspaceScopeId.Create(fixture.Paths.RootPath);
-            var ledger = await new GovernedModelUsageLedgerStore(fixture.Paths, trust)
-                .ReadRunAsync(workspaceId, interrupted.Id);
-            if (expectedPhase is null)
+            await using var recoveryGate = new CustomLoopWorkspaceExecutionGate(fixture.Paths);
+            var recoveryOwnership = recoveryGate.TryAcquire($"model-crash-recovery-{boundary.ToString().ToLowerInvariant()}", Hash64('6'));
+            Assert.Equal(CustomLoopExecutionLeaseStatus.Acquired, recoveryOwnership.Status);
+            IDisposable? recoveryLease = Assert.IsAssignableFrom<IDisposable>(recoveryOwnership.Lease);
+            try
             {
-                Assert.Equal(GovernedModelUsageLedgerReadStatus.NotFound, ledger.Status);
-                Assert.Empty(ledger.Entries);
-            }
-            else
-            {
-                Assert.Equal(GovernedModelUsageLedgerReadStatus.Found, ledger.Status);
-                Assert.Equal(expectedPhase, ledger.Entries[^1].Phase);
-                Assert.Equal(expectedLedgerEntries, ledger.Entries.Count);
-                var reservation = Assert.Single(ledger.Entries, entry => entry.Phase == GovernedModelUsageLedgerPhase.ReservationCommitted).Reservation;
-                Assert.NotNull(reservation);
-                Assert.All(ledger.Entries, entry =>
+                await using var restarted = await fixture.CreateRuntimeAsync(preserveCurrentConversation: true);
+                Assert.All(orphanedSnapshots, directory => Assert.False(Directory.Exists(directory)));
+                Assert.False(restarted.CustomLoopRecoveryRequired);
+
+                var unavailableReplay = await restarted.InvokeGovernedLoopAsync(input);
+                Assert.Equal("WorkspaceHostUnavailable", unavailableReplay.Status);
+                Assert.False(unavailableReplay.WasDispatched);
+                Assert.Null(unavailableReplay.Run);
+                Assert.False(restarted.CustomLoopRecoveryRequired);
+                Assert.Equal(expectedProviderAttempts, fixture.ProviderAttempts);
+
+                recoveryLease.Dispose();
+                recoveryLease = null;
+
+                var replay = await restarted.InvokeGovernedLoopAsync(input);
+                Assert.False(replay.WasDispatched);
+                Assert.Equal(interrupted.Id, replay.Run?.Id);
+                Assert.Equal(CustomLoopRunStatus.NeedsReview.ToString(), replay.Run?.Status);
+                Assert.Equal("recovery_open_attempt", replay.Run?.FailureCode);
+                Assert.False(restarted.CustomLoopRecoveryRequired);
+                Assert.Equal(expectedProviderAttempts, fixture.ProviderAttempts);
+
+                var recovered = Assert.IsType<LoopRunSnapshot>(await restarted.GetCustomLoopRunAsync(interrupted.Id));
+                Assert.Equal(CustomLoopRunStatus.NeedsReview.ToString(), recovered.Status);
+                Assert.Equal("recovery_open_attempt", recovered.FailureCode);
+                if (expectedPhase is null)
                 {
-                    Assert.Equal(route.Primary.ContentHash, entry.Identity.ProfilePinHash);
-                    Assert.Equal(route.Requirements.Budget.ContentHash, entry.Identity.BudgetPolicyHash);
-                    Assert.Equal(reservation!.ContentHash, entry.Reservation?.ContentHash);
-                    Assert.DoesNotContain(entry.Phase, new[]
+                    Assert.Equal("NotFound", recovered.ModelUsage?.Status);
+                }
+                else
+                {
+                    Assert.Equal(expectedPhase.ToString(), Assert.Single(recovered.ModelUsage!.Attempts).Phase);
+                }
+
+                var trust = new FileCapabilityCatalogTrustProvider(fixture.TrustRootPath);
+                var workspaceId = CapabilityWorkspaceScopeId.Create(fixture.Paths.RootPath);
+                var ledger = await new GovernedModelUsageLedgerStore(fixture.Paths, trust)
+                    .ReadRunAsync(workspaceId, interrupted.Id);
+                if (expectedPhase is null)
+                {
+                    Assert.Equal(GovernedModelUsageLedgerReadStatus.NotFound, ledger.Status);
+                    Assert.Empty(ledger.Entries);
+                }
+                else
+                {
+                    Assert.Equal(GovernedModelUsageLedgerReadStatus.Found, ledger.Status);
+                    Assert.Equal(expectedPhase, ledger.Entries[^1].Phase);
+                    Assert.Equal(expectedLedgerEntries, ledger.Entries.Count);
+                    var reservation = Assert.Single(ledger.Entries, entry => entry.Phase == GovernedModelUsageLedgerPhase.ReservationCommitted).Reservation;
+                    Assert.NotNull(reservation);
+                    Assert.All(ledger.Entries, entry =>
                     {
-                        GovernedModelUsageLedgerPhase.DispatchProvedNotStarted,
-                        GovernedModelUsageLedgerPhase.Reconciled,
+                        Assert.Equal(route.Primary.ContentHash, entry.Identity.ProfilePinHash);
+                        Assert.Equal(route.Requirements.Budget.ContentHash, entry.Identity.BudgetPolicyHash);
+                        Assert.Equal(reservation!.ContentHash, entry.Reservation?.ContentHash);
+                        Assert.DoesNotContain(entry.Phase, new[]
+                        {
+                            GovernedModelUsageLedgerPhase.DispatchProvedNotStarted,
+                            GovernedModelUsageLedgerPhase.Reconciled,
+                        });
                     });
-                });
-                if (expectedPhase == GovernedModelUsageLedgerPhase.UsageObserved)
-                {
-                    Assert.Equal(GovernedModelUsageEvidenceStatus.Authoritative, ledger.Entries[^1].Usage?.InputTokens.Status);
-                    Assert.Equal(1, ledger.Entries[^1].Usage?.InputTokens.Value);
-                    Assert.Equal(1, ledger.Entries[^1].Usage?.OutputTokens.Value);
+                    if (expectedPhase == GovernedModelUsageLedgerPhase.UsageObserved)
+                    {
+                        Assert.Equal(GovernedModelUsageEvidenceStatus.Authoritative, ledger.Entries[^1].Usage?.InputTokens.Status);
+                        Assert.Equal(1, ledger.Entries[^1].Usage?.InputTokens.Value);
+                        Assert.Equal(1, ledger.Entries[^1].Usage?.OutputTokens.Value);
+                    }
                 }
             }
-
-            await using var restarted = await fixture.CreateRuntimeAsync(preserveCurrentConversation: true);
-            Assert.All(orphanedSnapshots, directory => Assert.False(Directory.Exists(directory)));
-            var recovered = Assert.IsType<LoopRunSnapshot>(await restarted.GetCustomLoopRunAsync(interrupted.Id));
-            Assert.Equal(CustomLoopRunStatus.NeedsReview.ToString(), recovered.Status);
-            Assert.Equal("recovery_open_attempt", recovered.FailureCode);
-            Assert.Equal(expectedProviderAttempts, fixture.ProviderAttempts);
-            if (expectedPhase is null)
+            finally
             {
-                Assert.Equal("NotFound", recovered.ModelUsage?.Status);
+                recoveryLease?.Dispose();
             }
-            else
-            {
-                Assert.Equal(expectedPhase.ToString(), Assert.Single(recovered.ModelUsage!.Attempts).Phase);
-            }
-
-            var replay = await restarted.InvokeGovernedLoopAsync(input);
-            Assert.False(replay.WasDispatched);
-            Assert.Equal(interrupted.Id, replay.Run?.Id);
-            Assert.Equal(CustomLoopRunStatus.NeedsReview.ToString(), replay.Run?.Status);
-            Assert.Equal(expectedProviderAttempts, fixture.ProviderAttempts);
         }
     }
 

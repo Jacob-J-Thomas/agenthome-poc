@@ -358,6 +358,16 @@ internal sealed class GovernedLoopRuntimeFacade : IDisposable, ITriggerGovernedL
             return Map(await _coordinator.InvokeAsync(request, cancellationToken).ConfigureAwait(false));
         }
 
+        if (await RequiresRetainedRunRecoveryAsync(operation!, cancellationToken).ConfigureAwait(false))
+        {
+            // Reconcile an exact retained running attempt before returning its non-dispatch replay; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/496.
+            var recovery = await _legacyRuntime.EnsureCustomExecutionAvailableAsync(invocationActor.Value, cancellationToken).ConfigureAwait(false);
+            if (!recovery.Available)
+            {
+                return Failure(recovery.Status, recovery.Detail);
+            }
+        }
+
         if (await CannotDispatchAsync(operation!, cancellationToken).ConfigureAwait(false))
         {
             return Map(await _coordinator.InvokeAsync(request, cancellationToken).ConfigureAwait(false));
@@ -475,6 +485,24 @@ internal sealed class GovernedLoopRuntimeFacade : IDisposable, ITriggerGovernedL
         {
             var run = await _runStore.GetAsync(operation.RunId, cancellationToken).ConfigureAwait(false);
             return run is not null && run.Status != CustomLoopRunStatus.Admitted;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task<bool> RequiresRetainedRunRecoveryAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken)
+    {
+        if (!_legacyRuntime.CustomExecutionReacquisitionAllowed || operation.RunId is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var run = await _runStore.GetAsync(operation.RunId, cancellationToken).ConfigureAwait(false);
+            return run?.Status == CustomLoopRunStatus.Running;
         }
         catch
         {
