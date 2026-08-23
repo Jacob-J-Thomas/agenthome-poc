@@ -662,6 +662,163 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Windows_get_retries_through_short_sharing_contention_and_returns_a_coherent_atomic_update_snapshot()
+    {
+        // FileShare enforcement is Windows-specific; other platforms cannot exercise this contract.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun();
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        Task<CustomLoopRunStoreResult> updateTask;
+        Task<CustomLoopRunRecord?> readTask;
+
+        await using (var externalWriter = new FileStream(artifactPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            readTask = store.GetAsync(admitted.Id);
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+            Assert.False(readTask.IsCompleted);
+        }
+
+        updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await updateTask.WaitAsync(TimeSpan.FromSeconds(10))).Status);
+        var observed = Assert.IsType<CustomLoopRunRecord>(await readTask.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal(admitted.Id, observed.Id);
+        Assert.Equal(admitted.LoopId, observed.LoopId);
+        Assert.True(observed.Status is CustomLoopRunStatus.Admitted or CustomLoopRunStatus.Running);
+        Assert.Equal(observed.Status == CustomLoopRunStatus.Admitted ? admitted.LifecycleVersion : running.LifecycleVersion, observed.LifecycleVersion);
+        Assert.Equal(CustomLoopRunStatus.Running, (await store.GetAsync(admitted.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task Get_exhausts_recognized_contention_with_the_original_io_evidence_and_exact_attempt_budget()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun();
+        await WriteDirectAsync(paths, run);
+        var contention = CreateRecognizedTransientIOException();
+        var beforeOpenCalls = 0;
+        Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> rejectRead = (boundary, _, _) =>
+        {
+            if (boundary == CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen)
+            {
+                Interlocked.Increment(ref beforeOpenCalls);
+                throw contention;
+            }
+
+            return ValueTask.CompletedTask;
+        };
+
+        using var store = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: rejectRead);
+        var exception = await Assert.ThrowsAsync<IOException>(() => store.GetAsync(run.Id).WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.Same(contention, exception);
+        Assert.Equal(9, beforeOpenCalls);
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Read, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+    }
+
+    [Fact]
+    public async Task Get_cancellation_during_contention_retry_delay_stops_before_another_attempt_and_allows_a_later_read()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun();
+        await WriteDirectAsync(paths, run);
+        using var cancellation = new CancellationTokenSource();
+        var contention = CreateRecognizedTransientIOException();
+        var beforeOpenCalls = 0;
+        Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> observeRead = (boundary, _, _) =>
+        {
+            if (boundary == CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen && Interlocked.Increment(ref beforeOpenCalls) == 1)
+            {
+                cancellation.Cancel();
+                throw contention;
+            }
+
+            return ValueTask.CompletedTask;
+        };
+
+        using var store = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: observeRead);
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.GetAsync(run.Id, cancellation.Token));
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Read, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+        Assert.Equal(1, beforeOpenCalls);
+
+        AssertRun(run, await store.GetAsync(run.Id).WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(2, beforeOpenCalls);
+    }
+
+    [Fact]
+    public async Task Windows_get_cancellation_during_sharing_retry_allows_a_later_evidence_read()
+    {
+        // FileShare enforcement is Windows-specific; other platforms cannot exercise this contract.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun();
+        await WriteDirectAsync(paths, run);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
+        using var store = new CustomLoopRunStore(paths);
+        using var cancellation = new CancellationTokenSource();
+
+        await using (var externalWriter = new FileStream(artifactPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var pendingRead = store.GetAsync(run.Id, cancellation.Token);
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+            Assert.False(pendingRead.IsCompleted);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pendingRead);
+        }
+
+        AssertRun(run, await store.GetAsync(run.Id).WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public async Task Get_does_not_retry_malformed_or_unrecognized_io_evidence_failures()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var malformed = CreateRun("loop-malformed", "run-malformed", "invoke-malformed");
+        await WriteRawAsync(paths, malformed.LoopId, malformed.Id, "{invalid");
+        using (var malformedStore = new CustomLoopRunStore(paths))
+        {
+            await Assert.ThrowsAsync<FormatException>(() => malformedStore.GetAsync(malformed.Id));
+        }
+
+        var run = CreateRun();
+        await WriteDirectAsync(paths, run);
+        var beforeOpenCalls = 0;
+        Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> rejectRead = (boundary, _, _) =>
+        {
+            if (boundary == CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen)
+            {
+                Interlocked.Increment(ref beforeOpenCalls);
+                throw new IOException("The reader encountered a non-contention I/O failure.");
+            }
+
+            return ValueTask.CompletedTask;
+        };
+
+        using var rejectedStore = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: rejectRead);
+        var exception = await Assert.ThrowsAsync<IOException>(() => rejectedStore.GetAsync(run.Id));
+
+        Assert.Equal(1, beforeOpenCalls);
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Read, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+    }
+
+    [Fact]
     public async Task ListRecent_reconciles_a_same_length_in_place_rewrite_after_its_first_snapshot()
     {
         using var workspace = new TestWorkspace();
@@ -2603,6 +2760,12 @@ public sealed class CustomLoopRunStoreTests
         var directory = Path.Combine(paths.CustomLoopRunsPath, run.LoopId);
         Directory.CreateDirectory(directory);
         await File.WriteAllBytesAsync(Path.Combine(directory, run.Id + ".json"), content);
+    }
+
+    private static IOException CreateRecognizedTransientIOException()
+    {
+        var errorCode = OperatingSystem.IsWindows() ? 32 : 11;
+        return new IOException("Injected recognized run-evidence contention.", unchecked((int)(0x80070000U | (uint)errorCode)));
     }
 
     private static async Task WriteDirectBatchAsync(WorkspacePaths paths, IEnumerable<CustomLoopRunRecord> runs)
