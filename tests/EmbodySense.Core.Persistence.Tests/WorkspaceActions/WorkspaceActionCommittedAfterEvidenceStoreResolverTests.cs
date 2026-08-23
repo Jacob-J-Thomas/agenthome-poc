@@ -88,6 +88,28 @@ public sealed class WorkspaceActionCommittedAfterEvidenceStoreResolverTests
     }
 
     [Fact]
+    public async Task Expired_preparation_cleanup_fails_closed_when_before_is_missing()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var (before, _, _) = Evidence();
+        var evidence = new WorkspaceActionEvidenceStore(paths);
+        await evidence.RetainBeforeAsync(before);
+        File.Delete(Path.Combine(
+            paths.AgentPath,
+            "loops",
+            "execution",
+            "workspace-actions",
+            "before",
+            before.EvidenceId + ".json"));
+
+        var resolver = new WorkspaceActionAttemptStorePresenceResolver(paths, evidence);
+        Assert.Equal(
+            new WorkspaceActionPreparationCleanupResult(false, 0),
+            await resolver.TryCleanupPreparationsAsync([before], 1));
+    }
+
+    [Fact]
     public async Task Referenced_oldest_preparation_does_not_starve_later_unreferenced_cleanup()
     {
         using var workspace = new TestWorkspace();

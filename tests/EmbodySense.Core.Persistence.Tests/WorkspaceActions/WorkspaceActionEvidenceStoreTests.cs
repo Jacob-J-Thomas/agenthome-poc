@@ -176,14 +176,176 @@ public sealed class WorkspaceActionEvidenceStoreTests
             quota with { MaximumEvidenceRecordsPerKind = WorkspaceActionContractLimits.MaxEvidenceRecordsPerKind + 1 }));
     }
 
-    private static WorkspaceActionBeforeEvidence Before()
+    [Fact]
+    public async Task Invalid_identifiers_and_exact_state_queries_fail_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new WorkspaceActionEvidenceStore(new WorkspacePaths(workspace.RootPath));
+
+        Assert.Null(await store.ReadBeforeAsync(null!));
+        Assert.Null(await store.ReadBeforeAsync("before-not-a-hash"));
+        Assert.Null(await store.ReadAfterAsync("after-../alias"));
+        Assert.Null(await store.ReadOutcomeAsync("outcome-"));
+        Assert.Null(await store.ReadTombstoneAsync("tombstone-"));
+        Assert.Null(await store.FindAfterAsync("bad", "operation-alpha", 1));
+        Assert.Null(await store.FindAfterAsync("effect-alpha", "bad", 1));
+        Assert.Null(await store.FindAfterAsync("effect-alpha", "operation-alpha", 0));
+        Assert.Null(await store.FindOutcomeAsync("bad", "operation-alpha", 1));
+        Assert.False(await store.IsUniqueTargetReferenceAsync("bad", "notes/file.txt", Hash('4'), Hash('5'), null));
+        Assert.False(await store.IsUniqueTargetReferenceAsync(Hash('1'), "../file.txt", Hash('4'), Hash('5'), null));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RetainBeforeAsync(Before() with { EvidenceId = "invalid" }));
+    }
+
+    [Fact]
+    public async Task Before_state_and_target_alias_queries_require_exact_identity()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var before = Before();
+        var alias = Before("notes/alias.txt", before.TargetFingerprint, before.CapturedAtUtc.AddSeconds(1));
+        var store = new WorkspaceActionEvidenceStore(paths);
+        await store.RetainBeforeAsync(before);
+        await store.RetainBeforeAsync(alias);
+
+        Assert.Equal(before, await store.FindBeforeStateAsync(
+            before.ScopeId,
+            before.TargetReference,
+            before.TargetFingerprint,
+            before.PreconditionEvidenceHash,
+            before.EntryKind,
+            before.PermissionOperation,
+            before.PermissionPolicyHash,
+            before.RootIdentityFingerprint,
+            before.ParentIdentityFingerprint,
+            before.NativeIdentityFingerprint,
+            before.ContentHash,
+            before.ByteCount,
+            before.GovernedVersion));
+        Assert.Null(await store.FindBeforeStateAsync(
+            before.ScopeId,
+            before.TargetReference,
+            before.TargetFingerprint,
+            before.PreconditionEvidenceHash,
+            before.EntryKind,
+            before.PermissionOperation,
+            before.PermissionPolicyHash,
+            before.RootIdentityFingerprint,
+            before.ParentIdentityFingerprint,
+            before.NativeIdentityFingerprint,
+            before.ContentHash,
+            before.ByteCount + 1,
+            before.GovernedVersion));
+        Assert.False(await store.IsUniqueTargetReferenceAsync(
+            before.TargetFingerprint,
+            before.TargetReference,
+            before.RootIdentityFingerprint,
+            before.ParentIdentityFingerprint,
+            before.NativeIdentityFingerprint));
+        Assert.True(await store.IsUniqueTargetReferenceAsync(
+            Hash('a'),
+            "notes/other.txt",
+            Hash('b'),
+            Hash('c'),
+            Hash('d')));
+    }
+
+    [Fact]
+    public async Task Tombstones_replay_across_restart_and_enforce_their_independent_quota()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var before = Before();
+        var tombstone = Tombstone(before, "quarantine-" + Hash('a'));
+        var store = new WorkspaceActionEvidenceStore(paths);
+        await store.RetainTombstoneAsync(tombstone);
+        await store.RetainTombstoneAsync(tombstone);
+
+        var restarted = new WorkspaceActionEvidenceStore(paths);
+        Assert.Equal(tombstone, await restarted.ReadTombstoneAsync(tombstone.TombstoneReference));
+        Assert.Null(await restarted.ReadTombstoneAsync("tombstone-" + Hash('f')));
+
+        var limited = new WorkspaceActionEvidenceStore(paths, new WorkspaceActionStorageLimits(64, 64, 1, 1_000_000));
+        var second = Tombstone(Before("notes/second.txt", Hash('e')), "quarantine-" + Hash('b'));
+        await Assert.ThrowsAnyAsync<InvalidOperationException>(() => limited.RetainTombstoneAsync(second));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new WorkspaceActionEvidenceStore(
+            paths,
+            new WorkspaceActionStorageLimits(64, 64, WorkspaceActionContractLimits.MaxTombstones + 1, 1_000_000)));
+    }
+
+    [Theory]
+    [InlineData("before")]
+    [InlineData("after")]
+    [InlineData("outcomes")]
+    [InlineData("tombstones")]
+    public async Task Unsupported_artifacts_in_each_evidence_kind_fail_closed(string kind)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var before = Before();
+        var store = new WorkspaceActionEvidenceStore(paths);
+        var root = Root(paths, kind);
+        Directory.CreateDirectory(root);
+
+        Func<Task> read;
+        switch (kind)
+        {
+            case "before":
+                await store.RetainBeforeAsync(before);
+                read = () => store.ReadBeforeAsync(before.EvidenceId);
+                break;
+            case "after":
+                var after = After(before, WorkspaceActionOperationIds.Write, Hash('8'));
+                await store.RetainAfterAsync(after);
+                read = () => store.ReadAfterAsync(after.EvidenceId);
+                break;
+            case "outcomes":
+                var outcome = WorkspaceActionEvidenceContract.CreateOutcome(After(before, WorkspaceActionOperationIds.Write, Hash('8')));
+                await store.RetainOutcomeAsync(outcome);
+                read = () => store.ReadOutcomeAsync(outcome.EvidenceId);
+                break;
+            case "tombstones":
+                var tombstone = Tombstone(before, "quarantine-" + Hash('a'));
+                await store.RetainTombstoneAsync(tombstone);
+                read = () => store.ReadTombstoneAsync(tombstone.TombstoneReference);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(kind));
+        }
+
+        await File.WriteAllTextAsync(Path.Combine(root, "not-supported.bin"), "value");
+        await Assert.ThrowsAsync<FormatException>(read);
+    }
+
+    [Fact]
+    public async Task Exceeding_record_bound_is_detected_before_reading_content()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new WorkspaceActionEvidenceStore(paths, new WorkspaceActionStorageLimits(1, 1, 1, 1));
+        var first = Before();
+        var second = Before("notes/second.txt", Hash('e'));
+        await store.RetainBeforeAsync(first);
+        var root = Root(paths, "before");
+        File.Copy(
+            Path.Combine(root, first.EvidenceId + ".json"),
+            Path.Combine(root, second.EvidenceId + ".json"));
+
+        await Assert.ThrowsAsync<FormatException>(() => new WorkspaceActionEvidenceStore(
+            paths,
+            new WorkspaceActionStorageLimits(1, 1, 1, 1_000_000)).ReadBeforeAsync(first.EvidenceId));
+    }
+
+    private static WorkspaceActionBeforeEvidence Before(
+        string targetReference = "notes/file.txt",
+        string? targetFingerprint = null,
+        DateTimeOffset? capturedAtUtc = null)
     {
         WorkspaceActionScopeId.TryParse("workspace", out var scope);
-        WorkspaceRelativeFileTarget.TryParse("notes/file.txt", out var target, out _);
+        WorkspaceRelativeFileTarget.TryParse(targetReference, out var target, out _);
         return WorkspaceActionEvidenceContract.CreateBefore(
             scope!,
             target!,
-            Hash('1'),
+            targetFingerprint ?? Hash('1'),
             Hash('2'),
             WorkspaceActionEntryKind.RegularFile,
             FileSystemOperation.Modify,
@@ -194,8 +356,19 @@ public sealed class WorkspaceActionEvidenceStoreTests
             Hash('7'),
             7,
             0,
-            DateTimeOffset.Parse("2026-08-12T20:00:00Z"));
+            capturedAtUtc ?? DateTimeOffset.Parse("2026-08-12T20:00:00Z"));
     }
+
+    private static WorkspaceActionTombstone Tombstone(WorkspaceActionBeforeEvidence before, string quarantineReference)
+        => WorkspaceActionEvidenceContract.CreateTombstone(
+            before,
+            quarantineReference,
+            "effect-alpha",
+            "operation-alpha",
+            1,
+            1,
+            before.CapturedAtUtc.AddSeconds(1),
+            before.CapturedAtUtc.AddHours(1));
 
     private static WorkspaceActionAfterEvidence After(
         WorkspaceActionBeforeEvidence before,
