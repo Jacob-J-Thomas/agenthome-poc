@@ -21,6 +21,7 @@ jobs:
     # Tool setup and diagnostic upload are outside the repository verifier budget.
     # Promotion runs once per stable merge candidate, so the exhaustive child receives a
     # bounded 900-second certification window instead of constraining the draft edit loop.
+    # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/509 owns retaining that bound as the canonical inventory grows.
     timeout-minutes: 20
 
     steps:
