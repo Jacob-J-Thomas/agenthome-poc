@@ -51,16 +51,11 @@ internal static class WorkspaceActionPrivatePermissions
             PropagationFlags.None,
             AccessControlType.Allow));
         SetRetainedHandleSecurity(handle, identity, security);
-        using var borrowedHandle = new SafeFileHandle(handle.DangerousGetHandle(), ownsHandle: false);
-        using var stream = new FileStream(borrowedHandle, FileAccess.ReadWrite, bufferSize: 1, isAsync: false);
-        var retained = FileSystemAclExtensions.GetAccessControl(stream);
-        var rules = retained.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier))
-            .Cast<FileSystemAccessRule>()
-            .ToArray();
-        if (!identity.Equals(retained.GetOwner(typeof(SecurityIdentifier)))
-            || !retained.AreAccessRulesProtected
-            || rules.Length != 1
-            || !IsCurrentUserFullControl(rules[0], identity, isDirectory))
+        var retained = ReadRetainedHandleSecurity(handle, isDirectory);
+        if (retained.Owner is null
+            || !identity.Equals(retained.Owner)
+            || !retained.ControlFlags.HasFlag(ControlFlags.DiscretionaryAclProtected)
+            || !IsCurrentUserFullControl(retained.DiscretionaryAcl, identity, isDirectory))
         {
             throw new UnauthorizedAccessException("Private workspace action handle did not retain its exact current-user ACL.");
         }
@@ -121,18 +116,97 @@ internal static class WorkspaceActionPrivatePermissions
     }
 
     [SupportedOSPlatform("windows")]
+    private static CommonSecurityDescriptor ReadRetainedHandleSecurity(
+        SafeFileHandle handle,
+        bool isDirectory)
+    {
+        var securityDescriptor = IntPtr.Zero;
+        try
+        {
+            var status = GetSecurityInfo(
+                handle,
+                SeFileObject,
+                OwnerSecurityInformation | DaclSecurityInformation,
+                out _,
+                out _,
+                out _,
+                out _,
+                out securityDescriptor);
+            if (status != 0)
+            {
+                throw new UnauthorizedAccessException(
+                    "Private workspace action handle did not return its security descriptor.",
+                    new Win32Exception(unchecked((int)status)));
+            }
+            if (securityDescriptor == IntPtr.Zero)
+            {
+                throw new UnauthorizedAccessException("Private workspace action handle returned an empty security descriptor.");
+            }
+            var length = GetSecurityDescriptorLength(securityDescriptor);
+            if (length is 0 or > MaximumPrivateSecurityDescriptorBytes)
+            {
+                throw new UnauthorizedAccessException("Private workspace action handle returned an invalid security descriptor length.");
+            }
+            var binary = new byte[checked((int)length)];
+            Marshal.Copy(securityDescriptor, binary, 0, binary.Length);
+            return new CommonSecurityDescriptor(isDirectory, false, binary, 0);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new UnauthorizedAccessException("Private workspace action handle returned an invalid security descriptor.", exception);
+        }
+        finally
+        {
+            if (securityDescriptor != IntPtr.Zero && LocalFree(securityDescriptor) != IntPtr.Zero)
+            {
+                throw new UnauthorizedAccessException(
+                    "Private workspace action security descriptor could not be released.",
+                    new Win32Exception(Marshal.GetLastPInvokeError()));
+            }
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
     private static bool IsCurrentUserFullControl(
-        FileSystemAccessRule rule,
+        DiscretionaryAcl? discretionaryAccessControlList,
         SecurityIdentifier identity,
         bool isDirectory)
-        => identity.Equals(rule.IdentityReference)
-            && !rule.IsInherited
-            && rule.AccessControlType == AccessControlType.Allow
-            && rule.FileSystemRights == FileSystemRights.FullControl
-            && rule.InheritanceFlags == (isDirectory
-                ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit
-                : InheritanceFlags.None)
-            && rule.PropagationFlags == PropagationFlags.None;
+    {
+        if (discretionaryAccessControlList is null
+            || discretionaryAccessControlList.Count != 1
+            || discretionaryAccessControlList[0] is not CommonAce accessControlEntry)
+        {
+            return false;
+        }
+        var expectedAceFlags = isDirectory
+            ? AceFlags.ObjectInherit | AceFlags.ContainerInherit
+            : AceFlags.None;
+        return identity.Equals(accessControlEntry.SecurityIdentifier)
+            && accessControlEntry.AceQualifier == AceQualifier.AccessAllowed
+            && accessControlEntry.AccessMask == (int)FileSystemRights.FullControl
+            && !accessControlEntry.IsInherited
+            && accessControlEntry.AceFlags == expectedAceFlags;
+    }
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [SupportedOSPlatform("windows")]
+    private static extern uint GetSecurityInfo(
+        SafeFileHandle handle,
+        int objectType,
+        uint securityInformation,
+        out IntPtr owner,
+        out IntPtr group,
+        out IntPtr discretionaryAccessControlList,
+        out IntPtr systemAccessControlList,
+        out IntPtr securityDescriptor);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [SupportedOSPlatform("windows")]
+    private static extern uint GetSecurityDescriptorLength(IntPtr securityDescriptor);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [SupportedOSPlatform("windows")]
+    private static extern IntPtr LocalFree(IntPtr memory);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     [SupportedOSPlatform("windows")]
@@ -149,4 +223,5 @@ internal static class WorkspaceActionPrivatePermissions
     private const uint OwnerSecurityInformation = 0x00000001;
     private const uint DaclSecurityInformation = 0x00000004;
     private const uint ProtectedDaclSecurityInformation = 0x80000000;
+    private const uint MaximumPrivateSecurityDescriptorBytes = 128 * 1024;
 }
