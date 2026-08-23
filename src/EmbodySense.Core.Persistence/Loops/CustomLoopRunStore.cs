@@ -3,7 +3,6 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Loops.Diagnostics;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention.Models;
-using System.Buffers;
 using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
@@ -2752,7 +2751,9 @@ public sealed class CustomLoopRunStore :
             }
 
             // Repository-owned writers are fenced and atomically replace sibling staging files. Direct in-place external
-            // writers require separate stable-snapshot hardening; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/490.
+            // writers are accepted only after #490's bounded paired-read snapshot establishes stable bytes; otherwise
+            // reads fail closed without treating a corrupt or unstable artifact as a valid run. See
+            // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/490.
             await using var stream = OpenSharedArtifactReadStream(location.Path);
             if (_artifactReadObserver is not null)
             {
@@ -2770,49 +2771,38 @@ public sealed class CustomLoopRunStore :
 
     private async Task<RunArtifact> ReadArtifactContentAsync(RunArtifactLocation location, FileStream stream, CancellationToken cancellationToken)
     {
-        long contentLength;
+        LoopArtifactStableSnapshot snapshot;
         try
         {
-            contentLength = stream.Length;
+            snapshot = await LoopArtifactStableSnapshotReader.ReadAsync(
+                stream,
+                CustomLoopLimits.MaxRunTraceUtf8Bytes,
+                "Custom loop run",
+                location.Path,
+                MaximumArtifactReadReconciliationAttempts,
+                _atomicMoveRetryDelay,
+                _artifactReadObserver is null
+                    ? null
+                    : token => _artifactReadObserver(CustomLoopRunReadBoundary.AfterCanonicalArtifactReadFirstSnapshot, location.Path, token),
+                cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception exception)
+        catch (FormatException exception)
         {
-            AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Read);
+            AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Validate);
             throw;
         }
 
-        if (contentLength <= 0 || contentLength > CustomLoopLimits.MaxRunTraceUtf8Bytes)
-        {
-            ThrowValidationFailure($"Custom loop run `{location.Path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
-        }
-
-        var length = checked((int)contentLength);
-        var rented = ArrayPool<byte>.Shared.Rent(length);
-        try
+        using (snapshot)
         {
             try
             {
-                await stream.ReadExactlyAsync(rented.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception exception)
-            {
-                AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Read);
-                throw;
-            }
-
-            try
-            {
-                return ReadArtifact(location, rented.AsMemory(0, length));
+                return ReadArtifact(location, snapshot.Content);
             }
             catch (Exception exception)
             {
                 AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Validate);
                 throw;
             }
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(rented, clearArray: true);
         }
     }
 
@@ -2988,27 +2978,32 @@ public sealed class CustomLoopRunStore :
     {
         EnsureSafeArtifactPath(path, mustExist: true);
         await using var stream = OpenSharedArtifactReadStream(path);
-        if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
-        {
-            throw new FormatException($"Custom loop run `{path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
-        }
-
-        var content = new byte[(int)stream.Length];
-        await stream.ReadExactlyAsync(content, cancellationToken).ConfigureAwait(false);
-        return content;
+        using var snapshot = await LoopArtifactStableSnapshotReader.ReadAsync(
+            stream,
+            CustomLoopLimits.MaxRunTraceUtf8Bytes,
+            "Custom loop run",
+            path,
+            MaximumArtifactReadReconciliationAttempts,
+            _atomicMoveRetryDelay,
+            afterFirstSnapshot: null,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return snapshot.Content.ToArray();
     }
 
     private async Task<string> ComputeBoundedArtifactHashAsync(string path, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(path, mustExist: true);
         await using var stream = OpenSharedArtifactReadStream(path);
-        if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
-        {
-            throw new FormatException($"Custom loop run `{path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
-        }
-
-        var hash = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
-        return Convert.ToHexString(hash).ToLowerInvariant();
+        using var snapshot = await LoopArtifactStableSnapshotReader.ReadAsync(
+            stream,
+            CustomLoopLimits.MaxRunTraceUtf8Bytes,
+            "Custom loop run",
+            path,
+            MaximumArtifactReadReconciliationAttempts,
+            _atomicMoveRetryDelay,
+            afterFirstSnapshot: null,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return ComputeHash(snapshot.Content.Span);
     }
 
     private static byte[] SerializeBounded(CustomLoopRunRecord run)
@@ -3651,14 +3646,16 @@ public sealed class CustomLoopRunStore :
     {
         EnsureSafeArtifactPath(root, path, mustExist: true);
         await using var stream = OpenSharedArtifactReadStream(path);
-        if (stream.Length <= 0 || stream.Length > maximumBytes)
-        {
-            throw new FormatException($"{label} `{path}` must contain between 1 and {maximumBytes} UTF-8 bytes.");
-        }
-
-        var content = new byte[(int)stream.Length];
-        await stream.ReadExactlyAsync(content, cancellationToken).ConfigureAwait(false);
-        return content;
+        using var snapshot = await LoopArtifactStableSnapshotReader.ReadAsync(
+            stream,
+            maximumBytes,
+            label,
+            path,
+            MaximumArtifactReadReconciliationAttempts,
+            _atomicMoveRetryDelay,
+            afterFirstSnapshot: null,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return snapshot.Content.ToArray();
     }
 
     private async Task WriteBoundedJsonArtifactAsync(
