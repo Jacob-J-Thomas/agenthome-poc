@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Governance.Permissions;
 using EmbodySense.Core.Startup.Governance;
+using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 
 namespace EmbodySense.Core.Startup.Governance;
@@ -24,17 +25,24 @@ public sealed record AgentToolApprovalRequest(
     string MatchedPath,
     string Reason)
 {
-    internal static AgentToolApprovalRequest FromToolApprovalRequest(ToolApprovalRequest request)
+    /// <summary>Creates a bounded interface projection, replacing mutation paths and free-form policy text with safe references.</summary>
+    public static AgentToolApprovalRequest FromToolApprovalRequest(ToolApprovalRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        var mutation = WorkspaceMutationEvidenceProjection.IsMutation(request.ToolRequest.Command);
+        var projected = WorkspaceMutationEvidenceProjection.ProjectRequest(request.ToolRequest);
         return new AgentToolApprovalRequest(
             request.RequestId,
             request.ToolRequest.Command.ToString().ToLowerInvariant(),
-            request.ToolRequest.TargetPath,
-            request.ResolvedPath,
+            projected.TargetPath,
+            WorkspaceMutationEvidenceProjection.ProjectResolvedTarget(request.ToolRequest, request.ResolvedPath),
             request.Operation.ToString().ToLowerInvariant(),
-            string.IsNullOrWhiteSpace(request.PermissionEvaluation.MatchedPath) ? "(default policy)" : request.PermissionEvaluation.MatchedPath,
-            request.PermissionEvaluation.Detail);
+            mutation
+                ? "(protected workspace policy)"
+                : string.IsNullOrWhiteSpace(request.PermissionEvaluation.MatchedPath) ? "(default policy)" : request.PermissionEvaluation.MatchedPath,
+            mutation
+                ? $"Governed workspace mutation permission decision: {request.PermissionEvaluation.Decision.ToString().ToLowerInvariant()}."
+                : request.PermissionEvaluation.Detail);
     }
 }

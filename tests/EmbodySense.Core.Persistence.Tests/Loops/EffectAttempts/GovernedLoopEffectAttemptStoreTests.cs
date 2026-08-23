@@ -408,6 +408,317 @@ public sealed class GovernedLoopEffectAttemptStoreTests
         Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Backpressured, (await store.BeginAsync(third)).Status);
     }
 
+    [Fact]
+    public async Task Invalid_options_and_attempt_inputs_fail_closed_without_publishing()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var prepared = Prepare();
+        var encodedLength = GovernedLoopEffectAttemptRecordCodec.Encode(prepared).Length;
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new GovernedLoopEffectAttemptStore(
+            paths,
+            new GovernedLoopEffectAttemptStoreOptions
+            {
+                MaxRecordUtf8Bytes = encodedLength,
+                MaxStoreUtf8Bytes = encodedLength - 1,
+            }));
+
+        var store = new GovernedLoopEffectAttemptStore(paths);
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Corrupt, (await store.BeginAsync(null!)).Status);
+        var authorized = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(prepared, Hash('8'), _now.AddSeconds(1));
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Corrupt, (await store.BeginAsync(authorized)).Status);
+    }
+
+    [Fact]
+    public async Task Preparation_claim_expiry_prevents_intent_publication()
+    {
+        using var workspace = new TestWorkspace();
+        var prepared = Prepare();
+        var result = await new GovernedLoopEffectAttemptStore(new WorkspacePaths(workspace.RootPath))
+            .BeginWithPreparationClaimAsync(prepared, _ => Task.FromResult(false));
+
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.PreparationExpired, result.Status);
+        var attemptsPath = new WorkspacePaths(workspace.RootPath).GovernedLoopEffectAttemptsPath;
+        Assert.Empty(Directory.EnumerateFiles(attemptsPath, "*.json"));
+        Assert.Empty(Directory.EnumerateFiles(attemptsPath, "*.head"));
+        Assert.Empty(Directory.EnumerateFiles(attemptsPath, "*.owner"));
+    }
+
+    [Fact]
+    public async Task Resume_replays_a_released_owner_and_reports_an_active_owner()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var prepared = Prepare();
+        var first = await new GovernedLoopEffectAttemptStore(paths).BeginAsync(prepared);
+        using var lease = first.Lease!;
+
+        var active = await new GovernedLoopEffectAttemptStore(paths).ResumeAsync(prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.OperationInProgress, active.Status);
+        Assert.Null(active.Lease);
+
+        lease.Dispose();
+        var replay = await new GovernedLoopEffectAttemptStore(paths).ResumeAsync(prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Replayed, replay.Status);
+        Assert.NotNull(replay.Lease);
+        replay.Lease!.Dispose();
+    }
+
+    [Fact]
+    public async Task Compare_exchange_fails_closed_for_head_pressure_missing_current_and_illegal_successor()
+    {
+        using (var pressureWorkspace = new TestWorkspace())
+        {
+            var pressurePaths = new WorkspacePaths(pressureWorkspace.RootPath);
+            var pressurePrepared = Prepare();
+            var encodedLength = GovernedLoopEffectAttemptRecordCodec.Encode(pressurePrepared).Length;
+            var pressureStore = new GovernedLoopEffectAttemptStore(
+                pressurePaths,
+                new GovernedLoopEffectAttemptStoreOptions
+                {
+                    MaxRecordUtf8Bytes = encodedLength,
+                    MaxStoreUtf8Bytes = encodedLength + 64,
+                });
+            var begun = await pressureStore.BeginAsync(pressurePrepared);
+            File.WriteAllText(Path.Combine(pressurePaths.GovernedLoopEffectAttemptsPath, new string('a', 64) + ".head"), new string('b', 64));
+            File.Delete(Path.Combine(pressurePaths.GovernedLoopEffectAttemptsPath, StorageKeyFor(pressurePrepared) + ".head"));
+
+            var authorized = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(pressurePrepared, Hash('8'), _now.AddSeconds(1));
+            Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Backpressured, (await pressureStore.CompareExchangeAsync(pressurePrepared.ContentHash, authorized, begun.Lease!)).Status);
+            begun.Lease!.Dispose();
+        }
+
+        using (var missingWorkspace = new TestWorkspace())
+        {
+            var missingPaths = new WorkspacePaths(missingWorkspace.RootPath);
+            var missingPrepared = Prepare();
+            var missingStore = new GovernedLoopEffectAttemptStore(missingPaths);
+            var begun = await missingStore.BeginAsync(missingPrepared);
+            foreach (var path in Directory.EnumerateFiles(missingPaths.GovernedLoopEffectAttemptsPath, "*.json"))
+            {
+                File.Delete(path);
+            }
+
+            var authorized = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(missingPrepared, Hash('8'), _now.AddSeconds(1));
+            Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Conflict, (await missingStore.CompareExchangeAsync(missingPrepared.ContentHash, authorized, begun.Lease!)).Status);
+            begun.Lease!.Dispose();
+        }
+
+        using var illegalWorkspace = new TestWorkspace();
+        var illegalPaths = new WorkspacePaths(illegalWorkspace.RootPath);
+        var illegalPrepared = Prepare();
+        var illegalStore = new GovernedLoopEffectAttemptStore(illegalPaths);
+        var illegalBegun = await illegalStore.BeginAsync(illegalPrepared);
+        var authorizedSuccessor = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(illegalPrepared, Hash('8'), _now.AddSeconds(1));
+        var crossed = GovernedLoopEffectAttemptContract.Advance(
+            authorizedSuccessor,
+            GovernedLoopEffectPhase.DispatchBoundaryReached,
+            GovernedLoopEffectOutcome.OutcomeUnknown,
+            GovernedLoopEffectEvidenceStatus.Pending,
+            null,
+            null,
+            _now.AddSeconds(2));
+
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Conflict, (await illegalStore.CompareExchangeAsync(illegalPrepared.ContentHash, crossed, illegalBegun.Lease!)).Status);
+        illegalBegun.Lease!.Dispose();
+    }
+
+    [Fact]
+    public async Task Initial_owner_file_contention_reports_operation_in_progress()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var prepared = Prepare();
+        Directory.CreateDirectory(paths.GovernedLoopEffectAttemptsPath);
+        var ownerPath = Path.Combine(paths.GovernedLoopEffectAttemptsPath, StorageKeyFor(prepared) + ".owner");
+        using var owner = new FileStream(ownerPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, bufferSize: 1, FileOptions.WriteThrough);
+
+        var result = await new GovernedLoopEffectAttemptStore(paths).BeginAsync(prepared);
+
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.OperationInProgress, result.Status);
+        Assert.Null(result.Lease);
+    }
+
+    [Theory]
+    [InlineData(".bad.tmp")]
+    [InlineData("not-a-version.json")]
+    [InlineData("not-a-head.head")]
+    [InlineData("not-an-owner.owner")]
+    public async Task Unsupported_effect_attempt_artifact_names_fail_closed(string fileName)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.GovernedLoopEffectAttemptsPath);
+        await File.WriteAllTextAsync(Path.Combine(paths.GovernedLoopEffectAttemptsPath, fileName), "unsupported");
+
+        var result = await new GovernedLoopEffectAttemptStore(paths).ResumeAsync("missing-operation", 1);
+
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Corrupt, result.Status);
+    }
+
+    [Fact]
+    public async Task Value_bearing_owner_and_child_directory_are_corrupt()
+    {
+        using (var ownerWorkspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(ownerWorkspace.RootPath);
+            var prepared = Prepare();
+            Directory.CreateDirectory(paths.GovernedLoopEffectAttemptsPath);
+            await File.WriteAllTextAsync(Path.Combine(paths.GovernedLoopEffectAttemptsPath, StorageKeyFor(prepared) + ".owner"), "unexpected-value");
+
+            var result = await new GovernedLoopEffectAttemptStore(paths).ResumeAsync(prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
+
+            Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Corrupt, result.Status);
+        }
+
+        using var directoryWorkspace = new TestWorkspace();
+        var directoryPaths = new WorkspacePaths(directoryWorkspace.RootPath);
+        Directory.CreateDirectory(Path.Combine(directoryPaths.GovernedLoopEffectAttemptsPath, "nested"));
+        var directoryResult = await new GovernedLoopEffectAttemptStore(directoryPaths).ResumeAsync("missing-operation", 1);
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Corrupt, directoryResult.Status);
+    }
+
+    [Fact]
+    public async Task Too_many_versions_are_rejected_before_recovery()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var prepared = Prepare();
+        var store = new GovernedLoopEffectAttemptStore(paths);
+        var begun = await store.BeginAsync(prepared);
+        var versions = Successors(prepared);
+        var current = prepared;
+        foreach (var version in versions)
+        {
+            Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Created, (await store.CompareExchangeAsync(current.ContentHash, version, begun.Lease!)).Status);
+            current = version;
+        }
+        begun.Lease!.Dispose();
+
+        var limited = new GovernedLoopEffectAttemptStore(paths, new GovernedLoopEffectAttemptStoreOptions { MaxVersionsPerAttempt = 2 });
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Corrupt, (await limited.BeginAsync(prepared)).Status);
+    }
+
+    [Fact]
+    public async Task Wrong_identity_version_is_corrupt()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var prepared = Prepare();
+        var other = Prepare(effectId: "effect-other", idempotencyOperationId: "effect-operation-other");
+        Directory.CreateDirectory(paths.GovernedLoopEffectAttemptsPath);
+        await File.WriteAllBytesAsync(
+            Path.Combine(paths.GovernedLoopEffectAttemptsPath, $"{StorageKeyFor(prepared)}.{other.ContentHash}.json"),
+            GovernedLoopEffectAttemptRecordCodec.Encode(other));
+
+        var result = await new GovernedLoopEffectAttemptStore(paths).BeginAsync(prepared);
+
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Corrupt, result.Status);
+    }
+
+    [Fact]
+    public async Task Resume_republishes_a_missing_head_and_reports_not_found_for_unknown_identity()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var prepared = Prepare();
+        var store = new GovernedLoopEffectAttemptStore(paths);
+        var begun = await store.BeginAsync(prepared);
+        begun.Lease!.Dispose();
+        File.Delete(Path.Combine(paths.GovernedLoopEffectAttemptsPath, StorageKeyFor(prepared) + ".head"));
+
+        var resumed = await new GovernedLoopEffectAttemptStore(paths).ResumeAsync(prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Replayed, resumed.Status);
+        resumed.Lease!.Dispose();
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.NotFound, (await store.ResumeAsync("missing-operation", 1)).Status);
+    }
+
+    [Fact]
+    public async Task Begin_replays_or_backpressures_a_current_intent_when_its_head_is_missing()
+    {
+        var prepared = Prepare();
+        var encodedLength = GovernedLoopEffectAttemptRecordCodec.Encode(prepared).Length;
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var store = new GovernedLoopEffectAttemptStore(paths);
+            var begun = await store.BeginAsync(prepared);
+            begun.Lease!.Dispose();
+            File.Delete(Path.Combine(paths.GovernedLoopEffectAttemptsPath, StorageKeyFor(prepared) + ".head"));
+
+            var replay = await store.BeginAsync(prepared);
+            Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Replayed, replay.Status);
+            replay.Lease!.Dispose();
+        }
+
+        using var pressureWorkspace = new TestWorkspace();
+        var pressurePaths = new WorkspacePaths(pressureWorkspace.RootPath);
+        var pressureStore = new GovernedLoopEffectAttemptStore(
+            pressurePaths,
+            new GovernedLoopEffectAttemptStoreOptions
+            {
+                MaxRecordUtf8Bytes = encodedLength,
+                MaxStoreUtf8Bytes = encodedLength + 64,
+            });
+        var pressureBegun = await pressureStore.BeginAsync(prepared);
+        pressureBegun.Lease!.Dispose();
+        File.WriteAllText(Path.Combine(pressurePaths.GovernedLoopEffectAttemptsPath, new string('a', 64) + ".head"), new string('b', 64));
+        File.Delete(Path.Combine(pressurePaths.GovernedLoopEffectAttemptsPath, StorageKeyFor(prepared) + ".head"));
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Backpressured, (await pressureStore.BeginAsync(prepared)).Status);
+    }
+
+    [Fact]
+    public async Task Mutation_lock_contention_and_unavailable_roots_fail_closed()
+    {
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            Directory.CreateDirectory(paths.GovernedLoopEffectAttemptsPath);
+            await using var externalLock = new FileStream(
+                Path.Combine(paths.GovernedLoopEffectAttemptsPath, ".custom-loop-mutations.lock"),
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None);
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            var result = await new GovernedLoopEffectAttemptStore(paths).BeginAsync(Prepare(), cancellation.Token);
+            Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Unavailable, result.Status);
+        }
+
+        using var unavailableWorkspace = new TestWorkspace();
+        var unavailablePaths = new WorkspacePaths(unavailableWorkspace.RootPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(unavailablePaths.GovernedLoopEffectAttemptsPath)!);
+        await File.WriteAllTextAsync(unavailablePaths.GovernedLoopEffectAttemptsPath, "not-a-directory");
+        Assert.Equal(
+            GovernedLoopEffectAttemptStoreStatus.Unavailable,
+            (await new GovernedLoopEffectAttemptStore(unavailablePaths).BeginAsync(Prepare())).Status);
+    }
+
+    [Fact]
+    public async Task Compare_exchange_fails_closed_while_mutation_lock_is_held()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new GovernedLoopEffectAttemptStore(paths);
+        var prepared = Prepare();
+        var begun = await store.BeginAsync(prepared);
+        var authorized = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(prepared, Hash('8'), _now.AddSeconds(1));
+        await using var externalLock = new FileStream(
+            Path.Combine(paths.GovernedLoopEffectAttemptsPath, ".custom-loop-mutations.lock"),
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.None);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+        var result = await store.CompareExchangeAsync(
+            prepared.ContentHash,
+            authorized,
+            begun.Lease!,
+            cancellation.Token);
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Unavailable, result.Status);
+        begun.Lease!.Dispose();
+    }
+
     private static GovernedLoopEffectAttempt Prepare(
         string? inputFingerprint = null,
         string effectId = "effect-1",
@@ -466,6 +777,12 @@ public sealed class GovernedLoopEffectAttemptStoreTests
         var storageKey = Convert.ToHexString(SHA256.HashData(material)).ToLowerInvariant();
         var path = Path.Combine(paths.GovernedLoopEffectAttemptsPath, $"{storageKey}.{attempt.ContentHash}.json");
         return File.WriteAllBytesAsync(path, GovernedLoopEffectAttemptRecordCodec.Encode(attempt));
+    }
+
+    private static string StorageKeyFor(GovernedLoopEffectAttempt attempt)
+    {
+        var material = Encoding.UTF8.GetBytes($"embodysense.governed-loop-effect-attempt-storage.v1\n{attempt.Payload.OperationId}\n{attempt.Payload.EffectGeneration}");
+        return Convert.ToHexString(SHA256.HashData(material)).ToLowerInvariant();
     }
 
     private static string Hash(char value) => new(value, 64);

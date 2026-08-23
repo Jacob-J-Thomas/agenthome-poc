@@ -175,7 +175,7 @@ internal sealed class GovernedLoopEffectAttemptTestFixture
     }
 }
 
-internal sealed class InMemoryEffectAttemptStore : IGovernedLoopEffectAttemptStore
+internal sealed class InMemoryEffectAttemptStore : IGovernedLoopEffectAttemptStore, IGovernedLoopEffectAttemptPreparationClaimStore
 {
     internal GovernedLoopEffectAttempt? Current { get; set; }
     internal int ResumeCalls { get; private set; }
@@ -196,11 +196,32 @@ internal sealed class InMemoryEffectAttemptStore : IGovernedLoopEffectAttemptSto
         return Task.FromResult(Apply(new GovernedLoopEffectAttemptStoreResult(GovernedLoopEffectAttemptStoreStatus.Replayed, Current, lease)));
     }
 
-    public Task<GovernedLoopEffectAttemptStoreResult> BeginAsync(GovernedLoopEffectAttempt prepared, CancellationToken cancellationToken = default)
+    public Task<GovernedLoopEffectAttemptStoreResult> BeginAsync(
+        GovernedLoopEffectAttempt prepared,
+        CancellationToken cancellationToken = default)
+        => BeginCoreAsync(prepared, null, cancellationToken);
+
+    public Task<GovernedLoopEffectAttemptStoreResult> BeginWithPreparationClaimAsync(
+        GovernedLoopEffectAttempt prepared,
+        Func<CancellationToken, Task<bool>> preparationClaim,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(preparationClaim);
+        return BeginCoreAsync(prepared, preparationClaim, cancellationToken);
+    }
+
+    private async Task<GovernedLoopEffectAttemptStoreResult> BeginCoreAsync(
+        GovernedLoopEffectAttempt prepared,
+        Func<CancellationToken, Task<bool>>? preparationClaim,
+        CancellationToken cancellationToken)
     {
         BeginCalls++;
+        if (Current is null && preparationClaim is not null && !await preparationClaim(cancellationToken))
+        {
+            return Apply(new GovernedLoopEffectAttemptStoreResult(GovernedLoopEffectAttemptStoreStatus.PreparationExpired));
+        }
         Current ??= prepared;
-        return Task.FromResult(Apply(new GovernedLoopEffectAttemptStoreResult(GovernedLoopEffectAttemptStoreStatus.Created, Current, new TestEffectAttemptLease())));
+        return Apply(new GovernedLoopEffectAttemptStoreResult(GovernedLoopEffectAttemptStoreStatus.Created, Current, new TestEffectAttemptLease()));
     }
 
     public Task<GovernedLoopEffectAttemptStoreResult> CompareExchangeAsync(string expectedContentHash, GovernedLoopEffectAttempt replacement, IGovernedLoopEffectAttemptLease lease, CancellationToken cancellationToken = default)

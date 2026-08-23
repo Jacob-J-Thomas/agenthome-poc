@@ -222,7 +222,7 @@ public sealed class CustomLoopRunValidatorTests
         });
         var extra = CustomLoopAdmissionRequestHash.Apply(run with
         {
-            CapabilityAdmission = CreateSequentialCapabilityAdmission(run.SequentialAdapterBinding!, [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]),
+            CapabilityAdmission = CreateSequentialCapabilityAdmission(run.SequentialAdapterBinding!, [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceReadCapabilityId]),
         });
         var duplicateAdmission = run.CapabilityAdmission with
         {

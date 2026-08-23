@@ -20,6 +20,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Startup.Loops;
@@ -33,6 +34,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
     private const string ModelInferenceCapabilityId = "org.embodysense/model-inference";
     private const string ModelProfileCapabilityId = "org.embodysense/model-profile/codex";
     private const string WorkspaceReadCapabilityId = "org.embodysense/workspace-read";
+    private const string WorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
     private static readonly DateTimeOffset _now = DateTimeOffset.Parse("2026-08-10T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
     private static readonly string _workspaceId = "workspace-sha256:" + new string('a', ContextualRoleLimits.Sha256HexCharacters);
 
@@ -176,9 +178,35 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
             Assert.True(
                 result.Status == GovernedLoopGraphAuthoringStatus.Committed,
                 $"The built-in catalog rejected `{descriptor.Descriptor.TypeId}`:{Environment.NewLine}{string.Join(Environment.NewLine, result.GraphValidationErrors.Select(error => $"{error.Code}: {error.Element.Path}"))}");
-            Assert.Equal(
-                GovernedLoopSequentialPlanBuildStatus.Ready,
-                GovernedLoopSequentialPlanBuilder.Build(Artifact(candidate)).Status);
+            var plan = GovernedLoopSequentialPlanBuilder.Build(Artifact(candidate));
+            Assert.True(
+                plan.Status == GovernedLoopSequentialPlanBuildStatus.Ready,
+                $"The sequential builder rejected `{descriptor.Descriptor.TypeId}` at `{plan.FailurePath}` with `{plan.Status}`.");
+        }
+    }
+
+    [Fact]
+    public async Task Built_in_catalog_advertises_and_admits_each_exact_workspace_action_descriptor()
+    {
+        var descriptors = new[]
+        {
+            WorkspaceActionNodeDescriptors.Append,
+            WorkspaceActionNodeDescriptors.Write,
+            WorkspaceActionNodeDescriptors.Delete,
+        };
+
+        foreach (var descriptor in descriptors)
+        {
+            var candidate = WorkspaceActionCandidate(descriptor);
+            var result = await AuthorWithBuiltInCatalogAsync(candidate);
+
+            Assert.True(
+                result.Status == GovernedLoopGraphAuthoringStatus.Committed,
+                $"The built-in catalog rejected `{descriptor.TypeId}`:{Environment.NewLine}{string.Join(Environment.NewLine, result.GraphValidationErrors.Select(error => $"{error.Code}: {error.Element.Path}"))}");
+            var plan = GovernedLoopSequentialPlanBuilder.Build(Artifact(candidate));
+            Assert.True(
+                plan.Status == GovernedLoopSequentialPlanBuildStatus.Ready,
+                $"The sequential builder rejected `{descriptor.TypeId}` at `{plan.FailurePath}` with `{plan.Status}`.");
         }
     }
 
@@ -190,7 +218,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
 
         Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, first.Status);
         Assert.Equal(first.GraphValidationEvidenceHash, second.GraphValidationEvidenceHash);
-        Assert.Equal("2e6a3f24bbaee6d59eb0ea3ba012533526fb465568537372dcb20f4550ec5678", first.GraphValidationEvidenceHash);
+        Assert.Equal("557783ab186ee6267f901308f6ce729bfbc95a829865b578ca7920985b26fc9f", first.GraphValidationEvidenceHash);
     }
 
     [Fact]
@@ -598,6 +626,47 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
             [new("text", GovernedLoopValueKind.Text, false)]);
     }
 
+    private static GovernedLoopGraphCandidate WorkspaceActionCandidate(GovernedLoopNodeDescriptor descriptor)
+    {
+        var baseline = Nodes();
+        var input = descriptor == WorkspaceActionNodeDescriptors.Delete
+            ? "{\"precondition\":{\"expectedContentHash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"kind\":\"expectedContentHash\"},\"schemaVersion\":1,\"scopeId\":\"workspace\",\"segments\":[],\"target\":\"notes.txt\"}"
+            : "{\"precondition\":{\"kind\":\"expectedAbsent\"},\"schemaVersion\":1,\"scopeId\":\"workspace\",\"segments\":[{\"kind\":\"literalUtf8\",\"literal\":\"hello\"}],\"target\":\"notes.txt\"}";
+        var action = new GovernedLoopNodeDefinition(
+            "workspace-action",
+            descriptor,
+            [Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+            GovernedLoopAuthorityCeiling.Create([WorkspaceCommandCapabilityId]),
+            new Dictionary<string, string> { ["input"] = input });
+        return new GovernedLoopGraphCandidate(
+            1,
+            descriptor.TypeId + "-loop",
+            "revision-1",
+            "Execute one exact governed workspace Action.",
+            RolePin(),
+            "trigger",
+            ["exit"],
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceCommandCapabilityId]),
+            [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
+            [baseline[0], baseline[1], action, baseline[2]],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("infer-to-action", "infer", "workspace-action", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("action-to-exit", "workspace-action", "exit", GovernedLoopControlCondition.Success),
+            ],
+            [
+                new GovernedLoopBindingDefinition("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new GovernedLoopBindingDefinition("action-result-to-exit", GovernedLoopBindingKind.Data, "workspace-action", "result", "exit", "result"),
+            ],
+            new GovernedLoopOutputContract("Return the result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
+            new GovernedLoopDisplayMetadata(
+                descriptor.TypeId + " loop",
+                "Catalog composition test.",
+                new[] { baseline[0], baseline[1], action, baseline[2] }.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Exact catalog node.", index * 100, 0)).ToArray()),
+            EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
+    }
+
     private static GovernedLoopGraphCandidate GraphCandidate(
         string graphId,
         IReadOnlyList<GovernedLoopNodeDefinition> nodes,
@@ -779,7 +848,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
                 ContextualRoleInstructionSourceKind.RoleArtifact,
                 "researcher-source",
                 ContextualRoleInstructionClassification.RoleInstruction),
-            new ContextualRolePolicyMaxima(ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceReadCapabilityId)));
+            new ContextualRolePolicyMaxima(ImmutableArray.Create(ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceCommandCapabilityId, WorkspaceReadCapabilityId)));
         return ContextualRoleRevisionContentHash.Apply(role);
     }
 

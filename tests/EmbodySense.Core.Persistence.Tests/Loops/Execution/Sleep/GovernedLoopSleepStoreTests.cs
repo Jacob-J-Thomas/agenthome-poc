@@ -631,6 +631,7 @@ public sealed class GovernedLoopSleepStoreTests
             postureHash,
             token));
         await AssertCancellationAsync(token => waitingStore.AdvanceWakeAsync(prepared, committed, token));
+        // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/508 owns exact native-lock readiness for the background-work projection.
         await AssertCancellationAsync(token => background.ReadAsync(
             GovernedLoopBackgroundWorkFamily.Wake,
             checkpoint.PublishedAtUtc,

@@ -54,6 +54,7 @@ using EmbodySense.Core.Startup.Inference;
 using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Loops.Execution.Effects;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Loops.Posture;
@@ -335,7 +336,7 @@ public sealed class AgentRuntimeFactory
             }
 
             var capabilityAuthority = new CapabilityAuthorityTransaction(paths);
-            var workspaceClient = new LocalWorkspaceClient(paths, new CapabilityAuthorityWorkspaceMutationCommitBoundary(paths, capabilityAuthority));
+            var workspaceClient = new LocalWorkspaceClient(paths);
             var loopDefinitionStore = new LoopDefinitionStore(paths, capabilityAuthority);
             var defaultLoop = await loopDefinitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation, cancellationToken) ?? LoopDefinition.CreateDefaultConversation();
             var capabilityAdmission = CapabilityAdmissionFactory.Create(paths, _capabilityTrustProvider, capabilityAuthority);
@@ -463,6 +464,17 @@ public sealed class AgentRuntimeFactory
                 governedEffectAuthorityEvidence,
                 governedEffectAuthorityEvidence,
                 capabilityAuthority);
+            var governedWorkspaceActionRegistry = GovernedWorkspaceActionFactory.CreateRegistry(
+                paths,
+                capabilityAuthority,
+                permissionService);
+            var governedWorkspaceActionFacade = GovernedLoopEffectAttemptFactory.Create(
+                paths,
+                _capabilityTrustProvider,
+                capabilityAuthority,
+                governedWorkspaceActionRegistry,
+                governedEffectAuthority);
+            var governedWorkspaceActionExecutor = new GovernedLoopWorkspaceActionExecutor(governedWorkspaceActionFacade);
             var governedModelUsageLedger = new EmbodySense.Core.Persistence.Inference.Profiles.GovernedModelUsageLedgerStore(
                 paths,
                 _capabilityTrustProvider,
@@ -518,7 +530,8 @@ public sealed class AgentRuntimeFactory
                 capabilityAdmissionService: capabilityAdmission,
                 conversationPublicationAuthorityBoundaryProvider: governedPublicationAuthority,
                 firstBoundRunCompletionBoundary: governedRunCompletion,
-                waitNodeExecutor: governedWaitNodeRelay);
+                waitNodeExecutor: governedWaitNodeRelay,
+                workspaceActionExecutor: governedWorkspaceActionExecutor);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,

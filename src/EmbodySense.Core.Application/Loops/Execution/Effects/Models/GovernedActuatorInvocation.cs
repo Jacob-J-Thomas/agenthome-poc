@@ -10,6 +10,7 @@ namespace EmbodySense.Core.Application.Loops.Execution.Effects.Models;
 /// <param name="Input">The bounded canonical in-memory input.</param>
 /// <param name="TargetFingerprint">The exact server-resolved target fingerprint.</param>
 /// <param name="PreconditionEvidenceHash">The optional optimistic-precondition evidence hash.</param>
+/// <param name="BeforeEvidenceId">The optional opaque server-owned before-evidence reference durably bound into intent.</param>
 public sealed record GovernedActuatorInvocation(
     GovernedActuatorOperationDescriptor Descriptor,
     string EffectId,
@@ -17,4 +18,5 @@ public sealed record GovernedActuatorInvocation(
     long EffectGeneration,
     GovernedActuatorInputEvidence Input,
     string TargetFingerprint,
-    string? PreconditionEvidenceHash);
+    string? PreconditionEvidenceHash,
+    string? BeforeEvidenceId);

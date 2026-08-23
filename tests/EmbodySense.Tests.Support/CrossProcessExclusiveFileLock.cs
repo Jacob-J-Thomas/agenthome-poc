@@ -19,6 +19,7 @@ public sealed class CrossProcessExclusiveFileLock : IDisposable
     public static CrossProcessExclusiveFileLock Acquire(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/510 owns Unix retained-handle compatibility for this test-only lock acquisition.
         var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
         try
         {

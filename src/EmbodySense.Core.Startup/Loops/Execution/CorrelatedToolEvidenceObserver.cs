@@ -53,9 +53,11 @@ internal sealed class CorrelatedToolEvidenceObserver : IToolGovernanceObserver
     public async Task ReserveAsync(ToolRequest request, string resolvedTarget, CustomLoopToolAuthoritySnapshot authority, int requestOrdinal, CancellationToken cancellationToken)
     {
         var correlationId = request.CorrelationId ?? throw new CustomLoopToolEvidenceIntegrityException("A bounded tool request must have a correlation id before evidence reservation.");
+        var evidenceRequest = WorkspaceMutationEvidenceProjection.ProjectRequest(request);
+        var evidenceTarget = WorkspaceMutationEvidenceProjection.ProjectResolvedTarget(request, resolvedTarget);
         lock (_gate)
         {
-            if (!_requests.TryAdd(correlationId, new RequestEvidenceState(requestOrdinal, request, resolvedTarget, authority)))
+            if (!_requests.TryAdd(correlationId, new RequestEvidenceState(requestOrdinal, evidenceRequest, evidenceTarget, authority)))
             {
                 throw new CustomLoopToolEvidenceIntegrityException("A tool request correlation id was reused within one inference attempt.");
             }
@@ -152,7 +154,11 @@ internal sealed class CorrelatedToolEvidenceObserver : IToolGovernanceObserver
     {
         _ = request.CorrelationId ?? throw new CustomLoopToolEvidenceIntegrityException("A bounded repeated tool request must have a correlation id before its integrity evidence is retained.");
         return RecordAsync(
-            new RequestEvidenceState(requestOrdinal, request, resolvedTarget, authority),
+            new RequestEvidenceState(
+                requestOrdinal,
+                WorkspaceMutationEvidenceProjection.ProjectRequest(request),
+                WorkspaceMutationEvidenceProjection.ProjectResolvedTarget(request, resolvedTarget),
+                authority),
             CustomLoopToolEvidencePhase.IntegrityFailed,
             null,
             null,
@@ -163,7 +169,8 @@ internal sealed class CorrelatedToolEvidenceObserver : IToolGovernanceObserver
 
     private async Task RecordAsync(RequestEvidenceState state, CustomLoopToolEvidencePhase phase, string? brokerRequestId, ToolGovernanceEvidence? governance, ToolResult? result, bool returnedToModel, CancellationToken cancellationToken)
     {
-        var canonical = result is not null ? ToolResultFormatter.FormatResults([result]) : null;
+        var evidenceResult = result is null ? null : WorkspaceMutationEvidenceProjection.ProjectResult(result);
+        var canonical = evidenceResult is not null ? ToolResultFormatter.FormatResults([evidenceResult]) : null;
         var evidence = new CustomLoopToolTraceEvidence(
             phase,
             state.Ordinal,
@@ -175,8 +182,8 @@ internal sealed class CorrelatedToolEvidenceObserver : IToolGovernanceObserver
             state.Request.Pattern,
             state.ResolvedTarget,
             state.Authority,
-            BoundGovernance(governance),
-            result?.Outcome,
+            BoundGovernance(WorkspaceMutationEvidenceProjection.ProjectGovernance(state.Request, governance)),
+            evidenceResult?.Outcome,
             canonical,
             canonical is null ? null : CustomLoopTraceContentHash.Compute(canonical),
             canonical?.Length,

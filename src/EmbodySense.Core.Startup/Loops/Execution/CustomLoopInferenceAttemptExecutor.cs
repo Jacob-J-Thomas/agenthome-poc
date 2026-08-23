@@ -37,7 +37,6 @@ using EmbodySense.Core.Persistence.ToolResults;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Inference;
 using EmbodySense.Core.Application.Capabilities;
-using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Startup.Capabilities;
 
@@ -241,7 +240,6 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             var permissionService = new ReloadingToolPermissionService(_paths, new PermissionPolicyStore());
             var observer = new CorrelatedToolEvidenceObserver(_evidenceSink, request);
             var retention = new ToolResultRetentionService(_auditLog, loopDefinition, _toolResultRetentionStore);
-            var mutationBoundary = new CapabilityAuthorityWorkspaceMutationCommitBoundary(_paths, _capabilityAuthorityTransaction);
             if (legacyDispatch)
             {
                 var revalidator = new CustomLoopToolActuationAuthorityRevalidator(
@@ -253,7 +251,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
                     _paths,
                     permissionService,
                     _approvalPrompt,
-                    new LocalWorkspaceClient(_paths, mutationBoundary),
+                    new LocalWorkspaceClient(_paths),
                     _auditLog,
                     loopDefinition,
                     _toolResultRetentionStore,
@@ -282,7 +280,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
                     _paths,
                     permissionService,
                     _approvalPrompt,
-                    new LocalWorkspaceClient(_paths, mutationBoundary),
+                    new LocalWorkspaceClient(_paths),
                     _auditLog,
                     loopDefinition,
                     _toolResultRetentionStore,

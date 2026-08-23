@@ -26,4 +26,7 @@ public enum GovernedLoopEffectAttemptStoreStatus
 
     /// <summary>No durable attempt exists for the exact stable operation generation.</summary>
     NotFound = 8,
+
+    /// <summary>The side-effect-free preparation was no longer current while cleanup was excluded.</summary>
+    PreparationExpired = 9,
 }

@@ -104,9 +104,8 @@ public static class GovernedLoopSequentialLegacyDefinitionProjector
                 })
                 .ToArray();
             var createdAtUtc = artifact.RevisionArtifact.CreatedAtUtc.ToUniversalTime();
-            CustomLoopToolAssignment[] toolAssignments = graph.AuthorityCeiling.CapabilityIds.Contains(
-                WorkspaceCommandCapabilityId,
-                StringComparer.Ordinal)
+            CustomLoopToolAssignment[] toolAssignments = graph.Nodes.Any(node => node.Descriptor.Kind == EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Inference
+                && node.AuthorityCeiling.CapabilityIds.Contains(WorkspaceCommandCapabilityId, StringComparer.Ordinal))
                 ? [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search]
                 : [];
             var definition = new CustomLoopDefinition(

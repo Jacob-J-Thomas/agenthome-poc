@@ -90,6 +90,7 @@ public sealed class GovernedLoopConversationPublicationCommitBoundary
             {
                 if (callbackClosed)
                 {
+                    // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/507 owns cancellation observability when closure wins before append lifetime creation.
                     callbackViolation ??= Protocol("The governed effect boundary did not await the conversation append while its authority boundary was active.");
                     throw callbackViolation;
                 }
