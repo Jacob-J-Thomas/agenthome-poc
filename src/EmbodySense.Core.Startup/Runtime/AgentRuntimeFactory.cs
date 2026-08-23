@@ -301,7 +301,7 @@ public sealed class AgentRuntimeFactory
             IReadOnlyList<CustomLoopRecoveryResult> recoveryResults = [];
             var customExecutionAvailable = recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired;
             var customExecutionReacquisitionAllowed = recoveryOwnership.Status is CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable;
-            var customRecoveryRequired = false;
+            var customRecoveryRequired = recoveryOwnership.Status is CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable;
             preserveCurrentConversation |= !customExecutionAvailable;
             using (recoveryOwnership.Lease)
             {

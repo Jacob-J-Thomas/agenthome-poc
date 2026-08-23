@@ -358,6 +358,16 @@ internal sealed class GovernedLoopRuntimeFacade : IDisposable, ITriggerGovernedL
             return Map(await _coordinator.InvokeAsync(request, cancellationToken).ConfigureAwait(false));
         }
 
+        if (_legacyRuntime.CustomRecoveryRequired)
+        {
+            // Reconcile retained execution before returning a non-dispatch replay; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/496.
+            var recovery = await _legacyRuntime.EnsureCustomExecutionAvailableAsync(invocationActor.Value, cancellationToken).ConfigureAwait(false);
+            if (!recovery.Available)
+            {
+                return Failure(recovery.Status, recovery.Detail);
+            }
+        }
+
         if (await CannotDispatchAsync(operation!, cancellationToken).ConfigureAwait(false))
         {
             return Map(await _coordinator.InvokeAsync(request, cancellationToken).ConfigureAwait(false));
