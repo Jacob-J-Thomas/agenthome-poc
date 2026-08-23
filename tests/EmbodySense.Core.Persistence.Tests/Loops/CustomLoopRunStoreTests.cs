@@ -685,9 +685,9 @@ public sealed class CustomLoopRunStoreTests
             readTask = store.GetAsync(admitted.Id);
             await Task.Delay(TimeSpan.FromMilliseconds(50));
             Assert.False(readTask.IsCompleted);
-
-            updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
         }
+
+        updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
 
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await updateTask.WaitAsync(TimeSpan.FromSeconds(10))).Status);
         var observed = Assert.IsType<CustomLoopRunRecord>(await readTask.WaitAsync(TimeSpan.FromSeconds(10)));
