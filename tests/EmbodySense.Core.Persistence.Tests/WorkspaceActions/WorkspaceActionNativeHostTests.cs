@@ -1333,7 +1333,7 @@ public sealed class WorkspaceActionNativeHostTests
     }
 
     [Fact]
-    public async Task ExistingWindowsReplacementRejectsExternalWinnerBeforePublication()
+    public async Task ExistingWindowsReplacementRejectsCompatibleExternalWriteBeforePublication()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1342,7 +1342,6 @@ public sealed class WorkspaceActionNativeHostTests
         using var workspace = new TestWorkspace();
         Directory.CreateDirectory(workspace.File("notes"));
         var path = workspace.File("notes", "windows-race.txt");
-        var original = workspace.File("notes", "windows-race.original");
         await File.WriteAllTextAsync(path, "before");
         var paths = new WorkspacePaths(workspace.RootPath);
         var observer = new CallbackNamespaceRaceObserver(point =>
@@ -1351,8 +1350,7 @@ public sealed class WorkspaceActionNativeHostTests
             {
                 return;
             }
-            File.Move(path, original);
-            File.WriteAllText(path, "external");
+            WriteAllTextWithCompatibleSharing(path, "external");
         });
         var input = Input(WorkspaceActionKind.Write, "notes/windows-race.txt", ExpectedHash("before"), "governed");
         var host = Host(paths, namespaceRaceObserver: observer);
@@ -1362,7 +1360,6 @@ public sealed class WorkspaceActionNativeHostTests
             Request(input, prepared.BeforeEvidence),
             new RecordingDispatchBoundary()));
 
-        Assert.Equal("before", await File.ReadAllTextAsync(original));
         Assert.Equal("external", await File.ReadAllTextAsync(path));
         var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
         Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
@@ -1379,7 +1376,7 @@ public sealed class WorkspaceActionNativeHostTests
     }
 
     [Fact]
-    public async Task ExistingWindowsReplacementFencesWorkspaceAncestorRenamesAndDeletionThroughPublication()
+    public async Task ExistingWindowsReplacementFailsClosedWhenAncestorRenameAndDeletionRaceTheFinalCheck()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1393,6 +1390,7 @@ public sealed class WorkspaceActionNativeHostTests
         await File.WriteAllTextAsync(path, "before");
         var renameBlocked = false;
         var deleteBlocked = false;
+        var targetDeleted = false;
         var observer = new CallbackNamespaceRaceObserver(point =>
         {
             if (point != WorkspaceActionNamespaceRacePoint.BeforeInstallSystemCall)
@@ -1409,7 +1407,16 @@ public sealed class WorkspaceActionNativeHostTests
             }
             try
             {
-                Directory.Delete(notes, recursive: true);
+                File.Delete(path);
+                targetDeleted = true;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                targetDeleted = false;
+            }
+            try
+            {
+                Directory.Delete(notes, recursive: false);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
@@ -1421,13 +1428,30 @@ public sealed class WorkspaceActionNativeHostTests
         var host = Host(paths, namespaceRaceObserver: observer);
         var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
 
-        var result = await host.ExecuteAsync(Request(input, prepared.BeforeEvidence), new RecordingDispatchBoundary());
+        await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            new RecordingDispatchBoundary()));
 
         Assert.True(renameBlocked);
         Assert.True(deleteBlocked);
+        Assert.True(targetDeleted);
         Assert.False(Directory.Exists(movedNotes));
-        Assert.Equal(WorkspaceActionNativeCommitStatus.OutcomeObserved, result.Status);
-        Assert.Equal("governed", await File.ReadAllTextAsync(path));
+        Assert.True(Directory.Exists(notes));
+        Assert.DoesNotContain(
+            Directory.EnumerateFileSystemEntries(notes),
+            entry => string.Equals(Path.GetFileName(entry), Path.GetFileName(path), StringComparison.Ordinal));
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+        Assert.Null(await new WorkspaceActionEvidenceStore(paths).FindAfterAsync("effect-alpha", "operation-alpha", 1));
+        var probe = await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence));
+        Assert.Equal(WorkspaceActionReconciliationPosture.Indeterminate, probe.Posture);
+        var replayBoundary = new RecordingDispatchBoundary();
+        Assert.Equal(
+            WorkspaceActionNativeCommitStatus.DispatchNotStarted,
+            (await Host(paths).ExecuteAsync(Request(input, prepared.BeforeEvidence), replayBoundary)).Status);
+        Assert.Equal(0, replayBoundary.CrossCount);
     }
 
     [Fact]
@@ -1475,7 +1499,7 @@ public sealed class WorkspaceActionNativeHostTests
     }
 
     [Fact]
-    public async Task ExistingWindowsReplacementExternalWriteAfterFinalCheckRequiresReconciliationAndRetainsBytes()
+    public async Task ExistingWindowsReplacementFenceBlocksExternalWriteBeforeFinalPublication()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1485,11 +1509,19 @@ public sealed class WorkspaceActionNativeHostTests
         Directory.CreateDirectory(workspace.File("notes"));
         var path = workspace.File("notes", "windows-write-race.txt");
         await File.WriteAllTextAsync(path, "before");
+        var writeBlocked = false;
         var observer = new CallbackNamespaceRaceObserver(point =>
         {
             if (point == WorkspaceActionNamespaceRacePoint.AfterWindowsReplacementFinalCheckBeforeReplaceSystemCall)
             {
-                WriteAllTextWithCompatibleSharing(path, "external");
+                try
+                {
+                    WriteAllTextWithCompatibleSharing(path, "external");
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    writeBlocked = true;
+                }
             }
         });
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -1497,20 +1529,16 @@ public sealed class WorkspaceActionNativeHostTests
         var host = Host(paths, namespaceRaceObserver: observer);
         var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
 
-        await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
-            Request(input, prepared.BeforeEvidence),
-            new RecordingDispatchBoundary()));
+        var result = await host.ExecuteAsync(Request(input, prepared.BeforeEvidence), new RecordingDispatchBoundary());
 
+        Assert.True(writeBlocked);
+        Assert.Equal(WorkspaceActionNativeCommitStatus.OutcomeObserved, result.Status);
         Assert.Equal("governed", await File.ReadAllTextAsync(path));
         var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
         Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
-        var displaced = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
-        Assert.Equal("external", await File.ReadAllTextAsync(displaced));
-        Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
-        Assert.Null(await new WorkspaceActionEvidenceStore(paths).FindAfterAsync("effect-alpha", "operation-alpha", 1));
-        Assert.Equal(
-            WorkspaceActionReconciliationPosture.Indeterminate,
-            (await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence))).Posture);
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        Assert.NotNull(await new WorkspaceActionEvidenceStore(paths).FindAfterAsync("effect-alpha", "operation-alpha", 1));
     }
 
     [Theory]
@@ -1528,11 +1556,20 @@ public sealed class WorkspaceActionNativeHostTests
         await File.WriteAllTextAsync(path, "before");
         var paths = new WorkspacePaths(workspace.RootPath);
         var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        var publishedTargetOpenBlocked = false;
         var observer = new CallbackNamespaceRaceObserver(point =>
         {
             if (point != WorkspaceActionNamespaceRacePoint.AfterWindowsReplacementSystemCallBeforeBackupRetention)
             {
                 return;
+            }
+            try
+            {
+                WriteAllTextWithCompatibleSharing(path, "external");
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                publishedTargetOpenBlocked = true;
             }
             var displaced = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
             File.Delete(displaced);
@@ -1550,6 +1587,7 @@ public sealed class WorkspaceActionNativeHostTests
             new RecordingDispatchBoundary()));
 
         Assert.Equal("governed", await File.ReadAllTextAsync(path));
+        Assert.True(publishedTargetOpenBlocked);
         Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
         if (substitute)
         {
@@ -1598,7 +1636,7 @@ public sealed class WorkspaceActionNativeHostTests
     }
 
     [Fact]
-    public async Task WindowsReplaceFileCrashBeforeBackupRetentionIsIndeterminateAndReleasedCleanupIsFenced()
+    public async Task WindowsAtomicReplacementCrashBeforeBackupRetentionIsIndeterminateAndReleasedCleanupIsFenced()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1703,17 +1741,29 @@ public sealed class WorkspaceActionNativeHostTests
         var host = Host(paths, namespaceRaceObserver: observer);
         var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
 
-        await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
+        await Assert.ThrowsAnyAsync<IOException>(() => host.ExecuteAsync(
             Request(input, prepared.BeforeEvidence),
             new RecordingDispatchBoundary()));
 
         Assert.Equal("before", await File.ReadAllTextAsync(alias));
+        Assert.Contains(
+            Directory.EnumerateFileSystemEntries(workspace.File("notes")),
+            entry => string.Equals(Path.GetFileName(entry), Path.GetFileName(alias), StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            Directory.EnumerateFileSystemEntries(workspace.File("notes")),
+            entry => string.Equals(Path.GetFileName(entry), "windows-case-alias.txt", StringComparison.Ordinal));
         var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
-        var stage = Assert.Single(Directory.EnumerateFiles(staging, "*.stage"));
-        Assert.Equal("governed", await File.ReadAllTextAsync(stage));
-        Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.marker"));
         Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.displaced"));
         Assert.Null(await new WorkspaceActionEvidenceStore(paths).FindAfterAsync("effect-alpha", "operation-alpha", 1));
+        var probe = await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence));
+        Assert.Equal(WorkspaceActionReconciliationPosture.Indeterminate, probe.Posture);
+        var replayBoundary = new RecordingDispatchBoundary();
+        Assert.Equal(
+            WorkspaceActionNativeCommitStatus.DispatchNotStarted,
+            (await Host(paths).ExecuteAsync(Request(input, prepared.BeforeEvidence), replayBoundary)).Status);
+        Assert.Equal(0, replayBoundary.CrossCount);
     }
 
     [Fact]
@@ -2197,6 +2247,36 @@ public sealed class WorkspaceActionNativeHostTests
         {
             // A case-sensitive macOS volume does not expose the two spellings as one native identity.
         }
+    }
+
+    [Fact]
+    public async Task ProbeProjectsHostEquivalentAncestorAliasAsIndeterminate()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        var original = workspace.File("NOTES");
+        var temporary = workspace.File("notes-temporary");
+        var alias = workspace.File("notes");
+        Directory.CreateDirectory(original);
+        await File.WriteAllTextAsync(workspace.File("NOTES", "value.txt"), "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Write, "NOTES/value.txt", ExpectedHash("before"), "after");
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await Host(paths).PrepareAsync(input));
+
+        Directory.Move(original, temporary);
+        Directory.Move(temporary, alias);
+        if (!Directory.Exists(original))
+        {
+            // A case-sensitive Windows volume does not expose the two spellings as one native identity.
+            return;
+        }
+
+        var probe = await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence));
+
+        Assert.Equal(WorkspaceActionReconciliationPosture.Indeterminate, probe.Posture);
     }
 
     [Fact]
@@ -2745,7 +2825,7 @@ public sealed class WorkspaceActionNativeHostTests
                 return Task.CompletedTask;
             }
             WriteCrashWorkerFailpointMarker(markerPath);
-            Environment.FailFast("aborted after ReplaceFileW and before private backup retention");
+            Environment.FailFast("aborted after atomic replacement and before private backup retention");
             throw new UnreachableException();
         }
     }

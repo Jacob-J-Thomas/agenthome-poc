@@ -122,6 +122,12 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
 
     public SafeFileHandle? TargetHandle => _targetHandle;
 
+    public void ReleaseTargetHandle()
+    {
+        _targetHandle?.Dispose();
+        _targetHandle = null;
+    }
+
     public static WorkspaceActionRetainedTargetSession Open(
         string rootPath,
         WorkspaceActionScopeId scopeId,
