@@ -16,4 +16,13 @@ public sealed record CredentialLeaseAttemptStoreOptions
 
     /// <summary>Gets or initializes the maximum immutable protocol versions retained per identity.</summary>
     public int MaxVersionsPerAttempt { get; init; } = CredentialLeaseContractLimits.MaximumVersions;
+
+    /// <summary>Gets an optional awaitable observer queued when bounded owner-marker takeover polling begins.</summary>
+    /// <remarks>
+    /// The observer is queued independently at most once per recovery operation after its first failed exact owner-marker attempt.
+    /// The recovery path never awaits it; a detached guard awaits the returned <see cref="ValueTask"/> and ignores all callback or
+    /// scheduling exceptions. It receives no cancellation signal, may run after the operation returns, and callers must make captured
+    /// state thread-safe and release any callback-owned resources independently. The default production path leaves this unset.
+    /// </remarks>
+    public Func<ValueTask>? OwnerTakeoverPollingObserver { get; init; }
 }

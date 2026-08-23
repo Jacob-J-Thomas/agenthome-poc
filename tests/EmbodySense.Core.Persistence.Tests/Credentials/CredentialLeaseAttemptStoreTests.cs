@@ -61,6 +61,279 @@ public sealed class CredentialLeaseAttemptStoreTests
     }
 
     [Fact]
+    public async Task Live_owner_takeover_poll_honors_cancellation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var intent = Intent();
+        var prepared = CredentialLeaseContract.Prepare(intent, _now);
+        var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
+        using var owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new CredentialLeaseAttemptStore(paths)
+            .ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration, cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Cancelled_resume_cannot_return_or_leak_a_lease_when_owner_releases()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var intent = Intent();
+        var prepared = CredentialLeaseContract.Prepare(intent, _now);
+        var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
+        using var owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        using var cancellation = new CancellationTokenSource();
+        var pollingStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var store = new CredentialLeaseAttemptStore(paths, new CredentialLeaseAttemptStoreOptions
+        {
+            OwnerTakeoverPollingObserver = () =>
+            {
+                pollingStarted.TrySetResult();
+                return ValueTask.CompletedTask;
+            },
+        });
+        var resume = store.ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration, cancellation.Token);
+
+        await pollingStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        cancellation.Cancel();
+        owner.Dispose();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => resume);
+
+        var retried = await new CredentialLeaseAttemptStore(paths)
+            .ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+        Assert.Equal(CredentialLeaseAttemptStoreStatus.Replayed, retried.Status);
+        retried.Lease!.Dispose();
+    }
+
+    [Fact]
+    public async Task Blocking_poll_observer_cannot_delay_takeover_deadline()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var intent = Intent();
+        var prepared = CredentialLeaseContract.Prepare(intent, _now);
+        var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
+        using var owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        var observerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observerRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observerFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var store = new CredentialLeaseAttemptStore(paths, new CredentialLeaseAttemptStoreOptions
+        {
+            OwnerTakeoverPollingObserver = () =>
+            {
+                observerStarted.TrySetResult();
+                try
+                {
+                    observerRelease.Task.GetAwaiter().GetResult();
+                }
+                finally
+                {
+                    observerFinished.TrySetResult();
+                }
+                return ValueTask.CompletedTask;
+            },
+        });
+
+        try
+        {
+            var resumed = store.ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+            await observerStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            var result = await resumed.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(CredentialLeaseAttemptStoreStatus.OperationInProgress, result.Status);
+        }
+        finally
+        {
+            observerRelease.TrySetResult();
+            await observerFinished.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        }
+    }
+
+    [Fact]
+    public async Task Blocking_poll_observer_cannot_delay_cancellation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var intent = Intent();
+        var prepared = CredentialLeaseContract.Prepare(intent, _now);
+        var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
+        using var owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        using var cancellation = new CancellationTokenSource();
+        var observerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observerRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observerFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var store = new CredentialLeaseAttemptStore(paths, new CredentialLeaseAttemptStoreOptions
+        {
+            OwnerTakeoverPollingObserver = () =>
+            {
+                observerStarted.TrySetResult();
+                try
+                {
+                    observerRelease.Task.GetAwaiter().GetResult();
+                }
+                finally
+                {
+                    observerFinished.TrySetResult();
+                }
+                return ValueTask.CompletedTask;
+            },
+        });
+
+        try
+        {
+            var resumed = store.ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration, cancellation.Token);
+            await observerStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => resumed).WaitAsync(TimeSpan.FromSeconds(1));
+        }
+        finally
+        {
+            observerRelease.TrySetResult();
+            await observerFinished.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        }
+    }
+
+    [Fact]
+    public async Task Throwing_poll_observer_cannot_change_live_owner_classification()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var intent = Intent();
+        var prepared = CredentialLeaseContract.Prepare(intent, _now);
+        var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
+        using var owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        var store = new CredentialLeaseAttemptStore(paths, new CredentialLeaseAttemptStoreOptions
+        {
+            OwnerTakeoverPollingObserver = static () => ValueTask.FromException(new InvalidOperationException("test observer failure")),
+        });
+
+        var resumed = await store.ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration)
+            .WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(CredentialLeaseAttemptStoreStatus.OperationInProgress, resumed.Status);
+    }
+
+    [Fact]
+    public async Task Async_throwing_poll_observer_cannot_change_live_owner_classification()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var intent = Intent();
+        var prepared = CredentialLeaseContract.Prepare(intent, _now);
+        var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
+        using var owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        var observerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observerFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var store = new CredentialLeaseAttemptStore(paths, new CredentialLeaseAttemptStoreOptions
+        {
+            OwnerTakeoverPollingObserver = async () =>
+            {
+                observerStarted.TrySetResult();
+                try
+                {
+                    await Task.Yield();
+                    throw new InvalidOperationException("test async observer failure");
+                }
+                finally
+                {
+                    observerFinished.TrySetResult();
+                }
+            },
+        });
+
+        try
+        {
+            var resumed = store.ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+            await observerStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            var result = await resumed.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(CredentialLeaseAttemptStoreStatus.OperationInProgress, result.Status);
+        }
+        finally
+        {
+            await observerFinished.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        }
+    }
+
+    [Fact]
+    public async Task Resume_owner_poll_does_not_hold_mutation_lock_for_an_unrelated_begin()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var first = Intent();
+        var firstPrepared = CredentialLeaseContract.Prepare(first, _now);
+        var firstBegun = await new CredentialLeaseAttemptStore(paths).BeginAsync(first, firstPrepared);
+        using var firstOwner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(firstBegun.Lease);
+        var pollingStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var store = new CredentialLeaseAttemptStore(paths, new CredentialLeaseAttemptStoreOptions
+        {
+            OwnerTakeoverPollingObserver = () =>
+            {
+                pollingStarted.TrySetResult();
+                return ValueTask.CompletedTask;
+            },
+        });
+        var resume = store.ResumeAsync(first.CredentialUseOperationId, first.CredentialUseGeneration);
+
+        await pollingStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        var second = Rehash(first with { LeaseId = "lease-concurrency-2", CredentialUseOperationId = "credential-use-concurrency-2" });
+        var secondResult = await new CredentialLeaseAttemptStore(paths)
+            .BeginAsync(second, CredentialLeaseContract.Prepare(second, _now))
+            .WaitAsync(TimeSpan.FromSeconds(1));
+
+        Assert.Equal(CredentialLeaseAttemptStoreStatus.Created, secondResult.Status);
+        secondResult.Lease!.Dispose();
+        firstOwner.Dispose();
+        var resumed = await resume.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(CredentialLeaseAttemptStoreStatus.Replayed, resumed.Status);
+        resumed.Lease!.Dispose();
+    }
+
+    [Fact]
+    public async Task Noncontention_owner_marker_access_failure_is_unavailable_without_polling()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var intent = Intent();
+        var prepared = CredentialLeaseContract.Prepare(intent, _now);
+        var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
+        begun.Lease!.Dispose();
+        var ownerPath = Directory.EnumerateFiles(paths.CredentialLeaseAttemptsPath, "*.owner").Single();
+
+        if (OperatingSystem.IsWindows())
+        {
+            var originalAttributes = File.GetAttributes(ownerPath);
+            File.SetAttributes(ownerPath, originalAttributes | FileAttributes.ReadOnly);
+            try
+            {
+                var unavailable = await new CredentialLeaseAttemptStore(paths)
+                    .ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration)
+                    .WaitAsync(TimeSpan.FromSeconds(1));
+                Assert.Equal(CredentialLeaseAttemptStoreStatus.Unavailable, unavailable.Status);
+            }
+            finally
+            {
+                File.SetAttributes(ownerPath, originalAttributes);
+            }
+        }
+        else
+        {
+            var originalMode = File.GetUnixFileMode(ownerPath);
+            File.SetUnixFileMode(ownerPath, UnixFileMode.UserRead);
+            try
+            {
+                var unavailable = await new CredentialLeaseAttemptStore(paths)
+                    .ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration)
+                    .WaitAsync(TimeSpan.FromSeconds(1));
+                Assert.Equal(CredentialLeaseAttemptStoreStatus.Unavailable, unavailable.Status);
+            }
+            finally
+            {
+                File.SetUnixFileMode(ownerPath, originalMode);
+            }
+        }
+    }
+
+    [Fact]
     public async Task Direct_successors_are_append_only_restart_safe_and_stale_heads_conflict()
     {
         using var workspace = new TestWorkspace();
