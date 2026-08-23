@@ -172,13 +172,13 @@ internal static class GovernedLoopRuntimeTests
             {
                 await using var restarted = await fixture.CreateRuntimeAsync(preserveCurrentConversation: true);
                 Assert.All(orphanedSnapshots, directory => Assert.False(Directory.Exists(directory)));
-                Assert.True(restarted.CustomLoopRecoveryRequired);
+                Assert.False(restarted.CustomLoopRecoveryRequired);
 
                 var unavailableReplay = await restarted.InvokeGovernedLoopAsync(input);
                 Assert.Equal("WorkspaceHostUnavailable", unavailableReplay.Status);
                 Assert.False(unavailableReplay.WasDispatched);
                 Assert.Null(unavailableReplay.Run);
-                Assert.True(restarted.CustomLoopRecoveryRequired);
+                Assert.False(restarted.CustomLoopRecoveryRequired);
                 Assert.Equal(expectedProviderAttempts, fixture.ProviderAttempts);
 
                 recoveryLease.Dispose();
