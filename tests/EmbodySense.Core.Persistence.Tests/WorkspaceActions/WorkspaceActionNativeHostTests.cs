@@ -505,7 +505,7 @@ public sealed class WorkspaceActionNativeHostTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+        Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(
             startInfo,
             typeof(WorkspaceActionNativeHostTests).Assembly.Location,
             $"{typeof(WorkspaceActionNativeHostTests).FullName}.{nameof(WorkspaceActionCrashWorker)}");
@@ -2636,7 +2636,7 @@ public sealed class WorkspaceActionNativeHostTests
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Verification.CoverageChildProcessAssembly.AddVstestArguments(
+        Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(
             startInfo,
             typeof(WorkspaceActionNativeHostTests).Assembly.Location,
             $"{typeof(WorkspaceActionNativeHostTests).FullName}.{nameof(WorkspaceActionCrashWorker)}");
