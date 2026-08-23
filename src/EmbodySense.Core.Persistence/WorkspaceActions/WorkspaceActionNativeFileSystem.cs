@@ -15,15 +15,15 @@ internal static class WorkspaceActionNativeFileSystem
 {
     private static readonly Encoding _strictUtf8 = new UTF8Encoding(false, true);
 
-    public static SafeFileHandle OpenAbsoluteDirectory(string path)
+    public static SafeFileHandle OpenAbsoluteDirectory(string path, bool denyDeleteSharing = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         if (OperatingSystem.IsWindows())
         {
             var handle = CreateFile(
                 Path.GetFullPath(path),
-                GenericRead | GenericWrite | DeleteAccess | SynchronizeAccess,
-                FileShareRead | FileShareWrite | FileShareDelete,
+                GenericRead | GenericWrite | SynchronizeAccess,
+                FileShareRead | FileShareWrite | (denyDeleteSharing ? 0 : FileShareDelete),
                 IntPtr.Zero,
                 OpenExisting,
                 FileFlagBackupSemantics | FileFlagOpenReparsePoint | FileFlagWriteThrough,
@@ -136,7 +136,8 @@ internal static class WorkspaceActionNativeFileSystem
     public static SafeFileHandle OpenRelativeDirectory(
         SafeFileHandle parent,
         string name,
-        bool privateSecurityAccess = false)
+        bool privateSecurityAccess = false,
+        bool denyDeleteSharing = false)
     {
         EnsureSimpleName(name);
         if (OperatingSystem.IsWindows())
@@ -144,11 +145,11 @@ internal static class WorkspaceActionNativeFileSystem
             var windowsHandle = NtCreateRelative(
                 parent,
                 name,
-                GenericRead | GenericWrite | DeleteAccess | (privateSecurityAccess ? PrivateSecurityAccess : 0) | SynchronizeAccess,
+                GenericRead | GenericWrite | (privateSecurityAccess ? PrivateSecurityAccess : 0) | SynchronizeAccess,
                 NtOpen,
                 NtDirectoryFile | NtSynchronousIoNonAlert | NtOpenReparsePoint | NtWriteThrough,
                 allowMissing: false,
-                FileShareRead | FileShareWrite | FileShareDelete);
+                FileShareRead | FileShareWrite | (denyDeleteSharing ? 0 : FileShareDelete));
             return RetainValidated(windowsHandle!, retained => RequireDirectory(retained, "workspace ancestor"));
         }
 
@@ -164,7 +165,7 @@ internal static class WorkspaceActionNativeFileSystem
         return RetainValidated(handle, retained => RequireDirectory(retained, "workspace ancestor"));
     }
 
-    private static string[] PrivateRelativeSegments(string workspaceRoot, string path)
+    internal static string[] PrivateRelativeSegments(string workspaceRoot, string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceRoot);
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
@@ -238,7 +239,6 @@ internal static class WorkspaceActionNativeFileSystem
         bool write,
         bool denyDeleteSharing = false,
         bool denyWriteSharing = false,
-        bool allowMultipleLinks = false,
         bool privateSecurityAccess = false)
     {
         EnsureSimpleName(name);
@@ -261,7 +261,7 @@ internal static class WorkspaceActionNativeFileSystem
                 shareAccess);
             if (handle is not null)
             {
-                return RetainValidated(handle, retained => RequireRegularFile(retained, "workspace target", requireSingleLink: !allowMultipleLinks));
+                return RetainValidated(handle, retained => RequireRegularFile(retained, "workspace target"));
             }
             return null;
         }
@@ -847,27 +847,20 @@ internal static class WorkspaceActionNativeFileSystem
     }
 
     public static void RequireRegularFile(SafeFileHandle handle, string description)
-        => RequireRegularFile(handle, description, requireSingleLink: true);
-
-    private static void RequireRegularFile(SafeFileHandle handle, string description, bool requireSingleLink)
     {
         var identity = GetIdentity(handle);
-        if (!identity.IsRegularFile
-            || identity.IsDirectory
-            || identity.IsReparsePoint
-            || (requireSingleLink ? identity.LinkCount != 1 : identity.LinkCount == 0))
+        if (!identity.IsRegularFile || identity.IsDirectory || identity.IsReparsePoint || identity.LinkCount != 1)
         {
-            throw new IOException($"The retained {description} is not one {(requireSingleLink ? "single-link " : string.Empty)}regular file.");
+            throw new IOException($"The retained {description} is not one single-link regular file.");
         }
     }
 
     public static async Task<byte[]> ReadAllBytesAsync(
         SafeFileHandle handle,
         int maximumBytes,
-        CancellationToken cancellationToken,
-        bool requireSingleLink = true)
+        CancellationToken cancellationToken)
     {
-        RequireRegularFile(handle, "workspace target", requireSingleLink);
+        RequireRegularFile(handle, "workspace target");
         var length = RandomAccess.GetLength(handle);
         if (length is < 0 || length > maximumBytes)
         {
@@ -888,7 +881,7 @@ internal static class WorkspaceActionNativeFileSystem
         {
             throw new IOException("The workspace target changed length during retained-handle evidence capture.");
         }
-        RequireRegularFile(handle, "workspace target", requireSingleLink);
+        RequireRegularFile(handle, "workspace target");
         return bytes;
     }
 
@@ -910,14 +903,7 @@ internal static class WorkspaceActionNativeFileSystem
     {
         if (OperatingSystem.IsWindows())
         {
-            var descriptor = ReadWindowsReplacementSecurityDescriptor(source);
-            SetWindowsReplacementSecurityDescriptor(stage, descriptor, protectDiscretionaryAccessControlList: true);
-            RequireWindowsReplacementMetadata(
-                source,
-                stage,
-                expectedProtectedDiscretionaryAccessControlList: true,
-                canonicalizeInheritedAccessControlEntryFlags: true);
-            return;
+            throw new PlatformNotSupportedException("Windows replacement metadata is authenticated after ReplaceFileW publication.");
         }
         var sourceIdentity = GetIdentity(source);
         var sourceDescriptor = source.DangerousGetHandle().ToInt32();
@@ -966,25 +952,6 @@ internal static class WorkspaceActionNativeFileSystem
         {
             throw new IOException("The published workspace replacement did not preserve the exact Unix owner, group, mode, and access-control evidence.");
         }
-    }
-
-    /// <summary>
-    /// Restores the source DACL inheritance posture after a staged Windows replacement is installed.
-    /// Windows replacement commits preserve only retained-handle owner, primary-group, DACL, and DACL-protection metadata;
-    /// they intentionally do not claim the broader <c>ReplaceFileW</c> metadata-merge contract.
-    /// </summary>
-    public static void RestoreWindowsReplacementMetadata(SafeFileHandle source, SafeFileHandle replacement)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("Windows replacement metadata restoration is available only on Windows.");
-        }
-        var descriptor = ReadWindowsReplacementSecurityDescriptor(source);
-        SetWindowsReplacementSecurityDescriptor(
-            replacement,
-            descriptor,
-            descriptor.ControlFlags.HasFlag(ControlFlags.DiscretionaryAclProtected));
-        RequireWindowsReplacementMetadata(source, replacement, expectedProtectedDiscretionaryAccessControlList: null);
     }
 
     public static void RemoveMacExtendedAccessControl(SafeFileHandle handle)
@@ -1206,7 +1173,7 @@ internal static class WorkspaceActionNativeFileSystem
         RequireRegularFile(target, "workspace action exchange target");
         if (OperatingSystem.IsWindows())
         {
-            throw new PlatformNotSupportedException("Windows existing-file commits use a retained current-target hard-link backup proof.");
+            throw new PlatformNotSupportedException("Windows existing-file commits use ReplaceFileW with an authenticated private displaced-target backup.");
         }
         var result = OperatingSystem.IsLinux()
             ? UnixRenameAt2(
@@ -1232,44 +1199,57 @@ internal static class WorkspaceActionNativeFileSystem
         }
     }
 
-    public static void LinkWindowsRelative(SafeFileHandle source, SafeFileHandle targetParent, string targetName)
+    public static string CaptureWindowsReplacementPath(SafeFileHandle replacement, string replacementName)
     {
-        EnsureSimpleName(targetName);
+        EnsureSimpleName(replacementName);
         if (!OperatingSystem.IsWindows())
         {
-            throw new PlatformNotSupportedException("Handle-relative Windows hard-link creation is available only on Windows.");
+            throw new PlatformNotSupportedException("Atomic Windows replacement is available only on Windows.");
         }
-        RequireRegularFile(source, "workspace action replacement backup source");
-        using (var existingTarget = OpenRelativeFile(targetParent, targetName, allowMissing: true, write: false))
+        RequireRegularFile(replacement, "workspace action replacement");
+        RequireExactOpenedName(replacement, replacementName);
+        return ReadFinalPath(replacement);
+    }
+
+    public static void ReplaceWindowsRelativeWithBackup(
+        string replacementPath,
+        SafeFileHandle replaced,
+        SafeFileHandle replacedParent,
+        string replacedName,
+        SafeFileHandle backupParent,
+        string backupName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(replacementPath);
+        EnsureSimpleName(replacedName);
+        EnsureSimpleName(backupName);
+        if (!OperatingSystem.IsWindows())
         {
-            if (existingTarget is not null)
+            throw new PlatformNotSupportedException("Atomic Windows replacement is available only on Windows.");
+        }
+        RequireRegularFile(replaced, "workspace action replaced target");
+        RequireExactOpenedName(replaced, replacedName);
+        RequireDirectory(replacedParent, "workspace action replacement parent");
+        RequireDirectory(backupParent, "workspace action replacement backup parent");
+        using (var existingBackup = OpenRelativeFile(backupParent, backupName, allowMissing: true, write: false))
+        {
+            if (existingBackup is not null)
             {
                 throw new IOException("The authenticated workspace replacement backup slot is already occupied.");
             }
         }
-        LinkWindowsRelativeCore(source, targetParent, targetName);
+        var replacedPath = Path.Combine(ReadFinalPath(replacedParent), replacedName);
+        var backupPath = Path.Combine(ReadFinalPath(backupParent), backupName);
+        if (!ReplaceFile(replacedPath, replacementPath, backupPath, 0, IntPtr.Zero, IntPtr.Zero))
+        {
+            throw NativeIOException("ReplaceFileW workspace action replacement", Marshal.GetLastPInvokeError());
+        }
+        GC.KeepAlive(replaced);
+        GC.KeepAlive(replacedParent);
+        GC.KeepAlive(backupParent);
     }
 
     public static void DeleteExact(SafeFileHandle parent, string name, SafeFileHandle retained, WorkspaceActionNativeFileStamp expected)
         => DeleteExact(parent, name, retained, expected, expectedLinkCount: 1);
-
-    public static void DeleteLinkedExact(
-        SafeFileHandle parent,
-        string name,
-        SafeFileHandle retained,
-        WorkspaceActionNativeFileStamp expected,
-        uint expectedLinkCount)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("Windows hard-link cleanup is available only on Windows.");
-        }
-        if (expectedLinkCount < 2)
-        {
-            throw new ArgumentOutOfRangeException(nameof(expectedLinkCount));
-        }
-        DeleteExact(parent, name, retained, expected, expectedLinkCount);
-    }
 
     private static void DeleteExact(
         SafeFileHandle parent,
@@ -1435,37 +1415,6 @@ internal static class WorkspaceActionNativeFileSystem
     }
 
     [SupportedOSPlatform("windows")]
-    private static void LinkWindowsRelativeCore(SafeFileHandle source, SafeFileHandle targetParent, string targetName)
-    {
-        var nameBytes = Encoding.Unicode.GetBytes(targetName);
-        var rootDirectoryOffset = IntPtr.Size == 8 ? 8 : 4;
-        var fileNameLengthOffset = rootDirectoryOffset + IntPtr.Size;
-        var fileNameOffset = fileNameLengthOffset + sizeof(uint);
-        var unalignedSize = checked(fileNameOffset + nameBytes.Length + sizeof(char));
-        var bufferSize = checked((unalignedSize + IntPtr.Size - 1) & -IntPtr.Size);
-        var buffer = Marshal.AllocHGlobal(bufferSize);
-        try
-        {
-            Marshal.Copy(new byte[bufferSize], 0, buffer, bufferSize);
-            // FileLinkInformationEx uses ULONG Flags. Zero intentionally refuses an occupied backup name.
-            Marshal.WriteInt32(buffer, 0);
-            Marshal.WriteIntPtr(buffer, rootDirectoryOffset, targetParent.DangerousGetHandle());
-            Marshal.WriteInt32(buffer, fileNameLengthOffset, nameBytes.Length);
-            Marshal.Copy(nameBytes, 0, IntPtr.Add(buffer, fileNameOffset), nameBytes.Length);
-            var status = NtSetInformationFile(source, out _, buffer, (uint)bufferSize, FileLinkInformationEx);
-            GC.KeepAlive(targetParent);
-            if (status < 0)
-            {
-                throw new IOException($"NtSetInformationFile workspace action hard-link backup failed closed with NTSTATUS 0x{unchecked((uint)status):x8}.");
-            }
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
-    }
-
-    [SupportedOSPlatform("windows")]
     private static RawSecurityDescriptor ReadWindowsReplacementSecurityDescriptor(SafeFileHandle handle)
     {
         var securityDescriptor = IntPtr.Zero;
@@ -1518,64 +1467,10 @@ internal static class WorkspaceActionNativeFileSystem
     }
 
     [SupportedOSPlatform("windows")]
-    private static void SetWindowsReplacementSecurityDescriptor(
-        SafeFileHandle handle,
-        RawSecurityDescriptor descriptor,
-        bool protectDiscretionaryAccessControlList)
-    {
-        var owner = descriptor.Owner
-            ?? throw new UnauthorizedAccessException("The retained Windows workspace replacement handle has no owner SID to copy.");
-        var group = descriptor.Group
-            ?? throw new UnauthorizedAccessException("The retained Windows workspace replacement handle has no primary-group SID to copy.");
-        if (!descriptor.ControlFlags.HasFlag(ControlFlags.DiscretionaryAclPresent)
-            || descriptor.DiscretionaryAcl is null)
-        {
-            throw new UnauthorizedAccessException("The retained Windows workspace replacement handle has no explicit DACL to copy.");
-        }
-        var ownerBytes = GetBinaryForm(owner);
-        var groupBytes = GetBinaryForm(group);
-        var accessControlListBytes = GetBinaryForm(descriptor.DiscretionaryAcl);
-        var pinnedOwner = GCHandle.Alloc(ownerBytes, GCHandleType.Pinned);
-        var pinnedGroup = GCHandle.Alloc(groupBytes, GCHandleType.Pinned);
-        var pinnedAccessControlList = GCHandle.Alloc(accessControlListBytes, GCHandleType.Pinned);
-        try
-        {
-            var securityInformation = OwnerSecurityInformation
-                | GroupSecurityInformation
-                | DaclSecurityInformation
-                | (protectDiscretionaryAccessControlList
-                    ? ProtectedDaclSecurityInformation
-                    : UnprotectedDaclSecurityInformation);
-            var status = SetSecurityInfo(
-                handle,
-                SeFileObject,
-                securityInformation,
-                pinnedOwner.AddrOfPinnedObject(),
-                pinnedGroup.AddrOfPinnedObject(),
-                pinnedAccessControlList.AddrOfPinnedObject(),
-                IntPtr.Zero);
-            if (status != 0)
-            {
-                throw new UnauthorizedAccessException(
-                    "The retained Windows workspace replacement stage rejected copied owner, group, and DACL metadata.",
-                    new Win32Exception(unchecked((int)status)));
-            }
-        }
-        finally
-        {
-            pinnedAccessControlList.Free();
-            pinnedGroup.Free();
-            pinnedOwner.Free();
-        }
-        GC.KeepAlive(handle);
-    }
-
-    [SupportedOSPlatform("windows")]
     private static void RequireWindowsReplacementMetadata(
         SafeFileHandle source,
         SafeFileHandle replacement,
-        bool? expectedProtectedDiscretionaryAccessControlList,
-        bool canonicalizeInheritedAccessControlEntryFlags = false)
+        bool? expectedProtectedDiscretionaryAccessControlList)
     {
         var sourceDescriptor = ReadWindowsReplacementSecurityDescriptor(source);
         var replacementDescriptor = ReadWindowsReplacementSecurityDescriptor(replacement);
@@ -1592,9 +1487,9 @@ internal static class WorkspaceActionNativeFileSystem
             || sourceDescriptor.DiscretionaryAcl is null
             || replacementDescriptor.DiscretionaryAcl is null
             || replacementDescriptor.ControlFlags.HasFlag(ControlFlags.DiscretionaryAclProtected) != expectedProtection
-            || !GetBinaryForm(sourceDescriptor.DiscretionaryAcl, canonicalizeInheritedAccessControlEntryFlags)
+            || !GetBinaryForm(sourceDescriptor.DiscretionaryAcl)
                 .AsSpan()
-                .SequenceEqual(GetBinaryForm(replacementDescriptor.DiscretionaryAcl, canonicalizeInheritedAccessControlEntryFlags)))
+                .SequenceEqual(GetBinaryForm(replacementDescriptor.DiscretionaryAcl)))
         {
             throw new IOException("The published Windows workspace replacement did not preserve exact owner, primary-group, DACL, and DACL-protection metadata.");
         }
@@ -1605,49 +1500,6 @@ internal static class WorkspaceActionNativeFileSystem
     {
         var bytes = new byte[accessControlList.BinaryLength];
         accessControlList.GetBinaryForm(bytes, 0);
-        return bytes;
-    }
-
-    [SupportedOSPlatform("windows")]
-    private static byte[] GetBinaryForm(GenericAcl accessControlList, bool canonicalizeInheritedAccessControlEntryFlags)
-    {
-        var bytes = GetBinaryForm(accessControlList);
-        if (!canonicalizeInheritedAccessControlEntryFlags)
-        {
-            return bytes;
-        }
-        if (bytes.Length < 8)
-        {
-            throw new UnauthorizedAccessException("The retained Windows workspace replacement DACL has an invalid ACL header.");
-        }
-        var accessControlEntryCount = BitConverter.ToUInt16(bytes, 4);
-        var offset = 8;
-        for (var index = 0; index < accessControlEntryCount; index++)
-        {
-            if (offset > bytes.Length - 4)
-            {
-                throw new UnauthorizedAccessException("The retained Windows workspace replacement DACL has a truncated ACE header.");
-            }
-            var accessControlEntryLength = BitConverter.ToUInt16(bytes, offset + 2);
-            if (accessControlEntryLength < 4 || accessControlEntryLength > bytes.Length - offset)
-            {
-                throw new UnauthorizedAccessException("The retained Windows workspace replacement DACL has an invalid ACE length.");
-            }
-            bytes[offset + 1] &= unchecked((byte)~(byte)AceFlags.Inherited);
-            offset += accessControlEntryLength;
-        }
-        if (offset != bytes.Length)
-        {
-            throw new UnauthorizedAccessException("The retained Windows workspace replacement DACL has trailing or unaccounted ACE bytes.");
-        }
-        return bytes;
-    }
-
-    [SupportedOSPlatform("windows")]
-    private static byte[] GetBinaryForm(SecurityIdentifier identity)
-    {
-        var bytes = new byte[identity.BinaryLength];
-        identity.GetBinaryForm(bytes, 0);
         return bytes;
     }
 
@@ -1753,6 +1605,10 @@ internal static class WorkspaceActionNativeFileSystem
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool FlushFileBuffers(SafeFileHandle file);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "ReplaceFileW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReplaceFile(string replacedFileName, string replacementFileName, string backupFileName, uint replaceFlags, IntPtr exclude, IntPtr reserved);
+
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentProcess();
@@ -1992,7 +1848,6 @@ internal static class WorkspaceActionNativeFileSystem
     private const int UnixMaximumFileNameBytes = 255;
     private const int UnixMaximumDirectoryRecordBytes = 1_280;
     private const int FileRenameInformationEx = 65;
-    private const int FileLinkInformationEx = 72;
     private const int FileIdInfo = 18;
     private const int FileCaseSensitiveInfo = 23;
     private const uint WindowsCaseSensitiveDirectory = 0x00000001;

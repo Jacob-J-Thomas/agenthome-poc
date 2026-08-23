@@ -317,12 +317,8 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                 windowComplete = false;
                 continue;
             }
-            var unpublishedWindowsReplacement = await HasUnpublishedWindowsReplacementBackupAsync(
-                candidate,
-                cancellationToken).ConfigureAwait(false);
-            var targetUnchanged = presence == WorkspaceActionAttemptPresence.ArtifactReleased
-                && !unpublishedWindowsReplacement;
-            if (!targetUnchanged || unpublishedWindowsReplacement)
+            var targetUnchanged = presence == WorkspaceActionAttemptPresence.ArtifactReleased;
+            if (!targetUnchanged)
             {
                 try
                 {
@@ -330,8 +326,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                         _rootPath,
                         _scopeId,
                         target!,
-                        writeTarget: false,
-                        allowTargetMultipleLinks: unpublishedWindowsReplacement);
+                        writeTarget: false);
                     targetUnchanged = await session.MatchesBeforeAsync(before, cancellationToken).ConfigureAwait(false);
                 }
                 catch (IOException)
@@ -344,7 +339,6 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                 && await TryDeleteOrphanCandidateAsync(
                     candidate,
                     before,
-                    target!,
                     presence == WorkspaceActionAttemptPresence.ArtifactReleased,
                     cancellationToken).ConfigureAwait(false))
             {
@@ -390,7 +384,8 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             _scopeId,
             request.Input.Target,
             writeTarget: true,
-            fenceTargetNamespace: OperatingSystem.IsWindows() && request.Input.Kind == WorkspaceActionKind.Delete);
+            fenceTargetNamespace: OperatingSystem.IsWindows() && request.Input.Kind == WorkspaceActionKind.Delete,
+            fenceDirectoryNamespace: OperatingSystem.IsWindows() && before.EntryKind == WorkspaceActionEntryKind.RegularFile);
         if (!await session.MatchesBeforeAsync(before, cancellationToken).ConfigureAwait(false))
         {
             return new WorkspaceActionNativeCommitResult(WorkspaceActionNativeCommitStatus.DispatchNotStarted, null);
@@ -475,12 +470,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             _rootPath,
             _scopeId,
             target!,
-            writeTarget: false,
-            allowTargetMultipleLinks: OperatingSystem.IsWindows());
-        if (OperatingSystem.IsWindows() && current.TargetIdentity is { LinkCount: not 1 })
-        {
-            return new WorkspaceActionReconciliationProbeResult(WorkspaceActionReconciliationPosture.Indeterminate, null, null);
-        }
+            writeTarget: false);
         return await current.MatchesBeforeAsync(before, cancellationToken).ConfigureAwait(false)
             ? new WorkspaceActionReconciliationProbeResult(WorkspaceActionReconciliationPosture.ProvedNotStarted, null, null)
             : new WorkspaceActionReconciliationProbeResult(WorkspaceActionReconciliationPosture.Indeterminate, null, null);
@@ -514,7 +504,6 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             cancellationToken).ConfigureAwait(false);
         SafeFileHandle? windowsDisplaced = null;
         WorkspaceActionNativeFileStamp? windowsDisplacedIdentity = null;
-        var windowsDisplacedLinked = false;
         var retainUnpublishedWindowsStage = false;
         try
         {
@@ -568,12 +557,6 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                         byte[] observedBytes;
                         var windowsAtomicReplacement = OperatingSystem.IsWindows()
                             && before.EntryKind == WorkspaceActionEntryKind.RegularFile;
-                        if (windowsAtomicReplacement)
-                        {
-                            // The old session handle has DELETE access. Release it before reopening the exact current
-                            // target with deny-delete sharing; TargetIdentity remains immutable for reconciliation proof.
-                            session.ReleaseTargetHandle();
-                        }
                         if (before.EntryKind == WorkspaceActionEntryKind.Absent)
                         {
                             if (_namespaceRaceObserver is not null)
@@ -599,13 +582,15 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                                     boundaryToken).ConfigureAwait(false);
                             }
                             using var observed = WorkspaceActionNativeFileSystem.OpenRelativeFile(session.ParentHandle, session.TerminalName, allowMissing: false, write: false)!;
+                            WorkspaceActionNativeFileSystem.RequireExactOpenedName(observed, session.TerminalName);
                             observedIdentity = WorkspaceActionNativeFileSystem.GetIdentity(observed);
                             observedBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(observed, WorkspaceActionContractLimits.MaxAfterImageBytes, boundaryToken).ConfigureAwait(false);
                         }
                         else if (windowsAtomicReplacement)
                         {
                             var displacedName = stage.Name + ".displaced";
-                            WorkspaceActionNativeFileStamp? currentTargetIdentity = null;
+                            using var stageFence = WorkspaceActionRetainedPrivateDirectoryFence.Open(_rootPath, _stagingRoot);
+                            stageFence.Revalidate();
                             if (_namespaceRaceObserver is not null)
                             {
                                 await _namespaceRaceObserver.ObserveAsync(
@@ -613,51 +598,24 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                                     before.EvidenceId,
                                     boundaryToken).ConfigureAwait(false);
                             }
-                            // The original DELETE handle is gone. Any failure while fencing the current target is
-                            // retained for reconciliation rather than risking a path-based cleanup of changed state.
+                            stageFence.Revalidate();
+                            session.RevalidateDirectories();
+                            session.RevalidateTerminalName();
+                            var replacementPath = WorkspaceActionNativeFileSystem.CaptureWindowsReplacementPath(stage.File, stage.Name);
                             retainUnpublishedWindowsStage = true;
-                            using (var currentTarget = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+                            stage.ReleaseFileHandle();
+                            WorkspaceActionNativeFileSystem.ReplaceWindowsRelativeWithBackup(
+                                replacementPath,
+                                session.TargetHandle!,
                                 session.ParentHandle,
                                 session.TerminalName,
-                                allowMissing: false,
-                                write: true,
-                                denyDeleteSharing: true,
-                                denyWriteSharing: false)!)
-                            {
-                                WorkspaceActionNativeFileSystem.RequireExactOpenedName(currentTarget, session.TerminalName);
-                                currentTargetIdentity = WorkspaceActionNativeFileSystem.GetIdentity(currentTarget);
-                                var currentTargetBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
-                                    currentTarget,
-                                    WorkspaceActionContractLimits.MaxBeforeImageBytes,
-                                    boundaryToken).ConfigureAwait(false);
-                                if (!currentTargetIdentity.Value.SameEntry(session.TargetIdentity!.Value)
-                                    || currentTargetBytes.LongLength != before.ByteCount
-                                    || !string.Equals(Sha256(currentTargetBytes), before.ContentHash, StringComparison.Ordinal))
-                                {
-                                    throw new IOException("The exact Windows target changed before its retained replacement fence was acquired.");
-                                }
-                                WorkspaceActionNativeFileSystem.PreserveReplacementMetadata(currentTarget, stage.File);
-                                WorkspaceActionNativeFileSystem.LinkWindowsRelative(currentTarget, stage.Directory, displacedName);
-                                windowsDisplacedLinked = true;
-                                if (_namespaceRaceObserver is not null)
-                                {
-                                    await _namespaceRaceObserver.ObserveAsync(
-                                        WorkspaceActionNamespaceRacePoint.AfterWindowsReplacementBackupLinkBeforeInstallSystemCall,
-                                        before.EvidenceId,
-                                        boundaryToken).ConfigureAwait(false);
-                                }
-                                WorkspaceActionNativeFileSystem.RenameRelative(
-                                    stage.File,
-                                    stage.Directory,
-                                    stage.Name,
-                                    session.ParentHandle,
-                                    session.TerminalName,
-                                    overwrite: true);
-                                stage.Published = true;
-                                WorkspaceActionNativeFileSystem.RestoreWindowsReplacementMetadata(currentTarget, stage.File);
-                            }
+                                stageFence.DirectoryHandle,
+                                displacedName);
+                            stage.Published = true;
+                            stageFence.Revalidate();
+                            session.RevalidateDirectories();
                             windowsDisplaced = WorkspaceActionNativeFileSystem.OpenRelativeFile(
-                                stage.Directory,
+                                stageFence.DirectoryHandle,
                                 displacedName,
                                 allowMissing: false,
                                 write: true,
@@ -673,26 +631,35 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                                     boundaryToken).ConfigureAwait(false);
                             }
                             var displacedBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
-                                windowsDisplaced!,
+                                windowsDisplaced,
                                 WorkspaceActionContractLimits.MaxBeforeImageBytes,
                                 boundaryToken).ConfigureAwait(false);
-                            if (windowsDisplacedIdentity is null
-                                || currentTargetIdentity is null
-                                || !WorkspaceActionNativeFileSystem.GetIdentity(windowsDisplaced).SameEntry(windowsDisplacedIdentity.Value)
-                                || windowsDisplacedIdentity.Value.LinkCount != 1
-                                || !windowsDisplacedIdentity.Value.SameEntry(currentTargetIdentity.Value)
-                                || !windowsDisplacedIdentity.Value.SameEntry(session.TargetIdentity!.Value)
+                            if (!windowsDisplacedIdentity.Value.SameEntry(session.TargetIdentity!.Value)
                                 || displacedBytes.LongLength != before.ByteCount
                                 || !string.Equals(Sha256(displacedBytes), before.ContentHash, StringComparison.Ordinal))
                             {
                                 throw new IOException("The atomic Windows replacement displaced a target other than the exact retained before image.");
                             }
-                            using var observed = WorkspaceActionNativeFileSystem.OpenRelativeFile(session.ParentHandle, session.TerminalName, allowMissing: false, write: false)!;
+                            using var observed = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+                                session.ParentHandle,
+                                session.TerminalName,
+                                allowMissing: false,
+                                write: true,
+                                denyDeleteSharing: true,
+                                denyWriteSharing: true)!;
+                            WorkspaceActionNativeFileSystem.RequireExactOpenedName(observed, session.TerminalName);
                             observedIdentity = WorkspaceActionNativeFileSystem.GetIdentity(observed);
                             observedBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
                                 observed,
                                 WorkspaceActionContractLimits.MaxAfterImageBytes,
                                 boundaryToken).ConfigureAwait(false);
+                            if (!observedIdentity.SameEntry(stage.Identity)
+                                || !string.Equals(Sha256(observedBytes), afterHash, StringComparison.Ordinal))
+                            {
+                                throw new IOException("The published Windows workspace after-image does not match the authenticated stage.");
+                            }
+                            WorkspaceActionNativeFileSystem.RequireReplacementMetadata(session.TargetHandle!, observed);
+                            WorkspaceActionNativeFileSystem.FlushFile(observed);
                         }
                         else
                         {
@@ -745,7 +712,10 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                             using var observed = WorkspaceActionNativeFileSystem.OpenRelativeFile(session.ParentHandle, session.TerminalName, allowMissing: false, write: false)!;
                             WorkspaceActionNativeFileSystem.RequireReplacementMetadata(session.TargetHandle, observed);
                         }
-                        WorkspaceActionNativeFileSystem.FlushFile(stage.File);
+                        if (stage.HasRetainedFileHandle)
+                        {
+                            WorkspaceActionNativeFileSystem.FlushFile(stage.File);
+                        }
                         WorkspaceActionNativeFileSystem.FlushDirectory(session.ParentHandle);
                         var after = WorkspaceActionEvidenceContract.CreateAfter(
                             before,
@@ -818,7 +788,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             windowsDisplaced?.Dispose();
             if (!stage.Published)
             {
-                if (!windowsDisplacedLinked && !retainUnpublishedWindowsStage)
+                if (!retainUnpublishedWindowsStage && stage.HasRetainedFileHandle)
                 {
                     WorkspaceActionNativeFileSystem.DeleteExact(stage.Directory, stage.Name, stage.File, stage.Identity);
                     DeleteStageMarker(stage);
@@ -1637,9 +1607,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                 ownership.DirectoryHandle,
                 name,
                 allowMissing: false,
-                write: false,
-                allowMultipleLinks: kind == WorkspaceActionAttemptArtifactKind.Stage
-                    && name.EndsWith(".stage.displaced", StringComparison.Ordinal))!;
+                write: false)!;
             if (!name.EndsWith(markerSuffix, StringComparison.Ordinal))
             {
                 var expectedMarkerName = kind == WorkspaceActionAttemptArtifactKind.Stage
@@ -1758,25 +1726,9 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
         return true;
     }
 
-    private async Task<bool> HasUnpublishedWindowsReplacementBackupAsync(
-        WorkspaceActionCleanupCandidate candidate,
-        CancellationToken cancellationToken)
-    {
-        if (!OperatingSystem.IsWindows()
-            || candidate.Marker.Kind != WorkspaceActionAttemptArtifactKind.Stage
-            || !string.Equals(candidate.Root, _stagingRoot, StringComparison.Ordinal))
-        {
-            return false;
-        }
-        using var ownership = await _guard.AcquireExclusiveReadLockAsync(_stagingRoot, cancellationToken).ConfigureAwait(false);
-        return _guard.FileExists(ownership, candidate.Marker.ArtifactReference)
-            && _guard.FileExists(ownership, candidate.Marker.ArtifactReference + ".displaced");
-    }
-
     private async Task<bool> TryDeleteOrphanCandidateAsync(
         WorkspaceActionCleanupCandidate candidate,
         WorkspaceActionBeforeEvidence before,
-        WorkspaceRelativeFileTarget target,
         bool artifactReleased,
         CancellationToken cancellationToken)
     {
@@ -1791,15 +1743,10 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             return false;
         }
         if (candidate.Marker.Kind == WorkspaceActionAttemptArtifactKind.Stage
-            && _guard.FileExists(ownership, candidate.Marker.ArtifactReference)
+            && !_guard.FileExists(ownership, candidate.Marker.ArtifactReference)
             && _guard.FileExists(ownership, candidate.Marker.ArtifactReference + ".displaced"))
         {
-            return await TryDeleteUnpublishedWindowsReplacementAsync(
-                ownership,
-                candidate,
-                before,
-                target,
-                cancellationToken).ConfigureAwait(false);
+            return false;
         }
         var payloadName = candidate.Marker.Kind == WorkspaceActionAttemptArtifactKind.Stage
             ? _guard.FileExists(ownership, candidate.Marker.ArtifactReference)
@@ -1852,122 +1799,6 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
         {
             throw new FormatException("Expired workspace delete retention could not remove its exact authenticated tombstone.");
         }
-        using var marker = WorkspaceActionNativeFileSystem.OpenRelativeFile(
-            ownership.DirectoryHandle,
-            candidate.MarkerName,
-            allowMissing: false,
-            write: true)!;
-        var markerIdentity = WorkspaceActionNativeFileSystem.GetIdentity(marker);
-        WorkspaceActionNativeFileSystem.DeleteExact(ownership.DirectoryHandle, candidate.MarkerName, marker, markerIdentity);
-        WorkspaceActionNativeFileSystem.FlushDirectory(ownership.DirectoryHandle);
-        return true;
-    }
-
-    private async Task<bool> TryDeleteUnpublishedWindowsReplacementAsync(
-        WorkspaceActionPrivateArtifactLockLease ownership,
-        WorkspaceActionCleanupCandidate candidate,
-        WorkspaceActionBeforeEvidence before,
-        WorkspaceRelativeFileTarget target,
-        CancellationToken cancellationToken)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return false;
-        }
-        var stageName = candidate.Marker.ArtifactReference;
-        var displacedName = stageName + ".displaced";
-        using var session = WorkspaceActionRetainedTargetSession.Open(
-            _rootPath,
-            _scopeId,
-            target,
-            writeTarget: true,
-            fenceTargetNamespace: true,
-            allowTargetMultipleLinks: true);
-        if (!await session.MatchesBeforeAsync(before, cancellationToken).ConfigureAwait(false)
-            || session.TargetIdentity is null)
-        {
-            return false;
-        }
-        session.RevalidateDirectories();
-        session.ReleaseTargetHandle();
-        if (_namespaceRaceObserver is not null)
-        {
-            await _namespaceRaceObserver.ObserveAsync(
-                WorkspaceActionNamespaceRacePoint.AfterWindowsReplacementTargetReleaseBeforeBackupFence,
-                before.EvidenceId,
-                cancellationToken).ConfigureAwait(false);
-        }
-        using var displaced = WorkspaceActionNativeFileSystem.OpenRelativeFile(
-            ownership.DirectoryHandle,
-            displacedName,
-            allowMissing: false,
-            write: true,
-            denyDeleteSharing: true,
-            denyWriteSharing: true,
-            allowMultipleLinks: true)!;
-        WorkspaceActionNativeFileSystem.RequireExactOpenedName(displaced, displacedName);
-        var displacedIdentity = WorkspaceActionNativeFileSystem.GetIdentity(displaced);
-        var displacedBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
-            displaced,
-            WorkspaceActionContractLimits.MaxBeforeImageBytes,
-            cancellationToken,
-            requireSingleLink: false).ConfigureAwait(false);
-        if (displacedIdentity.LinkCount != 2
-            || displacedBytes.LongLength != before.ByteCount
-            || !string.Equals(Sha256(displacedBytes), before.ContentHash, StringComparison.Ordinal))
-        {
-            return false;
-        }
-        using var currentTarget = WorkspaceActionNativeFileSystem.OpenRelativeFile(
-            session.ParentHandle,
-            session.TerminalName,
-            allowMissing: true,
-            write: false,
-            denyWriteSharing: true,
-            allowMultipleLinks: true);
-        if (currentTarget is null)
-        {
-            return false;
-        }
-        WorkspaceActionNativeFileSystem.RequireExactOpenedName(currentTarget, session.TerminalName);
-        var currentTargetIdentity = WorkspaceActionNativeFileSystem.GetIdentity(currentTarget);
-        var currentTargetBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
-            currentTarget,
-            WorkspaceActionContractLimits.MaxBeforeImageBytes,
-            cancellationToken,
-            requireSingleLink: false).ConfigureAwait(false);
-        session.RevalidateDirectories();
-        if (!displacedIdentity.SameEntry(session.TargetIdentity.Value)
-            || !currentTargetIdentity.SameEntry(session.TargetIdentity.Value)
-            || !currentTargetIdentity.SameEntry(displacedIdentity)
-            || currentTargetIdentity.LinkCount != 2
-            || currentTargetBytes.LongLength != before.ByteCount
-            || !string.Equals(Sha256(currentTargetBytes), before.ContentHash, StringComparison.Ordinal))
-        {
-            return false;
-        }
-        using var stage = WorkspaceActionNativeFileSystem.OpenRelativeFile(
-            ownership.DirectoryHandle,
-            stageName,
-            allowMissing: false,
-            write: true)!;
-        var stageIdentity = WorkspaceActionNativeFileSystem.GetIdentity(stage);
-        var stageBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
-            stage,
-            WorkspaceActionContractLimits.MaxAfterImageBytes,
-            cancellationToken).ConfigureAwait(false);
-        if (stageBytes.LongLength != candidate.Marker.ByteCount
-            || !string.Equals(Sha256(stageBytes), candidate.Marker.ContentHash, StringComparison.Ordinal))
-        {
-            return false;
-        }
-        WorkspaceActionNativeFileSystem.DeleteLinkedExact(
-            ownership.DirectoryHandle,
-            displacedName,
-            displaced,
-            displacedIdentity,
-            expectedLinkCount: 2);
-        WorkspaceActionNativeFileSystem.DeleteExact(ownership.DirectoryHandle, stageName, stage, stageIdentity);
         using var marker = WorkspaceActionNativeFileSystem.OpenRelativeFile(
             ownership.DirectoryHandle,
             candidate.MarkerName,

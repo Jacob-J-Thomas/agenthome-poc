@@ -31,6 +31,14 @@ internal sealed class WorkspaceActionStage(
     public WorkspaceActionNativeFileStamp MarkerIdentity { get; } = markerIdentity;
 
     public bool Published { get; set; }
+    public bool HasRetainedFileHandle => _file is not null;
+
+    public void ReleaseFileHandle()
+    {
+        _file?.Dispose();
+        _file = null;
+    }
+
 
     public void Dispose()
     {

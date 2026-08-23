@@ -9,7 +9,6 @@ namespace EmbodySense.Core.Persistence.WorkspaceActions;
 internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
 {
     private readonly List<(SafeFileHandle Handle, WorkspaceActionNativeFileStamp Identity, string? Name)> _directories = [];
-    private readonly bool _allowTargetMultipleLinks;
     private readonly string _rootPath;
     private readonly WorkspaceRelativeFileTarget _target;
     private SafeFileHandle? _targetHandle;
@@ -20,13 +19,12 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
         WorkspaceRelativeFileTarget target,
         bool writeTarget,
         bool fenceTargetNamespace,
-        bool allowTargetMultipleLinks)
+        bool fenceDirectoryNamespace)
     {
         _rootPath = Path.GetFullPath(rootPath);
         _target = target;
-        _allowTargetMultipleLinks = allowTargetMultipleLinks;
         ScopeId = scopeId;
-        var root = WorkspaceActionNativeFileSystem.OpenAbsoluteDirectory(_rootPath);
+        var root = WorkspaceActionNativeFileSystem.OpenAbsoluteDirectory(_rootPath, denyDeleteSharing: fenceDirectoryNamespace);
         try
         {
             var rootIdentity = WorkspaceActionNativeFileSystem.GetIdentity(root);
@@ -43,7 +41,7 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
             for (var index = 0; index < segments.Count - 1; index++)
             {
                 comparisonSegments[index] = segments[index];
-                var next = WorkspaceActionNativeFileSystem.OpenRelativeDirectory(current, segments[index]);
+                var next = WorkspaceActionNativeFileSystem.OpenRelativeDirectory(current, segments[index], denyDeleteSharing: fenceDirectoryNamespace);
                 try
                 {
                     WorkspaceActionNativeFileSystem.RequireExactOpenedName(next, segments[index]);
@@ -74,8 +72,7 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
                 allowMissing: true,
                 write: writeTarget,
                 denyDeleteSharing: fenceTargetNamespace,
-                denyWriteSharing: fenceTargetNamespace,
-                allowMultipleLinks: allowTargetMultipleLinks);
+                denyWriteSharing: fenceTargetNamespace);
             if (_targetHandle is not null)
             {
                 WorkspaceActionNativeFileSystem.RequireExactOpenedName(_targetHandle, TerminalName);
@@ -121,21 +118,14 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
 
     public SafeFileHandle? TargetHandle => _targetHandle;
 
-    /// <summary>Releases the mutable retained target handle while preserving its immutable captured identity.</summary>
-    public void ReleaseTargetHandle()
-    {
-        _targetHandle?.Dispose();
-        _targetHandle = null;
-    }
-
     public static WorkspaceActionRetainedTargetSession Open(
         string rootPath,
         WorkspaceActionScopeId scopeId,
         WorkspaceRelativeFileTarget target,
         bool writeTarget,
         bool fenceTargetNamespace = false,
-        bool allowTargetMultipleLinks = false)
-        => new(rootPath, scopeId, target, writeTarget, fenceTargetNamespace, allowTargetMultipleLinks);
+        bool fenceDirectoryNamespace = false)
+        => new(rootPath, scopeId, target, writeTarget, fenceTargetNamespace, fenceDirectoryNamespace);
 
     public Task<byte[]> ReadTargetBytesAsync(int maximumBytes, CancellationToken cancellationToken)
         => _targetHandle is null
@@ -143,8 +133,7 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
             : WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
                 _targetHandle,
                 maximumBytes,
-                cancellationToken,
-                requireSingleLink: !_allowTargetMultipleLinks);
+                cancellationToken);
 
     public async Task<bool> MatchesBeforeAsync(WorkspaceActionBeforeEvidence before, CancellationToken cancellationToken)
     {
@@ -163,8 +152,7 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
                 ParentHandle,
                 TerminalName,
                 allowMissing: true,
-                write: false,
-                allowMultipleLinks: _allowTargetMultipleLinks);
+                write: false);
             return !Exists && named is null;
         }
         if (!Exists
@@ -177,8 +165,7 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
             ParentHandle,
             TerminalName,
             allowMissing: true,
-            write: false,
-            allowMultipleLinks: _allowTargetMultipleLinks))
+            write: false))
         {
             if (named is null || !WorkspaceActionNativeFileSystem.GetIdentity(named).SameEntry(TargetIdentity.Value))
             {
@@ -207,8 +194,7 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
             ParentHandle,
             TerminalName,
             allowMissing: true,
-            write: false,
-            allowMultipleLinks: _allowTargetMultipleLinks))
+            write: false))
         {
             if (named is null || !WorkspaceActionNativeFileSystem.GetIdentity(named).SameEntry(TargetIdentity.Value))
             {
@@ -218,6 +204,17 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
         var bytes = await ReadTargetBytesAsync(WorkspaceActionContractLimits.MaxAfterImageBytes, cancellationToken).ConfigureAwait(false);
         var contentHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         return bytes.LongLength == after.ByteCount && string.Equals(contentHash, after.ContentHash, StringComparison.Ordinal);
+    }
+
+    public void RevalidateTerminalName()
+    {
+        using var named = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+            ParentHandle,
+            TerminalName,
+            allowMissing: false,
+            write: false)
+            ?? throw new IOException("The exact workspace target disappeared before the native commit boundary.");
+        WorkspaceActionNativeFileSystem.RequireExactOpenedName(named, TerminalName);
     }
 
     public void RevalidateDirectories()
