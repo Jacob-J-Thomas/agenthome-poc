@@ -52,8 +52,10 @@ public sealed class CustomLoopRunStore :
     private const string ScheduleAdmissionRetirementFileName = ".schedule-admission-retirements.json";
     private const int MaximumScheduleAdmissionInterruptedWriteArtifacts = 32;
     private const int MaximumArtifactReadReconciliationAttempts = 3;
+    private const int MaximumEvidenceReadContentionAttempts = 9;
     private static readonly byte[] _discoveryIndexPendingContent = "pending\n"u8.ToArray();
     private static readonly TimeSpan _atomicMoveRetryDelay = TimeSpan.FromMilliseconds(50);
+    private static readonly TimeSpan _evidenceReadContentionRetryDelay = TimeSpan.FromMilliseconds(25);
     private static readonly TimeSpan _auxiliaryAtomicMoveContentionTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan _canonicalAtomicMoveContentionTimeout = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan _discoveryIndexMaintenanceTimeout = TimeSpan.FromSeconds(30);
@@ -930,10 +932,15 @@ public sealed class CustomLoopRunStore :
     /// <param name="runId">The run ID.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>The validated run, or <see langword="null"/> when no artifact exists.</returns>
+    /// <remarks>
+    /// A short-lived sharing or atomic-replacement conflict retries with a fixed cancellation-aware budget so this public
+    /// evidence read can obtain one coherent canonical snapshot. Schema, containment, reparse, format, and all other I/O
+    /// failures remain immediately visible; this method never returns a cached or stale run.
+    /// </remarks>
     public async Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default)
     {
         var safeRunId = CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
-        var artifact = await ReadArtifactByRunIdAsync(safeRunId, cancellationToken);
+        var artifact = await ReadArtifactByRunIdWithContentionRetryAsync(safeRunId, cancellationToken);
         return artifact?.Run;
     }
 
@@ -2960,6 +2967,43 @@ public sealed class CustomLoopRunStore :
         return null;
     }
 
+    private async Task<RunArtifact?> ReadArtifactByRunIdWithContentionRetryAsync(string runId, CancellationToken cancellationToken)
+    {
+        IOException? lastContention = null;
+        for (var attempt = 1; attempt <= MaximumEvidenceReadContentionAttempts; attempt++)
+        {
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return await ReadArtifactByRunIdAsync(runId, cancellationToken);
+            }
+            catch (OperationCanceledException exception)
+            {
+                AttachPersistenceDiagnostic(exception, CustomLoopRunPersistenceDiagnosticStage.Read);
+                throw;
+            }
+            catch (IOException exception) when (IsTransientEvidenceReadContention(exception))
+            {
+                lastContention = exception;
+                if (attempt < MaximumEvidenceReadContentionAttempts)
+                {
+                    try
+                    {
+                        await Task.Delay(_evidenceReadContentionRetryDelay, cancellationToken);
+                    }
+                    catch (OperationCanceledException cancellationException)
+                    {
+                        AttachPersistenceDiagnostic(cancellationException, CustomLoopRunPersistenceDiagnosticStage.Read);
+                        throw;
+                    }
+                }
+            }
+        }
+
+        ExceptionDispatchInfo.Capture(lastContention!).Throw();
+        throw new InvalidOperationException("The bounded custom-loop evidence read retry did not retain its contention evidence.");
+    }
+
     private async ValueTask ReconcileArtifactReadMissAsync(string? path, CancellationToken cancellationToken)
     {
         await ObserveArtifactReadBoundaryAsync(CustomLoopRunReadBoundary.AfterCanonicalArtifactReadMiss, path, cancellationToken);
@@ -3987,6 +4031,13 @@ public sealed class CustomLoopRunStore :
         return OperatingSystem.IsWindows()
             ? errorCode is SharingViolation or LockViolation
             : errorCode is ResourceTemporarilyUnavailable or ResourceDeadlockAvoided;
+    }
+
+    private static bool IsTransientEvidenceReadContention(IOException exception)
+    {
+        const int UnableToRemoveReplaced = 1175;
+        var errorCode = exception.HResult & 0xFFFF;
+        return IsLockContention(exception) || OperatingSystem.IsWindows() && errorCode == UnableToRemoveReplaced;
     }
 
     private static bool IsReadOnlyLockAccessFailure(Exception exception)
