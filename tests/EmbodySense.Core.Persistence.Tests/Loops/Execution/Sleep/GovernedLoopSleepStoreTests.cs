@@ -606,22 +606,11 @@ public sealed class GovernedLoopSleepStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var checkpoint = GovernedLoopSleepContractTestFixture.TimestampCheckpoint();
         var postureHash = GovernedLoopSleepContractTestFixture.Hash('9');
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var release = new ManualResetEventSlim();
-        var blockingStore = new GovernedLoopSleepStore(paths, new GovernedLoopSleepStoreOptions
-        {
-            DurableBoundaryObserver = boundary =>
-            {
-                if (boundary == GovernedLoopSleepStorePersistenceBoundary.PrecursorCreated)
-                {
-                    entered.TrySetResult();
-                    release.Wait();
-                }
-            },
-        });
-        var blocker = Task.Run(() => blockingStore.PublishAndReleaseAsync(checkpoint, postureHash));
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        using var cancellation = new CancellationTokenSource();
+        var waitingStore = new GovernedLoopSleepStore(paths);
+        Assert.Equal(GovernedLoopSleepCheckpointMutationStatus.Committed, (await waitingStore.PublishAndReleaseAsync(checkpoint, postureHash))!.Status);
+        // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/505
+        // Own the real cross-process lock directly so fixture readiness never depends on ThreadPool scheduling.
+        using var externalLock = CrossProcessExclusiveFileLock.Acquire(Path.Combine(StoreRoot(paths), ".queue.lock"));
         var secondCheckpoint = GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
             GovernedLoopSleepContractTestFixture.Binding(runId: "cancelled-waiter"));
         var identity = GovernedLoopSleepContractTestFixture.WakeIdentity(checkpoint);
@@ -631,36 +620,33 @@ public sealed class GovernedLoopSleepStoreTests
             2,
             identity,
             recordedAtUtc: prepared.RecordedAtUtc.AddSeconds(1));
-        var waitingStore = new GovernedLoopSleepStore(paths);
-        var publish = waitingStore.PublishAndReleaseAsync(secondCheckpoint, postureHash, cancellation.Token);
-        var readCheckpoint = waitingStore.ReadCheckpointAsync(checkpoint.CheckpointId, cancellation.Token);
-        var readWake = waitingStore.ReadWakeAsync(identity.WakeId, cancellation.Token);
-        var createWake = waitingStore.CreateWakeAsync(checkpoint, prepared, postureHash, cancellation.Token);
-        var advanceWake = waitingStore.AdvanceWakeAsync(prepared, committed, cancellation.Token);
-        var background = new GovernedLoopBackgroundWorkSource(new ScheduleStore(paths), waitingStore)
-            .ReadAsync(
-                GovernedLoopBackgroundWorkFamily.Wake,
-                checkpoint.PublishedAtUtc,
-                1,
-                cancellation.Token);
+        var background = new GovernedLoopBackgroundWorkSource(new ScheduleStore(paths), waitingStore);
 
-        try
+        await AssertCancellationAsync(token => waitingStore.PublishAndReleaseAsync(secondCheckpoint, postureHash, token));
+        await AssertCancellationAsync(token => waitingStore.ReadCheckpointAsync(checkpoint.CheckpointId, token));
+        await AssertCancellationAsync(token => waitingStore.ReadWakeAsync(identity.WakeId, token));
+        await AssertCancellationAsync(token => waitingStore.CreateWakeAsync(
+            checkpoint,
+            prepared,
+            postureHash,
+            token));
+        await AssertCancellationAsync(token => waitingStore.AdvanceWakeAsync(prepared, committed, token));
+        await AssertCancellationAsync(token => background.ReadAsync(
+            GovernedLoopBackgroundWorkFamily.Wake,
+            checkpoint.PublishedAtUtc,
+            1,
+            token));
+
+        externalLock.Dispose();
+        Assert.Equal(GovernedLoopSleepStoreReadStatus.Found, (await waitingStore.ReadCheckpointAsync(checkpoint.CheckpointId))!.Status);
+
+        static async Task AssertCancellationAsync(Func<CancellationToken, Task> operation)
         {
-            await Task.Delay(50);
+            using var cancellation = new CancellationTokenSource();
+            var pending = operation(cancellation.Token);
             cancellation.Cancel();
-            await Assert.ThrowsAsync<OperationCanceledException>(() => publish);
-            await Assert.ThrowsAsync<OperationCanceledException>(() => readCheckpoint);
-            await Assert.ThrowsAsync<OperationCanceledException>(() => readWake);
-            await Assert.ThrowsAsync<OperationCanceledException>(() => createWake);
-            await Assert.ThrowsAsync<OperationCanceledException>(() => advanceWake);
-            await Assert.ThrowsAsync<OperationCanceledException>(() => background);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
         }
-        finally
-        {
-            release.Set();
-        }
-
-        Assert.Equal(GovernedLoopSleepCheckpointMutationStatus.Committed, (await blocker)!.Status);
     }
 
     [Fact]

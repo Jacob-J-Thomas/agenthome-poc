@@ -18,12 +18,15 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
     private const long MaximumConfiguredStoreBytes = 512L * 1024 * 1024;
     private const int RequiredProtocolVersions = 4;
     private const int HeadBytes = 71;
+    private static readonly TimeSpan _ownerTakeoverTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan _ownerTakeoverPollInterval = TimeSpan.FromMilliseconds(10);
     private readonly CustomLoopArtifactPathGuard _guard;
     private readonly Guid _instanceId = Guid.NewGuid();
     private readonly int _maximumAttempts;
     private readonly int _maximumRecordBytes;
     private readonly long _maximumStoreBytes;
     private readonly int _maximumVersionsPerAttempt;
+    private readonly Func<ValueTask>? _ownerTakeoverPollingObserver;
     private readonly string _root;
 
     /// <summary>Creates one bounded workspace-scoped credential lease-attempt store.</summary>
@@ -44,6 +47,7 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
         _maximumRecordBytes = options.MaxRecordUtf8Bytes;
         _maximumStoreBytes = options.MaxStoreUtf8Bytes;
         _maximumVersionsPerAttempt = options.MaxVersionsPerAttempt;
+        _ownerTakeoverPollingObserver = options.OwnerTakeoverPollingObserver;
         _root = paths.CredentialLeaseAttemptsPath;
         _guard = new CustomLoopArtifactPathGuard(paths.RootPath);
     }
@@ -77,7 +81,7 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
                     return Result(CredentialLeaseAttemptStoreStatus.Replayed, current);
                 }
 
-                var replayLease = TryAcquireOwner(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+                var replayLease = TryAcquireOwner(intent.CredentialUseOperationId, intent.CredentialUseGeneration, cancellationToken);
                 return replayLease is null
                     ? Result(CredentialLeaseAttemptStoreStatus.OperationInProgress, current)
                     : Result(CredentialLeaseAttemptStoreStatus.Replayed, current, replayLease);
@@ -95,7 +99,7 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
                 return Result(CredentialLeaseAttemptStoreStatus.Backpressured);
             }
 
-            var lease = TryAcquireOwner(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+            var lease = TryAcquireOwner(intent.CredentialUseOperationId, intent.CredentialUseGeneration, cancellationToken);
             if (lease is null)
             {
                 return Result(CredentialLeaseAttemptStoreStatus.OperationInProgress);
@@ -137,23 +141,66 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            using var mutation = await AcquireMutationLockAsync(cancellationToken).ConfigureAwait(false);
-            ValidateDirectory(out _, out _);
             var storageKey = StorageKey(credentialUseOperationId, credentialUseGeneration);
-            var current = await ReadCurrentAsync(storageKey, credentialUseOperationId, credentialUseGeneration, cancellationToken).ConfigureAwait(false);
-            if (current is null)
+            CredentialLeaseAttemptHistory current;
+            using (var mutation = await AcquireMutationLockAsync(cancellationToken).ConfigureAwait(false))
             {
-                return Result(CredentialLeaseAttemptStoreStatus.NotFound);
-            }
-            if (IsTerminal(current.Current.Phase))
-            {
-                return Result(CredentialLeaseAttemptStoreStatus.Replayed, current);
+                ValidateDirectory(out _, out _);
+                var loadedCurrent = await ReadCurrentAsync(storageKey, credentialUseOperationId, credentialUseGeneration, cancellationToken).ConfigureAwait(false);
+                if (loadedCurrent is null)
+                {
+                    return Result(CredentialLeaseAttemptStoreStatus.NotFound);
+                }
+                current = loadedCurrent;
+                if (IsTerminal(current.Current.Phase))
+                {
+                    return Result(CredentialLeaseAttemptStoreStatus.Replayed, current);
+                }
+
+                var immediateLease = TryAcquireOwner(credentialUseOperationId, credentialUseGeneration, cancellationToken);
+                if (immediateLease is not null)
+                {
+                    try
+                    {
+                        return Result(CredentialLeaseAttemptStoreStatus.Replayed, current, immediateLease);
+                    }
+                    catch
+                    {
+                        immediateLease.Dispose();
+                        throw;
+                    }
+                }
             }
 
-            var lease = TryAcquireOwner(credentialUseOperationId, credentialUseGeneration);
-            return lease is null
-                ? Result(CredentialLeaseAttemptStoreStatus.OperationInProgress, current)
-                : Result(CredentialLeaseAttemptStoreStatus.Replayed, current, lease);
+            var recoveredLease = await TryAcquireOwnerAsync(credentialUseOperationId, credentialUseGeneration, cancellationToken).ConfigureAwait(false);
+            if (recoveredLease is null)
+            {
+                return Result(CredentialLeaseAttemptStoreStatus.OperationInProgress, current);
+            }
+
+            try
+            {
+                using var mutation = await AcquireMutationLockAsync(cancellationToken).ConfigureAwait(false);
+                ValidateDirectory(out _, out _);
+                var revalidated = await ReadCurrentAsync(storageKey, credentialUseOperationId, credentialUseGeneration, cancellationToken).ConfigureAwait(false);
+                if (revalidated is null)
+                {
+                    return Result(CredentialLeaseAttemptStoreStatus.NotFound);
+                }
+                if (IsTerminal(revalidated.Current.Phase))
+                {
+                    return Result(CredentialLeaseAttemptStoreStatus.Replayed, revalidated);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                var result = Result(CredentialLeaseAttemptStoreStatus.Replayed, revalidated, recoveredLease);
+                recoveredLease = null;
+                return result;
+            }
+            finally
+            {
+                recoveredLease?.Dispose();
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -268,8 +315,83 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
         }
     }
 
-    private CredentialLeaseAttemptLease? TryAcquireOwner(string operationId, long generation)
+    private async Task<CredentialLeaseAttemptLease?> TryAcquireOwnerAsync(string operationId, long generation, CancellationToken cancellationToken)
     {
+        // Process termination and handle release are separate observations on Windows. Retry only the exact owner
+        // marker for a short bounded interval; never delete or bypass retained ownership evidence.
+        using var takeoverDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        takeoverDeadline.CancelAfter(_ownerTakeoverTimeout);
+        var pollingStarted = false;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (takeoverDeadline.IsCancellationRequested)
+            {
+                return null;
+            }
+
+            var lease = TryAcquireOwner(operationId, generation, cancellationToken);
+            if (lease is not null)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    lease.Dispose();
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+                if (takeoverDeadline.IsCancellationRequested)
+                {
+                    lease.Dispose();
+                    return null;
+                }
+                return lease;
+            }
+
+            if (!pollingStarted)
+            {
+                pollingStarted = true;
+                QueueOwnerTakeoverPollingObserver();
+            }
+
+            try
+            {
+                await Task.Delay(_ownerTakeoverPollInterval, takeoverDeadline.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
+        }
+    }
+
+    private void QueueOwnerTakeoverPollingObserver()
+    {
+        var observer = _ownerTakeoverPollingObserver;
+        if (observer is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await observer().ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                }
+            });
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private CredentialLeaseAttemptLease? TryAcquireOwner(string operationId, long generation, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         var path = _guard.GetFilePath(_root, OwnerFileName(StorageKey(operationId, generation)));
         try
         {
@@ -279,12 +401,35 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
                 stream.Dispose();
                 throw new FormatException("Credential lease ownership evidence must remain value-free.");
             }
-            return new CredentialLeaseAttemptLease(_instanceId, operationId, generation, stream);
+            var lease = new CredentialLeaseAttemptLease(_instanceId, operationId, generation, stream);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                lease.Dispose();
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            return lease;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (IsOwnerMarkerContention(exception))
         {
             return null;
         }
+    }
+
+    private static bool IsOwnerMarkerContention(Exception exception)
+    {
+        const int ResourceTemporarilyUnavailable = 11;
+        const int SharingViolation = 32;
+        const int LockViolation = 33;
+        const int ResourceDeadlockAvoided = 35;
+        if (exception is not IOException and not UnauthorizedAccessException)
+        {
+            return false;
+        }
+
+        var errorCode = exception.HResult & 0xFFFF;
+        return OperatingSystem.IsWindows()
+            ? errorCode is SharingViolation or LockViolation
+            : errorCode is ResourceTemporarilyUnavailable or ResourceDeadlockAvoided;
     }
 
     private async Task<FileStream> AcquireMutationLockAsync(CancellationToken cancellationToken)
