@@ -662,6 +662,99 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task ListRecent_reconciles_a_same_length_in_place_rewrite_after_its_first_snapshot()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var original = CustomLoopAdmissionRequestHash.Apply(CreateRun() with { TriggerPrompt = new string('a', 96), AdmissionRequestHash = string.Empty });
+        var replacement = CustomLoopAdmissionRequestHash.Apply(original with { TriggerPrompt = new string('b', 96), AdmissionRequestHash = string.Empty });
+        var originalContent = CustomLoopRunArtifactSerializer.Serialize(original);
+        var replacementContent = CustomLoopRunArtifactSerializer.Serialize(replacement);
+        Assert.Equal(originalContent.Length, replacementContent.Length);
+        await WriteDirectAsync(paths, original);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, original.LoopId, original.Id + ".json");
+        var firstSnapshotCount = 0;
+        var rewriteInjected = 0;
+        Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> rewriteAfterFirstSnapshot = async (boundary, path, cancellationToken) =>
+        {
+            if (boundary == CustomLoopRunReadBoundary.AfterCanonicalArtifactReadFirstSnapshot && Interlocked.Increment(ref firstSnapshotCount) == 1)
+            {
+                Assert.Equal(artifactPath, path);
+                Interlocked.Increment(ref rewriteInjected);
+                await File.WriteAllBytesAsync(path, replacementContent, cancellationToken);
+            }
+        };
+
+        using var store = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: rewriteAfterFirstSnapshot);
+        var summaries = await store.ListRecentAsync(1);
+
+        Assert.True(firstSnapshotCount >= 2);
+        Assert.Equal(1, rewriteInjected);
+        Assert.Equal(original.Id, Assert.Single(summaries).Id);
+        var read = await store.GetAsync(original.Id);
+        Assert.NotNull(read);
+        Assert.Equal(replacement.TriggerPrompt, read.TriggerPrompt);
+        Assert.Equal(replacement.AdmissionRequestHash, read.AdmissionRequestHash);
+    }
+
+    [Fact]
+    public async Task Get_fails_closed_after_each_bounded_snapshot_attempt_observes_a_same_length_in_place_rewrite()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var first = CustomLoopAdmissionRequestHash.Apply(CreateRun() with { TriggerPrompt = new string('a', 96), AdmissionRequestHash = string.Empty });
+        var second = CustomLoopAdmissionRequestHash.Apply(first with { TriggerPrompt = new string('b', 96), AdmissionRequestHash = string.Empty });
+        var firstContent = CustomLoopRunArtifactSerializer.Serialize(first);
+        var secondContent = CustomLoopRunArtifactSerializer.Serialize(second);
+        Assert.Equal(firstContent.Length, secondContent.Length);
+        await WriteDirectAsync(paths, first);
+        var rewrites = 0;
+        Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> rewriteEveryFirstSnapshot = async (boundary, path, cancellationToken) =>
+        {
+            if (boundary == CustomLoopRunReadBoundary.AfterCanonicalArtifactReadFirstSnapshot)
+            {
+                var replacement = Interlocked.Increment(ref rewrites) % 2 == 0 ? firstContent : secondContent;
+                await File.WriteAllBytesAsync(path, replacement, cancellationToken);
+            }
+        };
+
+        using var store = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: rewriteEveryFirstSnapshot);
+        var exception = await Assert.ThrowsAnyAsync<IOException>(() => store.GetAsync(first.Id));
+
+        Assert.Equal(3, rewrites);
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Read, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+    }
+
+    [Fact]
+    public async Task Get_detects_an_in_place_truncation_after_its_first_snapshot_and_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun();
+        await WriteDirectAsync(paths, run);
+        var firstSnapshotCallbacks = 0;
+        var truncationInjected = 0;
+        Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> truncateAfterFirstSnapshot = async (boundary, path, cancellationToken) =>
+        {
+            if (boundary == CustomLoopRunReadBoundary.AfterCanonicalArtifactReadFirstSnapshot)
+            {
+                Interlocked.Increment(ref firstSnapshotCallbacks);
+                if (Interlocked.Exchange(ref truncationInjected, 1) == 0)
+                {
+                    await File.WriteAllBytesAsync(path, [(byte)'{'], cancellationToken);
+                }
+            }
+        };
+
+        using var store = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: truncateAfterFirstSnapshot);
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(run.Id));
+
+        Assert.Equal(1, truncationInjected);
+        Assert.Equal(2, firstSnapshotCallbacks);
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Validate, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+    }
+
+    [Fact]
     public async Task Get_retries_when_a_canonical_run_disappears_between_enumeration_and_open()
     {
         using var workspace = new TestWorkspace();

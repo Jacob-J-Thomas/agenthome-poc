@@ -11,6 +11,9 @@ public enum CustomLoopRunReadBoundary
     /// <summary>The canonical run artifact reader has opened its handle and has not read bytes yet.</summary>
     AfterCanonicalArtifactReadOpen,
 
+    /// <summary>The canonical run artifact reader captured its first bounded byte snapshot and is about to verify it.</summary>
+    AfterCanonicalArtifactReadFirstSnapshot,
+
     /// <summary>A canonical run artifact was unavailable during bounded reconciliation after it had been enumerated.</summary>
     AfterCanonicalArtifactReadMiss,
 }
