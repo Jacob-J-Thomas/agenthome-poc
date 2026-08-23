@@ -299,6 +299,91 @@ public sealed class GovernedLoopEffectAttemptServiceTests
         Assert.Equal(1, catalog.ResolveCalls);
     }
 
+    [Theory]
+    [InlineData("indeterminate")]
+    [InlineData("cancel")]
+    [InlineData("throw")]
+    public async Task Retained_dispatch_boundary_probe_failures_require_reconciliation_without_redispatch(string probeFailure)
+    {
+        var fixture = GovernedLoopEffectAttemptTestFixture.Create();
+        Assert.True(GovernedActuatorInputContract.TryCanonicalize(fixture.Request.InputJson, out var input, out _));
+        var store = new InMemoryEffectAttemptStore
+        {
+            Current = ToPhase(GovernedLoopEffectAttemptTestFixture.Prepare(fixture.Request, fixture.Descriptor, input!), GovernedLoopEffectPhase.DispatchBoundaryReached),
+        };
+        using var cancellation = new CancellationTokenSource();
+        var operation = new StubOperation(fixture.Descriptor, Preparation(fixture))
+        {
+            Probe = _ => probeFailure switch
+            {
+                "cancel" => CancelProbe(cancellation),
+                "throw" => throw new IOException("simulated probe failure"),
+                _ => new GovernedActuatorProbeResult(GovernedActuatorProbePosture.Indeterminate, null),
+            },
+        };
+
+        var result = await Service(new StubCatalog(fixture, operation), store, new StubAuthorityBoundary()).ExecuteAsync(fixture.Request, cancellation.Token);
+
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired, result.Status);
+        Assert.Equal(GovernedLoopEffectPhase.ReconciliationRequired, result.Attempt?.Payload.Phase);
+        Assert.Equal(1, operation.ProbeCalls);
+        Assert.Equal(0, operation.PrepareCalls);
+        Assert.Equal(0, operation.ExecuteCalls);
+        Assert.Equal(0, store.BeginCalls);
+    }
+
+    [Fact]
+    public async Task Retained_dispatch_boundary_exact_probe_requires_reconciliation_when_trusted_time_is_unavailable()
+    {
+        var fixture = GovernedLoopEffectAttemptTestFixture.Create();
+        Assert.True(GovernedActuatorInputContract.TryCanonicalize(fixture.Request.InputJson, out var input, out _));
+        var store = new InMemoryEffectAttemptStore
+        {
+            Current = ToPhase(GovernedLoopEffectAttemptTestFixture.Prepare(fixture.Request, fixture.Descriptor, input!), GovernedLoopEffectPhase.DispatchBoundaryReached),
+        };
+        var operation = new StubOperation(fixture.Descriptor, Preparation(fixture))
+        {
+            Probe = _ => new GovernedActuatorProbeResult(
+                GovernedActuatorProbePosture.OutcomeObserved,
+                new GovernedActuatorExternalOutcome(GovernedLoopEffectOutcome.Succeeded, "outcome-recovered", "after-recovered")),
+        };
+        var service = new GovernedLoopEffectAttemptService(new StubCatalog(fixture, operation), store, new StubAuthorityBoundary(), new ThrowingTimeProvider());
+
+        var result = await service.ExecuteAsync(fixture.Request);
+
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired, result.Status);
+        Assert.Equal(GovernedLoopEffectPhase.DispatchBoundaryReached, result.Attempt?.Payload.Phase);
+        Assert.Equal(1, operation.ProbeCalls);
+        Assert.Equal(0, store.ExchangeCalls);
+        Assert.Equal(0, operation.ExecuteCalls);
+    }
+
+    [Fact]
+    public async Task Retained_dispatch_boundary_exact_probe_requires_reconciliation_when_outcome_exchange_is_lost()
+    {
+        var fixture = GovernedLoopEffectAttemptTestFixture.Create();
+        Assert.True(GovernedActuatorInputContract.TryCanonicalize(fixture.Request.InputJson, out var input, out _));
+        var store = new InMemoryEffectAttemptStore
+        {
+            Current = ToPhase(GovernedLoopEffectAttemptTestFixture.Prepare(fixture.Request, fixture.Descriptor, input!), GovernedLoopEffectPhase.DispatchBoundaryReached),
+            FailExchangeCall = 1,
+        };
+        var operation = new StubOperation(fixture.Descriptor, Preparation(fixture))
+        {
+            Probe = _ => new GovernedActuatorProbeResult(
+                GovernedActuatorProbePosture.OutcomeObserved,
+                new GovernedActuatorExternalOutcome(GovernedLoopEffectOutcome.Succeeded, "outcome-recovered", "after-recovered")),
+        };
+
+        var result = await Service(new StubCatalog(fixture, operation), store, new StubAuthorityBoundary()).ExecuteAsync(fixture.Request);
+
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired, result.Status);
+        Assert.Equal(GovernedLoopEffectPhase.ReconciliationRequired, result.Attempt?.Payload.Phase);
+        Assert.Equal(1, operation.ProbeCalls);
+        Assert.Equal(2, store.ExchangeCalls);
+        Assert.Equal(0, operation.ExecuteCalls);
+    }
+
     [Fact]
     public async Task Resume_backpressure_is_projected_without_catalog_authority_or_dispatch()
     {
@@ -1361,6 +1446,12 @@ public sealed class GovernedLoopEffectAttemptServiceTests
             request.InputJson,
             authority,
             request.CorrelationId);
+
+    private static GovernedActuatorProbeResult CancelProbe(CancellationTokenSource cancellation)
+    {
+        cancellation.Cancel();
+        throw new OperationCanceledException(cancellation.Token);
+    }
 
     private static GovernedLoopEffectAttempt ToPhase(GovernedLoopEffectAttempt prepared, GovernedLoopEffectPhase phase)
     {

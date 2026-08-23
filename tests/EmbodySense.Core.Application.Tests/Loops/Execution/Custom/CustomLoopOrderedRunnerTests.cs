@@ -187,6 +187,106 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Canonical_workspace_action_without_an_executor_stops_before_action_dispatch()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact(owningRole: role));
+        var store = new FakeRunStore(context.Run);
+        var inference = new QueueExecutor(Result("bounded provider output"));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, inference), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal("canonical_dispatch_evidence_invalid", result.Run!.FailureCode);
+        Assert.Single(inference.Requests);
+        Assert.DoesNotContain(result.Run.Events, IsWorkspaceActionStart);
+        Assert.DoesNotContain(result.Run.Events, IsWorkspaceActionCompletion);
+    }
+
+    [Theory]
+    [InlineData(GovernedLoopWorkspaceActionExecutionStatus.Rejected, CustomLoopOrderedRunStatus.Failed, "workspace_action_rejected")]
+    [InlineData(GovernedLoopWorkspaceActionExecutionStatus.Completed, CustomLoopOrderedRunStatus.NeedsReview, "workspace_action_reconciliation_required")]
+    public async Task Canonical_workspace_action_rejected_or_without_output_retains_the_corresponding_terminal_posture(
+        GovernedLoopWorkspaceActionExecutionStatus actionStatus,
+        CustomLoopOrderedRunStatus expectedStatus,
+        string expectedFailureCode)
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact(owningRole: role));
+        var store = new FakeRunStore(context.Run);
+        var inference = new QueueExecutor(Result("bounded provider output"));
+        var action = new QueueWorkspaceActionExecutor(new GovernedLoopWorkspaceActionExecutionResult(actionStatus, null, "The workspace action returned no canonical output."));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, inference, workspaceActionExecutor: action), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Equal(expectedFailureCode, result.Run!.FailureCode);
+        Assert.Single(action.Requests);
+        Assert.Single(result.Run.Events, IsWorkspaceActionStart);
+        Assert.Single(result.Run.Events, item => item.SequentialNodeEvidence is
+        {
+            NodeId: "workspace-action",
+            Disposition: CustomLoopSequentialNodeDisposition.Rejected or CustomLoopSequentialNodeDisposition.NeedsReview,
+        });
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Canonical_workspace_action_completion_response_loss_reads_back_the_exact_durable_outcome_without_redispatch()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact(owningRole: role));
+        var store = new FakeRunStore(context.Run);
+        var responseLost = false;
+        store.AfterUpdate = candidate =>
+        {
+            if (!responseLost && candidate.Events.Any(IsWorkspaceActionCompletion))
+            {
+                responseLost = true;
+                throw new IOException("Simulated response loss after the workspace Action outcome committed.");
+            }
+
+            return Task.CompletedTask;
+        };
+        var inference = new QueueExecutor(Result("bounded provider output"));
+        var action = new QueueWorkspaceActionExecutor(WorkspaceActionOutcome(WorkspaceActionResultStatus.Committed));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, inference, workspaceActionExecutor: action), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.True(responseLost);
+        Assert.Equal(CustomLoopOrderedRunStatus.Completed, result.Status);
+        Assert.Single(action.Requests);
+        Assert.Single(result.Run!.Events, IsWorkspaceActionCompletion);
+        Assert.True(WorkspaceActionResultContract.TryParse(result.Run.FinalOutput, out var retained));
+        Assert.Equal(WorkspaceActionResultStatus.Committed, retained!.Status);
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
     public async Task Canonical_workspace_action_start_recovers_and_replays_one_retained_mutation_after_process_loss()
     {
         var context = await SequentialContextAsync(
