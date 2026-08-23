@@ -1,6 +1,9 @@
 using System.Diagnostics;
-using System.Security.Cryptography;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
+using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Application.LocalWorkspace.Actions.Models;
@@ -23,6 +26,44 @@ public sealed class WorkspaceActionNativeHostTests
     private const string WorkerInputVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_INPUT";
     private const string WorkerKindVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_KIND";
     private const string WorkerRootVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_ROOT";
+
+    [Fact]
+    public async Task Windows_private_workspace_action_root_reopens_nested_children_with_exact_current_user_acl()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Write, "notes/private-acl.txt", ExpectedAbsent(), "first");
+        var host = Host(paths);
+
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+        var result = await host.ExecuteAsync(Request(input, prepared.BeforeEvidence), new RecordingDispatchBoundary());
+
+        Assert.Equal(WorkspaceActionNativeCommitStatus.OutcomeObserved, result.Status);
+        var targetLocks = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "target-locks");
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        AssertCurrentUserPrivateDirectorySecurity(targetLocks);
+        AssertCurrentUserPrivateDirectorySecurity(staging);
+        var originalNestedChildren = Directory.EnumerateFiles(targetLocks).Order(StringComparer.Ordinal).ToArray();
+        Assert.Contains(originalNestedChildren, path => string.Equals(Path.GetFileName(path), ".custom-loop-mutations.lock", StringComparison.Ordinal));
+        Assert.Contains(originalNestedChildren, path => Path.GetFileName(path).StartsWith("shard-", StringComparison.Ordinal));
+        Assert.All(originalNestedChildren, AssertCurrentUserPrivateFileSecurity);
+
+        var reopened = await Host(paths).PrepareAsync(Input(
+            WorkspaceActionKind.Write,
+            "notes/private-acl.txt",
+            ExpectedHash("first"),
+            "second"));
+
+        Assert.NotNull(reopened);
+        Assert.Equal(originalNestedChildren, Directory.EnumerateFiles(targetLocks).Order(StringComparer.Ordinal));
+        AssertCurrentUserPrivateDirectorySecurity(targetLocks);
+        Assert.All(Directory.EnumerateFiles(targetLocks), AssertCurrentUserPrivateFileSecurity);
+    }
 
     [Fact]
     public async Task ExistingWriteRequiresFreshModifyPermissionRatherThanStaleCreateClassification()
@@ -1807,6 +1848,45 @@ public sealed class WorkspaceActionNativeHostTests
 
     private static string Sha256(string value)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    [SupportedOSPlatform("windows")]
+    private static void AssertCurrentUserPrivateDirectorySecurity(string path)
+    {
+        var security = FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path));
+        AssertCurrentUserPrivateSecurity(
+            security,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AssertCurrentUserPrivateFileSecurity(string path)
+    {
+        var security = FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
+        AssertCurrentUserPrivateSecurity(security, InheritanceFlags.None);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AssertCurrentUserPrivateSecurity(
+        FileSystemSecurity security,
+        InheritanceFlags expectedInheritance)
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        var currentUser = identity.User;
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier))
+            .OfType<FileSystemAccessRule>()
+            .ToArray();
+
+        Assert.NotNull(currentUser);
+        Assert.True(security.AreAccessRulesProtected);
+        Assert.Equal(currentUser, security.GetOwner(typeof(SecurityIdentifier)));
+        var rule = Assert.Single(rules);
+        Assert.False(rule.IsInherited);
+        Assert.Equal(AccessControlType.Allow, rule.AccessControlType);
+        Assert.Equal(currentUser, rule.IdentityReference);
+        Assert.Equal(FileSystemRights.FullControl, rule.FileSystemRights);
+        Assert.Equal(expectedInheritance, rule.InheritanceFlags);
+        Assert.Equal(PropagationFlags.None, rule.PropagationFlags);
+    }
 
     private static bool TryCreateHardLink(string alias, string source)
         => OperatingSystem.IsWindows()

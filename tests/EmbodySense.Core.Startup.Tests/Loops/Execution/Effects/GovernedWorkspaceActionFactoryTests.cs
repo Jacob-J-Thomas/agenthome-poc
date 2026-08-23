@@ -121,7 +121,6 @@ public sealed class GovernedWorkspaceActionFactoryTests
         var committed = await executor.ExecuteAsync(request);
         var replayed = await executor.ExecuteAsync(request);
 
-        Assert.Equal("replacement", File.ReadAllText(workspace.File("shared", "note.txt")));
         Assert.Equal(GovernedLoopWorkspaceActionExecutionStatus.Completed, committed.Status);
         Assert.True(WorkspaceActionResultContract.TryParse(committed.CanonicalOutput, out var committedResult));
         Assert.Equal(WorkspaceActionResultStatus.Committed, committedResult!.Status);
@@ -129,6 +128,7 @@ public sealed class GovernedWorkspaceActionFactoryTests
         Assert.True(WorkspaceActionResultContract.TryParse(replayed.CanonicalOutput, out var replayedResult));
         Assert.Equal(WorkspaceActionResultStatus.Replayed, replayedResult!.Status);
         Assert.Equal(committedResult.AfterEvidenceId, replayedResult.AfterEvidenceId);
+        Assert.Equal("replacement", File.ReadAllText(workspace.File("shared", "note.txt")));
     }
 
     [Fact]
