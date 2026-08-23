@@ -667,7 +667,6 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                             {
                                 throw new IOException("The private Windows replacement original witness did not retain the exact before image.");
                             }
-                            WorkspaceActionNativeFileSystem.RequireReplacementMetadata(windowsOriginalSecuritySnapshot, windowsOriginal);
                             if (_namespaceRaceObserver is not null)
                             {
                                 await _namespaceRaceObserver.ObserveAsync(
@@ -743,7 +742,6 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                                 allowMultipleLinks: true)!;
                             WorkspaceActionNativeFileSystem.RequireExactOpenedName(windowsDisplaced, displacedName);
                             windowsDisplacedIdentity = WorkspaceActionNativeFileSystem.GetIdentity(windowsDisplaced);
-                            WorkspaceActionNativeFileSystem.RequireReplacementMetadata(windowsOriginalSecuritySnapshot, windowsOriginal);
                             if (_namespaceRaceObserver is not null)
                             {
                                 await _namespaceRaceObserver.ObserveAsync(
@@ -764,7 +762,6 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                                 throw new IOException("The atomic Windows replacement displaced a target other than the exact retained before image.");
                             }
                             WorkspaceActionNativeFileSystem.RequireExactOpenedName(windowsOriginal, originalName);
-                            WorkspaceActionNativeFileSystem.RequireReplacementMetadata(windowsOriginalSecuritySnapshot, windowsDisplaced);
                             observedIdentity = WorkspaceActionNativeFileSystem.GetIdentity(observed);
                             observedBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
                                 observed,
@@ -1751,7 +1748,10 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                 ownership.DirectoryHandle,
                 name,
                 allowMissing: false,
-                write: false)!;
+                write: false,
+                allowMultipleLinks: kind == WorkspaceActionAttemptArtifactKind.Stage
+                    && (name.EndsWith(".stage.original", StringComparison.Ordinal)
+                        || name.EndsWith(".stage.displaced", StringComparison.Ordinal)))!;
             if (!name.EndsWith(markerSuffix, StringComparison.Ordinal))
             {
                 var expectedMarkerName = kind == WorkspaceActionAttemptArtifactKind.Stage
