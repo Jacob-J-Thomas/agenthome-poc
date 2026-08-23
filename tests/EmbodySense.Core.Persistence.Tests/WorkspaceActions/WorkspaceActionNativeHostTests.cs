@@ -1589,6 +1589,8 @@ public sealed class WorkspaceActionNativeHostTests
         Assert.Equal("governed", await File.ReadAllTextAsync(path));
         Assert.True(publishedTargetOpenBlocked);
         Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
+        var original = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.original"));
+        Assert.Equal("before", await File.ReadAllTextAsync(original));
         if (substitute)
         {
             var displaced = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
@@ -1622,7 +1624,7 @@ public sealed class WorkspaceActionNativeHostTests
 
             Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
             Assert.Equal(
-                1,
+                0,
                 await Host(
                     paths,
                     timeProvider: clock,
@@ -1631,8 +1633,59 @@ public sealed class WorkspaceActionNativeHostTests
             Assert.Equal("governed", await File.ReadAllTextAsync(path));
             Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
             Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.displaced"));
-            Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.marker"));
+            Assert.Single(Directory.EnumerateFiles(staging, "*.stage.original"));
+            Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
         }
+    }
+
+    [Fact]
+    public async Task WindowsOriginalWitnessBeforeReplacementIsCleanedOnlyAfterExactTargetProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var path = workspace.File("notes", "windows-original-cleanup.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var clock = new MutableWorkspaceActionTimeProvider(TimeProvider.System.GetUtcNow());
+        var input = Input(WorkspaceActionKind.Write, "notes/windows-original-cleanup.txt", ExpectedHash("before"), "governed");
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await Host(paths, timeProvider: clock).PrepareAsync(input));
+        var observer = new CallbackNamespaceRaceObserver(point =>
+        {
+            if (point == WorkspaceActionNamespaceRacePoint.AfterWindowsReplacementFinalCheckBeforeReplaceSystemCall)
+            {
+                throw new IOException("Stop after retaining the exact original witness.");
+            }
+        });
+
+        await Assert.ThrowsAsync<IOException>(() => Host(paths, timeProvider: clock, namespaceRaceObserver: observer).ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            new RecordingDispatchBoundary()));
+
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        Assert.Equal("before", await File.ReadAllTextAsync(path));
+        Assert.Single(Directory.EnumerateFiles(staging, "*.stage"));
+        var original = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.original"));
+        Assert.Equal("before", await File.ReadAllTextAsync(original));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+        Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
+
+        clock.Advance(TimeSpan.FromHours(25));
+        Assert.Equal(
+            1,
+            await Host(
+                paths,
+                timeProvider: clock,
+                attemptPresence: new FixedAttemptPresenceResolver(WorkspaceActionAttemptPresence.NotFound)).CleanupOrphansAsync(1));
+
+        Assert.Equal("before", await File.ReadAllTextAsync(path));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.original"));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.marker"));
     }
 
     [Fact]
@@ -1660,6 +1713,8 @@ public sealed class WorkspaceActionNativeHostTests
         var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
         Assert.Equal("governed", await File.ReadAllTextAsync(path));
         Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
+        var original = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.original"));
+        Assert.Equal("before", await File.ReadAllTextAsync(original));
         var displaced = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
         Assert.Equal("before", await File.ReadAllTextAsync(displaced));
         Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
@@ -1713,6 +1768,7 @@ public sealed class WorkspaceActionNativeHostTests
         Assert.True(writeBlocked);
         Assert.True(deleteBlocked);
         Assert.Equal("governed", await File.ReadAllTextAsync(path));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.original"));
         Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.displaced"));
         Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.marker"));
     }

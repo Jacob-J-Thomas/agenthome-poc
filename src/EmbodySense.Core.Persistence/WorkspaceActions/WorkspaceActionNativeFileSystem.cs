@@ -1248,6 +1248,60 @@ internal static class WorkspaceActionNativeFileSystem
         }
     }
 
+    public static string CaptureWindowsReplacementPath(SafeFileHandle replacement, string replacementName)
+    {
+        EnsureSimpleName(replacementName);
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("Atomic Windows replacement is available only on Windows.");
+        }
+        RequireRegularFile(replacement, "workspace action replacement");
+        RequireExactOpenedName(replacement, replacementName);
+        return ReadFinalPath(replacement);
+    }
+
+    public static void ReplaceWindowsRelativeWithBackup(
+        string replacementPath,
+        SafeFileHandle replaced,
+        SafeFileHandle replacedParent,
+        string replacedName,
+        SafeFileHandle backupParent,
+        string backupName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(replacementPath);
+        EnsureSimpleName(replacedName);
+        EnsureSimpleName(backupName);
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("Atomic Windows replacement is available only on Windows.");
+        }
+        RequireRegularFile(replaced, "workspace action replaced target", requireSingleLink: false);
+        if (GetIdentity(replaced).LinkCount != 2)
+        {
+            throw new IOException("The retained Windows replacement target did not keep its exact original witness link.");
+        }
+        RequireExactOpenedName(replaced, replacedName);
+        RequireDirectory(replacedParent, "workspace action replacement parent");
+        RequireDirectory(backupParent, "workspace action replacement backup parent");
+        using (var existingBackup = OpenRelativeFile(backupParent, backupName, allowMissing: true, write: false))
+        {
+            if (existingBackup is not null)
+            {
+                throw new IOException("The authenticated workspace replacement backup slot is already occupied.");
+            }
+        }
+        var replacedPath = Path.Combine(ReadFinalPath(replacedParent), replacedName);
+        var backupPath = Path.Combine(ReadFinalPath(backupParent), backupName);
+        if (!ReplaceFile(replacedPath, replacementPath, backupPath, 0, IntPtr.Zero, IntPtr.Zero))
+        {
+            // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/506 owns partial-error status coverage.
+            throw NativeIOException("ReplaceFileW workspace action replacement", Marshal.GetLastPInvokeError());
+        }
+        GC.KeepAlive(replaced);
+        GC.KeepAlive(replacedParent);
+        GC.KeepAlive(backupParent);
+    }
+
     public static void LinkWindowsRelative(SafeFileHandle source, SafeFileHandle targetParent, string targetName)
     {
         EnsureSimpleName(targetName);
@@ -1288,6 +1342,24 @@ internal static class WorkspaceActionNativeFileSystem
         {
             Marshal.FreeHGlobal(buffer);
         }
+    }
+
+    public static void DeleteLinkedExact(
+        SafeFileHandle parent,
+        string name,
+        SafeFileHandle retained,
+        WorkspaceActionNativeFileStamp expected,
+        uint expectedLinkCount)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("Windows hard-link cleanup is available only on Windows.");
+        }
+        if (expectedLinkCount < 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(expectedLinkCount));
+        }
+        DeleteExact(parent, name, retained, expected, expectedLinkCount);
     }
 
     public static void DeleteExact(SafeFileHandle parent, string name, SafeFileHandle retained, WorkspaceActionNativeFileStamp expected)
@@ -1722,6 +1794,10 @@ internal static class WorkspaceActionNativeFileSystem
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool FlushFileBuffers(SafeFileHandle file);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "ReplaceFileW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReplaceFile(string replacedFileName, string replacementFileName, string backupFileName, uint replaceFlags, IntPtr exclude, IntPtr reserved);
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentProcess();

@@ -31,6 +31,13 @@ internal readonly record struct WorkspaceActionNativeFileStamp(
             && string.Equals(FileIdentity, other.FileIdentity, StringComparison.Ordinal)
             && string.Equals(LifetimeIdentity, other.LifetimeIdentity, StringComparison.Ordinal);
 
+    /// <summary>Returns whether Windows replacement retained the staged file identity and original target lifetime.</summary>
+    public bool MatchesWindowsReplacementPublication(WorkspaceActionNativeFileStamp stage, WorkspaceActionNativeFileStamp originalTarget)
+        => SameMount(stage)
+            && SameMount(originalTarget)
+            && string.Equals(FileIdentity, stage.FileIdentity, StringComparison.Ordinal)
+            && string.Equals(LifetimeIdentity, originalTarget.LifetimeIdentity, StringComparison.Ordinal);
+
     /// <summary>Returns whether two retained handles are rooted in the same exact mounted filesystem instance.</summary>
     public bool SameMount(WorkspaceActionNativeFileStamp other) => Device == other.Device && MountId == other.MountId;
 }
