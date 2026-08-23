@@ -352,6 +352,7 @@ static async Task<int> HostCommandActionAsync(string behavior, string[] values)
             await Task.WhenAll(stdout, stderr);
             return 0;
         case "unicode-boundary":
+            Console.OutputEncoding = new UTF8Encoding(false, true);
             Console.Write(new string('x', 4_095) + "😀");
             return 0;
         case "hang":
