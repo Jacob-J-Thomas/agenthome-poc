@@ -1,6 +1,7 @@
 using EmbodySense.Core.Application.Credentials;
 using EmbodySense.Core.Application.Credentials.Models;
 using EmbodySense.Core.Common.Credentials;
+using EmbodySense.Core.Common.Credentials.Leases.Models;
 using EmbodySense.Core.Common.Credentials.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 
@@ -18,7 +19,28 @@ internal sealed class CredentialLifecycleRegistryStore(CredentialRegistryStore r
 
     public Task<CredentialRegistryReadResult> ReadAsync(CancellationToken cancellationToken = default) => registry.ReadAsync(cancellationToken);
 
-    public async Task<CredentialRegistryMutationResult> MutateAsync(CredentialRegistryMutation mutation, CancellationToken cancellationToken = default)
+    public Task<CredentialRegistryMutationResult> MutateAsync(CredentialRegistryMutation mutation, CancellationToken cancellationToken = default)
+    {
+        if (mutation?.ReferenceId is not null && !string.IsNullOrEmpty(mutation.WorkspaceId))
+        {
+            var target = CredentialProviderTarget.Derive(mutation.WorkspaceId, mutation.ReferenceId);
+            if (!CredentialOperationMutex.TryAcquire(target, cancellationToken, out var operationLock))
+            {
+                return Task.FromResult(new CredentialRegistryMutationResult(CredentialRegistryMutationStatus.Unavailable, mutation.OperationId, null, null, CredentialFailure.FromCode(CredentialFailureCode.Unavailable)));
+            }
+
+            using (operationLock)
+            {
+                // Named mutex ownership is thread-affine. Complete the bounded durable mutation on the acquiring thread.
+                var result = MutateOrderedAsync(mutation, cancellationToken).ConfigureAwait(false).GetAwaiter().GetResult();
+                return Task.FromResult(result);
+            }
+        }
+
+        return MutateOrderedAsync(mutation!, cancellationToken);
+    }
+
+    private async Task<CredentialRegistryMutationResult> MutateOrderedAsync(CredentialRegistryMutation mutation, CancellationToken cancellationToken)
     {
         if (mutation?.Kind != CredentialRegistryMutationKind.ReconcileRepair)
         {
@@ -39,6 +61,8 @@ internal sealed class CredentialLifecycleRegistryStore(CredentialRegistryStore r
     }
 
     public Task<bool> AcknowledgeAuditAsync(CredentialContractId auditOperationId, CancellationToken cancellationToken = default) => registry.AcknowledgeLifecycleAuditAsync(auditOperationId, cancellationToken);
+
+    public ValueTask<CredentialEvidenceWriteResult> ReserveAsync(CredentialLeaseIntent intent, CancellationToken cancellationToken) => registry.ReserveAsync(intent, cancellationToken);
 
     public ValueTask<CredentialEvidenceWriteResult> AppendAsync(CredentialUseEvidence evidence, CancellationToken cancellationToken) => registry.AppendAsync(evidence, cancellationToken);
 }

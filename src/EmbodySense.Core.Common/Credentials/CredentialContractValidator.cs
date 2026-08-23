@@ -1,6 +1,10 @@
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Credentials.Leases;
+using EmbodySense.Core.Common.Credentials.Leases.Models;
 using EmbodySense.Core.Common.Credentials.Models;
+using EmbodySense.Core.Common.Secrets.Redaction;
+using EmbodySense.Core.Common.Secrets.Redaction.Models;
 
 namespace EmbodySense.Core.Common.Credentials;
 
@@ -127,6 +131,10 @@ public static class CredentialContractValidator
         Require(CredentialContractText.IsUtc(evidence.UsedAtUtc), CredentialContractErrorCode.InvalidTimestamp, "$.usedAtUtc", errors);
         Require(Enum.IsDefined(evidence.Outcome), CredentialContractErrorCode.InvalidUseOutcome, "$.outcome", errors);
         Require(evidence.RedactionApplied, CredentialContractErrorCode.RedactionNotApplied, "$.redactionApplied", errors);
+        if (evidence.Lease is not null)
+        {
+            ValidateLeaseEvidence(evidence, evidence.Lease, errors);
+        }
         return CredentialContractValidationResult.FromErrors(errors);
     }
 
@@ -178,6 +186,86 @@ public static class CredentialContractValidator
         }
     }
 
+    private static void ValidateLeaseEvidence(CredentialUseEvidence evidence, CredentialLeaseUseEvidence lease, List<CredentialContractError> errors)
+    {
+        var attempt = lease.Attempt;
+        var intent = attempt?.Intent;
+        var current = attempt?.Versions is { Count: > 0 } ? attempt.Current : null;
+        var phase = current?.Phase ?? (CredentialLeasePhase)0;
+        var boundaryAtUtc = attempt?.Versions?.FirstOrDefault(version => version.Phase == CredentialLeasePhase.RedemptionBoundaryReached)?.RecordedAtUtc;
+        var terminal = phase is CredentialLeasePhase.NotRedeemed or CredentialLeasePhase.Redeemed or CredentialLeasePhase.RedemptionFailed or CredentialLeasePhase.RedemptionAmbiguous;
+        var expectedOutcome = phase switch
+        {
+            CredentialLeasePhase.Redeemed => CredentialUseOutcome.Succeeded,
+            CredentialLeasePhase.RedemptionAmbiguous => CredentialUseOutcome.OutcomeUncertain,
+            _ => CredentialUseOutcome.FailedBeforeActuation,
+        };
+        var summary = lease.RedactionSummary;
+        var summaryValid = summary is not null
+            && Enum.IsDefined(summary.Status)
+            && summary.SensitiveValueCount is >= 0 and <= RedactionLimits.AbsoluteMaxSensitiveValues
+            && summary.IgnoredValueCount is >= 0 and <= RedactionLimits.AbsoluteMaxSensitiveValues
+            && summary.ReplacementCount is >= 0 and <= RedactionLimits.AbsoluteMaxProjectionCharacters
+            && summary.ExaminedCharacterCount is >= 0 and <= RedactionLimits.AbsoluteMaxProjectionCharacters
+            && summary.WorkUnitCount is >= 0 and <= RedactionLimits.AbsoluteMaxWorkUnits;
+
+        Require(lease.SchemaVersion == CredentialLeaseUseEvidence.CurrentSchemaVersion
+            && attempt is not null
+            && CredentialLeaseContract.Validate(attempt) is null
+            && intent is not null
+            && current is not null
+            && terminal
+            && CredentialContractText.IsUtc(current.RecordedAtUtc)
+            && current.RecordedAtUtc >= intent!.IssuedAtUtc
+            && (phase == CredentialLeasePhase.NotRedeemed && boundaryAtUtc is null
+                || phase != CredentialLeasePhase.NotRedeemed
+                    && boundaryAtUtc is { } boundary
+                    && CredentialContractText.IsUtc(boundary)
+                    && boundary >= intent.IssuedAtUtc
+                    && boundary < intent.EffectiveExpiresAtUtc
+                    && current.RecordedAtUtc >= boundary)
+            && ValidLeaseEvidenceHash(current.CurrentAuthorityEvidenceHash)
+            && ValidLeaseEvidenceHash(current.RegistryEvidenceHash)
+            && (phase == CredentialLeasePhase.NotRedeemed
+                || current.CurrentAuthorityEvidenceHash is not null && current.RegistryEvidenceHash is not null)
+            && (current.CurrentAuthorityEvidenceHash is null) == (current.RegistryEvidenceHash is null)
+            && summaryValid,
+            CredentialContractErrorCode.InvalidCredentialUseEvidence,
+            "$.lease",
+            errors);
+
+        if (intent is null)
+        {
+            return;
+        }
+        var scope = evidence.UsedScope;
+        Require(evidence.EvidenceId.Equals(CredentialLeaseContract.ComputeEvidenceId(intent.CredentialUseOperationId, intent.CredentialUseGeneration))
+            && string.Equals(evidence.ReferenceId.Value, intent.Registry.ReferenceId, StringComparison.Ordinal)
+            && string.Equals(evidence.BindingHash.Value, intent.Registry.BindingHash, StringComparison.Ordinal)
+            && string.Equals(evidence.ProofId.Value, intent.Authority.AuthorityProofId, StringComparison.Ordinal)
+            && string.Equals(evidence.RunId.Value, intent.Execution.RunId, StringComparison.Ordinal)
+            && evidence.UsedAtUtc == current!.RecordedAtUtc
+            && evidence.Outcome == expectedOutcome
+            && scope is not null
+            && string.Equals(scope.WorkspaceId, intent.Execution.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(scope.ActorId, intent.Execution.ActorId, StringComparison.Ordinal)
+            && string.Equals(scope.RoleId, intent.Execution.RoleId, StringComparison.Ordinal)
+            && string.Equals(scope.LoopId, intent.Execution.LoopId, StringComparison.Ordinal)
+            && scope.LoopRevision == intent.Execution.DeclaredLoopRevision
+            && string.Equals(scope.NodeId, intent.Effect.NodeId, StringComparison.Ordinal)
+            && string.Equals(scope.Capability?.Id.Value, intent.Capability.CapabilityId, StringComparison.Ordinal)
+            && string.Equals(scope.Capability?.Version.Value, intent.Capability.CapabilityVersion, StringComparison.Ordinal)
+            && string.Equals(scope.Capability?.Hash.Value, intent.Capability.CapabilityDescriptorHash, StringComparison.Ordinal)
+            && string.Equals(scope.Implementation?.ProviderId.Value, intent.Capability.CapabilityProviderId, StringComparison.Ordinal)
+            && string.Equals(scope.Implementation?.ImplementationId, intent.Capability.CapabilityImplementationId, StringComparison.Ordinal)
+            && string.Equals(scope.Service, intent.Target.TargetClass, StringComparison.Ordinal)
+            && scope.Target is null
+            && string.Equals(scope.OperationClass, intent.Target.OperationClass, StringComparison.Ordinal),
+            CredentialContractErrorCode.InvalidCredentialUseEvidence,
+            "$.lease.correlation",
+            errors);
+    }
+
     private static void ValidateCapability(Capabilities.CapabilityDescriptorIdentity? capability, CapabilityImplementationIdentity? implementation, List<CredentialContractError> errors, string path)
     {
         Require(capability?.Id is not null && capability.Version is not null && capability.Hash is not null, CredentialContractErrorCode.InvalidCapabilityIdentity, path, errors);
@@ -205,4 +293,10 @@ public static class CredentialContractValidator
     }
 
     private static CredentialContractError Error(CredentialContractErrorCode code, string path) => CredentialContractError.Create(code, path);
+
+    private static bool ValidLeaseEvidenceHash(string? value) => value is null || IsPrefixedHash(value);
+    private static bool IsPrefixedHash(string? value)
+        => value is { Length: 71 }
+            && value.StartsWith("sha256:", StringComparison.Ordinal)
+            && value[7..].All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 }
