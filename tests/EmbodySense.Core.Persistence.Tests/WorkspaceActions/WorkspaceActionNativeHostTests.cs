@@ -956,10 +956,6 @@ public sealed class WorkspaceActionNativeHostTests
     [Fact]
     public async Task ReleasedDeletePayloadIsReclaimedOnlyAfterAuthenticatedRetentionExpiry()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
         using var workspace = new TestWorkspace();
         Directory.CreateDirectory(workspace.File("notes"));
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -968,7 +964,21 @@ public sealed class WorkspaceActionNativeHostTests
         var clock = new MutableWorkspaceActionTimeProvider(DateTimeOffset.Parse("2026-08-16T12:00:00Z"));
         var resolver = new FixedAttemptPresenceResolver(WorkspaceActionAttemptPresence.ArtifactReleased);
         var quota = new WorkspaceActionStorageLimits(16, 2, 1, 32);
-        var host = Host(paths, quota: quota, timeProvider: clock, attemptPresence: resolver);
+        var cleanupObserver = new CallbackNamespaceRaceObserver(point =>
+        {
+            if (point == WorkspaceActionNamespaceRacePoint.BeforeCleanupArtifactDelete)
+            {
+                Assert.NotEmpty(Directory.EnumerateFiles(
+                    Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "quarantine"),
+                    "*.payload"));
+            }
+        });
+        var host = Host(
+            paths,
+            quota: quota,
+            timeProvider: clock,
+            attemptPresence: resolver,
+            namespaceRaceObserver: cleanupObserver);
         var first = Input(WorkspaceActionKind.Delete, "notes/first.txt", ExpectedHash("first"));
         var firstBefore = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(first));
         var firstResult = await host.ExecuteAsync(
@@ -983,6 +993,9 @@ public sealed class WorkspaceActionNativeHostTests
 
         clock.Advance(TimeSpan.FromDays(2));
         Assert.Equal(1, await host.CleanupOrphansAsync(1));
+        Assert.Contains(
+            WorkspaceActionNamespaceRacePoint.BeforeCleanupArtifactDelete,
+            cleanupObserver.Points);
         Assert.Empty(Directory.EnumerateFiles(quarantine, "*.payload"));
         Assert.Empty(Directory.EnumerateFiles(quarantine, "*.reservation"));
 
@@ -994,6 +1007,140 @@ public sealed class WorkspaceActionNativeHostTests
             Request(second, secondBefore.BeforeEvidence, "effect-second", "operation-second"),
             new RecordingDispatchBoundary());
         Assert.Equal(WorkspaceActionNativeCommitStatus.OutcomeObserved, secondResult.Status);
+    }
+
+    [Theory]
+    [InlineData(WorkspaceActionKind.Write)]
+    [InlineData(WorkspaceActionKind.Delete)]
+    public async Task AfterEvidenceBeforeOutcomeIsIndeterminateAndNeverRedispatches(WorkspaceActionKind kind)
+    {
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var path = workspace.File("notes", "after-before-outcome.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var input = Input(kind, "notes/after-before-outcome.txt", ExpectedHash("before"), kind == WorkspaceActionKind.Write ? "after" : null);
+        var observer = new ThrowingDurabilityObserver(WorkspaceActionDurabilityPoint.AfterEvidenceBeforeOutcome);
+        var host = Host(paths, observer: observer);
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+        var boundary = new RecordingDispatchBoundary();
+
+        await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            boundary));
+
+        Assert.Equal(WorkspaceActionDurabilityPoint.AfterEvidenceBeforeOutcome, observer.Point);
+        Assert.Equal(1, boundary.CrossCount);
+        var evidence = new WorkspaceActionEvidenceStore(paths);
+        var after = await evidence.FindAfterAsync("effect-alpha", "operation-alpha", 1);
+        Assert.NotNull(after);
+        Assert.Null(await evidence.FindOutcomeAsync("effect-alpha", "operation-alpha", 1));
+        var probe = await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence));
+        Assert.Equal(WorkspaceActionReconciliationPosture.Indeterminate, probe.Posture);
+        Assert.Equal(after!.EvidenceId, probe.AfterEvidenceId);
+        Assert.Null(probe.OutcomeEvidenceId);
+
+        var replayBoundary = new RecordingDispatchBoundary();
+        var replay = await Host(paths).ExecuteAsync(Request(input, prepared.BeforeEvidence), replayBoundary);
+        Assert.Equal(WorkspaceActionNativeCommitStatus.DispatchNotStarted, replay.Status);
+        Assert.Equal(0, replayBoundary.CrossCount);
+    }
+
+    [Fact]
+    public async Task ProbeRejectsMalformedAndMismatchedRetainedEvidenceWithoutMutation()
+    {
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Write, "notes/probe-validation.txt", ExpectedAbsent(), "after");
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await Host(paths).PrepareAsync(input));
+
+        var malformed = await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence) with { TargetFingerprint = "invalid" });
+        Assert.Equal(WorkspaceActionReconciliationPosture.Unknown, malformed.Posture);
+
+        var mismatchedTarget = await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence) with { TargetFingerprint = new string('0', 64) });
+        Assert.Equal(WorkspaceActionReconciliationPosture.Unknown, mismatchedTarget.Posture);
+
+        var missingBefore = await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence) with { BeforeEvidenceId = "before-" + new string('0', 64) });
+        Assert.Equal(WorkspaceActionReconciliationPosture.Unknown, missingBefore.Posture);
+        Assert.False(File.Exists(workspace.File("notes", "probe-validation.txt")));
+    }
+
+    [Fact]
+    public async Task ProbeFailsClosedWhenAfterEvidenceIsMissingButOutcomeRemains()
+    {
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Write, "notes/probe-after-missing.txt", ExpectedAbsent(), "after");
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await Host(paths).PrepareAsync(input));
+        var result = await Host(paths).ExecuteAsync(Request(input, prepared.BeforeEvidence), new RecordingDispatchBoundary());
+        Assert.Equal(WorkspaceActionNativeCommitStatus.OutcomeObserved, result.Status);
+
+        var afterRoot = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "after");
+        File.Delete(Path.Combine(afterRoot, result.Outcome!.AfterEvidenceId + ".json"));
+
+        var probe = await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence));
+        Assert.Equal(WorkspaceActionReconciliationPosture.Unknown, probe.Posture);
+        Assert.Null(probe.AfterEvidenceId);
+        Assert.Null(probe.OutcomeEvidenceId);
+    }
+
+    [Fact]
+    public async Task UnsupportedStagingArtifactFailsClosedBeforeNativeDispatch()
+    {
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Write, "notes/unsupported-stage.txt", ExpectedAbsent(), "after");
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await Host(paths).PrepareAsync(input));
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        Directory.CreateDirectory(staging);
+        await File.WriteAllTextAsync(Path.Combine(staging, "unsupported-artifact.bin"), "unexpected");
+        var boundary = new RecordingDispatchBoundary();
+
+        await Assert.ThrowsAsync<FormatException>(() => Host(paths).ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            boundary));
+
+        Assert.Equal(0, boundary.CrossCount);
+        Assert.True(File.Exists(Path.Combine(staging, "unsupported-artifact.bin")));
+        Assert.False(File.Exists(workspace.File("notes", "unsupported-stage.txt")));
+    }
+
+    [Fact]
+    public async Task DeleteObserverRepopulationFailsClosedAfterExactNamespaceRename()
+    {
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var path = workspace.File("notes", "delete-repopulation.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var observer = new CallbackNamespaceRaceObserver(point =>
+        {
+            if (point == WorkspaceActionNamespaceRacePoint.AfterDeleteSystemCall)
+            {
+                File.WriteAllText(path, "repopulated");
+            }
+        });
+        var input = Input(WorkspaceActionKind.Delete, "notes/delete-repopulation.txt", ExpectedHash("before"));
+        var host = Host(paths, namespaceRaceObserver: observer);
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+        var boundary = new RecordingDispatchBoundary();
+
+        await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            boundary));
+
+        Assert.Equal(1, boundary.CrossCount);
+        Assert.Equal("repopulated", await File.ReadAllTextAsync(path));
+        var quarantine = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "quarantine");
+        var payload = Assert.Single(Directory.EnumerateFiles(quarantine, "*.payload"));
+        Assert.Equal("before", await File.ReadAllTextAsync(payload));
+        Assert.Single(Directory.EnumerateFiles(quarantine, "*.reservation"));
+        Assert.Null(await new WorkspaceActionEvidenceStore(paths).FindAfterAsync("effect-alpha", "operation-alpha", 1));
+        Assert.Contains(WorkspaceActionNamespaceRacePoint.BeforeDeleteSystemCall, observer.Points);
+        Assert.Contains(WorkspaceActionNamespaceRacePoint.AfterDeleteSystemCall, observer.Points);
     }
 
     [Fact]
@@ -2825,14 +2972,18 @@ public sealed class WorkspaceActionNativeHostTests
         }
     }
 
-    private sealed class ThrowingDurabilityObserver : IWorkspaceActionDurabilityObserver
+    private sealed class ThrowingDurabilityObserver(WorkspaceActionDurabilityPoint? throwPoint = null) : IWorkspaceActionDurabilityObserver
     {
         public WorkspaceActionDurabilityPoint Point { get; private set; }
 
         public Task ObserveAsync(WorkspaceActionDurabilityPoint point, string beforeEvidenceId, string effectId, CancellationToken cancellationToken = default)
         {
             Point = point;
-            throw new IOException("Injected after-publication evidence failure.");
+            if (throwPoint is null || throwPoint == point)
+            {
+                throw new IOException("Injected after-publication evidence failure.");
+            }
+            return Task.CompletedTask;
         }
     }
 
