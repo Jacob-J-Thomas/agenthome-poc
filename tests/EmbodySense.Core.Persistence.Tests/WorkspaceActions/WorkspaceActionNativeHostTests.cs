@@ -24,6 +24,7 @@ public sealed class WorkspaceActionNativeHostTests
     private const string WorkerFailpointMarkerVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_FAILPOINT_MARKER";
     private const string WorkerExitBeforeMutationVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_EXIT_BEFORE_MUTATION";
     private const string WorkerTargetVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_TARGET";
+    private const string WorkerExitAfterWindowsReplacementSystemCallVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_EXIT_AFTER_WINDOWS_REPLACE";
     private const string WorkerInputVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_INPUT";
     private const string WorkerKindVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_KIND";
     private const string WorkerRootVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_ROOT";
@@ -428,6 +429,33 @@ public sealed class WorkspaceActionNativeHostTests
     }
 
     [Fact]
+    public async Task WindowsMultiLinkedTargetProbeIsIndeterminateRatherThanThrowing()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var source = workspace.File("notes", "probe-source.txt");
+        var alias = workspace.File("notes", "probe-alias.txt");
+        await File.WriteAllTextAsync(source, "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Write, "notes/probe-source.txt", ExpectedHash("before"), "after");
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await Host(paths).PrepareAsync(input));
+        if (!TryCreateHardLink(alias, source))
+        {
+            return;
+        }
+
+        var probe = await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence));
+
+        Assert.Equal(WorkspaceActionReconciliationPosture.Indeterminate, probe.Posture);
+        Assert.Equal("before", await File.ReadAllTextAsync(source));
+        Assert.Equal("before", await File.ReadAllTextAsync(alias));
+    }
+
+    [Fact]
     public async Task DirectNativeCallerCannotBypassClosedInputValidation()
     {
         using var workspace = new TestWorkspace();
@@ -564,10 +592,15 @@ public sealed class WorkspaceActionNativeHostTests
             Environment.GetEnvironmentVariable(WorkerExitBeforeMutationVariable),
             "1",
             StringComparison.Ordinal);
+        var exitAfterWindowsReplacementSystemCall = string.Equals(
+            Environment.GetEnvironmentVariable(WorkerExitAfterWindowsReplacementSystemCallVariable),
+            "1",
+            StringComparison.Ordinal);
         var result = await Host(
             new WorkspacePaths(root),
             observer: exitBeforeMutation ? null : new ExitDurabilityObserver(failpointMarker),
-            commitObserver: exitBeforeMutation ? new ExitCommitObserver(failpointMarker) : null).ExecuteAsync(
+            commitObserver: exitBeforeMutation ? new ExitCommitObserver(failpointMarker) : null,
+            namespaceRaceObserver: exitAfterWindowsReplacementSystemCall ? new ExitNamespaceRaceObserver(failpointMarker) : null).ExecuteAsync(
             new WorkspaceActionNativeExecutionRequest(input!, targetFingerprint, before, "effect-alpha", "operation-alpha", 1),
             new RecordingDispatchBoundary());
         throw new InvalidOperationException($"The crash boundary returned unexpectedly with {result.Status}.");
@@ -1300,7 +1333,7 @@ public sealed class WorkspaceActionNativeHostTests
     }
 
     [Fact]
-    public async Task ExistingWindowsReplacementRaceRetainsExternalWinnerAsAuthenticatedBackup()
+    public async Task ExistingWindowsReplacementRejectsExternalWinnerBeforePublication()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1330,12 +1363,11 @@ public sealed class WorkspaceActionNativeHostTests
             new RecordingDispatchBoundary()));
 
         Assert.Equal("before", await File.ReadAllTextAsync(original));
-        Assert.Equal("governed", await File.ReadAllTextAsync(path));
+        Assert.Equal("external", await File.ReadAllTextAsync(path));
         var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
         Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
-        var displaced = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
-        Assert.Equal("external", await File.ReadAllTextAsync(displaced));
-        Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.marker"));
         Assert.Null(await new WorkspaceActionEvidenceStore(paths).FindAfterAsync("effect-alpha", "operation-alpha", 1));
         var probe = await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence));
         Assert.Equal(WorkspaceActionReconciliationPosture.Indeterminate, probe.Posture);
@@ -1443,7 +1475,7 @@ public sealed class WorkspaceActionNativeHostTests
     }
 
     [Fact]
-    public async Task ExistingWindowsReplacementCompatibleExternalWriteRequiresReconciliationAndRetainsBytes()
+    public async Task ExistingWindowsReplacementExternalWriteAfterFinalCheckRequiresReconciliationAndRetainsBytes()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1455,7 +1487,7 @@ public sealed class WorkspaceActionNativeHostTests
         await File.WriteAllTextAsync(path, "before");
         var observer = new CallbackNamespaceRaceObserver(point =>
         {
-            if (point == WorkspaceActionNamespaceRacePoint.BeforeInstallSystemCall)
+            if (point == WorkspaceActionNamespaceRacePoint.AfterWindowsReplacementFinalCheckBeforeReplaceSystemCall)
             {
                 WriteAllTextWithCompatibleSharing(path, "external");
             }
@@ -1479,6 +1511,172 @@ public sealed class WorkspaceActionNativeHostTests
         Assert.Equal(
             WorkspaceActionReconciliationPosture.Indeterminate,
             (await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence))).Posture);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExistingWindowsReplacementMissingOrSubstitutedBackupAfterNativeBoundaryRequiresReconciliation(bool substitute)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var path = workspace.File("notes", "windows-backup-tamper.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        var observer = new CallbackNamespaceRaceObserver(point =>
+        {
+            if (point != WorkspaceActionNamespaceRacePoint.AfterWindowsReplacementSystemCallBeforeBackupRetention)
+            {
+                return;
+            }
+            var displaced = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+            File.Delete(displaced);
+            if (substitute)
+            {
+                File.WriteAllText(displaced, "external");
+            }
+        });
+        var input = Input(WorkspaceActionKind.Write, "notes/windows-backup-tamper.txt", ExpectedHash("before"), "governed");
+        var host = Host(paths, namespaceRaceObserver: observer);
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+
+        await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            new RecordingDispatchBoundary()));
+
+        Assert.Equal("governed", await File.ReadAllTextAsync(path));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
+        if (substitute)
+        {
+            var displaced = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+            Assert.Equal("external", await File.ReadAllTextAsync(displaced));
+        }
+        else
+        {
+            Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+        }
+        Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        Assert.Null(await new WorkspaceActionEvidenceStore(paths).FindAfterAsync("effect-alpha", "operation-alpha", 1));
+        Assert.Equal(
+            WorkspaceActionReconciliationPosture.Indeterminate,
+            (await Host(paths).ProbeAsync(Probe(input, prepared.BeforeEvidence))).Posture);
+        var replayBoundary = new RecordingDispatchBoundary();
+        Assert.Equal(
+            WorkspaceActionNativeCommitStatus.DispatchNotStarted,
+            (await Host(paths).ExecuteAsync(Request(input, prepared.BeforeEvidence), replayBoundary)).Status);
+        Assert.Equal(0, replayBoundary.CrossCount);
+        if (!substitute)
+        {
+            var clock = new MutableWorkspaceActionTimeProvider(TimeProvider.System.GetUtcNow());
+            clock.Advance(TimeSpan.FromHours(25));
+
+            Assert.Equal(
+                0,
+                await Host(
+                    paths,
+                    timeProvider: clock,
+                    attemptPresence: new FixedAttemptPresenceResolver(WorkspaceActionAttemptPresence.NotFound)).CleanupOrphansAsync(1));
+
+            Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
+            Assert.Equal(
+                1,
+                await Host(
+                    paths,
+                    timeProvider: clock,
+                    attemptPresence: new FixedAttemptPresenceResolver(WorkspaceActionAttemptPresence.ArtifactReleased)).CleanupOrphansAsync(1));
+
+            Assert.Equal("governed", await File.ReadAllTextAsync(path));
+            Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
+            Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+            Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        }
+    }
+
+    [Fact]
+    public async Task WindowsReplaceFileCrashBeforeBackupRetentionIsIndeterminateAndReleasedCleanupIsFenced()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var path = workspace.File("notes", "windows-replace-crash.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Write, "notes/windows-replace-crash.txt", ExpectedHash("before"), "governed");
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await Host(paths).PrepareAsync(input));
+
+        _ = await RunCrashWorkerAsync(
+            workspace.RootPath,
+            input,
+            prepared.BeforeEvidence,
+            exitBeforeMutation: false,
+            exitAfterWindowsReplacementSystemCall: true);
+
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        Assert.Equal("governed", await File.ReadAllTextAsync(path));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
+        var displaced = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+        Assert.Equal("before", await File.ReadAllTextAsync(displaced));
+        Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        var restarted = Host(paths);
+        Assert.Equal(
+            WorkspaceActionReconciliationPosture.Indeterminate,
+            (await restarted.ProbeAsync(Probe(input, prepared.BeforeEvidence))).Posture);
+        var replayBoundary = new RecordingDispatchBoundary();
+        Assert.Equal(
+            WorkspaceActionNativeCommitStatus.DispatchNotStarted,
+            (await restarted.ExecuteAsync(Request(input, prepared.BeforeEvidence), replayBoundary)).Status);
+        Assert.Equal(0, replayBoundary.CrossCount);
+
+        var writeBlocked = false;
+        var deleteBlocked = false;
+        var cleanupObserver = new CallbackNamespaceRaceObserver(point =>
+        {
+            if (point != WorkspaceActionNamespaceRacePoint.BeforeCleanupArtifactDelete)
+            {
+                return;
+            }
+            var retained = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+            try
+            {
+                WriteAllTextWithCompatibleSharing(retained, "external");
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                writeBlocked = true;
+            }
+            try
+            {
+                File.Delete(retained);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                deleteBlocked = true;
+            }
+        });
+        var clock = new MutableWorkspaceActionTimeProvider(TimeProvider.System.GetUtcNow());
+        clock.Advance(TimeSpan.FromHours(25));
+
+        Assert.Equal(
+            1,
+            await Host(
+                paths,
+                timeProvider: clock,
+                attemptPresence: new FixedAttemptPresenceResolver(WorkspaceActionAttemptPresence.ArtifactReleased),
+                namespaceRaceObserver: cleanupObserver).CleanupOrphansAsync(1));
+
+        Assert.True(writeBlocked);
+        Assert.True(deleteBlocked);
+        Assert.Equal("governed", await File.ReadAllTextAsync(path));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+        Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.marker"));
     }
 
     [Fact]
@@ -2291,7 +2489,8 @@ public sealed class WorkspaceActionNativeHostTests
         string rootPath,
         WorkspaceActionInput input,
         WorkspaceActionBeforeEvidence before,
-        bool exitBeforeMutation)
+        bool exitBeforeMutation,
+        bool exitAfterWindowsReplacementSystemCall = false)
     {
         var startInfo = new ProcessStartInfo("dotnet")
         {
@@ -2314,6 +2513,7 @@ public sealed class WorkspaceActionNativeHostTests
         var failpointMarker = Path.Combine(rootPath, $"workspace-action-crash-failpoint-{Guid.NewGuid():N}.marker");
         startInfo.Environment[WorkerFailpointMarkerVariable] = failpointMarker;
         startInfo.Environment[WorkerExitBeforeMutationVariable] = exitBeforeMutation ? "1" : "0";
+        startInfo.Environment[WorkerExitAfterWindowsReplacementSystemCallVariable] = exitAfterWindowsReplacementSystemCall ? "1" : "0";
         using var worker = Process.Start(startInfo) ?? throw new InvalidOperationException("The workspace action crash worker did not start.");
         var output = worker.StandardOutput.ReadToEndAsync();
         var error = worker.StandardError.ReadToEndAsync();
@@ -2531,6 +2731,21 @@ public sealed class WorkspaceActionNativeHostTests
         {
             WriteCrashWorkerFailpointMarker(markerPath);
             Environment.FailFast("aborted after private staging and before workspace namespace mutation");
+            throw new UnreachableException();
+        }
+    }
+
+    private sealed class ExitNamespaceRaceObserver(string markerPath) : IWorkspaceActionNamespaceRaceObserver
+    {
+        public Task ObserveAsync(WorkspaceActionNamespaceRacePoint point, string beforeEvidenceId, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (point != WorkspaceActionNamespaceRacePoint.AfterWindowsReplacementSystemCallBeforeBackupRetention)
+            {
+                return Task.CompletedTask;
+            }
+            WriteCrashWorkerFailpointMarker(markerPath);
+            Environment.FailFast("aborted after ReplaceFileW and before private backup retention");
             throw new UnreachableException();
         }
     }

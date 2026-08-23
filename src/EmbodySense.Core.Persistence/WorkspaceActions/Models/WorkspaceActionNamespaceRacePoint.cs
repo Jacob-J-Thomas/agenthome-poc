@@ -18,4 +18,13 @@ public enum WorkspaceActionNamespaceRacePoint
     /// <summary>The delete system call returned before quarantine winner and ancestor namespace proof.</summary>
     AfterDeleteSystemCall = 4,
 
+    /// <summary>The final exact Windows before-image check completed immediately before the ReplaceFileW call.</summary>
+    AfterWindowsReplacementFinalCheckBeforeReplaceSystemCall = 5,
+
+    /// <summary>ReplaceFileW returned before the private backup was opened and authenticated.</summary>
+    AfterWindowsReplacementSystemCallBeforeBackupRetention = 6,
+
+    /// <summary>An orphan-cleanup payload is retained with write and delete sharing denied before its exact deletion.</summary>
+    BeforeCleanupArtifactDelete = 7,
+
 }

@@ -12,6 +12,7 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
     private readonly string _rootPath;
     private readonly WorkspaceRelativeFileTarget _target;
     private SafeFileHandle? _targetHandle;
+    private readonly bool _allowMultipleLinksForProbe;
 
     private WorkspaceActionRetainedTargetSession(
         string rootPath,
@@ -19,11 +20,13 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
         WorkspaceRelativeFileTarget target,
         bool writeTarget,
         bool fenceTargetNamespace,
-        bool fenceDirectoryNamespace)
+        bool fenceDirectoryNamespace,
+        bool allowMultipleLinksForProbe)
     {
         _rootPath = Path.GetFullPath(rootPath);
         _target = target;
         ScopeId = scopeId;
+        _allowMultipleLinksForProbe = allowMultipleLinksForProbe;
         var root = WorkspaceActionNativeFileSystem.OpenAbsoluteDirectory(_rootPath, denyDeleteSharing: fenceDirectoryNamespace);
         try
         {
@@ -72,7 +75,8 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
                 allowMissing: true,
                 write: writeTarget,
                 denyDeleteSharing: fenceTargetNamespace,
-                denyWriteSharing: fenceTargetNamespace);
+                denyWriteSharing: fenceTargetNamespace,
+                allowMultipleLinks: _allowMultipleLinksForProbe);
             if (_targetHandle is not null)
             {
                 WorkspaceActionNativeFileSystem.RequireExactOpenedName(_targetHandle, TerminalName);
@@ -125,15 +129,21 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
         bool writeTarget,
         bool fenceTargetNamespace = false,
         bool fenceDirectoryNamespace = false)
-        => new(rootPath, scopeId, target, writeTarget, fenceTargetNamespace, fenceDirectoryNamespace);
+        => new(rootPath, scopeId, target, writeTarget, fenceTargetNamespace, fenceDirectoryNamespace, allowMultipleLinksForProbe: false);
 
+    public static WorkspaceActionRetainedTargetSession OpenForProbe(
+        string rootPath,
+        WorkspaceActionScopeId scopeId,
+        WorkspaceRelativeFileTarget target)
+        => new(rootPath, scopeId, target, writeTarget: false, fenceTargetNamespace: false, fenceDirectoryNamespace: false, allowMultipleLinksForProbe: true);
     public Task<byte[]> ReadTargetBytesAsync(int maximumBytes, CancellationToken cancellationToken)
         => _targetHandle is null
             ? throw new FileNotFoundException("The exact workspace action target is absent.")
             : WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
                 _targetHandle,
                 maximumBytes,
-                cancellationToken);
+                cancellationToken,
+                requireSingleLink: !_allowMultipleLinksForProbe);
 
     public async Task<bool> MatchesBeforeAsync(WorkspaceActionBeforeEvidence before, CancellationToken cancellationToken)
     {
@@ -157,7 +167,8 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
         }
         if (!Exists
             || TargetIdentity is null
-            || !string.Equals(before.NativeIdentityFingerprint, TargetIdentity.Value.Fingerprint, StringComparison.Ordinal))
+            || !string.Equals(before.NativeIdentityFingerprint, TargetIdentity.Value.Fingerprint, StringComparison.Ordinal)
+            || (_allowMultipleLinksForProbe && TargetIdentity.Value.LinkCount != 1))
         {
             return false;
         }
@@ -165,14 +176,24 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
             ParentHandle,
             TerminalName,
             allowMissing: true,
-            write: false))
+            write: false,
+            allowMultipleLinks: _allowMultipleLinksForProbe))
         {
-            if (named is null || !WorkspaceActionNativeFileSystem.GetIdentity(named).SameEntry(TargetIdentity.Value))
+            if (named is null)
+            {
+                return false;
+            }
+            var namedIdentity = WorkspaceActionNativeFileSystem.GetIdentity(named);
+            if (!namedIdentity.SameEntry(TargetIdentity.Value) || namedIdentity.LinkCount != 1)
             {
                 return false;
             }
         }
         var bytes = await ReadTargetBytesAsync(WorkspaceActionContractLimits.MaxBeforeImageBytes, cancellationToken).ConfigureAwait(false);
+        if (_allowMultipleLinksForProbe && WorkspaceActionNativeFileSystem.GetIdentity(_targetHandle!).LinkCount != 1)
+        {
+            return false;
+        }
         var contentHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         return bytes.LongLength == before.ByteCount && string.Equals(contentHash, before.ContentHash, StringComparison.Ordinal);
     }

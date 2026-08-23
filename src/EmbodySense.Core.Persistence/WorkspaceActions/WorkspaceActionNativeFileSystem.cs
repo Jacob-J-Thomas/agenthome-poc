@@ -239,7 +239,8 @@ internal static class WorkspaceActionNativeFileSystem
         bool write,
         bool denyDeleteSharing = false,
         bool denyWriteSharing = false,
-        bool privateSecurityAccess = false)
+        bool privateSecurityAccess = false,
+        bool allowMultipleLinks = false)
     {
         EnsureSimpleName(name);
         if (OperatingSystem.IsWindows())
@@ -261,7 +262,7 @@ internal static class WorkspaceActionNativeFileSystem
                 shareAccess);
             if (handle is not null)
             {
-                return RetainValidated(handle, retained => RequireRegularFile(retained, "workspace target"));
+                return RetainValidated(handle, retained => RequireRegularFile(retained, "workspace target", requireSingleLink: !allowMultipleLinks));
             }
             return null;
         }
@@ -271,7 +272,7 @@ internal static class WorkspaceActionNativeFileSystem
         if (descriptor >= 0)
         {
             var handle = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
-            return RetainValidated(handle, retained => RequireRegularFile(retained, "workspace target"));
+            return RetainValidated(handle, retained => RequireRegularFile(retained, "workspace target", requireSingleLink: !allowMultipleLinks));
         }
         var error = Marshal.GetLastPInvokeError();
         if (allowMissing && error == UnixNoEntry)
@@ -847,20 +848,26 @@ internal static class WorkspaceActionNativeFileSystem
     }
 
     public static void RequireRegularFile(SafeFileHandle handle, string description)
+        => RequireRegularFile(handle, description, requireSingleLink: true);
+    private static void RequireRegularFile(SafeFileHandle handle, string description, bool requireSingleLink)
     {
         var identity = GetIdentity(handle);
-        if (!identity.IsRegularFile || identity.IsDirectory || identity.IsReparsePoint || identity.LinkCount != 1)
+        if (!identity.IsRegularFile
+            || identity.IsDirectory
+            || identity.IsReparsePoint
+            || (requireSingleLink && identity.LinkCount != 1))
         {
-            throw new IOException($"The retained {description} is not one single-link regular file.");
+            throw new IOException($"The retained {description} is not one {(requireSingleLink ? "single-link " : string.Empty)}regular file.");
         }
     }
 
     public static async Task<byte[]> ReadAllBytesAsync(
         SafeFileHandle handle,
         int maximumBytes,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireSingleLink = true)
     {
-        RequireRegularFile(handle, "workspace target");
+        RequireRegularFile(handle, "workspace target", requireSingleLink);
         var length = RandomAccess.GetLength(handle);
         if (length is < 0 || length > maximumBytes)
         {
@@ -881,7 +888,7 @@ internal static class WorkspaceActionNativeFileSystem
         {
             throw new IOException("The workspace target changed length during retained-handle evidence capture.");
         }
-        RequireRegularFile(handle, "workspace target");
+        RequireRegularFile(handle, "workspace target", requireSingleLink);
         return bytes;
     }
 
@@ -1241,6 +1248,7 @@ internal static class WorkspaceActionNativeFileSystem
         var backupPath = Path.Combine(ReadFinalPath(backupParent), backupName);
         if (!ReplaceFile(replacedPath, replacementPath, backupPath, 0, IntPtr.Zero, IntPtr.Zero))
         {
+            // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/506 owns partial-error status coverage.
             throw NativeIOException("ReplaceFileW workspace action replacement", Marshal.GetLastPInvokeError());
         }
         GC.KeepAlive(replaced);
