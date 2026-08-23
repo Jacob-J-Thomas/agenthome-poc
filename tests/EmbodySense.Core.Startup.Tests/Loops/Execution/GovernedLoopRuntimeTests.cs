@@ -164,6 +164,28 @@ internal static class GovernedLoopRuntimeTests
             var route = Assert.Single(interruptedRecord.SequentialAdapterBinding!.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries);
             Assert.Empty(route.Fallbacks);
 
+            await using var restarted = await fixture.CreateRuntimeAsync(preserveCurrentConversation: true);
+            Assert.All(orphanedSnapshots, directory => Assert.False(Directory.Exists(directory)));
+            // Reacquire the retained host before projecting recovery; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/496.
+            var replay = await restarted.InvokeGovernedLoopAsync(input);
+            Assert.False(replay.WasDispatched);
+            Assert.Equal(interrupted.Id, replay.Run?.Id);
+            Assert.Equal(CustomLoopRunStatus.NeedsReview.ToString(), replay.Run?.Status);
+            Assert.Equal("recovery_open_attempt", replay.Run?.FailureCode);
+            Assert.Equal(expectedProviderAttempts, fixture.ProviderAttempts);
+
+            var recovered = Assert.IsType<LoopRunSnapshot>(await restarted.GetCustomLoopRunAsync(interrupted.Id));
+            Assert.Equal(CustomLoopRunStatus.NeedsReview.ToString(), recovered.Status);
+            Assert.Equal("recovery_open_attempt", recovered.FailureCode);
+            if (expectedPhase is null)
+            {
+                Assert.Equal("NotFound", recovered.ModelUsage?.Status);
+            }
+            else
+            {
+                Assert.Equal(expectedPhase.ToString(), Assert.Single(recovered.ModelUsage!.Attempts).Phase);
+            }
+
             var trust = new FileCapabilityCatalogTrustProvider(fixture.TrustRootPath);
             var workspaceId = CapabilityWorkspaceScopeId.Create(fixture.Paths.RootPath);
             var ledger = await new GovernedModelUsageLedgerStore(fixture.Paths, trust)
@@ -198,27 +220,6 @@ internal static class GovernedLoopRuntimeTests
                     Assert.Equal(1, ledger.Entries[^1].Usage?.OutputTokens.Value);
                 }
             }
-
-            await using var restarted = await fixture.CreateRuntimeAsync(preserveCurrentConversation: true);
-            Assert.All(orphanedSnapshots, directory => Assert.False(Directory.Exists(directory)));
-            var recovered = Assert.IsType<LoopRunSnapshot>(await restarted.GetCustomLoopRunAsync(interrupted.Id));
-            Assert.Equal(CustomLoopRunStatus.NeedsReview.ToString(), recovered.Status);
-            Assert.Equal("recovery_open_attempt", recovered.FailureCode);
-            Assert.Equal(expectedProviderAttempts, fixture.ProviderAttempts);
-            if (expectedPhase is null)
-            {
-                Assert.Equal("NotFound", recovered.ModelUsage?.Status);
-            }
-            else
-            {
-                Assert.Equal(expectedPhase.ToString(), Assert.Single(recovered.ModelUsage!.Attempts).Phase);
-            }
-
-            var replay = await restarted.InvokeGovernedLoopAsync(input);
-            Assert.False(replay.WasDispatched);
-            Assert.Equal(interrupted.Id, replay.Run?.Id);
-            Assert.Equal(CustomLoopRunStatus.NeedsReview.ToString(), replay.Run?.Status);
-            Assert.Equal(expectedProviderAttempts, fixture.ProviderAttempts);
         }
     }
 
