@@ -9,6 +9,7 @@ namespace EmbodySense.Core.Persistence.WorkspaceActions;
 internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
 {
     private readonly List<(SafeFileHandle Handle, WorkspaceActionNativeFileStamp Identity, string? Name)> _directories = [];
+    private readonly bool _allowTargetMultipleLinks;
     private readonly string _rootPath;
     private readonly WorkspaceRelativeFileTarget _target;
     private SafeFileHandle? _targetHandle;
@@ -18,10 +19,12 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
         WorkspaceActionScopeId scopeId,
         WorkspaceRelativeFileTarget target,
         bool writeTarget,
-        bool fenceTargetNamespace)
+        bool fenceTargetNamespace,
+        bool allowTargetMultipleLinks)
     {
         _rootPath = Path.GetFullPath(rootPath);
         _target = target;
+        _allowTargetMultipleLinks = allowTargetMultipleLinks;
         ScopeId = scopeId;
         var root = WorkspaceActionNativeFileSystem.OpenAbsoluteDirectory(_rootPath);
         try
@@ -71,7 +74,8 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
                 allowMissing: true,
                 write: writeTarget,
                 denyDeleteSharing: fenceTargetNamespace,
-                denyWriteSharing: fenceTargetNamespace);
+                denyWriteSharing: fenceTargetNamespace,
+                allowMultipleLinks: allowTargetMultipleLinks);
             if (_targetHandle is not null)
             {
                 WorkspaceActionNativeFileSystem.RequireExactOpenedName(_targetHandle, TerminalName);
@@ -117,18 +121,30 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
 
     public SafeFileHandle? TargetHandle => _targetHandle;
 
+    /// <summary>Releases the mutable retained target handle while preserving its immutable captured identity.</summary>
+    public void ReleaseTargetHandle()
+    {
+        _targetHandle?.Dispose();
+        _targetHandle = null;
+    }
+
     public static WorkspaceActionRetainedTargetSession Open(
         string rootPath,
         WorkspaceActionScopeId scopeId,
         WorkspaceRelativeFileTarget target,
         bool writeTarget,
-        bool fenceTargetNamespace = false)
-        => new(rootPath, scopeId, target, writeTarget, fenceTargetNamespace);
+        bool fenceTargetNamespace = false,
+        bool allowTargetMultipleLinks = false)
+        => new(rootPath, scopeId, target, writeTarget, fenceTargetNamespace, allowTargetMultipleLinks);
 
     public Task<byte[]> ReadTargetBytesAsync(int maximumBytes, CancellationToken cancellationToken)
         => _targetHandle is null
             ? throw new FileNotFoundException("The exact workspace action target is absent.")
-            : WorkspaceActionNativeFileSystem.ReadAllBytesAsync(_targetHandle, maximumBytes, cancellationToken);
+            : WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
+                _targetHandle,
+                maximumBytes,
+                cancellationToken,
+                requireSingleLink: !_allowTargetMultipleLinks);
 
     public async Task<bool> MatchesBeforeAsync(WorkspaceActionBeforeEvidence before, CancellationToken cancellationToken)
     {
@@ -143,7 +159,12 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
         }
         if (before.EntryKind == WorkspaceActionEntryKind.Absent)
         {
-            using var named = WorkspaceActionNativeFileSystem.OpenRelativeFile(ParentHandle, TerminalName, allowMissing: true, write: false);
+            using var named = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+                ParentHandle,
+                TerminalName,
+                allowMissing: true,
+                write: false,
+                allowMultipleLinks: _allowTargetMultipleLinks);
             return !Exists && named is null;
         }
         if (!Exists
@@ -152,7 +173,12 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
         {
             return false;
         }
-        using (var named = WorkspaceActionNativeFileSystem.OpenRelativeFile(ParentHandle, TerminalName, allowMissing: true, write: false))
+        using (var named = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+            ParentHandle,
+            TerminalName,
+            allowMissing: true,
+            write: false,
+            allowMultipleLinks: _allowTargetMultipleLinks))
         {
             if (named is null || !WorkspaceActionNativeFileSystem.GetIdentity(named).SameEntry(TargetIdentity.Value))
             {
@@ -177,7 +203,12 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
         {
             return false;
         }
-        using (var named = WorkspaceActionNativeFileSystem.OpenRelativeFile(ParentHandle, TerminalName, allowMissing: true, write: false))
+        using (var named = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+            ParentHandle,
+            TerminalName,
+            allowMissing: true,
+            write: false,
+            allowMultipleLinks: _allowTargetMultipleLinks))
         {
             if (named is null || !WorkspaceActionNativeFileSystem.GetIdentity(named).SameEntry(TargetIdentity.Value))
             {
