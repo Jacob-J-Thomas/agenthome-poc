@@ -1894,9 +1894,9 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
         var stageExists = candidate.Marker.Kind == WorkspaceActionAttemptArtifactKind.Stage
             && _guard.FileExists(ownership, candidate.Marker.ArtifactReference);
         var displacedExists = candidate.Marker.Kind == WorkspaceActionAttemptArtifactKind.Stage
-            && _guard.FileExists(ownership, candidate.Marker.ArtifactReference + ".displaced");
+            && _guard.FileExists(ownership, candidate.Marker.ArtifactReference + ".displaced", allowMultipleLinks: true);
         var originalExists = candidate.Marker.Kind == WorkspaceActionAttemptArtifactKind.Stage
-            && _guard.FileExists(ownership, candidate.Marker.ArtifactReference + ".original");
+            && _guard.FileExists(ownership, candidate.Marker.ArtifactReference + ".original", allowMultipleLinks: true);
         if (candidate.Marker.Kind == WorkspaceActionAttemptArtifactKind.Stage && originalExists)
         {
             return await TryDeleteWindowsReplacementWitnessesAsync(

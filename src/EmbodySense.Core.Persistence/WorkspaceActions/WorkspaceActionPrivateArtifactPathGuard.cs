@@ -121,7 +121,7 @@ internal sealed class WorkspaceActionPrivateArtifactPathGuard
         return WorkspaceActionNativeFileSystem.EnumerateRelativeNames(ownership.DirectoryHandle, maximumEntries);
     }
 
-    public bool FileExists(WorkspaceActionPrivateArtifactLockLease ownership, string fileName)
+    public bool FileExists(WorkspaceActionPrivateArtifactLockLease ownership, string fileName, bool allowMultipleLinks = false)
     {
         ArgumentNullException.ThrowIfNull(ownership);
         EnsureSimpleName(fileName);
@@ -129,7 +129,8 @@ internal sealed class WorkspaceActionPrivateArtifactPathGuard
             ownership.DirectoryHandle,
             fileName,
             allowMissing: true,
-            write: false);
+            write: false,
+            allowMultipleLinks: allowMultipleLinks);
         return file is not null;
     }
 
