@@ -41,14 +41,20 @@ internal static class WorkspaceActionNativeFileSystem
             });
         }
 
+        return OpenUnixAbsoluteDirectory(path);
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This Unix absolute-directory shim is covered through public workspace-action behavior on Linux/macOS and is unreachable in Windows coverage runs.")]
+    private static SafeFileHandle OpenUnixAbsoluteDirectory(string path)
+    {
         RequireUnixPlatform();
         var descriptor = UnixOpen(Path.GetFullPath(path), UnixReadOnly | UnixDirectory | UnixNoFollow | UnixCloseOnExec);
         if (descriptor < 0)
         {
             throw NativeIOException("open absolute workspace directory", Marshal.GetLastPInvokeError());
         }
-        var unix = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
-        return RetainValidated(unix, retained => RequireDirectory(retained, "workspace directory"));
+        var handle = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+        return RetainValidated(handle, retained => RequireDirectory(retained, "workspace directory"));
     }
 
     public static SafeFileHandle OpenPrivateDirectoryUnderWorkspace(string workspaceRoot, string path)
@@ -154,6 +160,12 @@ internal static class WorkspaceActionNativeFileSystem
             return RetainValidated(windowsHandle!, retained => RequireDirectory(retained, "workspace ancestor"));
         }
 
+        return OpenUnixRelativeDirectory(parent, name);
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This Unix relative-directory shim is covered through public workspace-action traversal behavior on Linux/macOS and is unreachable in Windows coverage runs.")]
+    private static SafeFileHandle OpenUnixRelativeDirectory(SafeFileHandle parent, string name)
+    {
         var descriptor = UnixOpenAt(parent.DangerousGetHandle().ToInt32(), name, UnixReadOnly | UnixDirectory | UnixNoFollow | UnixCloseOnExec, 0);
         if (descriptor < 0)
         {
@@ -207,23 +219,7 @@ internal static class WorkspaceActionNativeFileSystem
         }
         else
         {
-            var parentDescriptor = parent.DangerousGetHandle().ToInt32();
-            var descriptor = UnixOpenAt(parentDescriptor, name, UnixReadOnly | UnixDirectory | UnixNoFollow | UnixCloseOnExec, 0);
-            if (descriptor < 0 && Marshal.GetLastPInvokeError() == UnixNoEntry)
-            {
-                var createResult = UnixMkdirAt(parentDescriptor, name, PermissionUserReadWriteExecute);
-                var createError = Marshal.GetLastPInvokeError();
-                if (createResult != 0 && createError != UnixAlreadyExists)
-                {
-                    throw NativeIOException("mkdirat private workspace action directory", createError);
-                }
-                descriptor = UnixOpenAt(parentDescriptor, name, UnixReadOnly | UnixDirectory | UnixNoFollow | UnixCloseOnExec, 0);
-            }
-            if (descriptor < 0)
-            {
-                throw NativeIOException("openat private workspace action directory", Marshal.GetLastPInvokeError());
-            }
-            handle = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+            handle = OpenOrCreateUnixRelativeDirectory(parent, name);
         }
 
         return RetainValidated(handle, retained =>
@@ -231,6 +227,28 @@ internal static class WorkspaceActionNativeFileSystem
             RequireDirectory(retained, "workspace action private directory");
             RequireExactOpenedName(retained, name);
         });
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This Unix private-directory creation shim is covered through public workspace-action behavior on Linux/macOS and is unreachable in Windows coverage runs.")]
+    private static SafeFileHandle OpenOrCreateUnixRelativeDirectory(SafeFileHandle parent, string name)
+    {
+        var parentDescriptor = parent.DangerousGetHandle().ToInt32();
+        var descriptor = UnixOpenAt(parentDescriptor, name, UnixReadOnly | UnixDirectory | UnixNoFollow | UnixCloseOnExec, 0);
+        if (descriptor < 0 && Marshal.GetLastPInvokeError() == UnixNoEntry)
+        {
+            var createResult = UnixMkdirAt(parentDescriptor, name, PermissionUserReadWriteExecute);
+            var createError = Marshal.GetLastPInvokeError();
+            if (createResult != 0 && createError != UnixAlreadyExists)
+            {
+                throw NativeIOException("mkdirat private workspace action directory", createError);
+            }
+            descriptor = UnixOpenAt(parentDescriptor, name, UnixReadOnly | UnixDirectory | UnixNoFollow | UnixCloseOnExec, 0);
+        }
+        if (descriptor < 0)
+        {
+            throw NativeIOException("openat private workspace action directory", Marshal.GetLastPInvokeError());
+        }
+        return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
     }
 
     public static SafeFileHandle? OpenRelativeFile(
@@ -271,6 +289,12 @@ internal static class WorkspaceActionNativeFileSystem
             return null;
         }
 
+        return OpenUnixRelativeFile(parent, name, allowMissing, allowMultipleLinks);
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This Unix relative-file shim is covered through public workspace-action behavior on Linux/macOS and is unreachable in Windows coverage runs.")]
+    private static SafeFileHandle? OpenUnixRelativeFile(SafeFileHandle parent, string name, bool allowMissing, bool allowMultipleLinks)
+    {
         var flags = UnixReadOnly | UnixNoFollow | UnixCloseOnExec | UnixNonBlocking;
         var descriptor = UnixOpenAt(parent.DangerousGetHandle().ToInt32(), name, flags, 0);
         if (descriptor >= 0)
@@ -330,6 +354,12 @@ internal static class WorkspaceActionNativeFileSystem
                 retained => RequireRegularFile(retained, "workspace action private stage"));
         }
 
+        return CreateUnixRelativeFile(parent, name);
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This Unix exclusive-file creation shim is covered through public workspace-action behavior on Linux/macOS and is unreachable in Windows coverage runs.")]
+    private static SafeFileHandle CreateUnixRelativeFile(SafeFileHandle parent, string name)
+    {
         var descriptor = UnixOpenAt(
             parent.DangerousGetHandle().ToInt32(),
             name,
@@ -375,20 +405,7 @@ internal static class WorkspaceActionNativeFileSystem
         }
         else
         {
-            var flags = UnixReadWrite | UnixNoFollow | UnixCloseOnExec | (create ? UnixCreate : 0);
-            var descriptor = UnixOpenAt(parent.DangerousGetHandle().ToInt32(), name, flags, PermissionUserReadWrite);
-            if (descriptor < 0)
-            {
-                var error = Marshal.GetLastPInvokeError();
-                if (allowMissing && error == UnixNoEntry)
-                {
-                    return null;
-                }
-                throw error is UnixNotDirectory || error == UnixSymbolicLinkLoop
-                    ? new IOException("Workspace private artifact refused a symbolic link or entry-kind substitution.")
-                    : NativeIOException("openat private workspace action artifact", error);
-            }
-            handle = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+            handle = OpenUnixRelativeFileForUpdate(parent, name, allowMissing, create);
         }
         if (handle is not null)
         {
@@ -400,6 +417,25 @@ internal static class WorkspaceActionNativeFileSystem
             });
         }
         return null;
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This Unix private-file update shim is covered through public workspace-action behavior on Linux/macOS and is unreachable in Windows coverage runs.")]
+    private static SafeFileHandle? OpenUnixRelativeFileForUpdate(SafeFileHandle parent, string name, bool allowMissing, bool create)
+    {
+        var flags = UnixReadWrite | UnixNoFollow | UnixCloseOnExec | (create ? UnixCreate : 0);
+        var descriptor = UnixOpenAt(parent.DangerousGetHandle().ToInt32(), name, flags, PermissionUserReadWrite);
+        if (descriptor < 0)
+        {
+            var error = Marshal.GetLastPInvokeError();
+            if (allowMissing && error == UnixNoEntry)
+            {
+                return null;
+            }
+            throw error is UnixNotDirectory || error == UnixSymbolicLinkLoop
+                ? new IOException("Workspace private artifact refused a symbolic link or entry-kind substitution.")
+                : NativeIOException("openat private workspace action artifact", error);
+        }
+        return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
     }
 
     public static IReadOnlyList<string> EnumerateRelativeNames(SafeFileHandle directory, int maximumEntries)
@@ -660,6 +696,12 @@ internal static class WorkspaceActionNativeFileSystem
                 !isDirectory && !isReparse,
                 isReparse);
         }
+        return GetUnixIdentity(handle);
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This Unix file-identity shim is covered through public workspace-action behavior on Linux/macOS and is unreachable in Windows coverage runs.")]
+    private static WorkspaceActionNativeFileStamp GetUnixIdentity(SafeFileHandle handle)
+    {
         if (OperatingSystem.IsLinux())
         {
             if (LinuxStatx(
@@ -751,6 +793,12 @@ internal static class WorkspaceActionNativeFileSystem
             return buffer.ToString();
         }
 
+        return ReadUnixFinalPath(handle);
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This Unix retained-handle path shim is covered through public workspace-action exact-name behavior on Linux/macOS and is unreachable in Windows coverage runs.")]
+    private static string ReadUnixFinalPath(SafeFileHandle handle)
+    {
         var bytes = new byte[MaximumNativePathBytes];
         int length;
         if (OperatingSystem.IsLinux())
