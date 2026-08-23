@@ -757,7 +757,8 @@ public sealed class CustomLoopRunStoreTests
         };
 
         using var store = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: observeRead);
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.GetAsync(run.Id, cancellation.Token));
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.GetAsync(run.Id, cancellation.Token));
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Read, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
         Assert.Equal(1, beforeOpenCalls);
 
         AssertRun(run, await store.GetAsync(run.Id).WaitAsync(TimeSpan.FromSeconds(5)));

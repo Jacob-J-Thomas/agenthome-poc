@@ -2987,7 +2987,15 @@ public sealed class CustomLoopRunStore :
                 lastContention = exception;
                 if (attempt < MaximumEvidenceReadContentionAttempts)
                 {
-                    await Task.Delay(_evidenceReadContentionRetryDelay, cancellationToken);
+                    try
+                    {
+                        await Task.Delay(_evidenceReadContentionRetryDelay, cancellationToken);
+                    }
+                    catch (OperationCanceledException cancellationException)
+                    {
+                        AttachPersistenceDiagnostic(cancellationException, CustomLoopRunPersistenceDiagnosticStage.Read);
+                        throw;
+                    }
                 }
             }
         }
