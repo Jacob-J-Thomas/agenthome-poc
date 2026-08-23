@@ -718,7 +718,7 @@ public sealed class IsolatedCommandActionNativeHost : ICommandActionNativeHost
                     maxSensitiveValues: CommandActionContractLimits.MaxSlots,
                     maxSensitiveValueCharacters: EphemeralSecretMaterial.MaxCharacters,
                     maxInputCharacters: RedactionLimits.AbsoluteMaxProjectionCharacters,
-                    maxOutputCharacters: CommandActionContractLimits.MaxRetainedOutputCharacters,
+                    maxOutputCharacters: RedactionLimits.AbsoluteMaxProjectionCharacters,
                     maxWorkUnits: RedactionLimits.AbsoluteMaxWorkUnits));
             fallback = new RedactionSummary(RedactionStatus.ScopeLimitExceeded, scope.SensitiveValueCount, scope.IgnoredValueCount, 0, 0, 0);
             return scope;
