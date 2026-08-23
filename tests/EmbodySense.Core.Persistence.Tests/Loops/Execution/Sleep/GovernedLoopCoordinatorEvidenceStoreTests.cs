@@ -641,46 +641,29 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var acquisition = Acquisition();
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var release = new ManualResetEventSlim();
-        var blockingStore = new GovernedLoopCoordinatorEvidenceStore(paths, new GovernedLoopCoordinatorEvidenceStoreOptions
-        {
-            DurableBoundaryObserver = boundary =>
-            {
-                if (boundary == GovernedLoopSleepStorePersistenceBoundary.PrecursorCreated)
-                {
-                    entered.TrySetResult();
-                    release.Wait();
-                }
-            },
-        });
-        var blocker = Task.Run(() => blockingStore.TryAcquireAsync(acquisition));
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        using var cancellation = new CancellationTokenSource();
         var waitingStore = new GovernedLoopCoordinatorEvidenceStore(paths);
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, (await waitingStore.TryAcquireAsync(acquisition))!.Status);
+        // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/505
+        // Own the real cross-process lock directly so fixture readiness never depends on ThreadPool scheduling.
+        using var externalLock = CrossProcessExclusiveFileLock.Acquire(Path.Combine(StoreRoot(paths), ".queue.lock"));
         var (heartbeat, lifecycle, failure) = MutationRequests(acquisition);
-        var read = waitingStore.ReadAsync(acquisition.ProposedOwnership.CoordinatorId, cancellation.Token);
-        var acquire = waitingStore.TryAcquireAsync(acquisition, cancellation.Token);
-        var renew = waitingStore.RenewHeartbeatAsync(heartbeat, cancellation.Token);
-        var appendLifecycle = waitingStore.AppendLifecycleAsync(lifecycle, cancellation.Token);
-        var appendFailure = waitingStore.AppendFailureAsync(failure, cancellation.Token);
 
-        try
+        await AssertCancellationAsync(token => waitingStore.ReadAsync(acquisition.ProposedOwnership.CoordinatorId, token));
+        await AssertCancellationAsync(token => waitingStore.TryAcquireAsync(acquisition, token));
+        await AssertCancellationAsync(token => waitingStore.RenewHeartbeatAsync(heartbeat, token));
+        await AssertCancellationAsync(token => waitingStore.AppendLifecycleAsync(lifecycle, token));
+        await AssertCancellationAsync(token => waitingStore.AppendFailureAsync(failure, token));
+
+        externalLock.Dispose();
+        Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, (await waitingStore.ReadAsync(acquisition.ProposedOwnership.CoordinatorId))!.Status);
+
+        static async Task AssertCancellationAsync(Func<CancellationToken, Task> operation)
         {
-            await Task.Delay(50);
+            using var cancellation = new CancellationTokenSource();
+            var pending = operation(cancellation.Token);
             cancellation.Cancel();
-            await Assert.ThrowsAsync<OperationCanceledException>(() => read);
-            await Assert.ThrowsAsync<OperationCanceledException>(() => acquire);
-            await Assert.ThrowsAsync<OperationCanceledException>(() => renew);
-            await Assert.ThrowsAsync<OperationCanceledException>(() => appendLifecycle);
-            await Assert.ThrowsAsync<OperationCanceledException>(() => appendFailure);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
         }
-        finally
-        {
-            release.Set();
-        }
-
-        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, (await blocker)!.Status);
     }
 
     [Fact]
