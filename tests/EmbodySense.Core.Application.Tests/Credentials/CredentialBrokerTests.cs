@@ -224,6 +224,114 @@ public sealed class CredentialBrokerTests
     }
 
     [Theory]
+    [InlineData("attempt-begin", false)]
+    [InlineData("attempt-begin", true)]
+    [InlineData("registry-read", false)]
+    [InlineData("registry-read", true)]
+    [InlineData("proof-verification", false)]
+    [InlineData("proof-verification", true)]
+    [InlineData("provider-resolution", false)]
+    [InlineData("provider-resolution", true)]
+    [InlineData("provider-health", false)]
+    [InlineData("provider-health", true)]
+    [InlineData("current-authority", false)]
+    [InlineData("current-authority", true)]
+    public async Task Dependency_exceptions_fail_closed_without_provider_or_consumer_execution(string failureStage, bool cancellationFailure)
+    {
+        using var cancellation = new CancellationTokenSource();
+        if (cancellationFailure)
+        {
+            cancellation.Cancel();
+        }
+        var fixture = Fixture(failureStage: failureStage, cancellationFailure: cancellationFailure);
+        var consumer = new RecordingConsumer();
+
+        var result = await fixture.Broker.UseAsync(fixture.Request, Id("run-1"), consumer, cancellation.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(CredentialFailureCode.Unavailable, result.Failure!.Code);
+        Assert.Equal(0, fixture.Provider.UseCount);
+        Assert.Equal(0, fixture.Provider.CallbackCount);
+        Assert.Equal(0, consumer.Count);
+        if (failureStage == "attempt-begin")
+        {
+            Assert.Null(result.LeaseAttempt);
+        }
+        else
+        {
+            Assert.Equal(CredentialLeasePhase.NotRedeemed, result.LeaseAttempt!.Current.Phase);
+        }
+    }
+
+    [Theory]
+    [InlineData(CredentialLeaseAttemptStoreStatus.Conflict, CredentialFailureCode.Conflict)]
+    [InlineData(CredentialLeaseAttemptStoreStatus.Backpressured, CredentialFailureCode.LimitExceeded)]
+    [InlineData(CredentialLeaseAttemptStoreStatus.Corrupt, CredentialFailureCode.OutcomeUncertain)]
+    [InlineData(CredentialLeaseAttemptStoreStatus.Unavailable, CredentialFailureCode.Unavailable)]
+    [InlineData(CredentialLeaseAttemptStoreStatus.NotFound, CredentialFailureCode.Unavailable)]
+    public async Task Begin_statuses_map_to_closed_failure_codes_without_execution(CredentialLeaseAttemptStoreStatus beginStatus, CredentialFailureCode expectedFailure)
+    {
+        var fixture = Fixture(beginStatus: beginStatus);
+        var consumer = new RecordingConsumer();
+
+        var result = await fixture.Broker.UseAsync(fixture.Request, Id("run-1"), consumer, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(expectedFailure, result.Failure!.Code);
+        Assert.Equal(CredentialLeasePhase.IntentPrepared, result.LeaseAttempt!.Current.Phase);
+        Assert.Equal(0, fixture.Provider.UseCount);
+        Assert.Equal(0, fixture.Provider.CallbackCount);
+        Assert.Equal(0, consumer.Count);
+    }
+
+    [Theory]
+    [InlineData("attempt-compare-exchange", false, CredentialLeasePhase.IntentPrepared)]
+    [InlineData("attempt-compare-exchange", true, CredentialLeasePhase.IntentPrepared)]
+    [InlineData("evidence-reservation", false, CredentialLeasePhase.NotRedeemed)]
+    [InlineData("evidence-reservation", true, CredentialLeasePhase.NotRedeemed)]
+    public async Task Post_authorization_dependency_exceptions_fail_closed_before_provider_execution(string failureStage, bool cancellationFailure, CredentialLeasePhase expectedPhase)
+    {
+        using var cancellation = new CancellationTokenSource();
+        if (cancellationFailure)
+        {
+            cancellation.Cancel();
+        }
+        var fixture = Fixture(failureStage: failureStage, cancellationFailure: cancellationFailure);
+        var consumer = new RecordingConsumer();
+
+        var result = await fixture.Broker.UseAsync(fixture.Request, Id("run-1"), consumer, cancellation.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(CredentialFailureCode.Unavailable, result.Failure!.Code);
+        Assert.Equal(expectedPhase, result.LeaseAttempt!.Current.Phase);
+        Assert.Equal(0, fixture.Provider.UseCount);
+        Assert.Equal(0, fixture.Provider.CallbackCount);
+        Assert.Equal(0, consumer.Count);
+    }
+
+    [Fact]
+    public async Task Terminal_evidence_exception_preserves_redeemed_attempt_without_replaying_provider_or_consumer()
+    {
+        var fixture = Fixture(failureStage: "evidence-append");
+        var firstConsumer = new RecordingConsumer();
+
+        var first = await fixture.Broker.UseAsync(fixture.Request, Id("run-1"), firstConsumer, CancellationToken.None);
+        var replayConsumer = new RecordingConsumer();
+        var replay = await fixture.Broker.UseAsync(fixture.Request, Id("run-1"), replayConsumer, CancellationToken.None);
+
+        Assert.False(first.Succeeded);
+        Assert.False(replay.Succeeded);
+        Assert.Equal(CredentialFailureCode.Unavailable, first.Failure!.Code);
+        Assert.Equal(CredentialFailureCode.Unavailable, replay.Failure!.Code);
+        Assert.Equal(CredentialLeasePhase.Redeemed, first.LeaseAttempt!.Current.Phase);
+        Assert.Equal(first.LeaseAttempt, replay.LeaseAttempt);
+        Assert.Equal(1, fixture.Provider.UseCount);
+        Assert.Equal(1, fixture.Provider.CallbackCount);
+        Assert.Equal(1, firstConsumer.Count);
+        Assert.Equal(0, replayConsumer.Count);
+    }
+
+    [Theory]
     [InlineData(true)]
     [InlineData(false)]
     public async Task Default_or_regressed_trusted_time_after_intent_publication_closes_not_redeemed_without_throwing_or_callback(bool defaultTime)
@@ -434,17 +542,27 @@ public sealed class CredentialBrokerTests
         bool denyProof = false,
         CredentialLeaseCurrentVerificationStatus currentStatus = CredentialLeaseCurrentVerificationStatus.Authorized,
         bool unconfiguredProvider = false,
-        bool failEvidence = false)
+        bool failEvidence = false,
+        string? failureStage = null,
+        bool cancellationFailure = false,
+        CredentialLeaseAttemptStoreStatus? beginStatus = null)
     {
         request ??= Request();
         authoritativeRequest ??= request;
         provider ??= new RecordingProvider();
-        var store = new InMemoryLeaseStore();
-        var registry = new RecordingRegistry(RegistryRead(authoritativeRequest)) { FailEvidence = failEvidence };
-        var verifier = new CredentialLeaseCurrentAuthorityVerifier(new CurrentSource(authoritativeRequest.LeaseIntent!, currentStatus));
-        var resolver = new ProviderResolver(provider, Provider(), unconfiguredProvider);
+        provider.FailureStage = failureStage;
+        provider.CancellationFailure = cancellationFailure;
+        var store = new InMemoryLeaseStore { FailureStage = failureStage, CancellationFailure = cancellationFailure, BeginStatus = beginStatus };
+        var registry = new RecordingRegistry(RegistryRead(authoritativeRequest))
+        {
+            FailEvidence = failEvidence,
+            FailureStage = failureStage,
+            CancellationFailure = cancellationFailure,
+        };
+        var verifier = new CredentialLeaseCurrentAuthorityVerifier(new CurrentSource(authoritativeRequest.LeaseIntent!, currentStatus, failureStage, cancellationFailure));
+        var resolver = new ProviderResolver(provider, Provider(), unconfiguredProvider, failureStage, cancellationFailure);
         var gate = new InMemoryBoundaryGate(store, registry, throwAfterBoundary, returnUnavailableAfterBoundary);
-        var broker = new CredentialBroker(denyProof ? new RejectingProofVerifier() : new AcceptingProofVerifier(), verifier, store, gate, registry, registry, resolver, new FixedTimeProvider(_now));
+        var broker = new CredentialBroker(denyProof ? new RejectingProofVerifier() : new AcceptingProofVerifier(failureStage, cancellationFailure), verifier, store, gate, registry, registry, resolver, new FixedTimeProvider(_now));
         return new BrokerFixture(broker, request, store, registry, provider);
     }
 
@@ -496,13 +614,19 @@ public sealed class CredentialBrokerTests
 
     private static CredentialLeaseIntent Rehash(CredentialLeaseIntent intent) => CredentialLeaseContract.ApplyIntentHash(intent with { ContentHash = string.Empty });
     private static string Hash(char character) => "sha256:" + new string(character, 64);
+    private static Exception DependencyFailure(bool cancellationFailure)
+        => cancellationFailure
+            ? new OperationCanceledException("simulated dependency cancellation")
+            : new IOException("simulated dependency failure");
 
     private sealed record BrokerFixture(CredentialBroker Broker, CredentialUseRequest Request, InMemoryLeaseStore Store, RecordingRegistry Registry, RecordingProvider Provider);
 
-    private sealed class AcceptingProofVerifier : ICredentialAuthorityProofVerifier
+    private sealed class AcceptingProofVerifier(string? failureStage = null, bool cancellationFailure = false) : ICredentialAuthorityProofVerifier
     {
         public ValueTask<CredentialAuthorityVerificationResult> VerifyAsync(CredentialUseRequest request, CredentialContractId currentRunId, CancellationToken cancellationToken)
-            => ValueTask.FromResult(CredentialAuthorityVerificationResult.Accept());
+            => failureStage == "proof-verification"
+                ? ValueTask.FromException<CredentialAuthorityVerificationResult>(DependencyFailure(cancellationFailure))
+                : ValueTask.FromResult(CredentialAuthorityVerificationResult.Accept());
     }
 
     private sealed class RejectingProofVerifier : ICredentialAuthorityProofVerifier
@@ -511,20 +635,33 @@ public sealed class CredentialBrokerTests
             => ValueTask.FromResult(CredentialAuthorityVerificationResult.Reject(CredentialFailure.FromCode(CredentialFailureCode.Unauthorized)));
     }
 
-    private sealed class CurrentSource(CredentialLeaseIntent expected, CredentialLeaseCurrentVerificationStatus status = CredentialLeaseCurrentVerificationStatus.Authorized) : ICredentialLeaseCurrentAuthoritySnapshotSource
+    private sealed class CurrentSource(
+        CredentialLeaseIntent expected,
+        CredentialLeaseCurrentVerificationStatus status = CredentialLeaseCurrentVerificationStatus.Authorized,
+        string? failureStage = null,
+        bool cancellationFailure = false) : ICredentialLeaseCurrentAuthoritySnapshotSource
     {
         public Task<CredentialLeaseCurrentAuthoritySnapshot> ReadAsync(string credentialUseOperationId, long credentialUseGeneration, CancellationToken cancellationToken = default)
-            => Task.FromResult(status == CredentialLeaseCurrentVerificationStatus.Authorized
-                ? new CredentialLeaseCurrentAuthoritySnapshot(status, expected, Hash('d'))
-                : new CredentialLeaseCurrentAuthoritySnapshot(status));
+            => failureStage == "current-authority"
+                ? Task.FromException<CredentialLeaseCurrentAuthoritySnapshot>(DependencyFailure(cancellationFailure))
+                : Task.FromResult(status == CredentialLeaseCurrentVerificationStatus.Authorized
+                    ? new CredentialLeaseCurrentAuthoritySnapshot(status, expected, Hash('d'))
+                    : new CredentialLeaseCurrentAuthoritySnapshot(status));
     }
 
-    private sealed class ProviderResolver(RecordingProvider provider, CredentialProviderId providerId, bool unconfigured = false) : ICredentialValueProviderResolver
+    private sealed class ProviderResolver(
+        RecordingProvider provider,
+        CredentialProviderId providerId,
+        bool unconfigured = false,
+        string? failureStage = null,
+        bool cancellationFailure = false) : ICredentialValueProviderResolver
     {
         public Task<CredentialValueProviderResolution> ResolveAsync(string workspaceId, CredentialReferenceId referenceId, CredentialProviderId requestedProviderId, CancellationToken cancellationToken = default)
-            => Task.FromResult(!unconfigured && requestedProviderId.Equals(providerId)
-                ? new CredentialValueProviderResolution(CredentialValueProviderResolutionStatus.Resolved, providerId, provider)
-                : new CredentialValueProviderResolution(CredentialValueProviderResolutionStatus.NotConfigured));
+            => failureStage == "provider-resolution"
+                ? Task.FromException<CredentialValueProviderResolution>(DependencyFailure(cancellationFailure))
+                : Task.FromResult(!unconfigured && requestedProviderId.Equals(providerId)
+                    ? new CredentialValueProviderResolution(CredentialValueProviderResolutionStatus.Resolved, providerId, provider)
+                    : new CredentialValueProviderResolution(CredentialValueProviderResolutionStatus.NotConfigured));
     }
 
     private sealed class InMemoryBoundaryGate(InMemoryLeaseStore store, RecordingRegistry registry, bool throwAfterBoundary = false, bool returnUnavailableAfterBoundary = false) : ICredentialLeaseRedemptionGate
@@ -560,9 +697,21 @@ public sealed class CredentialBrokerTests
         private readonly object _sync = new();
         private CredentialLeaseAttemptHistory? _history;
         private Owner? _owner;
+        internal string? FailureStage { get; init; }
+        internal bool CancellationFailure { get; init; }
+        internal CredentialLeaseAttemptStoreStatus? BeginStatus { get; init; }
 
         public Task<CredentialLeaseAttemptStoreResult> BeginAsync(CredentialLeaseIntent intent, CredentialLeaseAttemptVersion prepared, CancellationToken cancellationToken = default)
         {
+            if (FailureStage == "attempt-begin")
+            {
+                return Task.FromException<CredentialLeaseAttemptStoreResult>(DependencyFailure(CancellationFailure));
+            }
+            if (BeginStatus is { } beginStatus)
+            {
+                var preparedHistory = CredentialLeaseContract.CreateHistory(intent, [prepared]);
+                return Task.FromResult(new CredentialLeaseAttemptStoreResult(beginStatus, preparedHistory));
+            }
             lock (_sync)
             {
                 if (_history is null)
@@ -590,6 +739,10 @@ public sealed class CredentialBrokerTests
 
         public Task<CredentialLeaseAttemptStoreResult> CompareExchangeAsync(string expectedContentHash, CredentialLeaseAttemptHistory replacement, ICredentialLeaseAttemptLease lease, CancellationToken cancellationToken = default)
         {
+            if (FailureStage == "attempt-compare-exchange")
+            {
+                return Task.FromException<CredentialLeaseAttemptStoreResult>(DependencyFailure(CancellationFailure));
+            }
             lock (_sync)
             {
                 if (_history is null || lease is not Owner owner || !ReferenceEquals(owner, _owner) || owner.Disposed || !string.Equals(_history.Current.ContentHash, expectedContentHash, StringComparison.Ordinal))
@@ -655,16 +808,27 @@ public sealed class CredentialBrokerTests
         internal IReadOnlyList<CredentialUseEvidence> Evidence => _evidence;
         internal bool FailEvidence { get; set; }
         internal bool FailReservation { get; set; }
+        internal string? FailureStage { get; init; }
+        internal bool CancellationFailure { get; init; }
 
         public ValueTask<CredentialActorAuthentication> AuthenticateActorAsync(string actorId, CancellationToken cancellationToken) => ValueTask.FromResult(CredentialActorAuthentication.AuthenticatedUser);
         public ValueTask<CredentialReferenceLookupResult> GetAsync(CredentialReferenceId referenceId, CancellationToken cancellationToken) => ValueTask.FromResult(CredentialReferenceLookupResult.Found(read.Entries[0].Reference));
-        public Task<CredentialRegistryReadResult> ReadAsync(CancellationToken cancellationToken = default) => Task.FromResult(read);
+        public Task<CredentialRegistryReadResult> ReadAsync(CancellationToken cancellationToken = default)
+            => FailureStage == "registry-read"
+                ? Task.FromException<CredentialRegistryReadResult>(DependencyFailure(CancellationFailure))
+                : Task.FromResult(read);
         public Task<CredentialRegistryMutationResult> MutateAsync(CredentialRegistryMutation mutation, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<bool> AcknowledgeAuditAsync(CredentialContractId auditOperationId, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public ValueTask<CredentialEvidenceWriteResult> ReserveAsync(CredentialLeaseIntent intent, CancellationToken cancellationToken)
-            => ValueTask.FromResult(FailReservation ? CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Unavailable)) : CredentialEvidenceWriteResult.Success());
+            => FailureStage == "evidence-reservation"
+                ? ValueTask.FromException<CredentialEvidenceWriteResult>(DependencyFailure(CancellationFailure))
+                : ValueTask.FromResult(FailReservation ? CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Unavailable)) : CredentialEvidenceWriteResult.Success());
         public ValueTask<CredentialEvidenceWriteResult> AppendAsync(CredentialUseEvidence evidence, CancellationToken cancellationToken)
         {
+            if (FailureStage == "evidence-append")
+            {
+                return ValueTask.FromException<CredentialEvidenceWriteResult>(DependencyFailure(CancellationFailure));
+            }
             if (FailEvidence)
             {
                 return ValueTask.FromResult(CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Unavailable)));
@@ -689,6 +853,8 @@ public sealed class CredentialBrokerTests
         internal bool ReturnWhileCallbackActive { get; set; }
         internal Task? WaitBeforeReturn { get; set; }
         internal CredentialProviderHealthResult Health { get; set; } = CredentialProviderHealthResult.Available();
+        internal string? FailureStage { get; set; }
+        internal bool CancellationFailure { get; set; }
         internal int UseCount { get; private set; }
         internal int CallbackCount { get; private set; }
         internal TaskCompletionSource CallbackEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -698,7 +864,10 @@ public sealed class CredentialBrokerTests
         public ValueTask<CredentialProviderResult> CreateAsync(CredentialProviderMutationRequest request, CredentialSecretWriteCallback source, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask<CredentialProviderResult> ReplaceAsync(CredentialProviderMutationRequest request, CredentialSecretWriteCallback source, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask<CredentialProviderResult> DeleteAsync(CredentialProviderDeleteRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public ValueTask<CredentialProviderHealthResult> GetHealthAsync(CredentialProviderUseRequest request, CancellationToken cancellationToken) => ValueTask.FromResult(Health);
+        public ValueTask<CredentialProviderHealthResult> GetHealthAsync(CredentialProviderUseRequest request, CancellationToken cancellationToken)
+            => FailureStage == "provider-health"
+                ? ValueTask.FromException<CredentialProviderHealthResult>(DependencyFailure(CancellationFailure))
+                : ValueTask.FromResult(Health);
 
         public async ValueTask<CredentialProviderResult> UseAsync(CredentialProviderUseRequest request, ICredentialTrustedUseConsumer trustedConsumer, CancellationToken cancellationToken)
         {
