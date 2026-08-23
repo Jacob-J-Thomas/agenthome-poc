@@ -350,11 +350,7 @@ public sealed class WebSessionHubTests
         await using var host = CreateHost(workspace, approvals);
         var invoker = new RecordingLoopRuntimeInvoker();
         var hub = CreateHub(host, approvals, new RecordingHubClients(), invoker);
-        var invocation = new GovernedLoopRunInvocationTransportInput(
-            "governed-one",
-            new GovernedLoopRevisionPublicationInput(1, 1, "graph-one", "revision-one", new string('a', 64), "publish-one", new string('b', 64)),
-            new GovernedLoopAuthorityGrantInput("grant-one", 1, "sha256:" + new string('c', 64)),
-            "prompt");
+        var invocation = CreateGovernedInvocationInput();
 
         var response = await hub.InvokeGovernedLoop(invocation);
 
@@ -363,6 +359,33 @@ public sealed class WebSessionHubTests
         Assert.Equal(invocation.OperationId, invoker.GovernedInvocationInput?.OperationId);
         Assert.Equal(invocation.Publication.GraphId, invoker.GovernedInvocationInput?.Publication.Revision.GraphId);
         Assert.Equal(invocation.AuthorityGrant.GrantId, invoker.GovernedInvocationInput?.AuthorityGrant.GrantId.Value);
+    }
+
+    [Fact]
+    public async Task Invoke_governed_loop_translates_malformed_and_runtime_failures_without_leaking_details()
+    {
+        using var workspace = new TestWorkspace();
+        var approvals = new WebApprovalCoordinator();
+        await using var host = CreateHost(workspace, approvals);
+
+        var malformedHub = CreateHub(host, approvals, new RecordingHubClients(), new RecordingLoopRuntimeInvoker());
+        var malformed = await Assert.ThrowsAsync<HubException>(() => malformedHub.InvokeGovernedLoop(null!));
+        Assert.Contains("coordinates are malformed", malformed.Message, StringComparison.Ordinal);
+
+        var cancelledHub = CreateHub(host, approvals, new RecordingHubClients(), new ThrowingLoopRuntimeInvoker(cancelled: true));
+        var cancelled = await Assert.ThrowsAsync<HubException>(() => cancelledHub.InvokeGovernedLoop(CreateGovernedInvocationInput()));
+        Assert.Equal("The governed-loop invocation was cancelled.", cancelled.Message);
+
+        const string Guidance = "Delete `.custom-loop-run-index.json` and retry the operation.";
+        var unsupportedHub = CreateHub(host, approvals, new RecordingHubClients(), new UnsupportedSchemaLoopRuntimeInvoker(Guidance));
+        var unsupported = await Assert.ThrowsAsync<HubException>(() => unsupportedHub.InvokeGovernedLoop(CreateGovernedInvocationInput()));
+        Assert.Contains("unsupported_loop_persistence_schema", unsupported.Message, StringComparison.Ordinal);
+        Assert.Contains(Guidance, unsupported.Message, StringComparison.Ordinal);
+
+        var failedHub = CreateHub(host, approvals, new RecordingHubClients(), new ThrowingLoopRuntimeInvoker(cancelled: false));
+        var failed = await Assert.ThrowsAsync<HubException>(() => failedHub.InvokeGovernedLoop(CreateGovernedInvocationInput()));
+        Assert.Contains("governed-loop invocation could not be processed safely", failed.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("sensitive runtime detail", failed.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -567,6 +590,15 @@ public sealed class WebSessionHubTests
             "read",
             "shared/**",
             "Needs approval.");
+    }
+
+    private static GovernedLoopRunInvocationTransportInput CreateGovernedInvocationInput()
+    {
+        return new GovernedLoopRunInvocationTransportInput(
+            "governed-one",
+            new GovernedLoopRevisionPublicationInput(1, 1, "graph-one", "revision-one", new string('a', 64), "publish-one", new string('b', 64)),
+            new GovernedLoopAuthorityGrantInput("grant-one", 1, "sha256:" + new string('c', 64)),
+            "prompt");
     }
 
     private static async Task<IReadOnlyList<WebPendingApproval>> WaitForPendingAsync(WebApprovalCoordinator coordinator, string ownerConnectionId)
