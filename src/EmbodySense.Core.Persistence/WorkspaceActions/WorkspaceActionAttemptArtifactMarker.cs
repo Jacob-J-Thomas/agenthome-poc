@@ -112,21 +112,6 @@ internal sealed record WorkspaceActionAttemptArtifactMarker(
         return true;
     }
 
-    public bool Matches(
-        WorkspaceActionBeforeEvidence before,
-        WorkspaceActionNativeExecutionRequest request,
-        string contentHash,
-        long byteCount)
-        => string.Equals(BeforeEvidenceId, before.EvidenceId, StringComparison.Ordinal)
-            && string.Equals(BeforeEvidenceHash, before.ContentHashOfRecord, StringComparison.Ordinal)
-            && string.Equals(TargetFingerprint, before.TargetFingerprint, StringComparison.Ordinal)
-            && string.Equals(TargetReference, before.TargetReference, StringComparison.Ordinal)
-            && string.Equals(EffectId, request.EffectId, StringComparison.Ordinal)
-            && string.Equals(IdempotencyOperationId, request.IdempotencyOperationId, StringComparison.Ordinal)
-            && EffectGeneration == request.EffectGeneration
-            && string.Equals(ContentHash, contentHash, StringComparison.Ordinal)
-            && ByteCount == byteCount;
-
     public bool MatchesBefore(WorkspaceActionBeforeEvidence before)
         => WorkspaceActionEvidenceContract.ValidateBefore(before) is null
             && string.Equals(BeforeEvidenceId, before.EvidenceId, StringComparison.Ordinal)

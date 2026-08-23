@@ -204,35 +204,6 @@ internal sealed class WorkspaceActionRetainedTargetSession : IDisposable
         return bytes.LongLength == before.ByteCount && string.Equals(contentHash, before.ContentHash, StringComparison.Ordinal);
     }
 
-    public async Task<bool> MatchesAfterAsync(WorkspaceActionAfterEvidence after, CancellationToken cancellationToken)
-    {
-        if (WorkspaceActionEvidenceContract.ValidateAfter(after) is not null
-            || after.EntryKind != WorkspaceActionEntryKind.RegularFile
-            || !string.Equals(after.ScopeId, ScopeId.Value, StringComparison.Ordinal)
-            || !string.Equals(after.TargetReference, _target.Value, StringComparison.Ordinal)
-            || !string.Equals(after.TargetFingerprint, TargetFingerprint, StringComparison.Ordinal)
-            || !Exists
-            || TargetIdentity is null
-            || !string.Equals(after.NativeIdentityFingerprint, TargetIdentity.Value.Fingerprint, StringComparison.Ordinal))
-        {
-            return false;
-        }
-        using (var named = WorkspaceActionNativeFileSystem.OpenRelativeFile(
-            ParentHandle,
-            TerminalName,
-            allowMissing: true,
-            write: false))
-        {
-            if (named is null || !WorkspaceActionNativeFileSystem.GetIdentity(named).SameEntry(TargetIdentity.Value))
-            {
-                return false;
-            }
-        }
-        var bytes = await ReadTargetBytesAsync(WorkspaceActionContractLimits.MaxAfterImageBytes, cancellationToken).ConfigureAwait(false);
-        var contentHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        return bytes.LongLength == after.ByteCount && string.Equals(contentHash, after.ContentHash, StringComparison.Ordinal);
-    }
-
     public void RevalidateTerminalName()
     {
         using var named = WorkspaceActionNativeFileSystem.OpenRelativeFile(

@@ -39,17 +39,6 @@ internal sealed class WorkspaceActionStage(
         _file = null;
     }
 
-    public void RetainFileHandle(SafeFileHandle file)
-    {
-        ArgumentNullException.ThrowIfNull(file);
-        if (_file is not null)
-        {
-            throw new InvalidOperationException("The workspace action stage already retains a file handle.");
-        }
-        _file = file;
-    }
-
-
     public void Dispose()
     {
         _file?.Dispose();

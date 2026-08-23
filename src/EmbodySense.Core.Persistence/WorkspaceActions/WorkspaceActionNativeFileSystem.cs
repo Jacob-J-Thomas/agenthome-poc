@@ -415,34 +415,6 @@ internal static class WorkspaceActionNativeFileSystem
             : EnumerateUnixRelativeNames(directory, maximumEntries);
     }
 
-    public static SafeFileHandle Duplicate(SafeFileHandle handle)
-    {
-        ArgumentNullException.ThrowIfNull(handle);
-        if (OperatingSystem.IsWindows())
-        {
-            var process = GetCurrentProcess();
-            if (!DuplicateHandle(
-                    process,
-                    handle,
-                    process,
-                    out var duplicate,
-                    0,
-                    inheritHandle: false,
-                    DuplicateSameAccess))
-            {
-                throw NativeIOException("DuplicateHandle workspace action retained handle", Marshal.GetLastPInvokeError());
-            }
-            return duplicate;
-        }
-        RequireUnixPlatform();
-        var descriptor = DuplicateUnixCloseOnExec(handle.DangerousGetHandle().ToInt32());
-        if (descriptor < 0)
-        {
-            throw NativeIOException("dup workspace action retained handle", Marshal.GetLastPInvokeError());
-        }
-        return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
-    }
-
     private static IReadOnlyList<string> EnumerateWindowsRelativeNames(SafeFileHandle directory, int maximumEntries)
     {
         const int BufferBytes = 64 * 1024;
@@ -1813,20 +1785,6 @@ internal static class WorkspaceActionNativeFileSystem
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ReplaceFile(string replacedFileName, string replacementFileName, string backupFileName, uint replaceFlags, IntPtr exclude, IntPtr reserved);
 
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr GetCurrentProcess();
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DuplicateHandle(
-        IntPtr sourceProcess,
-        SafeFileHandle sourceHandle,
-        IntPtr targetProcess,
-        out SafeFileHandle targetHandle,
-        uint desiredAccess,
-        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
-        uint options);
-
     [DllImport("ntdll.dll")]
     private static extern int NtCreateFile(out IntPtr file, uint desiredAccess, ref ObjectAttributes objectAttributes, out IoStatusBlock ioStatusBlock, IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions, IntPtr eaBuffer, uint eaLength);
 
@@ -2028,7 +1986,6 @@ internal static class WorkspaceActionNativeFileSystem
     private const uint FileAttributeNormal = 0x00000080;
     private const uint FileAttributeDirectory = 0x00000010;
     private const uint FileAttributeReparsePoint = 0x00000400;
-    private const uint DuplicateSameAccess = 0x00000002;
     private const uint ObjectAttributeCaseInsensitive = 0x00000040;
     private const uint NtOpen = 1;
     private const uint NtCreate = 2;

@@ -2274,30 +2274,6 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                 : null;
     }
 
-    private async Task<bool> ProveDeleteOutcomeAsync(WorkspaceActionAfterEvidence after, CancellationToken cancellationToken)
-    {
-        if (after.TombstoneReference is null || after.QuarantineReference is null)
-        {
-            return false;
-        }
-        var tombstone = await _evidence.ReadTombstoneAsync(after.TombstoneReference, cancellationToken).ConfigureAwait(false);
-        if (WorkspaceActionEvidenceContract.ValidateTombstone(tombstone) is not null
-            || !string.Equals(tombstone!.BeforeEvidenceId, after.BeforeEvidenceId, StringComparison.Ordinal)
-            || !string.Equals(tombstone.QuarantineReference, after.QuarantineReference, StringComparison.Ordinal))
-        {
-            return false;
-        }
-        using var directory = WorkspaceActionNativeFileSystem.OpenPrivateDirectoryUnderWorkspace(_rootPath, _quarantineRoot);
-        using var payload = WorkspaceActionNativeFileSystem.OpenRelativeFile(directory, tombstone.QuarantineReference + ".payload", allowMissing: true, write: false);
-        if (payload is null
-            || !string.Equals(WorkspaceActionNativeFileSystem.GetIdentity(payload).Fingerprint, tombstone.NativeIdentityFingerprint, StringComparison.Ordinal))
-        {
-            return false;
-        }
-        var bytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(payload, WorkspaceActionContractLimits.MaxBeforeImageBytes, cancellationToken).ConfigureAwait(false);
-        return bytes.LongLength == tombstone.ByteCount && string.Equals(Sha256(bytes), tombstone.ContentHash, StringComparison.Ordinal);
-    }
-
     private static bool OutcomeMatchesAfter(WorkspaceActionOutcomeEvidence outcome, WorkspaceActionAfterEvidence after)
         => WorkspaceActionEvidenceContract.ValidateOutcome(outcome) is null
             && WorkspaceActionEvidenceContract.ValidateAfter(after) is null
