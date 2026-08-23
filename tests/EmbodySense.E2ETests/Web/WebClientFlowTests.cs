@@ -200,10 +200,10 @@ public sealed class WebClientFlowTests
 
         var arguments = args.ToArray();
         options = WebRunOptions.FromArguments(arguments);
-        var builder = Program.CreateBuilder(arguments, options);
+        var builder = EmbodySense.Web.Program.CreateBuilder(arguments, options);
         configureServices?.Invoke(builder.Services);
         var app = builder.Build();
-        Program.ConfigurePipeline(app);
+        EmbodySense.Web.Program.ConfigurePipeline(app);
         return app;
     }
 

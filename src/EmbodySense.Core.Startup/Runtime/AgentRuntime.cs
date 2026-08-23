@@ -24,6 +24,7 @@ using EmbodySense.Core.Persistence.Triggers;
 using EmbodySense.Core.Startup.Triggers;
 using EmbodySense.Core.Startup.Loops.Posture;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring;
+using EmbodySense.Core.Startup.Inference.Profiles;
 
 namespace EmbodySense.Core.Startup.Runtime;
 
@@ -49,6 +50,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly IScheduleDeliveryProvenancePort _scheduleDeliveryProvenance;
     private readonly GovernedLoopOperationalFacade _governedLoopOperations;
     private readonly GovernedLoopGraphAuthoringFacade _governedLoopGraphAuthoring;
+    private readonly IModelProfileCatalogFacade _modelProfiles;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
     private readonly GovernedLoopWaitRuntimeHost? _governedWaitRuntimeHost;
     private readonly GovernedLoopSleepService? _governedSleep;
@@ -66,6 +68,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         IScheduleDeliveryProvenancePort scheduleDeliveryProvenance,
         GovernedLoopOperationalFacade governedLoopOperations,
         GovernedLoopGraphAuthoringFacade governedLoopGraphAuthoring,
+        IModelProfileCatalogFacade modelProfiles,
         DefaultConversationTurnReviewService defaultConversationReviews,
         CodexRuntimeStatus codexRuntimeStatus,
         GovernedLoopWaitRuntimeHost? governedWaitRuntimeHost = null,
@@ -82,6 +85,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(governedLoops);
         ArgumentNullException.ThrowIfNull(governedLoopOperations);
         ArgumentNullException.ThrowIfNull(governedLoopGraphAuthoring);
+        ArgumentNullException.ThrowIfNull(modelProfiles);
         ArgumentNullException.ThrowIfNull(defaultConversationReviews);
         ArgumentNullException.ThrowIfNull(codexRuntimeStatus);
 
@@ -97,6 +101,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _scheduleDeliveryProvenance = scheduleDeliveryProvenance ?? throw new ArgumentNullException(nameof(scheduleDeliveryProvenance));
         _governedLoopOperations = governedLoopOperations ?? throw new ArgumentNullException(nameof(governedLoopOperations));
         _governedLoopGraphAuthoring = governedLoopGraphAuthoring;
+        _modelProfiles = modelProfiles;
         _defaultConversationReviews = defaultConversationReviews;
         _governedWaitRuntimeHost = governedWaitRuntimeHost;
         _governedSleep = governedSleep;
@@ -126,6 +131,9 @@ public sealed class AgentRuntime : IAsyncDisposable
 
     /// <summary>Gets the shared catalog, immutable graph history, and role-bound lifecycle authoring facade.</summary>
     public GovernedLoopGraphAuthoringFacade GovernedLoopGraphAuthoring => _governedLoopGraphAuthoring;
+
+    /// <summary>Gets the shared safe model-profile catalog and exact configured default.</summary>
+    public IModelProfileCatalogFacade ModelProfiles => _modelProfiles;
 
     internal IConversationMemoryStore ConversationMemory { get; }
 

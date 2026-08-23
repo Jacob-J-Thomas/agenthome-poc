@@ -16,6 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\EmbodySense.E2EBrowserHost\EmbodySense.E2EBrowserHost.csproj" />
     <ProjectReference Include="..\..\src\EmbodySense.Web\EmbodySense.Web.csproj" />
     <ProjectReference Include="..\EmbodySense.Tests.Support\EmbodySense.Tests.Support.csproj" />
     <ProjectReference Include="..\EmbodySense.CancellationHost\EmbodySense.CancellationHost.csproj" ReferenceOutputAssembly="false" AdditionalProperties="Configuration=$(Configuration)" />

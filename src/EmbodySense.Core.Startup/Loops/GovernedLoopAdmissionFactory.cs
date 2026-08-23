@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
+using EmbodySense.Core.Application.Inference.Profiles;
 using EmbodySense.Core.Application.Loops.Admission;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.Revisions;
@@ -12,6 +13,7 @@ using EmbodySense.Core.Persistence.Loops.Admission;
 using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
 using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Core.Startup.Capabilities;
+using EmbodySense.Core.Startup.Inference.Profiles;
 
 namespace EmbodySense.Core.Startup.Loops;
 
@@ -42,9 +44,23 @@ public static class GovernedLoopAdmissionFactory
         WorkspacePaths paths,
         ICapabilityCatalogTrustProvider trustProvider,
         TimeProvider? timeProvider = null)
+        => Create(paths, trustProvider, new UnconfiguredModelRoutingAdmissionService(), timeProvider);
+
+    /// <summary>Creates production admission with explicit server-owned trust and model-routing composition.</summary>
+    /// <param name="paths">The initialized canonical workspace paths.</param>
+    /// <param name="trustProvider">The exact trust provider shared by all authenticated stores.</param>
+    /// <param name="modelRoutingAdmissionService">The server-owned deterministic model-routing admission service.</param>
+    /// <param name="timeProvider">The trusted clock, or the system clock when omitted.</param>
+    /// <returns>A disposable surface-neutral admission facade.</returns>
+    public static GovernedLoopAdmissionFacade Create(
+        WorkspacePaths paths,
+        ICapabilityCatalogTrustProvider trustProvider,
+        IGovernedModelRoutingAdmissionService modelRoutingAdmissionService,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
+        ArgumentNullException.ThrowIfNull(modelRoutingAdmissionService);
 
         trustProvider.RequireDisjointWorkspace(paths.RootPath);
         var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
@@ -104,6 +120,7 @@ public static class GovernedLoopAdmissionFactory
                 roleSource,
                 grantResolver,
                 capabilityAdmission,
+                modelRoutingAdmissionService,
                 authorityTransaction,
                 new GovernedLoopAdmissionRunIdentityGenerator(),
                 timeProvider,
@@ -148,6 +165,46 @@ public static class GovernedLoopAdmissionFactory
             roleSource,
             grantResolver,
             capabilityAdmissionService,
+            new UnconfiguredModelRoutingAdmissionService(),
+            authorityTransaction,
+            runIdentityGenerator,
+            timeProvider,
+            null);
+
+    /// <summary>Creates inert admission over caller-owned Application ports with exact governed model routing.</summary>
+    /// <param name="workspaceId">The exact canonical identity of the physical workspace.</param>
+    /// <param name="store">The append-only admission evidence store.</param>
+    /// <param name="graphStore">The exact immutable graph revision store.</param>
+    /// <param name="bindingSource">The published graph-to-role binding source.</param>
+    /// <param name="roleSource">The exact role revision source.</param>
+    /// <param name="grantResolver">The current grant resolver.</param>
+    /// <param name="capabilityAdmissionService">The current capability admission service.</param>
+    /// <param name="modelRoutingAdmissionService">The current exact model-profile routing admission service.</param>
+    /// <param name="authorityTransaction">The single reentrant authority fence shared by every supplied port.</param>
+    /// <param name="runIdentityGenerator">The server-owned run identity generator.</param>
+    /// <param name="timeProvider">The trusted clock, or the system clock when omitted.</param>
+    /// <returns>A surface-neutral facade that does not own the supplied ports.</returns>
+    public static GovernedLoopAdmissionFacade Create(
+        string workspaceId,
+        IGovernedLoopAdmissionStore store,
+        IGovernedLoopGraphRevisionStore graphStore,
+        IGovernedLoopGrantBindingSource bindingSource,
+        IAuthorityGrantRoleSource roleSource,
+        IAuthorityGrantResolver grantResolver,
+        ICapabilityAdmissionService capabilityAdmissionService,
+        IGovernedModelRoutingAdmissionService modelRoutingAdmissionService,
+        ICapabilityAuthorityTransaction authorityTransaction,
+        IGovernedLoopAdmissionRunIdentityGenerator runIdentityGenerator,
+        TimeProvider? timeProvider = null)
+        => Create(
+            workspaceId,
+            store,
+            graphStore,
+            bindingSource,
+            roleSource,
+            grantResolver,
+            capabilityAdmissionService,
+            modelRoutingAdmissionService,
             authorityTransaction,
             runIdentityGenerator,
             timeProvider,
@@ -161,6 +218,7 @@ public static class GovernedLoopAdmissionFactory
         IAuthorityGrantRoleSource roleSource,
         IAuthorityGrantResolver grantResolver,
         ICapabilityAdmissionService capabilityAdmissionService,
+        IGovernedModelRoutingAdmissionService modelRoutingAdmissionService,
         ICapabilityAuthorityTransaction authorityTransaction,
         IGovernedLoopAdmissionRunIdentityGenerator runIdentityGenerator,
         TimeProvider? timeProvider,
@@ -174,6 +232,7 @@ public static class GovernedLoopAdmissionFactory
             roleSource,
             grantResolver,
             capabilityAdmissionService,
+            modelRoutingAdmissionService,
             authorityTransaction,
             runIdentityGenerator,
             timeProvider);

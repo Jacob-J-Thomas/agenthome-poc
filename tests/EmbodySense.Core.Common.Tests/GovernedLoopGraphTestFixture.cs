@@ -1,6 +1,9 @@
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 
 namespace EmbodySense.Core.Common.Tests;
 
@@ -23,7 +26,8 @@ internal static class GovernedLoopGraphTestFixture
         IEnumerable<GovernedLoopBindingDefinition>? bindings = null,
         GovernedLoopOutputContract? output = null,
         GovernedLoopDisplayMetadata? display = null,
-        int schemaVersion = GovernedLoopGraphDefinition.CurrentSchemaVersion)
+        int schemaVersion = GovernedLoopGraphDefinition.CurrentSchemaVersion,
+        GovernedModelRoutingPolicy? defaultModelRoutingPolicy = null)
     {
         authorityCeiling ??= GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, WorkspaceReadCapability]);
         schemas ??= Schemas();
@@ -34,7 +38,38 @@ internal static class GovernedLoopGraphTestFixture
         display ??= Display();
         owningRole ??= Role();
         terminalNodeIds ??= ["exit"];
-        return GovernedLoopGraphDefinition.Create(schemaVersion, graphId, revisionId, purpose, owningRole, entryNodeId, terminalNodeIds, authorityCeiling, schemas, nodes, edges, bindings, output, display);
+        return GovernedLoopGraphDefinition.Create(schemaVersion, graphId, revisionId, purpose, owningRole, entryNodeId, terminalNodeIds, authorityCeiling, schemas, nodes, edges, bindings, output, display, defaultModelRoutingPolicy ?? DefaultModelRoutingPolicy());
+    }
+
+    public static GovernedModelRoutingPolicy DefaultModelRoutingPolicy()
+    {
+        _ = CapabilityId.TryParse(ModelInferenceCapability, out var profileId, out _);
+        _ = CapabilityDataClass.TryParse("public", out var publicData, out _);
+        var privacy = GovernedModelPrivacyRequirement.Create(
+            1,
+            localOnly: true,
+            CapabilityEgressMode.None,
+            [],
+            [publicData!],
+            ["local"],
+            GovernedModelRetentionPosture.None,
+            GovernedModelTrainingPosture.Prohibited);
+        var unbounded = GovernedModelUsageCeiling.Create(
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelMonetaryLimit.Unbounded);
+        var budget = GovernedModelBudgetPolicy.Create(1, unbounded, unbounded, unbounded);
+        var requirements = GovernedModelProfileRequirements.Create(
+            1,
+            [GovernedModelModality.Text],
+            [],
+            1,
+            1,
+            privacy,
+            budget);
+        return GovernedModelRoutingPolicy.Create(1, GovernedModelRoutingSelector.Exact(profileId!), [], requirements);
     }
 
     public static ContextualRoleRevisionPin Role(

@@ -28,7 +28,7 @@ public sealed class CapabilityPostureFacadeTests
 
         Assert.Equal("available", catalog.Status);
         Assert.Equal(
-            ["org.embodysense/conversation-turn", "org.embodysense/model-inference", "org.embodysense/triggers/time", "org.embodysense/workspace-command"],
+            ["org.embodysense/conversation-turn", "org.embodysense/model-inference", "org.embodysense/model-profile/codex", "org.embodysense/triggers/time", "org.embodysense/workspace-command"],
             catalog.Capabilities.Select(item => item.Id));
         Assert.Equal("available", inference.Status);
         var inferencePosture = Assert.IsType<CapabilityPostureSnapshot>(inference.Capability);

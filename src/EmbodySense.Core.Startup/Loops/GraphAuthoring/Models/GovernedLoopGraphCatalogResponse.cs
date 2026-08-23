@@ -1,4 +1,5 @@
 using EmbodySense.Core.Startup.ContextualRoles.Models;
+using EmbodySense.Core.Startup.Inference.Profiles.Models;
 
 namespace EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
 
@@ -7,4 +8,5 @@ public sealed record GovernedLoopGraphCatalogResponse(
     string Status,
     string SourceEvidenceId,
     IReadOnlyList<GovernedLoopGraphCatalogNodeSnapshot> NodeDescriptors,
-    ContextualRoleCatalogResponse Roles);
+    ContextualRoleCatalogResponse Roles,
+    ModelProfileCatalogResponse ModelProfiles);

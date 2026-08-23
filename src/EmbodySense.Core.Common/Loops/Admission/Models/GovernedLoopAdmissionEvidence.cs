@@ -2,6 +2,7 @@ using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 
 namespace EmbodySense.Core.Common.Loops.Admission.Models;
 
@@ -14,6 +15,7 @@ namespace EmbodySense.Core.Common.Loops.Admission.Models;
 /// <param name="GrantDependencyEvidenceHash">The canonical lowercase SHA-256 digest proving the grant's exact active dependencies.</param>
 /// <param name="EffectiveAuthority">The effective ceiling after every source has narrowed authority.</param>
 /// <param name="CapabilityAdmission">The exact immutable capability-resolution snapshot.</param>
+/// <param name="ModelRoutingAdmission">The exact deterministic model-routing snapshot, explicitly empty when no Inference node is reachable.</param>
 /// <param name="References">The bounded exact evidence references, excluding payloads and diagnostics.</param>
 /// <param name="EvaluatedAtUtc">The trusted UTC evaluation time.</param>
 /// <param name="ContentHash">The canonical hash over this complete evidence record except this field.</param>
@@ -26,6 +28,7 @@ public sealed record GovernedLoopAdmissionEvidence(
     string GrantDependencyEvidenceHash,
     AuthorityCeiling EffectiveAuthority,
     CapabilityAdmissionSnapshot CapabilityAdmission,
+    GovernedModelRoutingAdmissionSnapshot ModelRoutingAdmission,
     IReadOnlyList<GovernedLoopAdmissionEvidenceReference> References,
     DateTimeOffset EvaluatedAtUtc,
     string ContentHash)
@@ -44,6 +47,9 @@ public sealed record GovernedLoopAdmissionEvidence(
 
     /// <summary>Gets the defensively copied immutable capability-resolution snapshot.</summary>
     public CapabilityAdmissionSnapshot CapabilityAdmission { get; } = GovernedLoopAdmissionContractCopy.Copy(CapabilityAdmission);
+
+    /// <summary>Gets the immutable routing snapshot atomically retained by this admission receipt.</summary>
+    public GovernedModelRoutingAdmissionSnapshot ModelRoutingAdmission { get; } = GovernedLoopAdmissionContractCopy.Copy(ModelRoutingAdmission);
 
     /// <summary>Gets the defensively copied bounded evidence references.</summary>
     public IReadOnlyList<GovernedLoopAdmissionEvidenceReference> References { get; } = GovernedLoopAdmissionContractCopy.Copy(References);

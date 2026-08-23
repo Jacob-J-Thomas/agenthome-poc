@@ -35,8 +35,9 @@ public sealed class GovernedLoopAdmissionDefensiveCopyTests
             pins,
             capabilityEvidence,
             capabilities.AdmittedAtUtc);
+        var baseline = GovernedLoopAdmissionTestFixture.Evidence(intent, capabilityAdmission: callerOwnedCapabilities);
         var references = GovernedLoopAdmissionContractHash
-            .CreateEvidenceReferences(intent, authority, callerOwnedCapabilities)
+            .CreateEvidenceReferences(intent, authority, callerOwnedCapabilities, baseline.ModelRoutingAdmission)
             .ToList();
         var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
             GovernedLoopAdmissionLimits.CurrentSchemaVersion,
@@ -47,6 +48,7 @@ public sealed class GovernedLoopAdmissionDefensiveCopyTests
             GovernedLoopAdmissionTestFixture.Hash('9'),
             authority,
             callerOwnedCapabilities,
+            baseline.ModelRoutingAdmission,
             references,
             GovernedLoopAdmissionTestFixture.EvaluatedAtUtc,
             string.Empty));
@@ -167,6 +169,7 @@ public sealed class GovernedLoopAdmissionDefensiveCopyTests
             valid.GrantDependencyEvidenceHash,
             oversizedAuthority,
             oversizedCapabilities,
+            valid.ModelRoutingAdmission,
             oversizedReferences,
             valid.EvaluatedAtUtc,
             valid.ContentHash);
@@ -192,6 +195,7 @@ public sealed class GovernedLoopAdmissionDefensiveCopyTests
             value.GrantDependencyEvidenceHash,
             effectiveAuthority ?? value.EffectiveAuthority,
             capabilityAdmission ?? value.CapabilityAdmission,
+            value.ModelRoutingAdmission,
             omitReferences ? null! : references ?? value.References,
             value.EvaluatedAtUtc,
             value.ContentHash);

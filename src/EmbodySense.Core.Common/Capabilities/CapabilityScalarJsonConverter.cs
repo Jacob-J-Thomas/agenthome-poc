@@ -19,6 +19,7 @@ internal sealed class CapabilityScalarJsonConverter<T> : JsonConverter<T> where 
             : typeToConvert == typeof(CapabilityVersionRange) && CapabilityVersionRange.TryParse(value, out var range, out _) ? range
             : typeToConvert == typeof(CapabilityDescriptorHash) && CapabilityDescriptorHash.TryParse(value, out var hash, out _) ? hash
             : typeToConvert == typeof(CapabilityIntegrityDigest) && CapabilityIntegrityDigest.TryParse(value, out var digest, out _) ? digest
+            : typeToConvert == typeof(CapabilityDataClass) && CapabilityDataClass.TryParse(value, out var dataClass, out _) ? dataClass
             : null;
         return parsed is T typed ? typed : throw new JsonException($"Capability scalar `{typeToConvert.Name}` is not canonical.");
     }
@@ -33,6 +34,7 @@ internal sealed class CapabilityScalarJsonConverter<T> : JsonConverter<T> where 
             CapabilityVersionRange item => item.Value,
             CapabilityDescriptorHash item => item.Value,
             CapabilityIntegrityDigest item => item.Value,
+            CapabilityDataClass item => item.Value,
             _ => throw new JsonException($"Capability scalar `{typeof(T).Name}` is not supported.")
         };
         writer.WriteStringValue(canonical);

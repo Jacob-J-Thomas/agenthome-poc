@@ -84,7 +84,9 @@ public sealed class GovernedLoopSequentialRunMaterializer : IGovernedLoopSequent
         var validation = CustomLoopRunValidator.Validate(candidate);
         if (!validation.IsValid)
         {
-            return Result(GovernedLoopSequentialMaterializationStatus.Invalid, null, anchorResult.Anchor, "The projected canonical admission could not form a valid ordered-run record.");
+            var first = validation.Errors.FirstOrDefault();
+            var evidence = first is null ? string.Empty : $" First failure: `{first.Code}` at `{first.Field}`.";
+            return Result(GovernedLoopSequentialMaterializationStatus.Invalid, null, anchorResult.Anchor, "The projected canonical admission could not form a valid ordered-run record." + evidence);
         }
 
         CustomLoopRunStoreResult created;

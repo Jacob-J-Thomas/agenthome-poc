@@ -29,7 +29,7 @@ public sealed class GovernedLoopGraphRevisionContractHashTests
         var artifact = Artifact(GovernedLoopGraphTestFixture.Create());
 
         Assert.Equal("c7ebd67190f910cda7016b2db89d3a69124b5333a638d8075ed0bcb42c59de35", artifact.LayoutHash);
-        Assert.Equal("f413dcd622332db07321e4ce8e8a01b6518dcebe9c8ff3f8c04a5f97ea871730", artifact.ArtifactHash);
+        Assert.Equal("9f5a0888b18c92c29c88e67c0b27894d71c878de9d9a6560a2f3269c1f13ec16", artifact.ArtifactHash);
     }
 
     [Fact]

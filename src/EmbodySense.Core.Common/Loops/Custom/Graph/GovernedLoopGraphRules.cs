@@ -5,6 +5,20 @@ namespace EmbodySense.Core.Common.Loops.Custom.Graph;
 
 internal static class GovernedLoopGraphRules
 {
+    private static readonly HashSet<string> _reservedModelRoutingParameterKeys = new(StringComparer.Ordinal)
+    {
+        "fallback-profile-ids",
+        "llm",
+        "llm-model",
+        "model",
+        "model-id",
+        "model-profile-id",
+        "profile-id",
+        "provider-id",
+        "routing-policy",
+        "usage-budget"
+    };
+
     public static void RequireId(string? value, string parameterName)
     {
         CustomLoopArtifactIdentifier.Require(value, parameterName);
@@ -79,4 +93,12 @@ internal static class GovernedLoopGraphRules
             throw new ArgumentException($"{parameterName} is undefined.", parameterName);
         }
     }
+
+    /// <summary>
+    /// Returns whether a generic parameter occupies the closed legacy-routing key set or the canonical
+    /// <c>model-routing.</c> namespace. Innocent descriptive keys are intentionally not inferred by substring.
+    /// </summary>
+    public static bool IsReservedModelRoutingParameter(string key)
+        => _reservedModelRoutingParameterKeys.Contains(key)
+            || key.StartsWith("model-routing.", StringComparison.Ordinal);
 }

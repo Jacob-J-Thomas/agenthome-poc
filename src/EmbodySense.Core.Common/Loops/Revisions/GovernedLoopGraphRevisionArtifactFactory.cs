@@ -94,5 +94,6 @@ public static class GovernedLoopGraphRevisionArtifactFactory
             graph.ControlEdges,
             graph.Bindings,
             graph.OutputContract,
-            graph.DisplayMetadata);
+            graph.DisplayMetadata,
+            graph.DefaultModelRoutingPolicy);
 }

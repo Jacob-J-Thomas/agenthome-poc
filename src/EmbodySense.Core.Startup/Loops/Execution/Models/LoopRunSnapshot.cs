@@ -1,5 +1,6 @@
 using EmbodySense.Core.Startup.Loops.Models;
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 
 namespace EmbodySense.Core.Startup.Loops.Execution.Models;
 
@@ -65,6 +66,12 @@ public sealed record LoopRunSnapshot(
     /// Legacy runs deliberately expose <see langword="null"/> instead of treating their separate admission hash as equivalent.
     /// </summary>
     public string? GovernedAdmissionRequestHash { get; init; }
+
+    /// <summary>Gets the exact immutable profile routing and budget admission evidence for canonical runs.</summary>
+    public GovernedModelRoutingAdmissionSnapshot? ModelRoutingAdmission { get; init; }
+
+    /// <summary>Gets authenticated per-attempt, node-series, and run-wide model reservation and usage posture.</summary>
+    public LoopRunModelUsageSnapshot? ModelUsage { get; init; }
 
     /// <summary>
     /// Gets the canonical disposition for each correlated conversation-publication operation.

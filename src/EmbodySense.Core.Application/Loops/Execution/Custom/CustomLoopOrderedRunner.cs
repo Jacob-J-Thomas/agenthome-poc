@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Application.Inference.Profiles;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
@@ -37,6 +38,8 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Inference.Profiles;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.PureNodes;
@@ -2241,7 +2244,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 && item.Attempt == attempt);
             if (observed?.CanonicalOutput is null
                 || completed.CanonicalOutput is null
-                || !string.Equals(observed.CanonicalOutput, completed.CanonicalOutput, StringComparison.Ordinal))
+                || !string.Equals(observed.CanonicalOutput, completed.CanonicalOutput, StringComparison.Ordinal)
+                || !string.Equals(observed.ModelExecutionEvidence?.ContentHash, completed.ModelExecutionEvidence?.ContentHash, StringComparison.Ordinal))
             {
                 var invalid = await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, "canonical_outcome_reconciliation_failed", "The retained ordered inference outcome is incomplete or divergent; automatic provider redispatch is forbidden.");
                 return new RunAdvance(invalid.Run, invalid);
@@ -2252,7 +2256,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 completed.Provider ?? string.Empty,
                 completed.Model,
                 completed.ProviderResponseId,
-                reservations);
+                reservations,
+                completed.ModelExecutionEvidence);
             var integrityError = ValidateProviderResult(run, replayResult, iteration, step.Id, attempt, out var durableToolRequestsConsumed, attemptOperationId);
             if (integrityError is not null)
             {
@@ -4270,6 +4275,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         var iteration = sequentialNode?.Activation.CycleIteration ?? run.Checkpoint.Iteration;
+        var admittedModel = sequentialNode is null
+            ? new AdmittedModelProjection(run.ModelSnapshot.Provider, run.ModelSnapshot.Model)
+            : ExactAdmittedModelProjection(sequentialNode, step.Id);
         var correlation = NewCorrelationId("attempt");
         var now = Now(run);
         var events = new List<CustomLoopRunEvent>();
@@ -4279,7 +4287,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         var sequenceOwner = events.Count == 0 ? run : run with { Events = [.. run.Events, .. events] };
-        var attemptStarted = Event(sequenceOwner, now, CustomLoopRunEventKind.NodeAttemptStarted, "Inference attempt trace committed before provider dispatch.", iteration, step.Id, attempt, assembly.Blocks, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: correlation, toolAuthority: authority, traceReservationUtf8Bytes: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes, eventId: sequentialNode?.AttemptOperationId);
+        var attemptStarted = Event(sequenceOwner, now, CustomLoopRunEventKind.NodeAttemptStarted, "Inference attempt trace committed before provider dispatch.", iteration, step.Id, attempt, assembly.Blocks, provider: admittedModel.ProviderId, model: admittedModel.ModelId, providerResponseId: correlation, toolAuthority: authority, traceReservationUtf8Bytes: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes, eventId: sequentialNode?.AttemptOperationId);
         events.Add(sequentialNode is null
             ? attemptStarted
             : WithSequentialEvidence(attemptStarted, sequentialNode, CustomLoopSequentialNodeEvidenceKind.DispatchStarted, CustomLoopSequentialNodeDisposition.Unknown));
@@ -4363,7 +4371,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             CapabilityAdmission = sequentialNode?.Binding.AdmissionReceipt.Evidence.CapabilityAdmission ?? run.CapabilityAdmission,
             AdmissionReceipt = sequentialNode?.Binding.AdmissionReceipt,
             ExecutionBinding = sequentialNode?.Binding.ExecutionBinding,
-            GraphArtifact = sequentialNode?.Artifact
+            GraphArtifact = sequentialNode?.Artifact,
+            PlanOrdinal = sequentialNode?.Activation.PlanOrdinal ?? -1,
+            ActivationOrdinal = sequentialNode?.Activation.ActivationOrdinal ?? -1,
+            VisitOrdinal = sequentialNode?.Activation.VisitOrdinal ?? 0,
+            AttemptOperationId = sequentialNode?.AttemptOperationId
         };
 
         CustomLoopInferenceAttemptResult result;
@@ -4427,6 +4439,26 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 providerInvoked = true;
                 dispatchState.MarkProviderRequestStarted();
             });
+        }
+        catch (GovernedModelPrimaryExecutionStoppedException exception)
+        {
+            var outcomeMayExist = exception.OutcomeMayExist;
+            return await RecordAttemptFailureAsync(
+                run,
+                actor,
+                step.Id,
+                iteration,
+                correlation,
+                assembly,
+                exception,
+                isExit: false,
+                providerWasInvoked: providerInvoked || outcomeMayExist,
+                sequentialNode,
+                outcomeMayExist ? CustomLoopRunStatus.NeedsReview : CustomLoopRunStatus.Failed,
+                outcomeMayExist ? "model_usage_recovery_requires_review" : "model_profile_attempt_stopped",
+                outcomeMayExist
+                    ? "Durable model-usage evidence proves provider dispatch may have advanced, but no exact publishable response is recoverable; operator review is required."
+                    : $"The exact model-profile attempt stopped before dispatch with `{exception.Status}` posture.");
         }
         catch (GovernedLoopEffectAuthorityStoppedException exception)
         {
@@ -4526,8 +4558,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var publicationId = assembly.ResolvedOutputPolicy.PublishToInvokingConversation ? PublicationOperationId(run.Id, iteration, step.Id, isExit: false) : null;
         var observedNow = Now(run);
         var safeProviderResponseId = SafeReference(result.ProviderResponseId);
-        var observed = Event(run, observedNow, CustomLoopRunEventKind.NodeOutcomeObserved, "Inference provider outcome was observed and retained as local evidence.", iteration, step.Id, attempt, output: canonical.Text, originalOutputCharacters: canonical.OriginalCharacterCount, truncated: canonical.Truncated, retained: assembly.ResolvedOutputPolicy.RetainForLoopReasoning, published: assembly.ResolvedOutputPolicy.PublishToInvokingConversation, publicationId: publicationId, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: safeProviderResponseId);
-        var completed = Event(run with { Events = [.. run.Events, observed] }, observedNow, CustomLoopRunEventKind.NodeAttemptCompleted, "Inference attempt completed without an automatic retry.", iteration, step.Id, attempt, output: canonical.Text, originalOutputCharacters: canonical.OriginalCharacterCount, truncated: canonical.Truncated, retained: assembly.ResolvedOutputPolicy.RetainForLoopReasoning, published: assembly.ResolvedOutputPolicy.PublishToInvokingConversation, publicationId: publicationId, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: safeProviderResponseId);
+        var observed = Event(run, observedNow, CustomLoopRunEventKind.NodeOutcomeObserved, "Inference provider outcome was observed and retained as local evidence.", iteration, step.Id, attempt, output: canonical.Text, originalOutputCharacters: canonical.OriginalCharacterCount, truncated: canonical.Truncated, retained: assembly.ResolvedOutputPolicy.RetainForLoopReasoning, published: assembly.ResolvedOutputPolicy.PublishToInvokingConversation, publicationId: publicationId, provider: result.Provider, model: result.Model, providerResponseId: safeProviderResponseId, modelExecutionEvidence: result.ModelExecutionEvidence);
+        var completed = Event(run with { Events = [.. run.Events, observed] }, observedNow, CustomLoopRunEventKind.NodeAttemptCompleted, "Inference attempt completed without an automatic retry.", iteration, step.Id, attempt, output: canonical.Text, originalOutputCharacters: canonical.OriginalCharacterCount, truncated: canonical.Truncated, retained: assembly.ResolvedOutputPolicy.RetainForLoopReasoning, published: assembly.ResolvedOutputPolicy.PublishToInvokingConversation, publicationId: publicationId, provider: result.Provider, model: result.Model, providerResponseId: safeProviderResponseId, modelExecutionEvidence: result.ModelExecutionEvidence);
         var unmarkedCandidate = Append(run, observedNow, [observed, completed]);
         var integrityError = ValidateProviderResult(unmarkedCandidate, result, iteration, step.Id, attempt, out _, sequentialNode?.AttemptOperationId);
         if (sequentialNode is not null)
@@ -5606,7 +5638,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             : uncertain
                 ? "Provider attempt failed after dispatch and its outcome cannot be proven."
                 : $"Provider attempt failed without an automatic retry: {SafeExceptionClass(exception)}.");
-        var failure = Event(run, Now(run), CustomLoopRunEventKind.NodeAttemptFailed, detail, iteration, stepId, attempt, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: correlation);
+        var admittedModel = TryAdmittedModelProjection(run, stepId);
+        var stoppedModel = (exception as GovernedModelPrimaryExecutionStoppedException)?.Primary?.Metadata;
+        var failure = Event(run, Now(run), CustomLoopRunEventKind.NodeAttemptFailed, detail, iteration, stepId, attempt, provider: stoppedModel?.ProviderId ?? admittedModel?.ProviderId ?? run.ModelSnapshot.Provider, model: stoppedModel?.ModelId ?? admittedModel?.ModelId ?? run.ModelSnapshot.Model, providerResponseId: correlation);
         if (sequentialNode is not null)
         {
             failure = WithSequentialEvidence(
@@ -5700,9 +5734,21 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             var requiresWorkspace = graphNode.AuthorityCeiling.CapabilityIds.Contains(
                 SequentialWorkspaceCommandCapabilityId,
                 StringComparer.Ordinal);
-            var requiredCapabilityIds = requiresWorkspace
-                ? new[] { SequentialModelInferenceCapabilityId, SequentialWorkspaceCommandCapabilityId }
-                : [SequentialModelInferenceCapabilityId];
+            var routing = receipt.Evidence.ModelRoutingAdmission.Entries.SingleOrDefault(entry =>
+                string.Equals(entry.NodeId, sequentialNode.Node.NodeId, StringComparison.Ordinal));
+            if (routing is null)
+            {
+                return false;
+            }
+
+            var requiredCapabilityIds = new[]
+                {
+                    SequentialModelInferenceCapabilityId,
+                    routing.Primary.Capability.DescriptorIdentity.Id.Value,
+                }
+                .Concat(requiresWorkspace ? [SequentialWorkspaceCommandCapabilityId] : [])
+                .Order(StringComparer.Ordinal)
+                .ToArray();
             var requiredPins = requiredCapabilityIds.Select(capabilityId => receipt.Evidence.CapabilityAdmission.Pins.SingleOrDefault(
                 pin => string.Equals(pin.DescriptorIdentity.Id.Value, capabilityId, StringComparison.Ordinal))).ToArray();
             if (requiredPins.Any(pin => pin is null))
@@ -7868,11 +7914,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopToolTraceEvidence? toolEvidence = null,
         int? traceReservationUtf8Bytes = null,
         string? eventId = null,
-        string? pureNodeOutcomeJson = null)
+        string? pureNodeOutcomeJson = null,
+        GovernedModelAttemptExecutionEvidence? modelExecutionEvidence = null)
     {
         return new CustomLoopRunEvent(run.Events.Length + 1, eventId ?? NewCorrelationId("event"), now, kind, iteration, stepId, attempt, detail, contextBlocks ?? [], output, originalOutputCharacters, truncated, retained, published, publicationId, provider, model, providerResponseId, exitDecision, toolAuthority, toolEvidence, traceReservationUtf8Bytes)
         {
             PureNodeOutcomeJson = pureNodeOutcomeJson,
+            ModelExecutionEvidence = modelExecutionEvidence,
         };
     }
 
@@ -8303,12 +8351,19 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopRunEvent? exactTerminal = null)
     {
         var metadata = RunMetadata(run);
+        var admittedModel = TryAdmittedModelProjection(run, stepId);
         metadata["iteration"] = iteration;
         metadata["stepId"] = stepId;
         metadata["attempt"] = attempt;
         metadata["attemptCorrelationId"] = correlation;
-        metadata["provider"] = run.ModelSnapshot.Provider;
-        metadata["model"] = run.ModelSnapshot.Model;
+        metadata["provider"] = result?.Provider ?? admittedModel?.ProviderId ?? run.ModelSnapshot.Provider;
+        metadata["model"] = result?.Model ?? admittedModel?.ModelId ?? run.ModelSnapshot.Model;
+        metadata["modelProfileId"] = result?.ModelExecutionEvidence?.ProfileId.Value;
+        metadata["modelProfilePinHash"] = result?.ModelExecutionEvidence?.ProfilePinHash;
+        metadata["modelConfigurationHash"] = result?.ModelExecutionEvidence?.ConfigurationHash;
+        metadata["modelUsageHash"] = result?.ModelExecutionEvidence?.Usage.ContentHash;
+        metadata["modelUsageUnknown"] = result?.ModelExecutionEvidence?.UsageUnknown;
+        metadata["modelUsageLedgerEntryHash"] = result?.ModelExecutionEvidence?.TerminalUsageEntryHash;
         metadata["providerResponseId"] = SafeReference(result?.ProviderResponseId);
         metadata["logicalRequestCharacters"] = assembly.LogicalRequestCharacterCount;
         metadata["contextBlockCount"] = assembly.Blocks.Length;
@@ -8366,7 +8421,30 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return "The provider executor returned no result after dispatch.";
         }
 
-        if (!string.Equals(result.Provider, run.ModelSnapshot.Provider, StringComparison.Ordinal) || !string.Equals(result.Model, run.ModelSnapshot.Model, StringComparison.Ordinal))
+        var routingEntries = run.SequentialAdapterBinding?.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries
+            .Where(entry => string.Equals(entry.NodeId, stepId, StringComparison.Ordinal))
+            .Take(2)
+            .ToArray();
+        if (run.SequentialAdapterBinding is not null)
+        {
+            if (routingEntries is not { Length: 1 }
+                || result.ModelExecutionEvidence is not { } executionEvidence
+                || !GovernedModelContractValidator.IsValid(executionEvidence)
+                || !string.Equals(executionEvidence.ProfileId.Value, routingEntries[0].Primary.Capability.DescriptorIdentity.Id.Value, StringComparison.Ordinal)
+                || !string.Equals(executionEvidence.ProfilePinHash, routingEntries[0].Primary.ContentHash, StringComparison.Ordinal)
+                || !string.Equals(executionEvidence.ConfigurationHash, routingEntries[0].Primary.Metadata.ConfigurationHash, StringComparison.Ordinal)
+                || !string.Equals(executionEvidence.ProviderId, routingEntries[0].Primary.Metadata.ProviderId, StringComparison.Ordinal)
+                || !string.Equals(executionEvidence.AdapterId, routingEntries[0].Primary.Metadata.AdapterId, StringComparison.Ordinal)
+                || !string.Equals(executionEvidence.ModelId, routingEntries[0].Primary.Metadata.ModelId, StringComparison.Ordinal)
+                || !string.Equals(result.Provider, executionEvidence.ProviderId, StringComparison.Ordinal)
+                || !string.Equals(result.Model, executionEvidence.ModelId, StringComparison.Ordinal))
+            {
+                return "The provider result does not match the exact admitted model-profile and reconciled usage evidence.";
+            }
+        }
+        else if (result.ModelExecutionEvidence is not null
+            || !string.Equals(result.Provider, run.ModelSnapshot.Provider, StringComparison.Ordinal)
+            || !string.Equals(result.Model, run.ModelSnapshot.Model, StringComparison.Ordinal))
         {
             return "The provider/model result does not match the immutable admitted model snapshot.";
         }
@@ -8456,6 +8534,40 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         return null;
+    }
+
+    private static AdmittedModelProjection ExactAdmittedModelProjection(
+        SequentialNodeExecutionContext context,
+        string nodeId)
+    {
+        var entries = context.Binding.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries
+            .Where(entry => string.Equals(entry.NodeId, nodeId, StringComparison.Ordinal))
+            .Take(2)
+            .ToArray();
+        if (entries.Length != 1)
+        {
+            throw new InvalidOperationException("Canonical Inference dispatch requires one exact admitted model-routing entry.");
+        }
+
+        return new AdmittedModelProjection(entries[0].Primary.Metadata.ProviderId, entries[0].Primary.Metadata.ModelId);
+    }
+
+    private static AdmittedModelProjection? TryAdmittedModelProjection(CustomLoopRunRecord run, string nodeId)
+    {
+        try
+        {
+            var entries = run.SequentialAdapterBinding?.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries
+                .Where(entry => string.Equals(entry.NodeId, nodeId, StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            return entries is { Length: 1 }
+                ? new AdmittedModelProjection(entries[0].Primary.Metadata.ProviderId, entries[0].Primary.Metadata.ModelId)
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static bool ToolOutcomeEvidenceMatches(CustomLoopToolTraceEvidence observed, CustomLoopToolTraceEvidence returned)
@@ -9020,7 +9132,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             || !GovernedLoopSequentialFrontierMachine.Validate(run.Frontier, binding, context.Plan)
             || !string.Equals(definition.RoleId, graph.OwningRole.Identity.RoleId, StringComparison.Ordinal)
             || definition.InferenceSteps.Length != context.Plan.Nodes.Count(item => Equals(item.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference))
-            || !IsExactSequentialCapabilitySet(context.AllowedCapabilityIds, invocation.TriggerOrigin is not null)
+            || !IsExactSequentialCapabilitySet(context.AllowedCapabilityIds, binding.AdmissionReceipt, invocation.TriggerOrigin is not null)
             || !run.CapabilityAdmission.Pins.Select(pin => pin.DescriptorIdentity.Id).Order().SequenceEqual(context.AllowedCapabilityIds.Order())
             || !CustomLoopDefinitionContentHash.Matches(definition)
             || !string.Equals(definition.ContentHash, projectedDefinition.ContentHash, StringComparison.Ordinal))
@@ -9045,15 +9157,26 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             && Equals(durableEntry.Descriptor, expected);
     }
 
-    private static bool IsExactSequentialCapabilitySet(IReadOnlyList<CapabilityId> capabilityIds, bool scheduled)
+    private static bool IsExactSequentialCapabilitySet(
+        IReadOnlyList<CapabilityId> capabilityIds,
+        EmbodySense.Core.Common.Loops.Admission.Models.GovernedLoopAdmissionReceipt admissionReceipt,
+        bool scheduled)
     {
         var values = capabilityIds.Select(item => item.Value).ToArray();
-        var toolFree = scheduled
-            ? new[] { SequentialConversationTurnCapabilityId, SequentialModelInferenceCapabilityId, SequentialScheduleTriggerCapabilityId }
-            : [SequentialConversationTurnCapabilityId, SequentialModelInferenceCapabilityId];
-        var toolEnabled = scheduled
-            ? new[] { SequentialConversationTurnCapabilityId, SequentialModelInferenceCapabilityId, SequentialScheduleTriggerCapabilityId, SequentialWorkspaceCommandCapabilityId }
-            : [SequentialConversationTurnCapabilityId, SequentialModelInferenceCapabilityId, SequentialWorkspaceCommandCapabilityId];
+        var profileIds = admissionReceipt.Evidence.ModelRoutingAdmission.Entries
+            .SelectMany(entry => entry.Fallbacks.Prepend(entry.Primary))
+            .Select(profile => profile.Capability.DescriptorIdentity.Id.Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var toolFree = new[] { SequentialConversationTurnCapabilityId, SequentialModelInferenceCapabilityId }
+            .Concat(scheduled ? [SequentialScheduleTriggerCapabilityId] : [])
+            .Concat(profileIds)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var toolEnabled = toolFree
+            .Append(SequentialWorkspaceCommandCapabilityId)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
         return values.SequenceEqual(toolFree, StringComparer.Ordinal)
             || values.SequenceEqual(toolEnabled, StringComparer.Ordinal);
     }
@@ -9235,5 +9358,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         IGovernedLoopSequentialAuditRecorder AuditRecorder);
 
     private sealed record CanonicalOutput(string Text, int OriginalCharacterCount, bool Truncated);
+
+    private sealed record AdmittedModelProjection(string ProviderId, string? ModelId);
 
 }

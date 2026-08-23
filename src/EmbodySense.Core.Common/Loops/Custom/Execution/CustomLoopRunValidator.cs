@@ -5,6 +5,7 @@ using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Inference.Profiles;
 using static EmbodySense.Core.Common.Loops.Custom.Execution.CustomLoopRunValidationRules;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Sequential;
@@ -301,7 +302,7 @@ public static class CustomLoopRunValidator
             || warning.RetainedForLoopReasoning is not null || warning.PublishedToInvokingConversation is not null || warning.ConversationPublicationId is not null
             || warning.Provider is not null || warning.Model is not null || warning.ProviderResponseId is not null || warning.ExitDecision is not null
             || warning.ToolAuthority is not null || warning.ToolEvidence is not null || warning.TraceReservationUtf8Bytes is not null || warning.ControlExpectedLifecycleVersion is not null
-            || warning.SequentialNodeEvidence is not null || warning.PureNodeOutcomeJson is not null || warning.WaitContinuationEvidenceHash is not null)
+            || warning.SequentialNodeEvidence is not null || warning.PureNodeOutcomeJson is not null || warning.WaitContinuationEvidenceHash is not null || warning.ModelExecutionEvidence is not null)
         {
             Add(errors, "invalid_terminal_integrity_warning", "warning", "The post-terminal integrity warning can carry only its sequence, id, timestamp, kind, detail, and an empty context-block list.");
         }
@@ -977,6 +978,14 @@ public static class CustomLoopRunValidator
             Add(errors, "sequential_tool_assignment_mismatch", "admittedDefinition.toolAssignments", "Canonical sequential execution supports either no tools or exactly the ordered List, Read, and Search assignment catalog.");
             return;
         }
+        var routedProfileIds = binding.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries
+            .SelectMany(entry => entry.Fallbacks.Prepend(entry.Primary))
+            .Select(profile => profile.Capability.DescriptorIdentity.Id.Value)
+            .Distinct(StringComparer.Ordinal);
+        expectedRootIdentities = expectedRootIdentities
+            .Concat(routedProfileIds)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
 
         var expectedGraphChecksum = "sha256:" + binding.GraphArtifactHash;
         if (!string.Equals(capabilityAdmission.Requirements.Artifact.Checksum?.Value, expectedGraphChecksum, StringComparison.Ordinal))
@@ -1333,6 +1342,7 @@ public static class CustomLoopRunValidator
             ValidatePureNodeOutcome(item, field, run, errors);
             ValidateSequentialNodeEvidence(item, index, field, run, sequentialStarts, sequentialTerminals, latestSequentialVisits, errors);
             ValidateWaitContinuationEvent(item, field, run, errors);
+            ValidateModelExecutionEvidence(item, field, run, errors);
             ValidateTraceReservation(item, field, run, errors);
             var isToolEvent = item.Kind is CustomLoopRunEventKind.ToolRequestReserved or CustomLoopRunEventKind.ToolGovernanceDecided or CustomLoopRunEventKind.ToolOutcomeObserved or CustomLoopRunEventKind.ToolIntegrityFailed;
             if (isToolEvent && (item.ToolAuthority is null || item.ToolEvidence is null || !ToolAuthoritiesEqual(item.ToolAuthority, item.ToolEvidence.Authority)))
@@ -1404,7 +1414,7 @@ public static class CustomLoopRunValidator
                 || marker.CanonicalOutput is not null || marker.OriginalOutputCharacterCount is not null || marker.CanonicalOutputTruncated is not null
                 || marker.RetainedForLoopReasoning is not null || marker.PublishedToInvokingConversation is not null || marker.ConversationPublicationId is not null
                 || marker.Provider is not null || marker.Model is not null || marker.ProviderResponseId is not null || marker.ExitDecision is not null || marker.ToolAuthority is not null || marker.ToolEvidence is not null || marker.TraceReservationUtf8Bytes is not null || marker.ControlExpectedLifecycleVersion is not null
-                || marker.SequentialNodeEvidence is not null || marker.PureNodeOutcomeJson is not null || marker.WaitContinuationEvidenceHash is not null)
+                || marker.SequentialNodeEvidence is not null || marker.PureNodeOutcomeJson is not null || marker.WaitContinuationEvidenceHash is not null || marker.ModelExecutionEvidence is not null)
             {
                 Add(errors, "invalid_admission_audit_marker", $"events[{markerIndex}]", "The admission-audit completion marker cannot carry prompt, output, provider, publication, or node-attempt data.");
             }
@@ -2751,7 +2761,42 @@ public static class CustomLoopRunValidator
             && left.ControlExpectedLifecycleVersion == right.ControlExpectedLifecycleVersion
             && Equals(left.SequentialNodeEvidence, right.SequentialNodeEvidence)
             && string.Equals(left.PureNodeOutcomeJson, right.PureNodeOutcomeJson, StringComparison.Ordinal)
-            && string.Equals(left.WaitContinuationEvidenceHash, right.WaitContinuationEvidenceHash, StringComparison.Ordinal);
+            && string.Equals(left.WaitContinuationEvidenceHash, right.WaitContinuationEvidenceHash, StringComparison.Ordinal)
+            && string.Equals(left.ModelExecutionEvidence?.ContentHash, right.ModelExecutionEvidence?.ContentHash, StringComparison.Ordinal);
+    }
+
+    private static void ValidateModelExecutionEvidence(
+        CustomLoopRunEvent item,
+        string field,
+        CustomLoopRunRecord run,
+        List<CustomLoopValidationError> errors)
+    {
+        if (item.ModelExecutionEvidence is not { } evidence)
+        {
+            return;
+        }
+        if (item.Kind is not CustomLoopRunEventKind.NodeOutcomeObserved and not CustomLoopRunEventKind.NodeAttemptCompleted)
+        {
+            Add(errors, "unexpected_model_execution_evidence", $"{field}.modelExecutionEvidence", "Only completed Inference outcome evidence may retain model execution evidence.");
+            return;
+        }
+        if (!GovernedModelContractValidator.IsValid(evidence)
+            || !string.Equals(item.Provider, evidence.ProviderId, StringComparison.Ordinal)
+            || !string.Equals(item.Model, evidence.ModelId, StringComparison.Ordinal))
+        {
+            Add(errors, "invalid_model_execution_evidence", $"{field}.modelExecutionEvidence", "Model execution evidence must be canonical and match the event provider/model projection.");
+        }
+        var entries = run.SequentialAdapterBinding?.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries
+            .Where(entry => string.Equals(entry.NodeId, item.StepId, StringComparison.Ordinal))
+            .Take(2)
+            .ToArray();
+        if (entries is not { Length: 1 }
+            || !string.Equals(evidence.ProfileId.Value, entries[0].Primary.Capability.DescriptorIdentity.Id.Value, StringComparison.Ordinal)
+            || !string.Equals(evidence.ProfilePinHash, entries[0].Primary.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(evidence.ConfigurationHash, entries[0].Primary.Metadata.ConfigurationHash, StringComparison.Ordinal))
+        {
+            Add(errors, "model_execution_admission_mismatch", $"{field}.modelExecutionEvidence", "Model execution evidence must cite the exact canonical routing admission for this Inference node.");
+        }
     }
 
     private static bool ToolAuthoritiesEqual(CustomLoopToolAuthoritySnapshot? left, CustomLoopToolAuthoritySnapshot? right)

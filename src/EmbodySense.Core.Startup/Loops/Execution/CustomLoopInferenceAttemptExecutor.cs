@@ -6,6 +6,8 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Inference;
+using EmbodySense.Core.Application.Inference.Profiles;
+using EmbodySense.Core.Application.Inference.Profiles.Models;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
@@ -19,6 +21,7 @@ using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -67,6 +70,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     private readonly ICapabilityAdmissionService _capabilityAdmissionService;
     private readonly ICapabilityAuthorityTransaction _capabilityAuthorityTransaction;
     private readonly IGovernedLoopEffectAuthorityBoundary? _effectAuthorityBoundary;
+    private readonly IGovernedModelPrimaryExecutionService? _modelPrimaryExecution;
 
     /// <summary>
     /// Creates the production attempt executor over the workspace's live role authority and run evidence.
@@ -131,6 +135,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     /// <param name="clientFactory">The client factory.</param>
     /// <param name="capabilityAuthorityTransaction">The optional capability-authority transaction shared with admission and governed skill mutation.</param>
     /// <param name="effectAuthorityBoundary">The fresh exact-reference authority boundary that fences provider transport.</param>
+    /// <param name="modelPrimaryExecution">The primary-only profile, reservation, transport, and usage boundary for canonical execution.</param>
     public CustomLoopInferenceAttemptExecutor(
         LlmInferenceClientOptions options,
         IToolApprovalPrompt approvalPrompt,
@@ -139,7 +144,8 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         ICapabilityAdmissionService capabilityAdmissionService,
         CustomLoopInferenceClientFactory? clientFactory = null,
         ICapabilityAuthorityTransaction? capabilityAuthorityTransaction = null,
-        IGovernedLoopEffectAuthorityBoundary? effectAuthorityBoundary = null)
+        IGovernedLoopEffectAuthorityBoundary? effectAuthorityBoundary = null,
+        IGovernedModelPrimaryExecutionService? modelPrimaryExecution = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(approvalPrompt);
@@ -161,6 +167,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         _capabilityAdmissionService = capabilityAdmissionService;
         _capabilityAuthorityTransaction = capabilityAuthorityTransaction ?? new CapabilityAuthorityTransaction(_paths);
         _effectAuthorityBoundary = effectAuthorityBoundary;
+        _modelPrimaryExecution = modelPrimaryExecution;
         _toolResultRetentionStore = new ToolResultRetentionStore(_paths);
     }
 
@@ -199,7 +206,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
     {
         ArgumentNullException.ThrowIfNull(request);
-        ValidateRequestEnvelope(request, _options.Surface);
+        ValidateRequestEnvelope(request, _options.Surface, validateLegacyModelSnapshot: _modelPrimaryExecution is null);
         var legacyDispatch = IsLegacyDispatch(request);
         GovernedLoopEffectAuthorityRequest? providerAuthorityRequest = null;
         if (legacyDispatch)
@@ -217,6 +224,10 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         else
         {
             providerAuthorityRequest = ResolveProviderAuthorityRequest(request);
+            if (_modelPrimaryExecution is null)
+            {
+                _ = RequireEffectAuthorityBoundary();
+            }
         }
 
         var authority = request.AuthoritySnapshot ?? await _authorityProvider.ResolveAsync(request.RoleId, request.AdmittedToolAssignments, cancellationToken);
@@ -291,6 +302,80 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             toolBroker = boundedBroker;
         }
 
+        if (!legacyDispatch && _modelPrimaryExecution is not null)
+        {
+            var routingEntries = request.AdmissionReceipt!.Evidence.ModelRoutingAdmission.Entries
+                .Where(entry => string.Equals(entry.NodeId, request.StepId, StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            if (routingEntries.Length != 1)
+            {
+                throw new GovernedModelPrimaryExecutionStoppedException(GovernedModelAttemptAdmissionStatus.Invalid);
+            }
+            var routingEntry = routingEntries[0];
+            var primaryRequest = new GovernedModelAttemptAdmissionRequest(
+                request.AdmissionReceipt.Evidence.ModelRoutingAdmission,
+                request.AdmissionReceipt,
+                request.RunId,
+                request.ExecutionBinding!.ExecutionGeneration,
+                request.StepId,
+                routingEntry.NodeTypeId,
+                request.PlanOrdinal,
+                request.ActivationOrdinal,
+                request.VisitOrdinal,
+                request.AttemptOperationId!,
+                request.Attempt,
+                routingEntry.Primary.ContentHash);
+            var primary = await _modelPrimaryExecution.ExecuteAsync(
+                new GovernedModelPrimaryExecutionRequest(primaryRequest, request.InferenceRequest, toolBroker),
+                CreateProviderTransportBoundary(providerAuthorityRequest!, injectedProviderRequestStarted: null),
+                responseChunkHandler: null,
+                providerRequestStarted: providerRequestStarted,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (primary.Response is null)
+            {
+                throw new GovernedModelPrimaryExecutionStoppedException(primary);
+            }
+
+            if (primary.Primary is null
+                || primary.ReservationEntry is null
+                || primary.TerminalUsageEntry is not
+                {
+                    Phase: GovernedModelUsageLedgerPhase.Reconciled,
+                    Usage: { } terminalUsage,
+                } terminalEntry
+                || !string.Equals(primary.Primary.ContentHash, routingEntry.Primary.ContentHash, StringComparison.Ordinal)
+                || !string.Equals(primary.ReservationEntry.Identity.ContentHash, terminalEntry.Identity.ContentHash, StringComparison.Ordinal)
+                || !string.Equals(primary.Response.Usage.ContentHash, terminalUsage.ContentHash, StringComparison.Ordinal))
+            {
+                throw new GovernedModelPrimaryExecutionStoppedException(
+                    primary with { AdmissionStatus = GovernedModelAttemptAdmissionStatus.Unavailable, Response = null });
+            }
+
+            var executionEvidence = GovernedModelAttemptExecutionEvidence.Create(
+                1,
+                primary.Primary.Capability.DescriptorIdentity.Id,
+                primary.Primary.ContentHash,
+                primary.Primary.Metadata.ConfigurationHash,
+                primary.Primary.Metadata.ProviderId,
+                primary.Primary.Metadata.AdapterId,
+                primary.Primary.Metadata.ModelId,
+                primary.Response.Surface,
+                primary.ReservationEntry.ContentHash,
+                terminalEntry.ContentHash,
+                terminalEntry.Phase,
+                terminalUsage,
+                terminalEntry.UsageUnknown);
+
+            return new CustomLoopInferenceAttemptResult(
+                primary.Response.OutputText,
+                primary.Response.ProviderId!,
+                primary.Response.Model,
+                primary.Response.ProviderResponseId,
+                boundedBroker?.ToolRequestsConsumed ?? 0,
+                executionEvidence);
+        }
+
         var effectiveOptions = _options with { Model = request.ModelSnapshot.Model };
         var usesInjectedFactory = _clientFactory is not null;
         var client = usesInjectedFactory
@@ -325,7 +410,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
                     request.InferenceRequest,
                     responseChunkHandler: null,
                     cancellationToken,
-                    CreateProviderTransportBoundary(providerAuthorityRequest!, providerRequestStarted));
+                    CreateProviderTransportBoundary(ResolveProviderAuthorityRequest(request), providerRequestStarted));
             }
 
             return new CustomLoopInferenceAttemptResult(
@@ -384,16 +469,21 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
                 decision: null);
         }
 
-        if (_effectAuthorityBoundary is null)
+        return authorityRequest!;
+    }
+
+    private IGovernedLoopEffectAuthorityBoundary RequireEffectAuthorityBoundary()
+    {
+        if (_effectAuthorityBoundary is not null)
         {
-            throw Stopped(
-                "No fresh execution-authority boundary was composed for canonical provider dispatch.",
-                GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable,
-                GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown,
-                decision: null);
+            return _effectAuthorityBoundary;
         }
 
-        return authorityRequest!;
+        throw Stopped(
+            "No fresh execution-authority boundary was composed for canonical provider dispatch.",
+            GovernedLoopEffectAuthorityExecutionStatus.AuthorityUnavailable,
+            GovernedLoopEffectAuthorityEvidenceStoreStatus.Unknown,
+            decision: null);
     }
 
     private static bool TryCreateProviderAuthorityRequest(
@@ -434,17 +524,36 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
 
             var nodeCapabilities = node.AuthorityCeiling.CapabilityIds;
             var requiresWorkspace = nodeCapabilities.Contains(WorkspaceCommandCapabilityId, StringComparer.Ordinal);
+            var routingEntry = admission.Evidence.ModelRoutingAdmission.Entries.SingleOrDefault(candidate =>
+                string.Equals(candidate.NodeId, request.StepId, StringComparison.Ordinal));
+            if (routingEntry is null
+                || !string.Equals(routingEntry.NodeTypeId, node.Descriptor.TypeId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var routedProfileIds = routingEntry.Fallbacks
+                .Prepend(routingEntry.Primary)
+                .Select(profile => profile.Capability.DescriptorIdentity.Id.Value)
+                .ToHashSet(StringComparer.Ordinal);
             if (!nodeCapabilities.Contains(ModelInferenceCapabilityId, StringComparer.Ordinal)
+                || !nodeCapabilities.ToHashSet(StringComparer.Ordinal).IsSupersetOf(routedProfileIds)
                 || nodeCapabilities.Any(value => !string.Equals(value, ModelInferenceCapabilityId, StringComparison.Ordinal)
-                    && !string.Equals(value, WorkspaceCommandCapabilityId, StringComparison.Ordinal))
+                    && !string.Equals(value, WorkspaceCommandCapabilityId, StringComparison.Ordinal)
+                    && !routedProfileIds.Contains(value))
                 || request.AllowTools && !requiresWorkspace)
             {
                 return false;
             }
 
-            var requiredIds = requiresWorkspace
-                ? new[] { ModelInferenceCapabilityId, WorkspaceCommandCapabilityId }
-                : [ModelInferenceCapabilityId];
+            var requiredIds = new[]
+                {
+                    ModelInferenceCapabilityId,
+                    routingEntry.Primary.Capability.DescriptorIdentity.Id.Value,
+                }
+                .Concat(requiresWorkspace ? [WorkspaceCommandCapabilityId] : [])
+                .Order(StringComparer.Ordinal)
+                .ToArray();
             var pins = requiredIds.Select(id => admission.Evidence.CapabilityAdmission.Pins.SingleOrDefault(pin => string.Equals(pin.DescriptorIdentity.Id.Value, id, StringComparison.Ordinal))).ToArray();
             if (pins.Any(pin => pin is null)
                 || pins.Select(pin => pin!.DescriptorIdentity.Id.Value).Distinct(StringComparer.Ordinal).Count() != requiredIds.Length)
@@ -634,9 +743,11 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         ArgumentNullException.ThrowIfNull(modelSnapshot);
         ArgumentException.ThrowIfNullOrWhiteSpace(modelSnapshot.Provider);
         cancellationToken.ThrowIfCancellationRequested();
-        var available = (_clientFactory is not null || _options.Surface == LlmInferenceSurface.OpenAiCodex)
-            && ProviderMatches(_options.Surface, modelSnapshot.Provider)
-            && string.Equals(_options.Model, modelSnapshot.Model, StringComparison.Ordinal);
+        var available = _modelPrimaryExecution is not null
+            ? _options.Surface == LlmInferenceSurface.OpenAiCodex
+            : (_clientFactory is not null || _options.Surface == LlmInferenceSurface.OpenAiCodex)
+                && ProviderMatches(_options.Surface, modelSnapshot.Provider)
+                && string.Equals(_options.Model, modelSnapshot.Model, StringComparison.Ordinal);
         return Task.FromResult(available);
     }
 
@@ -665,7 +776,10 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         };
     }
 
-    private static void ValidateRequestEnvelope(CustomLoopInferenceAttemptRequest request, LlmInferenceSurface configuredSurface)
+    private static void ValidateRequestEnvelope(
+        CustomLoopInferenceAttemptRequest request,
+        LlmInferenceSurface configuredSurface,
+        bool validateLegacyModelSnapshot)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(request.RunId);
@@ -695,7 +809,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             throw new ArgumentOutOfRangeException(nameof(request), request.ToolRequestsUsedInRun, "Persisted run tool-request usage is outside the governed evidence limit.");
         }
 
-        if (!ProviderMatches(configuredSurface, request.ModelSnapshot.Provider))
+        if (validateLegacyModelSnapshot && !ProviderMatches(configuredSurface, request.ModelSnapshot.Provider))
         {
             throw new ArgumentException("The admitted provider snapshot does not match this inference executor.", nameof(request));
         }

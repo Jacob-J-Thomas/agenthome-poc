@@ -114,7 +114,8 @@ internal sealed class GovernedLoopEffectAttemptTestFixture
             ],
             [],
             new GovernedLoopOutputContract("Return completion.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published", true)]),
-            new GovernedLoopDisplayMetadata("Effect loop", "Effect loop.", nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()));
+            new GovernedLoopDisplayMetadata("Effect loop", "Effect loop.", nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()),
+            GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
         var revision = GovernedLoopRevisionArtifactFactory.Create(1, graph.RevisionReference, null, null, "create-effect-loop", "user-owner", Now.AddMinutes(-10));
         var artifact = GovernedLoopGraphRevisionArtifactFactory.Create(1, revision, graph);
         var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, artifact.RevisionArtifact.Revision, "publish-effect-loop", Hash('7'));
@@ -134,7 +135,9 @@ internal sealed class GovernedLoopEffectAttemptTestFixture
         var snapshot = new CapabilityAdmissionSnapshot(1, workspaceId, manifest, manifestHash!.Value, [pin], [new CapabilityAdmissionEvidence(manifest.SubjectId, capabilityId!, manifest.Required[0].CompatibleVersionRange, false, "Selected", identity, "Selected exact probe.")], Now.AddMinutes(-5));
         var execution = GovernedLoopExecutionBinding.Create(1, "run-effect", artifact.RevisionArtifact.Revision, 1);
         var effective = RequiredAuthority(identity!, sideEffect);
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(1, GovernedLoopAdmissionContractHash.ComputeIntentHash(intent), execution, profilePin, new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None), Hash('d'), effective, snapshot, GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effective, snapshot), Now.AddMinutes(-5), string.Empty));
+        var boundary = new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None);
+        var modelRouting = GovernedLoopAdmissionContractHash.CreateEmptyModelRoutingAdmission(intent, execution, profilePin, boundary, Hash('d'), effective, snapshot, Now.AddMinutes(-5));
+        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(1, GovernedLoopAdmissionContractHash.ComputeIntentHash(intent), execution, profilePin, boundary, Hash('d'), effective, snapshot, modelRouting, GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effective, snapshot, modelRouting), Now.AddMinutes(-5), string.Empty));
         var receipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(1, intent, evidence, Now.AddMinutes(-5), string.Empty));
         Assert.True(GovernedLoopAdmissionValidator.Validate(receipt).IsValid);
         var request = new GovernedLoopEffectAttemptRequest(

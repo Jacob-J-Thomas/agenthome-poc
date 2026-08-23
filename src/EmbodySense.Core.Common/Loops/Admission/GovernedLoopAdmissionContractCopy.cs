@@ -4,6 +4,7 @@ using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Loops.Admission.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 
 namespace EmbodySense.Core.Common.Loops.Admission;
 
@@ -80,6 +81,32 @@ internal static class GovernedLoopAdmissionContractCopy
             value.AdmittedAtUtc);
     }
 
+    internal static GovernedModelRoutingAdmissionSnapshot Copy(GovernedModelRoutingAdmissionSnapshot? value)
+        => value is null
+            ? null!
+            : GovernedModelRoutingAdmissionSnapshot.Create(
+                value.SchemaVersion,
+                value.WorkspaceId,
+                value.AdmissionOperationId,
+                value.AdmissionIntentHash,
+                value.ExecutionBindingReferenceHash,
+                value.RunId,
+                value.GraphId,
+                value.GraphRevisionId,
+                value.GraphExecutableHash,
+                value.ExecutionGeneration,
+                value.OwningRoleId,
+                value.OwningRoleRevision,
+                value.OwningRoleContentHash,
+                value.CapabilityAdmissionReferenceHash,
+                value.AuthorityAdmissionReferenceHash,
+                value.CapabilityCatalogRevision,
+                value.ResolvedDefaultProfileId,
+                value.DefaultSourceRevisionHash,
+                value.AdapterRegistryRevisionHash,
+                value.EvaluatedAtUtc,
+                value.Entries);
+
     internal static IReadOnlyList<GovernedLoopAdmissionEvidenceReference> Copy(IReadOnlyList<GovernedLoopAdmissionEvidenceReference>? values)
         => values is null ? null! : Snapshot(values, GovernedLoopAdmissionLimits.MaxEvidenceReferences);
 
@@ -98,6 +125,7 @@ internal static class GovernedLoopAdmissionContractCopy
                 value.GrantDependencyEvidenceHash,
                 value.EffectiveAuthority,
                 value.CapabilityAdmission,
+                value.ModelRoutingAdmission,
                 value.References,
                 value.EvaluatedAtUtc,
                 value.ContentHash);

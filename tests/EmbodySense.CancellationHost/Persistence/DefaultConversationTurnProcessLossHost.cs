@@ -61,7 +61,12 @@ internal static class DefaultConversationTurnProcessLossHost
                 await responseChunkHandler(output, cancellationToken);
             }
 
-            return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex, "test-model", "provider-response-1");
+            return new LlmInferenceResponse(
+                output,
+                LlmInferenceSurface.OpenAiCodex,
+                EmbodySense.Core.Common.Inference.Profiles.Models.LlmInferenceUsageEvidence.Unavailable("test", "v1"),
+                "test-model",
+                "provider-response-1");
         }
 
         public async Task<LlmInferenceResponse> GenerateAsync(

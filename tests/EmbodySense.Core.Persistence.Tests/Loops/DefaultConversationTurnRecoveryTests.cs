@@ -175,7 +175,7 @@ public sealed class DefaultConversationTurnRecoveryTests
     public async Task Restart_retains_observed_output_for_review_when_completion_audit_failed()
     {
         using var workspace = new TestWorkspace();
-        var response = new LlmInferenceResponse("observed answer", LlmInferenceSurface.OpenAiCodex, ProviderResponseId: "provider-turn-2");
+        var response = new LlmInferenceResponse("observed answer", LlmInferenceSurface.OpenAiCodex, EmbodySense.Core.Common.Inference.Profiles.Models.LlmInferenceUsageEvidence.Unavailable("test", "v1"), ProviderResponseId: "provider-turn-2");
         var client = new RecordingInferenceClient("unused")
         {
             Failure = new LlmInferenceObservedResponseException("completion audit failed after provider success", response, new IOException("audit unavailable"))
@@ -3548,7 +3548,7 @@ public sealed class DefaultConversationTurnRecoveryTests
                 await responseChunkHandler(output, cancellationToken);
             }
 
-            return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex, "test-model", "provider-response-1");
+            return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex, EmbodySense.Core.Common.Inference.Profiles.Models.LlmInferenceUsageEvidence.Unavailable("test", "v1"), "test-model", "provider-response-1");
         }
 
         public async Task<LlmInferenceResponse> GenerateAsync(

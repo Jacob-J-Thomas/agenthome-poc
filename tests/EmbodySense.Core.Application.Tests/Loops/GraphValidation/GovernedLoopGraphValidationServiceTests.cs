@@ -17,6 +17,7 @@ namespace EmbodySense.Core.Application.Tests.Loops.GraphValidation;
 public sealed class GovernedLoopGraphValidationServiceTests
 {
     private const string ModelInferenceCapability = "org.embodysense/model-inference";
+    private const string ModelProfileCapability = "org.embodysense/model-profile/codex";
     private const string WorkspaceReadCapability = "org.embodysense/workspace-read";
 
     [Fact]
@@ -1350,7 +1351,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
         string roleId = "researcher",
         IReadOnlyList<string>? capabilityIds = null)
         => AuthorityGrantApplicationTestFixture.Role(
-            capabilityIds: capabilityIds ?? [ModelInferenceCapability, WorkspaceReadCapability],
+            capabilityIds: capabilityIds ?? [ModelInferenceCapability, ModelProfileCapability, WorkspaceReadCapability],
             roleId: roleId);
 
     private static ContextualRoleRevisionPin RolePin(string roleId = "researcher")
@@ -1746,7 +1747,8 @@ public sealed class GovernedLoopGraphValidationServiceTests
             graph.ControlEdges.Cast<GovernedLoopControlEdgeDefinition?>().ToArray(),
             graph.Bindings.Cast<GovernedLoopBindingDefinition?>().ToArray(),
             graph.OutputContract,
-            graph.DisplayMetadata);
+            graph.DisplayMetadata,
+            graph.DefaultModelRoutingPolicy);
 
     private static GovernedLoopCatalogParameterContract[] ParameterContracts(GovernedLoopNodeDefinition node)
     {
@@ -1765,7 +1767,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
 
     private static GovernedLoopGraphCandidate Candidate(IReadOnlyList<GovernedLoopNodeDefinition?>? nodes = null, IReadOnlyList<GovernedLoopControlEdgeDefinition?>? edges = null)
     {
-        return new GovernedLoopGraphCandidate(1, "research-loop", "revision-1", "Research one question safely.", RolePin(), "trigger", ["exit"], GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, WorkspaceReadCapability]), Schemas(), nodes ?? Nodes(), edges ?? Edges(), Bindings(), Output(), Display());
+        return new GovernedLoopGraphCandidate(1, "research-loop", "revision-1", "Research one question safely.", RolePin(), "trigger", ["exit"], GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, ModelProfileCapability, WorkspaceReadCapability]), Schemas(), nodes ?? Nodes(), edges ?? Edges(), Bindings(), Output(), Display(), GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
     }
 
     private static GovernedLoopValueSchemaDefinition[] Schemas() => [new("text", GovernedLoopValueKind.Text, false)];
@@ -1775,7 +1777,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
         return
         [
             new GovernedLoopNodeDefinition("trigger", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Trigger, "manual-trigger", 1), [Output("request", GovernedLoopBindingKind.Data), Output("invocation-context", GovernedLoopBindingKind.Context)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>()),
-            new GovernedLoopNodeDefinition("infer", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1), [Input("request", GovernedLoopBindingKind.Data), Input("invocation-context", GovernedLoopBindingKind.Context), Output("result", GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability]), new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
+            new GovernedLoopNodeDefinition("infer", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1), [Input("request", GovernedLoopBindingKind.Data), Input("invocation-context", GovernedLoopBindingKind.Context), Output("result", GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, ModelProfileCapability]), new Dictionary<string, string> { ["instruction"] = "Answer safely." }),
             new GovernedLoopNodeDefinition("exit", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1), [Input("result", GovernedLoopBindingKind.Data), Output("published-result", GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>())
         ];
     }

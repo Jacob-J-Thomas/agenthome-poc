@@ -363,6 +363,19 @@ public sealed class CliBehaviorTests
                 case "model/list":
                   write({ id: message.id, result: { data: [{ id: advertisedModel, model: advertisedModel }] } });
                   break;
+                case "thread/start": {
+                  const model = String(message.params?.model ?? "");
+                  const modelProvider = String(message.params?.modelProvider ?? "");
+                  write({
+                    id: message.id,
+                    result: {
+                      model,
+                      modelProvider,
+                      thread: { id: "thread-cli-probe", modelProvider }
+                    }
+                  });
+                  break;
+                }
                 default:
                   break;
                 }

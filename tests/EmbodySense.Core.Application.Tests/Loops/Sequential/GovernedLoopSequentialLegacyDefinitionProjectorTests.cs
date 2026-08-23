@@ -133,7 +133,8 @@ public sealed class GovernedLoopSequentialLegacyDefinitionProjectorTests
                 {
                     DisplayName = node.NodeId == "infer-01" ? "Changed inference label" : node.DisplayName,
                     CanvasX = (node.CanvasX ?? 0) + 25,
-                }).ToArray()));
+                }).ToArray()),
+            graph.DefaultModelRoutingPolicy);
         var changedArtifact = GovernedLoopGraphRevisionArtifactFactory.Create(
             GovernedLoopGraphRevisionArtifact.CurrentSchemaVersion,
             artifact.RevisionArtifact,
@@ -272,18 +273,15 @@ public sealed class GovernedLoopSequentialLegacyDefinitionProjectorTests
             GraphLayoutHash = binding.GraphLayoutHash,
         };
         var source = receipt.Evidence;
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            source.SchemaVersion,
-            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+        var evidence = GovernedModelProfileApplicationTestFixture.EmptyRoutingEvidence(
+            intent,
             source.Binding,
             source.GrantProfile,
             source.GrantBoundary,
             source.GrantDependencyEvidenceHash,
             source.EffectiveAuthority,
             source.CapabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, source.EffectiveAuthority, source.CapabilityAdmission),
-            source.EvaluatedAtUtc,
-            string.Empty));
+            source.EvaluatedAtUtc);
         receipt = GovernedLoopAdmissionContractHash.Apply(receipt with { Intent = intent, Evidence = evidence, ContentHash = string.Empty });
         return GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
             binding.SchemaVersion,

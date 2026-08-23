@@ -1,4 +1,6 @@
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -7,6 +9,33 @@ namespace EmbodySense.Core.Common.Tests;
 
 public sealed class GovernedLoopGraphNormalizerTests
 {
+    [Fact]
+    public void Normalize_rejects_model_routing_outside_authority_and_malformed_authored_classes_with_structured_errors()
+    {
+        Assert.True(CapabilityId.TryParse("org.example/model-outside", out var outsideProfile, out _));
+        var outsidePolicy = GovernedModelRoutingPolicy.Create(
+            1,
+            GovernedModelRoutingSelector.Exact(outsideProfile!),
+            [],
+            GovernedLoopGraphTestFixture.DefaultModelRoutingPolicy().Requirements);
+        var nodes = GovernedLoopGraphTestFixture.Nodes();
+        nodes[1] = new GovernedLoopNodeDefinition(
+            nodes[1].Id,
+            nodes[1].Descriptor,
+            nodes[1].Ports,
+            nodes[1].AuthorityCeiling,
+            nodes[1].Parameters,
+            outsidePolicy,
+            [(CapabilityDataClass)null!]);
+
+        var result = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: nodes));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, error => error.Code == "node.model-routing.authority.invalid" && error.Element.Id == "infer");
+        Assert.Contains(result.Errors, error => error.Code == "node.model-routing.input-data-classes.invalid" && error.Element.Id == "infer");
+        Assert.DoesNotContain(result.Errors, error => error.Code == "graph.canonicalization-failed");
+    }
+
     [Fact]
     public void NormalizeReturnsCanonicalGraphAndPermutationStableResult()
     {
@@ -569,7 +598,7 @@ public sealed class GovernedLoopGraphNormalizerTests
             bindings.Add(new GovernedLoopBindingDefinition("binding-extra", GovernedLoopBindingKind.Data, "producer-extra", "output", "consumer-extra", "input"));
         }
 
-        return new GovernedLoopGraphCandidate(1, "binding-limit", "revision-1", "Validate binding limits.", GovernedLoopGraphTestFixture.Role(), "trigger", ["exit"], authority, GovernedLoopGraphTestFixture.Schemas(), nodes, edges, bindings, new GovernedLoopOutputContract("Return the result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]), new GovernedLoopDisplayMetadata("Binding limit", "Display only.", []));
+        return new GovernedLoopGraphCandidate(1, "binding-limit", "revision-1", "Validate binding limits.", GovernedLoopGraphTestFixture.Role(), "trigger", ["exit"], authority, GovernedLoopGraphTestFixture.Schemas(), nodes, edges, bindings, new GovernedLoopOutputContract("Return the result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]), new GovernedLoopDisplayMetadata("Binding limit", "Display only.", []), GovernedLoopGraphTestFixture.DefaultModelRoutingPolicy());
     }
 
     private static GovernedLoopNodeDefinition?[] NodesForMalformedContracts()
@@ -593,7 +622,8 @@ public sealed class GovernedLoopGraphNormalizerTests
         string? purpose = "Research one question within explicit context and authority.",
         IReadOnlyList<GovernedLoopNodeDefinition?>? nodes = null,
         IReadOnlyList<GovernedLoopControlEdgeDefinition?>? edges = null,
-        IReadOnlyList<GovernedLoopBindingDefinition?>? bindings = null)
+        IReadOnlyList<GovernedLoopBindingDefinition?>? bindings = null,
+        GovernedModelRoutingPolicy? defaultModelRoutingPolicy = null)
     {
         return new GovernedLoopGraphCandidate(
             1,
@@ -609,6 +639,7 @@ public sealed class GovernedLoopGraphNormalizerTests
             edges ?? GovernedLoopGraphTestFixture.Edges(),
             bindings ?? GovernedLoopGraphTestFixture.Bindings(),
             GovernedLoopGraphTestFixture.Output(),
-            GovernedLoopGraphTestFixture.Display());
+            GovernedLoopGraphTestFixture.Display(),
+            defaultModelRoutingPolicy ?? GovernedLoopGraphTestFixture.DefaultModelRoutingPolicy());
     }
 }

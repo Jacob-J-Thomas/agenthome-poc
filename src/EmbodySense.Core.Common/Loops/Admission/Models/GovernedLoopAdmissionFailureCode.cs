@@ -35,5 +35,9 @@ public enum GovernedLoopAdmissionFailureCode
 
     /// <summary>The exact requirements are structurally or policy-incompatible with the already-proved non-widening admitted ceiling.</summary>
     /// <remarks>Current catalog, provider, host, store, or evidence unavailability is nonterminal and cannot produce this rejection.</remarks>
-    CapabilityResolutionDenied = 12
+    CapabilityResolutionDenied = 12,
+
+    /// <summary>Current exact evidence proves an authored model-routing candidate ineligible.</summary>
+    /// <remarks>Unavailable catalog, metadata, adapter, or default-source evidence is nonterminal and cannot produce this rejection.</remarks>
+    ModelRoutingDenied = 13
 }

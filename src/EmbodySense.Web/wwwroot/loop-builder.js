@@ -3368,11 +3368,7 @@ function renderRunEvidence() {
       )
       .join("\n") || "No provider attempt has been persisted yet.",
   );
-  appendEvidenceSection(
-    "Provider usage and cost",
-    "Unavailable",
-    "The current provider response does not report token usage or cost; no estimate is fabricated.",
-  );
+  appendModelUsageEvidence(selectedRun);
   appendEvidenceSection(
     "Role and authority",
     definitionRoleId(definition),
@@ -3518,6 +3514,92 @@ function renderRunEvidence() {
       selectedRun.failureDetail ??
         "Inspect the ordered timeline for the persisted boundary.",
     );
+}
+
+function appendModelUsageEvidence(run) {
+  const projection = run?.modelUsage;
+  if (!projection) {
+    appendEvidenceSection(
+      "Provider usage and cost",
+      "Legacy evidence only",
+      "No authenticated model-usage projection is attached to this legacy run; no value is inferred.",
+    );
+    return;
+  }
+  if (projection.status !== "Found" || !projection.run) {
+    appendEvidenceSection(
+      "Provider usage and cost",
+      formatStatus(projection.status ?? "Unavailable"),
+      projection.status === "NotFound"
+        ? "No provider-usage reservation exists for this run."
+        : "Authenticated provider-usage evidence is unavailable; no amount is inferred or released.",
+    );
+    return;
+  }
+
+  const aggregate = projection.run;
+  const details = [
+    `Ledger generation ${projection.workspaceLedgerGeneration}`,
+    `Input tokens: ${formatUsageDimension(aggregate.inputTokens)}`,
+    `Output tokens: ${formatUsageDimension(aggregate.outputTokens)}`,
+    `Cached tokens: ${formatUsageDimension(aggregate.cachedTokens)}`,
+    `Total tokens: ${formatUsageDimension(aggregate.totalTokens)}`,
+    `Cost: ${formatMonetaryUsage(aggregate.monetaryCosts)}`,
+  ];
+  for (const series of projection.nodeSeries ?? []) {
+    details.push(
+      `Node ${series.nodeId}: ${series.attemptCount} attempt${series.attemptCount === 1 ? "" : "s"} · ${series.usageUnavailableAttemptCount} unavailable usage · ${series.outstandingReservationAttemptCount} outstanding reservation${series.outstandingReservationAttemptCount === 1 ? "" : "s"}`,
+    );
+  }
+  for (const attempt of projection.attempts ?? []) {
+    details.push(
+      `Attempt ${attempt.attemptOperationId}: node ${attempt.nodeId} · ${attempt.phase} · profile pin ${attempt.profilePinHash} · usage ${attempt.usage ? formatAttemptUsage(attempt.usage) : "not observed"}${attempt.usageUnknown ? " · unknown bounded usage retained" : ""}${attempt.reservationOutstanding ? " · reservation outstanding" : ""}`,
+    );
+  }
+  appendEvidenceSection(
+    "Provider usage and cost",
+    `${aggregate.attemptCount} governed attempt${aggregate.attemptCount === 1 ? "" : "s"} · ${aggregate.usageUnavailableAttemptCount} unavailable usage · ${aggregate.usageUnknownAttemptCount} unknown bounded`,
+    details.join("\n"),
+  );
+}
+
+function formatUsageDimension(dimension) {
+  if (!dimension) return "unavailable";
+  const measured =
+    dimension.status === "Authoritative" && dimension.authoritativeValue != null
+      ? `${dimension.authoritativeValue} authoritative`
+      : "unavailable";
+  return dimension.outstandingBoundedReservation > 0
+    ? `${measured} · ${dimension.outstandingBoundedReservation} bounded reservation outstanding`
+    : measured;
+}
+
+function formatMonetaryUsage(costs) {
+  if (!Array.isArray(costs) || costs.length === 0) return "unavailable";
+  return costs
+    .map((cost) => {
+      const measured =
+        cost.status === "Authoritative" && cost.authoritativeMicros != null
+          ? `${cost.authoritativeMicros} ${cost.currency} micros authoritative`
+          : `${cost.currency} unavailable`;
+      return cost.outstandingBoundedReservationMicros > 0
+        ? `${measured} · ${cost.outstandingBoundedReservationMicros} micros bounded reservation outstanding`
+        : measured;
+    })
+    .join(" · ");
+}
+
+function formatAttemptUsage(usage) {
+  const value = (measurement) =>
+    measurement?.status === 2 || measurement?.status === "Authoritative"
+      ? measurement.value
+      : "unavailable";
+  const cost = usage.monetaryCost;
+  const money =
+    cost?.status === 2 || cost?.status === "Authoritative"
+      ? `${cost.micros} ${cost.currency} micros`
+      : "cost unavailable";
+  return `input ${value(usage.inputTokens)} · output ${value(usage.outputTokens)} · cached ${value(usage.cachedTokens)} · total ${value(usage.totalTokens)} · ${money} · source ${usage.sourceId}/${usage.sourceContractVersion}`;
 }
 
 function publicationDispositionLines(run, dispositions) {

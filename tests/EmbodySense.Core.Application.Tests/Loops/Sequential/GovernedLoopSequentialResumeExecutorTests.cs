@@ -345,21 +345,19 @@ public sealed class GovernedLoopSequentialResumeExecutorTests
             artifact.ArtifactHash,
             artifact.LayoutHash);
         var execution = GovernedLoopExecutionBinding.Create(1, runId, publication.Revision, 1);
-        var evidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
-            1,
-            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+        var grantBoundary = new AuthorityGrantBoundary(
+            _now.AddHours(-1),
+            _now.AddHours(1),
+            seedReceipt.Evidence.GrantBoundary.CompletionConstraint);
+        var evidence = GovernedModelProfileApplicationTestFixture.EmptyRoutingEvidence(
+            intent,
             execution,
             seedReceipt.Evidence.GrantProfile,
-            new AuthorityGrantBoundary(
-                _now.AddHours(-1),
-                _now.AddHours(1),
-                seedReceipt.Evidence.GrantBoundary.CompletionConstraint),
+            grantBoundary,
             seedReceipt.Evidence.GrantDependencyEvidenceHash,
             seedReceipt.Evidence.EffectiveAuthority,
             seedReceipt.Evidence.CapabilityAdmission,
-            GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, seedReceipt.Evidence.EffectiveAuthority, seedReceipt.Evidence.CapabilityAdmission),
-            _now,
-            string.Empty));
+            _now);
         var receipt = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(1, intent, evidence, _now, string.Empty));
         var outcome = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionTerminalOutcome(
             1,

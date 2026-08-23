@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
+using EmbodySense.E2EBrowserHost;
 using EmbodySense.Web.Models;
 
 namespace EmbodySense.E2ETests.Web;
@@ -35,19 +36,78 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
             throw new InvalidOperationException($"Expected Web assembly at {webAssemblyPath}.");
         }
 
+        return await StartCoreAsync(
+            webAssemblyPath,
+            workspaceRoot,
+            port,
+            codexExecutablePath,
+            model,
+            [],
+            environment);
+    }
+
+    public static async Task<ExternalWebApplicationProcess> StartBrowserProfileHostAsync(
+        string workspaceRoot,
+        int port,
+        string codexExecutablePath,
+        string model,
+        string capabilityTrustRoot,
+        IReadOnlyList<BrowserModelProfileSpec> profiles)
+    {
+        var hostAssemblyPath = typeof(BrowserProfileWebHost).Assembly.Location;
+        if (!File.Exists(hostAssemblyPath))
+        {
+            throw new InvalidOperationException($"Expected browser-profile host assembly at {hostAssemblyPath}.");
+        }
+        var additionalArguments = new List<string>
+        {
+            "--browser-profile-web-host",
+            "--capability-trust-root",
+            capabilityTrustRoot,
+        };
+        foreach (var profile in profiles)
+        {
+            additionalArguments.Add("--additional-model-profile");
+            additionalArguments.Add(BrowserProfileWebHost.Serialize(profile));
+        }
+
+        var runtimeConfigPath = Path.Combine(AppContext.BaseDirectory, "EmbodySense.E2ETests.runtimeconfig.json");
+        var depsFilePath = Path.Combine(AppContext.BaseDirectory, "EmbodySense.E2ETests.deps.json");
+        return await StartCoreAsync(
+            hostAssemblyPath,
+            workspaceRoot,
+            port,
+            codexExecutablePath,
+            model,
+            additionalArguments,
+            environment: null,
+            dotnetExecRuntimeConfigPath: runtimeConfigPath,
+            dotnetExecDepsFilePath: depsFilePath);
+    }
+
+    private static async Task<ExternalWebApplicationProcess> StartCoreAsync(
+        string assemblyPath,
+        string workspaceRoot,
+        int port,
+        string codexExecutablePath,
+        string model,
+        IReadOnlyList<string> additionalArguments,
+        IReadOnlyDictionary<string, string>? environment,
+        string? dotnetExecRuntimeConfigPath = null,
+        string? dotnetExecDepsFilePath = null)
+    {
         var output = new ProcessOutputBuffer();
         var error = new ProcessOutputBuffer();
         var startInfo = new ProcessStartInfo
         {
             FileName = "dotnet",
-            WorkingDirectory = Path.GetDirectoryName(webAssemblyPath)!,
+            WorkingDirectory = Path.GetDirectoryName(assemblyPath)!,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
             ArgumentList =
             {
-                webAssemblyPath,
                 "--workdir",
                 workspaceRoot,
                 "--port",
@@ -58,6 +118,23 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
                 codexExecutablePath
             }
         };
+        if (dotnetExecRuntimeConfigPath is not null && dotnetExecDepsFilePath is not null)
+        {
+            startInfo.ArgumentList.Insert(0, assemblyPath);
+            startInfo.ArgumentList.Insert(0, dotnetExecDepsFilePath);
+            startInfo.ArgumentList.Insert(0, "--depsfile");
+            startInfo.ArgumentList.Insert(0, dotnetExecRuntimeConfigPath);
+            startInfo.ArgumentList.Insert(0, "--runtimeconfig");
+            startInfo.ArgumentList.Insert(0, "exec");
+        }
+        else
+        {
+            startInfo.ArgumentList.Insert(0, assemblyPath);
+        }
+        foreach (var argument in additionalArguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
         foreach (var item in environment ?? new Dictionary<string, string>())
         {
             startInfo.Environment[item.Key] = item.Value;
