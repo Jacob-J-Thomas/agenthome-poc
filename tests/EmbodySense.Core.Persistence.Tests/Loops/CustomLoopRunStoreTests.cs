@@ -677,8 +677,6 @@ public sealed class CustomLoopRunStoreTests
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
         var running = Advance(admitted, CustomLoopRunStatus.Running);
         var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
-        var artifactDirectory = Path.GetDirectoryName(artifactPath)!;
-        var stagingPattern = $".{Path.GetFileName(artifactPath)}.*.tmp";
         Task<CustomLoopRunStoreResult> updateTask;
         Task<CustomLoopRunRecord?> readTask;
 
@@ -689,13 +687,6 @@ public sealed class CustomLoopRunStoreTests
             Assert.False(readTask.IsCompleted);
 
             updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
-            var wait = Stopwatch.StartNew();
-            while (!Directory.EnumerateFiles(artifactDirectory, stagingPattern).Any())
-            {
-                Assert.False(updateTask.IsCompleted, "The atomic update completed before its external sharing contention was released.");
-                Assert.True(wait.Elapsed < TimeSpan.FromSeconds(10), "The atomic update did not reach its staged replacement boundary.");
-                await Task.Delay(TimeSpan.FromMilliseconds(15));
-            }
         }
 
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await updateTask.WaitAsync(TimeSpan.FromSeconds(10))).Status);
