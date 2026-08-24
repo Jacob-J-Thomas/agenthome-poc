@@ -486,6 +486,43 @@ public sealed class WorkspaceActionNativeHostTests
     }
 
     [Fact]
+    public async Task WindowsExternalSecondHardLinkWithUninspectableStagingDoesNotProveDispatchNotStarted()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var source = workspace.File("notes", "overflow-link-source.txt");
+        var alias = workspace.File("notes", "overflow-link-alias.txt");
+        await File.WriteAllTextAsync(source, "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var quota = new WorkspaceActionStorageLimits(8, 1, 2, 32);
+        var input = Input(WorkspaceActionKind.Write, "notes/overflow-link-source.txt", ExpectedHash("before"), "after");
+        var host = Host(paths, quota: quota);
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+        if (!TryCreateHardLink(alias, source))
+        {
+            return;
+        }
+
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        Directory.CreateDirectory(staging);
+        for (var index = 0; index < 6; index++)
+        {
+            await File.WriteAllTextAsync(Path.Combine(staging, $"overflow-{index}.bin"), "uninspectable");
+        }
+
+        var dispatch = new RecordingDispatchBoundary();
+        await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(Request(input, prepared.BeforeEvidence), dispatch));
+
+        Assert.Equal(0, dispatch.CrossCount);
+        Assert.Equal("before", await File.ReadAllTextAsync(source));
+        Assert.Equal("before", await File.ReadAllTextAsync(alias));
+    }
+
+    [Fact]
     public async Task DirectNativeCallerCannotBypassClosedInputValidation()
     {
         using var workspace = new TestWorkspace();

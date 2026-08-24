@@ -441,6 +441,10 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                 {
                     return new WorkspaceActionNativeCommitResult(WorkspaceActionNativeCommitStatus.DispatchNotStarted, null);
                 }
+                if (multiLinkedPosture == RetainedWindowsMultiLinkedBeforeImagePosture.Indeterminate)
+                {
+                    throw new IOException("The exact multi-linked workspace target could not be authenticated against its bounded private replacement evidence.");
+                }
                 return new WorkspaceActionNativeCommitResult(WorkspaceActionNativeCommitStatus.DispatchNotStarted, null);
             }
             var currentPermission = await RevalidatePermissionAsync(
@@ -808,7 +812,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             var entries = _guard.EnumerateNames(ownership, maximumEntries + _quota.MaximumStagingEntries + 1).ToArray();
             if (entries.Length > maximumEntries + _quota.MaximumStagingEntries)
             {
-                return RetainedWindowsMultiLinkedBeforeImagePosture.Unrelated;
+                return RetainedWindowsMultiLinkedBeforeImagePosture.Indeterminate;
             }
             var names = entries.ToHashSet(StringComparer.Ordinal);
             hasExpectedArtifact = names.Contains(stageName)
@@ -888,7 +892,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             }
             return hasExpectedArtifact
                 ? RetainedWindowsMultiLinkedBeforeImagePosture.CorruptOrPartial
-                : RetainedWindowsMultiLinkedBeforeImagePosture.Unrelated;
+                : RetainedWindowsMultiLinkedBeforeImagePosture.Indeterminate;
         }
         catch (FormatException)
         {
@@ -898,7 +902,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             }
             return hasExpectedArtifact
                 ? RetainedWindowsMultiLinkedBeforeImagePosture.CorruptOrPartial
-                : RetainedWindowsMultiLinkedBeforeImagePosture.Unrelated;
+                : RetainedWindowsMultiLinkedBeforeImagePosture.Indeterminate;
         }
         catch (UnauthorizedAccessException)
         {
@@ -908,7 +912,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             }
             return hasExpectedArtifact
                 ? RetainedWindowsMultiLinkedBeforeImagePosture.CorruptOrPartial
-                : RetainedWindowsMultiLinkedBeforeImagePosture.Unrelated;
+                : RetainedWindowsMultiLinkedBeforeImagePosture.Indeterminate;
         }
     }
 
