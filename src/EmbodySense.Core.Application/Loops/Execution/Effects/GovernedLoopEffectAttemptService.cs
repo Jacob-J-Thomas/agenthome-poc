@@ -375,7 +375,10 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
                     }
                     return await MarkPriorAuthorityAmbiguousAsync(current, authority.StoredDecisionContentHash, lease, cancellationToken).ConfigureAwait(false);
                 }
-                return await StopBeforeDispatchAsync(current, lease, "Current authority stopped the actuator before dispatch.", cancellationToken).ConfigureAwait(false);
+                var authorityDetail = authority.Decision is { Reason: var reason } && Enum.IsDefined(reason)
+                    ? $"Current authority stopped the actuator before dispatch ({reason})."
+                    : "Current authority stopped the actuator before dispatch.";
+                return await StopBeforeDispatchAsync(current, lease, authorityDetail, cancellationToken).ConfigureAwait(false);
             }
             if (authority.Result is null)
             {
@@ -427,7 +430,10 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
         if (adapter.Status == GovernedActuatorAdapterStatus.DispatchNotStarted
             && current.Payload.Phase == GovernedLoopEffectPhase.IntentPrepared)
         {
-            return await StopBeforeDispatchAsync(current, lease, "The server actuator affirmatively proved dispatch did not start.", cancellationToken).ConfigureAwait(false);
+            var detail = adapter.DispatchNotStartedReason is { } reason && Enum.IsDefined(reason)
+                ? $"The server actuator affirmatively proved dispatch did not start ({reason})."
+                : "The server actuator affirmatively proved dispatch did not start.";
+            return await StopBeforeDispatchAsync(current, lease, detail, cancellationToken).ConfigureAwait(false);
         }
         if (adapter.Status != GovernedActuatorAdapterStatus.OutcomeObserved
             || current.Payload.Phase != GovernedLoopEffectPhase.DispatchBoundaryReached

@@ -15,6 +15,7 @@ namespace EmbodySense.Core.Common.Loops.Sequential.Models;
 /// <param name="InvocationPayloadHash">The exact immutable invocation-snapshot hash.</param>
 /// <param name="GraphArtifactHash">The exact immutable graph-artifact hash.</param>
 /// <param name="GraphLayoutHash">The exact immutable graph-layout hash.</param>
+/// <param name="CommandActionCapabilityIds">The exact sorted distinct command Action capability roots derived from the immutable graph.</param>
 /// <param name="ContentHash">The canonical hash over every preceding field.</param>
 /// <remarks>This value links evidence but does not grant, widen, refresh, or re-resolve authority.</remarks>
 public sealed record GovernedLoopSequentialAdapterBinding(
@@ -28,6 +29,7 @@ public sealed record GovernedLoopSequentialAdapterBinding(
     string InvocationPayloadHash,
     string GraphArtifactHash,
     string GraphLayoutHash,
+    IReadOnlyList<string> CommandActionCapabilityIds,
     string ContentHash)
 {
     /// <summary>Gets the only supported experimental binding schema version.</summary>
@@ -38,4 +40,9 @@ public sealed record GovernedLoopSequentialAdapterBinding(
 
     /// <summary>Gets the defensively copied complete immutable admission receipt.</summary>
     public GovernedLoopAdmissionReceipt AdmissionReceipt { get; } = GovernedLoopAdmissionContractCopy.Copy(AdmissionReceipt);
+
+    /// <summary>Gets the defensively copied exact command Action capability-root snapshot.</summary>
+    public IReadOnlyList<string> CommandActionCapabilityIds { get; } = CommandActionCapabilityIds is null
+        ? null!
+        : Array.AsReadOnly(CommandActionCapabilityIds.Take(GovernedLoopSequentialContractLimits.MaxCommandActionCapabilities + 1).ToArray());
 }

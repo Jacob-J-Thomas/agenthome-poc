@@ -126,6 +126,11 @@ if (args is ["trigger-queue-hold-lock", var lockWorkspaceRoot, var lockReleaseMa
     return await TriggerQueueCrossProcessHost.RunLockHolderAsync(lockWorkspaceRoot, lockReleaseMarker, lockReadyMarker, lockResultMarker);
 }
 
+if (args is ["governed-loop-sleep-hold-lease", var sleepWorkspaceRoot, var sleepCheckpointId, var sleepReleaseMarker, var sleepReadyMarker, var sleepResultMarker])
+{
+    return await GovernedLoopSleepLeaseHolderHost.RunAsync(sleepWorkspaceRoot, sleepCheckpointId, sleepReleaseMarker, sleepReadyMarker, sleepResultMarker);
+}
+
 if (args is ["human-input-response", var responseMode, var responseWorkspaceRoot, var responseTrustRoot, var responseReleaseMarker, var responseReadyMarker, var responseResultMarker, var responseOperationId, var responseId, var responseActorId, var responseActorRoleId, var responseBoundary])
 {
     return await HumanInputResponseCrossProcessHost.RunAsync(responseMode, responseWorkspaceRoot, responseTrustRoot, responseReleaseMarker, responseReadyMarker, responseResultMarker, responseOperationId, responseId, responseActorId, responseActorRoleId, responseBoundary);
@@ -134,6 +139,16 @@ if (args is ["human-input-response", var responseMode, var responseWorkspaceRoot
 if (args is ["capability", var behavior])
 {
     return await HostCapabilityAsync(behavior);
+}
+
+if (args is ["command-action", var commandBehavior, .. var commandValues])
+{
+    return await HostCommandActionAsync(commandBehavior, commandValues);
+}
+
+if (args is ["command-action-concurrency", var commandWorkspaceRoot, var commandTemplateHash, var commandMaximumConcurrency, var commandReadyMarker, var commandReleaseMarker])
+{
+    return await CommandActionConcurrencyGateCrossProcessHost.RunAsync(commandWorkspaceRoot, commandTemplateHash, commandMaximumConcurrency, commandReadyMarker, commandReleaseMarker);
 }
 
 if (args is ["hold-contextual-role", var contextualRoleWorkspaceRoot])
@@ -308,6 +323,45 @@ static async Task<int> HostCapabilityAsync(string behavior)
             return 0;
         case "working-root":
             Console.Write(JsonSerializer.Serialize(Environment.CurrentDirectory));
+            return 0;
+        default:
+            return 2;
+    }
+}
+
+static async Task<int> HostCommandActionAsync(string behavior, string[] values)
+{
+    var input = await Console.In.ReadToEndAsync();
+    switch (behavior)
+    {
+        case "literal":
+            Console.Write(JsonSerializer.Serialize(new
+            {
+                arguments = values,
+                environment = Environment.GetEnvironmentVariables().Keys.Cast<object>().Select(value => value.ToString()).OrderBy(value => value, StringComparer.Ordinal),
+                input,
+            }));
+            return 0;
+        case "nonzero":
+            Console.Error.Write("token=secret-canary C:\\private\\command.txt");
+            return 7;
+        case "malformed":
+            Console.Write("not-json");
+            return 0;
+        case "invalid-encoding":
+            await Console.OpenStandardOutput().WriteAsync(new byte[] { 0xff, 0xfe });
+            return 0;
+        case "overflow":
+            var stdout = Task.Run(() => Console.Out.Write(new string('x', 128 * 1024)));
+            var stderr = Task.Run(() => Console.Error.Write(new string('y', 128 * 1024)));
+            await Task.WhenAll(stdout, stderr);
+            return 0;
+        case "unicode-boundary":
+            Console.OutputEncoding = new UTF8Encoding(false, true);
+            Console.Write(new string('x', 4_095) + "😀");
+            return 0;
+        case "hang":
+            await Task.Delay(Timeout.InfiniteTimeSpan);
             return 0;
         default:
             return 2;

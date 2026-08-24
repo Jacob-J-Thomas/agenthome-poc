@@ -168,13 +168,12 @@ public sealed class IsolatedCapabilityExecutableHost : ICapabilityExecutableHost
         Process? process = null;
         try
         {
-            await using (var launchFence = await artifactLease.AcquireLaunchFenceAsync(cancellationToken))
+            process = await artifactLease.ExecuteWithLaunchFenceAsync(
+                _ => Task.FromResult(_isolationBoundary.StartIsolated(startInfo, invocation.Manifest, artifactLease)),
+                cancellationToken);
+            if (process is null)
             {
-                if (launchFence is null)
-                {
-                    return Result(CapabilityExecutableInvocationStatus.Unavailable, invocation.OperationId, null, "The capability lifecycle changed before isolated process launch.", null, startedAt);
-                }
-                process = _isolationBoundary.StartIsolated(startInfo, invocation.Manifest, artifactLease);
+                return Result(CapabilityExecutableInvocationStatus.Unavailable, invocation.OperationId, null, "The capability lifecycle changed before isolated process launch.", null, startedAt);
             }
             var budget = new CapabilityProcessOutputBudget(invocation.Manifest.Descriptor.ResourceLimits.MaxOutputBytes);
             var stdoutTask = ReadBoundedAsync(process.StandardOutput, budget);

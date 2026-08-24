@@ -18,4 +18,5 @@ public sealed record GovernedLoopGraphCatalogNodeSnapshot(
     string? CycleTimeBudgetMillisecondsParameterId,
     IReadOnlyList<GovernedLoopGraphCatalogPortSnapshot> Ports,
     IReadOnlyList<GovernedLoopGraphCatalogParameterSnapshot> Parameters,
-    IReadOnlyList<string> RequiredCapabilityIds);
+    IReadOnlyList<string> RequiredCapabilityIds,
+    GovernedLoopGraphCatalogCommandActionSnapshot? CommandAction = null);

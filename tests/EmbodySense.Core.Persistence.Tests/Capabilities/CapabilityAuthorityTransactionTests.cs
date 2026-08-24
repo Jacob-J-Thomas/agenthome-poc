@@ -171,6 +171,29 @@ public sealed class CapabilityAuthorityTransactionTests
     }
 
     [Fact]
+    public async Task Nested_validated_operation_borrows_the_active_fence_without_creating_an_escaping_lease()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var outer = new CapabilityAuthorityTransaction(paths);
+        var nested = new CapabilityAuthorityTransaction(paths);
+        var validatorCalls = 0;
+        var operationCalls = 0;
+
+        var accepted = await outer.ExecuteAsync(_ => nested.ExecuteWithValidatedAuthorityAsync(
+            _ => Task.FromResult(Interlocked.Increment(ref validatorCalls) == 1),
+            _ => Task.FromResult(Interlocked.Increment(ref operationCalls).ToString(System.Globalization.CultureInfo.InvariantCulture))));
+        var rejected = await outer.ExecuteAsync(_ => nested.ExecuteWithValidatedAuthorityAsync(
+            _ => Task.FromResult(false),
+            _ => Task.FromResult("must-not-run")));
+
+        Assert.Equal("1", accepted);
+        Assert.Null(rejected);
+        Assert.Equal(1, validatorCalls);
+        Assert.Equal(1, operationCalls);
+    }
+
+    [Fact]
     public async Task Child_execution_context_cannot_reuse_an_invalidated_outer_frame()
     {
         using var workspace = new TestWorkspace();

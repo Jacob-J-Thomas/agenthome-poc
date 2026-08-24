@@ -20,6 +20,8 @@ internal sealed class TriggerQueueArtifactGuard
     private readonly string _queueRoot;
     private readonly StringComparison _comparison;
     private readonly int _maxTombstoneArtifacts;
+    private readonly Action<string>? _mutationLockContentionObserver;
+    private readonly Action<string>? _mutationLockAcquiredObserver;
     private readonly bool _recycleAuthenticatedTombstones;
 
     /// <summary>Initializes the guard for one workspace and queue root.</summary>
@@ -27,12 +29,16 @@ internal sealed class TriggerQueueArtifactGuard
         string workspaceRoot,
         string queueRoot,
         int maxTombstoneArtifacts,
-        bool recycleAuthenticatedTombstones = false)
+        bool recycleAuthenticatedTombstones = false,
+        Action<string>? mutationLockContentionObserver = null,
+        Action<string>? mutationLockAcquiredObserver = null)
     {
         _workspaceRoot = Path.GetFullPath(workspaceRoot);
         _queueRoot = Path.GetFullPath(queueRoot);
         _comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         _maxTombstoneArtifacts = maxTombstoneArtifacts;
+        _mutationLockContentionObserver = mutationLockContentionObserver;
+        _mutationLockAcquiredObserver = mutationLockAcquiredObserver;
         _recycleAuthenticatedTombstones = recycleAuthenticatedTombstones;
         EnsureContained(_workspaceRoot, _queueRoot);
     }
@@ -67,6 +73,7 @@ internal sealed class TriggerQueueArtifactGuard
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 FileStream? stream = null;
+                var lockContended = false;
                 try
                 {
                     stream = directoryAuthority.OpenOrCreate(Path.GetFileName(path));
@@ -84,8 +91,21 @@ internal sealed class TriggerQueueArtifactGuard
                         }
 
                         ValidateRootSnapshot(rootSnapshot);
+                        // This is an observational verification seam only. The callback runs after exact native
+                        // acquisition and handle/root validation while the lease is held; it cannot alter posture.
+                        try
+                        {
+                            _mutationLockAcquiredObserver?.Invoke(path);
+                        }
+                        catch (Exception)
+                        {
+                            // Diagnostics must never change the lock acquisition result or persistence posture.
+                        }
+
                         return new TriggerQueueMutationLease(stream, processLock, directoryAuthority, rootSnapshot, path, handleIdentity);
                     }
+
+                    lockContended = true;
                 }
                 catch (IOException)
                 {
@@ -98,6 +118,20 @@ internal sealed class TriggerQueueArtifactGuard
                 }
 
                 stream?.Dispose();
+                if (lockContended)
+                {
+                    // This is an observational verification seam only. The callback runs after the native
+                    // attempt has failed and the transient handle has been released; it does not affect durability.
+                    try
+                    {
+                        _mutationLockContentionObserver?.Invoke(path);
+                    }
+                    catch (Exception)
+                    {
+                        // Diagnostics must never change the lock acquisition result or persistence posture.
+                    }
+                }
+
                 if (wait.Elapsed >= _lockTimeout)
                 {
                     throw new TimeoutException("Trigger queue mutation lock remained busy beyond the bounded acquisition interval.");

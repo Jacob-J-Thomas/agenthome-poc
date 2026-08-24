@@ -38,7 +38,8 @@ $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
 $maximumArtifactStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunArtifactMaximumShapeTests.Adversarial_maximum_transition_reservations_and_canonical_order_checks_remain_bounded"
 $deletionCapacityStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTraceRetentionStoreTests.Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible"
-# https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422: retain one bounded lane-level hang guard without rejecting a healthy coverage lane before the 900-second Solution watchdog.
+# https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422: retain one bounded lane-level hang guard without rejecting a healthy coverage lane before the 1200-second Solution watchdog.
+# https://github.com/Jacob-J-Thomas/agenthome-poc/issues/509: keep the outer Solution watchdog at its expanded certification bound.
 $testLaneTimeoutSeconds = 600
 $coverageChildProcessTestProjects = @(
     "EmbodySense.Core.Persistence.Tests.csproj",

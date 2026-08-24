@@ -1,5 +1,6 @@
 using System.Text.Json;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Loops.Sequential.Actions;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation;
@@ -7,6 +8,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -31,6 +33,7 @@ public sealed class GovernedLoopGraphAuthoringFacade
     private readonly IGovernedLoopNodeCatalog _catalog;
     private readonly IContextualRoleCatalogFacade _roles;
     private readonly IModelProfileCatalogFacade _modelProfiles;
+    private readonly ICommandActionRegistrationResolver? _commandActions;
     private readonly IGovernedLoopGraphRevisionStore _store;
     private readonly string _surfaceId;
     private readonly string _workspaceId;
@@ -44,7 +47,8 @@ public sealed class GovernedLoopGraphAuthoringFacade
         IGovernedLoopAuthoritySnapshotProvider authority,
         ICapabilityAuthorityTransaction authorityTransaction,
         IContextualRoleCatalogFacade roles,
-        IModelProfileCatalogFacade modelProfiles)
+        IModelProfileCatalogFacade modelProfiles,
+        ICommandActionRegistrationResolver? commandActions = null)
     {
         if (!AuthorityActorId.TryParse(actorId, out var parsedActor, out _))
         {
@@ -59,6 +63,7 @@ public sealed class GovernedLoopGraphAuthoringFacade
         _authorityTransaction = authorityTransaction ?? throw new ArgumentNullException(nameof(authorityTransaction));
         _roles = roles ?? throw new ArgumentNullException(nameof(roles));
         _modelProfiles = modelProfiles ?? throw new ArgumentNullException(nameof(modelProfiles));
+        _commandActions = commandActions;
         _actorId = parsedActor!;
     }
 
@@ -335,8 +340,15 @@ public sealed class GovernedLoopGraphAuthoringFacade
             snapshot?.Lifecycle.Head,
             Array.AsReadOnly((snapshot?.Artifacts ?? []).ToArray()));
 
-    private static GovernedLoopGraphCatalogNodeSnapshot Map(GovernedLoopNodeCatalogDescriptor item)
-        => new(
+    private GovernedLoopGraphCatalogNodeSnapshot Map(GovernedLoopNodeCatalogDescriptor item)
+    {
+        var commandAction = _commandActions is not null
+            && CommandActionNodeDescriptors.IsCommandAction(item.Descriptor)
+            && _commandActions.TryResolve(item.Descriptor, out var registration)
+            && registration is not null
+                ? MapCommandAction(registration.Template, item.IsExecutable)
+                : null;
+        return new(
             item.Descriptor,
             item.IsAdvertised,
             item.IsExecutable,
@@ -363,8 +375,31 @@ public sealed class GovernedLoopGraphAuthoringFacade
                 parameter.MaximumCharacters,
                 parameter.MinimumInteger,
                 parameter.MaximumInteger,
-                Array.AsReadOnly(parameter.AllowedValues.ToArray()))).ToArray()),
-            Array.AsReadOnly(item.RequiredCapabilityIds.ToArray()));
+                Array.AsReadOnly(parameter.AllowedValues.ToArray()),
+                parameter.MaximumUtf8Bytes,
+                parameter.AllowLeadingOption,
+                parameter.AllowResponseFileReference)).ToArray()),
+            Array.AsReadOnly(item.RequiredCapabilityIds.ToArray()),
+            commandAction);
+    }
+
+    private static GovernedLoopGraphCatalogCommandActionSnapshot MapCommandAction(
+        EmbodySense.Core.Common.CommandActions.Models.CommandActionTemplate template,
+        bool isExecutable)
+        => new(
+            template.TemplateId,
+            template.TemplateVersion,
+            template.ContentHash,
+            isExecutable ? "ready" : template.RequiresCredentialChannel ? "credential-channel-unavailable" : "runtime-unavailable",
+            template.RequiresCredentialChannel,
+            Token(template.Isolation.WorkingDirectory),
+            Token(template.Isolation.Network),
+            template.Isolation.MaxExecutionMilliseconds,
+            template.Isolation.MaxTerminationMilliseconds,
+            template.Isolation.MaxMemoryBytes,
+            template.Isolation.MaxOutputBytes,
+            template.Isolation.MaxConcurrency,
+            template.Isolation.RequireProcessTreeTermination);
 
     private static string Token<T>(T value) where T : struct, Enum
         => JsonNamingPolicy.KebabCaseLower.ConvertName(value.ToString());

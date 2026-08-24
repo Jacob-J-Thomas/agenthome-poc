@@ -1,4 +1,6 @@
 using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Tests.CommandActions;
+using EmbodySense.Core.Application.CommandActions.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
@@ -6,6 +8,8 @@ using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.CommandActions;
+using EmbodySense.Core.Common.CommandActions.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
 using EmbodySense.Core.Common.Loops;
@@ -184,6 +188,78 @@ internal static class GovernedLoopSequentialApplicationTestFixture
                 new GovernedLoopBindingDefinition("action-result-to-exit", GovernedLoopBindingKind.Data, "workspace-action", "result", "exit", "result"),
             ],
             authorityCeiling: GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, WorkspaceCommandCapabilityId]));
+    }
+
+    internal static GovernedLoopGraphRevisionArtifact CommandActionArtifact(
+        CommandActionRegistration? registration = null,
+        IReadOnlyDictionary<string, string>? parameters = null,
+        ContextualRoleRevisionPin? owningRole = null)
+    {
+        registration ??= CommandActionApplicationTestData.Registration();
+        parameters ??= new Dictionary<string, string> { ["value"] = "literal ; $(data)" };
+        var capabilityId = registration.Template.Capability.Id.Value;
+        var nodes = new GovernedLoopNodeDefinition[]
+        {
+            Trigger("trigger"),
+            Inference("infer", "Produce one bounded result before the exact command Action."),
+            new(
+                "command-action",
+                CommandActionNodeDescriptors.For(registration.Template),
+                [Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([capabilityId]),
+                parameters),
+            Exit("exit"),
+        };
+        return Artifact(
+            nodes,
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("infer-to-action", "infer", "command-action", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("action-to-exit", "command-action", "exit", GovernedLoopControlCondition.Success),
+            ],
+            ["exit"],
+            owningRole,
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new GovernedLoopBindingDefinition("action-result-to-exit", GovernedLoopBindingKind.Data, "command-action", "result", "exit", "result"),
+            ],
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId, capabilityId]));
+    }
+
+    internal static GovernedLoopGraphRevisionArtifact CommandActionOnlyArtifact(
+        CommandActionRegistration? registration = null,
+        IReadOnlyDictionary<string, string>? parameters = null,
+        ContextualRoleRevisionPin? owningRole = null)
+    {
+        registration ??= CommandActionApplicationTestData.Registration();
+        parameters ??= new Dictionary<string, string> { ["value"] = "literal ; $(data)" };
+        var capabilityId = registration.Template.Capability.Id.Value;
+        var nodes = new GovernedLoopNodeDefinition[]
+        {
+            Trigger("trigger"),
+            new(
+                "command-action",
+                CommandActionNodeDescriptors.For(registration.Template),
+                [Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([capabilityId]),
+                parameters),
+            Exit("exit"),
+        };
+        return Artifact(
+            nodes,
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-action", "trigger", "command-action", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("action-to-exit", "command-action", "exit", GovernedLoopControlCondition.Success),
+            ],
+            ["exit"],
+            owningRole,
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("action-result-to-exit", GovernedLoopBindingKind.Data, "command-action", "result", "exit", "result"),
+            ],
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, capabilityId]));
     }
 
     internal static GovernedLoopSequentialInvocationSnapshot InvocationSnapshot(

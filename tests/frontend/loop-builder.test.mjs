@@ -603,6 +603,105 @@ test("governed graph lifecycle conflicts rehydrate the current graph before anot
   );
 });
 
+test("governed graph catalog projects safe command identity and keeps unavailable isolation visible but disabled", async () => {
+  const catalog = createGovernedGraphCatalog();
+  const commandCapability = "org.example/command";
+  const commandEntry = (hashCharacter, executable, availability) => ({
+    descriptor: {
+      kind: "action",
+      typeId: `command-${hashCharacter.repeat(64)}`,
+      version: 1,
+    },
+    isAdvertised: true,
+    isExecutable: executable,
+    isLegalEntry: false,
+    isLegalTerminal: false,
+    allowedControlOutcomes: ["success", "failure"],
+    requiredControlOutcomes: ["success", "failure"],
+    joinPolicy: "none",
+    minimumIncomingControlEdges: 1,
+    allowsCycle: false,
+    cycleIterationBudgetParameterId: null,
+    cycleTimeBudgetMillisecondsParameterId: null,
+    ports: [
+      {
+        id: "result",
+        direction: "output",
+        bindingKind: "data",
+        allowedValueKinds: ["command-action-result"],
+        required: true,
+      },
+    ],
+    parameters: [
+      {
+        id: "value",
+        valueKind: "text",
+        required: true,
+        minimumCharacters: 1,
+        maximumCharacters: 128,
+        minimumInteger: null,
+        maximumInteger: null,
+        allowedValues: [],
+      },
+    ],
+    requiredCapabilityIds: [commandCapability],
+    commandAction: {
+      templateId: `org.example/render-${hashCharacter}`,
+      templateVersion: 3,
+      templateHash: hashCharacter.repeat(64),
+      availability,
+      requiresCredentialChannel: false,
+      workingDirectory: "artifact-root",
+      network: "denied",
+      maxExecutionMilliseconds: 5000,
+      maxTerminationMilliseconds: 2000,
+      maxMemoryBytes: 64000000,
+      maxOutputBytes: 16384,
+      maxConcurrency: 1,
+      requiresProcessTreeTermination: true,
+    },
+  });
+  catalog.nodeDescriptors.push(
+    commandEntry("e", true, "ready"),
+    commandEntry("f", false, "isolation-unavailable"),
+  );
+  catalog.roles.roles[0].capabilityMaximumIds.push(commandCapability);
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: catalog,
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.governedGraphTab.click();
+  const commandButtons = findByTag(
+    app.elements.governedGraphCatalog,
+    "button",
+  ).filter((button) => /Command Action/.test(button.textContent));
+
+  assert.equal(commandButtons.length, 2);
+  assert.match(commandButtons[0].textContent, /org\.example\/render-e v3/);
+  assert.equal(commandButtons[0].disabled, false);
+  assert.match(commandButtons[1].textContent, /Isolation unavailable/);
+  assert.equal(commandButtons[1].disabled, true);
+  assert.doesNotMatch(
+    app.elements.governedGraphCatalog.textContent,
+    /command\.exe|file:\/\/|\/sources\/|C:\\/,
+  );
+
+  app.elements.governedGraphId.value = "command-graph";
+  app.elements.governedGraphRevisionId.value = "revision-1";
+  app.elements.governedGraphDisplayName.value = "Command graph";
+  app.elements.governedGraphPurpose.value = "Run one governed command.";
+  await app.elements.governedGraphNewButton.click();
+  await commandButtons[0].click();
+
+  assert.match(
+    app.elements.governedGraphInspector.textContent,
+    /Command template.*org\.example\/render-e v3.*Command availability.*Ready.*credentials not required.*Artifact root working scope.*Denied network.*process tree must be proved terminal/i,
+  );
+});
+
 test("loaded governed graph restores a non-first primary before deriving ordered fallback state", async () => {
   const modelA = "org.example/model-a";
   const modelB = "org.example/model-b";

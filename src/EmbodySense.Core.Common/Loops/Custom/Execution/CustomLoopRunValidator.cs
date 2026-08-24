@@ -17,6 +17,7 @@ using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.LocalWorkspace.Actions;
+using EmbodySense.Core.Common.CommandActions;
 using System.Text;
 using System.Text.Json;
 
@@ -441,7 +442,9 @@ public static class CustomLoopRunValidator
         }
         else
         {
-            var definitionValidation = CustomLoopDefinitionValidator.Validate(run.AdmittedDefinition);
+            var definitionValidation = run.SequentialInvocationSnapshot is not null && run.SequentialAdapterBinding is not null
+                ? CustomLoopDefinitionValidator.ValidateSequentialProjection(run.AdmittedDefinition)
+                : CustomLoopDefinitionValidator.Validate(run.AdmittedDefinition);
             foreach (var error in definitionValidation.Errors)
             {
                 Add(errors, error.Code, $"admittedDefinition.{error.Field}", error.Message);
@@ -837,7 +840,7 @@ public static class CustomLoopRunValidator
             .ToArray();
         return runningNodes.Length > 0
             && runningNodes.All(node => HasRestartSafePureRunningAttempt(run, node)
-                || HasRestartSafeWorkspaceActionRunningAttempt(run, node)
+                || HasRestartSafeRecoverableActionRunningAttempt(run, node)
                 || HasAuthenticatedTerminalRunningAttempt(run, node));
     }
 
@@ -864,7 +867,7 @@ public static class CustomLoopRunValidator
         return starts.Length == 1;
     }
 
-    private static bool HasRestartSafeWorkspaceActionRunningAttempt(CustomLoopRunRecord run, GovernedLoopNodeExecutionEvidence node)
+    private static bool HasRestartSafeRecoverableActionRunningAttempt(CustomLoopRunRecord run, GovernedLoopNodeExecutionEvidence node)
     {
         if (node is not
             {
@@ -873,7 +876,8 @@ public static class CustomLoopRunValidator
                 AttemptOperationId: not null,
                 Descriptor.Kind: GovernedLoopNodeKind.Action,
             }
-            || !WorkspaceActionNodeDescriptors.TryResolve(node.Descriptor, out _))
+            || !(WorkspaceActionNodeDescriptors.TryResolve(node.Descriptor, out _)
+                || CommandActionNodeDescriptors.IsCommandAction(node.Descriptor)))
         {
             return false;
         }
@@ -982,6 +986,7 @@ public static class CustomLoopRunValidator
         var binding = run.SequentialAdapterBinding!;
         var capabilityAdmission = run.CapabilityAdmission;
         var toolAssignments = run.AdmittedDefinition?.ToolAssignments;
+        var hasInference = run.AdmittedDefinition?.InferenceSteps.Length > 0;
         var hasWorkspaceCommandAdmission = capabilityAdmission.Evidence.Any(item => item.SubjectId.Equals(capabilityAdmission.Requirements.SubjectId)
             && string.Equals(item.Outcome, "Selected", StringComparison.Ordinal)
             && string.Equals(item.SelectedIdentity?.Id.Value, "org.embodysense/workspace-command", StringComparison.Ordinal));
@@ -989,11 +994,15 @@ public static class CustomLoopRunValidator
         var scheduled = run.SequentialInvocationSnapshot?.TriggerOrigin is not null;
         if (toolAssignments is { Length: 0 })
         {
-            expectedRootIdentities = scheduled
-                ? _sequentialScheduledToolFreeCapabilityRootIds
-                : _sequentialToolFreeCapabilityRootIds;
+            expectedRootIdentities = hasInference
+                ? scheduled
+                    ? _sequentialScheduledToolFreeCapabilityRootIds
+                    : _sequentialToolFreeCapabilityRootIds
+                : scheduled
+                    ? ["org.embodysense/conversation-turn", "org.embodysense/triggers/time"]
+                    : ["org.embodysense/conversation-turn"];
         }
-        else if (toolAssignments is not null && toolAssignments.SequenceEqual(_sequentialToolEnabledAssignments))
+        else if (hasInference && toolAssignments is not null && toolAssignments.SequenceEqual(_sequentialToolEnabledAssignments))
         {
             expectedRootIdentities = scheduled
                 ? _sequentialScheduledToolEnabledCapabilityRootIds
@@ -1011,9 +1020,15 @@ public static class CustomLoopRunValidator
         var routedProfileIds = binding.AdmissionReceipt.Evidence.ModelRoutingAdmission.Entries
             .SelectMany(entry => entry.Fallbacks.Prepend(entry.Primary))
             .Select(profile => profile.Capability.DescriptorIdentity.Id.Value)
-            .Distinct(StringComparer.Ordinal);
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (!hasInference && routedProfileIds.Length > 0)
+        {
+            Add(errors, "sequential_model_routing_without_inference", "capabilityAdmission.evidence.modelRoutingAdmission", "A canonical graph without an Inference node cannot retain model-routing admission evidence.");
+        }
         expectedRootIdentities = expectedRootIdentities
-            .Concat(routedProfileIds)
+            .Concat(hasInference ? routedProfileIds : [])
+            .Concat(binding.CommandActionCapabilityIds)
             .Order(StringComparer.Ordinal)
             .ToArray();
 
@@ -1031,7 +1046,7 @@ public static class CustomLoopRunValidator
             .ToArray();
         if (!selectedRootIdentities.SequenceEqual(expectedRootIdentities, StringComparer.Ordinal))
         {
-            Add(errors, "sequential_capability_identity_mismatch", "capabilityAdmission.evidence", $"Canonical sequential execution requires exactly the sorted roots derived from its trigger origin, closed inference-tool shape, and exact workspace Action descriptors (expected `{string.Join(',', expectedRootIdentities)}`; observed `{string.Join(',', selectedRootIdentities)}`).");
+            Add(errors, "sequential_capability_identity_mismatch", "capabilityAdmission.evidence", $"Canonical sequential execution requires exactly the sorted roots derived from its trigger origin, closed inference-tool shape, and exact recoverable Action descriptors (expected `{string.Join(',', expectedRootIdentities)}`; observed `{string.Join(',', selectedRootIdentities)}`).");
         }
     }
 
@@ -1825,7 +1840,7 @@ public static class CustomLoopRunValidator
             var isPureNode = IsPureNodeEvent(run, item);
             var isTopologyNode = IsTopologyNodeEvent(run, item);
             var isWaitNode = IsWaitNodeEvent(run, item);
-            var isWorkspaceAction = IsWorkspaceActionEvent(run, item);
+            var isRecoverableAction = IsRecoverableActionEvent(run, item);
             var hasValidPureEventShape = item.Kind switch
             {
                 CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
@@ -1884,12 +1899,12 @@ public static class CustomLoopRunValidator
                 return;
             }
 
-            if (isWorkspaceAction)
+            if (isRecoverableAction)
             {
                 var hasValidActionShape = item.Kind switch
                 {
                     CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
-                    CustomLoopRunEventKind.NodeAttemptCompleted => item.CanonicalOutput is not null && WorkspaceActionResultContract.TryParse(item.CanonicalOutput, out _),
+                    CustomLoopRunEventKind.NodeAttemptCompleted => item.CanonicalOutput is not null && IsRecoverableActionResult(run, item, item.CanonicalOutput),
                     CustomLoopRunEventKind.NodeAttemptFailed => HasPriorSequentialDispatch(run.Events, eventIndex, evidence, CustomLoopRunEventKind.NodeAttemptStarted),
                     _ => false,
                 };
@@ -1897,7 +1912,7 @@ public static class CustomLoopRunValidator
                     || item.Iteration != (evidence.CycleIteration ?? 1)
                     || !hasValidActionShape)
                 {
-                    Add(errors, "sequential_workspace_action_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential workspace Action evidence must identify its exact activation and use the canonical reserved start, value-free completion, or failure envelope.");
+                    Add(errors, "sequential_recoverable_action_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential recoverable Action evidence must identify its exact activation and use the canonical reserved start, value-free completion, or failure envelope.");
                 }
 
                 return;
@@ -1991,7 +2006,7 @@ public static class CustomLoopRunValidator
     private static void ValidateTraceReservation(CustomLoopRunEvent item, string field, CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
     {
         var startsAttempt = item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted;
-        var expectedReservation = IsPureNodeEvent(run, item) || IsTopologyNodeEvent(run, item) || IsWorkspaceActionEvent(run, item)
+        var expectedReservation = IsPureNodeEvent(run, item) || IsTopologyNodeEvent(run, item) || IsRecoverableActionEvent(run, item)
             ? CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes
             : CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes;
         if (startsAttempt && item.TraceReservationUtf8Bytes != expectedReservation)
@@ -2036,7 +2051,7 @@ public static class CustomLoopRunValidator
         return run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal)?.Descriptor.Kind == GovernedLoopNodeKind.Wait;
     }
 
-    private static bool IsWorkspaceActionEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    private static bool IsRecoverableActionEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
     {
         if (item.SequentialNodeEvidence is not { ActivationOrdinal: var activationOrdinal })
         {
@@ -2044,7 +2059,22 @@ public static class CustomLoopRunValidator
         }
 
         var descriptor = run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal)?.Descriptor;
-        return WorkspaceActionNodeDescriptors.TryResolve(descriptor, out _);
+        return WorkspaceActionNodeDescriptors.TryResolve(descriptor, out _)
+            || CommandActionNodeDescriptors.IsCommandAction(descriptor);
+    }
+
+    private static bool IsRecoverableActionResult(CustomLoopRunRecord run, CustomLoopRunEvent item, string canonicalOutput)
+    {
+        if (item.SequentialNodeEvidence is not { ActivationOrdinal: var activationOrdinal })
+        {
+            return false;
+        }
+
+        var descriptor = run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal)?.Descriptor;
+        return WorkspaceActionNodeDescriptors.TryResolve(descriptor, out _)
+            ? WorkspaceActionResultContract.TryParse(canonicalOutput, out _)
+            : CommandActionNodeDescriptors.IsCommandAction(descriptor)
+                && CommandActionResultContract.TryParse(canonicalOutput, out _);
     }
 
     private static bool ToolPhaseMatchesEventKind(CustomLoopToolEvidencePhase phase, CustomLoopRunEventKind kind)
@@ -2472,7 +2502,10 @@ public static class CustomLoopRunValidator
                 && item.PureNodeOutcomeJson is not null
                 || activation.Descriptor.Kind == GovernedLoopNodeKind.Action
                 && item.CanonicalOutput is not null
-                && WorkspaceActionResultContract.TryParse(item.CanonicalOutput, out _))
+                && (WorkspaceActionNodeDescriptors.TryResolve(activation.Descriptor, out _)
+                    ? WorkspaceActionResultContract.TryParse(item.CanonicalOutput, out _)
+                    : CommandActionNodeDescriptors.IsCommandAction(activation.Descriptor)
+                        && CommandActionResultContract.TryParse(item.CanonicalOutput, out _)))
             && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
             && CustomLoopSequentialOutcomeArtifactHash.Matches(item)) == true;
     }

@@ -75,6 +75,8 @@ public sealed class GovernedGraphsApiControllerTests
             var unauthorized = await client.GetAsync("/api/governed-graphs/catalog");
             var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             var beforeInitialization = await SendAsync(client, HttpMethod.Get, "/api/governed-graphs/catalog", token);
+            var detailBeforeInitialization = await SendAsync(client, HttpMethod.Get, "/api/governed-graphs/detail?graphId=before-init", token);
+            var mutationBeforeInitialization = await SendAsync(client, HttpMethod.Post, "/api/governed-graphs/mutate", token);
             var initialized = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token);
             var catalog = await SendAsync(client, HttpMethod.Get, "/api/governed-graphs/catalog", token);
             var missing = await SendAsync(client, HttpMethod.Get, "/api/governed-graphs/detail?graphId=missing-graph", token);
@@ -83,6 +85,8 @@ public sealed class GovernedGraphsApiControllerTests
 
             Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, beforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, detailBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, mutationBeforeInitialization.StatusCode);
             Assert.Equal(HttpStatusCode.OK, initialized.StatusCode);
             Assert.True(catalog.StatusCode == HttpStatusCode.OK, catalogJson);
             Assert.True(catalog.Headers.CacheControl?.NoStore == true);

@@ -110,6 +110,9 @@ public static class GovernedLoopWaitNodeCatalogContract
             && candidate.Required == canonical.Required
             && candidate.MinimumCharacters == canonical.MinimumCharacters
             && candidate.MaximumCharacters == canonical.MaximumCharacters
+            && candidate.MaximumUtf8Bytes == canonical.MaximumUtf8Bytes
+            && candidate.AllowLeadingOption == canonical.AllowLeadingOption
+            && candidate.AllowResponseFileReference == canonical.AllowResponseFileReference
             && candidate.MinimumInteger == canonical.MinimumInteger
             && candidate.MaximumInteger == canonical.MaximumInteger
             && candidate.AllowedValues is not null

@@ -84,6 +84,16 @@ internal static class GovernedLoopGraphValidationEvidenceHash
                 writer.WriteBoolean("required", parameter.Required);
                 writer.WriteNumber("minimumCharacters", parameter.MinimumCharacters);
                 writer.WriteNumber("maximumCharacters", parameter.MaximumCharacters);
+                if (parameter.MaximumUtf8Bytes.HasValue)
+                {
+                    writer.WriteNumber("maximumUtf8Bytes", parameter.MaximumUtf8Bytes.Value);
+                }
+                else
+                {
+                    writer.WriteNull("maximumUtf8Bytes");
+                }
+                writer.WriteBoolean("allowLeadingOption", parameter.AllowLeadingOption);
+                writer.WriteBoolean("allowResponseFileReference", parameter.AllowResponseFileReference);
                 if (parameter.MinimumInteger.HasValue)
                 {
                     writer.WriteNumber("minimumInteger", parameter.MinimumInteger.Value);

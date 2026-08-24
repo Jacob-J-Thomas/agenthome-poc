@@ -80,8 +80,8 @@ public sealed class CustomLoopRecoveryService
 
         var admissionAuditComplete = CustomLoopRunValidator.HasCompleteAdmissionAudit(run);
         var hasRestartSafeDeterministicAttempt = HasRestartSafeDeterministicAttemptSinceCheckpoint(run);
-        var hasRestartSafeWorkspaceActionAttempt = HasRestartSafeWorkspaceActionAttemptSinceCheckpoint(run);
-        var hasRestartSafeAttempt = hasRestartSafeDeterministicAttempt || hasRestartSafeWorkspaceActionAttempt;
+        var hasRestartSafeRecoverableActionAttempt = HasRestartSafeRecoverableActionAttemptSinceCheckpoint(run);
+        var hasRestartSafeAttempt = hasRestartSafeDeterministicAttempt || hasRestartSafeRecoverableActionAttempt;
         var hasOpenAttempt = HasOpenAttemptSinceCheckpoint(run);
         var recoverableWaitClaims = GovernedLoopWaitClaimEvidence.FindExactRecoverableClaims(run);
         var recoverableWaitContinuations = GovernedLoopWaitClaimEvidence.FindExactRecoverableContinuations(run);
@@ -145,7 +145,7 @@ public sealed class CustomLoopRecoveryService
                 ? "recovery_deterministic_cancellation_reconciliation_required"
                 : target == CustomLoopRunStatus.NeedsReview ? "recovery_open_attempt" : null;
         var candidate = CreateCandidate(run, target, failureCode, detail, now);
-        var metadata = RecoveryMetadata(run, candidate, hasOpenAttempt, hasRestartSafeDeterministicAttempt, hasRestartSafeWorkspaceActionAttempt, admissionAuditComplete);
+        var metadata = RecoveryMetadata(run, candidate, hasOpenAttempt, hasRestartSafeDeterministicAttempt, hasRestartSafeRecoverableActionAttempt, admissionAuditComplete);
 
         // Record intent before the lifecycle mutation so a crash never produces an unexplained
         // recovery transition.
@@ -245,7 +245,7 @@ public sealed class CustomLoopRecoveryService
         CustomLoopRunRecord candidate,
         bool hasOpenAttempt,
         bool hasRestartSafeDeterministicAttempt,
-        bool hasRestartSafeWorkspaceActionAttempt,
+        bool hasRestartSafeRecoverableActionAttempt,
         bool admissionAuditComplete)
     {
         return new Dictionary<string, object?>
@@ -262,7 +262,7 @@ public sealed class CustomLoopRecoveryService
             ["recoveryEventId"] = candidate.Events[^1].EventId,
             ["openAttemptAfterCheckpoint"] = hasOpenAttempt,
             ["restartSafeDeterministicAttemptAfterCheckpoint"] = hasRestartSafeDeterministicAttempt,
-            ["restartSafeWorkspaceActionAttemptAfterCheckpoint"] = hasRestartSafeWorkspaceActionAttempt,
+            ["restartSafeRecoverableActionAttemptAfterCheckpoint"] = hasRestartSafeRecoverableActionAttempt,
             ["admissionAuditComplete"] = admissionAuditComplete,
             ["automaticExecution"] = false
         };
@@ -343,7 +343,7 @@ public sealed class CustomLoopRecoveryService
             && (item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
             && !HasAuthenticatedTerminalSequentialOutcome(run, item)
             && !IsRestartSafeDeterministicAttemptStart(run, item)
-            && !IsRestartSafeWorkspaceActionAttemptStart(run, item)
+            && !IsRestartSafeRecoverableActionAttemptStart(run, item)
             && !GovernedLoopWaitClaimEvidence.IsExactRecoverableClaimStart(run, item)
             && !GovernedLoopWaitClaimEvidence.IsExactRecoverableContinuationStart(run, item)
             && !IsExactWaitingAttemptStart(run, item));
@@ -374,7 +374,7 @@ public sealed class CustomLoopRecoveryService
         return exactStarts.Length != 1
             || (!HasAuthenticatedTerminalSequentialOutcome(run, exactStarts[0])
                 && !IsRestartSafeDeterministicAttemptStart(run, exactStarts[0])
-                && !IsRestartSafeWorkspaceActionAttemptStart(run, exactStarts[0])
+                && !IsRestartSafeRecoverableActionAttemptStart(run, exactStarts[0])
                 && !GovernedLoopWaitClaimEvidence.IsExactRecoverableClaimStart(run, exactStarts[0])
                 && !GovernedLoopWaitClaimEvidence.IsExactRecoverableContinuationStart(run, exactStarts[0])
                 && !IsExactWaitingAttemptStart(run, exactStarts[0]));
@@ -513,10 +513,10 @@ public sealed class CustomLoopRecoveryService
     internal static bool HasRestartSafeDeterministicAttemptSinceCheckpoint(CustomLoopRunRecord run)
         => run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence && IsRestartSafeDeterministicAttemptStart(run, item));
 
-    internal static bool HasRestartSafeWorkspaceActionAttemptSinceCheckpoint(CustomLoopRunRecord run)
-        => run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence && IsRestartSafeWorkspaceActionAttemptStart(run, item));
+    internal static bool HasRestartSafeRecoverableActionAttemptSinceCheckpoint(CustomLoopRunRecord run)
+        => run.Events.Any(item => item.Sequence > run.Checkpoint.LastCommittedSequence && IsRestartSafeRecoverableActionAttemptStart(run, item));
 
-    private static bool IsRestartSafeWorkspaceActionAttemptStart(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    private static bool IsRestartSafeRecoverableActionAttemptStart(CustomLoopRunRecord run, CustomLoopRunEvent item)
     {
         if (run.Frontier is not { } frontier
             || run.SequentialAdapterBinding is not { } binding
@@ -540,7 +540,7 @@ public sealed class CustomLoopRecoveryService
                     Attempt: { } attempt,
                     AttemptOperationId: { } attemptOperationId,
                 } node
-            || !WorkspaceActionNodeDescriptors.TryResolve(node.Descriptor, out _))
+            || !GovernedLoopSequentialNodeDescriptors.IsRecoverableAction(node.Descriptor))
         {
             return false;
         }

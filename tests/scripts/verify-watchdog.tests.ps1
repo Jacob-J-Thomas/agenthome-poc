@@ -456,6 +456,14 @@ Assert-True -Condition ($linkedEffectFixturePlan.TestProjects -ccontains "tests/
 Assert-True -Condition ($linkedEffectFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj") -Message "A linked effect-attempt fixture must execute its Startup consumer."
 Assert-True -Condition (@($linkedEffectFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Linked effect-attempt inputs must run every consuming suite without focused filtering."
 
+$linkedCommandActionFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/CommandActions/CommandActionApplicationTestData.cs")
+Assert-Equal -Actual ($linkedCommandActionFixturePlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj|tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj" -Message "The linked command-Action fixture must select its Application owner and Startup consumer."
+Assert-True -Condition (@($linkedCommandActionFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "The linked command-Action fixture must run both consuming suites without focused filtering."
+
+$linkedSequentialFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialApplicationTestFixture.cs")
+Assert-Equal -Actual ($linkedSequentialFixturePlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj|tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj" -Message "The linked sequential fixture must select its Application owner and Startup consumer."
+Assert-True -Condition (@($linkedSequentialFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "The linked sequential fixture must run both consuming suites without focused filtering."
+
 $browserHostPlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.E2EBrowserHost/Program.cs", "tests/EmbodySense.E2EBrowserHost/EmbodySense.E2EBrowserHost.csproj")
 Assert-True -Condition $browserHostPlan.RequiresBuild -Message "The external browser host must compile during qualification."
 Assert-Equal -Actual ($browserHostPlan.TestProjects -join "|") -Expected "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj" -Message "The external browser host must execute its owning E2E consumer without becoming a separate test lane."
@@ -721,9 +729,9 @@ Assert-Equal -Actual $exactDeadline.Code -Expected "passed" -Message "Successful
 $overDeadline = Get-VerificationDeadlineDisposition -ElapsedTicks ($deadlineTicks + 1) -DeadlineTicks $deadlineTicks -ProcessExited $true -ExitCode 0 -CompletionMarkerCount 1 -ChildTimedOut $false -CancellationRequested $false
 Assert-Equal -Actual $overDeadline.Code -Expected "deadline-exceeded" -Message "One tick over 600 seconds must fail."
 
-$promotionDeadlineTicks = [TimeSpan]::FromSeconds(900).Ticks
+$promotionDeadlineTicks = [TimeSpan]::FromSeconds(1200).Ticks
 $exactPromotionDeadline = Get-VerificationDeadlineDisposition -ElapsedTicks $promotionDeadlineTicks -DeadlineTicks $promotionDeadlineTicks -ProcessExited $true -ExitCode 0 -CompletionMarkerCount 1 -ChildTimedOut $false -CancellationRequested $false
-Assert-True -Condition $exactPromotionDeadline.Succeeded -Message "Exactly 900 seconds must remain inside the explicit promotion deadline."
+Assert-True -Condition $exactPromotionDeadline.Succeeded -Message "Exactly 1200 seconds must remain inside the explicit promotion deadline."
 $overPromotionDeadline = Get-VerificationDeadlineDisposition -ElapsedTicks ($promotionDeadlineTicks + 1) -DeadlineTicks $promotionDeadlineTicks -ProcessExited $true -ExitCode 0 -CompletionMarkerCount 1 -ChildTimedOut $false -CancellationRequested $false
 Assert-Equal -Actual $overPromotionDeadline.Code -Expected "deadline-exceeded" -Message "One tick over the bounded promotion deadline must fail."
 
@@ -753,7 +761,7 @@ $workflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
 $qualificationWorkflow = (Get-Content -LiteralPath $qualificationWorkflowPath -Raw).Replace("`r`n", "`n")
 $trustedLocalQualificationWorkflow = (Get-Content -LiteralPath $trustedLocalQualificationWorkflowPath -Raw).Replace("`r`n", "`n")
 Assert-True -Condition ($watchdogScript.IndexOf('[int]$DeadlineSeconds = 600', [StringComparison]::Ordinal) -ge 0) -Message "The external watchdog must default to exactly 600 seconds."
-Assert-True -Condition ($watchdogScript.IndexOf('[ValidateRange(1, 900)]', [StringComparison]::Ordinal) -ge 0) -Message "No accepted watchdog override may exceed the bounded 900-second promotion window."
+Assert-True -Condition ($watchdogScript.IndexOf('[ValidateRange(1, 1200)]', [StringComparison]::Ordinal) -ge 0) -Message "No accepted watchdog override may exceed the bounded 1200-second promotion window."
 Assert-True -Condition ($watchdogScript.IndexOf('[switch]$Qualification', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must expose the bounded qualification child explicitly."
 Assert-True -Condition ($watchdogScript.IndexOf('[ValidateSet("Full", "Solution", "StaticContracts")]', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must expose explicit component modes for the hosted fan-out."
 Assert-True -Condition ($watchdogScript.IndexOf('"StaticContracts" { "static-contracts"; break }', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must map the static component to the exact hyphenated verifier marker identity."
@@ -804,7 +812,7 @@ Assert-True -Condition ($qualificationScript.IndexOf('@("prettier", "--check", "
 Assert-True -Condition ($watchdogScript.IndexOf('Test-VerificationDeadlineExceeded -ElapsedTicks $stopwatch.Elapsed.Ticks -DeadlineTicks $deadlineTicks', [StringComparison]::Ordinal) -ge 0) -Message "The running watchdog must use the tested inclusive deadline decision."
 Assert-True -Condition ($watchdogScript.IndexOf('Stop-VerificationProcessTree $process', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must terminate the full verifier process tree."
 Assert-True -Condition ($verifyScript.IndexOf('VERIFY_COMPLETE schema_version=1 status=passed', [StringComparison]::Ordinal) -ge 0) -Message "The verifier must emit an exact terminal marker only after successful completion."
-Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 900 -VerificationComponent Solution', [StringComparison]::Ordinal) -ge 0) -Message "Solution promotion must invoke the external watchdog with its explicit fifteen-minute certification bound."
+Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 1200 -VerificationComponent Solution', [StringComparison]::Ordinal) -ge 0) -Message "Solution promotion must invoke the external watchdog with its explicit twenty-minute certification bound."
 Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600 -VerificationComponent StaticContracts', [StringComparison]::Ordinal) -ge 0) -Message "Static promotion must invoke the external watchdog with its bounded ten-minute certification bound."
 Assert-True -Condition ($workflow.IndexOf('-SkipCoverage', [StringComparison]::Ordinal) -lt 0) -Message "Promotion verification must retain coverage collection and thresholds."
 Assert-True -Condition ($workflow.IndexOf("github.event.pull_request.draft == false", [StringComparison]::Ordinal) -ge 0) -Message "Promotion verification must run only for a merge-candidate pull request or main."

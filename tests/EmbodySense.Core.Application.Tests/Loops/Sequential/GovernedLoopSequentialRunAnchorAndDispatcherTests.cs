@@ -395,6 +395,7 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             invocation.ContentHash,
             artifact.ArtifactHash,
             artifact.LayoutHash,
+            [],
             string.Empty));
         var anchorResult = GovernedLoopSequentialRunAnchorGuard.Create(adapterBinding, request, receipt, invocation, artifact);
         var plan = Assert.IsType<GovernedLoopSequentialPlan>(GovernedLoopSequentialPlanBuilder.Build(artifact).Plan);
@@ -577,6 +578,7 @@ public sealed class GovernedLoopSequentialRunAnchorAndDispatcherTests
             source.InvocationPayloadHash,
             source.GraphArtifactHash,
             source.GraphLayoutHash,
+            source.CommandActionCapabilityIds,
             source.ContentHash);
 
     private static GovernedLoopSequentialNodeEvidenceReceipt Evidence(

@@ -5,6 +5,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
@@ -170,6 +171,13 @@ public static class GovernedLoopSequentialContractValidator
         ValidateHash(binding.InvocationPayloadHash, "$.invocationPayloadHash", errors);
         ValidateHash(binding.GraphArtifactHash, "$.graphArtifactHash", errors);
         ValidateHash(binding.GraphLayoutHash, "$.graphLayoutHash", errors);
+        if (binding.CommandActionCapabilityIds is null
+            || binding.CommandActionCapabilityIds.Count > GovernedLoopSequentialContractLimits.MaxCommandActionCapabilities
+            || !binding.CommandActionCapabilityIds.SequenceEqual(binding.CommandActionCapabilityIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal), StringComparer.Ordinal)
+            || binding.CommandActionCapabilityIds.Any(value => !CapabilityId.TryParse(value, out _, out _)))
+        {
+            Add(errors, GovernedLoopSequentialValidationErrorCode.InvalidComposition, "$.commandActionCapabilityIds");
+        }
         if (validateContentHash)
         {
             ValidateHash(binding.ContentHash, "$.contentHash", errors);

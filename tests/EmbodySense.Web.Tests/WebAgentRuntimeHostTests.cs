@@ -81,6 +81,30 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task InvokeGovernedLoopAsync_validates_input_and_owner_then_reaches_the_runtime_boundary()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var host = CreateHost(workspace.RootPath, codexPath);
+        await host.InitializeWorkspaceAsync();
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() => host.InvokeGovernedLoopAsync(null!, "connection-1"));
+
+        var transport = new GovernedLoopRunInvocationTransportInput(
+            "governed-host-boundary",
+            new GovernedLoopRevisionPublicationInput(1, 1, "missing-graph", "missing-revision", new string('a', 64), "publish-one", new string('b', 64)),
+            new GovernedLoopAuthorityGrantInput("grant-one", 1, "sha256:" + new string('c', 64)),
+            "prompt");
+        Assert.True(GovernedLoopRunInvocationTransport.TryCreate(transport, out var input));
+        Assert.NotNull(input);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => host.InvokeGovernedLoopAsync(input!, " "));
+        var response = await host.InvokeGovernedLoopAsync(input!, "connection-1");
+
+        Assert.Equal("NotFound", response.Status);
+    }
+
+    [Fact]
     public async Task InitializeWorkspaceAsync_serializes_concurrent_clients_and_reports_the_already_initialized_race()
     {
         using var workspace = new TestWorkspace();

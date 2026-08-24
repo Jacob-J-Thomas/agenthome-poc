@@ -156,6 +156,7 @@ internal static class WorkspaceToolAuthorityTestFixture
             invocation.ContentHash,
             artifact.ArtifactHash,
             artifact.LayoutHash,
+            [],
             string.Empty));
         var anchorResult = GovernedLoopSequentialRunAnchorGuard.Create(adapterBinding, admissionRequest, receipt, invocation, artifact);
         Assert.True(anchorResult.Anchor is not null, anchorResult.Status.ToString());

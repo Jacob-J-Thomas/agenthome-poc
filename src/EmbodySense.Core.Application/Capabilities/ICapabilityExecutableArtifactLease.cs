@@ -26,4 +26,17 @@ public interface ICapabilityExecutableArtifactLease : IAsyncDisposable
     /// <param name="cancellationToken">The cancellation token used while acquiring and validating launch authority.</param>
     /// <returns>A launch fence when the exact artifact remains enabled and current; otherwise <see langword="null"/>.</returns>
     Task<ICapabilityExecutableLaunchFence?> AcquireLaunchFenceAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Executes one bounded launch operation while final lifecycle validation and its authority fence remain active.</summary>
+    /// <typeparam name="TResult">The reference-type launch result.</typeparam>
+    /// <param name="operation">The bounded launch operation that must complete before authority is released.</param>
+    /// <param name="cancellationToken">The cancellation token used while validating and launching.</param>
+    /// <returns>The launch result when lifecycle validation succeeds; otherwise <see langword="null"/>.</returns>
+    async Task<TResult?> ExecuteWithLaunchFenceAsync<TResult>(Func<CancellationToken, Task<TResult>> operation, CancellationToken cancellationToken = default)
+        where TResult : class
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        await using var fence = await AcquireLaunchFenceAsync(cancellationToken).ConfigureAwait(false);
+        return fence is null ? null : await operation(cancellationToken).ConfigureAwait(false);
+    }
 }

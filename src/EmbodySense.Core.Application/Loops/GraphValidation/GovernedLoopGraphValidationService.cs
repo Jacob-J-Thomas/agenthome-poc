@@ -3,10 +3,13 @@ using System.Text;
 using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
@@ -237,14 +240,14 @@ public sealed class GovernedLoopGraphValidationService
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var parameter in descriptor.Parameters.Take(CustomLoopLimits.MaxGraphDescriptorParameters).OrderBy(parameter => parameter?.Id, StringComparer.Ordinal))
         {
-            if (parameter is null || !CustomLoopArtifactIdentifier.IsValid(parameter.Id) || !ids.Add(parameter.Id) || !Enum.IsDefined(parameter.ValueKind) || parameter.ValueKind == GovernedLoopParameterValueKind.Unknown || parameter.MinimumCharacters < 0 || parameter.MinimumCharacters > parameter.MaximumCharacters || parameter.MaximumCharacters > CustomLoopLimits.MaxGraphParameterValueCharacters || parameter.AllowedValues is null)
+            if (parameter is null || !CustomLoopArtifactIdentifier.IsValid(parameter.Id) || !ids.Add(parameter.Id) || !Enum.IsDefined(parameter.ValueKind) || parameter.ValueKind == GovernedLoopParameterValueKind.Unknown || parameter.MinimumCharacters < 0 || parameter.MinimumCharacters > parameter.MaximumCharacters || parameter.MaximumCharacters > CustomLoopLimits.MaxGraphParameterValueCharacters || parameter.MaximumUtf8Bytes is <= 0 or > CustomLoopLimits.MaxGraphParameterValueCharacters * 4 || parameter.AllowedValues is null)
             {
                 Add(errors, "catalog.parameter-contract.invalid", GovernedLoopGraphElementKind.Catalog, descriptor.Descriptor.TypeId, $"{descriptorPath}.parameters", "Parameter contracts must have unique canonical identities, defined value semantics, and bounded character ranges.");
                 continue;
             }
 
             var hasIntegerRange = parameter.MinimumInteger.HasValue && parameter.MaximumInteger.HasValue && parameter.MinimumInteger <= parameter.MaximumInteger;
-            var allowedValuesValid = parameter.AllowedValues.Count > 0 && parameter.AllowedValues.Count <= CustomLoopLimits.MaxGraphDescriptorParameters && parameter.AllowedValues.Take(CustomLoopLimits.MaxGraphDescriptorParameters).All(value => IsCanonicalParameterText(value, parameter.MinimumCharacters, parameter.MaximumCharacters)) && parameter.AllowedValues.Take(CustomLoopLimits.MaxGraphDescriptorParameters).Distinct(StringComparer.Ordinal).Count() == parameter.AllowedValues.Count;
+            var allowedValuesValid = parameter.AllowedValues.Count > 0 && parameter.AllowedValues.Count <= CustomLoopLimits.MaxGraphDescriptorParameters && parameter.AllowedValues.Take(CustomLoopLimits.MaxGraphDescriptorParameters).All(value => IsCompatibleParameterText(value, parameter)) && parameter.AllowedValues.Take(CustomLoopLimits.MaxGraphDescriptorParameters).Distinct(StringComparer.Ordinal).Count() == parameter.AllowedValues.Count;
             if (parameter.ValueKind == GovernedLoopParameterValueKind.Integer != hasIntegerRange || parameter.ValueKind == GovernedLoopParameterValueKind.Enumeration != allowedValuesValid || parameter.ValueKind != GovernedLoopParameterValueKind.Integer && (parameter.MinimumInteger.HasValue || parameter.MaximumInteger.HasValue) || parameter.ValueKind != GovernedLoopParameterValueKind.Enumeration && parameter.AllowedValues.Count > 0)
             {
                 Add(errors, "catalog.parameter-contract.semantics", GovernedLoopGraphElementKind.Catalog, descriptor.Descriptor.TypeId, $"{descriptorPath}.parameters[{parameter.Id}]", "Integer ranges and enumeration values must be present only for their matching canonical value semantics.");
@@ -515,7 +518,7 @@ public sealed class GovernedLoopGraphValidationService
 
     private static bool IsCompatibleParameterValue(string value, GovernedLoopCatalogParameterContract contract)
     {
-        if (!IsCanonicalParameterText(value, contract.MinimumCharacters, contract.MaximumCharacters))
+        if (!IsCompatibleParameterText(value, contract))
         {
             return false;
         }
@@ -527,11 +530,24 @@ public sealed class GovernedLoopGraphValidationService
             GovernedLoopParameterValueKind.Integer => contract.MinimumInteger.HasValue && contract.MaximumInteger.HasValue && long.TryParse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var integer) && string.Equals(integer.ToString(CultureInfo.InvariantCulture), value, StringComparison.Ordinal) && integer >= contract.MinimumInteger.Value && integer <= contract.MaximumInteger.Value,
             GovernedLoopParameterValueKind.Number => IsCanonicalFiniteNumber(value),
             GovernedLoopParameterValueKind.Identifier => CustomLoopArtifactIdentifier.IsValid(value),
+            GovernedLoopParameterValueKind.CapabilityPath => CommandActionInputContract.IsCanonicalIdentifier(value),
             GovernedLoopParameterValueKind.JsonPointer => IsCanonicalJsonPointer(value),
+            GovernedLoopParameterValueKind.WorkspaceRelativeTarget => WorkspaceRelativeFileTarget.TryParse(value, out var target, out _) && string.Equals(target!.Value, value, StringComparison.Ordinal),
+            GovernedLoopParameterValueKind.Json => IsCanonicalJson(value),
             GovernedLoopParameterValueKind.Enumeration => contract.AllowedValues.Contains(value, StringComparer.Ordinal),
             _ => false
         };
     }
+
+    private static bool IsCompatibleParameterText(string value, GovernedLoopCatalogParameterContract contract)
+        => IsCanonicalParameterText(value, contract.MinimumCharacters, contract.MaximumCharacters)
+            && (!contract.MaximumUtf8Bytes.HasValue || Encoding.UTF8.GetByteCount(value) <= contract.MaximumUtf8Bytes.Value)
+            && (contract.AllowLeadingOption || !value.StartsWith("-", StringComparison.Ordinal))
+            && (contract.AllowResponseFileReference || !value.StartsWith("@", StringComparison.Ordinal));
+
+    private static bool IsCanonicalJson(string value)
+        => GovernedActuatorInputContract.TryCanonicalize(value, out var canonical, out _)
+            && string.Equals(canonical!.CanonicalJson, value, StringComparison.Ordinal);
 
     private static bool IsValidKindSet(GovernedLoopValueKindSet? kinds)
     {

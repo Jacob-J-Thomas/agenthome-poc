@@ -400,6 +400,11 @@ public sealed class WebClientFlowTests
             return new LoopRunInvocationResponse("Admitted", "Completed", true, null, [], "Approval decision completed the invocation.");
         }
 
+        public Task<GovernedLoopRunInvocationResponse> InvokeGovernedLoopAsync(GovernedLoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
+
         public Task<LoopRunControlResponse> ResumeLoopAsync(LoopRunControlInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
         {
             throw new NotSupportedException();
