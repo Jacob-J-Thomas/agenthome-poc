@@ -437,7 +437,7 @@ Assert-Contains -Actual $promotionCancellationWorkflow -Expected "types: [conver
 Assert-Contains -Actual $promotionCancellationWorkflow -Expected "name: cancel-obsolete-promotion" -Message "Draft demotion must emit one distinct non-required cancellation context."
 Assert-Contains -Actual $promotionCancellationWorkflow -Expected "actions: write" -Message "Draft demotion requires narrowly scoped authority to cancel obsolete workflow runs."
 Assert-Contains -Actual $promotionCancellationWorkflow -Expected "pull-requests: read" -Message "Draft demotion must re-read live pull-request eligibility before cancellation."
-Assert-Contains -Actual $promotionCancellationWorkflow -Expected "uses: actions/github-script@v8" -Message "Draft demotion must use the bounded GitHub API cancellation path."
+Assert-Contains -Actual $promotionCancellationWorkflow -Expected "uses: actions/github-script@v9" -Message "Draft demotion must use the bounded GitHub API cancellation path."
 Assert-Contains -Actual $promotionCancellationWorkflow -Expected "github.rest.pulls.get" -Message "Draft demotion must re-read live pull-request state."
 Assert-Contains -Actual $promotionCancellationWorkflow -Expected "if (!live.data.draft)" -Message "A stale demotion event must retain every newer promotion after the pull request is ready again."
 Assert-Contains -Actual $promotionCancellationWorkflow -Expected '["verify.yml", "browser-e2e.yml"]' -Message "Draft demotion may cancel only the two exhaustive promotion workflows."

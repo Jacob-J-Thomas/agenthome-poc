@@ -373,6 +373,7 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
 
         try
         {
+            // Track deterministic blocking-observer deadline coverage under https://github.com/Jacob-J-Thomas/agenthome-poc/issues/515.
             _ = Task.Run(async () =>
             {
                 try
