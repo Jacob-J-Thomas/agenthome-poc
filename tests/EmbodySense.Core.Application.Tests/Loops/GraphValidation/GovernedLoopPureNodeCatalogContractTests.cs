@@ -28,7 +28,7 @@ public sealed class GovernedLoopPureNodeCatalogContractTests
             Assert.True(descriptor.IsExecutable);
             Assert.False(descriptor.IsLegalEntry);
             Assert.False(descriptor.IsLegalTerminal);
-            Assert.Equal([GovernedLoopControlCondition.Success], descriptor.AllowedControlOutcomes);
+            Assert.Equal([GovernedLoopControlCondition.Success, GovernedLoopControlCondition.Failure], descriptor.AllowedControlOutcomes);
             Assert.Equal([GovernedLoopControlCondition.Success], descriptor.RequiredControlOutcomes);
             Assert.Equal(GovernedLoopJoinPolicy.None, descriptor.JoinPolicy);
             Assert.Equal(1, descriptor.MinimumIncomingControlEdges);

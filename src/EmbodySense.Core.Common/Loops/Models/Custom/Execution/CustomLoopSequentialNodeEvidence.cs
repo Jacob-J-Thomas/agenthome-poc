@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using System.Text.Json.Serialization;
 
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
@@ -47,4 +48,12 @@ public sealed partial record CustomLoopSequentialNodeEvidence(
 {
     /// <summary>Gets the only supported schema version.</summary>
     public const int CurrentSchemaVersion = 1;
+
+    /// <summary>Gets the exact classified failure evidence identity carried by a failed or review-blocked activation.</summary>
+    [JsonRequired]
+    public string? FailureEvidenceId { get; init; }
+
+    /// <summary>Gets the exact classified failure evidence hash carried by a failed or review-blocked activation.</summary>
+    [JsonRequired]
+    public string? FailureEvidenceHash { get; init; }
 }

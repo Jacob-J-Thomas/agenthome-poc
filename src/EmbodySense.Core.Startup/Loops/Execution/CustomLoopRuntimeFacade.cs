@@ -1645,6 +1645,33 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             runEvent.ToolEvidence is null ? null : Map(runEvent.ToolEvidence))
         {
             ModelExecutionEvidence = runEvent.ModelExecutionEvidence,
+            FailureEvidence = runEvent.FailureEvidence is null ? null : new LoopRunFailureEvidenceSnapshot(
+                runEvent.FailureEvidence.SchemaVersion,
+                runEvent.FailureEvidence.MappingVersion,
+                runEvent.FailureEvidence.EvidenceId,
+                runEvent.FailureEvidence.WorkspaceId,
+                runEvent.FailureEvidence.RunId,
+                runEvent.FailureEvidence.Revision.GraphId,
+                runEvent.FailureEvidence.Revision.RevisionId,
+                runEvent.FailureEvidence.Revision.ExecutableHash,
+                runEvent.FailureEvidence.ExecutionGeneration,
+                runEvent.FailureEvidence.ActivationOrdinal,
+                runEvent.FailureEvidence.VisitOrdinal,
+                runEvent.FailureEvidence.NodeId,
+                runEvent.FailureEvidence.Attempt,
+                runEvent.FailureEvidence.FailureClass.ToString(),
+                runEvent.FailureEvidence.ServerCode,
+                runEvent.FailureEvidence.Source.ToString(),
+                runEvent.FailureEvidence.EffectCertainty.ToString(),
+                runEvent.FailureEvidence.AuthorityPosture.ToString(),
+                runEvent.FailureEvidence.HumanPosture.ToString(),
+                runEvent.FailureEvidence.RetrySafety.ToString(),
+                runEvent.FailureEvidence.Severity.ToString(),
+                runEvent.FailureEvidence.Precedence,
+                runEvent.FailureEvidence.CausalEvidence.Select(item => new LoopRunFailureEvidenceReferenceSnapshot(item.EvidenceId, item.EvidenceHash)).ToArray(),
+                runEvent.FailureEvidence.SafeDetail,
+                runEvent.FailureEvidence.ObservedAtUtc,
+                runEvent.FailureEvidence.ContentHash),
         };
     }
 

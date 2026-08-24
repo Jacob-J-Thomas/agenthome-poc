@@ -116,6 +116,26 @@ public sealed class WebSessionHubTests
     }
 
     [Fact]
+    public async Task GetCurrentTranscript_treats_connection_abort_as_an_inert_disconnect()
+    {
+        using var workspace = new TestWorkspace();
+        var approvals = new WebApprovalCoordinator();
+        await using var host = CreateHost(workspace, approvals);
+        await host.InitializeWorkspaceAsync();
+        using var connection = new CancellationTokenSource();
+        connection.Cancel();
+        var hub = CreateHub(
+            host,
+            approvals,
+            new RecordingHubClients(),
+            context: new TestHubCallerContext("connection-aborted", connection.Token));
+
+        var transcript = await hub.GetCurrentTranscript();
+
+        Assert.Null(transcript);
+    }
+
+    [Fact]
     public async Task SendMessage_streams_error_when_message_is_blank()
     {
         using var workspace = new TestWorkspace();

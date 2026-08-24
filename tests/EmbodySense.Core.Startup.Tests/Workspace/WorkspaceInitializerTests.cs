@@ -131,55 +131,92 @@ public sealed class WorkspaceInitializerTests
     [Fact]
     public async Task InitializeAsync_concurrently_seeds_distinct_workspaces_while_the_first_anchor_commit_holds_the_proved_server_trust_root()
     {
-        using var trustRoot = new TestWorkspace();
-        using var firstWorkspace = new TestWorkspace();
-        using var secondWorkspace = new TestWorkspace();
-        var barrier = new BlockingCapabilityCatalogAnchorDurabilityBarrier();
-        var firstProvider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath, barrier);
-        var secondProvider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
-        var signalingProvider = new SignalingCapabilityCatalogTrustProvider(secondProvider);
-        var firstInitializer = new WorkspaceInitializer(new WorkspaceScaffolder(), new BuiltInCapabilityCatalogSeeder(firstProvider));
-        var secondInitializer = new WorkspaceInitializer(new WorkspaceScaffolder(), new BuiltInCapabilityCatalogSeeder(signalingProvider));
-        var timeout = TimeSpan.FromSeconds(5);
-        using var cancellation = new CancellationTokenSource();
+        TestWorkspace? trustRoot = null;
+        TestWorkspace? firstWorkspace = null;
+        TestWorkspace? secondWorkspace = null;
+        CancellationTokenSource? cancellation = null;
+        var readinessTimeout = TimeSpan.FromSeconds(30);
+        var convergenceTimeout = TimeSpan.FromSeconds(60);
+        var cleanupTimeout = TimeSpan.FromSeconds(60);
         Task? firstInitialization = null;
         Task? secondInitialization = null;
         var initializationsConverged = false;
+        var initializationsStarted = false;
+        var initializationsDrained = false;
 
         try
         {
-            firstInitialization = firstInitializer.InitializeAsync(firstWorkspace.RootPath, cancellation.Token);
-            await barrier.AnchorWriteEntered.WaitAsync(timeout);
-            secondInitialization = secondInitializer.InitializeAsync(secondWorkspace.RootPath, cancellation.Token);
-            await signalingProvider.ReadEntered.WaitAsync(timeout);
-            Assert.False(signalingProvider.ReadCompleted.IsCompleted);
-            Assert.False(secondInitialization.IsCompleted);
-            barrier.Release();
-            await signalingProvider.ReadCompleted.WaitAsync(timeout);
-            await Task.WhenAll(firstInitialization, secondInitialization).WaitAsync(timeout);
-            initializationsConverged = true;
+            trustRoot = new TestWorkspace();
+            firstWorkspace = new TestWorkspace();
+            secondWorkspace = new TestWorkspace();
+            var barrier = new BlockingCapabilityCatalogAnchorDurabilityBarrier();
+            var firstProvider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath, barrier);
+            var secondProvider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
+            var signalingProvider = new SignalingCapabilityCatalogTrustProvider(secondProvider);
+            var firstInitializer = new WorkspaceInitializer(new WorkspaceScaffolder(), new BuiltInCapabilityCatalogSeeder(firstProvider));
+            var secondInitializer = new WorkspaceInitializer(new WorkspaceScaffolder(), new BuiltInCapabilityCatalogSeeder(signalingProvider));
+            cancellation = new CancellationTokenSource();
+            try
+            {
+                firstInitialization = firstInitializer.InitializeAsync(firstWorkspace.RootPath, cancellation.Token);
+                initializationsStarted = true;
+                await WaitForPhaseAsync(barrier.AnchorWriteEntered, "first anchor durability barrier", readinessTimeout);
+                secondInitialization = secondInitializer.InitializeAsync(secondWorkspace.RootPath, cancellation.Token);
+                await WaitForPhaseAsync(signalingProvider.ReadEntered, "second trust-root read", readinessTimeout);
+                Assert.False(signalingProvider.ReadCompleted.IsCompleted);
+                Assert.False(secondInitialization.IsCompleted);
+                barrier.Release();
+                await WaitForPhaseAsync(signalingProvider.ReadCompleted, "second trust-root read completion", readinessTimeout);
+                await WaitForPhaseAsync(Task.WhenAll(firstInitialization, secondInitialization), "initialization convergence", convergenceTimeout);
+                initializationsConverged = true;
+            }
+            finally
+            {
+                barrier.Release();
+                if (!initializationsConverged)
+                {
+                    cancellation.Cancel();
+                }
+
+                await AwaitInitializationCleanupAsync(firstInitialization, secondInitialization, initializationsConverged, cancellation.Token, cleanupTimeout, [trustRoot.RootPath, firstWorkspace.RootPath, secondWorkspace.RootPath]);
+                initializationsDrained = true;
+            }
+
+            var first = await new CapabilityCatalogStore(new WorkspacePaths(firstWorkspace.RootPath), firstProvider).ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
+            var second = await new CapabilityCatalogStore(new WorkspacePaths(secondWorkspace.RootPath), secondProvider).ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
+            Assert.Equal(CapabilityCatalogReadStatus.Available, first.Status);
+            Assert.Equal(CapabilityCatalogReadStatus.Available, second.Status);
+            Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, first.Page!.Entries.Count);
+            Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, second.Page!.Entries.Count);
+            Assert.Equal(2, Directory.EnumerateFiles(firstProvider.AnchorsPath, "*.json", SearchOption.TopDirectoryOnly).Count());
         }
         finally
         {
-            barrier.Release();
-            if (!initializationsConverged)
+            if (!initializationsStarted || initializationsDrained)
             {
-                cancellation.Cancel();
+                secondWorkspace?.Dispose();
+                firstWorkspace?.Dispose();
+                trustRoot?.Dispose();
+                cancellation?.Dispose();
             }
-
-            await AwaitInitializationCleanupAsync(firstInitialization, secondInitialization, initializationsConverged);
         }
-
-        var first = await new CapabilityCatalogStore(new WorkspacePaths(firstWorkspace.RootPath), firstProvider).ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
-        var second = await new CapabilityCatalogStore(new WorkspacePaths(secondWorkspace.RootPath), secondProvider).ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
-        Assert.Equal(CapabilityCatalogReadStatus.Available, first.Status);
-        Assert.Equal(CapabilityCatalogReadStatus.Available, second.Status);
-        Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, first.Page!.Entries.Count);
-        Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, second.Page!.Entries.Count);
-        Assert.Equal(2, Directory.EnumerateFiles(firstProvider.AnchorsPath, "*.json", SearchOption.TopDirectoryOnly).Count());
     }
 
-    private static async Task AwaitInitializationCleanupAsync(Task? firstInitialization, Task? secondInitialization, bool initializationsConverged)
+    private static async Task WaitForPhaseAsync(Task phase, string phaseName, TimeSpan timeout)
+    {
+        var startedAt = TimeProvider.System.GetTimestamp();
+        try
+        {
+            await phase.WaitAsync(timeout);
+        }
+        catch (TimeoutException exception)
+        {
+            var elapsed = TimeProvider.System.GetElapsedTime(startedAt);
+            throw new TimeoutException($"The {phaseName} phase did not complete within {timeout}; monotonic elapsed time was {elapsed}.", exception);
+        }
+    }
+
+    private static async Task AwaitInitializationCleanupAsync(Task? firstInitialization, Task? secondInitialization, bool initializationsConverged, CancellationToken ownedCancellationToken, TimeSpan timeout, IReadOnlyList<string> workspaceRoots)
     {
         var initializations = new[] { firstInitialization, secondInitialization }.OfType<Task>().ToArray();
         if (initializations.Length == 0)
@@ -189,10 +226,16 @@ public sealed class WorkspaceInitializerTests
 
         try
         {
-            await Task.WhenAll(initializations);
+            await Task.WhenAll(initializations).WaitAsync(timeout);
         }
-        catch when (!initializationsConverged)
+        catch (OperationCanceledException exception) when (!initializationsConverged && ownedCancellationToken.IsCancellationRequested && exception.CancellationToken == ownedCancellationToken)
         {
+        }
+        catch (TimeoutException exception)
+        {
+            var states = string.Join(", ", initializations.Select((task, index) => $"initialization-{index + 1}={task.Status}"));
+            var roots = string.Join(", ", workspaceRoots);
+            throw new TimeoutException($"Initialization cleanup did not drain within {timeout}. Task states: {states}. Retained workspace roots: {roots}.", exception);
         }
     }
 

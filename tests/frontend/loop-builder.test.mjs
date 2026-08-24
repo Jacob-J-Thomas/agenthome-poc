@@ -4451,6 +4451,91 @@ test("Runs projects durable timeline and context evidence from the authenticated
   );
 });
 
+test("Runs keeps canonical failure evidence distinct, exact, and inert", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Failed";
+  run.events.push({
+    sequence: 5,
+    eventId: "failure-event",
+    timestampUtc: "2026-07-16T12:00:03Z",
+    kind: "NodeAttemptFailed",
+    iteration: 1,
+    stepId: "step-research",
+    attempt: 1,
+    detail: "Classified failure retained.",
+    contextBlocks: [],
+    canonicalOutput: null,
+    failureEvidence: {
+      schemaVersion: 1,
+      mappingVersion: 1,
+      evidenceId: "failure-evidence",
+      workspaceId: `workspace-sha256:${"a".repeat(64)}`,
+      runId: run.id,
+      graphId: "graph-research",
+      revisionId: "revision-2",
+      executableHash: "b".repeat(64),
+      executionGeneration: 1,
+      activationOrdinal: 1,
+      visitOrdinal: 1,
+      nodeId: "step-research",
+      attempt: 1,
+      failureClass: "ValidationConfiguration",
+      serverCode: "validation-rejected",
+      source: "Validation",
+      effectCertainty: "NotApplicable",
+      authorityPosture: "NotApplicable",
+      humanPosture: "None",
+      retrySafety: "NotRetryable",
+      severity: "Error",
+      precedence: 700,
+      causalEvidence: [
+        { evidenceId: "dispatch-evidence", evidenceHash: "c".repeat(64) },
+      ],
+      safeDetail:
+        '<IMG SRC=x ONERROR="globalThis.compromised=true"><SCRIPT>globalThis.compromised=true</SCRIPT>',
+      observedAtUtc: "2026-07-16T12:00:03Z",
+      contentHash: "d".repeat(64),
+    },
+  });
+  server.runs = [runSummary(run)];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+
+  await app.elements.runsTab.click();
+  await flushAsyncWork();
+
+  assert.match(
+    app.elements.runTimeline.textContent,
+    /Validation Configuration/,
+  );
+  assert.match(app.elements.runTimeline.textContent, /validation-rejected/);
+  assert.match(
+    app.elements.inspectorContent.textContent,
+    /Classified failure evidence/,
+  );
+  assert.match(
+    app.elements.inspectorContent.textContent,
+    /workspace-sha256:a{64}/,
+  );
+  assert.match(
+    app.elements.inspectorContent.textContent,
+    /graph-research · revision-2/,
+  );
+  assert.match(app.elements.inspectorContent.textContent, /precedence 700/);
+  assert.equal(
+    app.elements.inspectorContent.textContent.includes("<SCRIPT>"),
+    true,
+  );
+  assert.equal(findByTag(app.elements.inspectorContent, "script").length, 0);
+  assert.equal(findByTag(app.elements.inspectorContent, "img").length, 0);
+  assert.doesNotMatch(
+    app.elements.inspectorContent.textContent,
+    /Needs Review/,
+  );
+});
+
 test("conversation publication disposition is table-driven, definite, and phase-aware", async (t) => {
   const publicationId = "publication-operation";
   const event = (sequence, kind, publishedToInvokingConversation = null) => ({

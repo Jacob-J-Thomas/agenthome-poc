@@ -23,6 +23,8 @@ using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
+using EmbodySense.Core.Common.Loops.Failures;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -726,6 +728,108 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     }
 
     [Fact]
+    public async Task Trace_capacity_admits_a_fail_terminal_without_consuming_another_provider_attempt()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext(FailGraph());
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+
+        var inferenceSelection = GovernedLoopSequentialFrontierMachine.Select(context.Run.Frontier, context.Binding, context.Plan);
+        var inferenceActivation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(inferenceSelection.Activation);
+        var inferenceStart = WithEvidence(
+            Event(2, "event-inference-start", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 1),
+            context.Binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var inferenceRunningFrontier = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Start(
+            context.Run.Frontier,
+            context.Binding,
+            context.Plan,
+            context.Plan.Nodes[1],
+            inferenceActivation,
+            1,
+            inferenceStart.EventId,
+            inferenceStart.TimestampUtc).Frontier);
+        var inferenceRunning = context.Run with
+        {
+            LifecycleVersion = 2,
+            UpdatedAtUtc = inferenceStart.TimestampUtc,
+            Frontier = inferenceRunningFrontier,
+            Events = [.. context.Run.Events, inferenceStart],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(inferenceRunning, 1)).Status);
+
+        var inferenceFailure = WithEvidence(
+            Event(3, "event-inference-failed", CustomLoopRunEventKind.NodeAttemptFailed, "step-1", 1),
+            context.Binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            CustomLoopSequentialNodeDisposition.Rejected,
+            new GovernedLoopFailureEvidenceReference(inferenceStart.EventId, inferenceStart.SequentialNodeEvidence!.EvidenceHash),
+            selectedControlEdgeIdsOverride: ["step-to-fail"],
+            skippedControlEdgeIdsOverride: ["step-to-exit"]);
+        var failReadyFrontier = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.FailRunning(
+            inferenceRunningFrontier,
+            context.Binding,
+            context.Plan,
+            context.Plan.Nodes[1],
+            inferenceRunningFrontier.Payload.Nodes[inferenceActivation.ActivationOrdinal],
+            1,
+            inferenceStart.EventId,
+            inferenceFailure.EventId,
+            inferenceFailure.SequentialNodeEvidence!.OutcomeArtifactHash,
+            GovernedLoopControlCondition.Failure,
+            inferenceFailure.TimestampUtc).Frontier);
+        var inferenceFailed = inferenceRunning with
+        {
+            LifecycleVersion = 3,
+            UpdatedAtUtc = inferenceFailure.TimestampUtc,
+            Frontier = failReadyFrontier,
+            Events = [.. inferenceRunning.Events, inferenceFailure],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(inferenceFailed, 2)).Status);
+
+        var failSelection = GovernedLoopSequentialFrontierMachine.Select(failReadyFrontier, context.Binding, context.Plan);
+        var failActivation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(failSelection.Activation);
+        var failStart = WithEvidence(
+            Event(4, "event-fail-start", CustomLoopRunEventKind.NodeAttemptStarted, "fail", 1) with
+            {
+                TraceReservationUtf8Bytes = CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
+            },
+            context.Binding,
+            "fail",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown,
+            activationOrdinalOverride: failActivation.ActivationOrdinal);
+        var failRunningFrontier = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Start(
+            failReadyFrontier,
+            context.Binding,
+            context.Plan,
+            context.Plan.Nodes[failActivation.PlanOrdinal],
+            failActivation,
+            1,
+            failStart.EventId,
+            failStart.TimestampUtc).Frontier);
+        var failRunning = inferenceFailed with
+        {
+            LifecycleVersion = 4,
+            UpdatedAtUtc = failStart.TimestampUtc,
+            Frontier = failRunningFrontier,
+            Events = [.. inferenceFailed.Events, failStart],
+        };
+
+        var result = await store.UpdateAsync(failRunning, 3);
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+        Assert.Equal(failStart.EventId, (await store.GetAsync(context.Run.Id))?.Events[^1].EventId);
+    }
+
+    [Fact]
     public async Task Persisted_marker_digest_substitution_fails_closed_after_restart()
     {
         using var workspace = new TestWorkspace();
@@ -796,7 +900,8 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             "step-1",
             1,
             CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
-            CustomLoopSequentialNodeDisposition.Rejected);
+            CustomLoopSequentialNodeDisposition.Rejected,
+            new GovernedLoopFailureEvidenceReference(start.EventId, start.SequentialNodeEvidence!.EvidenceHash));
         var completed = started with
         {
             LifecycleVersion = 3,
@@ -820,6 +925,83 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             ? rejectedEvent.SequentialNodeEvidence!.EvidenceHash
             : completedEvent.SequentialNodeEvidence!.EvidenceHash;
         Assert.Null(await secondStore.ResolveAsync(loserHash));
+    }
+
+    [Fact]
+    public async Task Classified_failure_round_trips_with_exact_precedence_and_tampering_fails_closed_after_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var context = CreateContext();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        GovernedLoopFailureEvidence? expectedFailure = null;
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+            var start = WithEvidence(
+                Event(2, "event-failure-start", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 1),
+                context.Binding,
+                "step-1",
+                1,
+                CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+                CustomLoopSequentialNodeDisposition.Unknown);
+            var selection = GovernedLoopSequentialFrontierMachine.Select(context.Run.Frontier, context.Binding, context.Plan);
+            var startedFrontier = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Start(
+                context.Run.Frontier,
+                context.Binding,
+                context.Plan,
+                context.Plan.Nodes[1],
+                selection.Activation,
+                1,
+                start.EventId,
+                start.TimestampUtc).Frontier);
+            var started = context.Run with
+            {
+                LifecycleVersion = 2,
+                UpdatedAtUtc = _timestamp.AddMinutes(1),
+                Frontier = startedFrontier,
+                Events = [.. context.Run.Events, start],
+            };
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(started, 1)).Status);
+
+            var rejectedEvent = WithEvidence(
+                Event(3, "event-failure-rejected", CustomLoopRunEventKind.NodeAttemptFailed, "step-1", 1),
+                context.Binding,
+                "step-1",
+                1,
+                CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+                CustomLoopSequentialNodeDisposition.Rejected,
+                new GovernedLoopFailureEvidenceReference(start.EventId, start.SequentialNodeEvidence!.EvidenceHash));
+            var rejected = started with
+            {
+                LifecycleVersion = 3,
+                UpdatedAtUtc = _timestamp.AddMinutes(2),
+                Events = [.. started.Events, rejectedEvent],
+            };
+            expectedFailure = rejectedEvent.FailureEvidence;
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(rejected, 2)).Status);
+        }
+
+        using (var restarted = new CustomLoopRunStore(paths))
+        {
+            var loaded = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(context.Run.Id));
+            var failure = Assert.IsType<GovernedLoopFailureEvidence>(loaded.Events[^1].FailureEvidence);
+            Assert.NotNull(expectedFailure);
+            Assert.Equal(expectedFailure.ContentHash, failure.ContentHash);
+            Assert.Equal(expectedFailure.CausalEvidence, failure.CausalEvidence);
+            Assert.Equal(700, failure.Precedence);
+            Assert.Equal("persistence-fixture-rejected", failure.ServerCode);
+            Assert.Equal(failure.ContentHash, loaded.Events[^1].SequentialNodeEvidence?.FailureEvidenceHash);
+            Assert.NotSame(expectedFailure, failure);
+        }
+
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, context.Run.LoopId, context.Run.Id + ".json");
+        var persisted = await File.ReadAllTextAsync(artifactPath);
+        var tampered = persisted.Replace("\"precedence\":700", "\"precedence\":699", StringComparison.Ordinal);
+        Assert.NotEqual(persisted, tampered);
+        await File.WriteAllTextAsync(artifactPath, tampered);
+
+        using var corruptRestart = new CustomLoopRunStore(paths);
+        await Assert.ThrowsAsync<FormatException>(() => corruptRestart.GetAsync(context.Run.Id));
     }
 
     internal static SequentialContext CreateContext(GovernedLoopSequentialTriggerOrigin? triggerOrigin = null, string identity = "sequential", bool scheduleTrigger = false)
@@ -1617,6 +1799,40 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             DefaultModelRoutingPolicy());
     }
 
+    private static GovernedLoopGraphDefinition FailGraph()
+    {
+        var source = LinearGraph();
+        var fail = new GovernedLoopNodeDefinition(
+            "fail",
+            GovernedLoopSequentialNodeDescriptors.FailTerminal,
+            [],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        return GovernedLoopGraphDefinition.Create(
+            source.SchemaVersion,
+            source.GraphId,
+            source.RevisionId,
+            "Route one classified provider failure into the canonical Fail terminal.",
+            source.OwningRole,
+            source.EntryNodeId,
+            ["exit", "fail"],
+            source.AuthorityCeiling,
+            source.ValueSchemas,
+            [.. source.Nodes, fail],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-step", "trigger", "step-1", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("step-to-exit", "step-1", "exit", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("step-to-fail", "step-1", "fail", GovernedLoopControlCondition.Failure),
+            ],
+            source.Bindings,
+            source.OutputContract,
+            new GovernedLoopDisplayMetadata(
+                "Failure-routed loop",
+                "Display metadata is not execution order.",
+                [.. source.DisplayMetadata.Nodes, new GovernedLoopNodeDisplayMetadata("fail", "fail", "Node.", 300, 0)]),
+            source.DefaultModelRoutingPolicy);
+    }
+
     private static CapabilityAdmissionSnapshot SequentialCapabilityAdmission(string graphArtifactHash, bool scheduleTrigger = false)
     {
         Assert.True(CapabilityId.TryParse("org.embodysense/loop-sequential", out var subject, out _));
@@ -1784,11 +2000,16 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         string nodeId,
         int attempt,
         CustomLoopSequentialNodeEvidenceKind kind,
-        CustomLoopSequentialNodeDisposition disposition)
+        CustomLoopSequentialNodeDisposition disposition,
+        GovernedLoopFailureEvidenceReference? failureSource = null,
+        int? activationOrdinalOverride = null,
+        string[]? outgoingControlEdgeIdsOverride = null,
+        string[]? selectedControlEdgeIdsOverride = null,
+        string[]? skippedControlEdgeIdsOverride = null)
     {
-        var activationOrdinal = string.Equals(nodeId, "trigger", StringComparison.Ordinal)
+        var activationOrdinal = activationOrdinalOverride ?? (string.Equals(nodeId, "trigger", StringComparison.Ordinal)
             ? 0
-            : string.Equals(nodeId, "exit", StringComparison.Ordinal) ? 2 : 1;
+            : string.Equals(nodeId, "exit", StringComparison.Ordinal) ? 2 : 1);
         var controlOutcome = kind switch
         {
             CustomLoopSequentialNodeEvidenceKind.DispatchStarted => (GovernedLoopControlCondition?)null,
@@ -1796,12 +2017,37 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             _ when disposition == CustomLoopSequentialNodeDisposition.Rejected => GovernedLoopControlCondition.Failure,
             _ => GovernedLoopControlCondition.Success,
         };
-        var outgoing = nodeId switch
+        var outgoing = outgoingControlEdgeIdsOverride ?? nodeId switch
         {
             "trigger" => new[] { "trigger-to-step" },
             "step-1" => new[] { "step-to-exit" },
             _ => [],
         };
+        var failure = disposition == CustomLoopSequentialNodeDisposition.Rejected
+            ? GovernedLoopFailureEvidenceContract.Create(
+                runEvent.EventId + "-failure",
+                binding.WorkspaceId,
+                binding.ExecutionBinding.RunId,
+                binding.ExecutionBinding.Revision,
+                binding.ExecutionBinding.ExecutionGeneration,
+                activationOrdinal,
+                1,
+                nodeId,
+                attempt,
+                GovernedLoopFailureClass.ValidationConfiguration,
+                "persistence-fixture-rejected",
+                GovernedLoopFailureSource.Validation,
+                GovernedLoopFailureEffectCertainty.NotApplicable,
+                GovernedLoopFailureAuthorityPosture.NotApplicable,
+                GovernedLoopFailureHumanPosture.None,
+                GovernedLoopFailureRetrySafety.NotRetryable,
+                GovernedLoopFailureSeverity.Error,
+                700,
+                [failureSource ?? throw new InvalidOperationException("Rejected sequential fixture evidence requires an exact causal source.")],
+                null,
+                runEvent.TimestampUtc)
+            : null;
+        var outcomeEvent = runEvent with { FailureEvidence = failure };
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             1,
             kind,
@@ -1816,14 +2062,18 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             null,
             null,
             controlOutcome,
-            controlOutcome is null or GovernedLoopControlCondition.Failure ? [] : outgoing,
-            controlOutcome == GovernedLoopControlCondition.Failure ? outgoing : [],
+            selectedControlEdgeIdsOverride ?? (controlOutcome is null or GovernedLoopControlCondition.Failure ? [] : outgoing),
+            skippedControlEdgeIdsOverride ?? (controlOutcome == GovernedLoopControlCondition.Failure ? outgoing : []),
             null,
             null,
             disposition,
-            CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
-            string.Empty));
-        return runEvent with { SequentialNodeEvidence = evidence };
+            CustomLoopSequentialOutcomeArtifactHash.Compute(outcomeEvent),
+            string.Empty)
+        {
+            FailureEvidenceId = failure?.EvidenceId,
+            FailureEvidenceHash = failure?.ContentHash,
+        });
+        return outcomeEvent with { SequentialNodeEvidence = evidence };
     }
 
     private static CustomLoopRunEvent WithWaitEvidence(

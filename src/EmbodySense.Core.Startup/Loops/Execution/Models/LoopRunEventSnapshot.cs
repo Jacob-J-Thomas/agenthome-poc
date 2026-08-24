@@ -51,4 +51,7 @@ public sealed record LoopRunEventSnapshot(
 {
     /// <summary>Gets the exact admitted profile pin and reconciled usage evidence retained for this provider outcome.</summary>
     public GovernedModelAttemptExecutionEvidence? ModelExecutionEvidence { get; init; }
+
+    /// <summary>Gets the bounded value-free canonical failure classification retained before any Failure route commitment.</summary>
+    public LoopRunFailureEvidenceSnapshot? FailureEvidence { get; init; }
 }

@@ -600,7 +600,7 @@ public sealed class CustomLoopRecoveryService
             && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
             && CustomLoopSequentialOutcomeArtifactHash.Matches(item);
         return exactStart
-            && (node.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate
+            && (node.Descriptor.Kind is GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate or GovernedLoopNodeKind.Fail
                 || node.Descriptor.Kind is GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Join
                     && HasExactClosedTopologyOutcome(run, binding, node, attempt, item.Sequence));
     }
