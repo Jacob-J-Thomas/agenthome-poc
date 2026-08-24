@@ -274,6 +274,22 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    internal async Task<GovernedLoopRetryPolicyPreviewResponse> PreviewGovernedLoopRetryPolicyAsync(
+        GovernedLoopRetryPolicyPreviewInput input,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return runtime.GovernedLoopGraphAuthoring.PreviewRetryPolicy(input);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
+    }
+
     internal async Task<ModelProfileCatalogResponse> ReadModelProfilesAsync(
         string? startAfterId,
         int maximumCount,

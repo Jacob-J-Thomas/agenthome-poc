@@ -480,6 +480,8 @@ public sealed class BrowserFlowTests
             Assert.Contains("Input Tokens Authoritative and hard bounded at dispatch", modelInspector, StringComparison.Ordinal);
             Assert.Contains("Monetary Cost Unavailable", modelInspector, StringComparison.Ordinal);
             Assert.Contains("Ordered model fallback candidatesNone", modelInspector, StringComparison.Ordinal);
+            await ClickButtonByTextAsync(browser, "#governedGraphInspector button", "Preview and enable retry");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphInspector').textContent.includes('retry-provider-inference') && document.getElementById('governedGraphInspector').textContent.includes('3 total attempts') && document.getElementById('governedGraphInspector').textContent.includes('runtime admission still required')");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "fail-terminal");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "success-exit");
 
@@ -511,7 +513,7 @@ public sealed class BrowserFlowTests
             Assert.Equal(BrowserProfileId, await browser.EvaluateStringAsync("document.getElementById('governedGraphModelProfile').value"));
             Assert.Equal("exact", await browser.EvaluateStringAsync("document.getElementById('governedGraphModelRoutingMode').value"));
             await ClickButtonByTextAsync(browser, "#governedGraphCanvas button", "provider-inference");
-            await browser.WaitForExpressionAsync("document.getElementById('governedGraphInspector').textContent.includes('Eligible') && document.getElementById('governedGraphInspector').textContent.includes('exact selector')");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphInspector').textContent.includes('Eligible') && document.getElementById('governedGraphInspector').textContent.includes('exact selector') && document.getElementById('governedGraphInspector').textContent.includes('retry-provider-inference') && document.getElementById('governedGraphInspector').textContent.includes('3 total attempts')");
             Assert.Contains(BrowserProfileId, await browser.EvaluateStringAsync("document.getElementById('governedGraphInspector').textContent"), StringComparison.Ordinal);
             Assert.Contains("1 immutable revision artifact", await browser.EvaluateStringAsync("document.getElementById('governedGraphLifecycle').textContent"), StringComparison.Ordinal);
             app.AssertHealthy();

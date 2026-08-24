@@ -129,12 +129,14 @@ public sealed class GovernedLoopExecutionTransitionTests
         var waitingNode = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Waiting, incomingEdgeIds: ["edge-a"]);
         var valid = GovernedLoopExecutionTestFixture.Frontier(binding, GovernedLoopFrontierStatus.Waiting, 2, [waitingNode], GovernedLoopExecutionTestFixture.UpdatedAtUtc.AddMinutes(1));
         var changedEdges = GovernedLoopExecutionTestFixture.Frontier(binding, GovernedLoopFrontierStatus.Waiting, 2, [GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Waiting, incomingEdgeIds: ["edge-b"])], GovernedLoopExecutionTestFixture.UpdatedAtUtc.AddMinutes(1));
-        var changedAttempt = GovernedLoopExecutionTestFixture.Frontier(binding, GovernedLoopFrontierStatus.Waiting, 2, [GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Waiting, incomingEdgeIds: ["edge-a"], attempt: 2)], GovernedLoopExecutionTestFixture.UpdatedAtUtc.AddMinutes(1));
+        var retryReservation = GovernedLoopExecutionTestFixture.Frontier(binding, GovernedLoopFrontierStatus.Waiting, 2, [GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Waiting, incomingEdgeIds: ["edge-a"], attempt: 2)], GovernedLoopExecutionTestFixture.UpdatedAtUtc.AddMinutes(1));
+        var skippedAttempt = GovernedLoopExecutionTestFixture.Frontier(binding, GovernedLoopFrontierStatus.Waiting, 2, [GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Waiting, incomingEdgeIds: ["edge-a"], attempt: 3)], GovernedLoopExecutionTestFixture.UpdatedAtUtc.AddMinutes(1));
         var missing = GovernedLoopExecutionTestFixture.Frontier(binding, GovernedLoopFrontierStatus.Active, 2, [GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Ready, "later")], GovernedLoopExecutionTestFixture.UpdatedAtUtc.AddMinutes(1));
 
         Assert.True(GovernedLoopExecutionValidator.ValidateTransition(current, valid).IsValid);
         Assert.Contains(GovernedLoopExecutionValidator.ValidateTransition(current, changedEdges).Errors, error => error.Code == GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged);
-        Assert.Contains(GovernedLoopExecutionValidator.ValidateTransition(current, changedAttempt).Errors, error => error.Code == GovernedLoopExecutionValidationErrorCode.IllegalTransition);
+        Assert.True(GovernedLoopExecutionValidator.ValidateTransition(current, retryReservation).IsValid);
+        Assert.Contains(GovernedLoopExecutionValidator.ValidateTransition(current, skippedAttempt).Errors, error => error.Code == GovernedLoopExecutionValidationErrorCode.IllegalTransition);
         Assert.Contains(GovernedLoopExecutionValidator.ValidateTransition(current, missing).Errors, error => error.Code == GovernedLoopExecutionValidationErrorCode.ImmutableEvidenceChanged);
 
         var completed = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Completed, outcomeEvidenceId: "outcome-a");

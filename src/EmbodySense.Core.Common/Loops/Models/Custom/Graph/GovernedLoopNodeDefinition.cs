@@ -2,6 +2,8 @@ namespace EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 
 /// <summary>Defines one executable node declaration in a canonical governed graph.</summary>
 /// <param name="Id">The stable node identifier.</param>
@@ -11,6 +13,7 @@ using EmbodySense.Core.Common.Inference.Profiles.Models;
 /// <param name="Parameters">The bounded descriptor-specific executable parameters.</param>
 /// <param name="ModelRoutingPolicy">The optional typed Inference-node routing override.</param>
 /// <param name="AuthoredInputDataClasses">The optional exact authored Inference input classification.</param>
+/// <param name="RetryPolicy">The optional exact bounded retry policy for this node.</param>
 public sealed record GovernedLoopNodeDefinition(
     string Id,
     GovernedLoopNodeDescriptor Descriptor,
@@ -18,7 +21,8 @@ public sealed record GovernedLoopNodeDefinition(
     GovernedLoopAuthorityCeiling AuthorityCeiling,
     IReadOnlyDictionary<string, string> Parameters,
     GovernedModelRoutingPolicy? ModelRoutingPolicy = null,
-    IReadOnlyList<CapabilityDataClass>? AuthoredInputDataClasses = null)
+    IReadOnlyList<CapabilityDataClass>? AuthoredInputDataClasses = null,
+    GovernedLoopRetryPolicy? RetryPolicy = null)
 {
     /// <summary>Gets an exact optional Inference-node routing override.</summary>
     public GovernedModelRoutingPolicy? ModelRoutingPolicy { get; } = ModelRoutingPolicy;
@@ -27,4 +31,9 @@ public sealed record GovernedLoopNodeDefinition(
     public IReadOnlyList<CapabilityDataClass>? AuthoredInputDataClasses { get; } = AuthoredInputDataClasses is null
         ? null
         : Array.AsReadOnly(AuthoredInputDataClasses.Take(CapabilityContractLimits.MaxDataClasses + 1).ToArray());
+
+    /// <summary>Gets the exact optional retry policy, which never exists unless authored and hash-authenticated.</summary>
+    public GovernedLoopRetryPolicy? RetryPolicy { get; } = RetryPolicy is null
+        ? null
+        : GovernedLoopRetryContract.CopyPolicy(RetryPolicy);
 }

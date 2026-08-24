@@ -1,8 +1,13 @@
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Sequential;
 
@@ -408,6 +413,174 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
         Assert.Equal(GovernedLoopFrontierStatus.Failed, failed.Payload.Status);
         Assert.Single(failed.Payload.Nodes, node => node.Status == GovernedLoopNodeExecutionStatus.Ready);
         Assert.True(GovernedLoopSequentialFrontierMachine.Validate(failed, context.AdapterBinding, context.Plan));
+    }
+
+    [Fact]
+    public async Task Retry_waiting_exhaustion_terminalizes_the_exact_activation_while_a_sibling_remains_waiting()
+    {
+        var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync(artifactFactory: ParallelRetryArtifact);
+        var fanOut = AdvanceInferenceToFanOut(context);
+        var branchA = context.Plan.Nodes.Single(node => string.Equals(node.NodeId, "branch-a", StringComparison.Ordinal));
+        var branchB = context.Plan.Nodes.Single(node => string.Equals(node.NodeId, "branch-b", StringComparison.Ordinal));
+
+        var runningA = Frontier(GovernedLoopSequentialFrontierMachine.Start(
+            fanOut,
+            context.AdapterBinding,
+            context.Plan,
+            branchA,
+            fanOut.Payload.Nodes.Single(node => string.Equals(node.NodeId, "branch-a", StringComparison.Ordinal)),
+            1,
+            "attempt-branch-a-1",
+            _startedAtUtc.AddSeconds(3)));
+        var waitingA = Frontier(GovernedLoopSequentialFrontierMachine.ParkRunningForRetry(
+            runningA,
+            context.AdapterBinding,
+            context.Plan,
+            branchA,
+            SelectedActivation(runningA, context),
+            1,
+            2,
+            "attempt-branch-a-2",
+            _startedAtUtc.AddSeconds(4)));
+        var selectedB = GovernedLoopSequentialFrontierMachine.Select(waitingA, context.AdapterBinding, context.Plan);
+        var runningB = Frontier(GovernedLoopSequentialFrontierMachine.Start(
+            waitingA,
+            context.AdapterBinding,
+            context.Plan,
+            branchB,
+            selectedB.Activation,
+            1,
+            "attempt-branch-b-1",
+            _startedAtUtc.AddSeconds(5)));
+        var waitingBoth = Frontier(GovernedLoopSequentialFrontierMachine.ParkRunningForRetry(
+            runningB,
+            context.AdapterBinding,
+            context.Plan,
+            branchB,
+            SelectedActivation(runningB, context),
+            1,
+            2,
+            "attempt-branch-b-2",
+            _startedAtUtc.AddSeconds(6)));
+
+        var exhausted = Frontier(GovernedLoopSequentialFrontierMachine.FailWaiting(
+            waitingBoth,
+            context.AdapterBinding,
+            context.Plan,
+            branchA,
+            waitingBoth.Payload.Nodes.Single(node => string.Equals(node.NodeId, "branch-a", StringComparison.Ordinal)),
+            2,
+            "attempt-branch-a-2",
+            "event-branch-a-exhausted",
+            Hash('e'),
+            GovernedLoopControlCondition.Failure,
+            _startedAtUtc.AddSeconds(7)));
+
+        Assert.Equal(GovernedLoopFrontierStatus.Active, exhausted.Payload.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Failed, exhausted.Payload.Nodes.Single(node => string.Equals(node.NodeId, "branch-a", StringComparison.Ordinal)).Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Waiting, exhausted.Payload.Nodes.Single(node => string.Equals(node.NodeId, "branch-b", StringComparison.Ordinal)).Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, exhausted.Payload.Nodes.Single(node => string.Equals(node.NodeId, "fail", StringComparison.Ordinal)).Status);
+        Assert.True(GovernedLoopSequentialFrontierMachine.Validate(exhausted, context.AdapterBinding, context.Plan));
+    }
+
+    [Fact]
+    public async Task Retry_parking_rejects_reusing_the_running_attempt_operation_as_the_next_reservation()
+    {
+        var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync(artifactFactory: ParallelRetryArtifact);
+        var fanOut = AdvanceInferenceToFanOut(context);
+        var branchA = context.Plan.Nodes.Single(node => string.Equals(node.NodeId, "branch-a", StringComparison.Ordinal));
+        var running = Frontier(GovernedLoopSequentialFrontierMachine.Start(
+            fanOut,
+            context.AdapterBinding,
+            context.Plan,
+            branchA,
+            fanOut.Payload.Nodes.Single(node => string.Equals(node.NodeId, "branch-a", StringComparison.Ordinal)),
+            1,
+            "attempt-branch-a-1",
+            _startedAtUtc.AddSeconds(3)));
+
+        var parked = GovernedLoopSequentialFrontierMachine.ParkRunningForRetry(
+            running,
+            context.AdapterBinding,
+            context.Plan,
+            branchA,
+            SelectedActivation(running, context),
+            1,
+            2,
+            "attempt-branch-a-1",
+            _startedAtUtc.AddSeconds(4));
+
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Invalid, parked.Status);
+        Assert.Null(parked.Frontier);
+        Assert.True(GovernedLoopSequentialFrontierMachine.Validate(running, context.AdapterBinding, context.Plan));
+
+        var nonUtc = GovernedLoopSequentialFrontierMachine.ParkRunningForRetry(
+            running,
+            context.AdapterBinding,
+            context.Plan,
+            branchA,
+            SelectedActivation(running, context),
+            1,
+            2,
+            "attempt-branch-a-2",
+            _startedAtUtc.AddSeconds(4).ToOffset(TimeSpan.FromHours(1)));
+
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Invalid, nonUtc.Status);
+        Assert.Null(nonUtc.Frontier);
+    }
+
+    [Fact]
+    public async Task Retry_resume_rejects_a_substituted_attempt_operation_without_releasing_the_waiting_reservation()
+    {
+        var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync(artifactFactory: ParallelRetryArtifact);
+        var fanOut = AdvanceInferenceToFanOut(context);
+        var branchA = context.Plan.Nodes.Single(node => string.Equals(node.NodeId, "branch-a", StringComparison.Ordinal));
+        var running = Frontier(GovernedLoopSequentialFrontierMachine.Start(
+            fanOut,
+            context.AdapterBinding,
+            context.Plan,
+            branchA,
+            fanOut.Payload.Nodes.Single(node => string.Equals(node.NodeId, "branch-a", StringComparison.Ordinal)),
+            1,
+            "attempt-branch-a-1",
+            _startedAtUtc.AddSeconds(3)));
+        var waiting = Frontier(GovernedLoopSequentialFrontierMachine.ParkRunningForRetry(
+            running,
+            context.AdapterBinding,
+            context.Plan,
+            branchA,
+            SelectedActivation(running, context),
+            1,
+            2,
+            "attempt-branch-a-2",
+            _startedAtUtc.AddSeconds(4)));
+        var activation = waiting.Payload.Nodes.Single(node => string.Equals(node.NodeId, "branch-a", StringComparison.Ordinal));
+
+        var resumed = GovernedLoopSequentialFrontierMachine.ResumeRetry(
+            waiting,
+            context.AdapterBinding,
+            context.Plan,
+            activation,
+            2,
+            "attempt-branch-a-substituted",
+            _startedAtUtc.AddSeconds(5));
+
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Invalid, resumed.Status);
+        Assert.Null(resumed.Frontier);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Waiting, activation.Status);
+        Assert.True(GovernedLoopSequentialFrontierMachine.Validate(waiting, context.AdapterBinding, context.Plan));
+
+        var nonUtc = GovernedLoopSequentialFrontierMachine.ResumeRetry(
+            waiting,
+            context.AdapterBinding,
+            context.Plan,
+            activation,
+            2,
+            "attempt-branch-a-2",
+            _startedAtUtc.AddSeconds(5).ToOffset(TimeSpan.FromHours(1)));
+
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Invalid, nonUtc.Status);
+        Assert.Null(nonUtc.Frontier);
     }
 
     [Fact]
@@ -865,6 +1038,55 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             GovernedLoopControlCondition.Success,
             [],
             _startedAtUtc.AddSeconds(2)));
+    }
+
+    private static GovernedLoopGraphRevisionArtifact ParallelRetryArtifact(ContextualRoleRevisionPin owningRole)
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.ParallelAllJoinArtifact(owningRole).Graph;
+        var policyA = GovernedLoopRetryContract.CreatePolicy(
+            "branch-retry-policy",
+            "branch-a",
+            [GovernedLoopFailureClass.DispatchProvedNotStarted],
+            [],
+            2,
+            1_000,
+            10_000,
+            GovernedLoopRetryBackoffStrategy.Fixed,
+            1,
+            1,
+            GovernedLoopRetryJitterStrategy.None,
+            0,
+            maximumResourceUnits: 2);
+        var policyB = GovernedLoopRetryContract.CreatePolicy(
+            "branch-retry-policy-b",
+            "branch-b",
+            [GovernedLoopFailureClass.DispatchProvedNotStarted],
+            [],
+            2,
+            1_000,
+            10_000,
+            GovernedLoopRetryBackoffStrategy.Fixed,
+            1,
+            1,
+            GovernedLoopRetryJitterStrategy.None,
+            0,
+            maximumResourceUnits: 2);
+        var nodes = source.Nodes.Select(node => string.Equals(node.Id, "branch-a", StringComparison.Ordinal)
+            ? new GovernedLoopNodeDefinition(node.Id, node.Descriptor, node.Ports, node.AuthorityCeiling, node.Parameters, node.ModelRoutingPolicy, node.AuthoredInputDataClasses, policyA)
+            : string.Equals(node.Id, "branch-b", StringComparison.Ordinal)
+                ? new GovernedLoopNodeDefinition(node.Id, node.Descriptor, node.Ports, node.AuthorityCeiling, node.Parameters, node.ModelRoutingPolicy, node.AuthoredInputDataClasses, policyB)
+                : node)
+            .Append(GovernedLoopSequentialApplicationTestFixture.Node("fail", GovernedLoopSequentialNodeDescriptors.FailTerminal))
+            .ToArray();
+        return GovernedLoopSequentialApplicationTestFixture.Artifact(
+            nodes,
+            source.ControlEdges.Append(new GovernedLoopControlEdgeDefinition("branch-a-to-fail", "branch-a", "fail", GovernedLoopControlCondition.Failure)).ToArray(),
+            source.TerminalNodeIds.Append("fail").ToArray(),
+            owningRole,
+            source.Bindings,
+            source.ValueSchemas,
+            source.OutputContract,
+            source.AuthorityCeiling);
     }
 
     private static string Hash(char value) => GovernedLoopSequentialApplicationTestFixture.Hash(value);

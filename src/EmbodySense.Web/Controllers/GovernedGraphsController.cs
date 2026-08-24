@@ -38,6 +38,25 @@ public sealed class GovernedGraphsController : ControllerBase
             : StatusCode(StatusCodes.Status503ServiceUnavailable, response);
     }
 
+    /// <summary>Canonicalizes non-authoritative retry-policy authoring values and returns finite server-owned bounds.</summary>
+    [HttpPost("retry-preview")]
+    public async Task<ActionResult<GovernedLoopRetryPolicyPreviewResponse>> PreviewRetryPolicy(
+        [FromBody] GovernedLoopRetryPolicyPreviewInput? input,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsWorkspaceInitialized())
+        {
+            return WorkspaceNotInitialized();
+        }
+        if (input is null)
+        {
+            return BadRequest(new { error = "retry_policy_preview_required", detail = "Bounded retry authoring intent is required." });
+        }
+
+        var response = await _host.PreviewGovernedLoopRetryPolicyAsync(input, cancellationToken);
+        return response.Status == "valid" ? Ok(response) : BadRequest(response);
+    }
+
     /// <summary>Reads one exact immutable graph aggregate by canonical identity.</summary>
     [HttpGet("detail")]
     public async Task<ActionResult<GovernedLoopGraphReadResponse>> Read(

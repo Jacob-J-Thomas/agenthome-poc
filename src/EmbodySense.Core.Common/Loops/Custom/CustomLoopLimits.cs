@@ -382,6 +382,14 @@ public static class CustomLoopLimits
     /// </summary>
     public const int MaxLifecycleControlDetailCharacters = 1_024;
     /// <summary>
+    /// Maximum append-only retry-state detail characters.
+    /// </summary>
+    /// <remarks>
+    /// Retry-state events retain only bounded server-owned transition detail. This keeps each
+    /// authenticated retry transition within its independently reserved trace footprint.
+    /// </remarks>
+    public const int MaxRetryStateDetailCharacters = MaxLifecycleControlDetailCharacters;
+    /// <summary>
     /// Maximum attempt start evidence UTF-8 bytes.
     /// </summary>
     public const int MaxAttemptStartEvidenceUtf8Bytes = 45_000;
@@ -432,6 +440,21 @@ public static class CustomLoopLimits
     /// Maximum trace control event UTF-8 bytes.
     /// </summary>
     public const int MaxTraceControlEventUtf8Bytes = 8 * 1_024;
+    /// <summary>
+    /// Maximum append-only retry-state event UTF-8 bytes.
+    /// </summary>
+    /// <remarks>
+    /// Retry-state transitions are node evidence rather than lifecycle control events. The
+    /// persistence store reserves this bounded footprint for every required successor without
+    /// consuming the permanent lifecycle and terminalization reserve. The 12 KiB ceiling is a
+    /// conservative schema-1 bound: 1,024 UTF-16 detail code units can encode to 6,144 bytes,
+    /// sixteen identifier/workspace fields consume at most 1,920 ASCII bytes, ten SHA-256 values
+    /// consume 640 ASCII bytes, and 2 KiB remains for the fixed canonical JSON structure, numeric
+    /// values, timestamps, enums, and content-registry reference. Retry events cannot carry
+    /// context, output, tool, failure, model, or sequential-evidence payloads. The public
+    /// persistence maximum-detail test guards the real compact encoded delta against this ceiling.
+    /// </remarks>
+    public const int MaxRetryStateEventUtf8Bytes = 12 * 1_024;
     /// <summary>
     /// Maximum permanent terminal integrity reserve UTF-8 bytes.
     /// </summary>

@@ -10,6 +10,7 @@ using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Application.Loops.Models;
@@ -120,6 +121,168 @@ public sealed class AgentRuntimeFactoryTests
         await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
 
         var catalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        var retryPreview = runtime.GovernedLoopGraphAuthoring.PreviewRetryPolicy(new GovernedLoopRetryPolicyPreviewInput(
+            "retry-infer",
+            "infer",
+            ["retryable-no-effect"],
+            [],
+            3,
+            1_000,
+            10_000,
+            "fixed",
+            250,
+            250,
+            "none",
+            0,
+            3_000,
+            null,
+            null,
+            null,
+            null));
+        var rejectedRetryPreview = runtime.GovernedLoopGraphAuthoring.PreviewRetryPolicy(new GovernedLoopRetryPolicyPreviewInput(
+            "retry-infer",
+            "infer",
+            ["retryable-no-effect"],
+            [],
+            catalog.RetryPolicies.MaximumAttempts + 1,
+            1_000,
+            10_000,
+            "fixed",
+            250,
+            250,
+            "none",
+            0,
+            null,
+            null,
+            null,
+            null,
+            null));
+        var exponentialPreview = runtime.GovernedLoopGraphAuthoring.PreviewRetryPolicy(new GovernedLoopRetryPolicyPreviewInput(
+            "retry-exponential",
+            "infer",
+            ["dispatch-proved-not-started"],
+            ["provider-dispatch-not-started"],
+            5,
+            100,
+            10_000,
+            "exponential",
+            4,
+            15,
+            "deterministic-bounded",
+            5,
+            20,
+            2,
+            30,
+            "USD",
+            4));
+        var noBackoffPreview = runtime.GovernedLoopGraphAuthoring.PreviewRetryPolicy(new GovernedLoopRetryPolicyPreviewInput(
+            "retry-none",
+            "infer",
+            ["timeout-cancellation-no-effect"],
+            [],
+            2,
+            100,
+            10_000,
+            "none",
+            0,
+            0,
+            "none",
+            0,
+            null,
+            null,
+            null,
+            null,
+            null));
+        var malformedRetryPreview = runtime.GovernedLoopGraphAuthoring.PreviewRetryPolicy(new GovernedLoopRetryPolicyPreviewInput(
+            "retry-malformed",
+            "infer",
+            ["unknown-failure"],
+            [],
+            2,
+            100,
+            10_000,
+            "unknown-backoff",
+            0,
+            0,
+            "unknown-jitter",
+            0,
+            null,
+            null,
+            null,
+            null,
+            null));
+        var nullFailureClassesPreview = runtime.GovernedLoopGraphAuthoring.PreviewRetryPolicy(new GovernedLoopRetryPolicyPreviewInput(
+            "retry-missing-failure-class",
+            "infer",
+            null!,
+            [],
+            2,
+            100,
+            10_000,
+            "fixed",
+            10,
+            10,
+            "none",
+            0,
+            null,
+            null,
+            null,
+            null,
+            null));
+        var dependencyPreview = runtime.GovernedLoopGraphAuthoring.PreviewRetryPolicy(new GovernedLoopRetryPolicyPreviewInput(
+            "retry-dependency",
+            "infer",
+            ["dependency-unavailable-before-dispatch"],
+            [],
+            2,
+            100,
+            10_000,
+            "fixed",
+            10,
+            10,
+            "none",
+            0,
+            null,
+            null,
+            null,
+            null,
+            null));
+        var unknownBackoffPreview = runtime.GovernedLoopGraphAuthoring.PreviewRetryPolicy(new GovernedLoopRetryPolicyPreviewInput(
+            "retry-unknown-backoff",
+            "infer",
+            ["retryable-no-effect"],
+            [],
+            2,
+            100,
+            10_000,
+            "unrecognized",
+            0,
+            0,
+            "none",
+            0,
+            null,
+            null,
+            null,
+            null,
+            null));
+        var unknownJitterPreview = runtime.GovernedLoopGraphAuthoring.PreviewRetryPolicy(new GovernedLoopRetryPolicyPreviewInput(
+            "retry-unknown-jitter",
+            "infer",
+            ["retryable-no-effect"],
+            [],
+            2,
+            100,
+            10_000,
+            "fixed",
+            1,
+            1,
+            "unrecognized",
+            0,
+            null,
+            null,
+            null,
+            null,
+            null));
         var role = Assert.Single(catalog.Roles.Roles, item => item.IsAdmissionReady);
         var candidate = BrowserGraphCandidate(new ContextualRoleRevisionPin(
             new ContextualRoleRevisionIdentity(role.RoleId, role.Revision),
@@ -138,6 +301,38 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal("available", catalog.Status);
         Assert.Contains(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.Trigger && item.IsExecutable);
         Assert.Contains(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.Wait && item.IsExecutable);
+        Assert.Equal(8, catalog.RetryPolicies.MaximumAttempts);
+        Assert.Equal(["none", "fixed", "exponential"], catalog.RetryPolicies.BackoffStrategies);
+        Assert.Equal("valid", retryPreview.Status);
+        var retryPolicy = Assert.IsType<GovernedLoopRetryPolicy>(retryPreview.Policy);
+        var retryBounds = Assert.IsType<GovernedLoopRetryPolicyPreviewSnapshot>(retryPreview.Preview);
+        Assert.Equal("retry-infer", retryPolicy.PolicyId);
+        Assert.Equal("infer", retryPolicy.NodeId);
+        Assert.Matches("^[0-9a-f]{64}$", retryPolicy.ContentHash);
+        Assert.Equal(500, retryBounds.MaximumBackoffMilliseconds);
+        Assert.Equal(3_500, retryBounds.MaximumReachableElapsedMilliseconds);
+        Assert.True(retryBounds.CurrentAdmissionStillRequired);
+        Assert.Equal("invalid", rejectedRetryPreview.Status);
+        Assert.Null(rejectedRetryPreview.Policy);
+        var exponentialBounds = Assert.IsType<GovernedLoopRetryPolicyPreviewSnapshot>(exponentialPreview.Preview);
+        Assert.Equal("valid", exponentialPreview.Status);
+        Assert.Equal(4, exponentialBounds.MaximumRetries);
+        Assert.Equal(52, exponentialBounds.MaximumBackoffMilliseconds);
+        Assert.Equal(500, exponentialBounds.MaximumAttemptExecutionMilliseconds);
+        Assert.Equal(552, exponentialBounds.MaximumReachableElapsedMilliseconds);
+        Assert.Equal(20, exponentialBounds.MaximumTokens);
+        Assert.Equal(2, exponentialBounds.MaximumToolCalls);
+        Assert.Equal(30, exponentialBounds.MaximumCostMicrounits);
+        Assert.Equal("USD", exponentialBounds.MaximumCostCurrency);
+        Assert.Equal(4, exponentialBounds.MaximumResourceUnits);
+        Assert.Equal("valid", noBackoffPreview.Status);
+        Assert.Equal(0, Assert.IsType<GovernedLoopRetryPolicyPreviewSnapshot>(noBackoffPreview.Preview).MaximumBackoffMilliseconds);
+        Assert.Equal("invalid", malformedRetryPreview.Status);
+        Assert.Equal("retry-policy-authoring-invalid", malformedRetryPreview.Reason);
+        Assert.Equal("invalid", nullFailureClassesPreview.Status);
+        Assert.Equal("valid", dependencyPreview.Status);
+        Assert.Equal("invalid", unknownBackoffPreview.Status);
+        Assert.Equal("invalid", unknownJitterPreview.Status);
         Assert.Equal("committed", created.Status);
         Assert.Matches("^[0-9a-f]{64}$", created.AuthoringRequestHash);
         Assert.Matches("^[0-9a-f]{64}$", created.GraphValidationEvidenceHash);

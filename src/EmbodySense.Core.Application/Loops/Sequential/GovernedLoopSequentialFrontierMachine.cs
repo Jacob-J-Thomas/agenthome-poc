@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
@@ -195,8 +196,8 @@ public static class GovernedLoopSequentialFrontierMachine
             && SameActivation(selected.Activation, activation);
         var selectedWaiting = Validate(frontier, binding, plan)
             && activation?.Status == GovernedLoopNodeExecutionStatus.Waiting
-            && frontier!.Payload.Nodes.Count(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Waiting) == 1
-            && SameActivation(frontier.Payload.Nodes.Single(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Waiting), activation);
+            && frontier!.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is { } retained
+            && SameActivation(retained, activation);
         var selectedNode = activation is null || plan is null || activation.PlanOrdinal < 0 || activation.PlanOrdinal >= plan.Nodes.Count
             ? null
             : plan.Nodes[activation.PlanOrdinal];
@@ -295,6 +296,48 @@ public static class GovernedLoopSequentialFrontierMachine
         }
     }
 
+    /// <summary>Parks one exact Running activation under a distinct, already-governed next-attempt reservation.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult ParkRunningForRetry(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
+        int currentAttempt,
+        int nextAttempt,
+        string? nextAttemptOperationId,
+        DateTimeOffset updatedAtUtc)
+    {
+        var selected = Select(frontier, binding, plan);
+        if (selected.Status != GovernedLoopSequentialFrontierSelectionStatus.Running
+            || !SamePlanNode(selected.Node, node)
+            || !SameActivation(selected.Activation, activation)
+            || selected.Attempt != currentAttempt
+            || nextAttempt != currentAttempt + 1
+            || !CustomLoopArtifactIdentifier.IsValid(nextAttemptOperationId)
+            || string.Equals(selected.AttemptOperationId, nextAttemptOperationId, StringComparison.Ordinal)
+            || node?.RetryPolicy is null)
+        {
+            return Invalid("Only an exact governed next-attempt reservation can park a Running activation for retry.");
+        }
+
+        try
+        {
+            var waiting = CopyActivation(activation!, GovernedLoopNodeExecutionStatus.Waiting, nextAttempt, nextAttemptOperationId, null, null, null, [], []);
+            var aggregate = frontier!.Payload.Nodes.Any(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Ready)
+                ? GovernedLoopFrontierStatus.Active
+                : GovernedLoopFrontierStatus.Waiting;
+            var successor = ReplaceActivation(frontier, binding!, waiting, aggregate, updatedAtUtc);
+            return TransitionIsValid(frontier, successor, binding, plan)
+                ? Applied(successor, "The exact next retry attempt was reserved and entered durable Waiting posture.")
+                : Invalid("The retry reservation violates the canonical frontier transition contract.");
+        }
+        catch (Exception exception) when (IsContractFailure(exception))
+        {
+            return Invalid($"The retry reservation was rejected by its bounded contract: {exception.GetType().Name}.");
+        }
+    }
+
     /// <summary>Resumes only one exact Waiting activation under its unchanged attempt and operation identity.</summary>
     public static GovernedLoopSequentialFrontierTransitionResult ResumeWaiting(
         GovernedLoopFrontierPosture? frontier,
@@ -329,6 +372,43 @@ public static class GovernedLoopSequentialFrontierMachine
         catch (Exception exception) when (IsContractFailure(exception))
         {
             return Invalid($"The Waiting-to-Running transition was rejected by its bounded contract: {exception.GetType().Name}.");
+        }
+    }
+
+    /// <summary>Resumes one exact retry reservation without changing its reserved attempt or operation identity.</summary>
+    public static GovernedLoopSequentialFrontierTransitionResult ResumeRetry(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopNodeExecutionEvidence? activation,
+        int attempt,
+        string? attemptOperationId,
+        DateTimeOffset updatedAtUtc)
+    {
+        if (!Validate(frontier, binding, plan)
+            || frontier!.Payload.Status is not (GovernedLoopFrontierStatus.Active or GovernedLoopFrontierStatus.Waiting)
+            || activation is null
+            || activation.Status != GovernedLoopNodeExecutionStatus.Waiting
+            || activation.Attempt != attempt
+            || !string.Equals(activation.AttemptOperationId, attemptOperationId, StringComparison.Ordinal)
+            || plan!.Nodes.ElementAtOrDefault(activation.PlanOrdinal)?.RetryPolicy is null
+            || frontier.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is not { } retained
+            || !SameActivation(retained, activation))
+        {
+            return Invalid("Only an exact durable governed retry reservation can resume.");
+        }
+
+        try
+        {
+            var running = CopyActivation(activation, GovernedLoopNodeExecutionStatus.Running, attempt, attemptOperationId, null, null, null, [], []);
+            var successor = ReplaceActivation(frontier, binding!, running, GovernedLoopFrontierStatus.Active, updatedAtUtc);
+            return TransitionIsValid(frontier, successor, binding, plan)
+                ? Applied(successor, "The exact reserved retry attempt resumed once under its durable wake operation.")
+                : Invalid("The retry Waiting-to-Running successor violates the canonical frontier transition contract.");
+        }
+        catch (Exception exception) when (IsContractFailure(exception))
+        {
+            return Invalid($"The retry resume was rejected by its bounded contract: {exception.GetType().Name}.");
         }
     }
 
@@ -691,8 +771,8 @@ public static class GovernedLoopSequentialFrontierMachine
             && string.Equals(activation.AttemptOperationId, attemptOperationId, StringComparison.Ordinal)
             && node is not null
             && activation.PlanOrdinal == node.Ordinal
-            && frontier!.Payload.Nodes.Count(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Waiting) == 1
-            && SameActivation(frontier.Payload.Nodes.Single(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Waiting), activation);
+            && frontier!.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is { } retained
+            && SameActivation(retained, activation);
         if ((!exactRunning && !exactWaiting)
             || resolution is not (GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked))
         {

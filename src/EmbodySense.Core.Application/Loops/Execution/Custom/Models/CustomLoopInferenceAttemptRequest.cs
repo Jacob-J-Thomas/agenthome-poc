@@ -70,4 +70,7 @@ public sealed record CustomLoopInferenceAttemptRequest(
 
     /// <summary>Gets the server-owned exact frontier attempt operation for canonical dispatch.</summary>
     public string? AttemptOperationId { get; init; }
+
+    /// <summary>Gets the remaining retry-series allowance that must be enforced before provider or tool dispatch, when this is a retried attempt.</summary>
+    public CustomLoopRetryDispatchBudget? RetryDispatchBudget { get; init; }
 }

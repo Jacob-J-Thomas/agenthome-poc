@@ -22,6 +22,8 @@ using EmbodySense.Core.Application.Loops.Failures.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Retry;
+using EmbodySense.Core.Application.Loops.Retry.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Loops.Sequential.Actions;
@@ -34,6 +36,7 @@ using EmbodySense.Core.Common.Loops.Execution.Authority;
 using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
 using EmbodySense.Core.Common.Loops.Failures;
@@ -102,6 +105,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly IGovernedLoopConversationPublicationAuthorityBoundaryProvider? _conversationPublicationAuthorityBoundaryProvider;
     private readonly GovernedLoopFirstBoundRunCompletionBoundary? _firstBoundRunCompletionBoundary;
     private readonly IGovernedLoopWaitNodeExecutor? _waitNodeExecutor;
+    private readonly IGovernedLoopRetryNodeExecutor? _retryNodeExecutor;
     private readonly IGovernedLoopWorkspaceActionExecutor? _workspaceActionExecutor;
     private readonly IGovernedLoopCommandActionExecutor? _commandActionExecutor;
     private readonly IGovernedLoopFailureClassifier _failureClassifier;
@@ -124,6 +128,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     /// <param name="conversationPublicationAuthorityBoundaryProvider">The canonical success-Exit publication authority-boundary provider. A missing provider leaves legacy execution unchanged but stops canonical publication.</param>
     /// <param name="firstBoundRunCompletionBoundary">The canonical success-Exit completion boundary. A missing boundary leaves legacy execution unchanged but stops canonical successful completion.</param>
     /// <param name="waitNodeExecutor">The canonical durable Wait executor. A missing executor rejects Wait dispatch without changing legacy execution.</param>
+    /// <param name="retryNodeExecutor">The canonical opt-in retry scheduler. A missing executor preserves the no-retry default.</param>
     /// <param name="workspaceActionExecutor">The canonical workspace Action executor. A missing executor rejects Action dispatch without changing legacy execution.</param>
     /// <param name="commandActionExecutor">The canonical structured command Action executor. A missing executor rejects command dispatch without changing legacy execution.</param>
     /// <param name="failureClassifier">The pure canonical schema-1 failure classifier. The built-in classifier is used when omitted for compatibility with existing internal composition.</param>
@@ -140,6 +145,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         IGovernedLoopConversationPublicationAuthorityBoundaryProvider? conversationPublicationAuthorityBoundaryProvider = null,
         GovernedLoopFirstBoundRunCompletionBoundary? firstBoundRunCompletionBoundary = null,
         IGovernedLoopWaitNodeExecutor? waitNodeExecutor = null,
+        IGovernedLoopRetryNodeExecutor? retryNodeExecutor = null,
         IGovernedLoopWorkspaceActionExecutor? workspaceActionExecutor = null,
         IGovernedLoopCommandActionExecutor? commandActionExecutor = null,
         IGovernedLoopFailureClassifier? failureClassifier = null)
@@ -156,6 +162,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         _conversationPublicationAuthorityBoundaryProvider = conversationPublicationAuthorityBoundaryProvider;
         _firstBoundRunCompletionBoundary = firstBoundRunCompletionBoundary;
         _waitNodeExecutor = waitNodeExecutor;
+        _retryNodeExecutor = retryNodeExecutor;
         _workspaceActionExecutor = workspaceActionExecutor;
         _commandActionExecutor = commandActionExecutor;
         _failureClassifier = failureClassifier ?? new GovernedLoopFailureClassifier();
@@ -447,6 +454,96 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         return await ContinueOwnedWaitAsync(run, request.Actor, context, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<CustomLoopOrderedRunResult> ResumeRetrySequentialAsync(
+        GovernedLoopSequentialOrderedRetryResumeRequest request,
+        IGovernedLoopSequentialOrderedNodeEvidenceRecorder nodeEvidenceRecorder,
+        IGovernedLoopSequentialAuditRecorder auditRecorder,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(nodeEvidenceRecorder);
+        ArgumentNullException.ThrowIfNull(auditRecorder);
+        var context = CreateSequentialContext(
+            request.SchemaVersion,
+            request.Anchor,
+            request.Plan,
+            request.Artifact,
+            nodeEvidenceRecorder,
+            auditRecorder);
+        if (context is null
+            || !EmbodySense.Core.Common.Loops.Execution.Retry.GovernedLoopRetryContract.IsValid(request.RetryState)
+            || request.RetryState.Disposition is not (GovernedLoopRetryStateDisposition.Dispatched or GovernedLoopRetryStateDisposition.Exhausted)
+            || string.IsNullOrWhiteSpace(request.Actor))
+        {
+            return Result(CustomLoopOrderedRunStatus.InvalidState, null, "The canonical retry resume hand-off is invalid and no ordered runtime work was dispatched.");
+        }
+
+        CustomLoopRunRecord? run;
+        try
+        {
+            run = await _runStore.GetAsync(context.Anchor.AdapterBinding.ExecutionBinding.RunId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return Result(CustomLoopOrderedRunStatus.Failed, null, $"The resumed retry run trace could not be loaded safely: {SafeExceptionClass(exception)}.");
+        }
+
+        if (run is null)
+        {
+            return Result(CustomLoopOrderedRunStatus.NotFound, null, "The custom-loop run does not exist.");
+        }
+
+        var retryStateEvents = run.Events.Where(item => string.Equals(item.RetryState?.ContentHash, request.RetryState.ContentHash, StringComparison.Ordinal)).Take(2).ToArray();
+        var retryMatches = retryStateEvents.Length == 1;
+        var activation = run.Frontier?.Payload.Nodes.ElementAtOrDefault(request.RetryState.Identity.ActivationOrdinal);
+        if (!SequentialRunMatches(run, context)
+            || !CustomLoopRunValidator.ValidateForDispatch(run).IsValid
+            || !retryMatches
+            || activation is null
+            || activation.VisitOrdinal != request.RetryState.Identity.VisitOrdinal
+            || !string.Equals(activation.NodeId, request.RetryState.Identity.NodeId, StringComparison.Ordinal))
+        {
+            return Result(CustomLoopOrderedRunStatus.InvalidState, run, "The durable retry reservation no longer matches the exact immutable graph, activation, and evidence chain.");
+        }
+
+        if (run.Status == CustomLoopRunStatus.Waiting)
+        {
+            return Result(CustomLoopOrderedRunStatus.Waiting, run, "The exact retry dispatch completed and ordered execution is durably parked again.");
+        }
+        if (run.Status == CustomLoopRunStatus.Completed)
+        {
+            return await CompleteCanonicalAsync(run, context, "The exact durable canonical completion was replayed after retry continuation.", run.FinalOutput ?? string.Empty).ConfigureAwait(false);
+        }
+        var dispatchMatches = request.RetryState.Disposition == GovernedLoopRetryStateDisposition.Dispatched
+            && activation.Status == GovernedLoopNodeExecutionStatus.Running
+            && activation.Attempt == request.RetryState.NextAttempt
+            && string.Equals(activation.AttemptOperationId, request.RetryState.AttemptOperationId, StringComparison.Ordinal);
+        var routedExhaustionMatches = request.RetryState.Disposition == GovernedLoopRetryStateDisposition.Exhausted
+            && activation.Status == GovernedLoopNodeExecutionStatus.Failed
+            && activation.OutcomeEvidenceId is not null
+            && activation.OutcomeEvidenceHash is not null
+            && retryStateEvents is [{ } retryStateEvent]
+            && run.Events.Count(item => string.Equals(item.EventId, activation.OutcomeEvidenceId, StringComparison.Ordinal)
+                && string.Equals(item.SequentialNodeEvidence?.OutcomeArtifactHash, activation.OutcomeEvidenceHash, StringComparison.Ordinal)
+                && item.FailureEvidence is { FailureClass: GovernedLoopFailureClass.Exhaustion } failure
+                && failure.CausalEvidence.Count == 1
+                && string.Equals(failure.CausalEvidence[0].EvidenceId, retryStateEvent.EventId, StringComparison.Ordinal)
+                && string.Equals(failure.CausalEvidence[0].EvidenceHash, request.RetryState.ContentHash, StringComparison.Ordinal)) == 1;
+        if (run.Status != CustomLoopRunStatus.Running || !dispatchMatches && !routedExhaustionMatches)
+        {
+            return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Ordered retry re-entry requires the exact durable Running dispatch or routed-exhaustion frontier.");
+        }
+
+        using var ownership = TryRegisterActiveRun(run.Id);
+        return ownership is null
+            ? Result(CustomLoopOrderedRunStatus.Failed, run, "This runtime is already coordinating ordered execution for the resumed retry run.")
+            : await ContinueRegisteredAsync(run, request.Actor, cancellationToken, context).ConfigureAwait(false);
     }
 
     private async Task<CustomLoopOrderedRunResult> ContinueOwnedWaitAsync(
@@ -848,6 +945,27 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                     }
 
                     run = resumedWait.Run!;
+                    continue;
+                }
+
+                if (FindSequentialDispatchStart(run, node, selected.Activation!, selected.Attempt!.Value, selected.AttemptOperationId!) is null
+                    && HasExactRetryDispatch(run, node, selected.Activation!, selected.Attempt.Value, selected.AttemptOperationId!))
+                {
+                    var retryDispatch = await DispatchSelectedSequentialNodeAsync(
+                        context,
+                        run,
+                        node,
+                        selected.Attempt.Value,
+                        selected.AttemptOperationId!,
+                        actor,
+                        dispatchState,
+                        cancellationToken);
+                    if (retryDispatch.Terminal is not null)
+                    {
+                        return retryDispatch.Terminal;
+                    }
+
+                    run = retryDispatch.Run!;
                     continue;
                 }
 
@@ -1646,6 +1764,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             {
                 return prepared;
             }
+            if (HasCommittedSequentialRetryPark(prepared.Run!, node, claimedActivation, attempt, attemptOperationId))
+            {
+                return prepared;
+            }
 
             var terminal = await TerminateAsync(prepared.Run!, actor, CustomLoopRunStatus.NeedsReview, "canonical_command_action_checkpoint_missing", "Canonical command Action evidence resolved without one checkpoint advancement.");
             return new RunAdvance(terminal.Run, terminal);
@@ -1943,7 +2065,22 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             run = persistedStart.Run!;
         }
 
+        if (RetryDeadlineReached(run, sequentialNode))
+        {
+            return await RejectSequentialNodeBeforeProviderAsync(
+                run,
+                actor,
+                sequentialNode,
+                node.NodeId,
+                isExit: false,
+                "retry_deadline_exceeded",
+                "The immutable retry-series deadline elapsed before the command Action request could start.",
+                dispatchStartAlreadyRetained: true,
+                reconcileRetainedDispatchStartAudit: false);
+        }
+
         GovernedLoopCommandActionExecutionResult result;
+        using var actionToken = CreateAttemptToken(run, cancellationToken, sequentialNode);
         try
         {
             result = await _commandActionExecutor.ExecuteAsync(
@@ -1957,9 +2094,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                         attempt),
                     context.Artifact,
                     attemptOperationId),
-                cancellationToken).ConfigureAwait(false);
+                actionToken.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (actionToken.IsCancellationRequested)
         {
             result = new GovernedLoopCommandActionExecutionResult(
                 GovernedLoopCommandActionExecutionStatus.NeedsReview,
@@ -2127,6 +2264,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             {
                 return prepared;
             }
+            if (HasCommittedSequentialRetryPark(prepared.Run!, node, claimedActivation, attempt, attemptOperationId))
+            {
+                return prepared;
+            }
 
             var terminal = await TerminateAsync(prepared.Run!, actor, CustomLoopRunStatus.NeedsReview, "canonical_workspace_action_checkpoint_missing", "Canonical workspace Action evidence resolved without one checkpoint advancement.");
             return new RunAdvance(terminal.Run, terminal);
@@ -2222,7 +2363,22 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             run = persistedStart.Run!;
         }
 
+        if (RetryDeadlineReached(run, sequentialNode))
+        {
+            return await RejectSequentialNodeBeforeProviderAsync(
+                run,
+                actor,
+                sequentialNode,
+                node.NodeId,
+                isExit: false,
+                "retry_deadline_exceeded",
+                "The immutable retry-series deadline elapsed before the workspace Action request could start.",
+                dispatchStartAlreadyRetained: true,
+                reconcileRetainedDispatchStartAudit: false);
+        }
+
         GovernedLoopWorkspaceActionExecutionResult result;
+        using var actionToken = CreateAttemptToken(run, cancellationToken, sequentialNode);
         try
         {
             result = await _workspaceActionExecutor.ExecuteAsync(
@@ -2237,9 +2393,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                     context.Artifact,
                     attemptOperationId,
                     inputJson),
-                cancellationToken).ConfigureAwait(false);
+                actionToken.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (actionToken.IsCancellationRequested)
         {
             result = new GovernedLoopWorkspaceActionExecutionResult(
                 GovernedLoopWorkspaceActionExecutionStatus.NeedsReview,
@@ -3045,6 +3201,42 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         string failureCode,
         string detail)
     {
+        if (_retryNodeExecutor is not null
+            && context.Node.RetryPolicy is not null
+            && failure.FailureEvidence is { RetrySafety: GovernedLoopFailureRetrySafety.RetryableWithExactIntent } retryableFailure)
+        {
+            GovernedLoopRetryExecutionResult retry;
+            try
+            {
+                retry = await _retryNodeExecutor.ScheduleAsync(
+                    new GovernedLoopRetryExecutionRequest(
+                        new GovernedLoopSequentialRunAnchor(context.Binding, run.SequentialInvocationSnapshot!),
+                        context.Plan,
+                        context.Node,
+                        retryableFailure,
+                        actor),
+                    IntegrityToken()).ConfigureAwait(false);
+            }
+            catch
+            {
+                retry = new GovernedLoopRetryExecutionResult(GovernedLoopRetryExecutionStatus.Unavailable, run, null, "retry-scheduler-unavailable");
+            }
+
+            if (retry.Status is GovernedLoopRetryExecutionStatus.Scheduled or GovernedLoopRetryExecutionStatus.Replayed
+                && retry.Run is not null)
+            {
+                return retry.Run.Status == CustomLoopRunStatus.Waiting
+                    ? new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, retry.Run, retry.Detail))
+                    : new RunAdvance(retry.Run, null);
+            }
+            if (retry.Status is GovernedLoopRetryExecutionStatus.NeedsReview or GovernedLoopRetryExecutionStatus.Unavailable or GovernedLoopRetryExecutionStatus.Conflict)
+            {
+                var review = await TerminateAsync(retry.Run ?? run, actor, CustomLoopRunStatus.NeedsReview, "canonical_retry_scheduling_unproven", retry.Detail);
+                return new RunAdvance(review.Run, review);
+            }
+            run = retry.Run ?? run;
+        }
+
         if (!HasAdmittedFailureRoute(context))
         {
             var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, failureCode, detail);
@@ -3068,6 +3260,26 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return persisted.Terminal is null
             ? new RunAdvance(persisted.Run, null)
             : persisted;
+    }
+
+    private static bool HasExactRetryDispatch(
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        int attempt,
+        string attemptOperationId)
+    {
+        var matches = run.Events.Where(item => item.RetryState is
+        {
+            Disposition: GovernedLoopRetryStateDisposition.Dispatched,
+            NextAttempt: { } nextAttempt,
+        } state
+            && nextAttempt == attempt
+            && state.Identity.ActivationOrdinal == activation.ActivationOrdinal
+            && state.Identity.VisitOrdinal == activation.VisitOrdinal
+            && string.Equals(state.Identity.NodeId, node.NodeId, StringComparison.Ordinal)
+            && string.Equals(state.AttemptOperationId, attemptOperationId, StringComparison.Ordinal)).Take(2).ToArray();
+        return matches.Length == 1;
     }
 
     private static bool HasAdmittedFailureRoute(SequentialNodeExecutionContext context)
@@ -3209,6 +3421,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         if (prepared.PendingCheckpoint is null)
         {
             if (HasCommittedSequentialFailureRoute(prepared.Run!, node, claimedActivation, attempt, attemptOperationId))
+            {
+                return prepared;
+            }
+            if (HasCommittedSequentialRetryPark(prepared.Run!, node, claimedActivation, attempt, attemptOperationId))
             {
                 return prepared;
             }
@@ -3479,6 +3695,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         if (prepared.PendingCheckpoint is null)
         {
             if (HasCommittedSequentialFailureRoute(prepared.Run!, node, claimedActivation, attempt, attemptOperationId))
+            {
+                return prepared;
+            }
+            if (HasCommittedSequentialRetryPark(prepared.Run!, node, claimedActivation, attempt, attemptOperationId))
             {
                 return prepared;
             }
@@ -3763,6 +3983,62 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         return frontierNode.SelectedControlEdgeIds.Count > 0;
+    }
+
+    private static bool HasCommittedSequentialRetryPark(
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        int attempt,
+        string attemptOperationId)
+    {
+        if (node.RetryPolicy is not { } policy
+            || !CustomLoopRunValidator.Validate(run).IsValid
+            || run.Status is not (CustomLoopRunStatus.Running or CustomLoopRunStatus.Waiting)
+            || FindSequentialNodeEvidence(run, node, activation, attempt) is not
+            {
+                Kind: CustomLoopRunEventKind.NodeAttemptFailed,
+                FailureEvidence: { RetrySafety: GovernedLoopFailureRetrySafety.RetryableWithExactIntent } failure,
+                SequentialNodeEvidence:
+                {
+                    Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+                    Disposition: CustomLoopSequentialNodeDisposition.Rejected,
+                },
+            }
+            || run.Frontier?.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is not
+            {
+                Status: GovernedLoopNodeExecutionStatus.Waiting,
+                Attempt: { } nextAttempt,
+                AttemptOperationId: { } nextAttemptOperationId,
+            } waiting
+            || waiting.ActivationOrdinal != activation.ActivationOrdinal
+            || waiting.VisitOrdinal != activation.VisitOrdinal
+            || nextAttempt != attempt + 1
+            || string.Equals(nextAttemptOperationId, attemptOperationId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var latest = run.Events.Select(item => item.RetryState)
+            .Where(state => state is not null
+                && state.Identity.ActivationOrdinal == activation.ActivationOrdinal
+                && state.Identity.VisitOrdinal == activation.VisitOrdinal)
+            .OrderByDescending(state => state!.StateVersion)
+            .FirstOrDefault();
+        return latest is
+        {
+            Disposition: GovernedLoopRetryStateDisposition.Scheduled,
+            CurrentAttempt: var currentAttempt,
+            NextAttempt: var retainedNextAttempt,
+            AttemptOperationId: var retainedOperationId,
+        }
+            && currentAttempt == attempt
+            && retainedNextAttempt == nextAttempt
+            && string.Equals(retainedOperationId, nextAttemptOperationId, StringComparison.Ordinal)
+            && string.Equals(latest.Identity.NodeId, node.NodeId, StringComparison.Ordinal)
+            && string.Equals(latest.Identity.PolicyHash, policy.ContentHash, StringComparison.Ordinal)
+            && string.Equals(latest.FailureEvidenceId, failure.EvidenceId, StringComparison.Ordinal)
+            && string.Equals(latest.FailureEvidenceHash, failure.ContentHash, StringComparison.Ordinal);
     }
 
     private bool TryCreateAuthenticatedPureCheckpointSnapshot(
@@ -5490,7 +5766,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             PlanOrdinal = sequentialNode?.Activation.PlanOrdinal ?? -1,
             ActivationOrdinal = sequentialNode?.Activation.ActivationOrdinal ?? -1,
             VisitOrdinal = sequentialNode?.Activation.VisitOrdinal ?? 0,
-            AttemptOperationId = sequentialNode?.AttemptOperationId
+            AttemptOperationId = sequentialNode?.AttemptOperationId,
+            RetryDispatchBudget = CreateRetryDispatchBudget(run, sequentialNode)
         };
 
         CustomLoopInferenceAttemptResult result;
@@ -5498,7 +5775,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         // pre-dispatch, while any failure after it must assume the external provider may have acted.
         var providerInvoked = false;
         ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
-        using var providerBoundaryToken = CreateProviderToken(run, cancellationToken);
+        using var providerBoundaryToken = CreateAttemptToken(run, cancellationToken, sequentialNode);
         using var providerToken = CancellationTokenSource.CreateLinkedTokenSource(providerBoundaryToken.Token);
         if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
         {
@@ -5547,10 +5824,36 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "run_deadline_exceeded", "The custom-loop execution deadline was reached before the provider request could start.");
                 return new RunAdvance(terminal.Run, terminal);
             }
+            if (sequentialNode is not null && RetryDeadlineReached(run, sequentialNode))
+            {
+                return await RecordAttemptFailureAsync(
+                    run,
+                    actor,
+                    step.Id,
+                    iteration,
+                    correlation,
+                    assembly,
+                    new TimeoutException("The immutable retry-series deadline elapsed before provider dispatch."),
+                    isExit: false,
+                    providerWasInvoked: false,
+                    sequentialNode,
+                    CustomLoopRunStatus.Failed,
+                    "retry_deadline_exceeded",
+                    "The immutable retry-series deadline elapsed before the retry provider request could start.");
+            }
 
             providerToken.Token.ThrowIfCancellationRequested();
             result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token, () =>
             {
+                providerBoundaryToken.Token.ThrowIfCancellationRequested();
+                if (ExecutionDeadlineReached(run))
+                {
+                    throw new TimeoutException("The canonical run deadline was reached at the provider dispatch boundary.");
+                }
+                if (sequentialNode is not null && RetryDeadlineReached(run, sequentialNode))
+                {
+                    throw new TimeoutException("The immutable retry-series deadline elapsed at the provider dispatch boundary.");
+                }
                 providerInvoked = true;
                 dispatchState.MarkProviderRequestStarted();
             });
@@ -5884,7 +6187,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         // cancellation and faults are evidence-uncertain rather than safe pre-invocation failures.
         var providerInvoked = false;
         ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
-        using var providerBoundaryToken = CreateProviderToken(run, cancellationToken);
+        using var providerBoundaryToken = CreateAttemptToken(run, cancellationToken);
         using var providerToken = CancellationTokenSource.CreateLinkedTokenSource(providerBoundaryToken.Token);
         if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
         {
@@ -7005,7 +7308,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         string? failureCode,
         string detail,
         CustomLoopRunStatus terminalStatus = CustomLoopRunStatus.Failed,
-        bool dispatchStartAlreadyRetained = false)
+        bool dispatchStartAlreadyRetained = false,
+        bool reconcileRetainedDispatchStartAudit = true)
     {
         var attempt = sequentialNode.Attempt;
         var iteration = sequentialNode.Activation.CycleIteration ?? run.Checkpoint.Iteration;
@@ -7015,7 +7319,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var correlation = NewCorrelationId(isExit ? "exit-rejection" : "attempt-rejection");
         var now = Now(run);
         var events = new List<CustomLoopRunEvent>();
-        if (dispatchStartAlreadyRetained)
+        if (dispatchStartAlreadyRetained && reconcileRetainedDispatchStartAudit)
         {
             var startAuditFailure = await ReconcileWaitNodeStartAuditAsync(
                 run,
@@ -9992,7 +10296,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 visits = maximumIterations;
             }
 
-            maximum = checked(maximum + visits);
+            var attemptsPerVisit = node.RetryPolicy?.MaximumAttempts ?? 1;
+            maximum = checked(maximum + checked(visits * attemptsPerVisit));
             if (maximum >= CustomLoopLimits.MaxModelAttemptsPerRun)
             {
                 return CustomLoopLimits.MaxModelAttemptsPerRun;
@@ -10173,14 +10478,63 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private bool ExecutionDeadlineReached(CustomLoopRunRecord run) => GetAccumulatedRunningMilliseconds(run, Now(run)) >= CustomLoopLimits.MaxRunExecutionMilliseconds;
 
-    private CancellationTokenSource CreateProviderToken(CustomLoopRunRecord run, CancellationToken callerToken)
+    private CancellationTokenSource CreateAttemptToken(CustomLoopRunRecord run, CancellationToken callerToken, SequentialNodeExecutionContext? sequentialNode = null)
     {
         var elapsed = GetAccumulatedRunningMilliseconds(run, Now(run));
-        var remainingMilliseconds = Math.Max(1, CustomLoopLimits.MaxRunExecutionMilliseconds - elapsed);
+        var remainingMilliseconds = CustomLoopLimits.MaxRunExecutionMilliseconds - elapsed;
+        if (sequentialNode?.Node.RetryPolicy is { } policy)
+        {
+            remainingMilliseconds = Math.Min(remainingMilliseconds, policy.PerAttemptTimeoutMilliseconds);
+            var retry = LatestRetryDispatch(run, sequentialNode);
+            if (retry is not null)
+            {
+                remainingMilliseconds = Math.Min(remainingMilliseconds, (long)Math.Floor((retry.Identity.DeadlineUtc - Now(run)).TotalMilliseconds));
+            }
+        }
         var source = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
-        source.CancelAfter(TimeSpan.FromMilliseconds(remainingMilliseconds));
+        source.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(1, remainingMilliseconds)));
         return source;
     }
+
+    private bool RetryDeadlineReached(CustomLoopRunRecord run, SequentialNodeExecutionContext sequentialNode)
+        => LatestRetryDispatch(run, sequentialNode)?.Identity.DeadlineUtc <= Now(run);
+
+    private static GovernedLoopRetryState? LatestRetryDispatch(CustomLoopRunRecord run, SequentialNodeExecutionContext sequentialNode)
+        => run.Events.Select(item => item.RetryState)
+            .Where(state => state is
+            {
+                Disposition: GovernedLoopRetryStateDisposition.Dispatched,
+                NextAttempt: not null,
+                AttemptOperationId: not null,
+            }
+                && state.Identity.ActivationOrdinal == sequentialNode.Activation.ActivationOrdinal
+                && state.Identity.VisitOrdinal == sequentialNode.Activation.VisitOrdinal
+                && state.NextAttempt == sequentialNode.Attempt
+                && string.Equals(state.AttemptOperationId, sequentialNode.AttemptOperationId, StringComparison.Ordinal))
+            .OrderByDescending(state => state!.StateVersion)
+            .FirstOrDefault();
+
+    private static CustomLoopRetryDispatchBudget? CreateRetryDispatchBudget(CustomLoopRunRecord run, SequentialNodeExecutionContext? sequentialNode)
+    {
+        if (sequentialNode?.Node.RetryPolicy is not { } policy
+            || LatestRetryDispatch(run, sequentialNode) is not { } retry)
+        {
+            return null;
+        }
+
+        var budget = retry.Budget;
+        return new CustomLoopRetryDispatchBudget(
+            Remaining(policy.MaximumTokens, budget.Tokens),
+            Remaining(policy.MaximumToolCalls, budget.ToolCalls),
+            Remaining(policy.MaximumCostMicrounits, budget.CostMicrounits),
+            policy.MaximumCostCurrency);
+    }
+
+    private static long? Remaining(long? maximum, long? consumed)
+        => maximum is null ? null : checked(maximum.Value - consumed!.Value);
+
+    private static int? Remaining(int? maximum, int? consumed)
+        => maximum is null ? null : checked(maximum.Value - consumed!.Value);
 
     private async Task<CustomLoopOrderedRunResult> CancelAfterInterruptedPreDispatchPersistenceAsync(CustomLoopRunRecord current, CustomLoopRunRecord candidate, string actor)
     {

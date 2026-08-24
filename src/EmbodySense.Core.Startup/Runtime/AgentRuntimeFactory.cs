@@ -19,6 +19,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Posture;
+using EmbodySense.Core.Application.Loops.Retry;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.Wait;
@@ -57,6 +58,7 @@ using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
+using EmbodySense.Core.Startup.Loops.Execution.Retry;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Loops.Posture;
@@ -553,6 +555,7 @@ public sealed class AgentRuntimeFactory
                 effectAuthorityBoundary: governedEffectAuthority,
                 modelPrimaryExecution: governedModelPrimaryExecution);
             var governedWaitNodeRelay = new GovernedLoopWaitNodeExecutionRelay();
+            var governedRetryNodeRelay = new GovernedLoopRetryNodeExecutionRelay();
             var governedWaitContinuationRelay = new GovernedLoopWaitContinuationRelay();
             var governedWaitPosture = new GovernedLoopCanonicalWaitCurrentPostureAdapter(
                 customRunStore,
@@ -578,6 +581,7 @@ public sealed class AgentRuntimeFactory
                 conversationPublicationAuthorityBoundaryProvider: governedPublicationAuthority,
                 firstBoundRunCompletionBoundary: governedRunCompletion,
                 waitNodeExecutor: governedWaitNodeRelay,
+                retryNodeExecutor: governedRetryNodeRelay,
                 workspaceActionExecutor: governedWorkspaceActionExecutor,
                 commandActionExecutor: governedCommandActionExecutor,
                 failureClassifier: failureClassifier);
@@ -610,14 +614,29 @@ public sealed class AgentRuntimeFactory
                 capabilityAuthority,
                 customExecutionGate,
                 governedWaitResume);
+            var governedRetryPosture = new GovernedLoopCanonicalRetryCurrentPostureAdapter(
+                customRunStore,
+                governedWaitPosture,
+                capabilityAdmission);
+            var governedRetryResume = new GovernedLoopSequentialRetryResumeExecutor(
+                governedWaitResume,
+                governedOrderedRuntime);
+            var governedRetry = new GovernedLoopRetryExecutionService(
+                customRunStore,
+                governedSleep,
+                governedRetryPosture,
+                governedRetryResume);
             governedWaitNodeRelay.Bind(governedWait);
+            governedRetryNodeRelay.Bind(governedRetry);
             governedWaitContinuationRelay.Bind(governedWait);
+            governedWaitContinuationRelay.BindRetry(governedRetry);
             governedWaitRuntimeHost = new GovernedLoopWaitRuntimeHost(
                 scheduleStore,
                 governedSleepStore,
                 coordinatorEvidenceStore,
                 governedSleep,
                 governedWait,
+                governedRetry,
                 operationalClock);
             var governedMaterializer = new GovernedLoopSequentialRunMaterializer(
                 customRunStore,

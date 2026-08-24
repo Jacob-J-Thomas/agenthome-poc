@@ -154,6 +154,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var request = CreateRequest() with
         {
             ModelSnapshot = new CustomLoopModelSnapshot("caller-selected-provider", "caller-selected-model"),
+            RetryDispatchBudget = new CustomLoopRetryDispatchBudget(3, null, 5, "USD"),
         };
 
         var result = await executor.ExecuteAsync(request, providerRequestStarted: () => providerStarts++);
@@ -173,10 +174,43 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(request.ActivationOrdinal, observed.Admission.ActivationOrdinal);
         Assert.Equal(request.VisitOrdinal, observed.Admission.VisitOrdinal);
         Assert.Equal(request.AttemptOperationId, observed.Admission.AttemptOperationId);
+        Assert.Equal(GovernedModelUsageLimit.Bounded(3), observed.Admission.RetryUsageCeiling?.TotalTokens);
+        Assert.Equal(GovernedModelMonetaryLimit.Bounded("USD", 5), observed.Admission.RetryUsageCeiling?.MonetaryCost);
         var routedPrimary = request.AdmissionReceipt!.Evidence.ModelRoutingAdmission.Entries.Single().Primary;
         Assert.Equal(routedPrimary.ContentHash, observed.Admission.RequestedPrimaryPinHash);
         Assert.Equal("caller-selected-model", request.ModelSnapshot.Model);
         Assert.Equal("caller-selected-provider", request.ModelSnapshot.Provider);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_rejects_retry_usage_ceiling_without_the_canonical_pretransport_reservation_boundary()
+    {
+        using var workspace = new TestWorkspace();
+        var transports = 0;
+        var executor = new CustomLoopInferenceAttemptExecutor(
+            CreateOptions(workspace),
+            (IToolApprovalPrompt)new RecordingApprovalPrompt(),
+            new TestAuthorityProvider(),
+            new NullEvidenceSink(),
+            new TestCapabilityAdmissionService(),
+            (options, broker) =>
+            {
+                transports++;
+                return new AsyncFakeInferenceClient(broker, (_, _, _) => Task.FromResult(Response()));
+            },
+            capabilityAuthorityTransaction: null,
+            effectAuthorityBoundary: null);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => executor.ExecuteAsync(CreateRequest() with
+        {
+            AdmissionReceipt = null,
+            ExecutionBinding = null,
+            GraphArtifact = null,
+            RetryDispatchBudget = new CustomLoopRetryDispatchBudget(1, null, null, null),
+        }));
+
+        Assert.Contains("canonical pre-transport", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, transports);
     }
 
     [Theory]
@@ -667,6 +701,38 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Contains(authorityEvents, item => item.Outcome == AuditSchema.Outcomes.Denied && Metadata(item, "command") == "write");
         Assert.All(authorityEvents, AssertCorrelation);
         Assert.All(events.Where(item => item.Action is AuditSchema.Actions.ToolPermissionEvaluate or AuditSchema.Actions.ToolExecute), AssertCorrelation);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_denies_tool_dispatches_after_the_remaining_retry_tool_ceiling()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "bounded");
+        var results = new List<ToolResult>();
+        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        {
+            Assert.NotNull(broker);
+            results.Add(await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken));
+            Assert.Empty(broker.AvailableCommands);
+            results.Add(await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken));
+            return Response();
+        });
+        var request = CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]) with
+        {
+            RetryDispatchBudget = new CustomLoopRetryDispatchBudget(null, 1, null, null),
+        };
+
+        var result = await executor.ExecuteAsync(request);
+
+        Assert.Equal(2, result.ToolRequestsConsumed);
+        Assert.Collection(
+            results,
+            item => Assert.Equal(ToolExecutionOutcome.Succeeded, item.Outcome),
+            item => Assert.Equal(ToolExecutionOutcome.Denied, item.Outcome));
+        var events = await new AuditLog(paths).ReadTailAsync(100);
+        Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolExecute);
+        Assert.Contains(events, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "limit_scope") == "retry");
     }
 
     [Fact]
@@ -1386,6 +1452,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         await Assert.ThrowsAsync<ArgumentException>(() => executor.ExecuteAsync(valid with { DefinitionHash = new string('A', 64) }));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => executor.ExecuteAsync(valid with { ToolRequestsUsedInRun = -1 }));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => executor.ExecuteAsync(valid with { ToolRequestsUsedInRun = 32 }));
+        await Assert.ThrowsAsync<ArgumentException>(() => executor.ExecuteAsync(valid with { RetryDispatchBudget = new CustomLoopRetryDispatchBudget(0, null, null, null) }));
         await Assert.ThrowsAsync<ArgumentException>(() => executor.ExecuteAsync(valid with { ModelSnapshot = new CustomLoopModelSnapshot("azure", "model") }));
         await Assert.ThrowsAsync<ArgumentException>(() => executor.ExecuteAsync(valid with { AllowTools = true, AdmittedToolAssignments = [CustomLoopToolAssignment.Unknown] }));
         await Assert.ThrowsAsync<ArgumentException>(() => executor.ExecuteAsync(valid with { AllowTools = true, AdmittedToolAssignments = [CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Read] }));

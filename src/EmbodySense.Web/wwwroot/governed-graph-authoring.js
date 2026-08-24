@@ -103,6 +103,19 @@ export function clientShapeErrors(graph) {
       errors.push(
         error("node-id-duplicate", "node", node.id, `nodes[${index}].id`),
       );
+    if (
+      node?.retryPolicy !== undefined &&
+      node.retryPolicy !== null &&
+      !isRetryPolicy(node.retryPolicy, node.id)
+    )
+      errors.push(
+        error(
+          "node-retry-policy-invalid",
+          "node",
+          node?.id,
+          `nodes[${index}].retryPolicy`,
+        ),
+      );
     ids.add(node?.id);
   }
   return Object.freeze(errors);
@@ -189,6 +202,13 @@ export function candidateFromGraph(graph) {
   const routing = routingPolicyIntent(graph.defaultModelRoutingPolicy);
   if (routing) candidate.defaultModelRoutingPolicy = routing;
   return candidate;
+}
+
+export function selectHydratedNodeId(nodes, currentNodeId) {
+  if (!Array.isArray(nodes) || nodes.length === 0) return null;
+  return nodes.some((item) => item?.id === currentNodeId)
+    ? currentNodeId
+    : (nodes[0]?.id ?? null);
 }
 
 export function exactRoutingPolicyIntent(
@@ -316,6 +336,34 @@ export function configureInferenceModelRouting(
     },
     previousProfileIds,
   );
+}
+
+export function configureNodeRetryPolicy(graph, nodeId, policy) {
+  const node = graph?.nodes?.find((item) => item.id === nodeId);
+  const excludedKinds = new Set([
+    "trigger",
+    "wait",
+    "humanreview",
+    "human-review",
+    "humaninput",
+    "human-input",
+    "exit",
+    "fail",
+  ]);
+  if (
+    !node ||
+    excludedKinds.has(String(node.descriptor?.kind ?? "").toLowerCase()) ||
+    (policy !== null && !isRetryPolicy(policy, nodeId))
+  )
+    return null;
+  return {
+    ...graph,
+    nodes: graph.nodes.map((item) =>
+      item.id === nodeId
+        ? { ...item, retryPolicy: policy === null ? null : clone(policy) }
+        : item,
+    ),
+  };
 }
 
 export function addCatalogNode(graph, contractItem, nodeId, canvasX, canvasY) {
@@ -744,6 +792,39 @@ function canonicalDataClasses(values) {
           /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(value),
       ) &&
       values.every((value, index) => index === 0 || values[index - 1] < value))
+  );
+}
+
+function isRetryPolicy(value, nodeId) {
+  if (!value || typeof value !== "object") return false;
+  const hash = /^[0-9a-f]{64}$/;
+  return (
+    value.schemaVersion === 1 &&
+    identifier.test(value.policyId ?? "") &&
+    value.nodeId === nodeId &&
+    Array.isArray(value.failureClasses) &&
+    value.failureClasses.length > 0 &&
+    value.failureClasses.every((item) => typeof item === "string") &&
+    Array.isArray(value.serverCodes) &&
+    Number.isSafeInteger(value.maximumAttempts) &&
+    value.maximumAttempts >= 2 &&
+    Number.isSafeInteger(value.perAttemptTimeoutMilliseconds) &&
+    value.perAttemptTimeoutMilliseconds > 0 &&
+    Number.isSafeInteger(value.maximumElapsedMilliseconds) &&
+    value.maximumElapsedMilliseconds > 0 &&
+    ["none", "fixed", "exponential"].includes(
+      String(value.backoffStrategy ?? "").toLowerCase(),
+    ) &&
+    Number.isSafeInteger(value.initialDelayMilliseconds) &&
+    value.initialDelayMilliseconds >= 0 &&
+    Number.isSafeInteger(value.maximumDelayMilliseconds) &&
+    value.maximumDelayMilliseconds >= 0 &&
+    ["none", "deterministicbounded", "deterministic-bounded"].includes(
+      String(value.jitterStrategy ?? "").toLowerCase(),
+    ) &&
+    Number.isSafeInteger(value.maximumJitterMilliseconds) &&
+    value.maximumJitterMilliseconds >= 0 &&
+    hash.test(value.contentHash ?? "")
   );
 }
 

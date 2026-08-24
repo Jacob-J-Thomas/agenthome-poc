@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Inference.Profiles;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Graph;
 
@@ -228,6 +229,13 @@ public static class GovernedLoopGraphNormalizer
 
             ValidatePorts(node, path, schemaIds, errors);
             ValidateParameters(node, path, errors);
+            if (node.RetryPolicy is not null
+                && (!GovernedLoopRetryContract.IsValid(node.RetryPolicy)
+                    || !string.Equals(node.RetryPolicy.NodeId, node.Id, StringComparison.Ordinal)
+                    || node.Descriptor?.Kind is GovernedLoopNodeKind.Trigger or GovernedLoopNodeKind.Wait or GovernedLoopNodeKind.HumanReview or GovernedLoopNodeKind.HumanInput or GovernedLoopNodeKind.Exit or GovernedLoopNodeKind.Fail))
+            {
+                errors.Add("node.retry-policy.invalid", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.retryPolicy", "A retry policy must be hash-authenticated, scoped to this exact fallible executable node, and cannot govern trigger, wait, human, or terminal nodes.");
+            }
             if (node.Descriptor?.Kind == GovernedLoopNodeKind.Inference)
             {
                 if (node.ModelRoutingPolicy is not null && !GovernedModelContractValidator.IsValid(node.ModelRoutingPolicy))

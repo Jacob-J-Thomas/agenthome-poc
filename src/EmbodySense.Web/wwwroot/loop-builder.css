@@ -2119,6 +2119,7 @@
 
 .governed-graph-identity label,
 .governed-graph-field,
+.governed-retry-policy label,
 .governed-graph-connector-editor label,
 .governed-graph-move label {
   display: grid;
@@ -2131,6 +2132,8 @@
 .governed-graph-identity select,
 .governed-graph-field input,
 .governed-graph-field select,
+.governed-retry-policy input,
+.governed-retry-policy select,
 .governed-graph-connector-editor select,
 .governed-graph-move input {
   min-width: 0;
@@ -2139,6 +2142,21 @@
   border-radius: 4px;
   background: var(--canvas);
   color: inherit;
+}
+
+.governed-retry-policy {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--canvas);
+}
+
+.governed-retry-policy h4,
+.governed-retry-policy p {
+  margin: 0;
 }
 
 .governed-graph-purpose {

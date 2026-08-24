@@ -27,6 +27,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
+using EmbodySense.Core.Application.Loops.Retry;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Actions;
 using EmbodySense.Core.Application.Loops.Sequential.Actions.Models;
@@ -7007,6 +7008,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
         GovernedLoopFirstBoundRunCompletionBoundary? firstBoundRunCompletionBoundary = null,
         bool composeFirstBoundRunCompletionBoundary = true,
         IGovernedLoopWaitNodeExecutor? waitNodeExecutor = null,
+        IGovernedLoopRetryNodeExecutor? retryNodeExecutor = null,
         IGovernedLoopWorkspaceActionExecutor? workspaceActionExecutor = null,
         IGovernedLoopCommandActionExecutor? commandActionExecutor = null,
         IGovernedLoopFailureClassifier? failureClassifier = null)
@@ -7028,6 +7030,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
                     timeProvider ?? new FixedTimeProvider(_now))
                 : null,
             waitNodeExecutor: waitNodeExecutor,
+            retryNodeExecutor: retryNodeExecutor,
             workspaceActionExecutor: workspaceActionExecutor,
             commandActionExecutor: commandActionExecutor,
             failureClassifier: failureClassifier);
@@ -8039,6 +8042,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
         public Func<CustomLoopRunRecord, CustomLoopRunRecord, CustomLoopRunRecord?>? RawConflictSuccessorFactory { get; set; }
 
+        public CustomLoopRunStoreResult? UpdateResultOverride { get; set; }
+
         public bool ConflictOnOutcomeWrite { get; init; }
 
         public bool ConflictOnPublicationWrite { get; init; }
@@ -8058,6 +8063,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
         public bool ReturnNullNonterminalList { get; set; }
 
         public bool ReturnDuplicateNonterminalList { get; set; }
+
+        public Action<CancellationToken>? BeforeListNonterminal { get; set; }
 
         public List<CustomLoopRunRecord> Writes { get; } = [];
 
@@ -8106,6 +8113,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
         public Task<IReadOnlyList<CustomLoopRunRecord>> ListNonterminalAsync(CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            BeforeListNonterminal?.Invoke(cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             if (ListNonterminalException is not null)
             {
@@ -8193,6 +8202,11 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 Current = rawSuccessor;
                 Writes.Add(rawSuccessor);
                 return CustomLoopRunStoreResult.VersionConflict(Current, expectedLifecycleVersion);
+            }
+
+            if (UpdateResultOverride is { } overrideResult)
+            {
+                return overrideResult;
             }
 
             if (ConflictOnAtomicTerminalWrite && run.Status == CustomLoopRunStatus.Completed)

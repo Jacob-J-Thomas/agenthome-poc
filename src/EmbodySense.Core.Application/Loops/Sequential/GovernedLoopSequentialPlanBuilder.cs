@@ -10,6 +10,7 @@ using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
@@ -312,6 +313,7 @@ public static class GovernedLoopSequentialPlanBuilder
                     Array.AsReadOnly(outgoingEdgeIds),
                     new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(
                         new Dictionary<string, string>(node.Parameters, StringComparer.Ordinal)),
+                    node.RetryPolicy is null ? null : GovernedLoopRetryContract.CopyPolicy(node.RetryPolicy),
                     incomingEdgeIds.Length == 1 ? incomingEdgeIds[0] : null,
                     outgoingEdgeIds.Length == 1 ? outgoingEdgeIds[0] : null));
             }

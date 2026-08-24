@@ -8,6 +8,7 @@ namespace EmbodySense.Core.Application.Loops.Wait;
 public sealed class GovernedLoopWaitContinuationRelay : IGovernedLoopWakeContinuationPort
 {
     private IGovernedLoopWakeContinuationPort? _target;
+    private IGovernedLoopWakeContinuationPort? _retryTarget;
 
     /// <summary>Binds the sole canonical continuation target exactly once.</summary>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="target"/> is null.</exception>
@@ -21,11 +22,23 @@ public sealed class GovernedLoopWaitContinuationRelay : IGovernedLoopWakeContinu
         }
     }
 
+    /// <summary>Binds the sole canonical retry continuation target exactly once.</summary>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="target"/> is null.</exception>
+    /// <exception cref="InvalidOperationException">Thrown when a retry target was already bound.</exception>
+    public void BindRetry(IGovernedLoopWakeContinuationPort target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        if (ReferenceEquals(target, this) || Interlocked.CompareExchange(ref _retryTarget, target, null) is not null)
+        {
+            throw new InvalidOperationException("The governed Wait continuation relay may be bound exactly once to a retry target.");
+        }
+    }
+
     /// <inheritdoc />
     public Task<GovernedLoopWakeContinuationResult?> ContinueAsync(
         GovernedLoopWakeContinuationRequest request,
         CancellationToken cancellationToken = default)
-        => Volatile.Read(ref _target)?.ContinueAsync(request, cancellationToken)
+        => Target(request)?.ContinueAsync(request, cancellationToken)
             ?? Task.FromResult<GovernedLoopWakeContinuationResult?>(
                 new GovernedLoopWakeContinuationResult(
                     GovernedLoopWakeContinuationStatus.Unavailable,
@@ -35,9 +48,14 @@ public sealed class GovernedLoopWaitContinuationRelay : IGovernedLoopWakeContinu
     public Task<GovernedLoopWakeContinuationResult?> ReconcileAsync(
         GovernedLoopWakeContinuationRequest request,
         CancellationToken cancellationToken = default)
-        => Volatile.Read(ref _target)?.ReconcileAsync(request, cancellationToken)
+        => Target(request)?.ReconcileAsync(request, cancellationToken)
             ?? Task.FromResult<GovernedLoopWakeContinuationResult?>(
                 new GovernedLoopWakeContinuationResult(
                     GovernedLoopWakeContinuationStatus.Unavailable,
                     EvidenceReference: "wait-continuation-not-composed"));
+
+    private IGovernedLoopWakeContinuationPort? Target(GovernedLoopWakeContinuationRequest request)
+        => request.Checkpoint.Binding.WaitOperationId.StartsWith("retry-", StringComparison.Ordinal)
+            ? Volatile.Read(ref _retryTarget)
+            : Volatile.Read(ref _target);
 }

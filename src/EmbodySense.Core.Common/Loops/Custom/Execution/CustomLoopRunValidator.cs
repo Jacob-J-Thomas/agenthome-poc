@@ -13,6 +13,8 @@ using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -306,7 +308,7 @@ public static class CustomLoopRunValidator
             || warning.RetainedForLoopReasoning is not null || warning.PublishedToInvokingConversation is not null || warning.ConversationPublicationId is not null
             || warning.Provider is not null || warning.Model is not null || warning.ProviderResponseId is not null || warning.ExitDecision is not null
             || warning.ToolAuthority is not null || warning.ToolEvidence is not null || warning.TraceReservationUtf8Bytes is not null || warning.ControlExpectedLifecycleVersion is not null
-            || warning.SequentialNodeEvidence is not null || warning.PureNodeOutcomeJson is not null || warning.WaitContinuationEvidenceHash is not null || warning.ModelExecutionEvidence is not null || warning.FailureEvidence is not null)
+            || warning.SequentialNodeEvidence is not null || warning.PureNodeOutcomeJson is not null || warning.WaitContinuationEvidenceHash is not null || warning.ModelExecutionEvidence is not null || warning.FailureEvidence is not null || warning.RetryState is not null)
         {
             Add(errors, "invalid_terminal_integrity_warning", "warning", "The post-terminal integrity warning can carry only its sequence, id, timestamp, kind, detail, and an empty context-block list.");
         }
@@ -613,14 +615,16 @@ public static class CustomLoopRunValidator
                 .Where(item => item is not null && string.Equals(item.EventId, outcomeEvidenceId, StringComparison.Ordinal))
                 .Take(2)
                 .ToArray();
-            var evidence = matchingEvents.Length == 1 ? matchingEvents[0].SequentialNodeEvidence : null;
+            var matchingEvent = matchingEvents.Length == 1 ? matchingEvents[0] : null;
+            var evidence = matchingEvent?.SequentialNodeEvidence;
             var nodeSelectedControlEdgeIds = node.SelectedControlEdgeIds;
             var nodeSkippedControlEdgeIds = node.SkippedControlEdgeIds;
             var evidenceSelectedControlEdgeIds = evidence?.SelectedControlEdgeIds;
             var evidenceSkippedControlEdgeIds = evidence?.SkippedControlEdgeIds;
-            var compatible = evidence is not null
+            var compatible = IsTerminalRetryFrontierEvidence(runEvents, matchingEvent, node)
+                || evidence is not null
                 && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
-                && CustomLoopSequentialOutcomeArtifactHash.Matches(matchingEvents[0])
+                && CustomLoopSequentialOutcomeArtifactHash.Matches(matchingEvent!)
                 && string.Equals(evidence.OutcomeArtifactHash, node.OutcomeEvidenceHash, StringComparison.Ordinal)
                 && evidence.ActivationOrdinal == node.ActivationOrdinal
                 && evidence.VisitOrdinal == node.VisitOrdinal
@@ -647,6 +651,44 @@ public static class CustomLoopRunValidator
                 Add(errors, "execution_frontier_outcome_evidence_mismatch", $"frontier.payload.nodes[{nodeIndex}].outcomeEvidenceId", "Committed frontier outcome evidence must identify one exact retained run event for the same node, attempt, artifact hash, and disposition.");
             }
         }
+    }
+
+    private static bool IsTerminalRetryFrontierEvidence(
+        IReadOnlyList<CustomLoopRunEvent> runEvents,
+        CustomLoopRunEvent? matchingEvent,
+        GovernedLoopNodeExecutionEvidence node)
+    {
+        if (node.Status != GovernedLoopNodeExecutionStatus.ReviewBlocked
+            || matchingEvent?.Kind != CustomLoopRunEventKind.RetryStateChanged
+            || matchingEvent.RetryState is not { } terminal
+            || terminal.Disposition is not (GovernedLoopRetryStateDisposition.Exhausted or GovernedLoopRetryStateDisposition.Stopped or GovernedLoopRetryStateDisposition.NeedsReview)
+            || !GovernedLoopRetryContract.IsValid(terminal)
+            || !string.Equals(node.OutcomeEvidenceHash, terminal.ContentHash, StringComparison.Ordinal)
+            || terminal.Identity.ActivationOrdinal != node.ActivationOrdinal
+            || terminal.Identity.VisitOrdinal != node.VisitOrdinal
+            || !string.Equals(terminal.Identity.NodeId, node.NodeId, StringComparison.Ordinal)
+            || terminal.NextAttempt is not null
+            || terminal.AttemptOperationId is not null
+            || node.ControlOutcome is not null
+            || node.SelectedControlEdgeIds.Count != 0
+            || node.SkippedControlEdgeIds.Count != 0)
+        {
+            return false;
+        }
+
+        var predecessors = runEvents
+            .TakeWhile(candidate => !ReferenceEquals(candidate, matchingEvent))
+            .Select(candidate => candidate?.RetryState)
+            .Where(candidate => candidate is not null
+                && string.Equals(candidate.Identity.SeriesId, terminal.Identity.SeriesId, StringComparison.Ordinal)
+                && candidate.StateVersion == terminal.StateVersion - 1)
+            .Take(2)
+            .ToArray();
+        var predecessor = predecessors.Length == 1 ? predecessors[0] : null;
+        return predecessor is not null
+            && predecessor.Disposition is GovernedLoopRetryStateDisposition.Scheduled or GovernedLoopRetryStateDisposition.Due
+            && predecessor.NextAttempt == node.Attempt
+            && string.Equals(predecessor.AttemptOperationId, node.AttemptOperationId, StringComparison.Ordinal);
     }
 
     private static bool IsFrontierOutcomeDispositionCompatible(
@@ -771,6 +813,9 @@ public static class CustomLoopRunValidator
         var completedActivations = run.Frontier?.Payload.Nodes
             .Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Wait && node.Status == GovernedLoopNodeExecutionStatus.Completed)
             .ToArray() ?? [];
+        var retryWaitingActivations = run.Frontier?.Payload.Nodes
+            .Where(node => node.Status == GovernedLoopNodeExecutionStatus.Waiting && HasExactWaitingRetry(run, node))
+            .ToArray() ?? [];
         if (waitingActivations.Any(node => retained.Count(item => item.ActivationOrdinal == node.ActivationOrdinal) != 1))
         {
             Add(errors, "waiting_run_evidence_required", "waitEvidence", "Every Waiting frontier activation requires exactly one activation-scoped Wait evidence record, regardless of aggregate lifecycle status.");
@@ -783,10 +828,28 @@ public static class CustomLoopRunValidator
             Add(errors, "completed_wait_evidence_required", "waitEvidence", "Every completed Wait activation requires exactly one retained park and continuation evidence chain.");
         }
 
-        if (run.Status == CustomLoopRunStatus.Waiting && waitingActivations.Length == 0)
+        if (run.Status == CustomLoopRunStatus.Waiting && waitingActivations.Length == 0 && retryWaitingActivations.Length == 0)
         {
-            Add(errors, "waiting_run_evidence_required", "waitEvidence", "A Waiting run requires at least one Waiting frontier activation with exact evidence.");
+            Add(errors, "waiting_run_evidence_required", "waitEvidence", "A Waiting run requires at least one exact Wait or governed-retry checkpoint binding.");
         }
+    }
+
+    private static bool HasExactWaitingRetry(CustomLoopRunRecord run, GovernedLoopNodeExecutionEvidence activation)
+    {
+        var matches = run.Events.Select(item => item?.RetryState)
+            .Where(state => state is not null
+                && state.Identity.ActivationOrdinal == activation.ActivationOrdinal
+                && state.Identity.VisitOrdinal == activation.VisitOrdinal
+                && string.Equals(state.Identity.NodeId, activation.NodeId, StringComparison.Ordinal))
+            .OrderByDescending(state => state!.StateVersion)
+            .ThenByDescending(state => state!.RecordedAtUtc)
+            .FirstOrDefault();
+        return matches is
+        {
+            Disposition: GovernedLoopRetryStateDisposition.Scheduled,
+        }
+            && matches.NextAttempt == activation.Attempt
+            && string.Equals(matches.AttemptOperationId, activation.AttemptOperationId, StringComparison.Ordinal);
     }
 
     private static void ValidateExecutionFrontierUpdate(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
@@ -1343,6 +1406,8 @@ public static class CustomLoopRunValidator
         var sequentialStarts = new HashSet<(int ActivationOrdinal, int Attempt)>();
         var sequentialTerminals = new HashSet<(int ActivationOrdinal, int Attempt)>();
         var latestSequentialVisits = new Dictionary<string, int>(StringComparer.Ordinal);
+        var retrySeriesByActivation = new Dictionary<(int ActivationOrdinal, int VisitOrdinal), string>();
+        var latestRetryStateBySeries = new Dictionary<string, GovernedLoopRetryState>(StringComparer.Ordinal);
         DateTimeOffset? previousTimestamp = null;
         for (var index = 0; index < run.Events.Length; index++)
         {
@@ -1394,9 +1459,12 @@ public static class CustomLoopRunValidator
             }
 
             ValidateEventCoordinates(item, field, errors);
-            var detailLimit = item.Kind is CustomLoopRunEventKind.LifecycleChanged or CustomLoopRunEventKind.IntegrityWarning
-                ? CustomLoopLimits.MaxLifecycleControlDetailCharacters
-                : CustomLoopLimits.MaxRunDetailCharacters;
+            var detailLimit = item.Kind switch
+            {
+                CustomLoopRunEventKind.LifecycleChanged or CustomLoopRunEventKind.IntegrityWarning => CustomLoopLimits.MaxLifecycleControlDetailCharacters,
+                CustomLoopRunEventKind.RetryStateChanged => CustomLoopLimits.MaxRetryStateDetailCharacters,
+                _ => CustomLoopLimits.MaxRunDetailCharacters,
+            };
             ValidateText(item.Detail, $"{field}.detail", detailLimit, required: true, errors);
             ValidateContextBlocks(item.ContextBlocks, $"{field}.contextBlocks", errors);
             ValidateOptionalText(item.CanonicalOutput, $"{field}.canonicalOutput", CustomLoopLimits.MaxCanonicalModelOutputCharacters, errors, requireNormalized: false);
@@ -1410,6 +1478,7 @@ public static class CustomLoopRunValidator
             ValidatePureNodeOutcome(item, field, run, errors);
             ValidateSequentialNodeEvidence(item, index, field, run, sequentialStarts, sequentialTerminals, latestSequentialVisits, errors);
             ValidateFailureEvidence(item, field, run, errors);
+            ValidateRetryState(item, index, field, run, retrySeriesByActivation, latestRetryStateBySeries, errors);
             ValidateWaitContinuationEvent(item, field, run, errors);
             ValidateModelExecutionEvidence(item, field, run, errors);
             ValidateTraceReservation(item, field, run, errors);
@@ -1483,7 +1552,7 @@ public static class CustomLoopRunValidator
                 || marker.CanonicalOutput is not null || marker.OriginalOutputCharacterCount is not null || marker.CanonicalOutputTruncated is not null
                 || marker.RetainedForLoopReasoning is not null || marker.PublishedToInvokingConversation is not null || marker.ConversationPublicationId is not null
                 || marker.Provider is not null || marker.Model is not null || marker.ProviderResponseId is not null || marker.ExitDecision is not null || marker.ToolAuthority is not null || marker.ToolEvidence is not null || marker.TraceReservationUtf8Bytes is not null || marker.ControlExpectedLifecycleVersion is not null
-                || marker.SequentialNodeEvidence is not null || marker.PureNodeOutcomeJson is not null || marker.WaitContinuationEvidenceHash is not null || marker.ModelExecutionEvidence is not null || marker.FailureEvidence is not null)
+                || marker.SequentialNodeEvidence is not null || marker.PureNodeOutcomeJson is not null || marker.WaitContinuationEvidenceHash is not null || marker.ModelExecutionEvidence is not null || marker.FailureEvidence is not null || marker.RetryState is not null)
             {
                 Add(errors, "invalid_admission_audit_marker", $"events[{markerIndex}]", "The admission-audit completion marker cannot carry prompt, output, provider, publication, or node-attempt data.");
             }
@@ -1649,14 +1718,22 @@ public static class CustomLoopRunValidator
                 Add(errors, "invalid_sequential_dispatch_marker", $"{field}.kind", "A sequential dispatch-start marker belongs only to a durable provider-attempt start event.");
             }
 
-            if (evidence.Attempt is not { } attempt
-                || attempt != 1
+            var attempt = evidence.Attempt.GetValueOrDefault();
+            if (evidence.Attempt is null
+                || attempt > 1 && !HasPriorRetryDispatch(run.Events, eventIndex, evidence)
                 || !starts.Add((evidence.ActivationOrdinal, attempt)))
             {
-                Add(errors, "invalid_sequential_node_attempt", $"{field}.sequentialNodeEvidence.attempt", "A dispatched activation must retain exactly one attempt-one start marker until governed retry policy is introduced.");
+                Add(errors, "invalid_sequential_node_attempt", $"{field}.sequentialNodeEvidence.attempt", "A dispatched activation must retain exactly one start marker; attempts after one require an earlier exact durable retry-dispatch reservation.");
             }
 
-            RegisterSequentialVisit(evidence, field, latestVisits, errors);
+            if (attempt == 1)
+            {
+                RegisterSequentialVisit(evidence, field, latestVisits, errors);
+            }
+            else if (latestVisits.GetValueOrDefault(evidence.NodeId) != evidence.VisitOrdinal)
+            {
+                Add(errors, "retry_visit_substituted", $"{field}.sequentialNodeEvidence.visitOrdinal", "A retry must preserve the original activation visit ordinal.");
+            }
             return;
         }
 
@@ -1713,10 +1790,63 @@ public static class CustomLoopRunValidator
                 latestVisits[evidence.NodeId] = evidence.VisitOrdinal;
             }
         }
-        else if (!starts.Contains(key))
+        else if (!starts.Contains(key) && !HasExactRetryExhaustionWithoutDispatch(run.Events, eventIndex, item, evidence))
         {
             Add(errors, "sequential_dispatch_marker_required", $"{field}.sequentialNodeEvidence", "Terminal provider-node evidence requires an earlier exact dispatch-start marker for the same canonical attempt.");
         }
+    }
+
+    private static bool HasExactRetryExhaustionWithoutDispatch(
+        IReadOnlyList<CustomLoopRunEvent> events,
+        int eventIndex,
+        CustomLoopRunEvent item,
+        CustomLoopSequentialNodeEvidence evidence)
+    {
+        if (evidence.Kind != CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection
+            || evidence.Disposition != CustomLoopSequentialNodeDisposition.Rejected
+            || evidence.Attempt is not { } attempt
+            || item.FailureEvidence is not
+            {
+                FailureClass: GovernedLoopFailureClass.Exhaustion,
+                EffectCertainty: GovernedLoopFailureEffectCertainty.DispatchProvedNotStarted,
+                RetrySafety: GovernedLoopFailureRetrySafety.NotRetryable,
+            } failure
+            || failure.CausalEvidence.Count != 1)
+        {
+            return false;
+        }
+
+        var terminals = events.Take(eventIndex)
+            .Where(candidate => candidate?.RetryState is
+            {
+                Disposition: GovernedLoopRetryStateDisposition.Exhausted,
+            } state
+                && state.Identity.ActivationOrdinal == evidence.ActivationOrdinal
+                && state.Identity.VisitOrdinal == evidence.VisitOrdinal
+                && string.Equals(state.Identity.NodeId, evidence.NodeId, StringComparison.Ordinal)
+                && string.Equals(candidate.EventId, failure.CausalEvidence[0].EvidenceId, StringComparison.Ordinal)
+                && string.Equals(state.ContentHash, failure.CausalEvidence[0].EvidenceHash, StringComparison.Ordinal))
+            .Take(2)
+            .ToArray();
+        if (terminals.Length != 1 || terminals[0].RetryState is not { } terminal)
+        {
+            return false;
+        }
+
+        var predecessors = events.TakeWhile(candidate => !ReferenceEquals(candidate, terminals[0]))
+            .Select(candidate => candidate?.RetryState)
+            .Where(candidate => candidate is not null
+                && string.Equals(candidate.Identity.SeriesId, terminal.Identity.SeriesId, StringComparison.Ordinal)
+                && candidate.StateVersion == terminal.StateVersion - 1)
+            .Take(2)
+            .ToArray();
+        return predecessors.Length == 1
+            && predecessors[0] is
+            {
+                Disposition: GovernedLoopRetryStateDisposition.Due,
+                NextAttempt: var nextAttempt,
+            }
+            && nextAttempt == attempt;
     }
 
     private static bool HasValidSequentialRouteShape(CustomLoopSequentialNodeEvidence evidence)
@@ -1804,6 +1934,106 @@ public static class CustomLoopRunValidator
         }
     }
 
+    private static void ValidateRetryState(
+        CustomLoopRunEvent item,
+        int eventIndex,
+        string field,
+        CustomLoopRunRecord run,
+        Dictionary<(int ActivationOrdinal, int VisitOrdinal), string> seriesByActivation,
+        Dictionary<string, GovernedLoopRetryState> latestBySeries,
+        List<CustomLoopValidationError> errors)
+    {
+        if (item.RetryState is not { } state)
+        {
+            if (item.Kind == CustomLoopRunEventKind.RetryStateChanged)
+            {
+                Add(errors, "retry_state_required", $"{field}.retryState", "A retry-state event requires one exact authenticated retry state.");
+            }
+            return;
+        }
+
+        var identity = state.Identity;
+        var activation = run.Frontier?.Payload.Nodes.ElementAtOrDefault(identity.ActivationOrdinal);
+        var binding = run.SequentialAdapterBinding;
+        var failures = run.Events.Take(eventIndex)
+            .Select(candidate => candidate?.FailureEvidence)
+            .Where(candidate => candidate is not null
+                && string.Equals(candidate.EvidenceId, state.FailureEvidenceId, StringComparison.Ordinal)
+                && string.Equals(candidate.ContentHash, state.FailureEvidenceHash, StringComparison.Ordinal))
+            .Take(2)
+            .ToArray();
+        var failure = failures.Length == 1 ? failures[0] : null;
+        var attemptStarts = run.Events.Take(eventIndex)
+            .Where(candidate => candidate?.SequentialNodeEvidence is
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            } start
+                && string.Equals(candidate.EventId, state.CurrentAttemptOperationId, StringComparison.Ordinal)
+                && start.ActivationOrdinal == identity.ActivationOrdinal
+                && start.VisitOrdinal == identity.VisitOrdinal
+                && string.Equals(start.NodeId, identity.NodeId, StringComparison.Ordinal)
+                && start.Attempt == state.CurrentAttempt)
+            .Take(2)
+            .ToArray();
+        if (item.Kind != CustomLoopRunEventKind.RetryStateChanged
+            || !GovernedLoopRetryContract.IsValid(state)
+            || binding is null
+            || !string.Equals(identity.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(identity.RunId, run.Id, StringComparison.Ordinal)
+            || identity.Revision != binding.ExecutionBinding.Revision
+            || identity.ExecutionGeneration != binding.ExecutionBinding.ExecutionGeneration
+            || activation is null
+            || activation.ActivationOrdinal != identity.ActivationOrdinal
+            || activation.VisitOrdinal != identity.VisitOrdinal
+            || !string.Equals(activation.NodeId, identity.NodeId, StringComparison.Ordinal)
+            || failure is null
+            || failure.ActivationOrdinal != identity.ActivationOrdinal
+            || failure.VisitOrdinal != identity.VisitOrdinal
+            || !string.Equals(failure.NodeId, identity.NodeId, StringComparison.Ordinal)
+            || failure.Attempt != state.CurrentAttempt
+            || attemptStarts.Length != 1
+            || item.Attempt != state.CurrentAttempt
+            || !string.Equals(item.StepId, identity.NodeId, StringComparison.Ordinal)
+            || item.SequentialNodeEvidence is not null
+            || item.FailureEvidence is not null
+            || item.ContextBlocks is not { Length: 0 }
+            || item.CanonicalOutput is not null
+            || item.ToolAuthority is not null
+            || item.ToolEvidence is not null
+            || item.PureNodeOutcomeJson is not null
+            || item.WaitContinuationEvidenceHash is not null
+            || item.ModelExecutionEvidence is not null)
+        {
+            Add(errors, "invalid_retry_state", $"{field}.retryState", "Retry state must authenticate the exact admitted run, revision, activation, retained failure, and value-free event coordinates.");
+            return;
+        }
+
+        var activationKey = (identity.ActivationOrdinal, identity.VisitOrdinal);
+        if (seriesByActivation.TryGetValue(activationKey, out var priorSeriesId)
+            && !string.Equals(priorSeriesId, identity.SeriesId, StringComparison.Ordinal))
+        {
+            Add(errors, "retry_series_substituted", $"{field}.retryState.identity.seriesId", "One activation visit may retain only one immutable retry series.");
+            return;
+        }
+        seriesByActivation[activationKey] = identity.SeriesId;
+
+        if (!latestBySeries.TryGetValue(identity.SeriesId, out var prior))
+        {
+            if (state.StateVersion != 1 || state.Disposition != GovernedLoopRetryStateDisposition.FailureRetained)
+            {
+                Add(errors, "retry_series_origin_required", $"{field}.retryState.stateVersion", "A retry series must begin with state version one retaining the exact first failure.");
+                return;
+            }
+        }
+        else if (!GovernedLoopRetryContract.IsValidTransition(prior, state))
+        {
+            Add(errors, "invalid_retry_state_transition", $"{field}.retryState.stateVersion", "Retry-state versions must form one contiguous authenticated monotonic transition chain.");
+            return;
+        }
+
+        latestBySeries[identity.SeriesId] = state;
+    }
+
     private static bool IsSortedUniqueIdentifiers(IReadOnlyList<string> values)
         => values.All(value => CustomLoopArtifactIdentifier.IsValid(value))
             && values.SequenceEqual(values.Order(StringComparer.Ordinal).Distinct(StringComparer.Ordinal), StringComparer.Ordinal);
@@ -1837,14 +2067,16 @@ public static class CustomLoopRunValidator
             || !string.Equals(activation.NodeId, evidence.NodeId, StringComparison.Ordinal)
             || !string.Equals(activation.CycleId, evidence.CycleId, StringComparison.Ordinal)
             || activation.CycleIteration != evidence.CycleIteration
-            || activation.Attempt != evidence.Attempt
+            || !HasCompatibleFrontierAttempt(run.Events, activation, evidence)
             || evidence.Kind == CustomLoopSequentialNodeEvidenceKind.TopologySkipped && activation.Status != GovernedLoopNodeExecutionStatus.Skipped
             || evidence.Kind == CustomLoopSequentialNodeEvidenceKind.TopologySkipped
                 && !HasExactGoverningSkipActivation(run.Frontier.Payload.Nodes, activation, evidence)
             || evidence.ControlOutcome is not null
                 && !evidence.SelectedControlEdgeIds.Concat(evidence.SkippedControlEdgeIds).Order(StringComparer.Ordinal)
                     .SequenceEqual(activation.OutgoingControlEdgeIds, StringComparer.Ordinal)
-            || evidence.ControlOutcome is { } controlOutcome && (activation.Status is not (GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running)
+            || evidence.ControlOutcome is { } controlOutcome
+                && !IsHistoricalRetryAttempt(run.Events, activation, evidence)
+                && (activation.Status is not (GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running)
                 && (activation.ControlOutcome != controlOutcome
                     || !activation.SelectedControlEdgeIds.SequenceEqual(evidence.SelectedControlEdgeIds, StringComparer.Ordinal)
                     || !activation.SkippedControlEdgeIds.SequenceEqual(evidence.SkippedControlEdgeIds, StringComparer.Ordinal)))
@@ -1855,6 +2087,46 @@ public static class CustomLoopRunValidator
             Add(errors, "sequential_node_activation_mismatch", $"{field}.sequentialNodeEvidence.activationOrdinal", "Sequential evidence must identify the exact durable frontier activation, visit, cycle, attempt, and committed route coordinates.");
         }
     }
+
+    private static bool HasCompatibleFrontierAttempt(
+        IReadOnlyList<CustomLoopRunEvent> events,
+        GovernedLoopNodeExecutionEvidence activation,
+        CustomLoopSequentialNodeEvidence evidence)
+    {
+        if (activation.Attempt == evidence.Attempt)
+        {
+            return true;
+        }
+
+        return IsHistoricalRetryAttempt(events, activation, evidence);
+    }
+
+    private static bool IsHistoricalRetryAttempt(
+        IReadOnlyList<CustomLoopRunEvent> events,
+        GovernedLoopNodeExecutionEvidence activation,
+        CustomLoopSequentialNodeEvidence evidence)
+        => evidence.Attempt is { } historicalAttempt
+            && activation.Attempt is { } currentAttempt
+            && historicalAttempt < currentAttempt
+            && events.Any(item => item?.RetryState is { } state
+                && state.Identity.ActivationOrdinal == evidence.ActivationOrdinal
+                && state.Identity.VisitOrdinal == evidence.VisitOrdinal
+                && state.CurrentAttempt == historicalAttempt
+                && string.Equals(state.Identity.NodeId, evidence.NodeId, StringComparison.Ordinal));
+
+    private static bool HasPriorRetryDispatch(
+        IReadOnlyList<CustomLoopRunEvent> events,
+        int eventIndex,
+        CustomLoopSequentialNodeEvidence evidence)
+        => events.Take(eventIndex).Any(item => item?.RetryState is
+        {
+            Disposition: GovernedLoopRetryStateDisposition.Dispatched,
+            NextAttempt: { } nextAttempt,
+        } state
+            && nextAttempt == evidence.Attempt
+            && state.Identity.ActivationOrdinal == evidence.ActivationOrdinal
+            && state.Identity.VisitOrdinal == evidence.VisitOrdinal
+            && string.Equals(state.Identity.NodeId, evidence.NodeId, StringComparison.Ordinal));
 
     private static bool HasExactGoverningSkipActivation(
         IReadOnlyList<GovernedLoopNodeExecutionEvidence> activations,
@@ -2250,7 +2522,7 @@ public static class CustomLoopRunValidator
             ValidateArtifactId(item.StepId, $"{field}.stepId", errors);
         }
 
-        var isNodeEvent = item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.ToolRequestReserved or CustomLoopRunEventKind.ToolGovernanceDecided or CustomLoopRunEventKind.ToolOutcomeObserved or CustomLoopRunEventKind.ToolIntegrityFailed;
+        var isNodeEvent = item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.ToolRequestReserved or CustomLoopRunEventKind.ToolGovernanceDecided or CustomLoopRunEventKind.ToolOutcomeObserved or CustomLoopRunEventKind.ToolIntegrityFailed or CustomLoopRunEventKind.RetryStateChanged;
         if (isNodeEvent && (item.Iteration is null || item.StepId is null || item.Attempt is null))
         {
             Add(errors, "node_event_coordinates_required", field, "Node attempt events require iteration, step id, and attempt.");
@@ -2959,7 +3231,8 @@ public static class CustomLoopRunValidator
             && string.Equals(left.PureNodeOutcomeJson, right.PureNodeOutcomeJson, StringComparison.Ordinal)
             && string.Equals(left.WaitContinuationEvidenceHash, right.WaitContinuationEvidenceHash, StringComparison.Ordinal)
             && string.Equals(left.ModelExecutionEvidence?.ContentHash, right.ModelExecutionEvidence?.ContentHash, StringComparison.Ordinal)
-            && string.Equals(left.FailureEvidence?.ContentHash, right.FailureEvidence?.ContentHash, StringComparison.Ordinal);
+            && string.Equals(left.FailureEvidence?.ContentHash, right.FailureEvidence?.ContentHash, StringComparison.Ordinal)
+            && string.Equals(left.RetryState?.ContentHash, right.RetryState?.ContentHash, StringComparison.Ordinal);
     }
 
     private static void ValidateModelExecutionEvidence(

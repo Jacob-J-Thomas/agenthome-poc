@@ -18,6 +18,8 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
@@ -2692,11 +2694,7 @@ public sealed class CustomLoopRunStore :
         }
 
         EnsureSafeDirectory(_runsRoot, create: false);
-        var rootFiles = Directory.EnumerateFiles(_runsRoot, "*", SearchOption.TopDirectoryOnly).ToArray();
-        if (rootFiles.Any(path => !IsAllowedRootArtifact(path)))
-        {
-            throw new FormatException("Custom loop run storage contains an unexpected root-level artifact; traces must be stored beneath their loop-id directory.");
-        }
+        RequireAllowedRootArtifacts();
 
         var locations = new List<RunArtifactLocation>();
         foreach (var directory in Directory.EnumerateDirectories(_runsRoot, "*", SearchOption.TopDirectoryOnly).OrderBy(path => path, PathComparer))
@@ -3077,6 +3075,11 @@ public sealed class CustomLoopRunStore :
         var attemptClosures = appended.Where(IsAttemptClosure).ToArray();
         var pureCompletions = attemptClosures.Count(item => IsExactPureCompletion(candidate, item));
         var lifecycleEvents = appended.Count(IsLifecycleControlEvent);
+        var retryStateEvents = appended.Count(item => item.Kind == CustomLoopRunEventKind.RetryStateChanged);
+        if (retryStateEvents > 0 && (lifecycleEvents > 1 || appended.Any(item => !IsRetryStateAtomicEvent(item))))
+        {
+            throw new FormatException("A retry-state mutation may atomically append only retry transitions, its lifecycle boundary, and terminal retry exhaustion evidence.");
+        }
         if (toolEvidenceBudget > 0 && delta > toolEvidenceBudget)
         {
             throw new FormatException("A governed tool-evidence phase exceeded its reserved maximum serialized footprint.");
@@ -3111,7 +3114,11 @@ public sealed class CustomLoopRunStore :
         var attemptClosureBudget = checked(
             (long)pureCompletions * CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes
             + (long)(attemptClosures.Length - pureCompletions) * CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
-        if (attemptClosures.Length > 0 && delta > attemptClosureBudget)
+        var terminalDataBudget = !current.IsTerminal && candidate.IsTerminal ? CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes : 0;
+        var lifecycleControlBudget = checked((long)lifecycleEvents * CustomLoopLimits.MaxTraceControlEventUtf8Bytes + terminalDataBudget);
+        var retryStateBudget = checked((long)retryStateEvents * CustomLoopLimits.MaxRetryStateEventUtf8Bytes);
+        var retryAtomicBudget = checked(retryStateBudget + lifecycleControlBudget);
+        if (attemptClosures.Length > 0 && delta > checked(attemptClosureBudget + (retryStateEvents > 0 ? retryAtomicBudget : 0)))
         {
             throw new FormatException(pureCompletions == attemptClosures.Length
                 ? "A pure-node outcome exceeded its reserved maximum serialized footprint."
@@ -3126,8 +3133,12 @@ public sealed class CustomLoopRunStore :
             throw new FormatException("The run consumed lifecycle/control slots reserved for terminalization or its one optional post-terminal integrity warning.");
         }
 
-        var terminalDataBudget = !current.IsTerminal && candidate.IsTerminal ? CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes : 0;
-        if (lifecycleEvents > 0 && delta > checked((long)lifecycleEvents * CustomLoopLimits.MaxTraceControlEventUtf8Bytes + terminalDataBudget))
+        if (retryStateEvents > 0 && delta > checked(retryAtomicBudget + attemptClosureBudget))
+        {
+            throw new FormatException("A retry-state append exceeded its reserved maximum serialized footprint.");
+        }
+
+        if (retryStateEvents == 0 && lifecycleEvents > 0 && delta > lifecycleControlBudget)
         {
             throw new FormatException("A lifecycle control event exceeded its permanent reserved serialized footprint.");
         }
@@ -3144,7 +3155,7 @@ public sealed class CustomLoopRunStore :
     /// </summary>
     /// <param name="run">The run.</param>
     /// <param name="persistedUtf8Bytes">The persisted UTF-8 bytes.</param>
-    /// <returns>The persisted bytes plus any lifecycle-dependent capacity reservation.</returns>
+    /// <returns>The persisted bytes plus lifecycle, retry-state successor, terminal-integrity, and open-effect capacity reservations.</returns>
     internal static long CalculateRequiredTraceCapacity(CustomLoopRunRecord run, long persistedUtf8Bytes)
     {
         if (persistedUtf8Bytes < 0)
@@ -3158,11 +3169,12 @@ public sealed class CustomLoopRunStore :
             return checked(persistedUtf8Bytes + (HasTerminalIntegrityWarning(run) ? 0 : CustomLoopLimits.MaxTraceControlEventUtf8Bytes));
         }
 
-        var maximumAttempts = run.SequentialInvocationSnapshot is not null
+        var traversalProviderAttemptCeiling = run.SequentialInvocationSnapshot is not null
                 && run.SequentialAdapterBinding is not null
                 && run.AdmittedDefinition.InferenceSteps.Length == 0
             ? 0
             : CustomLoopLimits.GetMaximumModelAttempts(run.AdmittedDefinition.InferenceSteps.Length, run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations);
+        var maximumAttempts = checked(traversalProviderAttemptCeiling + CalculateAdmittedRetryProviderStartAllowance(run));
         var canonicalExitStarts = run.Events.Count(IsCanonicalDeterministicExitStart);
         if (canonicalExitStarts > 1)
         {
@@ -3184,12 +3196,14 @@ public sealed class CustomLoopRunStore :
         }
 
         var outstanding = CalculateOutstandingReservation(run);
+        var outstandingRetryStateReservation = CalculateOutstandingRetryStateReservation(run);
         var remainingControlReserve = CustomLoopLimits.MaxTraceControlReserveUtf8Bytes - checked(controlEventCount * CustomLoopLimits.MaxTraceControlEventUtf8Bytes);
         // Reserve evidence only for effects already open. Future pure-node, provider, and tool effects are
         // independently capacity-gated before dispatch; workspace quota reserves the full per-run ceiling.
         return checked(
             persistedUtf8Bytes
             + outstanding.Utf8Bytes
+            + outstandingRetryStateReservation
             + remainingControlReserve
             + CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes);
     }
@@ -3244,6 +3258,14 @@ public sealed class CustomLoopRunStore :
     private static bool IsLifecycleControlEvent(CustomLoopRunEvent item)
     {
         return item.Kind is CustomLoopRunEventKind.LifecycleChanged or CustomLoopRunEventKind.IntegrityWarning;
+    }
+
+    private static bool IsRetryStateAtomicEvent(CustomLoopRunEvent item)
+    {
+        return item.Kind is CustomLoopRunEventKind.RetryStateChanged
+            or CustomLoopRunEventKind.LifecycleChanged
+            or CustomLoopRunEventKind.NodeAttemptFailed
+            or CustomLoopRunEventKind.TopologyNodeSkipped;
     }
 
     private static bool IsAttemptClosure(CustomLoopRunEvent item)
@@ -3384,6 +3406,103 @@ public sealed class CustomLoopRunStore :
         return new TraceReservation(total, earliest);
     }
 
+    private static long CalculateOutstandingRetryStateReservation(CustomLoopRunRecord run)
+    {
+        long total = 0;
+        foreach (var state in LatestRetryStates(run))
+        {
+            var requiredEvents = CalculateOutstandingRetryStateEvents(state);
+            total = checked(total + ((long)requiredEvents * CustomLoopLimits.MaxRetryStateEventUtf8Bytes));
+        }
+
+        return total;
+    }
+
+    private static int CalculateAdmittedRetryProviderStartAllowance(CustomLoopRunRecord run)
+    {
+        // The ordinary traversal ceiling counts exactly one provider attempt for every admitted
+        // inference activation. A durable retry series adds only attempts that are already
+        // evidenced by its current state. Dispatched alone also admits its one exact next start;
+        // Scheduled, Due, and Reserved do not. The run validator binds every retry state and any
+        // attempt after one to the same run, revision, activation, visit, node, and dispatch.
+        var allowance = 0;
+        foreach (var state in LatestRetryStates(run))
+        {
+            var activation = run.Frontier?.Payload.Nodes.ElementAtOrDefault(state.Identity.ActivationOrdinal);
+            if (activation?.Descriptor.Kind != GovernedLoopNodeKind.Inference)
+            {
+                continue;
+            }
+
+            var persistedRetryStarts = checked(state.CurrentAttempt - 1);
+            allowance = checked(allowance + persistedRetryStarts + (state.Disposition == GovernedLoopRetryStateDisposition.Dispatched ? 1 : 0));
+        }
+
+        return allowance;
+    }
+
+    private static IEnumerable<GovernedLoopRetryState> LatestRetryStates(CustomLoopRunRecord run)
+        => run.Events
+            .Where(item => item.Kind == CustomLoopRunEventKind.RetryStateChanged && item.RetryState is not null)
+            .GroupBy(item => item.RetryState!.Identity.SeriesId, StringComparer.Ordinal)
+            .Select(group => group.OrderBy(item => item.Sequence).Last().RetryState!);
+
+    private static int CalculateOutstandingRetryStateEvents(GovernedLoopRetryState state)
+    {
+        // A retained state authenticates the policy hash but not its numeric attempt ceiling. Reserve
+        // through the schema-1 maximum so a valid reopened series cannot consume capacity that a
+        // later contract-valid successor requires. C(a) below is one terminal successor at the
+        // ceiling and six successors for every earlier attempt; C(1) is therefore 43 at the
+        // eight-attempt schema maximum.
+        const int MaximumAttempts = GovernedLoopRetryContractLimits.MaximumAttempts;
+        return state.Disposition switch
+        {
+            GovernedLoopRetryStateDisposition.FailureRetained or GovernedLoopRetryStateDisposition.AttemptCompleted
+                => RemainingAfterAttemptCompletion(state.CurrentAttempt, MaximumAttempts),
+            GovernedLoopRetryStateDisposition.Scheduled when state.WakeCheckpointId is null
+                => RemainingAfterUncheckpointedSchedule(state.NextAttempt!.Value, MaximumAttempts),
+            GovernedLoopRetryStateDisposition.Scheduled
+                => RemainingAfterCheckpointedSchedule(state.NextAttempt!.Value, MaximumAttempts),
+            GovernedLoopRetryStateDisposition.Due
+                => RemainingAfterDue(state.NextAttempt!.Value, MaximumAttempts),
+            GovernedLoopRetryStateDisposition.Reserved
+                => RemainingAfterReservation(state.NextAttempt!.Value, MaximumAttempts),
+            GovernedLoopRetryStateDisposition.Dispatched
+                => RemainingAfterDispatch(state.NextAttempt!.Value, MaximumAttempts),
+            _ => 0,
+        };
+    }
+
+    private static int RemainingAfterAttemptCompletion(int completedAttempt, int maximumAttempts)
+        // ScheduleAsync persists a terminal successor at the policy bound. Otherwise it appends
+        // Scheduled and the checkpoint/wake/dispatch chain for the next exact attempt.
+        => completedAttempt >= maximumAttempts
+            ? 1
+            : checked(1 + RemainingAfterUncheckpointedSchedule(completedAttempt + 1, maximumAttempts));
+
+    private static int RemainingAfterUncheckpointedSchedule(int nextAttempt, int maximumAttempts)
+        // This state is already persisted. Count only PublishCheckpointCoreAsync's attached
+        // successor, then the wake and a later retry-safe result; never count Scheduled twice.
+        => checked(1 + RemainingAfterCheckpointedSchedule(nextAttempt, maximumAttempts));
+
+    private static int RemainingAfterCheckpointedSchedule(int nextAttempt, int maximumAttempts)
+        // ContinueAsync appends Due before it reserves and dispatches the exact attempt.
+        => checked(1 + RemainingAfterDue(nextAttempt, maximumAttempts));
+
+    private static int RemainingAfterDue(int nextAttempt, int maximumAttempts)
+        // ContinueAsync appends Reserved before it reaches the dispatch boundary.
+        => checked(1 + RemainingAfterReservation(nextAttempt, maximumAttempts));
+
+    private static int RemainingAfterReservation(int nextAttempt, int maximumAttempts)
+        // ContinueAsync appends Dispatched; the later result can retain the completed attempt.
+        => checked(1 + RemainingAfterDispatch(nextAttempt, maximumAttempts));
+
+    private static int RemainingAfterDispatch(int dispatchedAttempt, int maximumAttempts)
+        // A retry-safe failure after ResumeOrderedAsync appends AttemptCompleted, then either
+        // terminalizes or schedules the following attempt. The persisted Dispatched event itself
+        // is not counted again.
+        => checked(1 + RemainingAfterAttemptCompletion(dispatchedAttempt, maximumAttempts));
+
     private static byte[] SerializeTombstoneBounded(CustomLoopTraceTombstone tombstone)
     {
         var content = CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(tombstone, _jsonOptions, $"Custom loop trace tombstone `{tombstone.RunId}`");
@@ -3496,11 +3615,7 @@ public sealed class CustomLoopRunStore :
     private void RecoverRunTemporaryArtifacts()
     {
         EnsureSafeDirectory(_runsRoot, create: false);
-        var rootFiles = Directory.EnumerateFiles(_runsRoot, "*", SearchOption.TopDirectoryOnly).ToArray();
-        if (rootFiles.Any(path => !IsAllowedRootArtifact(path)))
-        {
-            throw new FormatException("Custom loop run storage contains an unexpected root-level artifact; traces must be stored beneath their loop-id directory.");
-        }
+        RequireAllowedRootArtifacts();
 
         foreach (var directory in Directory.EnumerateDirectories(_runsRoot, "*", SearchOption.TopDirectoryOnly))
         {
@@ -3527,6 +3642,25 @@ public sealed class CustomLoopRunStore :
                 }
             }
         }
+    }
+
+    private void RequireAllowedRootArtifacts()
+    {
+        var unexpectedRootFiles = Directory.EnumerateFiles(_runsRoot, "*", SearchOption.TopDirectoryOnly)
+            .Where(path => !IsAllowedRootArtifact(path))
+            .ToArray();
+        if (unexpectedRootFiles.Length == 0)
+        {
+            return;
+        }
+
+        // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/512: retain bounded artifact identity so a concurrent writer can be attributed without weakening strict root-layout validation.
+        var boundedNames = unexpectedRootFiles
+            .OrderBy(path => path, PathComparer)
+            .Take(8)
+            .Select(path => JsonSerializer.Serialize(Path.GetFileName(path)));
+        var omitted = unexpectedRootFiles.Length > 8 ? $"; omitted={unexpectedRootFiles.Length - 8}" : string.Empty;
+        throw new FormatException($"Custom loop run storage contains an unexpected root-level artifact; traces must be stored beneath their loop-id directory. Artifacts=[{string.Join(",", boundedNames)}]{omitted}.");
     }
 
     private void RecoverTraceDeletionOperationTemporaryArtifacts()

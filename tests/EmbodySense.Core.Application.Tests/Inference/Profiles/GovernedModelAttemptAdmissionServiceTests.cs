@@ -422,6 +422,52 @@ public sealed class GovernedModelAttemptAdmissionServiceTests
     }
 
     [Fact]
+    public async Task Retry_usage_ceiling_narrows_the_durable_model_reservation_before_provider_transport()
+    {
+        var fixture = Fixture(fullBudget: true);
+        var transport = new CountingTransport();
+        var execution = Execution(fixture, transport);
+        var retryCeiling = GovernedModelUsageCeiling.Create(
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Bounded(4),
+            GovernedModelMonetaryLimit.Bounded("USD", 40));
+        var request = fixture.Request with { RetryUsageCeiling = retryCeiling };
+
+        var result = await Execute(execution, new GovernedModelPrimaryExecutionRequest(request, LlmInferenceRequest.FromUserText("test")));
+
+        Assert.NotNull(result.Response);
+        var envelope = Assert.IsType<ExactModelProfileInferenceClientRequest>(transport.ResolverRequest);
+        Assert.Equal(4, envelope.Reservation.TotalTokens.Maximum);
+        Assert.Equal("USD", envelope.Reservation.MonetaryCost.Currency);
+        Assert.Equal(40, envelope.Reservation.MonetaryCost.MaximumMicros);
+        Assert.NotEqual(fixture.Request.RoutingAdmission.Entries.Single().Requirements.Budget.ContentHash, envelope.AttemptIdentity.BudgetPolicyHash);
+        Assert.Equal(envelope.AttemptIdentity.BudgetPolicyHash, envelope.BudgetPolicy.ContentHash);
+        Assert.Equal(envelope.BudgetPolicy.ContentHash, fixture.Ledger.LastReservationRequest?.BudgetPolicy.ContentHash);
+        Assert.Equal(envelope.Reservation.ContentHash, fixture.Ledger.History[0].Reservation?.ContentHash);
+    }
+
+    [Fact]
+    public async Task Retry_usage_ceiling_rejects_an_incompatible_monetary_currency_before_any_durable_reservation()
+    {
+        var fixture = Fixture(fullBudget: true);
+        var incompatible = GovernedModelUsageCeiling.Create(
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelMonetaryLimit.Bounded("EUR", 40));
+        var request = fixture.Request with { RetryUsageCeiling = incompatible };
+
+        var result = await fixture.Service.ReserveAsync(request, LlmInferenceRequest.FromUserText("test"));
+
+        Assert.Equal(GovernedModelAttemptAdmissionStatus.Invalid, result.Status);
+        Assert.Equal(0, fixture.Ledger.ReserveCalls);
+        Assert.Equal(0, fixture.Authority.Calls);
+    }
+
+    [Fact]
     public async Task Changed_provider_payload_cannot_replay_prior_classification_or_reservation()
     {
         var fixture = Fixture();
@@ -806,7 +852,7 @@ public sealed class GovernedModelAttemptAdmissionServiceTests
         var adapter = new AdapterSource(pin.Metadata.ContentHash, pin.AdapterRegistryRevisionHash);
         var data = dataPostureSource ?? new DataSource(dataStatus, request);
         var authority = new AuthoritySource(request, routingEntry, pin);
-        var ledger = new Ledger(reserveStatus, retainOnReserve, reservation);
+        var ledger = new Ledger(reserveStatus, retainOnReserve);
         var service = new GovernedModelAttemptAdmissionService(catalog, metadata, adapter, data, authority, ledger, new FixedTimeProvider(_now));
         return new AttemptFixture(service, request, pin, reservation, ledger, catalog, authority);
     }
@@ -889,13 +935,14 @@ public sealed class GovernedModelAttemptAdmissionServiceTests
         }
     }
 
-    private sealed class Ledger(GovernedModelUsageLedgerAppendStatus reserveStatus, bool retainOnReserve, GovernedModelUsageCeiling reservation) : IGovernedModelUsageLedger
+    private sealed class Ledger(GovernedModelUsageLedgerAppendStatus reserveStatus, bool retainOnReserve) : IGovernedModelUsageLedger
     {
         private readonly object _sync = new();
         internal List<GovernedModelUsageLedgerEntry> History { get; } = [];
         internal GovernedModelUsageLedgerRunReadResult? RunReadOverride { get; set; }
         internal int ReadCalls { get; private set; }
         internal int ReserveCalls { get; private set; }
+        internal GovernedModelUsageReservationRequest? LastReservationRequest { get; private set; }
         internal bool ThrowAfterDispatchAppend { get; set; }
         public Task<GovernedModelUsageLedgerReadResult> ReadAsync(GovernedModelUsageLedgerIdentity identity, CancellationToken cancellationToken = default)
         {
@@ -926,7 +973,8 @@ public sealed class GovernedModelAttemptAdmissionServiceTests
             lock (_sync)
             {
                 ReserveCalls++;
-                var entry = GovernedModelUsageLedgerEntry.Create(1, request.Identity, 1, GovernedModelUsageLedgerPhase.ReservationCommitted, reservation, null, null, null, false, request.EvidenceHash, null, request.RecordedAtUtc);
+                LastReservationRequest = request;
+                var entry = GovernedModelUsageLedgerEntry.Create(1, request.Identity, 1, GovernedModelUsageLedgerPhase.ReservationCommitted, request.BudgetPolicy.PerAttempt, null, null, null, false, request.EvidenceHash, null, request.RecordedAtUtc);
                 if (History.Count > 0)
                 {
                     var exact = string.Equals(History[0].ContentHash, entry.ContentHash, StringComparison.Ordinal);
