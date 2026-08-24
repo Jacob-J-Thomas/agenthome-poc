@@ -1975,16 +1975,10 @@ public sealed class WorkspaceActionNativeHostTests
         Assert.Equal(WorkspaceActionReconciliationPosture.Indeterminate, probe.Posture);
         Assert.Null(probe.AfterEvidenceId);
         var replayDispatch = new RecordingDispatchBoundary();
-        if (isAmbiguousPublishedShape)
-        {
-            var replay = await restarted.ExecuteAsync(Request(input, prepared.BeforeEvidence), replayDispatch);
-            Assert.Equal(WorkspaceActionNativeCommitStatus.DispatchNotStarted, replay.Status);
-        }
-        else
-        {
-            var replayException = await Assert.ThrowsAsync<IOException>(() => restarted.ExecuteAsync(Request(input, prepared.BeforeEvidence), replayDispatch));
-            Assert.Contains("requires reconciliation", replayException.Message, StringComparison.Ordinal);
-        }
+        // 1177 crossed native dispatch even though the target is absent; the authenticated retained
+        // stage/original/displaced witness must therefore remain reconciliation-required.
+        var replayException = await Assert.ThrowsAsync<IOException>(() => restarted.ExecuteAsync(Request(input, prepared.BeforeEvidence), replayDispatch));
+        Assert.Contains("requires reconciliation", replayException.Message, StringComparison.Ordinal);
         Assert.Equal(0, replayDispatch.CrossCount);
 
         var clock = new MutableWorkspaceActionTimeProvider(TimeProvider.System.GetUtcNow());
