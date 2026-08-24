@@ -48,6 +48,8 @@ internal sealed class InMemoryGovernedLoopSleepStore : IGovernedLoopSleepStore
 
     internal bool ReturnNullWakeRead { get; set; }
 
+    internal Action<CancellationToken>? BeforePublish { get; set; }
+
     internal Action<GovernedLoopWakeEvidence, CancellationToken>? OnCreate { get; set; }
 
     internal Barrier? PublishBarrier { get; set; }
@@ -101,6 +103,8 @@ internal sealed class InMemoryGovernedLoopSleepStore : IGovernedLoopSleepStore
         string expectedPostureHash,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        BeforePublish?.Invoke(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         lock (_sync)
         {

@@ -8042,6 +8042,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
         public Func<CustomLoopRunRecord, CustomLoopRunRecord, CustomLoopRunRecord?>? RawConflictSuccessorFactory { get; set; }
 
+        public CustomLoopRunStoreResult? UpdateResultOverride { get; set; }
+
         public bool ConflictOnOutcomeWrite { get; init; }
 
         public bool ConflictOnPublicationWrite { get; init; }
@@ -8061,6 +8063,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
         public bool ReturnNullNonterminalList { get; set; }
 
         public bool ReturnDuplicateNonterminalList { get; set; }
+
+        public Action<CancellationToken>? BeforeListNonterminal { get; set; }
 
         public List<CustomLoopRunRecord> Writes { get; } = [];
 
@@ -8109,6 +8113,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
         public Task<IReadOnlyList<CustomLoopRunRecord>> ListNonterminalAsync(CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            BeforeListNonterminal?.Invoke(cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             if (ListNonterminalException is not null)
             {
@@ -8196,6 +8202,11 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 Current = rawSuccessor;
                 Writes.Add(rawSuccessor);
                 return CustomLoopRunStoreResult.VersionConflict(Current, expectedLifecycleVersion);
+            }
+
+            if (UpdateResultOverride is { } overrideResult)
+            {
+                return overrideResult;
             }
 
             if (ConflictOnAtomicTerminalWrite && run.Status == CustomLoopRunStatus.Completed)

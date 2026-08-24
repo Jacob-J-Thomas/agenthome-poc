@@ -1055,9 +1055,23 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
     private sealed class CanonicalRetryPosturePort(TimeProvider timeProvider) : IGovernedLoopRetryCurrentPosturePort
     {
+        internal bool DependenciesEligible { get; set; } = true;
+
+        internal Exception? Exception { get; set; }
+
+        internal Action<CancellationToken>? BeforeRead { get; set; }
+
         internal bool AuthorityEligible { get; set; } = true;
 
         internal GovernedLoopRetryBudgetSnapshot? Budget { get; set; }
+
+        internal bool LifecycleEligible { get; set; } = true;
+
+        internal DateTimeOffset? ObservedAtUtc { get; set; }
+
+        internal bool ReturnNull { get; set; }
+
+        internal GovernedLoopRetryCurrentPostureReadStatus Status { get; set; } = GovernedLoopRetryCurrentPostureReadStatus.Found;
 
         public Task<GovernedLoopRetryCurrentPostureReadResult?> ReadAsync(
             CustomLoopRunRecord run,
@@ -1066,14 +1080,26 @@ public sealed partial class CustomLoopOrderedRunnerTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            BeforeRead?.Invoke(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Exception is not null)
+            {
+                throw Exception;
+            }
+            if (ReturnNull)
+            {
+                return Task.FromResult<GovernedLoopRetryCurrentPostureReadResult?>(null);
+            }
             return Task.FromResult<GovernedLoopRetryCurrentPostureReadResult?>(new GovernedLoopRetryCurrentPostureReadResult(
-                GovernedLoopRetryCurrentPostureReadStatus.Found,
-                new GovernedLoopRetryCurrentPosture(
-                    true,
-                    AuthorityEligible,
-                    true,
-                    Budget ?? new GovernedLoopRetryBudgetSnapshot(failure.Attempt, 0, 0, null, null, failure.Attempt),
-                    timeProvider.GetUtcNow())));
+                Status,
+                Status == GovernedLoopRetryCurrentPostureReadStatus.Found
+                    ? new GovernedLoopRetryCurrentPosture(
+                        LifecycleEligible,
+                        AuthorityEligible,
+                        DependenciesEligible,
+                        Budget ?? new GovernedLoopRetryBudgetSnapshot(failure.Attempt, 0, 0, null, null, failure.Attempt),
+                        ObservedAtUtc ?? timeProvider.GetUtcNow())
+                    : null));
         }
     }
 
@@ -1081,6 +1107,14 @@ public sealed partial class CustomLoopOrderedRunnerTests
     {
         private GovernedLoopWaitOrderedContext? _context;
         private IGovernedLoopSequentialOrderedRuntime? _runtime;
+
+        internal Exception? ResolveException { get; set; }
+
+        internal Action<CancellationToken>? BeforeResolve { get; set; }
+
+        internal Exception? ResumeException { get; set; }
+
+        internal bool ReturnNullContext { get; set; }
 
         internal void Bind(GovernedLoopWaitOrderedContext context, IGovernedLoopSequentialOrderedRuntime runtime)
         {
@@ -1091,8 +1125,15 @@ public sealed partial class CustomLoopOrderedRunnerTests
         public Task<GovernedLoopWaitOrderedContext?> ResolveAsync(CustomLoopRunRecord run, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            BeforeResolve?.Invoke(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (ResolveException is not null)
+            {
+                throw ResolveException;
+            }
             return Task.FromResult<GovernedLoopWaitOrderedContext?>(
-                _context is not null
+                !ReturnNullContext
+                && _context is not null
                 && string.Equals(_context.Anchor.AdapterBinding.ExecutionBinding.RunId, run.Id, StringComparison.Ordinal)
                     ? _context
                     : null);
@@ -1101,7 +1142,14 @@ public sealed partial class CustomLoopOrderedRunnerTests
         public Task<CustomLoopOrderedRunResult> ResumeRetryAsync(
             GovernedLoopRetryOrderedResumeRequest request,
             CancellationToken cancellationToken = default)
-            => _runtime!.ResumeRetryAsync(
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (ResumeException is not null)
+            {
+                throw ResumeException;
+            }
+
+            return _runtime!.ResumeRetryAsync(
                 new GovernedLoopSequentialOrderedRetryResumeRequest(
                     GovernedLoopSequentialOrderedRetryResumeRequest.CurrentSchemaVersion,
                     request.Context.Anchor,
@@ -1110,6 +1158,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
                     request.RetryState,
                     request.Actor),
                 cancellationToken);
+        }
     }
 
     private sealed class RecordingRetryNodeExecutor(IGovernedLoopRetryNodeExecutor target) : IGovernedLoopRetryNodeExecutor
@@ -1130,5 +1179,13 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 throw;
             }
         }
+    }
+
+    private sealed class ThrowingRetryNodeExecutor : IGovernedLoopRetryNodeExecutor
+    {
+        public Task<GovernedLoopRetryExecutionResult> ScheduleAsync(
+            GovernedLoopRetryExecutionRequest request,
+            CancellationToken cancellationToken = default)
+            => throw new IOException("simulated retry scheduler outage");
     }
 }

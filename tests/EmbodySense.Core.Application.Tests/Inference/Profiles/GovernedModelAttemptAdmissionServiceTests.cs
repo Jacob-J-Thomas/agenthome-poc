@@ -449,6 +449,25 @@ public sealed class GovernedModelAttemptAdmissionServiceTests
     }
 
     [Fact]
+    public async Task Retry_usage_ceiling_rejects_an_incompatible_monetary_currency_before_any_durable_reservation()
+    {
+        var fixture = Fixture(fullBudget: true);
+        var incompatible = GovernedModelUsageCeiling.Create(
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelMonetaryLimit.Bounded("EUR", 40));
+        var request = fixture.Request with { RetryUsageCeiling = incompatible };
+
+        var result = await fixture.Service.ReserveAsync(request, LlmInferenceRequest.FromUserText("test"));
+
+        Assert.Equal(GovernedModelAttemptAdmissionStatus.Invalid, result.Status);
+        Assert.Equal(0, fixture.Ledger.ReserveCalls);
+        Assert.Equal(0, fixture.Authority.Calls);
+    }
+
+    [Fact]
     public async Task Changed_provider_payload_cannot_replay_prior_classification_or_reservation()
     {
         var fixture = Fixture();
