@@ -1298,7 +1298,8 @@ internal static class WorkspaceActionNativeFileSystem
         SafeFileHandle replacedParent,
         string replacedName,
         SafeFileHandle backupParent,
-        string backupName)
+        string backupName,
+        IWorkspaceActionWindowsReplacementBoundary? replacementBoundary = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(replacementPath);
         EnsureSimpleName(replacedName);
@@ -1324,7 +1325,11 @@ internal static class WorkspaceActionNativeFileSystem
         }
         var replacedPath = Path.Combine(ReadFinalPath(replacedParent), replacedName);
         var backupPath = Path.Combine(ReadFinalPath(backupParent), backupName);
-        if (!ReplaceFile(replacedPath, replacementPath, backupPath, 0, IntPtr.Zero, IntPtr.Zero))
+        if (replacementBoundary is not null)
+        {
+            replacementBoundary.Replace(replacedPath, replacementPath, backupPath);
+        }
+        else if (!ReplaceFile(replacedPath, replacementPath, backupPath, 0, IntPtr.Zero, IntPtr.Zero))
         {
             // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/506 owns partial-error status coverage.
             throw NativeIOException("ReplaceFileW workspace action replacement", Marshal.GetLastPInvokeError());

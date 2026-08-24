@@ -1920,6 +1920,103 @@ public sealed class WorkspaceActionNativeHostTests
         Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.marker"));
     }
 
+    [Theory]
+    [InlineData(PartialReplaceFileFailureBoundary.UnableToRemoveReplaced)]
+    [InlineData(PartialReplaceFileFailureBoundary.UnableToMoveReplacement)]
+    [InlineData(PartialReplaceFileFailureBoundary.UnableToMoveReplacement2)]
+    public async Task WindowsPartialReplaceFileFailuresRetainEvidenceAndNeverRedispatch(int nativeErrorCode)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var path = workspace.File("notes", "windows-partial-replace.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Write, "notes/windows-partial-replace.txt", ExpectedHash("before"), "governed");
+        var failure = new PartialReplaceFileFailureBoundary(nativeErrorCode);
+        var host = Host(paths, windowsReplacementBoundary: failure);
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+        var firstDispatch = new RecordingDispatchBoundary();
+
+        var exception = await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            firstDispatch));
+
+        Assert.Contains(nativeErrorCode.ToString(), exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, failure.InvocationCount);
+        Assert.Equal(1, firstDispatch.CrossCount);
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        var stage = Assert.Single(Directory.EnumerateFiles(staging, "*.stage"));
+        var original = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.original"));
+        Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        Assert.Equal("governed", await File.ReadAllTextAsync(stage));
+        Assert.Equal("before", await File.ReadAllTextAsync(original));
+        Assert.Null(await new WorkspaceActionEvidenceStore(paths).FindAfterAsync("effect-alpha", "operation-alpha", 1));
+        Assert.Null(await new WorkspaceActionEvidenceStore(paths).FindOutcomeAsync("effect-alpha", "operation-alpha", 1));
+
+        var isAmbiguousPublishedShape = nativeErrorCode == PartialReplaceFileFailureBoundary.UnableToMoveReplacement2;
+        if (isAmbiguousPublishedShape)
+        {
+            var displaced = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+            Assert.Equal("before", await File.ReadAllTextAsync(displaced));
+            Assert.False(File.Exists(path));
+        }
+        else
+        {
+            Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+            Assert.Equal("before", await File.ReadAllTextAsync(path));
+        }
+
+        var restarted = Host(paths);
+        var probe = await restarted.ProbeAsync(Probe(input, prepared.BeforeEvidence));
+        Assert.Equal(WorkspaceActionReconciliationPosture.Indeterminate, probe.Posture);
+        Assert.Null(probe.AfterEvidenceId);
+        var replayDispatch = new RecordingDispatchBoundary();
+        if (isAmbiguousPublishedShape)
+        {
+            var replay = await restarted.ExecuteAsync(Request(input, prepared.BeforeEvidence), replayDispatch);
+            Assert.Equal(WorkspaceActionNativeCommitStatus.DispatchNotStarted, replay.Status);
+        }
+        else
+        {
+            var replayException = await Assert.ThrowsAsync<IOException>(() => restarted.ExecuteAsync(Request(input, prepared.BeforeEvidence), replayDispatch));
+            Assert.Contains("requires reconciliation", replayException.Message, StringComparison.Ordinal);
+        }
+        Assert.Equal(0, replayDispatch.CrossCount);
+
+        var clock = new MutableWorkspaceActionTimeProvider(TimeProvider.System.GetUtcNow());
+        clock.Advance(TimeSpan.FromHours(25));
+        if (isAmbiguousPublishedShape)
+        {
+            await File.WriteAllTextAsync(path, "external");
+            var cleanup = await Host(
+                paths,
+                timeProvider: clock,
+                attemptPresence: new FixedAttemptPresenceResolver(WorkspaceActionAttemptPresence.ArtifactReleased)).CleanupOrphansAsync(1);
+            Assert.Equal(0, cleanup);
+            Assert.Equal("external", await File.ReadAllTextAsync(path));
+            Assert.Single(Directory.EnumerateFiles(staging, "*.stage"));
+            Assert.Single(Directory.EnumerateFiles(staging, "*.stage.original"));
+            Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+            Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        }
+        else
+        {
+            var cleanup = await Host(
+                paths,
+                timeProvider: clock,
+                attemptPresence: new FixedAttemptPresenceResolver(WorkspaceActionAttemptPresence.ArtifactReleased)).CleanupOrphansAsync(1);
+            Assert.Equal(1, cleanup);
+            Assert.Equal("before", await File.ReadAllTextAsync(path));
+            Assert.Empty(Directory.EnumerateFiles(staging, "*.stage"));
+            Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.original"));
+            Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        }
+    }
+
     [Fact]
     public async Task ExistingWindowsReplacementRejectsCaseOnlyTargetAliasBeforePublishing()
     {
@@ -2551,7 +2648,8 @@ public sealed class WorkspaceActionNativeHostTests
         IWorkspaceActionAttemptPresenceResolver? attemptPresence = null,
         WorkspaceActionEvidenceStore? evidenceStore = null,
         IWorkspaceActionPermissionRevalidator? permissionRevalidator = null,
-        IWorkspaceActionNamespaceRaceObserver? namespaceRaceObserver = null)
+        IWorkspaceActionNamespaceRaceObserver? namespaceRaceObserver = null,
+        IWorkspaceActionWindowsReplacementBoundary? windowsReplacementBoundary = null)
     {
         WorkspaceActionScopeId.TryParse("workspace", out var scope);
         return new WorkspaceActionNativeHost(
@@ -2566,7 +2664,8 @@ public sealed class WorkspaceActionNativeHostTests
             namespaceRaceObserver: namespaceRaceObserver,
             quota: quota,
             committedAfterEvidence: committedAfterEvidence,
-            attemptPresence: attemptPresence);
+            attemptPresence: attemptPresence,
+            windowsReplacementBoundary: windowsReplacementBoundary);
     }
 
     private static WorkspaceActionInput Input(

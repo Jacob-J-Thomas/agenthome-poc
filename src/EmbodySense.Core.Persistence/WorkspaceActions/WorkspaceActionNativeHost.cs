@@ -27,6 +27,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
     private readonly IWorkspaceActionCommitObserver? _commitObserver;
     private readonly IWorkspaceActionDurabilityObserver? _durabilityObserver;
     private readonly IWorkspaceActionNamespaceRaceObserver? _namespaceRaceObserver;
+    private readonly IWorkspaceActionWindowsReplacementBoundary? _windowsReplacementBoundary;
     private readonly WorkspaceActionCleanupCursorStore _cleanupCursors;
     private readonly WorkspaceActionEvidenceStore _evidence;
     private readonly WorkspaceActionPrivateArtifactPathGuard _guard;
@@ -39,6 +40,19 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
     private readonly TimeProvider _timeProvider;
 
     /// <summary>Creates the one native workspace actuator host for a statically admitted root and scope.</summary>
+    /// <param name="paths">The statically admitted workspace paths.</param>
+    /// <param name="scopeId">The exact workspace action scope.</param>
+    /// <param name="commitBoundary">The capability-authority commit boundary.</param>
+    /// <param name="permissionRevalidator">The permission revalidator used before each mutation.</param>
+    /// <param name="evidenceStore">The optional evidence store to reuse.</param>
+    /// <param name="timeProvider">The optional clock used for evidence and retention decisions.</param>
+    /// <param name="durabilityObserver">The optional crash-window observer.</param>
+    /// <param name="commitObserver">The optional commit-window observer.</param>
+    /// <param name="namespaceRaceObserver">The optional native namespace race observer.</param>
+    /// <param name="quota">The optional storage limits.</param>
+    /// <param name="committedAfterEvidence">The optional resolver for externally committed after evidence.</param>
+    /// <param name="attemptPresence">The optional effect-attempt presence resolver.</param>
+    /// <param name="windowsReplacementBoundary">Optional deterministic replacement seam for Windows recovery tests; production composition leaves the native ReplaceFileW call selected.</param>
     public WorkspaceActionNativeHost(
         WorkspacePaths paths,
         WorkspaceActionScopeId scopeId,
@@ -51,7 +65,8 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
         IWorkspaceActionNamespaceRaceObserver? namespaceRaceObserver = null,
         WorkspaceActionStorageLimits? quota = null,
         IWorkspaceActionCommittedAfterEvidenceResolver? committedAfterEvidence = null,
-        IWorkspaceActionAttemptPresenceResolver? attemptPresence = null)
+        IWorkspaceActionAttemptPresenceResolver? attemptPresence = null,
+        IWorkspaceActionWindowsReplacementBoundary? windowsReplacementBoundary = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         _scopeId = scopeId ?? throw new ArgumentNullException(nameof(scopeId));
@@ -66,6 +81,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
         _durabilityObserver = durabilityObserver;
         _commitObserver = commitObserver;
         _namespaceRaceObserver = namespaceRaceObserver;
+        _windowsReplacementBoundary = windowsReplacementBoundary;
         _rootPath = Path.TrimEndingDirectorySeparator(paths.RootPath);
         var privateRoot = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions");
         _stagingRoot = Path.Combine(privateRoot, "staging");
@@ -395,10 +411,22 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
         {
             return new WorkspaceActionNativeCommitResult(WorkspaceActionNativeCommitStatus.DispatchNotStarted, null);
         }
+        catch (IOException)
+        {
+            if (await IsRetainedMultiLinkedBeforeImageAsync(request.Input.Target, before, cancellationToken).ConfigureAwait(false))
+            {
+                throw new IOException("A retained Windows replacement witness requires reconciliation before this workspace action can continue.");
+            }
+            throw;
+        }
         using (session)
         {
             if (!await session.MatchesBeforeAsync(before, cancellationToken).ConfigureAwait(false))
             {
+                if (await IsRetainedMultiLinkedBeforeImageAsync(request.Input.Target, before, cancellationToken).ConfigureAwait(false))
+                {
+                    throw new IOException("A retained Windows replacement witness requires reconciliation before this workspace action can continue.");
+                }
                 return new WorkspaceActionNativeCommitResult(WorkspaceActionNativeCommitStatus.DispatchNotStarted, null);
             }
             var currentPermission = await RevalidatePermissionAsync(
@@ -415,6 +443,34 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             return request.Input.Kind == WorkspaceActionKind.Delete
                 ? await ExecuteDeleteAsync(request, before, session, dispatchBoundary, cancellationToken).ConfigureAwait(false)
                 : await ExecuteInstallAsync(request, before, session, dispatchBoundary, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<bool> IsRetainedMultiLinkedBeforeImageAsync(
+        WorkspaceRelativeFileTarget target,
+        WorkspaceActionBeforeEvidence before,
+        CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows() || before.EntryKind != WorkspaceActionEntryKind.RegularFile)
+        {
+            return false;
+        }
+        try
+        {
+            using var probe = WorkspaceActionRetainedTargetSession.OpenForProbe(_rootPath, _scopeId, target);
+            if (probe.TargetIdentity is null
+                || probe.TargetIdentity.Value.LinkCount != 2
+                || !string.Equals(probe.TargetFingerprint, before.TargetFingerprint, StringComparison.Ordinal))
+            {
+                return false;
+            }
+            var identity = probe.TargetIdentity.Value;
+            var bytes = await probe.ReadTargetBytesAsync(WorkspaceActionContractLimits.MaxBeforeImageBytes, cancellationToken).ConfigureAwait(false);
+            return MatchesExactBeforeImage(identity, bytes, before);
+        }
+        catch (IOException)
+        {
+            return false;
         }
     }
 
@@ -709,7 +765,8 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                                 session.ParentHandle,
                                 session.TerminalName,
                                 stageFence.DirectoryHandle,
-                                displacedName);
+                                displacedName,
+                                _windowsReplacementBoundary);
                             stage.Published = true;
                             using var observed = WorkspaceActionNativeFileSystem.OpenRelativeFile(
                                 session.ParentHandle,
