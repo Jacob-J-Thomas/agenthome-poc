@@ -2122,6 +2122,82 @@ public sealed class WorkspaceActionNativeHostTests
         Assert.Equal("before-after", await File.ReadAllTextAsync(stage));
     }
 
+    [Theory]
+    [InlineData("original", false)]
+    [InlineData("original", true)]
+    [InlineData("displaced", false)]
+    [InlineData("displaced", true)]
+    public async Task WindowsPartialReplaceFileAppendCorruptBeforeImageWitnessRequiresReconciliationWithoutRedispatch(string artifact, bool tamper)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var path = workspace.File("notes", "windows-partial-replace-append-before-image.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Append, "notes/windows-partial-replace-append-before-image.txt", ExpectedHash("before"), "-after");
+        var failure = new PartialReplaceFileFailureBoundary(PartialReplaceFileFailureBoundary.UnableToMoveReplacement2);
+        var host = Host(paths, windowsReplacementBoundary: failure);
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+
+        await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            new RecordingDispatchBoundary()));
+
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        var stage = Assert.Single(Directory.EnumerateFiles(staging, "*.stage"));
+        var beforeImage = Assert.Single(Directory.EnumerateFiles(staging, $"*.stage.{artifact}"));
+        if (tamper)
+        {
+            await File.WriteAllTextAsync(beforeImage, "tampered");
+        }
+        else
+        {
+            File.Delete(beforeImage);
+        }
+
+        var restarted = Host(paths);
+        var replayDispatch = new RecordingDispatchBoundary();
+        var replayException = await Assert.ThrowsAsync<IOException>(() => restarted.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            replayDispatch));
+
+        Assert.Contains("requires reconciliation", replayException.Message, StringComparison.Ordinal);
+        Assert.Equal(0, replayDispatch.CrossCount);
+        Assert.Equal("before-after", await File.ReadAllTextAsync(stage));
+    }
+
+    [Fact]
+    public async Task WindowsUnrelatedMalformedStageMarkerDoesNotCreateFalsePositiveReconciliationWitness()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var path = workspace.File("notes", "windows-unrelated-malformed-marker.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Write, "notes/windows-unrelated-malformed-marker.txt", ExpectedHash("before"), "governed");
+        var host = Host(paths);
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+        File.Delete(path);
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        await File.WriteAllTextAsync(Path.Combine(staging, "stage-unrelated.stage.marker"), "malformed marker");
+        var replayDispatch = new RecordingDispatchBoundary();
+
+        var result = await host.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            replayDispatch);
+
+        Assert.Equal(WorkspaceActionNativeCommitStatus.DispatchNotStarted, result.Status);
+        Assert.Equal(0, replayDispatch.CrossCount);
+    }
+
     [Fact]
     public async Task ExistingWindowsReplacementRejectsCaseOnlyTargetAliasBeforePublishing()
     {

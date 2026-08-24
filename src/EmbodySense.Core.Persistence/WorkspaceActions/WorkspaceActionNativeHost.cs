@@ -492,7 +492,6 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                 ownership,
                 entries,
                 cancellationToken).ConfigureAwait(false);
-            var expectedStageName = expectedStageNames.Count == 1 ? expectedStageNames.Single() : null;
             if (expectedStageNames.Any(stageName =>
                     names.Contains(stageName)
                     || names.Contains(stageName + ".marker")
