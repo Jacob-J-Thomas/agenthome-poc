@@ -165,7 +165,11 @@ internal static class GovernedLoopRuntimeTests
             Assert.Empty(route.Fallbacks);
 
             await using var recoveryGate = new CustomLoopWorkspaceExecutionGate(fixture.Paths);
-            var recoveryOwnership = recoveryGate.TryAcquire($"model-crash-recovery-{boundary.ToString().ToLowerInvariant()}", Hash64('6'));
+            var recoveryOwnership = await WaitForRecoveryOwnershipAfterChildExitAsync(
+                recoveryGate,
+                $"model-crash-recovery-{boundary.ToString().ToLowerInvariant()}",
+                Hash64('6'),
+                boundary);
             Assert.Equal(CustomLoopExecutionLeaseStatus.Acquired, recoveryOwnership.Status);
             IDisposable? recoveryLease = Assert.IsAssignableFrom<IDisposable>(recoveryOwnership.Lease);
             try
@@ -334,6 +338,36 @@ internal static class GovernedLoopRuntimeTests
             }
             throw new Xunit.Sdk.XunitException($"The external model host did not reach {boundary} within 20 seconds.");
         }
+    }
+
+    private static async Task<CustomLoopExecutionLeaseResult> WaitForRecoveryOwnershipAfterChildExitAsync(
+        CustomLoopWorkspaceExecutionGate recoveryGate,
+        string operationId,
+        string requestHash,
+        GovernedModelPrimaryExecutionBoundary boundary)
+    {
+        var startedAt = Stopwatch.GetTimestamp();
+        CustomLoopExecutionLeaseResult? lastOwnership = null;
+        while (Stopwatch.GetElapsedTime(startedAt) < TimeSpan.FromSeconds(20))
+        {
+            lastOwnership = recoveryGate.TryAcquire(operationId, requestHash);
+            if (lastOwnership.Status != CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
+            {
+                return lastOwnership;
+            }
+
+            await Task.Delay(25);
+        }
+
+        lastOwnership = recoveryGate.TryAcquire(operationId, requestHash);
+        if (lastOwnership.Status != CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
+        {
+            return lastOwnership;
+        }
+
+        throw new Xunit.Sdk.XunitException(
+            $"The model crash child did not release its workspace host before recovery for {boundary}. " +
+            $"Last ownership status: {lastOwnership.Status}. {lastOwnership.Detail}");
     }
 
     internal static async Task Production_runtime_parks_and_wakes_a_canonical_wait_after_restart()
