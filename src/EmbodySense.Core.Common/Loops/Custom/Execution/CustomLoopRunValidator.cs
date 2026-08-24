@@ -1459,9 +1459,12 @@ public static class CustomLoopRunValidator
             }
 
             ValidateEventCoordinates(item, field, errors);
-            var detailLimit = item.Kind is CustomLoopRunEventKind.LifecycleChanged or CustomLoopRunEventKind.IntegrityWarning
-                ? CustomLoopLimits.MaxLifecycleControlDetailCharacters
-                : CustomLoopLimits.MaxRunDetailCharacters;
+            var detailLimit = item.Kind switch
+            {
+                CustomLoopRunEventKind.LifecycleChanged or CustomLoopRunEventKind.IntegrityWarning => CustomLoopLimits.MaxLifecycleControlDetailCharacters,
+                CustomLoopRunEventKind.RetryStateChanged => CustomLoopLimits.MaxRetryStateDetailCharacters,
+                _ => CustomLoopLimits.MaxRunDetailCharacters,
+            };
             ValidateText(item.Detail, $"{field}.detail", detailLimit, required: true, errors);
             ValidateContextBlocks(item.ContextBlocks, $"{field}.contextBlocks", errors);
             ValidateOptionalText(item.CanonicalOutput, $"{field}.canonicalOutput", CustomLoopLimits.MaxCanonicalModelOutputCharacters, errors, requireNormalized: false);

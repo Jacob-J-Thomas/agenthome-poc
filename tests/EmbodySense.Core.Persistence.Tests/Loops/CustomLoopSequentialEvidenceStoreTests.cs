@@ -10,7 +10,9 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Admission.Models;
@@ -19,6 +21,8 @@ using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
@@ -669,6 +673,197 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     }
 
     [Fact]
+    public async Task Trace_capacity_admits_one_canonical_scheduled_retry_wake_as_one_atomic_store_update()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var stages = await CreateCheckpointedRetryStagesAsync(paths, "retry-capacity");
+        var store = stages.Store;
+        var context = stages.Context;
+        var activation = stages.Activation;
+        var checkpointed = stages.Checkpointed;
+        var attached = stages.Attached;
+        var eligibleAtUtc = stages.EligibleAtUtc;
+        var operationId = attached.AttemptOperationId!;
+        var budget = attached.Budget;
+
+        var due = RetrySuccessor(attached, GovernedLoopRetryStateDisposition.Due, budget, eligibleAtUtc);
+        var reserved = RetrySuccessor(due, GovernedLoopRetryStateDisposition.Reserved, new GovernedLoopRetryBudgetSnapshot(2, null, null, null, null, 2), eligibleAtUtc);
+        var dispatched = RetrySuccessor(reserved, GovernedLoopRetryStateDisposition.Dispatched, reserved.Budget, eligibleAtUtc);
+        var resumedFrontier = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.ResumeRetry(
+            checkpointed.Frontier,
+            context.Binding,
+            context.Plan,
+            checkpointed.Frontier!.Payload.Nodes[activation.ActivationOrdinal],
+            2,
+            operationId,
+            eligibleAtUtc).Frontier);
+        var resumed = checkpointed with
+        {
+            LifecycleVersion = 6,
+            Status = CustomLoopRunStatus.Running,
+            UpdatedAtUtc = eligibleAtUtc,
+            ExecutionClock = checkpointed.ExecutionClock with { ActiveSinceUtc = eligibleAtUtc },
+            Frontier = resumedFrontier,
+            Events = [
+                .. checkpointed.Events,
+                RetryStateEvent(9, due) with { Detail = MaximumRetryStateDetail() },
+                RetryStateEvent(10, reserved) with { Detail = MaximumRetryStateDetail() },
+                RetryStateEvent(11, dispatched) with { Detail = MaximumRetryStateDetail() },
+                RetryLifecycleEvent(12, eligibleAtUtc, "Ordered execution resumed for one exact bounded retry."),
+            ],
+        };
+
+        using var maximumWorkspace = new TestWorkspace();
+        var maximumStages = await CreateCheckpointedRetryStagesAsync(
+            new WorkspacePaths(maximumWorkspace.RootPath),
+            "retry-capacity-maximum-shape",
+            MaximumRetryStateDetail());
+        var maximumAttachmentDelta = CustomLoopRunArtifactSerializer.Serialize(maximumStages.Checkpointed).Length - CustomLoopRunArtifactSerializer.Serialize(maximumStages.ScheduledRun).Length;
+        Assert.InRange(maximumAttachmentDelta, 1, CustomLoopLimits.MaxRetryStateEventUtf8Bytes);
+        Assert.True(maximumStages.Checkpointed.Events[^1].RetryState is
+        {
+            Disposition: GovernedLoopRetryStateDisposition.Scheduled,
+            NextAttempt: 2,
+            AttemptOperationId: not null,
+            WakeCheckpointId: not null,
+            WakeCheckpointHash: not null,
+            FailureEvidenceId: not null,
+            FailureEvidenceHash: not null,
+        });
+        var resumedDelta = CustomLoopRunArtifactSerializer.Serialize(resumed).Length - CustomLoopRunArtifactSerializer.Serialize(checkpointed).Length;
+        Assert.InRange(
+            resumedDelta,
+            1,
+            checked((3 * CustomLoopLimits.MaxRetryStateEventUtf8Bytes) + CustomLoopLimits.MaxTraceControlEventUtf8Bytes));
+
+        var oversized = resumed with
+        {
+            Events = [
+                .. checkpointed.Events,
+                RetryStateEvent(9, due) with { Detail = new string('x', CustomLoopLimits.MaxRetryStateDetailCharacters + 1) },
+                RetryStateEvent(10, reserved),
+                RetryStateEvent(11, dispatched),
+                RetryLifecycleEvent(12, eligibleAtUtc, "Ordered execution resumed for one exact bounded retry."),
+            ],
+        };
+        await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(oversized, 5));
+        var malformed = resumed with
+        {
+            Events = [
+                .. checkpointed.Events,
+                RetryStateEvent(9, due with { ContentHash = new string('0', 64) }),
+                RetryStateEvent(10, reserved),
+                RetryStateEvent(11, dispatched),
+                RetryLifecycleEvent(12, eligibleAtUtc, "Ordered execution resumed for one exact bounded retry."),
+            ],
+        };
+        await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(malformed, 5));
+        var prematureStart = WithEvidence(
+            Event(13, operationId, CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 2) with { TimestampUtc = eligibleAtUtc },
+            context.Binding,
+            "step-1",
+            2,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var unrelated = resumed with { Events = [.. resumed.Events, prematureStart] };
+        await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(unrelated, 5));
+
+        Assert.True(await store.HasSufficientTraceCapacityForDispatchAsync(resumed, 5));
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(resumed, 5)).Status);
+        var stored = Assert.IsType<CustomLoopRunRecord>(await new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)).GetAsync(context.Run.Id));
+        Assert.Equal(CustomLoopRunStatus.Running, stored.Status);
+        Assert.Equal(
+            [GovernedLoopRetryStateDisposition.FailureRetained, GovernedLoopRetryStateDisposition.Scheduled, GovernedLoopRetryStateDisposition.Scheduled, GovernedLoopRetryStateDisposition.Due, GovernedLoopRetryStateDisposition.Reserved, GovernedLoopRetryStateDisposition.Dispatched],
+            stored.Events.Where(item => item.RetryState is not null).Select(item => item.RetryState!.Disposition));
+    }
+
+    [Fact]
+    public async Task Trace_capacity_admits_a_terminal_retry_exhaustion_with_exact_failure_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var stages = await CreateCheckpointedRetryStagesAsync(paths, "retry-exhaustion-capacity");
+        var checkpointed = stages.Checkpointed;
+        var attached = stages.Attached;
+        var eligibleAtUtc = stages.EligibleAtUtc;
+        var waitingActivation = checkpointed.Frontier!.Payload.Nodes[stages.Activation.ActivationOrdinal];
+        var due = RetrySuccessor(attached, GovernedLoopRetryStateDisposition.Due, attached.Budget, eligibleAtUtc);
+        var exhausted = RetryTerminalSuccessor(due, GovernedLoopRetryStateDisposition.Exhausted, due.Budget, eligibleAtUtc);
+        var dueEvent = RetryStateEvent(9, due);
+        var exhaustedEvent = RetryStateEvent(10, exhausted);
+        var exhaustionEvent = RetryExhaustionEvent(
+            checkpointed with { Events = [.. checkpointed.Events, dueEvent, exhaustedEvent] },
+            stages.Context.Plan,
+            waitingActivation,
+            exhaustedEvent,
+            exhausted,
+            eligibleAtUtc,
+            "retry-budget-exhausted");
+        var failedTransition = GovernedLoopSequentialFrontierMachine.FailWaiting(
+            checkpointed.Frontier,
+            stages.Context.Binding,
+            stages.Context.Plan,
+            stages.Context.Plan.Nodes[waitingActivation.PlanOrdinal],
+            waitingActivation,
+            waitingActivation.Attempt!.Value,
+            attached.AttemptOperationId,
+            exhaustionEvent.EventId,
+            exhaustionEvent.SequentialNodeEvidence!.OutcomeArtifactHash,
+            GovernedLoopControlCondition.Failure,
+            eligibleAtUtc,
+            [],
+            null);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, failedTransition.Status);
+        var terminalFrontier = Assert.IsType<GovernedLoopFrontierPosture>(failedTransition.Frontier);
+        Assert.Equal(GovernedLoopFrontierStatus.Failed, terminalFrontier.Payload.Status);
+        var terminal = checkpointed with
+        {
+            LifecycleVersion = 6,
+            Status = CustomLoopRunStatus.Failed,
+            UpdatedAtUtc = eligibleAtUtc,
+            CompletedAtUtc = eligibleAtUtc,
+            FailureCode = "canonical_retry_budget_exhausted",
+            FailureDetail = "retry-budget-exhausted",
+            FinalOutput = null,
+            Frontier = terminalFrontier,
+            Events = [
+                .. checkpointed.Events,
+                dueEvent,
+                exhaustedEvent,
+                exhaustionEvent,
+                RetryLifecycleEvent(12, eligibleAtUtc, "The retry budget was exhausted without dispatch and the run stopped with exact classified evidence."),
+            ],
+        };
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await stages.Store.UpdateAsync(terminal, 5)).Status);
+        var stored = Assert.IsType<CustomLoopRunRecord>(await new CustomLoopRunStore(paths).GetAsync(stages.Context.Run.Id));
+        Assert.Equal(CustomLoopRunStatus.Failed, stored.Status);
+        Assert.Equal(GovernedLoopRetryStateDisposition.Exhausted, stored.Events[^3].RetryState?.Disposition);
+        Assert.Equal(
+            [CustomLoopRunEventKind.RetryStateChanged, CustomLoopRunEventKind.RetryStateChanged, CustomLoopRunEventKind.NodeAttemptFailed, CustomLoopRunEventKind.LifecycleChanged],
+            stored.Events.TakeLast(4).Select(item => item.Kind));
+    }
+
+    [Fact]
+    public async Task Trace_capacity_rejects_a_near_limit_scheduled_retry_when_its_full_successor_chain_cannot_fit()
+    {
+        using var workspace = new TestWorkspace();
+        var padding = NearLimitRetryCapacityContextBlocks();
+
+        // The padded trace itself remains below the hard artifact limit. The public Scheduled
+        // update reaches the store, which must retain capacity for its checkpoint, wake,
+        // dispatch, and later retry-safe completion successors instead of accepting a suffix
+        // that cannot finish canonically.
+        var exception = await Assert.ThrowsAsync<FormatException>(() => CreateCheckpointedRetryStagesAsync(
+            new WorkspacePaths(workspace.RootPath),
+            "retry-capacity-near-limit",
+            admissionContextBlocks: padding));
+
+        Assert.Contains("lacks atomically reserved capacity", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Trace_capacity_does_not_widen_the_legacy_model_attempt_ceiling()
     {
         using var workspace = new TestWorkspace();
@@ -1011,7 +1206,8 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         GovernedLoopGraphDefinition graph,
         GovernedLoopSequentialTriggerOrigin? triggerOrigin = null,
         string identity = "sequential",
-        bool scheduleTrigger = false)
+        bool scheduleTrigger = false,
+        CustomLoopContextBlock[]? admissionContextBlocks = null)
     {
         var revisionArtifact = GovernedLoopRevisionArtifactFactory.Create(
             1,
@@ -1126,6 +1322,15 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             1,
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeDisposition.Completed);
+        if (admissionContextBlocks is not null)
+        {
+            var padded = admitted with { ContextBlocks = admissionContextBlocks };
+            var evidence = Assert.IsType<CustomLoopSequentialNodeEvidence>(padded.SequentialNodeEvidence) with
+            {
+                OutcomeArtifactHash = CustomLoopSequentialOutcomeArtifactHash.Compute(padded),
+            };
+            admitted = padded with { SequentialNodeEvidence = CustomLoopSequentialNodeEvidenceHash.Apply(evidence) };
+        }
         var run = new CustomLoopRunRecord(
             1,
             execution.RunId,
@@ -1159,6 +1364,173 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         run = CustomLoopAdmissionRequestHash.Apply(run);
         Assert.True(CustomLoopRunValidator.Validate(run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(run).Errors));
         return new SequentialContext(run, invocation, binding, anchor, plan);
+    }
+
+    private static async Task<RetryCapacityStages> CreateCheckpointedRetryStagesAsync(
+        WorkspacePaths paths,
+        string identity,
+        string? attachmentDetail = null,
+        CustomLoopContextBlock[]? admissionContextBlocks = null)
+    {
+        var context = CreateContext(RetryGraph(), identity: identity, admissionContextBlocks: admissionContextBlocks);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+
+        var selection = GovernedLoopSequentialFrontierMachine.Select(context.Run.Frontier, context.Binding, context.Plan);
+        var node = Assert.IsType<GovernedLoopSequentialPlanNode>(selection.Node);
+        var activation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(selection.Activation);
+        var start = WithEvidence(
+            Event(3, "retry-attempt-start", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 1),
+            context.Binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var runningFrontier = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Start(
+            context.Run.Frontier,
+            context.Binding,
+            context.Plan,
+            node,
+            activation,
+            1,
+            start.EventId,
+            start.TimestampUtc).Frontier);
+        var running = context.Run with
+        {
+            LifecycleVersion = 2,
+            Status = CustomLoopRunStatus.Running,
+            UpdatedAtUtc = start.TimestampUtc,
+            ExecutionClock = new CustomLoopExecutionClock(0, start.TimestampUtc),
+            Frontier = runningFrontier,
+            Events = [
+                .. context.Run.Events,
+                RetryLifecycleEvent(2, start.TimestampUtc, "Ordered execution started one exact retryable provider attempt."),
+                start,
+            ],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, 1)).Status);
+
+        var failure = RetryableFailureEvent(
+            Event(4, "retry-attempt-failed", CustomLoopRunEventKind.NodeAttemptFailed, "step-1", 1),
+            context.Binding,
+            new GovernedLoopFailureEvidenceReference(start.EventId, start.SequentialNodeEvidence!.EvidenceHash));
+        var failed = running with
+        {
+            LifecycleVersion = 3,
+            UpdatedAtUtc = failure.TimestampUtc,
+            Events = [.. running.Events, failure],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(failed, 2)).Status);
+
+        var policy = Assert.IsType<GovernedLoopRetryPolicy>(node.RetryPolicy);
+        var retainedFailure = Assert.IsType<GovernedLoopFailureEvidence>(failure.FailureEvidence);
+        var series = GovernedLoopRetryContract.CreateSeries(policy, retainedFailure, start.TimestampUtc);
+        var budget = new GovernedLoopRetryBudgetSnapshot(1, null, null, null, null, 1);
+        var retryOperationId = GovernedLoopRetryContract.CreateAttemptOperationId(series.SeriesId, 2);
+        var eligibleAtUtc = failure.TimestampUtc.Add(GovernedLoopRetryContract.ComputeDelay(policy, series.SeriesId, 2));
+        var retained = GovernedLoopRetryContract.CreateState(
+            series,
+            1,
+            GovernedLoopRetryStateDisposition.FailureRetained,
+            1,
+            start.EventId,
+            null,
+            null,
+            budget,
+            null,
+            null,
+            null,
+            retainedFailure.EvidenceId,
+            retainedFailure.ContentHash,
+            failure.TimestampUtc);
+        var scheduled = GovernedLoopRetryContract.CreateState(
+            series,
+            2,
+            GovernedLoopRetryStateDisposition.Scheduled,
+            1,
+            start.EventId,
+            2,
+            retryOperationId,
+            budget,
+            eligibleAtUtc,
+            null,
+            null,
+            retainedFailure.EvidenceId,
+            retainedFailure.ContentHash,
+            failure.TimestampUtc);
+        var parked = GovernedLoopSequentialFrontierMachine.ParkRunningForRetry(
+            failed.Frontier,
+            context.Binding,
+            context.Plan,
+            node,
+            runningFrontier.Payload.Nodes[activation.ActivationOrdinal],
+            1,
+            2,
+            retryOperationId,
+            failure.TimestampUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, parked.Status);
+        var waitingFrontier = Assert.IsType<GovernedLoopFrontierPosture>(parked.Frontier);
+        var scheduledRun = failed with
+        {
+            LifecycleVersion = 4,
+            Status = CustomLoopRunStatus.Waiting,
+            UpdatedAtUtc = failure.TimestampUtc,
+            ExecutionClock = new CustomLoopExecutionClock(60_000, null),
+            Frontier = waitingFrontier,
+            Events = [
+                .. failed.Events,
+                RetryStateEvent(5, retained),
+                RetryStateEvent(6, scheduled),
+                RetryLifecycleEvent(7, failure.TimestampUtc, "Ordered execution entered Waiting for one exact bounded retry."),
+            ],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(scheduledRun, 3)).Status);
+
+        var waitingActivation = waitingFrontier.Payload.Nodes[activation.ActivationOrdinal];
+        var attachedAtUtc = failure.TimestampUtc.AddTicks(1);
+        var checkpoint = GovernedLoopSleepContractHash.Apply(new GovernedLoopSleepCheckpoint(
+            1,
+            string.Empty,
+            new GovernedLoopSleepBinding(
+                context.Binding.ExecutionBinding,
+                context.Binding.AdmissionReceipt.Intent.Publication,
+                waitingFrontier.Payload.FrontierVersion,
+                waitingFrontier.Payload.ContentHash,
+                waitingActivation.ActivationOrdinal,
+                waitingActivation.CycleId,
+                waitingActivation.CycleIteration,
+                waitingActivation.NodeId,
+                waitingActivation.VisitOrdinal,
+                waitingActivation.Attempt!.Value,
+                waitingActivation.AttemptOperationId!),
+            GovernedLoopWakeMode.Timestamp,
+            scheduled.NextRetryAtUtc,
+            null,
+            attachedAtUtc,
+            string.Empty));
+        var attached = GovernedLoopRetryContract.CreateState(
+            scheduled.Identity,
+            3,
+            GovernedLoopRetryStateDisposition.Scheduled,
+            scheduled.CurrentAttempt,
+            scheduled.CurrentAttemptOperationId,
+            scheduled.NextAttempt,
+            scheduled.AttemptOperationId,
+            scheduled.Budget,
+            scheduled.NextRetryAtUtc,
+            checkpoint.CheckpointId,
+            checkpoint.ContentHash,
+            scheduled.FailureEvidenceId,
+            scheduled.FailureEvidenceHash,
+            attachedAtUtc);
+        var checkpointed = scheduledRun with
+        {
+            LifecycleVersion = 5,
+            UpdatedAtUtc = attachedAtUtc,
+            Events = [.. scheduledRun.Events, RetryStateEvent(8, attached) with { Detail = attachmentDetail ?? "Canonical retry-state transition." }],
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(checkpointed, 4)).Status);
+        return new RetryCapacityStages(store, context, activation, scheduledRun, checkpointed, attached, eligibleAtUtc);
     }
 
     private static WaitRunStages CreateWaitStages()
@@ -1799,6 +2171,37 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             DefaultModelRoutingPolicy());
     }
 
+    private static GovernedLoopGraphDefinition RetryGraph()
+    {
+        var source = LinearGraph();
+        var inference = source.Nodes.Single(node => node.Id == "step-1");
+        var retryInference = new GovernedLoopNodeDefinition(
+            inference.Id,
+            inference.Descriptor,
+            inference.Ports,
+            inference.AuthorityCeiling,
+            inference.Parameters,
+            inference.ModelRoutingPolicy,
+            inference.AuthoredInputDataClasses,
+            RetryPolicy(inference.Id));
+        return GovernedLoopGraphDefinition.Create(
+            source.SchemaVersion,
+            source.GraphId,
+            source.RevisionId,
+            source.Purpose,
+            source.OwningRole,
+            source.EntryNodeId,
+            source.TerminalNodeIds,
+            source.AuthorityCeiling,
+            source.ValueSchemas,
+            source.Nodes.Select(node => node.Id == inference.Id ? retryInference : node),
+            source.ControlEdges,
+            source.Bindings,
+            source.OutputContract,
+            source.DisplayMetadata,
+            source.DefaultModelRoutingPolicy);
+    }
+
     private static GovernedLoopGraphDefinition FailGraph()
     {
         var source = LinearGraph();
@@ -1962,6 +2365,235 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             GovernedModelRoutingSelector.Exact(profileId!),
             source.FallbackProfileIds,
             source.Requirements);
+    }
+
+    private static GovernedLoopRetryPolicy RetryPolicy(string nodeId)
+        => GovernedLoopRetryContract.CreatePolicy(
+            "retry-capacity-policy",
+            nodeId,
+            [GovernedLoopFailureClass.DispatchProvedNotStarted],
+            ["provider-dispatch-not-started"],
+            2,
+            1_000,
+            600_000,
+            GovernedLoopRetryBackoffStrategy.Fixed,
+            1_000,
+            1_000,
+            GovernedLoopRetryJitterStrategy.None,
+            0,
+            null,
+            null,
+            null,
+            null,
+            2);
+
+    private static CustomLoopRunEvent RetryableFailureEvent(CustomLoopRunEvent eventValue, GovernedLoopSequentialAdapterBinding binding, GovernedLoopFailureEvidenceReference causalEvidence)
+    {
+        var rejected = WithEvidence(
+            eventValue,
+            binding,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            CustomLoopSequentialNodeDisposition.Rejected,
+            causalEvidence);
+        var failure = GovernedLoopFailureEvidenceContract.Create(
+            eventValue.EventId + "-failure",
+            binding.WorkspaceId,
+            binding.ExecutionBinding.RunId,
+            binding.ExecutionBinding.Revision,
+            binding.ExecutionBinding.ExecutionGeneration,
+            1,
+            1,
+            "step-1",
+            1,
+            GovernedLoopFailureClass.DispatchProvedNotStarted,
+            "provider-dispatch-not-started",
+            GovernedLoopFailureSource.Provider,
+            GovernedLoopFailureEffectCertainty.DispatchProvedNotStarted,
+            GovernedLoopFailureAuthorityPosture.Current,
+            GovernedLoopFailureHumanPosture.None,
+            GovernedLoopFailureRetrySafety.RetryableWithExactIntent,
+            GovernedLoopFailureSeverity.Error,
+            700,
+            [causalEvidence],
+            null,
+            eventValue.TimestampUtc);
+        var withFailure = rejected with { FailureEvidence = failure };
+        var sequential = Assert.IsType<CustomLoopSequentialNodeEvidence>(rejected.SequentialNodeEvidence) with
+        {
+            OutcomeArtifactHash = CustomLoopSequentialOutcomeArtifactHash.Compute(withFailure),
+            FailureEvidenceId = failure.EvidenceId,
+            FailureEvidenceHash = failure.ContentHash,
+        };
+        return withFailure with { SequentialNodeEvidence = CustomLoopSequentialNodeEvidenceHash.Apply(sequential) };
+    }
+
+    private static CustomLoopRunEvent RetryStateEvent(long sequence, GovernedLoopRetryState state)
+        => new(sequence, $"retry-{state.StateVersion}", state.RecordedAtUtc, CustomLoopRunEventKind.RetryStateChanged, 1, state.Identity.NodeId, state.CurrentAttempt, "Canonical retry-state transition.", [], null, null, null, null, null, null, null, null, null, null)
+        {
+            RetryState = state,
+        };
+
+    private static string MaximumRetryStateDetail()
+    {
+        var surrogatePair = char.ConvertFromUtf32(0x1F600);
+        var detail = string.Concat(Enumerable.Repeat(surrogatePair, CustomLoopLimits.MaxRetryStateDetailCharacters / surrogatePair.Length));
+        Assert.Equal(CustomLoopLimits.MaxRetryStateDetailCharacters, detail.Length);
+        return detail;
+    }
+
+    private static CustomLoopContextBlock[] NearLimitRetryCapacityContextBlocks()
+        => Enumerable.Range(0, 46).Select(index =>
+        {
+            var prefix = index.ToString("D2") + ":";
+            var content = prefix + new string('x', CustomLoopLimits.MaxLogicalProviderRequestCharacters - prefix.Length);
+            return new CustomLoopContextBlock(
+                CustomLoopContextSource.HarnessGovernance,
+                $"retry-capacity-{index:D2}",
+                LlmMessageRole.System,
+                true,
+                null,
+                content,
+                CustomLoopTraceContentHash.Compute(content),
+                content.Length,
+                false,
+                EmbodySenseDeveloperInstructions.CurrentVersion);
+        }).ToArray();
+
+    private static CustomLoopRunEvent RetryLifecycleEvent(long sequence, DateTimeOffset timestampUtc, string detail)
+        => new(sequence, $"retry-lifecycle-{sequence}", timestampUtc, CustomLoopRunEventKind.LifecycleChanged, null, null, null, detail, [], null, null, null, null, null, null, null, null, null, null);
+
+    private static GovernedLoopRetryState RetrySuccessor(
+        GovernedLoopRetryState current,
+        GovernedLoopRetryStateDisposition disposition,
+        GovernedLoopRetryBudgetSnapshot budget,
+        DateTimeOffset recordedAtUtc)
+        => GovernedLoopRetryContract.CreateState(
+            current.Identity,
+            current.StateVersion + 1,
+            disposition,
+            current.CurrentAttempt,
+            current.CurrentAttemptOperationId,
+            current.NextAttempt,
+            current.AttemptOperationId,
+            budget,
+            null,
+            current.WakeCheckpointId,
+            current.WakeCheckpointHash,
+            current.FailureEvidenceId,
+            current.FailureEvidenceHash,
+            recordedAtUtc);
+
+    private static GovernedLoopRetryState RetryTerminalSuccessor(
+        GovernedLoopRetryState current,
+        GovernedLoopRetryStateDisposition disposition,
+        GovernedLoopRetryBudgetSnapshot budget,
+        DateTimeOffset recordedAtUtc)
+        => GovernedLoopRetryContract.CreateState(
+            current.Identity,
+            current.StateVersion + 1,
+            disposition,
+            current.CurrentAttempt,
+            current.CurrentAttemptOperationId,
+            null,
+            null,
+            budget,
+            null,
+            null,
+            null,
+            current.FailureEvidenceId,
+            current.FailureEvidenceHash,
+            recordedAtUtc);
+
+    private static CustomLoopRunEvent RetryExhaustionEvent(
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlan plan,
+        GovernedLoopNodeExecutionEvidence activation,
+        CustomLoopRunEvent terminalStateEvent,
+        GovernedLoopRetryState terminal,
+        DateTimeOffset recordedAtUtc,
+        string detail)
+    {
+        var binding = Assert.IsType<GovernedLoopSequentialAdapterBinding>(run.SequentialAdapterBinding);
+        var selectedEdges = plan.ControlEdges
+            .Where(edge => string.Equals(edge.FromNodeId, activation.NodeId, StringComparison.Ordinal)
+                && edge.Condition == GovernedLoopControlCondition.Failure)
+            .Select(edge => edge.Id)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var skippedEdges = activation.OutgoingControlEdgeIds.Except(selectedEdges, StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        var failure = GovernedLoopFailureEvidenceContract.Create(
+            $"retry-exhaustion-{terminal.Identity.SeriesId[..16]}-{terminal.StateVersion}",
+            binding.WorkspaceId,
+            run.Id,
+            binding.ExecutionBinding.Revision,
+            binding.ExecutionBinding.ExecutionGeneration,
+            activation.ActivationOrdinal,
+            activation.VisitOrdinal,
+            activation.NodeId,
+            activation.Attempt!.Value,
+            GovernedLoopFailureClass.Exhaustion,
+            detail,
+            GovernedLoopFailureSource.Runtime,
+            GovernedLoopFailureEffectCertainty.DispatchProvedNotStarted,
+            GovernedLoopFailureAuthorityPosture.Current,
+            GovernedLoopFailureHumanPosture.None,
+            GovernedLoopFailureRetrySafety.NotRetryable,
+            GovernedLoopFailureSeverity.Error,
+            900,
+            [new GovernedLoopFailureEvidenceReference(terminalStateEvent.EventId, terminal.ContentHash)],
+            "retry budget exhausted before dispatch",
+            recordedAtUtc);
+        var runEvent = new CustomLoopRunEvent(
+            run.Events.Length + 1,
+            failure.EvidenceId,
+            recordedAtUtc,
+            CustomLoopRunEventKind.NodeAttemptFailed,
+            activation.CycleIteration ?? run.Checkpoint.Iteration,
+            activation.NodeId,
+            activation.Attempt,
+            "The exact retry budget was exhausted before another attempt could dispatch.",
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null)
+        {
+            FailureEvidence = failure,
+        };
+        var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
+            CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
+            CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            binding.WorkspaceId,
+            run.Id,
+            binding.ExecutionBinding.Revision,
+            binding.ExecutionBinding.ExecutionGeneration,
+            activation.ActivationOrdinal,
+            activation.VisitOrdinal,
+            activation.NodeId,
+            activation.Attempt,
+            activation.CycleId,
+            activation.CycleIteration,
+            GovernedLoopControlCondition.Failure,
+            selectedEdges,
+            skippedEdges,
+            null,
+            null,
+            CustomLoopSequentialNodeDisposition.Rejected,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent),
+            string.Empty)
+        {
+            FailureEvidenceId = failure.EvidenceId,
+            FailureEvidenceHash = failure.ContentHash,
+        });
+        return runEvent with { SequentialNodeEvidence = evidence };
     }
 
     private static CustomLoopRunEvent Event(
@@ -2205,6 +2837,15 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         CustomLoopRunRecord SkippedParkPhase,
         CustomLoopRunRecord Continued,
         CustomLoopRunRecord Completed);
+
+    private sealed record RetryCapacityStages(
+        CustomLoopRunStore Store,
+        SequentialContext Context,
+        GovernedLoopNodeExecutionEvidence Activation,
+        CustomLoopRunRecord ScheduledRun,
+        CustomLoopRunRecord Checkpointed,
+        GovernedLoopRetryState Attached,
+        DateTimeOffset EligibleAtUtc);
 
     internal sealed record SequentialContext(
         CustomLoopRunRecord Run,
