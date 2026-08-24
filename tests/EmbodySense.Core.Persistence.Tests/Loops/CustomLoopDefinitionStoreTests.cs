@@ -126,6 +126,7 @@ public sealed class CustomLoopDefinitionStoreTests
         Assert.Equal(CustomLoopDefinitionStoreStatus.Created, (await store.CreateAsync(definition)).Status);
         File.Delete(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json"));
 
+        // Bounded definition-catalog and receipt-read contention is tracked by https://github.com/Jacob-J-Thomas/agenthome-poc/issues/417.
         var recovered = await new CustomLoopDefinitionStore(paths).CreateAsync(definition);
         var receipt = await new CustomLoopDefinitionStore(paths).GetMutationOperationAsync(definition.LastMutationOperationId);
 
