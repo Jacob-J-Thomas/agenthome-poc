@@ -776,6 +776,40 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         Assert.Equal(
             [GovernedLoopRetryStateDisposition.FailureRetained, GovernedLoopRetryStateDisposition.Scheduled, GovernedLoopRetryStateDisposition.Scheduled, GovernedLoopRetryStateDisposition.Due, GovernedLoopRetryStateDisposition.Reserved, GovernedLoopRetryStateDisposition.Dispatched],
             stored.Events.Where(item => item.RetryState is not null).Select(item => item.RetryState!.Disposition));
+
+        var retryStart = WithEvidence(
+            Event(13, operationId, CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 2) with { TimestampUtc = eligibleAtUtc },
+            context.Binding,
+            "step-1",
+            2,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var retried = resumed with
+        {
+            LifecycleVersion = 7,
+            UpdatedAtUtc = retryStart.TimestampUtc,
+            Events = [.. resumed.Events, retryStart],
+        };
+
+        Assert.True(await store.HasSufficientTraceCapacityForDispatchAsync(retried, 6));
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(retried, 6)).Status);
+
+        var extraStart = WithEvidence(
+            Event(14, "retry-unadmitted-attempt", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 3) with { TimestampUtc = retryStart.TimestampUtc },
+            context.Binding,
+            "step-1",
+            3,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown);
+        var unadmitted = retried with
+        {
+            LifecycleVersion = 8,
+            UpdatedAtUtc = extraStart.TimestampUtc,
+            Events = [.. retried.Events, extraStart],
+        };
+
+        var unadmittedException = await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(unadmitted, 7));
+        Assert.Contains("attempts after one require an earlier exact durable retry-dispatch reservation", unadmittedException.Message, StringComparison.Ordinal);
     }
 
     [Fact]

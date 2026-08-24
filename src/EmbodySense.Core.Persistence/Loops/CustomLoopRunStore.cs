@@ -3169,11 +3169,12 @@ public sealed class CustomLoopRunStore :
             return checked(persistedUtf8Bytes + (HasTerminalIntegrityWarning(run) ? 0 : CustomLoopLimits.MaxTraceControlEventUtf8Bytes));
         }
 
-        var maximumAttempts = run.SequentialInvocationSnapshot is not null
+        var traversalProviderAttemptCeiling = run.SequentialInvocationSnapshot is not null
                 && run.SequentialAdapterBinding is not null
                 && run.AdmittedDefinition.InferenceSteps.Length == 0
             ? 0
             : CustomLoopLimits.GetMaximumModelAttempts(run.AdmittedDefinition.InferenceSteps.Length, run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations);
+        var maximumAttempts = checked(traversalProviderAttemptCeiling + CalculateAdmittedRetryProviderStartAllowance(run));
         var canonicalExitStarts = run.Events.Count(IsCanonicalDeterministicExitStart);
         if (canonicalExitStarts > 1)
         {
@@ -3408,10 +3409,7 @@ public sealed class CustomLoopRunStore :
     private static long CalculateOutstandingRetryStateReservation(CustomLoopRunRecord run)
     {
         long total = 0;
-        foreach (var state in run.Events
-                     .Where(item => item.Kind == CustomLoopRunEventKind.RetryStateChanged && item.RetryState is not null)
-                     .GroupBy(item => item.RetryState!.Identity.SeriesId, StringComparer.Ordinal)
-                     .Select(group => group.OrderBy(item => item.Sequence).Last().RetryState!))
+        foreach (var state in LatestRetryStates(run))
         {
             var requiredEvents = CalculateOutstandingRetryStateEvents(state);
             total = checked(total + ((long)requiredEvents * CustomLoopLimits.MaxRetryStateEventUtf8Bytes));
@@ -3419,6 +3417,35 @@ public sealed class CustomLoopRunStore :
 
         return total;
     }
+
+    private static int CalculateAdmittedRetryProviderStartAllowance(CustomLoopRunRecord run)
+    {
+        // The ordinary traversal ceiling counts exactly one provider attempt for every admitted
+        // inference activation. A durable retry series adds only attempts that are already
+        // evidenced by its current state. Dispatched alone also admits its one exact next start;
+        // Scheduled, Due, and Reserved do not. The run validator binds every retry state and any
+        // attempt after one to the same run, revision, activation, visit, node, and dispatch.
+        var allowance = 0;
+        foreach (var state in LatestRetryStates(run))
+        {
+            var activation = run.Frontier?.Payload.Nodes.ElementAtOrDefault(state.Identity.ActivationOrdinal);
+            if (activation?.Descriptor.Kind != GovernedLoopNodeKind.Inference)
+            {
+                continue;
+            }
+
+            var persistedRetryStarts = checked(state.CurrentAttempt - 1);
+            allowance = checked(allowance + persistedRetryStarts + (state.Disposition == GovernedLoopRetryStateDisposition.Dispatched ? 1 : 0));
+        }
+
+        return allowance;
+    }
+
+    private static IEnumerable<GovernedLoopRetryState> LatestRetryStates(CustomLoopRunRecord run)
+        => run.Events
+            .Where(item => item.Kind == CustomLoopRunEventKind.RetryStateChanged && item.RetryState is not null)
+            .GroupBy(item => item.RetryState!.Identity.SeriesId, StringComparer.Ordinal)
+            .Select(group => group.OrderBy(item => item.Sequence).Last().RetryState!);
 
     private static int CalculateOutstandingRetryStateEvents(GovernedLoopRetryState state)
     {
