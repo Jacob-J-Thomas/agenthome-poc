@@ -2142,11 +2142,13 @@ public sealed class WorkspaceActionNativeHostTests
         var failure = new PartialReplaceFileFailureBoundary(PartialReplaceFileFailureBoundary.UnableToMoveReplacement2);
         var host = Host(paths, windowsReplacementBoundary: failure);
         var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+        var firstDispatch = new RecordingDispatchBoundary();
 
         await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
             Request(input, prepared.BeforeEvidence),
-            new RecordingDispatchBoundary()));
+            firstDispatch));
 
+        Assert.Equal(1, firstDispatch.CrossCount);
         var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
         var stage = Assert.Single(Directory.EnumerateFiles(staging, "*.stage"));
         var beforeImage = Assert.Single(Directory.EnumerateFiles(staging, $"*.stage.{artifact}"));
@@ -2187,6 +2189,7 @@ public sealed class WorkspaceActionNativeHostTests
         var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
         File.Delete(path);
         var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        Directory.CreateDirectory(staging);
         await File.WriteAllTextAsync(Path.Combine(staging, "stage-unrelated.stage.marker"), "malformed marker");
         var replayDispatch = new RecordingDispatchBoundary();
 
