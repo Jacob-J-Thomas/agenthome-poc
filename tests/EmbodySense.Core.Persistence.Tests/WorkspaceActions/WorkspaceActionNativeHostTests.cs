@@ -456,6 +456,36 @@ public sealed class WorkspaceActionNativeHostTests
     }
 
     [Fact]
+    public async Task WindowsExternalSecondHardLinkAfterPreparationIsDispatchNotStartedWithoutRedispatch()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var source = workspace.File("notes", "external-link-source.txt");
+        var alias = workspace.File("notes", "external-link-alias.txt");
+        await File.WriteAllTextAsync(source, "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Write, "notes/external-link-source.txt", ExpectedHash("before"), "after");
+        var host = Host(paths);
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+        if (!TryCreateHardLink(alias, source))
+        {
+            return;
+        }
+
+        var dispatch = new RecordingDispatchBoundary();
+        var result = await host.ExecuteAsync(Request(input, prepared.BeforeEvidence), dispatch);
+
+        Assert.Equal(WorkspaceActionNativeCommitStatus.DispatchNotStarted, result.Status);
+        Assert.Equal(0, dispatch.CrossCount);
+        Assert.Equal("before", await File.ReadAllTextAsync(source));
+        Assert.Equal("before", await File.ReadAllTextAsync(alias));
+    }
+
+    [Fact]
     public async Task DirectNativeCallerCannotBypassClosedInputValidation()
     {
         using var workspace = new TestWorkspace();
@@ -2009,6 +2039,56 @@ public sealed class WorkspaceActionNativeHostTests
             Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.original"));
             Assert.Empty(Directory.EnumerateFiles(staging, "*.stage.marker"));
         }
+    }
+
+    [Theory]
+    [InlineData(PartialReplaceFileFailureBoundary.UnableToRemoveReplaced, false)]
+    [InlineData(PartialReplaceFileFailureBoundary.UnableToRemoveReplaced, true)]
+    [InlineData(PartialReplaceFileFailureBoundary.UnableToMoveReplacement, false)]
+    [InlineData(PartialReplaceFileFailureBoundary.UnableToMoveReplacement, true)]
+    public async Task WindowsPartialReplaceFileCurrentTargetCorruptMarkerRequiresReconciliationWithoutRedispatch(int nativeErrorCode, bool tamperMarker)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var path = workspace.File("notes", "windows-partial-replace-current-target.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Write, "notes/windows-partial-replace-current-target.txt", ExpectedHash("before"), "governed");
+        var failure = new PartialReplaceFileFailureBoundary(nativeErrorCode);
+        var host = Host(paths, windowsReplacementBoundary: failure);
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+        var firstDispatch = new RecordingDispatchBoundary();
+
+        await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            firstDispatch));
+
+        Assert.Equal(1, firstDispatch.CrossCount);
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        var stage = Assert.Single(Directory.EnumerateFiles(staging, "*.stage"));
+        var marker = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        Assert.Single(Directory.EnumerateFiles(staging, "*.stage.original"));
+        if (tamperMarker)
+        {
+            await File.WriteAllTextAsync(marker, "tampered authenticated marker");
+        }
+        else
+        {
+            File.Delete(marker);
+        }
+
+        var replayDispatch = new RecordingDispatchBoundary();
+        var replayException = await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            replayDispatch));
+
+        Assert.Contains("requires reconciliation", replayException.Message, StringComparison.Ordinal);
+        Assert.Equal(0, replayDispatch.CrossCount);
+        Assert.Equal("governed", await File.ReadAllTextAsync(stage));
     }
 
     [Theory]
