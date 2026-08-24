@@ -154,6 +154,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var request = CreateRequest() with
         {
             ModelSnapshot = new CustomLoopModelSnapshot("caller-selected-provider", "caller-selected-model"),
+            RetryDispatchBudget = new CustomLoopRetryDispatchBudget(3, null, 5, "USD"),
         };
 
         var result = await executor.ExecuteAsync(request, providerRequestStarted: () => providerStarts++);
@@ -173,10 +174,43 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(request.ActivationOrdinal, observed.Admission.ActivationOrdinal);
         Assert.Equal(request.VisitOrdinal, observed.Admission.VisitOrdinal);
         Assert.Equal(request.AttemptOperationId, observed.Admission.AttemptOperationId);
+        Assert.Equal(GovernedModelUsageLimit.Bounded(3), observed.Admission.RetryUsageCeiling?.TotalTokens);
+        Assert.Equal(GovernedModelMonetaryLimit.Bounded("USD", 5), observed.Admission.RetryUsageCeiling?.MonetaryCost);
         var routedPrimary = request.AdmissionReceipt!.Evidence.ModelRoutingAdmission.Entries.Single().Primary;
         Assert.Equal(routedPrimary.ContentHash, observed.Admission.RequestedPrimaryPinHash);
         Assert.Equal("caller-selected-model", request.ModelSnapshot.Model);
         Assert.Equal("caller-selected-provider", request.ModelSnapshot.Provider);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_rejects_retry_usage_ceiling_without_the_canonical_pretransport_reservation_boundary()
+    {
+        using var workspace = new TestWorkspace();
+        var transports = 0;
+        var executor = new CustomLoopInferenceAttemptExecutor(
+            CreateOptions(workspace),
+            (IToolApprovalPrompt)new RecordingApprovalPrompt(),
+            new TestAuthorityProvider(),
+            new NullEvidenceSink(),
+            new TestCapabilityAdmissionService(),
+            (options, broker) =>
+            {
+                transports++;
+                return new AsyncFakeInferenceClient(broker, (_, _, _) => Task.FromResult(Response()));
+            },
+            capabilityAuthorityTransaction: null,
+            effectAuthorityBoundary: null);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => executor.ExecuteAsync(CreateRequest() with
+        {
+            AdmissionReceipt = null,
+            ExecutionBinding = null,
+            GraphArtifact = null,
+            RetryDispatchBudget = new CustomLoopRetryDispatchBudget(1, null, null, null),
+        }));
+
+        Assert.Contains("canonical pre-transport", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, transports);
     }
 
     [Theory]
@@ -1418,6 +1452,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         await Assert.ThrowsAsync<ArgumentException>(() => executor.ExecuteAsync(valid with { DefinitionHash = new string('A', 64) }));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => executor.ExecuteAsync(valid with { ToolRequestsUsedInRun = -1 }));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => executor.ExecuteAsync(valid with { ToolRequestsUsedInRun = 32 }));
+        await Assert.ThrowsAsync<ArgumentException>(() => executor.ExecuteAsync(valid with { RetryDispatchBudget = new CustomLoopRetryDispatchBudget(0, null, null, null) }));
         await Assert.ThrowsAsync<ArgumentException>(() => executor.ExecuteAsync(valid with { ModelSnapshot = new CustomLoopModelSnapshot("azure", "model") }));
         await Assert.ThrowsAsync<ArgumentException>(() => executor.ExecuteAsync(valid with { AllowTools = true, AdmittedToolAssignments = [CustomLoopToolAssignment.Unknown] }));
         await Assert.ThrowsAsync<ArgumentException>(() => executor.ExecuteAsync(valid with { AllowTools = true, AdmittedToolAssignments = [CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Read] }));

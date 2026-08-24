@@ -75,7 +75,7 @@ internal sealed class GovernedLoopCanonicalRetryCurrentPostureAdapter : IGoverne
         try
         {
             sleep = await _sleepPosture.ReadAsync(binding.ExecutionBinding, cancellationToken).ConfigureAwait(false);
-            var allowed = LoopCapabilityRequirements.GetAssignedCapabilityIds(current.AdmittedDefinition.CapabilityRequirements);
+            var allowed = LoopCapabilityRequirements.GetAssignedCapabilityIds(current.CapabilityAdmission.Requirements);
             capabilities = await _capabilityAdmission.RevalidateAsync(current.CapabilityAdmission, allowed, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

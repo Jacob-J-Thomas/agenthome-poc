@@ -47,8 +47,11 @@ using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
+using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -75,6 +78,7 @@ using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Inference;
 using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
@@ -1550,6 +1554,161 @@ internal static class GovernedLoopRuntimeTests
         Assert.Equal(2, fixture.ProviderAttempts);
     }
 
+    internal static async Task Production_runtime_parks_recovers_and_retries_one_exact_pretransport_failure()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(
+            failBeforeProviderTransportAttempts: 1,
+            retrySafeProviderFailures: true,
+            scheduleTrigger: true);
+        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var workerNow = scheduledAtUtc.AddMinutes(2);
+        var scenario = ScheduleScenario.Create(fixture, scheduledAtUtc, "retry one exact pretransport provider failure", "governed-runtime-retry");
+        using (var schedule = ScheduleRuntimeFactory.Create(
+                   fixture.Paths,
+                   scenario,
+                   scenario,
+                   scenario,
+                   new FixedTriggerTimeProvider(workerNow)))
+        {
+            Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await schedule.CreateAsync(scenario.Definition)).Status);
+            Assert.Equal(ScheduleEvaluationStatus.Queued, (await schedule.EvaluateOnceAsync(scenario.Definition.ScheduleId)).Status);
+        }
+
+        var queue = new TriggerQueueStore(fixture.Paths, TriggerQueueQuota.Runtime, timeProvider: new FixedTriggerTimeProvider(workerNow));
+        string runId;
+
+        await using (var runtime = await fixture.CreateRuntimeAsync())
+        {
+            var graph = await runtime.GovernedLoopGraphAuthoring.ReadAsync(fixture.Publication.Revision.GraphId);
+            var retryPolicy = Assert.Single(graph.Artifacts)
+                .Graph.Nodes.Single(item => string.Equals(item.Id, "inference", StringComparison.Ordinal)).RetryPolicy;
+            var generation = (await queue.GetSnapshotAsync(workerNow)).Generation;
+            var worker = runtime.CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(workerNow));
+            var dispatch = await worker.RunOnceAsync(new TriggerWorkerSelectionInput(
+                "retry-worker",
+                generation,
+                workerNow,
+                TimeSpan.FromSeconds(30),
+                [],
+                2));
+            var dispatchEntry = Assert.IsType<TriggerWorkerEntrySnapshot>(dispatch.Entry);
+            Assert.True(dispatchEntry.GovernedRunId is not null, $"Selection={dispatch.SelectionStatus}; State={dispatchEntry.State}; Outcome={dispatchEntry.DispatchOutcome}; Detail={dispatchEntry.DispatchDetail}");
+            var parked = Assert.IsType<LoopRunSnapshot>(await runtime.GetCustomLoopRunAsync(dispatchEntry.GovernedRunId));
+
+            Assert.NotNull(retryPolicy);
+            Assert.True(
+                string.Equals(CustomLoopRunStatus.Waiting.ToString(), parked.Status, StringComparison.Ordinal),
+                $"Expected one durable retry park but got {parked.Status}: {parked.FailureCode}/{parked.FailureDetail}");
+            runId = parked.Id;
+            var retry = Assert.Single(parked.RetrySeries);
+            Assert.Equal("Scheduled", retry.Disposition);
+            Assert.Equal(1, retry.CurrentAttempt);
+            Assert.Equal(2, retry.NextAttempt);
+            Assert.NotNull(retry.WakeCheckpointId);
+            Assert.NotNull(retry.NextRetryAtUtc);
+            var listed = Assert.Single(await runtime.ListCustomLoopRunsAsync(1));
+            Assert.Equal(runId, listed.Id);
+            Assert.Equal("Waiting", listed.Status);
+            Assert.Equal(parked.LifecycleVersion, listed.LifecycleVersion);
+            await using var inspection = new LoopRunInspectionFacade(fixture.Paths.RootPath);
+            var inspected = Assert.IsType<LoopRunSnapshot>(await inspection.GetAsync(runId));
+            var inspectedRetry = Assert.Single(inspected.RetrySeries);
+            var page = await inspection.ListPageAsync(1, fixture.Publication.Revision.GraphId);
+
+            Assert.Single(page.Items);
+            Assert.Null(page.ContinuationCursor);
+            Assert.Equal(retry.SeriesId, inspectedRetry.SeriesId);
+            Assert.Equal(retry.PolicyId, inspectedRetry.PolicyId);
+            Assert.Equal(retry.PolicyHash, inspectedRetry.PolicyHash);
+            Assert.Equal(retry.NodeId, inspectedRetry.NodeId);
+            Assert.Equal(retry.ActivationOrdinal, inspectedRetry.ActivationOrdinal);
+            Assert.Equal(retry.VisitOrdinal, inspectedRetry.VisitOrdinal);
+            Assert.Equal(retry.StateVersion, inspectedRetry.StateVersion);
+            Assert.Equal(retry.Disposition, inspectedRetry.Disposition);
+            Assert.Equal(retry.CurrentAttempt, inspectedRetry.CurrentAttempt);
+            Assert.Equal(retry.CurrentAttemptOperationId, inspectedRetry.CurrentAttemptOperationId);
+            Assert.Equal(retry.NextAttempt, inspectedRetry.NextAttempt);
+            Assert.Equal(retry.AttemptOperationId, inspectedRetry.AttemptOperationId);
+            Assert.Equal(retry.Budget, inspectedRetry.Budget);
+            Assert.Equal(retry.StartedAtUtc, inspectedRetry.StartedAtUtc);
+            Assert.Equal(retry.DeadlineUtc, inspectedRetry.DeadlineUtc);
+            Assert.Equal(retry.NextRetryAtUtc, inspectedRetry.NextRetryAtUtc);
+            Assert.Equal(retry.WakeCheckpointId, inspectedRetry.WakeCheckpointId);
+            Assert.Equal(retry.WakeCheckpointHash, inspectedRetry.WakeCheckpointHash);
+            Assert.Equal(retry.FailureEvidenceId, inspectedRetry.FailureEvidenceId);
+            Assert.Equal(retry.FailureEvidenceHash, inspectedRetry.FailureEvidenceHash);
+            Assert.Equal(retry.RecordedAtUtc, inspectedRetry.RecordedAtUtc);
+            Assert.Equal(retry.ContentHash, inspectedRetry.ContentHash);
+            var activation = await runtime.StartGovernedWaitBackgroundAsync();
+
+            Assert.True(activation.Available, activation.Detail);
+            using var store = new CustomLoopRunStore(fixture.Paths);
+            CustomLoopRunRecord completed;
+            try
+            {
+                completed = await WaitForRunAsync(store, runId, CustomLoopRunStatus.Completed, TimeSpan.FromSeconds(10));
+            }
+            catch (Exception exception)
+            {
+                var current = await store.GetAsync(runId);
+                var currentRetry = current?.Events
+                    .Where(item => item.RetryState is not null)
+                    .Select(item => item.RetryState!)
+                    .LastOrDefault();
+                var sleepStore = new GovernedLoopSleepStore(fixture.Paths);
+                var checkpoint = currentRetry?.WakeCheckpointId is null
+                    ? null
+                    : await sleepStore.ReadCheckpointAsync(currentRetry.WakeCheckpointId);
+                GovernedLoopWakeEvidenceReadResult? wake = null;
+                if (checkpoint?.Checkpoint is { } retainedCheckpoint)
+                {
+                    var identity = GovernedLoopSleepContractHash.Apply(new GovernedLoopWakeIdentity(
+                        GovernedLoopWakeIdentity.CurrentSchemaVersion,
+                        string.Empty,
+                        retainedCheckpoint.CheckpointId,
+                        retainedCheckpoint.ContentHash,
+                        retainedCheckpoint.WakeMode,
+                        null,
+                        null,
+                        string.Empty));
+                    wake = await sleepStore.ReadWakeAsync(identity.WakeId);
+                }
+
+                var coordinator = await new GovernedLoopCoordinatorEvidenceStore(fixture.Paths).ReadAsync("local-background");
+                var candidates = await new GovernedLoopBackgroundWorkSource(
+                    new ScheduleStore(fixture.Paths), sleepStore).ReadAsync(
+                    GovernedLoopBackgroundWorkFamily.Wake,
+                    DateTimeOffset.UtcNow,
+                    16);
+                throw new Xunit.Sdk.XunitException(
+                    $"{exception.Message} Retry={currentRetry?.Disposition}/{currentRetry?.WakeCheckpointId}/{currentRetry?.NextRetryAtUtc:O}; checkpoint={checkpoint?.Status}/{checkpoint?.Checkpoint?.WakeDeadlineUtc:O}; wake={wake?.Status}/{wake?.Evidence?.Disposition}/{wake?.Evidence?.DispositionEvidenceReference}; candidates={candidates?.WakeStatus}/{candidates?.WakeCandidates.Count}; coordinator={coordinator?.Status}/{coordinator?.Snapshot?.LatestLifecycle.Status}/{coordinator?.Snapshot?.LatestFailureSequence}/{coordinator?.Snapshot?.LatestFailureHash}.");
+            }
+            var failure = Assert.Single(completed.Events, item => item.FailureEvidence is not null).FailureEvidence;
+            var retryEvents = completed.Events.Where(item => item.RetryState is not null).Select(item => item.RetryState!).ToArray();
+            retry = Assert.Single(Assert.IsType<LoopRunSnapshot>(await runtime.GetCustomLoopRunAsync(runId)).RetrySeries);
+
+            Assert.Equal(GovernedLoopFailureClass.DispatchProvedNotStarted, failure!.FailureClass);
+            Assert.Equal(GovernedLoopFailureRetrySafety.RetryableWithExactIntent, failure.RetrySafety);
+            Assert.Equal(
+                [
+                    GovernedLoopRetryStateDisposition.FailureRetained,
+                    GovernedLoopRetryStateDisposition.Scheduled,
+                    GovernedLoopRetryStateDisposition.Scheduled,
+                    GovernedLoopRetryStateDisposition.Due,
+                    GovernedLoopRetryStateDisposition.Reserved,
+                    GovernedLoopRetryStateDisposition.Dispatched,
+                ],
+                retryEvents.Select(item => item.Disposition).ToArray());
+            Assert.Equal("Dispatched", retry.Disposition);
+            Assert.Equal(1, retry.CurrentAttempt);
+            Assert.Equal(2, retry.NextAttempt);
+            Assert.Equal(2, retry.Budget.Attempts);
+            Assert.Equal(0, retry.Budget.Tokens);
+            Assert.Equal(0, retry.Budget.ToolCalls);
+            Assert.Equal(1, fixture.ProviderAttempts);
+        }
+    }
+
     internal static async Task Paused_then_cancelled_run_does_not_consume_first_bound_completion()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(
@@ -2673,12 +2832,15 @@ internal static class GovernedLoopRuntimeTests
             TimeSpan? grantLifetime = null,
             AuthorityGrantCompletionConstraintKind completionConstraint = AuthorityGrantCompletionConstraintKind.None,
             int failFirstAttempts = 0,
+            int failBeforeProviderTransportAttempts = 0,
+            bool retrySafeProviderFailures = false,
             bool scheduleTrigger = false,
             TimeSpan? waitDelay = null,
             bool useConfiguredModelProfile = false)
         {
             Assert.InRange(inferenceSteps, 1, 2);
             Assert.InRange(failFirstAttempts, 0, 2);
+            Assert.InRange(failBeforeProviderTransportAttempts, 0, 2);
             if (waitDelay is { } delay)
             {
                 Assert.InRange(delay, TimeSpan.FromSeconds(5), TimeSpan.FromMinutes(10));
@@ -2689,7 +2851,7 @@ internal static class GovernedLoopRuntimeTests
             {
                 await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
                 var paths = new WorkspacePaths(workspace.RootPath);
-                var codexPath = await CreateCodexExecutableAsync(workspace, pauseProvider, failFirstAttempts);
+                var codexPath = await CreateCodexExecutableAsync(workspace, pauseProvider, failFirstAttempts, failBeforeProviderTransportAttempts);
                 var testProfile = useConfiguredModelProfile ? null : await TestExactModelProfile.CreateAsync(workspace.RootPath);
                 if (testProfile is not null)
                 {
@@ -2708,7 +2870,8 @@ internal static class GovernedLoopRuntimeTests
                     inferenceSteps,
                     scheduleTrigger,
                     waitDeadlineUtc,
-                    modelProfileCapabilityId);
+                    modelProfileCapabilityId,
+                    retrySafeProviderFailures);
                 var grant = await CreateGrantAsync(
                     workspace,
                     paths,
@@ -3009,6 +3172,10 @@ internal static class GovernedLoopRuntimeTests
                 {
                     return new ExactModelProfileInferenceClientResolution(ExactModelProfileInferenceClientResolutionStatus.Ineligible, null);
                 }
+                if (control.ConsumePreTransportFailure())
+                {
+                    return new ExactModelProfileInferenceClientResolution(ExactModelProfileInferenceClientResolutionStatus.Unavailable, null);
+                }
 
                 var acknowledgement = new ExactModelProfileEnforcementAcknowledgement(
                     request.Primary.ContentHash,
@@ -3114,27 +3281,46 @@ internal static class GovernedLoopRuntimeTests
             }
         }
 
-        private sealed class TestExactProviderControl(string workspacePath, bool pauseProvider, int failFirstAttempts)
+        private sealed class TestExactProviderControl(
+            string workspacePath,
+            bool pauseProvider,
+            int failFirstAttempts,
+            int failBeforeProviderTransportAttempts)
         {
             private const string ConfigurationFileName = "governed-test-exact-provider.config";
             private const string CounterFileName = "governed-provider-attempts.txt";
+            private const string PreTransportCounterFileName = "governed-provider-pretransport-attempts.txt";
             private const string StartedFileName = "governed-provider-started.marker";
             private const string ReleaseFileName = "governed-provider-release.marker";
 
             public int FailFirstAttempts { get; } = failFirstAttempts;
 
+            public int FailBeforeProviderTransportAttempts { get; } = failBeforeProviderTransportAttempts;
+
             public static TestExactProviderControl Read(string workspacePath)
             {
                 var configurationPath = Path.Combine(workspacePath, ConfigurationFileName);
                 var settings = File.ReadAllLines(configurationPath);
-                if (settings.Length != 2
+                if (settings.Length != 3
                     || !bool.TryParse(settings[0], out var pauseProvider)
-                    || !int.TryParse(settings[1], System.Globalization.CultureInfo.InvariantCulture, out var failFirstAttempts))
+                    || !int.TryParse(settings[1], System.Globalization.CultureInfo.InvariantCulture, out var failFirstAttempts)
+                    || !int.TryParse(settings[2], System.Globalization.CultureInfo.InvariantCulture, out var failBeforeProviderTransportAttempts))
                 {
                     throw new InvalidOperationException("The test-only exact provider configuration is invalid.");
                 }
 
-                return new TestExactProviderControl(workspacePath, pauseProvider, failFirstAttempts);
+                return new TestExactProviderControl(workspacePath, pauseProvider, failFirstAttempts, failBeforeProviderTransportAttempts);
+            }
+
+            public bool ConsumePreTransportFailure()
+            {
+                var counterPath = Path.Combine(workspacePath, PreTransportCounterFileName);
+                var existing = File.Exists(counterPath)
+                    ? int.Parse(File.ReadAllText(counterPath), System.Globalization.CultureInfo.InvariantCulture)
+                    : 0;
+                var next = checked(existing + 1);
+                File.WriteAllText(counterPath, next.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                return next <= FailBeforeProviderTransportAttempts;
             }
 
             public int RecordDispatch()
@@ -3162,10 +3348,18 @@ internal static class GovernedLoopRuntimeTests
                 }
             }
 
-            public static Task WriteConfigurationAsync(TestWorkspace workspace, bool pauseProvider, int failFirstAttempts)
+            public static Task WriteConfigurationAsync(
+                TestWorkspace workspace,
+                bool pauseProvider,
+                int failFirstAttempts,
+                int failBeforeProviderTransportAttempts)
                 => File.WriteAllLinesAsync(
                     workspace.File(ConfigurationFileName),
-                    [pauseProvider.ToString(System.Globalization.CultureInfo.InvariantCulture), failFirstAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture)]);
+                    [
+                        pauseProvider.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        failFirstAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        failBeforeProviderTransportAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ]);
         }
 
         private static async Task<ContextualRoleRevision> CreateRoleAsync(WorkspacePaths paths, bool scheduleTrigger, string modelProfileCapabilityId)
@@ -3210,14 +3404,16 @@ internal static class GovernedLoopRuntimeTests
             int inferenceSteps,
             bool scheduleTrigger,
             DateTimeOffset? waitDeadlineUtc,
-            string modelProfileCapabilityId)
+            string modelProfileCapabilityId,
+            bool retrySafeProviderFailures)
         {
             var candidate = Candidate(
                 new ContextualRoleRevisionPin(role.Identity, role.ContentHash),
                 inferenceSteps,
                 scheduleTrigger,
                 waitDeadlineUtc,
-                modelProfileCapabilityId);
+                modelProfileCapabilityId,
+                retrySafeProviderFailures);
             var normalized = GovernedLoopGraphNormalizer.Normalize(candidate);
             Assert.True(normalized.IsValid);
             var revision = normalized.Graph!.RevisionReference;
@@ -3441,7 +3637,8 @@ internal static class GovernedLoopRuntimeTests
             int inferenceSteps,
             bool scheduleTrigger,
             DateTimeOffset? waitDeadlineUtc,
-            string modelProfileCapabilityId)
+            string modelProfileCapabilityId,
+            bool retrySafeProviderFailures)
         {
             var nodes = new List<GovernedLoopNodeDefinition>
             {
@@ -3468,7 +3665,8 @@ internal static class GovernedLoopRuntimeTests
                     new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
                     [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
                     GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId, modelProfileCapabilityId]),
-                    new Dictionary<string, string> { ["instruction"] = $"Answer bounded inference step {index}." }));
+                    new Dictionary<string, string> { ["instruction"] = $"Answer bounded inference step {index}." },
+                    RetryPolicy: retrySafeProviderFailures && index == 1 ? RetryPolicy(nodeId) : null));
                 controlEdges.Add(new GovernedLoopControlEdgeDefinition(
                     index == 1 ? "trigger-to-inference" : $"inference-{index - 1}-to-inference-{index}",
                     dataSourceNodeId,
@@ -3511,6 +3709,17 @@ internal static class GovernedLoopRuntimeTests
                 GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]),
                 new Dictionary<string, string>()));
             controlEdges.Add(new GovernedLoopControlEdgeDefinition("inference-to-exit", controlSourceNodeId, "exit", GovernedLoopControlCondition.Success));
+            if (retrySafeProviderFailures)
+            {
+                nodes.Add(new GovernedLoopNodeDefinition(
+                    "fail",
+                    GovernedLoopSequentialNodeDescriptors.FailTerminal,
+                    [],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>()));
+                controlEdges.Add(new GovernedLoopControlEdgeDefinition("inference-to-fail", "inference", "fail", GovernedLoopControlCondition.Failure));
+                display.Add(new GovernedLoopNodeDisplayMetadata("fail", "Fail", "Preserve the classified failure.", (inferenceSteps + 1) * 100, 100));
+            }
             bindings.Add(new GovernedLoopBindingDefinition("result-binding", GovernedLoopBindingKind.Data, dataSourceNodeId, dataSourcePortId, "exit", "result"));
             display.Add(new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Finish.", (inferenceSteps + (waitDeadlineUtc is null ? 1 : 2)) * 100, 0));
 
@@ -3521,7 +3730,7 @@ internal static class GovernedLoopRuntimeTests
                 "Execute one canonical sequential inference chain.",
                 role,
                 "trigger",
-                ["exit"],
+                retrySafeProviderFailures ? ["exit", "fail"] : ["exit"],
                 GovernedLoopAuthorityCeiling.Create(
                     scheduleTrigger
                         ? [ConversationTurnCapabilityId, ModelInferenceCapabilityId, modelProfileCapabilityId, ScheduleTriggerCapabilityId]
@@ -3536,6 +3745,22 @@ internal static class GovernedLoopRuntimeTests
                 new GovernedLoopDisplayMetadata("Governed sequential loop", "Public Startup composition test.", display),
                 RuntimeRoutingPolicy(modelProfileCapabilityId));
         }
+
+        private static GovernedLoopRetryPolicy RetryPolicy(string nodeId)
+            => GovernedLoopRetryContract.CreatePolicy(
+                "runtime-retry-policy",
+                nodeId,
+                [GovernedLoopFailureClass.DispatchProvedNotStarted],
+                ["provider-dispatch-not-started"],
+                2,
+                10_000,
+                30_000,
+                GovernedLoopRetryBackoffStrategy.Fixed,
+                500,
+                500,
+                GovernedLoopRetryJitterStrategy.None,
+                0,
+                maximumResourceUnits: 2);
 
         private static GovernedModelRoutingPolicy RuntimeRoutingPolicy(string modelProfileCapabilityId)
         {
@@ -3698,7 +3923,8 @@ internal static class GovernedLoopRuntimeTests
         private static async Task<string> CreateCodexExecutableAsync(
             TestWorkspace workspace,
             bool pauseProvider,
-            int failFirstAttempts)
+            int failFirstAttempts,
+            int failBeforeProviderTransportAttempts)
         {
             var runtimeDirectory = workspace.File("governed-codex-runtime");
             Directory.CreateDirectory(runtimeDirectory);
@@ -3708,7 +3934,7 @@ internal static class GovernedLoopRuntimeTests
             var startedPath = System.Text.Json.JsonSerializer.Serialize(workspace.File("governed-provider-started.marker"));
             var releasePath = System.Text.Json.JsonSerializer.Serialize(workspace.File("governed-provider-release.marker"));
             var pauseEveryTurn = pauseProvider ? "true" : "false";
-            await TestExactProviderControl.WriteConfigurationAsync(workspace, pauseProvider, failFirstAttempts);
+            await TestExactProviderControl.WriteConfigurationAsync(workspace, pauseProvider, failFirstAttempts, failBeforeProviderTransportAttempts);
             await File.WriteAllTextAsync(scriptPath, $$"""
                 const fs = require("node:fs");
                 const readline = require("node:readline");
