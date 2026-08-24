@@ -2516,7 +2516,8 @@ public sealed class CustomLoopRunStoreTests
             var paths = new WorkspacePaths(workspace.RootPath);
             Directory.CreateDirectory(paths.CustomLoopRunsPath);
             await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopRunsPath, "unexpected-root-artifact"), "evidence");
-            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync("run-alpha"));
+            var exception = await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync("run-alpha"));
+            Assert.Contains("Artifacts=[\"unexpected-root-artifact\"]", exception.Message, StringComparison.Ordinal);
         }
 
         using (var workspace = new TestWorkspace())

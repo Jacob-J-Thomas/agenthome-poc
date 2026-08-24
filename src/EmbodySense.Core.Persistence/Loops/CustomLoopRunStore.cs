@@ -2692,11 +2692,7 @@ public sealed class CustomLoopRunStore :
         }
 
         EnsureSafeDirectory(_runsRoot, create: false);
-        var rootFiles = Directory.EnumerateFiles(_runsRoot, "*", SearchOption.TopDirectoryOnly).ToArray();
-        if (rootFiles.Any(path => !IsAllowedRootArtifact(path)))
-        {
-            throw new FormatException("Custom loop run storage contains an unexpected root-level artifact; traces must be stored beneath their loop-id directory.");
-        }
+        RequireAllowedRootArtifacts();
 
         var locations = new List<RunArtifactLocation>();
         foreach (var directory in Directory.EnumerateDirectories(_runsRoot, "*", SearchOption.TopDirectoryOnly).OrderBy(path => path, PathComparer))
@@ -3496,11 +3492,7 @@ public sealed class CustomLoopRunStore :
     private void RecoverRunTemporaryArtifacts()
     {
         EnsureSafeDirectory(_runsRoot, create: false);
-        var rootFiles = Directory.EnumerateFiles(_runsRoot, "*", SearchOption.TopDirectoryOnly).ToArray();
-        if (rootFiles.Any(path => !IsAllowedRootArtifact(path)))
-        {
-            throw new FormatException("Custom loop run storage contains an unexpected root-level artifact; traces must be stored beneath their loop-id directory.");
-        }
+        RequireAllowedRootArtifacts();
 
         foreach (var directory in Directory.EnumerateDirectories(_runsRoot, "*", SearchOption.TopDirectoryOnly))
         {
@@ -3527,6 +3519,25 @@ public sealed class CustomLoopRunStore :
                 }
             }
         }
+    }
+
+    private void RequireAllowedRootArtifacts()
+    {
+        var unexpectedRootFiles = Directory.EnumerateFiles(_runsRoot, "*", SearchOption.TopDirectoryOnly)
+            .Where(path => !IsAllowedRootArtifact(path))
+            .ToArray();
+        if (unexpectedRootFiles.Length == 0)
+        {
+            return;
+        }
+
+        // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/512: retain bounded artifact identity so a concurrent writer can be attributed without weakening strict root-layout validation.
+        var boundedNames = unexpectedRootFiles
+            .OrderBy(path => path, PathComparer)
+            .Take(8)
+            .Select(path => JsonSerializer.Serialize(Path.GetFileName(path)));
+        var omitted = unexpectedRootFiles.Length > 8 ? $"; omitted={unexpectedRootFiles.Length - 8}" : string.Empty;
+        throw new FormatException($"Custom loop run storage contains an unexpected root-level artifact; traces must be stored beneath their loop-id directory. Artifacts=[{string.Join(",", boundedNames)}]{omitted}.");
     }
 
     private void RecoverTraceDeletionOperationTemporaryArtifacts()
