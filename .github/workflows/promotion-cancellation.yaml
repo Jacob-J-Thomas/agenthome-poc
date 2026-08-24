@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Cancel only older promotion runs while the pull request remains draft
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const owner = context.repo.owner;
