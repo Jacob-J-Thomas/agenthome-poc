@@ -456,6 +456,14 @@ Assert-True -Condition ($linkedEffectFixturePlan.TestProjects -ccontains "tests/
 Assert-True -Condition ($linkedEffectFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj") -Message "A linked effect-attempt fixture must execute its Startup consumer."
 Assert-True -Condition (@($linkedEffectFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Linked effect-attempt inputs must run every consuming suite without focused filtering."
 
+$linkedCommandActionFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/CommandActions/CommandActionApplicationTestData.cs")
+Assert-Equal -Actual ($linkedCommandActionFixturePlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj|tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj" -Message "The linked command-Action fixture must select its Application owner and Startup consumer."
+Assert-True -Condition (@($linkedCommandActionFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "The linked command-Action fixture must run both consuming suites without focused filtering."
+
+$linkedSequentialFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialApplicationTestFixture.cs")
+Assert-Equal -Actual ($linkedSequentialFixturePlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj|tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj" -Message "The linked sequential fixture must select its Application owner and Startup consumer."
+Assert-True -Condition (@($linkedSequentialFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "The linked sequential fixture must run both consuming suites without focused filtering."
+
 $browserHostPlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.E2EBrowserHost/Program.cs", "tests/EmbodySense.E2EBrowserHost/EmbodySense.E2EBrowserHost.csproj")
 Assert-True -Condition $browserHostPlan.RequiresBuild -Message "The external browser host must compile during qualification."
 Assert-Equal -Actual ($browserHostPlan.TestProjects -join "|") -Expected "tests/EmbodySense.E2ETests/EmbodySense.E2ETests.csproj" -Message "The external browser host must execute its owning E2E consumer without becoming a separate test lane."
