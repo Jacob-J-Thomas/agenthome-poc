@@ -53,7 +53,8 @@ public sealed class GovernedLoopSleepStore : IGovernedLoopSleepStore, IGovernedL
             storeRoot,
             options.MaxDurabilityArtifacts,
             recycleAuthenticatedTombstones: true,
-            mutationLockContentionObserver: options.MutationLockContentionObserver);
+            mutationLockContentionObserver: options.MutationLockContentionObserver,
+            mutationLockAcquiredObserver: options.MutationLockAcquiredObserver);
     }
 
     /// <inheritdoc />

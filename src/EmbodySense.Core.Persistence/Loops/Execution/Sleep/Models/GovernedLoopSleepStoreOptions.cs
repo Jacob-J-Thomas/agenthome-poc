@@ -28,4 +28,8 @@ public sealed class GovernedLoopSleepStoreOptions
     /// <summary>Gets an optional observer invoked after a native workspace-lock attempt is found contended.</summary>
     /// <remarks>This is an observational verification seam only; it does not participate in durability decisions.</remarks>
     public Action<string>? MutationLockContentionObserver { get; init; }
+
+    /// <summary>Gets an optional observer invoked after the exact native workspace lock has been acquired and validated.</summary>
+    /// <remarks>This is an observational verification seam only; exceptions are swallowed and the observer runs while the lease is held.</remarks>
+    public Action<string>? MutationLockAcquiredObserver { get; init; }
 }
