@@ -414,7 +414,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
         catch (IOException)
         {
             if (await IsRetainedMultiLinkedBeforeImageAsync(request.Input.Target, before, cancellationToken).ConfigureAwait(false)
-                || await IsRetainedWindowsAbsentTargetWitnessAsync(request, before, cancellationToken).ConfigureAwait(false))
+                || await RequiresWindowsReplacementReconciliationAsync(request, before, cancellationToken).ConfigureAwait(false))
             {
                 throw new IOException("A retained Windows replacement witness requires reconciliation before this workspace action can continue.");
             }
@@ -425,7 +425,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             if (!await session.MatchesBeforeAsync(before, cancellationToken).ConfigureAwait(false))
             {
                 if (await IsRetainedMultiLinkedBeforeImageAsync(request.Input.Target, before, cancellationToken).ConfigureAwait(false)
-                    || await IsRetainedWindowsAbsentTargetWitnessAsync(request, before, cancellationToken).ConfigureAwait(false))
+                    || await RequiresWindowsReplacementReconciliationAsync(request, before, cancellationToken).ConfigureAwait(false))
                 {
                     throw new IOException("A retained Windows replacement witness requires reconciliation before this workspace action can continue.");
                 }
@@ -448,7 +448,15 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
         }
     }
 
-    private async Task<bool> IsRetainedWindowsAbsentTargetWitnessAsync(
+    private async Task<bool> RequiresWindowsReplacementReconciliationAsync(
+        WorkspaceActionNativeExecutionRequest request,
+        WorkspaceActionBeforeEvidence before,
+        CancellationToken cancellationToken)
+        => await ClassifyRetainedWindowsAbsentTargetWitnessAsync(request, before, cancellationToken).ConfigureAwait(false)
+            is RetainedWindowsAbsentTargetWitnessPosture.Valid
+            or RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
+
+    private async Task<RetainedWindowsAbsentTargetWitnessPosture> ClassifyRetainedWindowsAbsentTargetWitnessAsync(
         WorkspaceActionNativeExecutionRequest request,
         WorkspaceActionBeforeEvidence before,
         CancellationToken cancellationToken)
@@ -457,8 +465,9 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             || before.EntryKind != WorkspaceActionEntryKind.RegularFile
             || !WorkspaceRelativeFileTarget.TryParse(before.TargetReference, out var target, out _))
         {
-            return false;
+            return RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
         }
+        var hasExpectedArtifact = false;
         try
         {
             PreparePrivateRoot(_stagingRoot);
@@ -467,13 +476,44 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             var entries = _guard.EnumerateNames(ownership, maximumEntries + _quota.MaximumStagingEntries + 1).ToArray();
             if (entries.Length > maximumEntries + _quota.MaximumStagingEntries)
             {
-                return false;
+                return RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
             }
             var names = entries.ToHashSet(StringComparer.Ordinal);
+            using var current = WorkspaceActionRetainedTargetSession.OpenForProbe(_rootPath, _scopeId, target!);
+            if (current.TargetIdentity is not null
+                || !string.Equals(current.TargetFingerprint, before.TargetFingerprint, StringComparison.Ordinal))
+            {
+                return RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
+            }
+
+            var expectedStageNames = await FindExpectedStageNamesAsync(
+                request,
+                before,
+                ownership,
+                entries,
+                cancellationToken).ConfigureAwait(false);
+            var expectedStageName = expectedStageNames.Count == 1 ? expectedStageNames.Single() : null;
+            if (expectedStageNames.Any(stageName =>
+                    names.Contains(stageName)
+                    || names.Contains(stageName + ".marker")
+                    || names.Contains(stageName + ".original")
+                    || names.Contains(stageName + ".displaced")))
+            {
+                hasExpectedArtifact = true;
+            }
             WorkspaceActionAttemptArtifactMarker? matchingMarker = null;
             foreach (var markerName in entries.Where(name => name.EndsWith(".stage.marker", StringComparison.Ordinal)))
             {
-                var marker = await ReadMarkerAsync(ownership, markerName, cancellationToken).ConfigureAwait(false);
+                WorkspaceActionAttemptArtifactMarker? marker;
+                try
+                {
+                    marker = await ReadMarkerAsync(ownership, markerName, cancellationToken).ConfigureAwait(false);
+                }
+                catch (IOException) when (expectedStageNames.Contains(markerName[..^".marker".Length]))
+                {
+                    hasExpectedArtifact = true;
+                    continue;
+                }
                 if (marker is null
                     || marker.Kind != WorkspaceActionAttemptArtifactKind.Stage
                     || !string.Equals(markerName, marker.ArtifactReference + ".marker", StringComparison.Ordinal)
@@ -485,15 +525,20 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                 {
                     continue;
                 }
+                hasExpectedArtifact = true;
                 if (matchingMarker is not null)
                 {
-                    return false;
+                    return RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
                 }
                 matchingMarker = marker;
             }
+            if (matchingMarker is null && !hasExpectedArtifact)
+            {
+                return RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
+            }
             if (matchingMarker is null)
             {
-                return false;
+                return RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
             }
 
             var stageName = matchingMarker.ArtifactReference;
@@ -503,13 +548,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                 || !names.Contains(originalName)
                 || !names.Contains(displacedName))
             {
-                return false;
-            }
-            using var current = WorkspaceActionRetainedTargetSession.OpenForProbe(_rootPath, _scopeId, target!);
-            if (current.TargetIdentity is not null
-                || !string.Equals(current.TargetFingerprint, before.TargetFingerprint, StringComparison.Ordinal))
-            {
-                return false;
+                return RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
             }
             using var stage = WorkspaceActionNativeFileSystem.OpenRelativeFile(
                 ownership.DirectoryHandle,
@@ -527,7 +566,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                 || stageBytes.LongLength != matchingMarker.ByteCount
                 || !string.Equals(Sha256(stageBytes), matchingMarker.ContentHash, StringComparison.Ordinal))
             {
-                return false;
+                return RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
             }
 
             using var original = WorkspaceActionNativeFileSystem.OpenRelativeFile(
@@ -548,7 +587,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             if (originalIdentity.LinkCount != 2
                 || !MatchesExactBeforeImage(originalIdentity, originalBytes, before))
             {
-                return false;
+                return RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
             }
 
             using var displaced = WorkspaceActionNativeFileSystem.OpenRelativeFile(
@@ -570,24 +609,142 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                 || displacedIdentity.LinkCount != 2
                 || !MatchesExactBeforeImage(displacedIdentity, displacedBytes, before))
             {
-                return false;
+                return RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
             }
             WorkspaceActionNativeFileSystem.RequireReplacementMetadata(original, displaced);
-            return true;
+            return RetainedWindowsAbsentTargetWitnessPosture.Valid;
         }
         catch (IOException)
         {
-            return false;
+            return hasExpectedArtifact
+                ? RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial
+                : RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
         }
         catch (FormatException)
         {
-            return false;
+            return hasExpectedArtifact
+                ? RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial
+                : RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
         }
         catch (UnauthorizedAccessException)
         {
-            return false;
+            return hasExpectedArtifact
+                ? RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial
+                : RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
         }
     }
+
+    private static async Task<HashSet<string>> FindExpectedStageNamesAsync(
+        WorkspaceActionNativeExecutionRequest request,
+        WorkspaceActionBeforeEvidence before,
+        WorkspaceActionPrivateArtifactLockLease ownership,
+        IReadOnlyCollection<string> entries,
+        CancellationToken cancellationToken)
+    {
+        var expectedStageNames = new HashSet<string>(StringComparer.Ordinal);
+        byte[] literal;
+        try
+        {
+            literal = WorkspaceActionInputContract.MaterializeLiteralBytes(request.Input);
+        }
+        catch (InvalidOperationException)
+        {
+            return expectedStageNames;
+        }
+
+        if (request.Input.Kind == WorkspaceActionKind.Write)
+        {
+            expectedStageNames.Add(ComputeStageName(request, before, Sha256(literal)));
+        }
+        foreach (var stageName in entries.Where(name => name.EndsWith(".stage", StringComparison.Ordinal)))
+        {
+            try
+            {
+                using var stage = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+                    ownership.DirectoryHandle,
+                    stageName,
+                    allowMissing: false,
+                    write: false,
+                    denyWriteSharing: true)!;
+                WorkspaceActionNativeFileSystem.RequireExactOpenedName(stage, stageName);
+                var stageBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
+                    stage,
+                    WorkspaceActionContractLimits.MaxAfterImageBytes,
+                    cancellationToken).ConfigureAwait(false);
+                if (string.Equals(stageName, ComputeStageName(request, before, Sha256(stageBytes)), StringComparison.Ordinal))
+                {
+                    expectedStageNames.Add(stageName);
+                }
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
+        if (request.Input.Kind == WorkspaceActionKind.Append)
+        {
+            foreach (var beforeImageName in entries.Where(name =>
+                         name.EndsWith(".stage.original", StringComparison.Ordinal)
+                         || name.EndsWith(".stage.displaced", StringComparison.Ordinal)))
+            {
+                try
+                {
+                    using var beforeImage = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+                        ownership.DirectoryHandle,
+                        beforeImageName,
+                        allowMissing: false,
+                        write: false,
+                        denyWriteSharing: true,
+                        privateSecurityAccess: true,
+                        allowMultipleLinks: true)!;
+                    WorkspaceActionNativeFileSystem.RequireExactOpenedName(beforeImage, beforeImageName);
+                    var beforeBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
+                        beforeImage,
+                        WorkspaceActionContractLimits.MaxBeforeImageBytes,
+                        cancellationToken,
+                        requireSingleLink: false).ConfigureAwait(false);
+                    if (!MatchesExactBeforeImage(
+                            WorkspaceActionNativeFileSystem.GetIdentity(beforeImage),
+                            beforeBytes,
+                            before))
+                    {
+                        continue;
+                    }
+                    var afterHash = Sha256(Concat(beforeBytes, literal));
+                    var expectedStageName = ComputeStageName(request, before, afterHash);
+                    var stageName = beforeImageName.EndsWith(".stage.original", StringComparison.Ordinal)
+                        ? beforeImageName[..^".original".Length]
+                        : beforeImageName[..^".displaced".Length];
+                    if (string.Equals(stageName, expectedStageName, StringComparison.Ordinal))
+                    {
+                        expectedStageNames.Add(expectedStageName);
+                    }
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+        }
+        return expectedStageNames;
+    }
+
+    private static string ComputeStageName(
+        WorkspaceActionNativeExecutionRequest request,
+        WorkspaceActionBeforeEvidence before,
+        string afterHash)
+        => "stage-" + WorkspaceActionFingerprint.Compute(
+            "embodysense.workspace-action-stage.v1",
+            before.ContentHashOfRecord,
+            request.EffectId,
+            request.IdempotencyOperationId,
+            request.EffectGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            afterHash) + ".stage";
 
     private async Task<bool> IsRetainedMultiLinkedBeforeImageAsync(
         WorkspaceRelativeFileTarget target,

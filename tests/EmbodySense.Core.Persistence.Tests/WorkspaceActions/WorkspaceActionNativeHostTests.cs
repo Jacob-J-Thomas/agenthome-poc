@@ -2011,6 +2011,117 @@ public sealed class WorkspaceActionNativeHostTests
         }
     }
 
+    [Theory]
+    [InlineData("marker", false)]
+    [InlineData("marker", true)]
+    [InlineData("original", false)]
+    [InlineData("displaced", false)]
+    public async Task WindowsPartialReplaceFileCorruptWitnessRequiresReconciliationWithoutRedispatch(string artifact, bool tamperMarker)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var path = workspace.File("notes", "windows-partial-replace-corrupt.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Write, "notes/windows-partial-replace-corrupt.txt", ExpectedHash("before"), "governed");
+        var failure = new PartialReplaceFileFailureBoundary(PartialReplaceFileFailureBoundary.UnableToMoveReplacement2);
+        var host = Host(paths, windowsReplacementBoundary: failure);
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+        var firstDispatch = new RecordingDispatchBoundary();
+
+        await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            firstDispatch));
+
+        Assert.Equal(1, firstDispatch.CrossCount);
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        var stage = Assert.Single(Directory.EnumerateFiles(staging, "*.stage"));
+        var marker = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        var original = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.original"));
+        var displaced = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+        switch (artifact)
+        {
+            case "marker" when tamperMarker:
+                await File.WriteAllTextAsync(marker, "tampered authenticated marker");
+                break;
+            case "marker":
+                File.Delete(marker);
+                break;
+            case "original":
+                File.Delete(original);
+                break;
+            case "displaced":
+                File.Delete(displaced);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(artifact), artifact, "Unsupported retained witness corruption case.");
+        }
+
+        var restarted = Host(paths);
+        var replayDispatch = new RecordingDispatchBoundary();
+        var replayException = await Assert.ThrowsAsync<IOException>(() => restarted.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            replayDispatch));
+
+        Assert.Contains("requires reconciliation", replayException.Message, StringComparison.Ordinal);
+        Assert.Equal(0, replayDispatch.CrossCount);
+        Assert.Equal("governed", await File.ReadAllTextAsync(stage));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WindowsPartialReplaceFileAppendCorruptMarkerRequiresReconciliationWithoutRedispatch(bool tamperMarker)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("notes"));
+        var path = workspace.File("notes", "windows-partial-replace-append.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = Input(WorkspaceActionKind.Append, "notes/windows-partial-replace-append.txt", ExpectedHash("before"), "-after");
+        var failure = new PartialReplaceFileFailureBoundary(PartialReplaceFileFailureBoundary.UnableToMoveReplacement2);
+        var host = Host(paths, windowsReplacementBoundary: failure);
+        var prepared = Assert.IsType<WorkspaceActionNativePreparation>(await host.PrepareAsync(input));
+        var firstDispatch = new RecordingDispatchBoundary();
+
+        await Assert.ThrowsAsync<IOException>(() => host.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            firstDispatch));
+
+        Assert.Equal(1, firstDispatch.CrossCount);
+        var staging = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions", "staging");
+        var stage = Assert.Single(Directory.EnumerateFiles(staging, "*.stage"));
+        var marker = Assert.Single(Directory.EnumerateFiles(staging, "*.stage.marker"));
+        Assert.Single(Directory.EnumerateFiles(staging, "*.stage.original"));
+        Assert.Single(Directory.EnumerateFiles(staging, "*.stage.displaced"));
+        if (tamperMarker)
+        {
+            await File.WriteAllTextAsync(marker, "tampered authenticated marker");
+        }
+        else
+        {
+            File.Delete(marker);
+        }
+
+        var restarted = Host(paths);
+        var replayDispatch = new RecordingDispatchBoundary();
+        var replayException = await Assert.ThrowsAsync<IOException>(() => restarted.ExecuteAsync(
+            Request(input, prepared.BeforeEvidence),
+            replayDispatch));
+
+        Assert.Contains("requires reconciliation", replayException.Message, StringComparison.Ordinal);
+        Assert.Equal(0, replayDispatch.CrossCount);
+        Assert.Equal("before-after", await File.ReadAllTextAsync(stage));
+    }
+
     [Fact]
     public async Task ExistingWindowsReplacementRejectsCaseOnlyTargetAliasBeforePublishing()
     {
