@@ -27,6 +27,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
     private readonly IWorkspaceActionCommitObserver? _commitObserver;
     private readonly IWorkspaceActionDurabilityObserver? _durabilityObserver;
     private readonly IWorkspaceActionNamespaceRaceObserver? _namespaceRaceObserver;
+    private readonly IWorkspaceActionWindowsReplacementBoundary? _windowsReplacementBoundary;
     private readonly WorkspaceActionCleanupCursorStore _cleanupCursors;
     private readonly WorkspaceActionEvidenceStore _evidence;
     private readonly WorkspaceActionPrivateArtifactPathGuard _guard;
@@ -39,6 +40,19 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
     private readonly TimeProvider _timeProvider;
 
     /// <summary>Creates the one native workspace actuator host for a statically admitted root and scope.</summary>
+    /// <param name="paths">The statically admitted workspace paths.</param>
+    /// <param name="scopeId">The exact workspace action scope.</param>
+    /// <param name="commitBoundary">The capability-authority commit boundary.</param>
+    /// <param name="permissionRevalidator">The permission revalidator used before each mutation.</param>
+    /// <param name="evidenceStore">The optional evidence store to reuse.</param>
+    /// <param name="timeProvider">The optional clock used for evidence and retention decisions.</param>
+    /// <param name="durabilityObserver">The optional crash-window observer.</param>
+    /// <param name="commitObserver">The optional commit-window observer.</param>
+    /// <param name="namespaceRaceObserver">The optional native namespace race observer.</param>
+    /// <param name="quota">The optional storage limits.</param>
+    /// <param name="committedAfterEvidence">The optional resolver for externally committed after evidence.</param>
+    /// <param name="attemptPresence">The optional effect-attempt presence resolver.</param>
+    /// <param name="windowsReplacementBoundary">Optional deterministic replacement seam for Windows recovery tests; production composition leaves the native ReplaceFileW call selected.</param>
     public WorkspaceActionNativeHost(
         WorkspacePaths paths,
         WorkspaceActionScopeId scopeId,
@@ -51,7 +65,8 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
         IWorkspaceActionNamespaceRaceObserver? namespaceRaceObserver = null,
         WorkspaceActionStorageLimits? quota = null,
         IWorkspaceActionCommittedAfterEvidenceResolver? committedAfterEvidence = null,
-        IWorkspaceActionAttemptPresenceResolver? attemptPresence = null)
+        IWorkspaceActionAttemptPresenceResolver? attemptPresence = null,
+        IWorkspaceActionWindowsReplacementBoundary? windowsReplacementBoundary = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         _scopeId = scopeId ?? throw new ArgumentNullException(nameof(scopeId));
@@ -66,6 +81,7 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
         _durabilityObserver = durabilityObserver;
         _commitObserver = commitObserver;
         _namespaceRaceObserver = namespaceRaceObserver;
+        _windowsReplacementBoundary = windowsReplacementBoundary;
         _rootPath = Path.TrimEndingDirectorySeparator(paths.RootPath);
         var privateRoot = Path.Combine(paths.AgentPath, "loops", "execution", "workspace-actions");
         _stagingRoot = Path.Combine(privateRoot, "staging");
@@ -395,10 +411,40 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
         {
             return new WorkspaceActionNativeCommitResult(WorkspaceActionNativeCommitStatus.DispatchNotStarted, null);
         }
+        catch (IOException)
+        {
+            var multiLinkedPosture = await ClassifyRetainedWindowsMultiLinkedBeforeImageAsync(request, before, cancellationToken).ConfigureAwait(false);
+            if (multiLinkedPosture is RetainedWindowsMultiLinkedBeforeImagePosture.Valid
+                or RetainedWindowsMultiLinkedBeforeImagePosture.CorruptOrPartial
+                || await RequiresWindowsReplacementReconciliationAsync(request, before, cancellationToken).ConfigureAwait(false))
+            {
+                throw new IOException("A retained Windows replacement witness requires reconciliation before this workspace action can continue.");
+            }
+            if (multiLinkedPosture == RetainedWindowsMultiLinkedBeforeImagePosture.Unrelated)
+            {
+                return new WorkspaceActionNativeCommitResult(WorkspaceActionNativeCommitStatus.DispatchNotStarted, null);
+            }
+            throw;
+        }
         using (session)
         {
             if (!await session.MatchesBeforeAsync(before, cancellationToken).ConfigureAwait(false))
             {
+                var multiLinkedPosture = await ClassifyRetainedWindowsMultiLinkedBeforeImageAsync(request, before, cancellationToken).ConfigureAwait(false);
+                if (multiLinkedPosture is RetainedWindowsMultiLinkedBeforeImagePosture.Valid
+                    or RetainedWindowsMultiLinkedBeforeImagePosture.CorruptOrPartial
+                    || await RequiresWindowsReplacementReconciliationAsync(request, before, cancellationToken).ConfigureAwait(false))
+                {
+                    throw new IOException("A retained Windows replacement witness requires reconciliation before this workspace action can continue.");
+                }
+                if (multiLinkedPosture == RetainedWindowsMultiLinkedBeforeImagePosture.Unrelated)
+                {
+                    return new WorkspaceActionNativeCommitResult(WorkspaceActionNativeCommitStatus.DispatchNotStarted, null);
+                }
+                if (multiLinkedPosture == RetainedWindowsMultiLinkedBeforeImagePosture.Indeterminate)
+                {
+                    throw new IOException("The exact multi-linked workspace target could not be authenticated against its bounded private replacement evidence.");
+                }
                 return new WorkspaceActionNativeCommitResult(WorkspaceActionNativeCommitStatus.DispatchNotStarted, null);
             }
             var currentPermission = await RevalidatePermissionAsync(
@@ -415,6 +461,458 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
             return request.Input.Kind == WorkspaceActionKind.Delete
                 ? await ExecuteDeleteAsync(request, before, session, dispatchBoundary, cancellationToken).ConfigureAwait(false)
                 : await ExecuteInstallAsync(request, before, session, dispatchBoundary, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<bool> RequiresWindowsReplacementReconciliationAsync(
+        WorkspaceActionNativeExecutionRequest request,
+        WorkspaceActionBeforeEvidence before,
+        CancellationToken cancellationToken)
+        => await ClassifyRetainedWindowsAbsentTargetWitnessAsync(request, before, cancellationToken).ConfigureAwait(false)
+            is RetainedWindowsAbsentTargetWitnessPosture.Valid
+            or RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
+
+    private async Task<RetainedWindowsAbsentTargetWitnessPosture> ClassifyRetainedWindowsAbsentTargetWitnessAsync(
+        WorkspaceActionNativeExecutionRequest request,
+        WorkspaceActionBeforeEvidence before,
+        CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows()
+            || before.EntryKind != WorkspaceActionEntryKind.RegularFile
+            || !WorkspaceRelativeFileTarget.TryParse(before.TargetReference, out var target, out _))
+        {
+            return RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
+        }
+        var hasExpectedArtifact = false;
+        try
+        {
+            PreparePrivateRoot(_stagingRoot);
+            using var ownership = await _guard.AcquireExclusiveReadLockAsync(_stagingRoot, cancellationToken).ConfigureAwait(false);
+            var maximumEntries = checked(_quota.MaximumStagingEntries * 4 + 1);
+            var entries = _guard.EnumerateNames(ownership, maximumEntries + _quota.MaximumStagingEntries + 1).ToArray();
+            if (entries.Length > maximumEntries + _quota.MaximumStagingEntries)
+            {
+                return RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
+            }
+            var names = entries.ToHashSet(StringComparer.Ordinal);
+            using var current = WorkspaceActionRetainedTargetSession.OpenForProbe(_rootPath, _scopeId, target!);
+            if (current.TargetIdentity is not null
+                || !string.Equals(current.TargetFingerprint, before.TargetFingerprint, StringComparison.Ordinal))
+            {
+                return RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
+            }
+
+            var expectedStageNames = await FindExpectedStageNamesAsync(
+                request,
+                before,
+                ownership,
+                entries,
+                cancellationToken).ConfigureAwait(false);
+            if (expectedStageNames.Any(stageName =>
+                    names.Contains(stageName)
+                    || names.Contains(stageName + ".marker")
+                    || names.Contains(stageName + ".original")
+                    || names.Contains(stageName + ".displaced")))
+            {
+                hasExpectedArtifact = true;
+            }
+            WorkspaceActionAttemptArtifactMarker? matchingMarker = null;
+            foreach (var markerName in entries.Where(name => name.EndsWith(".stage.marker", StringComparison.Ordinal)))
+            {
+                WorkspaceActionAttemptArtifactMarker? marker;
+                try
+                {
+                    marker = await ReadMarkerAsync(ownership, markerName, cancellationToken).ConfigureAwait(false);
+                }
+                catch (IOException) when (expectedStageNames.Contains(markerName[..^".marker".Length]))
+                {
+                    hasExpectedArtifact = true;
+                    continue;
+                }
+                if (marker is null
+                    || marker.Kind != WorkspaceActionAttemptArtifactKind.Stage
+                    || !string.Equals(markerName, marker.ArtifactReference + ".marker", StringComparison.Ordinal)
+                    || !marker.MatchesBefore(before)
+                    || !string.Equals(marker.BeforeEvidenceId, request.BeforeEvidenceId, StringComparison.Ordinal)
+                    || !string.Equals(marker.EffectId, request.EffectId, StringComparison.Ordinal)
+                    || !string.Equals(marker.IdempotencyOperationId, request.IdempotencyOperationId, StringComparison.Ordinal)
+                    || marker.EffectGeneration != request.EffectGeneration)
+                {
+                    continue;
+                }
+                hasExpectedArtifact = true;
+                if (matchingMarker is not null)
+                {
+                    return RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
+                }
+                matchingMarker = marker;
+            }
+            if (matchingMarker is null && !hasExpectedArtifact)
+            {
+                return RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
+            }
+            if (matchingMarker is null)
+            {
+                return RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
+            }
+
+            var stageName = matchingMarker.ArtifactReference;
+            var originalName = stageName + ".original";
+            var displacedName = stageName + ".displaced";
+            if (!names.Contains(stageName)
+                || !names.Contains(originalName)
+                || !names.Contains(displacedName))
+            {
+                return RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
+            }
+            using var stage = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+                ownership.DirectoryHandle,
+                stageName,
+                allowMissing: false,
+                write: false,
+                denyWriteSharing: true)!;
+            WorkspaceActionNativeFileSystem.RequireExactOpenedName(stage, stageName);
+            var stageIdentity = WorkspaceActionNativeFileSystem.GetIdentity(stage);
+            var stageBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
+                stage,
+                WorkspaceActionContractLimits.MaxAfterImageBytes,
+                cancellationToken).ConfigureAwait(false);
+            if (stageIdentity.LinkCount != 1
+                || stageBytes.LongLength != matchingMarker.ByteCount
+                || !string.Equals(Sha256(stageBytes), matchingMarker.ContentHash, StringComparison.Ordinal))
+            {
+                return RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
+            }
+
+            using var original = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+                ownership.DirectoryHandle,
+                originalName,
+                allowMissing: false,
+                write: false,
+                denyWriteSharing: true,
+                privateSecurityAccess: true,
+                allowMultipleLinks: true)!;
+            WorkspaceActionNativeFileSystem.RequireExactOpenedName(original, originalName);
+            var originalIdentity = WorkspaceActionNativeFileSystem.GetIdentity(original);
+            var originalBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
+                original,
+                WorkspaceActionContractLimits.MaxBeforeImageBytes,
+                cancellationToken,
+                requireSingleLink: false).ConfigureAwait(false);
+            if (originalIdentity.LinkCount != 2
+                || !MatchesExactBeforeImage(originalIdentity, originalBytes, before))
+            {
+                return RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
+            }
+
+            using var displaced = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+                ownership.DirectoryHandle,
+                displacedName,
+                allowMissing: false,
+                write: false,
+                denyWriteSharing: true,
+                privateSecurityAccess: true,
+                allowMultipleLinks: true)!;
+            WorkspaceActionNativeFileSystem.RequireExactOpenedName(displaced, displacedName);
+            var displacedIdentity = WorkspaceActionNativeFileSystem.GetIdentity(displaced);
+            var displacedBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
+                displaced,
+                WorkspaceActionContractLimits.MaxBeforeImageBytes,
+                cancellationToken,
+                requireSingleLink: false).ConfigureAwait(false);
+            if (!displacedIdentity.SameEntry(originalIdentity)
+                || displacedIdentity.LinkCount != 2
+                || !MatchesExactBeforeImage(displacedIdentity, displacedBytes, before))
+            {
+                return RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial;
+            }
+            WorkspaceActionNativeFileSystem.RequireReplacementMetadata(original, displaced);
+            return RetainedWindowsAbsentTargetWitnessPosture.Valid;
+        }
+        catch (IOException)
+        {
+            return hasExpectedArtifact
+                ? RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial
+                : RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
+        }
+        catch (FormatException)
+        {
+            return hasExpectedArtifact
+                ? RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial
+                : RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return hasExpectedArtifact
+                ? RetainedWindowsAbsentTargetWitnessPosture.CorruptOrPartial
+                : RetainedWindowsAbsentTargetWitnessPosture.Unrelated;
+        }
+    }
+
+    private static async Task<HashSet<string>> FindExpectedStageNamesAsync(
+        WorkspaceActionNativeExecutionRequest request,
+        WorkspaceActionBeforeEvidence before,
+        WorkspaceActionPrivateArtifactLockLease ownership,
+        IReadOnlyCollection<string> entries,
+        CancellationToken cancellationToken)
+    {
+        var expectedStageNames = new HashSet<string>(StringComparer.Ordinal);
+        byte[] literal;
+        try
+        {
+            literal = WorkspaceActionInputContract.MaterializeLiteralBytes(request.Input);
+        }
+        catch (InvalidOperationException)
+        {
+            return expectedStageNames;
+        }
+
+        if (request.Input.Kind == WorkspaceActionKind.Write)
+        {
+            expectedStageNames.Add(ComputeStageName(request, before, Sha256(literal)));
+        }
+        foreach (var stageName in entries.Where(name => name.EndsWith(".stage", StringComparison.Ordinal)))
+        {
+            try
+            {
+                using var stage = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+                    ownership.DirectoryHandle,
+                    stageName,
+                    allowMissing: false,
+                    write: false,
+                    denyWriteSharing: true)!;
+                WorkspaceActionNativeFileSystem.RequireExactOpenedName(stage, stageName);
+                var stageBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
+                    stage,
+                    WorkspaceActionContractLimits.MaxAfterImageBytes,
+                    cancellationToken).ConfigureAwait(false);
+                if (string.Equals(stageName, ComputeStageName(request, before, Sha256(stageBytes)), StringComparison.Ordinal))
+                {
+                    expectedStageNames.Add(stageName);
+                }
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
+        if (request.Input.Kind == WorkspaceActionKind.Append)
+        {
+            foreach (var beforeImageName in entries.Where(name =>
+                         name.EndsWith(".stage.original", StringComparison.Ordinal)
+                         || name.EndsWith(".stage.displaced", StringComparison.Ordinal)))
+            {
+                try
+                {
+                    using var beforeImage = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+                        ownership.DirectoryHandle,
+                        beforeImageName,
+                        allowMissing: false,
+                        write: false,
+                        denyWriteSharing: true,
+                        privateSecurityAccess: true,
+                        allowMultipleLinks: true)!;
+                    WorkspaceActionNativeFileSystem.RequireExactOpenedName(beforeImage, beforeImageName);
+                    var beforeBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
+                        beforeImage,
+                        WorkspaceActionContractLimits.MaxBeforeImageBytes,
+                        cancellationToken,
+                        requireSingleLink: false).ConfigureAwait(false);
+                    if (!MatchesExactBeforeImage(
+                            WorkspaceActionNativeFileSystem.GetIdentity(beforeImage),
+                            beforeBytes,
+                            before))
+                    {
+                        continue;
+                    }
+                    var afterHash = Sha256(Concat(beforeBytes, literal));
+                    var expectedStageName = ComputeStageName(request, before, afterHash);
+                    var stageName = beforeImageName.EndsWith(".stage.original", StringComparison.Ordinal)
+                        ? beforeImageName[..^".original".Length]
+                        : beforeImageName[..^".displaced".Length];
+                    if (string.Equals(stageName, expectedStageName, StringComparison.Ordinal))
+                    {
+                        expectedStageNames.Add(expectedStageName);
+                    }
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+        }
+        return expectedStageNames;
+    }
+
+    private static string ComputeStageName(
+        WorkspaceActionNativeExecutionRequest request,
+        WorkspaceActionBeforeEvidence before,
+        string afterHash)
+        => "stage-" + WorkspaceActionFingerprint.Compute(
+            "embodysense.workspace-action-stage.v1",
+            before.ContentHashOfRecord,
+            request.EffectId,
+            request.IdempotencyOperationId,
+            request.EffectGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            afterHash) + ".stage";
+
+    private async Task<RetainedWindowsMultiLinkedBeforeImagePosture> ClassifyRetainedWindowsMultiLinkedBeforeImageAsync(
+        WorkspaceActionNativeExecutionRequest request,
+        WorkspaceActionBeforeEvidence before,
+        CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows()
+            || before.EntryKind != WorkspaceActionEntryKind.RegularFile
+            || !WorkspaceRelativeFileTarget.TryParse(before.TargetReference, out var target, out _))
+        {
+            return RetainedWindowsMultiLinkedBeforeImagePosture.NotApplicable;
+        }
+        var targetIsExactMultiLinkedBeforeImage = false;
+        var hasExpectedArtifact = false;
+        try
+        {
+            using var probe = WorkspaceActionRetainedTargetSession.OpenForProbe(_rootPath, _scopeId, target!);
+            if (probe.TargetIdentity is null
+                || probe.TargetIdentity.Value.LinkCount < 2
+                || !string.Equals(probe.TargetFingerprint, before.TargetFingerprint, StringComparison.Ordinal))
+            {
+                return RetainedWindowsMultiLinkedBeforeImagePosture.NotApplicable;
+            }
+            var targetIdentity = probe.TargetIdentity.Value;
+            var beforeBytes = await probe.ReadTargetBytesAsync(WorkspaceActionContractLimits.MaxBeforeImageBytes, cancellationToken).ConfigureAwait(false);
+            if (!MatchesExactBeforeImage(targetIdentity, beforeBytes, before))
+            {
+                return RetainedWindowsMultiLinkedBeforeImagePosture.NotApplicable;
+            }
+            targetIsExactMultiLinkedBeforeImage = true;
+            byte[] literal;
+            try
+            {
+                literal = WorkspaceActionInputContract.MaterializeLiteralBytes(request.Input);
+            }
+            catch (InvalidOperationException)
+            {
+                return RetainedWindowsMultiLinkedBeforeImagePosture.NotApplicable;
+            }
+            var afterHash = request.Input.Kind == WorkspaceActionKind.Append
+                ? Sha256(Concat(beforeBytes, literal))
+                : Sha256(literal);
+            var stageName = ComputeStageName(request, before, afterHash);
+            var markerName = stageName + ".marker";
+            var originalName = stageName + ".original";
+
+            PreparePrivateRoot(_stagingRoot);
+            using var ownership = await _guard.AcquireExclusiveReadLockAsync(_stagingRoot, cancellationToken).ConfigureAwait(false);
+            var maximumEntries = checked(_quota.MaximumStagingEntries * 4 + 1);
+            var entries = _guard.EnumerateNames(ownership, maximumEntries + _quota.MaximumStagingEntries + 1).ToArray();
+            if (entries.Length > maximumEntries + _quota.MaximumStagingEntries)
+            {
+                return RetainedWindowsMultiLinkedBeforeImagePosture.Indeterminate;
+            }
+            var names = entries.ToHashSet(StringComparer.Ordinal);
+            hasExpectedArtifact = names.Contains(stageName)
+                || names.Contains(markerName)
+                || names.Contains(originalName)
+                || names.Contains(stageName + ".displaced");
+            if (!hasExpectedArtifact)
+            {
+                return RetainedWindowsMultiLinkedBeforeImagePosture.Unrelated;
+            }
+            if (!names.Contains(markerName)
+                || !names.Contains(stageName)
+                || !names.Contains(originalName)
+                || names.Contains(stageName + ".displaced"))
+            {
+                return RetainedWindowsMultiLinkedBeforeImagePosture.CorruptOrPartial;
+            }
+            var marker = await ReadMarkerAsync(ownership, markerName, cancellationToken).ConfigureAwait(false);
+            if (marker is null
+                || marker.Kind != WorkspaceActionAttemptArtifactKind.Stage
+                || !string.Equals(marker.ArtifactReference, stageName, StringComparison.Ordinal)
+                || !marker.MatchesBefore(before)
+                || !string.Equals(marker.BeforeEvidenceId, request.BeforeEvidenceId, StringComparison.Ordinal)
+                || !string.Equals(marker.EffectId, request.EffectId, StringComparison.Ordinal)
+                || !string.Equals(marker.IdempotencyOperationId, request.IdempotencyOperationId, StringComparison.Ordinal)
+                || marker.EffectGeneration != request.EffectGeneration)
+            {
+                return RetainedWindowsMultiLinkedBeforeImagePosture.CorruptOrPartial;
+            }
+            using var stage = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+                ownership.DirectoryHandle,
+                stageName,
+                allowMissing: false,
+                write: false,
+                denyWriteSharing: true)!;
+            WorkspaceActionNativeFileSystem.RequireExactOpenedName(stage, stageName);
+            var stageIdentity = WorkspaceActionNativeFileSystem.GetIdentity(stage);
+            var stageBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
+                stage,
+                WorkspaceActionContractLimits.MaxAfterImageBytes,
+                cancellationToken).ConfigureAwait(false);
+            if (stageIdentity.LinkCount != 1
+                || stageBytes.LongLength != marker.ByteCount
+                || !string.Equals(Sha256(stageBytes), marker.ContentHash, StringComparison.Ordinal))
+            {
+                return RetainedWindowsMultiLinkedBeforeImagePosture.CorruptOrPartial;
+            }
+            using var original = WorkspaceActionNativeFileSystem.OpenRelativeFile(
+                ownership.DirectoryHandle,
+                originalName,
+                allowMissing: false,
+                write: false,
+                denyWriteSharing: true,
+                privateSecurityAccess: true,
+                allowMultipleLinks: true)!;
+            WorkspaceActionNativeFileSystem.RequireExactOpenedName(original, originalName);
+            var originalIdentity = WorkspaceActionNativeFileSystem.GetIdentity(original);
+            var originalBytes = await WorkspaceActionNativeFileSystem.ReadAllBytesAsync(
+                original,
+                WorkspaceActionContractLimits.MaxBeforeImageBytes,
+                cancellationToken,
+                requireSingleLink: false).ConfigureAwait(false);
+            if (originalIdentity.LinkCount != 2
+                || !originalIdentity.SameEntry(targetIdentity)
+                || !MatchesExactBeforeImage(originalIdentity, originalBytes, before))
+            {
+                return RetainedWindowsMultiLinkedBeforeImagePosture.CorruptOrPartial;
+            }
+            WorkspaceActionNativeFileSystem.RequireReplacementMetadata(original, probe.TargetHandle!);
+            return RetainedWindowsMultiLinkedBeforeImagePosture.Valid;
+        }
+        catch (IOException)
+        {
+            if (!targetIsExactMultiLinkedBeforeImage)
+            {
+                return RetainedWindowsMultiLinkedBeforeImagePosture.NotApplicable;
+            }
+            return hasExpectedArtifact
+                ? RetainedWindowsMultiLinkedBeforeImagePosture.CorruptOrPartial
+                : RetainedWindowsMultiLinkedBeforeImagePosture.Indeterminate;
+        }
+        catch (FormatException)
+        {
+            if (!targetIsExactMultiLinkedBeforeImage)
+            {
+                return RetainedWindowsMultiLinkedBeforeImagePosture.NotApplicable;
+            }
+            return hasExpectedArtifact
+                ? RetainedWindowsMultiLinkedBeforeImagePosture.CorruptOrPartial
+                : RetainedWindowsMultiLinkedBeforeImagePosture.Indeterminate;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            if (!targetIsExactMultiLinkedBeforeImage)
+            {
+                return RetainedWindowsMultiLinkedBeforeImagePosture.NotApplicable;
+            }
+            return hasExpectedArtifact
+                ? RetainedWindowsMultiLinkedBeforeImagePosture.CorruptOrPartial
+                : RetainedWindowsMultiLinkedBeforeImagePosture.Indeterminate;
         }
     }
 
@@ -709,7 +1207,8 @@ public sealed class WorkspaceActionNativeHost : IWorkspaceActionNativeHost
                                 session.ParentHandle,
                                 session.TerminalName,
                                 stageFence.DirectoryHandle,
-                                displacedName);
+                                displacedName,
+                                _windowsReplacementBoundary);
                             stage.Published = true;
                             using var observed = WorkspaceActionNativeFileSystem.OpenRelativeFile(
                                 session.ParentHandle,
