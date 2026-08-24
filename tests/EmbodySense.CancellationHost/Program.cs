@@ -126,6 +126,11 @@ if (args is ["trigger-queue-hold-lock", var lockWorkspaceRoot, var lockReleaseMa
     return await TriggerQueueCrossProcessHost.RunLockHolderAsync(lockWorkspaceRoot, lockReleaseMarker, lockReadyMarker, lockResultMarker);
 }
 
+if (args is ["governed-loop-sleep-hold-lock", var sleepLockPath, var sleepReleaseMarker, var sleepReadyMarker, var sleepResultMarker])
+{
+    return await GovernedLoopSleepLockHolderHost.RunAsync(sleepLockPath, sleepReleaseMarker, sleepReadyMarker, sleepResultMarker);
+}
+
 if (args is ["human-input-response", var responseMode, var responseWorkspaceRoot, var responseTrustRoot, var responseReleaseMarker, var responseReadyMarker, var responseResultMarker, var responseOperationId, var responseId, var responseActorId, var responseActorRoleId, var responseBoundary])
 {
     return await HumanInputResponseCrossProcessHost.RunAsync(responseMode, responseWorkspaceRoot, responseTrustRoot, responseReleaseMarker, responseReadyMarker, responseResultMarker, responseOperationId, responseId, responseActorId, responseActorRoleId, responseBoundary);

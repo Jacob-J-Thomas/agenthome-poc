@@ -23,6 +23,7 @@ namespace EmbodySense.Core.Persistence.Tests.Loops.Execution.Sleep;
 
 public sealed class GovernedLoopSleepStoreTests
 {
+    private const int MaximumChildEvidenceCharacters = 8_192;
     private const string CrossProcessWorkspace = "EMBODYSENSE_SLEEP_STORE_WORKSPACE";
     private const string CrossProcessGate = "EMBODYSENSE_SLEEP_STORE_GATE";
     private const string CrossProcessReady = "EMBODYSENSE_SLEEP_STORE_READY";
@@ -609,37 +610,72 @@ public sealed class GovernedLoopSleepStoreTests
         var waitingStore = new GovernedLoopSleepStore(paths);
         Assert.Equal(GovernedLoopSleepCheckpointMutationStatus.Committed, (await waitingStore.PublishAndReleaseAsync(checkpoint, postureHash))!.Status);
         // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/505
-        // Own the real cross-process lock directly so fixture readiness never depends on ThreadPool scheduling.
-        using var externalLock = CrossProcessExclusiveFileLock.Acquire(Path.Combine(StoreRoot(paths), ".queue.lock"));
-        var secondCheckpoint = GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
-            GovernedLoopSleepContractTestFixture.Binding(runId: "cancelled-waiter"));
-        var identity = GovernedLoopSleepContractTestFixture.WakeIdentity(checkpoint);
-        var prepared = GovernedLoopSleepContractTestFixture.WakeEvidence(identity: identity);
-        var committed = GovernedLoopSleepContractTestFixture.WakeEvidence(
-            GovernedLoopWakeDisposition.Committed,
-            2,
-            identity,
-            recordedAtUtc: prepared.RecordedAtUtc.AddSeconds(1));
-        var background = new GovernedLoopBackgroundWorkSource(new ScheduleStore(paths), waitingStore);
+        // Hold the exact native lock in a separate process and publish readiness only after acquisition.
+        var lockPath = Path.Combine(StoreRoot(paths), ".queue.lock");
+        var releaseMarker = workspace.File("release-sleep-lock-holder");
+        var readyMarker = workspace.File("sleep-lock-holder-ready");
+        var resultMarker = workspace.File("sleep-lock-holder-result");
+        using var lockHolder = StartSleepLockHolder(lockPath, releaseMarker, readyMarker, resultMarker);
+        try
+        {
+            await WaitForPathAsync(readyMarker, lockHolder);
+            var secondCheckpoint = GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
+                GovernedLoopSleepContractTestFixture.Binding(runId: "cancelled-waiter"));
+            var identity = GovernedLoopSleepContractTestFixture.WakeIdentity(checkpoint);
+            var prepared = GovernedLoopSleepContractTestFixture.WakeEvidence(identity: identity);
+            var committed = GovernedLoopSleepContractTestFixture.WakeEvidence(
+                GovernedLoopWakeDisposition.Committed,
+                2,
+                identity,
+                recordedAtUtc: prepared.RecordedAtUtc.AddSeconds(1));
+            var backgroundReadReachedNativeLock = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var backgroundStore = new GovernedLoopSleepStore(paths, new GovernedLoopSleepStoreOptions
+            {
+                MutationLockContentionObserver = contendedPath => backgroundReadReachedNativeLock.TrySetResult(contendedPath),
+            });
+            var background = new GovernedLoopBackgroundWorkSource(new ScheduleStore(paths), backgroundStore);
 
-        await AssertCancellationAsync(token => waitingStore.PublishAndReleaseAsync(secondCheckpoint, postureHash, token));
-        await AssertCancellationAsync(token => waitingStore.ReadCheckpointAsync(checkpoint.CheckpointId, token));
-        await AssertCancellationAsync(token => waitingStore.ReadWakeAsync(identity.WakeId, token));
-        await AssertCancellationAsync(token => waitingStore.CreateWakeAsync(
-            checkpoint,
-            prepared,
-            postureHash,
-            token));
-        await AssertCancellationAsync(token => waitingStore.AdvanceWakeAsync(prepared, committed, token));
-        // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/508 owns exact native-lock readiness for the background-work projection.
-        await AssertCancellationAsync(token => background.ReadAsync(
-            GovernedLoopBackgroundWorkFamily.Wake,
-            checkpoint.PublishedAtUtc,
-            1,
-            token));
+            await AssertCancellationAsync(token => waitingStore.PublishAndReleaseAsync(secondCheckpoint, postureHash, token));
+            await AssertCancellationAsync(token => waitingStore.ReadCheckpointAsync(checkpoint.CheckpointId, token));
+            await AssertCancellationAsync(token => waitingStore.ReadWakeAsync(identity.WakeId, token));
+            await AssertCancellationAsync(token => waitingStore.CreateWakeAsync(
+                checkpoint,
+                prepared,
+                postureHash,
+                token));
+            await AssertCancellationAsync(token => waitingStore.AdvanceWakeAsync(prepared, committed, token));
+            // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/508 owns exact native-lock readiness for the background-work projection.
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var pending = background.ReadAsync(
+                    GovernedLoopBackgroundWorkFamily.Wake,
+                    checkpoint.PublishedAtUtc,
+                    1,
+                    cancellation.Token);
+                var contendedPath = await backgroundReadReachedNativeLock.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                Assert.Equal(
+                    Path.GetFullPath(lockPath),
+                    Path.GetFullPath(contendedPath));
+                cancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+            }
 
-        externalLock.Dispose();
-        Assert.Equal(GovernedLoopSleepStoreReadStatus.Found, (await waitingStore.ReadCheckpointAsync(checkpoint.CheckpointId))!.Status);
+            await ReleaseSleepLockHolderAsync(lockHolder, releaseMarker, resultMarker);
+            var resumedBackgroundRead = await background.ReadAsync(
+                GovernedLoopBackgroundWorkFamily.Wake,
+                checkpoint.PublishedAtUtc,
+                1);
+            Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Empty, resumedBackgroundRead!.WakeStatus);
+            Assert.Empty(resumedBackgroundRead.WakeCandidates);
+            Assert.Equal(GovernedLoopSleepStoreReadStatus.Found, (await waitingStore.ReadCheckpointAsync(checkpoint.CheckpointId))!.Status);
+        }
+        finally
+        {
+            if (!lockHolder.HasExited)
+            {
+                await ReleaseSleepLockHolderAsync(lockHolder, releaseMarker, resultMarker);
+            }
+        }
 
         static async Task AssertCancellationAsync(Func<CancellationToken, Task> operation)
         {
@@ -647,6 +683,52 @@ public sealed class GovernedLoopSleepStoreTests
             var pending = operation(cancellation.Token);
             cancellation.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        }
+    }
+
+    [Fact]
+    public async Task Mutation_lock_contention_observer_cannot_change_a_successful_background_read()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var checkpoint = GovernedLoopSleepContractTestFixture.TimestampCheckpoint();
+        var postureHash = GovernedLoopSleepContractTestFixture.Hash('9');
+        var store = new GovernedLoopSleepStore(paths);
+        Assert.Equal(GovernedLoopSleepCheckpointMutationStatus.Committed, (await store.PublishAndReleaseAsync(checkpoint, postureHash))!.Status);
+        // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/508
+        var lockPath = Path.Combine(StoreRoot(paths), ".queue.lock");
+        var releaseMarker = workspace.File("release-observer-lock-holder");
+        var readyMarker = workspace.File("observer-lock-holder-ready");
+        var resultMarker = workspace.File("observer-lock-holder-result");
+        using var lockHolder = StartSleepLockHolder(lockPath, releaseMarker, readyMarker, resultMarker);
+        try
+        {
+            await WaitForPathAsync(readyMarker, lockHolder);
+            var contention = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var observedStore = new GovernedLoopSleepStore(paths, new GovernedLoopSleepStoreOptions
+            {
+                MutationLockContentionObserver = contendedPath =>
+                {
+                    contention.TrySetResult(contendedPath);
+                    throw new InvalidOperationException("diagnostic observer failure");
+                },
+            });
+            var background = new GovernedLoopBackgroundWorkSource(new ScheduleStore(paths), observedStore);
+            var pending = background.ReadAsync(GovernedLoopBackgroundWorkFamily.Wake, checkpoint.PublishedAtUtc, 1);
+            var contendedPath = await contention.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(Path.GetFullPath(lockPath), Path.GetFullPath(contendedPath));
+            await ReleaseSleepLockHolderAsync(lockHolder, releaseMarker, resultMarker);
+
+            var result = await pending;
+            Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Empty, result!.WakeStatus);
+            Assert.Empty(result.WakeCandidates);
+        }
+        finally
+        {
+            if (!lockHolder.HasExited)
+            {
+                await ReleaseSleepLockHolderAsync(lockHolder, releaseMarker, resultMarker);
+            }
         }
     }
 
@@ -1287,6 +1369,30 @@ public sealed class GovernedLoopSleepStoreTests
     private static string LatestLedger(WorkspacePaths paths)
         => Directory.EnumerateFiles(StoreRoot(paths), "ledger-*.json").Order(StringComparer.Ordinal).Last();
 
+    private static Process StartSleepLockHolder(string lockPath, string releaseMarker, string readyMarker, string resultMarker)
+        => Verification.CancellationHostProcess.Start(
+            "governed-loop-sleep-hold-lock",
+            lockPath,
+            releaseMarker,
+            readyMarker,
+            resultMarker);
+
+    private static async Task ReleaseSleepLockHolderAsync(Process process, string releaseMarker, string resultMarker)
+    {
+        try
+        {
+            await File.WriteAllTextAsync(releaseMarker, "release");
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+            await AssertProcessSucceededAsync(process);
+            Assert.Equal("released", await File.ReadAllTextAsync(resultMarker));
+        }
+        catch
+        {
+            await StopSleepLockHolderAsync(process);
+            throw;
+        }
+    }
+
     private static Process StartCrossProcessHost(
         string workspace,
         string gate,
@@ -1326,14 +1432,78 @@ public sealed class GovernedLoopSleepStoreTests
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process sleep-store test host did not start.");
     }
 
-    private static async Task WaitForPathAsync(string path)
+    private static async Task WaitForPathAsync(string path, Process? process = null)
     {
         var wait = Stopwatch.StartNew();
         while (!File.Exists(path))
         {
-            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(60), $"Cross-process sleep host did not create `{path}`.");
+            if (process is { HasExited: true })
+            {
+                var evidence = await ReadChildEvidenceAsync(process);
+                Assert.Fail($"Cross-process sleep lock holder exited with code {process.ExitCode} before reporting `{path}`.{Environment.NewLine}{evidence}");
+            }
+
+            if (wait.Elapsed >= TimeSpan.FromSeconds(60))
+            {
+                if (process is not null)
+                {
+                    await StopSleepLockHolderAsync(process);
+                    var evidence = await ReadChildEvidenceAsync(process);
+                    Assert.Fail($"Cross-process sleep lock holder did not report ready within 60 seconds: `{path}`.{Environment.NewLine}{evidence}");
+                }
+
+                Assert.Fail($"Cross-process sleep host did not create `{path}`.");
+            }
+
             await Task.Delay(10);
         }
+    }
+
+    private static async Task StopSleepLockHolderAsync(Process process)
+    {
+        if (!process.HasExited)
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException) when (process.HasExited)
+            {
+            }
+        }
+
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (TimeoutException)
+        {
+        }
+    }
+
+    private static async Task<string> ReadChildEvidenceAsync(Process process)
+    {
+        if (!process.HasExited)
+        {
+            return $"pid={process.Id} exit=<still-running> stdout=<unavailable> stderr=<unavailable>";
+        }
+
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        await Task.WhenAll(outputTask, errorTask);
+        return $"pid={process.Id} exit={process.ExitCode} stdout={BoundChildEvidence(outputTask.Result)} stderr={BoundChildEvidence(errorTask.Result)}";
+    }
+
+    private static string BoundChildEvidence(string evidence)
+    {
+        if (string.IsNullOrEmpty(evidence))
+        {
+            return "<empty>";
+        }
+
+        return evidence.Length <= MaximumChildEvidenceCharacters
+            ? evidence
+            : "<truncated>" + evidence[^MaximumChildEvidenceCharacters..];
     }
 
     private static async Task AssertProcessSucceededAsync(Process process)

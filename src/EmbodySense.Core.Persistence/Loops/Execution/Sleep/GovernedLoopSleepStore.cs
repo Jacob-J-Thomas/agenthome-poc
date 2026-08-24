@@ -48,7 +48,12 @@ public sealed class GovernedLoopSleepStore : IGovernedLoopSleepStore, IGovernedL
         _maximumCatalogBytes = options.MaxCatalogUtf8Bytes;
         _observer = new GovernedLoopSleepStoreDurabilityObserver(options.DurableBoundaryObserver);
         var storeRoot = paths.AgentFile(Path.Combine("loops", "execution", "sleep"));
-        _guard = new TriggerQueueArtifactGuard(paths.RootPath, storeRoot, options.MaxDurabilityArtifacts, recycleAuthenticatedTombstones: true);
+        _guard = new TriggerQueueArtifactGuard(
+            paths.RootPath,
+            storeRoot,
+            options.MaxDurabilityArtifacts,
+            recycleAuthenticatedTombstones: true,
+            mutationLockContentionObserver: options.MutationLockContentionObserver);
     }
 
     /// <inheritdoc />

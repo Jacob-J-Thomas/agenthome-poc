@@ -24,4 +24,8 @@ public sealed class GovernedLoopSleepStoreOptions
     /// <summary>Gets an optional synchronous observer invoked at exact durable publication boundaries.</summary>
     /// <remarks>Observer exceptions model abrupt process loss and therefore make the immediate result ambiguous.</remarks>
     public Action<GovernedLoopSleepStorePersistenceBoundary>? DurableBoundaryObserver { get; init; }
+
+    /// <summary>Gets an optional observer invoked after a native workspace-lock attempt is found contended.</summary>
+    /// <remarks>This is an observational verification seam only; it does not participate in durability decisions.</remarks>
+    public Action<string>? MutationLockContentionObserver { get; init; }
 }
