@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Persistence.WorkspaceActions;
+namespace EmbodySense.Core.Persistence.WorkspaceActions.Models;
 
 internal enum RetainedWindowsMultiLinkedBeforeImagePosture
 {
