@@ -455,11 +455,12 @@ public sealed class BrowserFlowTests
             await SetValueAsync(browser, "#governedGraphId", "browser-scheduled-graph");
             await browser.WaitForExpressionAsync("!document.getElementById('governedGraphLoadButton').disabled");
             await ClickAsync(browser, "#governedGraphLoadButton");
-            await browser.WaitForExpressionAsync("document.getElementById('governedGraphNotice').textContent.includes('No durable governed graph has this ID')");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphNotice').textContent.includes('No durable governed graph has this ID') && !document.getElementById('governedGraphNewButton').disabled");
             await SetValueAsync(browser, "#governedGraphRevisionId", "revision-1");
             await SetValueAsync(browser, "#governedGraphDisplayName", "Browser scheduled graph");
             await SetValueAsync(browser, "#governedGraphPurpose", "Publish one server-cataloged scheduled graph.");
             await ClickAsync(browser, "#governedGraphNewButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphLifecycle').textContent.includes('Local draft')");
             await SetValueAsync(browser, "#governedGraphModelProfile", BrowserProfileId, "change");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "schedule-trigger");
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "provider-inference");
