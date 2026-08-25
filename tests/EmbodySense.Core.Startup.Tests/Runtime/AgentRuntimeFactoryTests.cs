@@ -2242,7 +2242,12 @@ public sealed class AgentRuntimeFactoryTests
                 new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
             ],
             GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, BuiltInCapabilityCatalog.CodexModelProfileCapabilityId]),
-            new Dictionary<string, string> { ["instruction"] = "Answer the bounded visible invocation." },
+            new Dictionary<string, string>
+            {
+                ["instruction"] = "Answer the bounded visible invocation.",
+                [GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter] = "2",
+                [GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter] = "5000",
+            },
             RetryPolicy: GovernedLoopRetryContract.CreatePolicy(
                 "browser-invocation-bounded-retry",
                 "inference",
@@ -2265,13 +2270,21 @@ public sealed class AgentRuntimeFactoryTests
                 new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.ResultPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "boolean", true),
             ],
             GovernedLoopAuthorityCeiling.Create([]),
-            new Dictionary<string, string>());
+            new Dictionary<string, string>
+            {
+                [GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter] = "2",
+                [GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter] = "5000",
+            });
         var condition = new GovernedLoopNodeDefinition(
             "condition",
             GovernedLoopSequentialNodeDescriptors.BooleanCondition,
             [new GovernedLoopPortDefinition(GovernedLoopTopologyNodeVocabulary.ValuePort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "boolean", true)],
             GovernedLoopAuthorityCeiling.Create([]),
-            new Dictionary<string, string>());
+            new Dictionary<string, string>
+            {
+                [GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter] = "2",
+                [GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter] = "5000",
+            });
         var exit = new GovernedLoopNodeDefinition(
             "exit",
             GovernedLoopSequentialNodeDescriptors.SuccessExit,
@@ -2308,9 +2321,10 @@ public sealed class AgentRuntimeFactoryTests
             [
                 new GovernedLoopControlEdgeDefinition("trigger-to-inference", trigger.Id, inference.Id, GovernedLoopControlCondition.Always),
                 new GovernedLoopControlEdgeDefinition("inference-to-validate", inference.Id, validate.Id, GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("inference-failure-to-fail", inference.Id, fail.Id, GovernedLoopControlCondition.Failure),
                 new GovernedLoopControlEdgeDefinition("validate-to-condition", validate.Id, condition.Id, GovernedLoopControlCondition.Success),
                 new GovernedLoopControlEdgeDefinition("condition-true-to-exit", condition.Id, exit.Id, GovernedLoopControlCondition.True),
-                new GovernedLoopControlEdgeDefinition("condition-false-to-fail", condition.Id, fail.Id, GovernedLoopControlCondition.False),
+                new GovernedLoopControlEdgeDefinition("condition-false-to-inference", condition.Id, inference.Id, GovernedLoopControlCondition.False),
             ],
             [
                 new GovernedLoopBindingDefinition("request-to-inference", GovernedLoopBindingKind.Data, trigger.Id, "request", inference.Id, "request"),

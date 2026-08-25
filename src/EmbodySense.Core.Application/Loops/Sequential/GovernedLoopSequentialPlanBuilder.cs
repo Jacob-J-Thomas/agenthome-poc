@@ -458,6 +458,12 @@ public static class GovernedLoopSequentialPlanBuilder
             iterationParameterId = descriptor.CycleIterationBudgetParameterId;
             durationParameterId = descriptor.CycleTimeBudgetMillisecondsParameterId;
         }
+        else if (GovernedLoopPureNodeCatalogContract.TryResolve(node.Descriptor, out descriptor)
+            && descriptor is { AllowsCycle: true })
+        {
+            iterationParameterId = descriptor.CycleIterationBudgetParameterId;
+            durationParameterId = descriptor.CycleTimeBudgetMillisecondsParameterId;
+        }
         else if (Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference))
         {
             iterationParameterId = GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter;

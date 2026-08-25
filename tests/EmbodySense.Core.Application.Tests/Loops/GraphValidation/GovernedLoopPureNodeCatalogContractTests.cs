@@ -32,9 +32,18 @@ public sealed class GovernedLoopPureNodeCatalogContractTests
             Assert.Equal([GovernedLoopControlCondition.Success], descriptor.RequiredControlOutcomes);
             Assert.Equal(GovernedLoopJoinPolicy.None, descriptor.JoinPolicy);
             Assert.Equal(1, descriptor.MinimumIncomingControlEdges);
-            Assert.False(descriptor.AllowsCycle);
-            Assert.Null(descriptor.CycleIterationBudgetParameterId);
-            Assert.Null(descriptor.CycleTimeBudgetMillisecondsParameterId);
+            if (descriptor.Descriptor.TypeId == GovernedLoopPureNodeVocabulary.SchemaConformance)
+            {
+                Assert.True(descriptor.AllowsCycle);
+                Assert.Equal(GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter, descriptor.CycleIterationBudgetParameterId);
+                Assert.Equal(GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter, descriptor.CycleTimeBudgetMillisecondsParameterId);
+            }
+            else
+            {
+                Assert.False(descriptor.AllowsCycle);
+                Assert.Null(descriptor.CycleIterationBudgetParameterId);
+                Assert.Null(descriptor.CycleTimeBudgetMillisecondsParameterId);
+            }
             Assert.Empty(descriptor.RequiredCapabilityIds);
             Assert.Equal(
                 new GovernedLoopNodeResourceBudget(
@@ -49,7 +58,9 @@ public sealed class GovernedLoopPureNodeCatalogContractTests
                 Assert.True(port.Required);
                 Assert.NotEmpty(port.AllowedValueKinds.Kinds);
             });
-            Assert.All(descriptor.Parameters, parameter => Assert.True(parameter.Required));
+            Assert.All(
+                descriptor.Parameters.Where(parameter => parameter.Id is not GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter and not GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter),
+                parameter => Assert.True(parameter.Required));
         });
         Assert.All(descriptors.Where(value => GovernedLoopPureNodeVocabulary.IsTransform(value.Descriptor.TypeId)), value => Assert.Equal(GovernedLoopNodeKind.Transform, value.Descriptor.Kind));
         Assert.All(descriptors.Where(value => GovernedLoopPureNodeVocabulary.IsValidate(value.Descriptor.TypeId)), value => Assert.Equal(GovernedLoopNodeKind.Validate, value.Descriptor.Kind));
@@ -73,7 +84,10 @@ public sealed class GovernedLoopPureNodeCatalogContractTests
         AssertDescriptor(
             GovernedLoopPureNodeVocabulary.SchemaConformance,
             [(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, PureKinds()), (GovernedLoopPureNodeVocabulary.ResultPort, GovernedLoopPortDirection.Output, [GovernedLoopValueKind.Boolean])],
-            []);
+            [
+                (GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter, GovernedLoopParameterValueKind.Integer),
+                (GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter, GovernedLoopParameterValueKind.Integer),
+            ]);
         AssertDescriptor(
             GovernedLoopPureNodeVocabulary.CanonicalEquality,
             [(GovernedLoopPureNodeVocabulary.LeftPort, GovernedLoopPortDirection.Input, PureKinds()), (GovernedLoopPureNodeVocabulary.RightPort, GovernedLoopPortDirection.Input, PureKinds()), (GovernedLoopPureNodeVocabulary.ResultPort, GovernedLoopPortDirection.Output, [GovernedLoopValueKind.Boolean])],
@@ -94,6 +108,27 @@ public sealed class GovernedLoopPureNodeCatalogContractTests
             GovernedLoopPureNodeVocabulary.ArrayLength,
             [(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, [GovernedLoopValueKind.Array]), (GovernedLoopPureNodeVocabulary.ResultPort, GovernedLoopPortDirection.Output, [GovernedLoopValueKind.Boolean])],
             [(GovernedLoopPureNodeVocabulary.MinimumParameter, GovernedLoopParameterValueKind.Integer), (GovernedLoopPureNodeVocabulary.MaximumParameter, GovernedLoopParameterValueKind.Integer)]);
+    }
+
+    [Fact]
+    public void OnlySchemaConformance_admits_explicit_bounded_cycle_parameters()
+    {
+        var schemaConformance = Assert.Single(
+            GovernedLoopPureNodeCatalogContract.Descriptors,
+            value => value.Descriptor.TypeId == GovernedLoopPureNodeVocabulary.SchemaConformance);
+
+        Assert.True(schemaConformance.AllowsCycle);
+        Assert.All(
+            schemaConformance.Parameters.Where(parameter => parameter.Id is GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter or GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter),
+            parameter =>
+            {
+                Assert.False(parameter.Required);
+                Assert.Equal(GovernedLoopParameterValueKind.Integer, parameter.ValueKind);
+                Assert.Equal(1, parameter.MinimumInteger);
+            });
+        Assert.All(
+            GovernedLoopPureNodeCatalogContract.Descriptors.Where(value => value.Descriptor.TypeId != GovernedLoopPureNodeVocabulary.SchemaConformance),
+            value => Assert.False(value.AllowsCycle));
     }
 
     [Fact]
