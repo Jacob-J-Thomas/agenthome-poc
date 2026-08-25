@@ -140,6 +140,86 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Scheduled_redelivery_of_a_tombstoned_run_conflicts_when_derived_admission_evidence_is_missing()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var scheduled = CreateScheduledRun(1, ScheduleOverlapPolicy.Skip);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun(scheduled.Run.LoopId, scheduled.Run.Id, scheduled.Run.AdmissionOperationId);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, admitted.LifecycleVersion)).Status);
+        var completed = Advance(running, CustomLoopRunStatus.Completed);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, running.LifecycleVersion)).Status);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(completed.Id));
+        var request = new CustomLoopTraceDeletionRequest(completed.Id, inspection.PersistedArtifactHash, "delete-scheduled-redelivery", "actor-user", "web");
+        var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp.AddMinutes(8));
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(mutation)).Status);
+
+        var redelivery = await store.CreateScheduledAsync(scheduled.Run, scheduled.Envelope);
+
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.Conflict, redelivery.Status);
+        Assert.Null(redelivery.Run);
+        Assert.Null(redelivery.Evidence);
+        Assert.NotNull(Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(completed.Id)).Tombstone);
+    }
+
+    [Fact]
+    public async Task Scheduled_admission_conflicts_with_an_existing_non_schedule_operation_identity()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var scheduled = CreateScheduledRun(1, ScheduleOverlapPolicy.Skip);
+        var collision = CreateRun("unrelated-loop", "run-operation-collision", scheduled.Run.AdmissionOperationId);
+        using var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(collision)).Status);
+
+        var result = await store.CreateScheduledAsync(scheduled.Run, scheduled.Envelope);
+
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.Conflict, result.Status);
+        Assert.Equal(collision.Id, result.Run!.Id);
+        Assert.Null(result.Evidence);
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, scheduled.Run.LoopId, scheduled.Run.Id + ".json")));
+    }
+
+    [Fact]
+    public async Task Scheduled_admission_returns_a_limit_when_authenticated_evidence_reaches_its_attempt_bound()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var scheduled = CreateScheduledRun(1, ScheduleOverlapPolicy.Allow);
+        Assert.True(TriggerDeliveryJson.TrySerialize(scheduled.Envelope, out var canonicalEnvelope, out _));
+        Assert.True(TriggerDeliveryHash.TryCompute(scheduled.Envelope, out var canonicalEnvelopeHash, out _));
+        var attempts = Enumerable.Range(1, ScheduleRunAdmissionEvidenceLimits.MaxAttempts)
+            .Select(ordinal => new ScheduleRunAdmissionAttempt(
+                ScheduleRunAdmissionAttempt.CurrentSchemaVersion,
+                ordinal,
+                ScheduleRunAdmissionDisposition.OverlapSerialized,
+                scheduled.Run.AdmissionOperationId,
+                scheduled.Run.Id,
+                "run-blocker",
+                _timestamp.AddSeconds(ordinal)))
+            .ToArray();
+        var evidence = ScheduleRunAdmissionEvidenceHash.Apply(new ScheduleRunAdmissionEvidence(
+            ScheduleRunAdmissionEvidence.CurrentSchemaVersion,
+            canonicalEnvelope!,
+            canonicalEnvelopeHash!,
+            scheduled.Run.LoopId,
+            attempts,
+            string.Empty));
+        Assert.True(ScheduleRunAdmissionEvidenceValidator.IsValid(evidence));
+        Directory.CreateDirectory(paths.CustomLoopScheduleAdmissionsPath);
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopScheduleAdmissionsPath, scheduled.Envelope.DeliveryId.Value + ".json"), JsonSerializer.Serialize(evidence, _artifactJsonOptions) + "\n");
+
+        var result = await new CustomLoopRunStore(paths).CreateScheduledAsync(scheduled.Run, scheduled.Envelope);
+
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.LimitExceeded, result.Status);
+        Assert.Null(result.Run);
+        Assert.Equal(ScheduleRunAdmissionEvidenceLimits.MaxAttempts, result.Evidence!.Attempts.Count);
+    }
+
+    [Fact]
     public async Task Scheduled_defer_one_admissions_retain_one_deferred_occurrence_and_replay_each_outcome()
     {
         using var workspace = new TestWorkspace();
@@ -3434,6 +3514,41 @@ public sealed class CustomLoopRunStoreTests
         Assert.True(Directory.Exists(artifactPath));
         Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
         Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+    }
+
+    [Fact]
+    public async Task Missing_target_after_canonical_rename_is_unknown_and_never_acknowledges_discovery()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-target-missing", "run-target-missing", "invoke-target-missing");
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
+        var deleted = false;
+        using (var failing = new CustomLoopRunStore(paths, null, (boundary, _) =>
+        {
+            if (boundary == CustomLoopRunPublicationBoundary.CanonicalRenamed)
+            {
+                File.Delete(artifactPath);
+                deleted = true;
+            }
+
+            return ValueTask.CompletedTask;
+        }))
+        {
+            var exception = await Assert.ThrowsAnyAsync<IOException>(() => failing.CreateAsync(run));
+            Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+            Assert.DoesNotContain(workspace.RootPath, exception.ToString(), StringComparison.Ordinal);
+        }
+
+        Assert.True(deleted);
+        Assert.False(File.Exists(artifactPath));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+        using var restarted = new CustomLoopRunStore(paths);
+        Assert.Null(await restarted.GetAsync(run.Id));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await restarted.CreateAsync(run)).Status);
+        AssertRun(run, await restarted.GetAsync(run.Id));
+        Assert.Single(Directory.EnumerateFiles(Path.Combine(paths.CustomLoopRunsPath, run.LoopId), "*.json"));
     }
 
     [Fact]
