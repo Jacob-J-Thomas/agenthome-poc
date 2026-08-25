@@ -26,6 +26,8 @@ public sealed class HumanReviewDecisionReceiptContractTests
         Assert.True(HumanReviewContractValidator.ValidateDecisionOperationReceipt(request, receipt).IsValid);
         Assert.True(HumanReviewContractValidator.ValidateContinuationReservation(request, reservation).IsValid);
         Assert.False(HumanReviewContractValidator.ValidateDecisionOperationReceipt(request, HumanReviewContractHash.ApplyDecisionOperationReceipt(receipt with { Decision = null, ReceiptHash = string.Empty })).IsValid);
+        var crossOperationReceipt = HumanReviewContractHash.ApplyDecisionOperationReceipt(receipt with { Decision = receipt.Decision! with { DecisionOperationId = "other-operation" }, ReceiptHash = string.Empty });
+        Assert.Contains(HumanReviewContractValidator.ValidateDecisionOperationReceipt(request, crossOperationReceipt).Errors, error => error.Code == "receipt_decision_operation_mismatch");
         Assert.False(HumanReviewContractValidator.ValidateContinuationReservation(request, HumanReviewContractHash.ApplyContinuationReservation(reservation with { Decision = reservation.Decision with { Kind = HumanReviewDecisionKind.Reject }, ReservationHash = string.Empty })).IsValid);
         Assert.False(HumanReviewContractValidator.ValidateDecisionProposal(proposal with { ProposalHash = HumanReviewTestData.Hash('b') }).IsValid);
     }
@@ -37,11 +39,24 @@ public sealed class HumanReviewDecisionReceiptContractTests
     public void Nonaccepted_receipts_require_no_decision(HumanReviewDecisionOperationDisposition disposition)
     {
         var request = HumanReviewTestData.Request();
+        var recordedAtUtc = disposition == HumanReviewDecisionOperationDisposition.Expired ? request.Timing.ExpiresAtUtc : HumanReviewTestData.CreatedAtUtc.AddMinutes(2);
         var receipt = HumanReviewContractHash.ApplyDecisionOperationReceipt(new HumanReviewDecisionOperationReceipt(
             1, "operation-" + disposition.ToString().ToLowerInvariant(), HumanReviewTestData.Hash('a'), new HumanReviewRequestReference(request.RequestId, request.RequestHash), disposition, null,
-            HumanReviewTestData.CreatedAtUtc.AddMinutes(2), new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "server-one", "receipt-correlation-two", HumanReviewTestData.CreatedAtUtc.AddMinutes(2), string.Empty), string.Empty));
+            recordedAtUtc, new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "server-one", "receipt-correlation-two", recordedAtUtc, string.Empty), string.Empty));
 
         Assert.True(HumanReviewContractValidator.ValidateDecisionOperationReceipt(request, receipt).IsValid);
+        if (disposition == HumanReviewDecisionOperationDisposition.Expired)
+        {
+            var beforeExpiry = request.Timing.ExpiresAtUtc.AddTicks(-1);
+            var earlyReceipt = HumanReviewContractHash.ApplyDecisionOperationReceipt(receipt with
+            {
+                RecordedAtUtc = beforeExpiry,
+                Provenance = HumanReviewContractHash.ApplyProvenance(receipt.Provenance with { ObservedAtUtc = beforeExpiry, ProvenanceHash = string.Empty }),
+                ReceiptHash = string.Empty,
+            });
+            Assert.Contains(HumanReviewContractValidator.ValidateDecisionOperationReceipt(request, earlyReceipt).Errors, error => error.Code == "early_expiry_receipt");
+        }
+
         var decision = HumanReviewTestData.Decision(request, HumanReviewDecisionKind.Reject);
         Assert.False(HumanReviewContractValidator.ValidateDecisionOperationReceipt(request, HumanReviewContractHash.ApplyDecisionOperationReceipt(receipt with
         {

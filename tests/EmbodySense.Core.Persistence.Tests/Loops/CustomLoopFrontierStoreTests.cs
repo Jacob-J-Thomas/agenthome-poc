@@ -300,6 +300,7 @@ public sealed class CustomLoopFrontierStoreTests
     [InlineData("lifecycle-omitted")]
     [InlineData("evidence-omitted")]
     [InlineData("event-evidence-payload-omitted")]
+    [InlineData("event-admission-marker-all-null")]
     [InlineData("binding-mismatch")]
     [InlineData("event-evidence-mismatch")]
     [InlineData("event-evidence-payload-mismatch")]
@@ -330,6 +331,9 @@ public sealed class CustomLoopFrontierStoreTests
                 break;
             case "event-evidence-payload-omitted":
                 root["run"]!["events"]!.AsArray()[^1]!.AsObject().Remove("humanReviewEvidence");
+                break;
+            case "event-admission-marker-all-null":
+                AppendEmptyHumanReviewEventMarker(root, "humanReviewRequestAdmitted", "orphan-human-review-admission");
                 break;
             case "binding-mismatch":
                 humanReview["request"]!["binding"]!["graphId"] = "other-graph";
@@ -1035,6 +1039,21 @@ public sealed class CustomLoopFrontierStoreTests
     }
 
     [Fact]
+    public async Task Lifecycle_history_reserves_the_expiry_slot_after_the_maximum_accepted_information_requests()
+    {
+        using var workspace = new TestWorkspace();
+        var admitted = await PersistHumanReviewAdmissionAsync(new WorkspacePaths(workspace.RootPath), "lifecycle-history-boundary");
+        var atLimit = CreateDecisionState(admitted, [.. Enumerable.Repeat(HumanReviewDecisionScenario.RequestInformation, HumanReviewContractLimits.MaxAcceptedDecisions), HumanReviewDecisionScenario.Expired]);
+        var overLimit = CreateDecisionState(admitted, [.. Enumerable.Repeat(HumanReviewDecisionScenario.RequestInformation, HumanReviewContractLimits.MaxAcceptedDecisions + 1), HumanReviewDecisionScenario.Expired]);
+        var overLimitValidation = CustomLoopRunValidator.Validate(overLimit);
+
+        Assert.Equal(HumanReviewContractLimits.MaxLifecycleHistory, atLimit.HumanReview!.LifecycleHistory.Length);
+        Assert.True(CustomLoopRunValidator.Validate(atLimit).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(atLimit).Errors));
+        Assert.Equal(HumanReviewContractLimits.MaxLifecycleHistory + 1, overLimit.HumanReview!.LifecycleHistory.Length);
+        Assert.Contains(overLimitValidation.Errors, error => error.Code == "human_review_lifecycle_history_limit");
+    }
+
+    [Fact]
     public async Task Decision_state_rejects_cross_plane_substitution_duplicate_identity_and_terminal_history_rewrites()
     {
         using var workspace = new TestWorkspace();
@@ -1167,6 +1186,8 @@ public sealed class CustomLoopFrontierStoreTests
     [InlineData("reservation-reference-omitted")]
     [InlineData("event-operation-reference-omitted")]
     [InlineData("event-reservation-reference-omitted")]
+    [InlineData("event-decision-marker-all-null")]
+    [InlineData("event-reservation-marker-all-null")]
     [InlineData("unknown-receipt-property")]
     [InlineData("reordered-receipt")]
     [InlineData("receipt-hash")]
@@ -1203,6 +1224,8 @@ public sealed class CustomLoopFrontierStoreTests
             case "reservation-reference-omitted": state["evidence"]!.AsArray()[2]!.AsObject().Remove("continuationReservation"); break;
             case "event-operation-reference-omitted": root["run"]!["events"]!.AsArray().Single(item => item!["humanReviewDecisionOperation"] is not null)!.AsObject().Remove("humanReviewDecisionOperation"); break;
             case "event-reservation-reference-omitted": root["run"]!["events"]!.AsArray().Single(item => item!["humanReviewContinuationReservation"] is not null)!.AsObject().Remove("humanReviewContinuationReservation"); break;
+            case "event-decision-marker-all-null": AppendEmptyHumanReviewEventMarker(root, "humanReviewDecisionOperationRecorded", "orphan-human-review-decision"); break;
+            case "event-reservation-marker-all-null": AppendEmptyHumanReviewEventMarker(root, "humanReviewContinuationReserved", "orphan-human-review-reservation"); break;
             case "unknown-receipt-property": state["operationReceipts"]!.AsArray()[0]!["unexpected"] = true; break;
             case "reordered-receipt": state["operationReceipts"]![0] = ReverseProperties(state["operationReceipts"]!.AsArray()[0]!.AsObject()); break;
             case "receipt-hash": state["operationReceipts"]!.AsArray()[0]!["receiptHash"] = HumanReviewHash('9'); break;
@@ -1485,6 +1508,19 @@ public sealed class CustomLoopFrontierStoreTests
             HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-decision-store", "lifecycle-expired", timestamp, string.Empty)),
             previous.LifecycleHash,
             string.Empty));
+
+    private static void AppendEmptyHumanReviewEventMarker(JsonObject root, string kind, string eventId)
+    {
+        var events = root["run"]!["events"]!.AsArray();
+        var marker = events[^1]!.DeepClone().AsObject();
+        marker["sequence"] = marker["sequence"]!.GetValue<long>() + 1;
+        marker["eventId"] = eventId;
+        marker["kind"] = kind;
+        marker.Remove("humanReviewEvidence");
+        marker.Remove("humanReviewDecisionOperation");
+        marker.Remove("humanReviewContinuationReservation");
+        events.Add(marker);
+    }
 
     private static CustomLoopRunEvent CreateHumanReviewStateEvent(CustomLoopRunEvent previous, HumanReviewEvidence evidence, HumanReviewDecisionOperationReference? operation, HumanReviewContinuationReservationReference? reservation)
         => previous with

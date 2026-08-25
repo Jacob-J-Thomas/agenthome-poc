@@ -3198,10 +3198,10 @@ public static class CustomLoopRunValidator
 
     private static void ValidateHumanReview(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
     {
-        var reviewEvents = run.Events?.Where(item => item?.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted).ToArray() ?? [];
+        var reviewEventMarkers = run.Events?.Where(item => item?.Kind is CustomLoopRunEventKind.HumanReviewRequestAdmitted or CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded or CustomLoopRunEventKind.HumanReviewContinuationReserved).ToArray() ?? [];
         if (run.HumanReview is null)
         {
-            if (reviewEvents.Length != 0 || run.Events?.Any(item => item is not null && (item.HumanReviewEvidence is not null || item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) == true)
+            if (reviewEventMarkers.Length != 0 || run.Events?.Any(item => item is not null && (item.HumanReviewEvidence is not null || item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) == true)
             {
                 Add(errors, "human_review_state_required", "humanReview", "Human Review events require the canonical Human Review state plane.");
             }
@@ -3449,6 +3449,7 @@ public static class CustomLoopRunValidator
 
     private static bool HasExactHumanReviewEventEvidenceBindings(CustomLoopRunRecord run, HumanReviewRequest request, HumanReviewRunState state)
     {
+        if (run.Events.Any(item => item is not null && !HasRequiredHumanReviewEventPayload(item))) return false;
         var reviewEvents = run.Events.Where(item => item?.HumanReviewEvidence is not null).ToArray();
         if (reviewEvents.Length != state.Evidence.Length) return false;
         for (var index = 0; index < state.Evidence.Length; index++)
@@ -3462,6 +3463,15 @@ public static class CustomLoopRunValidator
         }
         return !run.Events.Any(item => item is not null && (item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null) && item.HumanReviewEvidence is null);
     }
+
+    private static bool HasRequiredHumanReviewEventPayload(CustomLoopRunEvent item)
+        => item.Kind switch
+        {
+            CustomLoopRunEventKind.HumanReviewRequestAdmitted => item.HumanReviewEvidence is not null && item.HumanReviewDecisionOperation is null && item.HumanReviewContinuationReservation is null,
+            CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded => item.HumanReviewEvidence is not null && item.HumanReviewDecisionOperation is not null && item.HumanReviewContinuationReservation is null,
+            CustomLoopRunEventKind.HumanReviewContinuationReserved => item.HumanReviewEvidence is not null && item.HumanReviewDecisionOperation is null && item.HumanReviewContinuationReservation is not null,
+            _ => true,
+        };
 
     private static void ValidateHumanReviewReceiptEvidenceCausality(HumanReviewRunState state, List<CustomLoopValidationError> errors)
     {
