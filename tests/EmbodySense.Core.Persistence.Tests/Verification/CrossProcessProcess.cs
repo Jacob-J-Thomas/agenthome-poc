@@ -23,13 +23,13 @@ internal sealed class CrossProcessProcess : IDisposable
 
     internal StreamWriter StandardInput => _ownership.StandardInput;
 
-    internal bool HasExited => Process.HasExited;
+    internal bool HasExited => _ownership.HasExited;
 
-    internal int ExitCode => Process.ExitCode;
+    internal int ExitCode => _ownership.ExitCode;
 
-    internal int Id => Process.Id;
+    internal int Id => _ownership.Id;
 
-    internal Task WaitForExitAsync() => Process.WaitForExitAsync();
+    internal Task WaitForExitAsync() => _ownership.WaitForExitAsync();
 
     public void Dispose()
     {

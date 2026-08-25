@@ -19,8 +19,10 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
     private const uint StandardOutputHandle = unchecked((uint)-11);
     private const uint StandardErrorHandle = unchecked((uint)-12);
     private const uint Infinite = 0xFFFFFFFF;
+    private const uint StillActive = 259;
 
     private readonly Process _process;
+    private readonly SafeFileHandle? _nativeProcessHandle;
     private readonly SafeFileHandle? _job;
     private readonly StreamReader? _standardOutput;
     private readonly StreamReader? _standardError;
@@ -28,12 +30,14 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
 
     private CrossProcessProcessOwnership(
         Process process,
+        SafeFileHandle? nativeProcessHandle,
         SafeFileHandle? job,
         StreamReader? standardOutput,
         StreamReader? standardError,
         StreamWriter? standardInput)
     {
         _process = process;
+        _nativeProcessHandle = nativeProcessHandle;
         _job = job;
         _standardOutput = standardOutput;
         _standardError = standardError;
@@ -48,6 +52,72 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
 
     internal StreamWriter StandardInput
         => _standardInput ?? throw new InvalidOperationException("Cross-process standard input was not redirected.");
+
+    internal bool HasExited => _nativeProcessHandle is null
+        ? _process.HasExited
+        : GetExitCode() != StillActive;
+
+    internal int ExitCode
+    {
+        get
+        {
+            var exitCode = GetExitCode();
+            if (exitCode == StillActive)
+            {
+                throw new InvalidOperationException("The cross-process child has not exited.");
+            }
+
+            return unchecked((int)exitCode);
+        }
+    }
+
+    internal int Id
+    {
+        get
+        {
+            if (_nativeProcessHandle is null)
+            {
+                return _process.Id;
+            }
+
+            var processId = GetProcessId(_nativeProcessHandle.DangerousGetHandle());
+            if (processId == 0)
+            {
+                throw LastWin32Exception("The cross-process child ID could not be read.");
+            }
+
+            return checked((int)processId);
+        }
+    }
+
+    internal async Task WaitForExitAsync()
+    {
+        if (_nativeProcessHandle is null)
+        {
+            await _process.WaitForExitAsync();
+            return;
+        }
+
+        while (!HasExited)
+        {
+            await Task.Delay(10);
+        }
+    }
+
+    private uint GetExitCode()
+    {
+        if (_nativeProcessHandle is null)
+        {
+            return _process.HasExited ? unchecked((uint)_process.ExitCode) : StillActive;
+        }
+
+        if (!GetExitCodeProcess(_nativeProcessHandle.DangerousGetHandle(), out var exitCode))
+        {
+            throw LastWin32Exception("The cross-process child exit code could not be read.");
+        }
+
+        return exitCode;
+    }
 
     internal static CrossProcessProcess Start(ProcessStartInfo startInfo)
     {
@@ -82,6 +152,7 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
         _standardOutput?.Dispose();
         _standardError?.Dispose();
         _job?.Dispose();
+        _nativeProcessHandle?.Dispose();
     }
 
     private static CrossProcessProcess StartManaged(ProcessStartInfo startInfo)
@@ -107,12 +178,14 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
         SafeFileHandle? errorRead = null;
         SafeFileHandle? errorWrite = null;
         Process? process = null;
+        SafeFileHandle? nativeProcessHandle = null;
         StreamReader? standardOutput = null;
         StreamReader? standardError = null;
         StreamWriter? standardInput = null;
         var processInformation = default(ProcessInformationData);
         var processCreated = false;
         var processResumed = false;
+        var processHandleTransferred = false;
 
         try
         {
@@ -181,6 +254,9 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
                 throw LastWin32Exception("The suspended cross-process child could not be assigned to its cleanup job.");
             }
 
+            nativeProcessHandle = new SafeFileHandle(processInformation.ProcessHandle, ownsHandle: true);
+            processHandleTransferred = true;
+
             if (startInfo.RedirectStandardOutput)
             {
                 standardOutput = CreateReader(outputRead, startInfo.StandardOutputEncoding);
@@ -205,8 +281,15 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
             }
 
             processResumed = true;
-            var ownership = new CrossProcessProcessOwnership(process, job, standardOutput, standardError, standardInput);
+            var ownership = new CrossProcessProcessOwnership(
+                process,
+                nativeProcessHandle,
+                job,
+                standardOutput,
+                standardError,
+                standardInput);
             job = null!;
+            nativeProcessHandle = null;
             standardOutput = null;
             standardError = null;
             standardInput = null;
@@ -228,11 +311,6 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
                 CloseHandle(processInformation.ThreadHandle);
             }
 
-            if (processInformation.ProcessHandle != IntPtr.Zero)
-            {
-                CloseHandle(processInformation.ProcessHandle);
-            }
-
             inputRead?.Dispose();
             inputWrite?.Dispose();
             outputRead?.Dispose();
@@ -243,6 +321,11 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
             standardError?.Dispose();
             standardInput?.Dispose();
             job?.Dispose();
+            nativeProcessHandle?.Dispose();
+            if (!processHandleTransferred && processInformation.ProcessHandle != IntPtr.Zero)
+            {
+                CloseHandle(processInformation.ProcessHandle);
+            }
         }
     }
 
@@ -252,6 +335,7 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
         ProcessStartInfo startInfo)
         => new(
             process,
+            null,
             job,
             startInfo.RedirectStandardOutput ? process.StandardOutput : null,
             startInfo.RedirectStandardError ? process.StandardError : null,
@@ -447,6 +531,13 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint ResumeThread(IntPtr thread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetProcessId(IntPtr process);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
