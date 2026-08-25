@@ -942,6 +942,38 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Get_reconciles_a_displaced_canonical_parent_before_accepting_a_run()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-read-parent", "run-read-parent", "invoke-read-parent");
+        await WriteDirectAsync(paths, run);
+        var canonicalDirectory = Path.Combine(paths.CustomLoopRunsPath, run.LoopId);
+        var displacedDirectory = workspace.File("displaced-read-parent");
+        var reconciliationCount = 0;
+        var displaced = 0;
+        Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> observeRead = (boundary, _, _) =>
+        {
+            if (boundary == CustomLoopRunReadBoundary.BeforeCanonicalArtifactReadOpen && Interlocked.Exchange(ref displaced, 1) == 0)
+            {
+                Directory.Move(canonicalDirectory, displacedDirectory);
+            }
+            else if (boundary == CustomLoopRunReadBoundary.AfterCanonicalArtifactReadMiss && Interlocked.Increment(ref reconciliationCount) == 2)
+            {
+                Directory.Move(displacedDirectory, canonicalDirectory);
+            }
+
+            return ValueTask.CompletedTask;
+        };
+
+        using var store = new CustomLoopRunStore(paths, timeProvider: null, artifactReadObserver: observeRead);
+        AssertRun(run, await store.GetAsync(run.Id));
+
+        Assert.Equal(2, reconciliationCount);
+        Assert.True(File.Exists(Path.Combine(canonicalDirectory, run.Id + ".json")));
+    }
+
+    [Fact]
     public async Task Get_propagates_reader_observer_file_not_found_without_reconciling_it_as_a_filesystem_miss()
     {
         using var workspace = new TestWorkspace();
@@ -1995,6 +2027,74 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Windows_run_page_uses_canonical_evidence_when_the_mutation_lease_is_read_only()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-read-only-page", "run-read-only-page", "invoke-read-only-page");
+        await WriteDirectAsync(paths, run);
+        using var store = new CustomLoopRunStore(paths);
+        Assert.Equal(run.Id, Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var lockPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-runs.lock");
+        File.Delete(indexPath);
+        var originalAttributes = File.GetAttributes(lockPath);
+        try
+        {
+            File.SetAttributes(lockPath, originalAttributes | FileAttributes.ReadOnly);
+
+            var page = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
+
+            Assert.Equal(run.Id, Assert.Single(page.Items).Id);
+            Assert.False(File.Exists(indexPath));
+        }
+        finally
+        {
+            File.SetAttributes(lockPath, originalAttributes);
+        }
+    }
+
+    [Fact]
+    public async Task Canonical_publication_rebuilds_derived_index_when_an_existing_artifact_changes_after_target_proof()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var original = CreateRun("loop-index-drift-original", "run-index-drift-original", "invoke-index-drift-original");
+        var externallyRewritten = CustomLoopAdmissionRequestHash.Apply(original with { TriggerPrompt = new string('x', 97), AdmissionRequestHash = string.Empty });
+        var rewrittenContent = CustomLoopRunArtifactSerializer.Serialize(externallyRewritten);
+        var originalPath = Path.Combine(paths.CustomLoopRunsPath, original.LoopId, original.Id + ".json");
+        using (var established = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await established.CreateAsync(original)).Status);
+        }
+
+        var rewriteCount = 0;
+        using var store = new CustomLoopRunStore(paths, null, async (boundary, cancellationToken) =>
+        {
+            if (boundary == CustomLoopRunPublicationBoundary.TargetProven && Interlocked.Exchange(ref rewriteCount, 1) == 0)
+            {
+                await File.WriteAllBytesAsync(originalPath, rewrittenContent, cancellationToken);
+            }
+        });
+        var published = CreateRun("loop-index-drift-published", "run-index-drift-published", "invoke-index-drift-published");
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(published)).Status);
+        Assert.Equal(1, rewriteCount);
+        var page = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
+        Assert.Equal(2, page.Items.Count);
+        Assert.Contains(page.Items, item => item.Id == original.Id);
+        Assert.Contains(page.Items, item => item.Id == published.Id);
+        var index = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")))!.AsObject();
+        var rewrittenEntry = index["entries"]!.AsArray().Single(entry => entry!["summary"]!["id"]!.GetValue<string>() == original.Id)!.AsObject();
+        Assert.Equal(rewrittenContent.Length, rewrittenEntry["artifactUtf8Bytes"]!.GetValue<int>());
+    }
+
+    [Fact]
     public async Task Repeated_exact_monitor_reads_use_the_unchanged_index_cache_without_rescanning_unrelated_storage()
     {
         using var workspace = new TestWorkspace();
@@ -2849,6 +2949,42 @@ public sealed class CustomLoopRunStoreTests
         File.Move(renamedPath, tracePath);
         await File.AppendAllTextAsync(tracePath, new string(' ', CustomLoopLimits.MaxRunTraceTombstoneUtf8Bytes));
         await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(completed.Id));
+    }
+
+    [Fact]
+    public async Task Trace_deletion_audit_mark_fails_closed_when_its_tombstone_no_longer_matches_the_operation_ledger()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun("loop-tombstone-ledger", "run-tombstone-ledger", "invoke-tombstone-ledger");
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, admitted.LifecycleVersion)).Status);
+        var completed = Advance(running, CustomLoopRunStatus.Completed);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, running.LifecycleVersion)).Status);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(completed.Id));
+        var request = new CustomLoopTraceDeletionRequest(completed.Id, inspection.PersistedArtifactHash, "delete-tombstone-ledger", "actor-user", "web");
+        var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp.AddMinutes(3));
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(mutation)).Status);
+        var tombstone = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(completed.Id)).Tombstone!;
+        var differentOperationId = "different-operation";
+        var mismatchedRequest = new CustomLoopTraceDeletionRequest(tombstone.RunId, tombstone.OriginalTraceHash, differentOperationId, tombstone.DeletionActor, tombstone.DeletionSurface);
+        var mismatched = tombstone with
+        {
+            DeletionOperationId = differentOperationId,
+            DeletionRequestHash = CustomLoopTraceDeletionRequestHash.Compute(mismatchedRequest),
+            IntentAuditCorrelationId = differentOperationId,
+            OutcomeAuditCorrelationId = differentOperationId
+        };
+        var tracePath = Path.Combine(paths.CustomLoopRunsPath, completed.LoopId, completed.Id + ".json");
+        await File.WriteAllTextAsync(tracePath, JsonSerializer.Serialize(mismatched, _artifactJsonOptions) + "\n");
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
+
+        Assert.Contains("no longer matches its durable operation ledger", exception.Message, StringComparison.Ordinal);
+        var operation = Assert.IsType<CustomLoopTraceDeletionOperation>((await store.GetTraceDeletionOperationAsync(mutation.Request.OperationId)).Operation);
+        Assert.Equal(CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit, operation.Integrity);
     }
 
     [Fact]
