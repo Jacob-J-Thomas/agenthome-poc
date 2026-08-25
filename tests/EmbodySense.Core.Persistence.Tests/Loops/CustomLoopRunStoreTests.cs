@@ -46,6 +46,53 @@ public sealed class CustomLoopRunStoreTests
     };
 
     [Fact]
+    public async Task Canonical_graph_frontier_trace_capacity_uses_the_graph_hard_ceiling_not_the_legacy_projection_ceiling()
+    {
+        var legacyRun = CreateRun();
+        var legacy = legacyRun with { Events = [.. legacyRun.Events, .. CreateClosedProviderAttempts("legacy", legacyRun.CreatedAtUtc)] };
+        using var legacyWorkspace = new TestWorkspace();
+        var legacyStore = new CustomLoopRunStore(new WorkspacePaths(legacyWorkspace.RootPath));
+
+        await Assert.ThrowsAsync<FormatException>(() => legacyStore.CreateAsync(legacy));
+
+        var canonicalContext = CustomLoopSequentialEvidenceStoreTests.CreateContext();
+        var canonical = canonicalContext.Run with
+        {
+            Events = [.. canonicalContext.Run.Events, .. CreateClosedProviderAttempts("canonical", canonicalContext.Run.CreatedAtUtc)]
+        };
+        using var canonicalWorkspace = new TestWorkspace();
+        var canonicalStore = new CustomLoopRunStore(new WorkspacePaths(canonicalWorkspace.RootPath));
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await canonicalStore.CreateAsync(canonical)).Status);
+
+        static CustomLoopRunEvent[] CreateClosedProviderAttempts(string prefix, DateTimeOffset timestampUtc)
+        {
+            return Enumerable.Range(1, 3)
+                .SelectMany(attempt =>
+                {
+                    var startSequence = attempt * 2L;
+                    return new[]
+                    {
+                        Event(startSequence, $"{prefix}-provider-start-{attempt}", CustomLoopRunEventKind.NodeAttemptStarted, timestampUtc) with
+                        {
+                            Iteration = 1,
+                            StepId = "step-1",
+                            Attempt = attempt,
+                            TraceReservationUtf8Bytes = CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes,
+                        },
+                        Event(startSequence + 1, $"{prefix}-provider-completed-{attempt}", CustomLoopRunEventKind.NodeAttemptCompleted, timestampUtc) with
+                        {
+                            Iteration = 1,
+                            StepId = "step-1",
+                            Attempt = attempt,
+                        },
+                    };
+                })
+                .ToArray();
+        }
+    }
+
+    [Fact]
     public async Task Run_created_schedule_proof_remains_durable_while_provider_dispatch_can_still_resume()
     {
         using var workspace = new TestWorkspace();

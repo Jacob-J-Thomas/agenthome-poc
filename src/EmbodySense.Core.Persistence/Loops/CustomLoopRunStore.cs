@@ -3181,11 +3181,13 @@ public sealed class CustomLoopRunStore :
             return checked(persistedUtf8Bytes + (HasTerminalIntegrityWarning(run) ? 0 : CustomLoopLimits.MaxTraceControlEventUtf8Bytes));
         }
 
-        var traversalProviderAttemptCeiling = run.SequentialInvocationSnapshot is not null
+        var traversalProviderAttemptCeiling = HasCanonicalGraphFrontier(run)
+            ? CustomLoopLimits.MaxModelAttemptsPerRun
+            : run.SequentialInvocationSnapshot is not null
                 && run.SequentialAdapterBinding is not null
                 && run.AdmittedDefinition.InferenceSteps.Length == 0
-            ? 0
-            : CustomLoopLimits.GetMaximumModelAttempts(run.AdmittedDefinition.InferenceSteps.Length, run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations);
+                ? 0
+                : CustomLoopLimits.GetMaximumModelAttempts(run.AdmittedDefinition.InferenceSteps.Length, run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations);
         var maximumAttempts = checked(traversalProviderAttemptCeiling + CalculateAdmittedRetryProviderStartAllowance(run));
         var canonicalExitStarts = run.Events.Count(IsCanonicalDeterministicExitStart);
         if (canonicalExitStarts > 1)
@@ -3233,6 +3235,9 @@ public sealed class CustomLoopRunStore :
                 Disposition: CustomLoopSequentialNodeDisposition.Unknown,
             },
         };
+
+    private static bool HasCanonicalGraphFrontier(CustomLoopRunRecord run)
+        => run.SequentialAdapterBinding is not null && run.Frontier is not null;
 
     private static int GetToolEvidencePhaseUtf8Bytes(CustomLoopToolTraceEvidence evidence)
     {

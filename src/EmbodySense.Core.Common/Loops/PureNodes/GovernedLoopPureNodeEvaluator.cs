@@ -11,6 +11,9 @@ namespace EmbodySense.Core.Common.Loops.PureNodes;
 /// <summary>Executes the closed schema-1 pure-node catalog without effects, ambient inputs, clocks, or provider access.</summary>
 public static class GovernedLoopPureNodeEvaluator
 {
+    private const string SchemaConformanceMaximumIterationsParameter = "max-iterations";
+    private const string SchemaConformanceMaximumDurationMillisecondsParameter = "max-duration-milliseconds";
+
     /// <summary>Evaluates one exact graph-bound Transform or Validate node.</summary>
     /// <param name="graph">The exact canonical graph revision.</param>
     /// <param name="nodeId">The exact Transform or Validate node identity.</param>
@@ -109,7 +112,7 @@ public static class GovernedLoopPureNodeEvaluator
         switch (node.Descriptor.TypeId)
         {
             case GovernedLoopPureNodeVocabulary.SchemaConformance:
-                if (!HasExactContract(node, [Input(GovernedLoopPureNodeVocabulary.InputPort), Output(GovernedLoopPureNodeVocabulary.ResultPort)], []))
+                if (!HasSchemaConformanceContract(node))
                 {
                     return InvalidContract(out validation);
                 }
@@ -464,6 +467,24 @@ public static class GovernedLoopPureNodeEvaluator
             && port.BindingKind == GovernedLoopBindingKind.Data
             && port.Required);
     }
+
+    private static bool HasSchemaConformanceContract(GovernedLoopNodeDefinition node)
+    {
+        var ports = new[] { Input(GovernedLoopPureNodeVocabulary.InputPort), Output(GovernedLoopPureNodeVocabulary.ResultPort) };
+        if (HasExactContract(node, ports, []))
+        {
+            return true;
+        }
+
+        return HasExactContract(node, ports, [SchemaConformanceMaximumDurationMillisecondsParameter, SchemaConformanceMaximumIterationsParameter])
+            && HasPositiveBound(node.Parameters[SchemaConformanceMaximumIterationsParameter], CustomLoopLimits.MaxGraphCycleIterations)
+            && HasPositiveBound(node.Parameters[SchemaConformanceMaximumDurationMillisecondsParameter], CustomLoopLimits.MaxGraphCycleMilliseconds);
+    }
+
+    private static bool HasPositiveBound(string value, long maximum)
+        => long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
+            && parsed >= 1
+            && parsed <= maximum;
 
     private static GovernedLoopTypedBindingValue? InputByPort(IEnumerable<GovernedLoopTypedBindingValue> inputs, string portId)
         => inputs.SingleOrDefault(input => string.Equals(input.TargetPortId, portId, StringComparison.Ordinal));

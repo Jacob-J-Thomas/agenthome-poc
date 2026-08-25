@@ -197,6 +197,54 @@ public sealed class GovernedLoopPureNodeOutcomeTests
     }
 
     [Fact]
+    public void Schema_conformance_accepts_only_the_exact_bounded_cycle_parameter_pair()
+    {
+        (string PortId, string SchemaId, GovernedLoopTypedValue Value)[] inputs =
+        [
+            (GovernedLoopPureNodeVocabulary.InputPort, "text", Value(GovernedLoopValueKind.Text, "\"terminal\"")),
+        ];
+        var bounded = Validate(
+            GovernedLoopPureNodeVocabulary.SchemaConformance,
+            inputs,
+            new Dictionary<string, string>
+            {
+                ["max-iterations"] = "3",
+                ["max-duration-milliseconds"] = "120000",
+            });
+
+        Assert.True(GovernedLoopPureNodeEvaluator.TryEvaluate(bounded.Graph, "pure", bounded.Inputs, out var output, out var evidence, out var validation));
+        Assert.True(validation.IsValid);
+        Assert.Equal("true", output.Value.CanonicalValueJson);
+        Assert.True(evidence!.Passed);
+
+        var missingDuration = Validate(
+            GovernedLoopPureNodeVocabulary.SchemaConformance,
+            inputs,
+            new Dictionary<string, string> { ["max-iterations"] = "3" });
+        var zeroIterations = Validate(
+            GovernedLoopPureNodeVocabulary.SchemaConformance,
+            inputs,
+            new Dictionary<string, string>
+            {
+                ["max-iterations"] = "0",
+                ["max-duration-milliseconds"] = "120000",
+            });
+        var extraParameter = Validate(
+            GovernedLoopPureNodeVocabulary.SchemaConformance,
+            inputs,
+            new Dictionary<string, string>
+            {
+                ["max-iterations"] = "3",
+                ["max-duration-milliseconds"] = "120000",
+                ["unexpected"] = "value",
+            });
+
+        AssertEvaluateCode(missingDuration.Graph, missingDuration.Inputs, "pure-node.contract-invalid");
+        AssertEvaluateCode(zeroIterations.Graph, zeroIterations.Inputs, "pure-node.contract-invalid");
+        AssertEvaluateCode(extraParameter.Graph, extraParameter.Inputs, "pure-node.contract-invalid");
+    }
+
+    [Fact]
     public void Structured_selection_honors_rfc6901_escaping_array_indexes_and_missing_paths()
     {
         var escaped = Transform(
@@ -370,9 +418,12 @@ public sealed class GovernedLoopPureNodeOutcomeTests
         return Case(graph, inputValues, GovernedLoopPureNodeVocabulary.OutputPort, outputValue, null);
     }
 
-    private static OutcomeCase Validate(string typeId, (string PortId, string SchemaId, GovernedLoopTypedValue Value)[] inputValues)
+    private static OutcomeCase Validate(
+        string typeId,
+        (string PortId, string SchemaId, GovernedLoopTypedValue Value)[] inputValues,
+        IReadOnlyDictionary<string, string>? parameters = null)
     {
-        var graph = PureGraph(GovernedLoopNodeKind.Validate, typeId, inputValues.Select(value => (value.PortId, value.SchemaId)).ToArray(), GovernedLoopPureNodeVocabulary.ResultPort, "boolean");
+        var graph = PureGraph(GovernedLoopNodeKind.Validate, typeId, inputValues.Select(value => (value.PortId, value.SchemaId)).ToArray(), GovernedLoopPureNodeVocabulary.ResultPort, "boolean", parameters);
         return Case(graph, inputValues, GovernedLoopPureNodeVocabulary.ResultPort, Value(GovernedLoopValueKind.Boolean, "true"), GovernedLoopValidationEvidence.Create(1, true, []));
     }
 

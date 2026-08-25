@@ -4,6 +4,7 @@ using EmbodySense.Core.Startup.Configuration;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Posture;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
 using EmbodySense.Core.Startup.Inference.Profiles.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
@@ -352,6 +353,26 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    /// <summary>Prepares one selected published graph revision for visible browser invocation without accepting authority assertions.</summary>
+    /// <param name="request">The browser-selected graph and revision identifiers.</param>
+    /// <param name="cancellationToken">The token used before any durable authority confirmation begins.</param>
+    /// <returns>Server-derived current publication, eligible exact grants, or one confirmation preview.</returns>
+    internal async Task<GovernedLoopInvocationPreparationResponse> PrepareGovernedLoopInvocationAsync(
+        GovernedLoopInvocationPreparationRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var runtime = await BeginGraphAuthoringRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.PrepareGovernedLoopInvocationAsync(request, cancellationToken);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
+    }
+
     /// <summary>Retires the cached runtime after an applied capability lifecycle mutation.</summary>
     /// <remarks>
     /// Command Action availability is verified while a runtime is composed and retained in its immutable graph catalog.
@@ -632,6 +653,103 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         {
             await EndCustomRuntimeOperationAsync();
         }
+    }
+
+    /// <summary>Confirms a server preview when required and invokes using only the exact server-returned grant.</summary>
+    /// <param name="request">The browser-held object selector, preview hash, operation identity, and Manual Trigger prompt.</param>
+    /// <param name="ownerConnectionId">The live SignalR connection that owns any governed approval interaction.</param>
+    /// <param name="cancellationToken">The token used until durable authority or invocation boundaries are reached.</param>
+    /// <returns>The canonical invocation projection, or a fail-closed safe rejection.</returns>
+    public async Task<GovernedLoopRunInvocationResponse> ConfirmAndInvokeGovernedLoopAsync(
+        GovernedLoopVisibleInvocationRequest request,
+        string ownerConnectionId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerConnectionId);
+
+        using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
+        using var approvalScope = _approvalCoordinator.BeginApprovalScope(ownerConnectionId);
+        var runtime = await BeginGraphAuthoringRuntimeOperationAsync(executionCancellation.Token);
+        try
+        {
+            var preparationRequest = new GovernedLoopInvocationPreparationRequest(request.GraphId, request.RevisionId);
+            var preparation = await runtime.PrepareGovernedLoopInvocationAsync(preparationRequest, executionCancellation.Token);
+            if (preparation.Status == GovernedLoopInvocationPreparationStatus.ConfirmationRequired)
+            {
+                if (request.GrantSelection is not null)
+                {
+                    return VisibleInvocationRejected("Invalid", "A server confirmation creates the exact least-authority grant and cannot accept an existing grant selection.");
+                }
+                if (string.IsNullOrWhiteSpace(request.PreviewHash))
+                {
+                    return VisibleInvocationRejected("ConfirmationRequired", "Explicit confirmation of the current server preview is required before this graph can run.");
+                }
+
+                return await ConfirmPreviewAndInvokeAsync(runtime, request, preparationRequest, executionCancellation.Token);
+            }
+
+            if (preparation.Status != GovernedLoopInvocationPreparationStatus.Ready || preparation.Publication is null)
+            {
+                return VisibleInvocationPreparationResult(preparation);
+            }
+            if (!string.IsNullOrWhiteSpace(request.PreviewHash))
+            {
+                if (request.GrantSelection is not null)
+                {
+                    return VisibleInvocationRejected("Invalid", "A preview confirmation cannot also select an existing authority grant.");
+                }
+
+                return await ConfirmPreviewAndInvokeAsync(runtime, request, preparationRequest, executionCancellation.Token);
+            }
+            if (request.GrantSelection is null)
+            {
+                return VisibleInvocationRejected("GrantChoiceRequired", "Select one current exact authority grant before invoking.");
+            }
+            var selectedChoices = preparation.EligibleGrants
+                .Where(choice => string.Equals(choice.Grant.GrantId.Value, request.GrantSelection.GrantId, StringComparison.Ordinal)
+                    && choice.Grant.Revision.Value == request.GrantSelection.Revision
+                    && string.Equals(choice.Grant.ContentHash, request.GrantSelection.ContentHash, StringComparison.Ordinal))
+                .ToArray();
+            if (selectedChoices.Length != 1)
+            {
+                return VisibleInvocationRejected("Stale", "The selected exact authority grant is no longer eligible for the current publication. Prepare again before invoking.");
+            }
+
+            return await runtime.InvokeGovernedLoopAsync(
+                new GovernedLoopRunInvocationInput(request.OperationId, preparation.Publication, selectedChoices[0].Grant, request.InvocationPrompt, IncludeInvokingConversation: false),
+                executionCancellation.Token);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
+    }
+
+    private static async Task<GovernedLoopRunInvocationResponse> ConfirmPreviewAndInvokeAsync(
+        AgentRuntime runtime,
+        GovernedLoopVisibleInvocationRequest request,
+        GovernedLoopInvocationPreparationRequest preparationRequest,
+        CancellationToken cancellationToken)
+    {
+        var confirmation = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(
+            new GovernedLoopInvocationAuthorityConfirmation(request.GraphId, request.RevisionId, request.PreviewHash!, request.OperationId),
+            cancellationToken);
+        if (confirmation.Status != GovernedLoopInvocationAuthorityConfirmationStatus.Confirmed || confirmation.Grant is null)
+        {
+            return VisibleInvocationConfirmationResult(confirmation);
+        }
+
+        var preparation = await runtime.PrepareGovernedLoopInvocationAsync(preparationRequest, cancellationToken);
+        var confirmedChoice = preparation.EligibleGrants.SingleOrDefault(choice => choice.Grant.Equals(confirmation.Grant));
+        if (preparation.Status != GovernedLoopInvocationPreparationStatus.Ready || preparation.Publication is null || confirmedChoice is null)
+        {
+            return VisibleInvocationRejected("Stale", "The confirmed authority no longer matches the current exact publication. Prepare and confirm again before invoking.");
+        }
+
+        return await runtime.InvokeGovernedLoopAsync(
+            new GovernedLoopRunInvocationInput(request.OperationId, preparation.Publication, confirmedChoice.Grant, request.InvocationPrompt, IncludeInvokingConversation: false),
+            cancellationToken);
     }
 
     /// <summary>
@@ -1181,6 +1299,33 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         {
             CodexRuntime = codexRuntimeStatus
         };
+    }
+
+    private static GovernedLoopRunInvocationResponse VisibleInvocationRejected(string failureCode, string detail)
+    {
+        return new GovernedLoopRunInvocationResponse("Rejected", "Rejected", failureCode, null, null, false, null, null, detail);
+    }
+
+    private static GovernedLoopRunInvocationResponse VisibleInvocationConfirmationResult(
+        GovernedLoopInvocationAuthorityConfirmationResult confirmation)
+    {
+        if (confirmation.Status == GovernedLoopInvocationAuthorityConfirmationStatus.Unavailable)
+        {
+            return new GovernedLoopRunInvocationResponse("Unavailable", null, null, null, null, false, null, null, confirmation.Detail);
+        }
+
+        return VisibleInvocationRejected(confirmation.Status.ToString(), confirmation.Detail);
+    }
+
+    private static GovernedLoopRunInvocationResponse VisibleInvocationPreparationResult(
+        GovernedLoopInvocationPreparationResponse preparation)
+    {
+        if (preparation.Status == GovernedLoopInvocationPreparationStatus.Unavailable)
+        {
+            return new GovernedLoopRunInvocationResponse("Unavailable", null, null, null, null, false, null, null, preparation.Detail);
+        }
+
+        return VisibleInvocationRejected(preparation.Status.ToString(), preparation.Detail);
     }
 
     private static async Task WriteTurnResultAsync(

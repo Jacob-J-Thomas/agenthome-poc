@@ -163,6 +163,514 @@ test("governed graph activation awaits the selected published graph read", async
   );
 });
 
+test("visible governed invocation confirms a no-grant preparation with only the exact preview and null grant selector", async () => {
+  const previewHash = "a".repeat(64);
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => ({
+      status: 200,
+      body: governedGraphRead(
+        governedGraphLifecycle("published", 4),
+        governedGraphArtifact(
+          governedGraphLifecycle("published", 4),
+          "Published graph",
+        ),
+      ),
+    }),
+  );
+  server.on("POST", "/api/governed-graphs/invocation-preparation", () => ({
+    status: 200,
+    body: {
+      status: "confirmation-required",
+      eligibleGrants: [],
+      preview: { semanticHash: previewHash },
+      detail: "Explicit confirmation is required.",
+    },
+  }));
+  const invocations = [];
+  const hub = {
+    connected: true,
+    on() {},
+    async invoke(method, request) {
+      invocations.push({ method, request });
+      return { status: "Rejected", detail: "The server retained no run." };
+    },
+  };
+  const app = await loadLoopBuilder({
+    server,
+    embodySenseSession: { getHub: async () => hub },
+  });
+
+  await openPublishedGovernedGraphAsync(app);
+  app.elements.governedGraphInvocationPrompt.value = "confirm-visible-prompt";
+  await app.elements.governedGraphPrepareInvokeButton.click();
+
+  assert.match(
+    app.elements.governedGraphInvocationStatus.textContent,
+    /Explicit confirmation is required/,
+  );
+  assert.equal(app.elements.governedGraphGrantSelectionField.hidden, true);
+  assert.equal(app.elements.governedGraphConfirmInvokeButton.hidden, false);
+  await app.elements.governedGraphConfirmInvokeButton.click();
+
+  assert.deepEqual(invocations, [
+    {
+      method: "ConfirmAndInvokeGovernedLoop",
+      request: {
+        graphId: "published-graph",
+        revisionId: "revision-1",
+        previewHash,
+        grantSelection: null,
+        operationId: "governed-invoke-00000000-0000-4000-8000-000000000001",
+        invocationPrompt: "confirm-visible-prompt",
+      },
+    },
+  ]);
+  assert.equal(app.elements.runsView.hidden, true);
+  assert.match(
+    app.elements.governedGraphInvocationStatus.textContent,
+    /Rejected/,
+  );
+});
+
+test("visible governed invocation selects one exact current grant without browser authority assertions", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => ({
+      status: 200,
+      body: governedGraphRead(
+        governedGraphLifecycle("published", 4),
+        governedGraphArtifact(
+          governedGraphLifecycle("published", 4),
+          "Published graph",
+        ),
+      ),
+    }),
+  );
+  const grants = [
+    {
+      grant: {
+        grantId: "grant-first",
+        revision: 1,
+        contentHash: "b".repeat(64),
+      },
+      expiresAtUtc: "2026-08-24T01:00:00Z",
+    },
+    {
+      grant: {
+        grantId: "grant-second",
+        revision: 2,
+        contentHash: "c".repeat(64),
+      },
+      expiresAtUtc: "2026-08-24T02:00:00Z",
+    },
+  ];
+  server.on("POST", "/api/governed-graphs/invocation-preparation", () => ({
+    status: 200,
+    body: {
+      status: "ready",
+      eligibleGrants: grants,
+      preview: null,
+      detail: "Two current exact grants are available.",
+    },
+  }));
+  const invocations = [];
+  const hub = {
+    connected: true,
+    on() {},
+    async invoke(method, request) {
+      invocations.push({ method, request });
+      return { status: "Rejected", detail: "The selected grant became stale." };
+    },
+  };
+  const app = await loadLoopBuilder({
+    server,
+    embodySenseSession: { getHub: async () => hub },
+  });
+
+  await openPublishedGovernedGraphAsync(app);
+  app.elements.governedGraphInvocationPrompt.value = "choose-second-grant";
+  await app.elements.governedGraphPrepareInvokeButton.click();
+
+  assert.equal(app.elements.governedGraphGrantSelectionField.hidden, false);
+  assert.equal(app.elements.governedGraphGrantSelection.children.length, 2);
+  assert.equal(app.elements.governedGraphConfirmInvokeButton.disabled, false);
+  assert.match(
+    app.elements.governedGraphGrantChoices.textContent,
+    /grant-first r1.*expires.*grant-second r2.*expires/,
+  );
+  app.elements.governedGraphGrantSelection.value = "1";
+  await app.elements.governedGraphGrantSelection.change();
+  await app.elements.governedGraphConfirmInvokeButton.click();
+
+  assert.equal(invocations.length, 1);
+  assert.equal(invocations[0].method, "ConfirmAndInvokeGovernedLoop");
+  assert.deepEqual(invocations[0].request.grantSelection, grants[1].grant);
+  assert.deepEqual(
+    Object.keys(invocations[0].request).sort(),
+    [
+      "graphId",
+      "revisionId",
+      "previewHash",
+      "grantSelection",
+      "operationId",
+      "invocationPrompt",
+    ].sort(),
+  );
+  assert.equal(invocations[0].request.actor, undefined);
+  assert.equal(invocations[0].request.workspace, undefined);
+  assert.equal(invocations[0].request.effectiveAuthority, undefined);
+  assert.equal(app.elements.runsView.hidden, true);
+  assert.match(app.elements.governedGraphInvocationStatus.textContent, /stale/);
+});
+
+test("visible governed invocation clears stale preparation when the displayed graph ID changes", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => ({
+      status: 200,
+      body: governedGraphRead(
+        governedGraphLifecycle("published", 4),
+        governedGraphArtifact(
+          governedGraphLifecycle("published", 4),
+          "Published graph",
+        ),
+      ),
+    }),
+  );
+  server.on("POST", "/api/governed-graphs/invocation-preparation", () => ({
+    status: 200,
+    body: {
+      status: "confirmation-required",
+      eligibleGrants: [],
+      preview: { semanticHash: "a".repeat(64) },
+      detail: "Explicit confirmation is required.",
+    },
+  }));
+  const invocations = [];
+  const app = await loadLoopBuilder({
+    server,
+    embodySenseSession: {
+      getHub: async () => ({
+        connected: true,
+        on() {},
+        async invoke(method, request) {
+          invocations.push({ method, request });
+          return { status: "Rejected" };
+        },
+      }),
+    },
+  });
+
+  await openPublishedGovernedGraphAsync(app);
+  await app.elements.governedGraphPrepareInvokeButton.click();
+  assert.equal(app.elements.governedGraphConfirmInvokeButton.hidden, false);
+
+  app.elements.governedGraphId.value = "other-published-graph";
+  await app.elements.governedGraphId.input();
+
+  assert.equal(app.elements.governedGraphPrepareInvokeButton.disabled, true);
+  assert.equal(app.elements.governedGraphConfirmInvokeButton.hidden, true);
+  assert.match(
+    app.elements.governedGraphInvocationStatus.textContent,
+    /Publish the exact current draft/i,
+  );
+  await app.elements.governedGraphPrepareInvokeButton.click();
+  await app.elements.governedGraphConfirmInvokeButton.click();
+  assert.equal(
+    server.calls.filter(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/governed-graphs/invocation-preparation",
+    ).length,
+    1,
+  );
+  assert.deepEqual(invocations, []);
+});
+
+test("visible governed invocation reuses an ambiguous operation until a conclusive or selector reset", async () => {
+  const grant = {
+    grant: {
+      grantId: "grant-current",
+      revision: 1,
+      contentHash: "b".repeat(64),
+    },
+    expiresAtUtc: "2026-08-24T01:00:00Z",
+  };
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => ({
+      status: 200,
+      body: governedGraphRead(
+        governedGraphLifecycle("published", 4),
+        governedGraphArtifact(
+          governedGraphLifecycle("published", 4),
+          "Published graph",
+        ),
+      ),
+    }),
+  );
+  server.on("POST", "/api/governed-graphs/invocation-preparation", () => ({
+    status: 200,
+    body: {
+      status: "ready",
+      eligibleGrants: [grant],
+      preview: null,
+      detail: "One exact grant is available.",
+    },
+  }));
+  const invocations = [];
+  const hub = {
+    connected: true,
+    on() {},
+    async invoke(method, request) {
+      invocations.push({ method, request });
+      if (invocations.length === 1) throw new Error("SignalR response lost.");
+      return { status: "Rejected", detail: "The server retained no run." };
+    },
+  };
+  const app = await loadLoopBuilder({
+    server,
+    embodySenseSession: { getHub: async () => hub },
+  });
+
+  await openPublishedGovernedGraphAsync(app);
+  app.elements.governedGraphInvocationPrompt.value = "retry-one";
+  await app.elements.governedGraphPrepareInvokeButton.click();
+  await app.elements.governedGraphConfirmInvokeButton.click();
+  await app.elements.governedGraphConfirmInvokeButton.click();
+
+  assert.equal(invocations.length, 2);
+  assert.equal(
+    invocations[1].request.operationId,
+    invocations[0].request.operationId,
+  );
+
+  await app.elements.governedGraphPrepareInvokeButton.click();
+  await app.elements.governedGraphConfirmInvokeButton.click();
+  assert.notEqual(
+    invocations[2].request.operationId,
+    invocations[1].request.operationId,
+  );
+
+  await app.elements.governedGraphPrepareInvokeButton.click();
+  app.elements.governedGraphId.value = "other-published-graph";
+  await app.elements.governedGraphId.input();
+  app.elements.governedGraphId.value = "published-graph";
+  await app.elements.governedGraphId.input();
+  await app.elements.governedGraphPrepareInvokeButton.click();
+  await app.elements.governedGraphConfirmInvokeButton.click();
+  assert.notEqual(
+    invocations[3].request.operationId,
+    invocations[2].request.operationId,
+  );
+});
+
+test("visible governed invocation retains only unresolved server outcomes without a proved run", async () => {
+  const statuses = [
+    { status: "Unavailable", retainsIdentity: true },
+    { status: "AuditUnavailable", retainsIdentity: true },
+    { status: "Unknown", retainsIdentity: true },
+    { status: "Executed", retainsIdentity: true },
+    { status: "AuditUnavailable", run: { id: "proved-run" } },
+    { status: "Rejected" },
+    { status: "Invalid" },
+    { status: "Conflict" },
+    { status: "NotFound" },
+    { status: "LimitExceeded" },
+  ];
+
+  for (const status of statuses) {
+    const { app, invocations } = await createReadyGovernedInvocationApp({
+      invoke: async () => ({
+        status: status.status,
+        run: status.run ?? null,
+        detail: `${status.status} response.`,
+      }),
+    });
+    await openPublishedGovernedGraphAsync(app);
+    app.elements.governedGraphInvocationPrompt.value = "status-replay";
+    await app.elements.governedGraphPrepareInvokeButton.click();
+    await app.elements.governedGraphConfirmInvokeButton.click();
+    if (status.retainsIdentity) {
+      await app.elements.governedGraphConfirmInvokeButton.click();
+      assert.equal(
+        invocations[1].request.operationId,
+        invocations[0].request.operationId,
+        `${status.status} must retain the unresolved exact operation`,
+      );
+    } else {
+      await app.elements.governedGraphPrepareInvokeButton.click();
+      await app.elements.governedGraphConfirmInvokeButton.click();
+      assert.notEqual(
+        invocations[1].request.operationId,
+        invocations[0].request.operationId,
+        `${status.status} must retire the conclusive operation`,
+      );
+    }
+  }
+});
+
+test("visible governed invocation reloads only an exact unresolved request and retires mismatches", async () => {
+  const storageKey = `embodysense.governed-graph-pending-invocation.v1.${encodeURIComponent("C:/workspace")}`;
+  const exactStorage = new FakeStorage();
+  const first = await createReadyGovernedInvocationApp({
+    sessionStorage: exactStorage,
+    invoke: async () => {
+      throw new Error("SignalR response lost.");
+    },
+  });
+  await openPublishedGovernedGraphAsync(first.app);
+  first.app.elements.governedGraphInvocationPrompt.value = "reload-exact";
+  await first.app.elements.governedGraphInvocationPrompt.input();
+  await first.app.elements.governedGraphPrepareInvokeButton.click();
+  await first.app.elements.governedGraphConfirmInvokeButton.click();
+  const retainedOperationId = first.invocations[0].request.operationId;
+  assert.match(
+    exactStorage.getItem(storageKey),
+    new RegExp(retainedOperationId),
+  );
+
+  const second = await createReadyGovernedInvocationApp({
+    sessionStorage: exactStorage,
+    invoke: async () => ({ status: "Unavailable", detail: "Outcome unknown." }),
+  });
+  await openPublishedGovernedGraphAsync(second.app);
+  second.app.elements.governedGraphInvocationPrompt.value = "reload-exact";
+  await second.app.elements.governedGraphInvocationPrompt.input();
+  await second.app.elements.governedGraphPrepareInvokeButton.click();
+  await second.app.elements.governedGraphConfirmInvokeButton.click();
+  assert.equal(second.invocations[0].request.operationId, retainedOperationId);
+  assert.match(
+    exactStorage.getItem(storageKey),
+    new RegExp(retainedOperationId),
+  );
+
+  const third = await createReadyGovernedInvocationApp({
+    sessionStorage: exactStorage,
+    invoke: async () => ({
+      status: "Rejected",
+      detail: "Conclusive rejection.",
+    }),
+  });
+  await openPublishedGovernedGraphAsync(third.app);
+  third.app.elements.governedGraphInvocationPrompt.value = "reload-exact";
+  await third.app.elements.governedGraphInvocationPrompt.input();
+  await third.app.elements.governedGraphPrepareInvokeButton.click();
+  await third.app.elements.governedGraphConfirmInvokeButton.click();
+  assert.equal(third.invocations[0].request.operationId, retainedOperationId);
+  assert.equal(exactStorage.getItem(storageKey), null);
+
+  const changedPromptStorage =
+    await createUnresolvedGovernedInvocationStorage("original-prompt");
+  const changedPrompt = await createReadyGovernedInvocationApp({
+    sessionStorage: changedPromptStorage.storage,
+    crypto: {
+      subtle: webcrypto.subtle,
+      randomUUID: () => "99999999-0000-4000-8000-000000000001",
+    },
+    invoke: async () => ({ status: "Unavailable", detail: "Outcome unknown." }),
+  });
+  await openPublishedGovernedGraphAsync(changedPrompt.app);
+  changedPrompt.app.elements.governedGraphInvocationPrompt.value =
+    "changed-prompt";
+  await changedPrompt.app.elements.governedGraphInvocationPrompt.input();
+  await changedPrompt.app.elements.governedGraphPrepareInvokeButton.click();
+  await changedPrompt.app.elements.governedGraphConfirmInvokeButton.click();
+  assert.notEqual(
+    changedPrompt.invocations[0].request.operationId,
+    changedPromptStorage.operationId,
+  );
+
+  const tamperedStorage =
+    await createUnresolvedGovernedInvocationStorage("tampered-prompt");
+  const tampered = JSON.parse(tamperedStorage.storage.getItem(storageKey));
+  tampered.grantSelection.contentHash = "f".repeat(64);
+  tamperedStorage.storage.setItem(storageKey, JSON.stringify(tampered));
+  const tamperedReload = await createReadyGovernedInvocationApp({
+    sessionStorage: tamperedStorage.storage,
+    crypto: {
+      subtle: webcrypto.subtle,
+      randomUUID: () => "88888888-0000-4000-8000-000000000001",
+    },
+    invoke: async () => ({ status: "Unavailable", detail: "Outcome unknown." }),
+  });
+  await openPublishedGovernedGraphAsync(tamperedReload.app);
+  tamperedReload.app.elements.governedGraphInvocationPrompt.value =
+    "tampered-prompt";
+  await tamperedReload.app.elements.governedGraphInvocationPrompt.input();
+  await tamperedReload.app.elements.governedGraphPrepareInvokeButton.click();
+  await tamperedReload.app.elements.governedGraphConfirmInvokeButton.click();
+  assert.notEqual(
+    tamperedReload.invocations[0].request.operationId,
+    tamperedStorage.operationId,
+  );
+
+  const changedGrantStorage =
+    await createUnresolvedGovernedInvocationStorage("changed-grant");
+  const changedGrantReload = await createReadyGovernedInvocationApp({
+    sessionStorage: changedGrantStorage.storage,
+    crypto: {
+      subtle: webcrypto.subtle,
+      randomUUID: () => "77777777-0000-4000-8000-000000000001",
+    },
+    grant: {
+      grant: {
+        grantId: "grant-replaced",
+        revision: 2,
+        contentHash: "c".repeat(64),
+      },
+      expiresAtUtc: "2026-08-24T02:00:00Z",
+    },
+    invoke: async () => ({ status: "Unavailable", detail: "Outcome unknown." }),
+  });
+  await openPublishedGovernedGraphAsync(changedGrantReload.app);
+  changedGrantReload.app.elements.governedGraphInvocationPrompt.value =
+    "changed-grant";
+  await changedGrantReload.app.elements.governedGraphInvocationPrompt.input();
+  await changedGrantReload.app.elements.governedGraphPrepareInvokeButton.click();
+  await changedGrantReload.app.elements.governedGraphConfirmInvokeButton.click();
+  assert.notEqual(
+    changedGrantReload.invocations[0].request.operationId,
+    changedGrantStorage.operationId,
+  );
+
+  const changedGraphStorage =
+    await createUnresolvedGovernedInvocationStorage("changed-graph");
+  const changedGraphReload = await createReadyGovernedInvocationApp({
+    sessionStorage: changedGraphStorage.storage,
+    invoke: async () => ({ status: "Unavailable", detail: "Outcome unknown." }),
+  });
+  await openPublishedGovernedGraphAsync(changedGraphReload.app);
+  changedGraphReload.app.elements.governedGraphId.value = "another-graph";
+  await changedGraphReload.app.elements.governedGraphId.input();
+  assert.equal(changedGraphStorage.storage.getItem(storageKey), null);
+});
+
 test("governed graph activation does not read a changed selection after catalog hydration", async () => {
   const sessionStorage = new FakeStorage();
   sessionStorage.setItem(
@@ -10110,6 +10618,90 @@ async function selectCustomLoop(app) {
   assert.ok(item, "expected a custom loop catalog item");
   await item.click();
   await flushAsyncWork();
+}
+
+async function openPublishedGovernedGraphAsync(app) {
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = "published-graph";
+  await app.elements.governedGraphId.input();
+  await app.elements.governedGraphLoadButton.click();
+  assert.match(app.elements.governedGraphLifecycle.textContent, /Published/);
+}
+
+async function createReadyGovernedInvocationApp({
+  crypto,
+  sessionStorage,
+  invoke,
+  grant = {
+    grant: {
+      grantId: "grant-current",
+      revision: 1,
+      contentHash: "b".repeat(64),
+    },
+    expiresAtUtc: "2026-08-24T01:00:00Z",
+  },
+}) {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => ({
+      status: 200,
+      body: governedGraphRead(
+        governedGraphLifecycle("published", 4),
+        governedGraphArtifact(
+          governedGraphLifecycle("published", 4),
+          "Published graph",
+        ),
+      ),
+    }),
+  );
+  server.on("POST", "/api/governed-graphs/invocation-preparation", () => ({
+    status: 200,
+    body: {
+      status: "ready",
+      eligibleGrants: [grant],
+      preview: null,
+      detail: "One exact grant is available.",
+    },
+  }));
+  const invocations = [];
+  const app = await loadLoopBuilder({
+    server,
+    sessionStorage,
+    crypto,
+    embodySenseSession: {
+      getHub: async () => ({
+        connected: true,
+        on() {},
+        async invoke(method, request) {
+          invocations.push({ method, request });
+          return await invoke(request, invocations.length);
+        },
+      }),
+    },
+  });
+  return { app, invocations };
+}
+
+async function createUnresolvedGovernedInvocationStorage(prompt) {
+  const storage = new FakeStorage();
+  const first = await createReadyGovernedInvocationApp({
+    sessionStorage: storage,
+    invoke: async () => {
+      throw new Error("SignalR response lost.");
+    },
+  });
+  await openPublishedGovernedGraphAsync(first.app);
+  first.app.elements.governedGraphInvocationPrompt.value = prompt;
+  await first.app.elements.governedGraphInvocationPrompt.input();
+  await first.app.elements.governedGraphPrepareInvokeButton.click();
+  await first.app.elements.governedGraphConfirmInvokeButton.click();
+  return { storage, operationId: first.invocations[0].request.operationId };
 }
 
 function nodeCard(app, className) {

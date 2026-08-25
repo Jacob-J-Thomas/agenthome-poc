@@ -2175,6 +2175,38 @@
   color: var(--red);
 }
 
+.governed-graph-invocation {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.governed-graph-invocation h3,
+.governed-graph-invocation p {
+  margin: 0;
+}
+
+.governed-graph-invocation label {
+  display: grid;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.governed-graph-invocation textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.governed-graph-grant-choices {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .governed-graph-workspace {
   display: grid;
   grid-template-columns: 210px minmax(420px, 1fr) 280px;

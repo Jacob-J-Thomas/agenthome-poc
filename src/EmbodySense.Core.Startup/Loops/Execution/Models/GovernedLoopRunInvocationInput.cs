@@ -8,6 +8,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution.Models;
 /// <param name="Publication">The exact immutable published revision pin.</param>
 /// <param name="AuthorityGrant">The exact immutable authority-grant revision.</param>
 /// <param name="InvocationPrompt">The bounded entry-trigger prompt.</param>
+/// <param name="IncludeInvokingConversation">Whether this trusted server-side caller admits the current logical conversation and permits its selected output publication.</param>
 /// <remarks>
 /// Workspace, actor, surface, role, graph payload, model, context, run, and execution-generation values are
 /// server-owned and intentionally absent. Supplying a pin identifies immutable evidence but grants no authority.
@@ -16,4 +17,5 @@ public sealed record GovernedLoopRunInvocationInput(
     string OperationId,
     GovernedLoopRevisionPublicationPin Publication,
     AuthorityGrantReference AuthorityGrant,
-    string InvocationPrompt);
+    string InvocationPrompt,
+    bool IncludeInvokingConversation = true);

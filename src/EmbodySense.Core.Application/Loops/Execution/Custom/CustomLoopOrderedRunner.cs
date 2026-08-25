@@ -3919,13 +3919,16 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                     Disposition: CustomLoopSequentialNodeDisposition.Completed,
                 } outcomeEvidence,
             } outcome
-            || run.Frontier?.Payload.Nodes.SingleOrDefault(item => string.Equals(item.NodeId, node.NodeId, StringComparison.Ordinal)) is not
-            {
-                Status: GovernedLoopNodeExecutionStatus.Completed,
-                Attempt: { } frontierAttempt,
-                OutcomeEvidenceId: { } outcomeEvidenceId,
-                OutcomeEvidenceHash: { } outcomeEvidenceHash,
-            } frontierNode
+            || run.Frontier?.Payload.Nodes.SingleOrDefault(item => item.ActivationOrdinal == activation.ActivationOrdinal
+                && item.PlanOrdinal == activation.PlanOrdinal
+                && item.VisitOrdinal == activation.VisitOrdinal
+                && string.Equals(item.NodeId, node.NodeId, StringComparison.Ordinal)) is not
+                {
+                    Status: GovernedLoopNodeExecutionStatus.Completed,
+                    Attempt: { } frontierAttempt,
+                    OutcomeEvidenceId: { } outcomeEvidenceId,
+                    OutcomeEvidenceHash: { } outcomeEvidenceHash,
+                } frontierNode
             || frontierAttempt != attempt
             || !Equals(frontierNode.Descriptor, node.Descriptor)
             || !string.Equals(outcomeEvidenceId, outcome.EventId, StringComparison.Ordinal)

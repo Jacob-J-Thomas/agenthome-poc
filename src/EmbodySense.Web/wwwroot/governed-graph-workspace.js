@@ -27,6 +27,8 @@ import {
 const selectionKeyPrefix = "embodysense.governed-graph-selection.v1";
 const pendingMutationKeyPrefix =
   "embodysense.governed-graph-pending-mutation.v1";
+const pendingInvocationKeyPrefix =
+  "embodysense.governed-graph-pending-invocation.v1";
 const retryableMutationKinds = new Set([
   "create-draft",
   "replace-draft",
@@ -45,6 +47,13 @@ const conclusiveMutationStatuses = new Set([
   "publication-rejected",
   "unauthorized",
 ]);
+const conclusiveInvocationStatuses = new Set([
+  "Rejected",
+  "Invalid",
+  "Conflict",
+  "NotFound",
+  "LimitExceeded",
+]);
 
 export function createGovernedGraphWorkspace({
   document,
@@ -52,6 +61,7 @@ export function createGovernedGraphWorkspace({
   requestJson,
   operationId,
   runtimeCatalog,
+  invokePublishedGraph,
 }) {
   const elements = bindElements(document);
   let catalog = null;
@@ -66,13 +76,21 @@ export function createGovernedGraphWorkspace({
   let storageScope = null;
   let selectionKey = null;
   let pendingMutationKey = null;
+  let pendingInvocationKey = null;
   let pendingMutation = null;
+  let pendingInvocation = null;
   let graphReadGeneration = 0;
   let activeGraphReadGeneration = null;
   let routingPreview = null;
   let routingPreviewGeneration = 0;
   let retryPolicyPreview = null;
   let graphFallbackOrder = [];
+  let invocationPreparation = null;
+  let invocationInFlight = false;
+  let invocationOutcome = "";
+  let invocationGrantSelection = null;
+  let invocationOperationId = null;
+  let invocationGeneration = 0;
 
   bindEvents();
 
@@ -94,6 +112,7 @@ export function createGovernedGraphWorkspace({
       storageScope = nextScope;
       selectionKey = `${selectionKeyPrefix}.${storageScope}`;
       pendingMutationKey = `${pendingMutationKeyPrefix}.${storageScope}`;
+      pendingInvocationKey = `${pendingInvocationKeyPrefix}.${storageScope}`;
       aggregate = null;
       catalog = null;
       graph = null;
@@ -106,6 +125,7 @@ export function createGovernedGraphWorkspace({
       retryPolicyPreview = null;
       graphFallbackOrder = [];
       pendingMutation = restorePendingMutation();
+      pendingInvocation = restorePendingInvocation();
       elements.graphId.value = "";
       restoreSelection();
       if (active && pendingMutation) restorePendingCandidate();
@@ -159,9 +179,34 @@ export function createGovernedGraphWorkspace({
     elements.publishButton.addEventListener("click", publishDraft);
     elements.disableButton.addEventListener("click", disablePublication);
     elements.archiveButton.addEventListener("click", archivePublication);
+    elements.prepareInvokeButton.addEventListener("click", prepareInvocation);
+    elements.confirmInvokeButton.addEventListener("click", confirmAndInvoke);
+    elements.grantSelection.addEventListener("change", () => {
+      const choice =
+        invocationPreparation?.eligibleGrants?.[
+          Number(elements.grantSelection.value)
+        ];
+      invocationGrantSelection = visibleGrantSelection(choice);
+      invocationOperationId = null;
+      clearPendingInvocation();
+      renderInvocation();
+    });
     elements.graphId.addEventListener("input", () => {
-      invalidateGraphRead();
+      invalidateGraphRead({
+        retainPending:
+          pendingInvocation?.graphId === elements.graphId.value.trim(),
+      });
       render();
+    });
+    elements.invocationPrompt.addEventListener("input", () => {
+      if (
+        !invocationPreparation &&
+        !invocationOperationId &&
+        pendingInvocation?.invocationPrompt === normalizedInvocationPrompt()
+      )
+        return;
+      invocationOperationId = null;
+      clearPendingInvocation();
     });
     elements.revisionId.addEventListener("input", updateIdentity);
     elements.displayName.addEventListener("input", updateIdentity);
@@ -265,6 +310,9 @@ export function createGovernedGraphWorkspace({
       )
     )
       return;
+    invalidateInvocation({
+      retainPending: pendingInvocation?.graphId === graphId,
+    });
     const readGeneration = beginGraphRead();
     if (!silent) outcome = "Reading immutable graph history…";
     render();
@@ -309,6 +357,135 @@ export function createGovernedGraphWorkspace({
         "The catalog was refreshed, but the exact unresolved mutation must be retried before a durable graph reload.";
       render();
     } else if (elements.graphId.value.trim()) await readGraph(false);
+  }
+
+  function publishedInvocationSelector() {
+    const revision = aggregate?.lifecycle?.publishedRevision?.revision;
+    if (
+      !revision?.graphId ||
+      !revision?.revisionId ||
+      elements.graphId.value.trim() !== revision.graphId ||
+      dirty ||
+      pendingMutation
+    )
+      return null;
+    return { graphId: revision.graphId, revisionId: revision.revisionId };
+  }
+
+  async function prepareInvocation() {
+    const selector = publishedInvocationSelector();
+    if (!selector || invocationInFlight) return;
+    const retainedInvocation = pendingInvocation;
+    const preparationGeneration = invalidateInvocation({ retainPending: true });
+    invocationInFlight = true;
+    renderInvocation();
+    try {
+      const preparation = await requestJson(
+        "/api/governed-graphs/invocation-preparation",
+        { method: "POST", body: JSON.stringify(selector) },
+      );
+      if (preparationGeneration !== invocationGeneration) return;
+      invocationPreparation = preparation;
+      invocationGrantSelection = visibleGrantSelection(
+        invocationPreparation?.eligibleGrants?.[0],
+      );
+      if (
+        !matchesPendingInvocation(
+          retainedInvocation,
+          selector,
+          invocationPreparation,
+          invocationGrantSelection,
+          normalizedInvocationPrompt(),
+        )
+      )
+        clearPendingInvocation();
+      else invocationOperationId = retainedInvocation.operationId;
+    } catch (error) {
+      if (preparationGeneration !== invocationGeneration) return;
+      invocationPreparation = {
+        status: "unavailable",
+        detail: `Preparation unavailable: ${error.message}`,
+      };
+    } finally {
+      if (preparationGeneration === invocationGeneration) {
+        invocationInFlight = false;
+        renderInvocation();
+      }
+    }
+  }
+
+  async function confirmAndInvoke() {
+    const selector = publishedInvocationSelector();
+    const preparation = invocationPreparation;
+    if (!selector || !preparation || invocationInFlight) return;
+    const confirmationRequired = preparation.status === "confirmation-required";
+    const ready = preparation.status === "ready";
+    if (!confirmationRequired && !(ready && invocationGrantSelection)) return;
+    const previewHash = confirmationRequired
+      ? preparation.preview?.semanticHash
+      : null;
+    if (confirmationRequired && !previewHash) return;
+
+    const prompt = normalizedInvocationPrompt();
+    if (
+      !matchesPendingInvocation(
+        pendingInvocation,
+        selector,
+        preparation,
+        invocationGrantSelection,
+        prompt,
+      )
+    ) {
+      clearPendingInvocation();
+      invocationOperationId = null;
+    }
+    invocationOperationId ??= operationId("governed-invoke");
+    const pending = createPendingInvocation(
+      selector,
+      preparation,
+      invocationGrantSelection,
+      prompt,
+      invocationOperationId,
+    );
+    if (!persistPendingInvocation(pending)) {
+      invocationOperationId = null;
+      invocationOutcome =
+        "Invocation was not sent because this browser could not retain its exact retry identity.";
+      renderInvocation();
+      return;
+    }
+    pendingInvocation = pending;
+    const invocationGenerationAtDispatch = invocationGeneration;
+    invocationInFlight = true;
+    renderInvocation();
+    try {
+      const response = await invokePublishedGraph({
+        graphId: selector.graphId,
+        revisionId: selector.revisionId,
+        previewHash,
+        grantSelection: confirmationRequired ? null : invocationGrantSelection,
+        operationId: invocationOperationId,
+        invocationPrompt: prompt,
+      });
+      if (invocationGenerationAtDispatch !== invocationGeneration) return;
+      const runId = response?.run?.id;
+      if (hasConclusiveInvocationOutcome(response)) {
+        invocationPreparation = null;
+        invocationOperationId = null;
+        clearPendingInvocation();
+      }
+      invocationOutcome = runId
+        ? `${humanize(response.status)} · exact run ${runId} is open in Runs.`
+        : `${humanize(response?.status)} · ${response?.detail ?? "The server did not admit this invocation."}`;
+    } catch (error) {
+      if (invocationGenerationAtDispatch !== invocationGeneration) return;
+      invocationOutcome = `Invocation unavailable: ${error.message}`;
+    } finally {
+      if (invocationGenerationAtDispatch === invocationGeneration) {
+        invocationInFlight = false;
+        renderInvocation();
+      }
+    }
   }
 
   async function saveDraft() {
@@ -687,6 +864,7 @@ export function createGovernedGraphWorkspace({
     renderInspector();
     renderErrors();
     renderStatusOnly();
+    renderInvocation();
   }
 
   function renderStatusOnly() {
@@ -752,6 +930,116 @@ export function createGovernedGraphWorkspace({
       : graph
         ? "Local draft · not durable"
         : "No graph loaded";
+  }
+
+  function renderInvocation() {
+    const selector = publishedInvocationSelector();
+    const preparation = invocationPreparation;
+    const choices = preparation?.eligibleGrants ?? [];
+    const canPrepare = Boolean(selector) && !invocationInFlight && !inFlight;
+    const canConfirm =
+      Boolean(selector) &&
+      !invocationInFlight &&
+      !inFlight &&
+      ((preparation?.status === "confirmation-required" &&
+        preparation.preview?.semanticHash) ||
+        (preparation?.status === "ready" && invocationGrantSelection));
+    elements.invocationPrompt.disabled =
+      !selector || invocationInFlight || inFlight;
+    elements.prepareInvokeButton.disabled = !canPrepare;
+    elements.prepareInvokeButton.textContent = invocationInFlight
+      ? "Preparing invocation"
+      : "Prepare invocation";
+    elements.confirmInvokeButton.hidden = !preparation || !canConfirm;
+    elements.confirmInvokeButton.disabled = !canConfirm;
+    elements.confirmInvokeButton.textContent =
+      preparation?.status === "confirmation-required"
+        ? "Confirm authority and invoke"
+        : "Invoke with exact grant";
+    elements.grantChoices.replaceChildren();
+    elements.grantSelection.replaceChildren();
+    elements.grantSelectionField.hidden = true;
+    if (!selector) {
+      elements.invocationStatus.textContent =
+        "Publish the exact current draft with no unsaved changes before preparing a Manual Trigger invocation.";
+      return;
+    }
+    if (!preparation) {
+      elements.invocationStatus.textContent =
+        invocationOutcome ||
+        "Prepare current server authority before invoking. The browser cannot submit actor, workspace, role, profile, publication, eligibility, or effective-authority data.";
+      return;
+    }
+    elements.invocationStatus.textContent = [
+      preparation.detail ?? "Server preparation completed.",
+      invocationOutcome,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    if (preparation.status === "confirmation-required") {
+      const preview = document.createElement("p");
+      preview.textContent =
+        "Explicit confirmation creates only the server-derived least-authority grant for this exact publication.";
+      elements.grantChoices.append(preview);
+    } else if (preparation.status === "ready") {
+      const selections = choices.map(visibleGrantSelection);
+      const selectedIndex = selections.findIndex((candidate) =>
+        sameGrantSelection(candidate, invocationGrantSelection),
+      );
+      if (selectedIndex < 0) invocationGrantSelection = selections[0] ?? null;
+      for (const [index, choice] of choices.entries()) {
+        const choiceElement = document.createElement("p");
+        choiceElement.textContent = `Eligible exact grant ${index + 1} · ${choice.grant?.grantId ?? "unavailable"} r${choice.grant?.revision ?? "unavailable"}${choice.expiresAtUtc ? ` · expires ${choice.expiresAtUtc}` : ""}`;
+        elements.grantChoices.append(choiceElement);
+      }
+      for (const [index, choice] of choices.entries()) {
+        const selection = selections[index];
+        if (!selection) continue;
+        const option = document.createElement("option");
+        option.value = String(index);
+        option.textContent = `${selection.grantId} r${selection.revision}${choice.expiresAtUtc ? ` · expires ${choice.expiresAtUtc}` : ""}`;
+        elements.grantSelection.append(option);
+      }
+      const grantOptionCount = elements.grantSelection.children.length;
+      elements.grantSelectionField.hidden = !grantOptionCount;
+      elements.grantSelection.disabled =
+        invocationInFlight || inFlight || !grantOptionCount;
+      if (grantOptionCount)
+        elements.grantSelection.value = String(
+          Math.max(
+            0,
+            selections.findIndex((candidate) =>
+              sameGrantSelection(candidate, invocationGrantSelection),
+            ),
+          ),
+        );
+    }
+  }
+
+  function visibleGrantSelection(choice) {
+    const grant = choice?.grant;
+    if (
+      typeof grant?.grantId !== "string" ||
+      !grant.grantId ||
+      !Number.isSafeInteger(grant.revision) ||
+      grant.revision < 1 ||
+      typeof grant.contentHash !== "string" ||
+      !grant.contentHash
+    )
+      return null;
+    return {
+      grantId: grant.grantId,
+      revision: grant.revision,
+      contentHash: grant.contentHash,
+    };
+  }
+
+  function sameGrantSelection(left, right) {
+    return (
+      left?.grantId === right?.grantId &&
+      left?.revision === right?.revision &&
+      left?.contentHash === right?.contentHash
+    );
   }
 
   function renderRoles() {
@@ -1673,6 +1961,51 @@ export function createGovernedGraphWorkspace({
     pendingMutation = null;
   }
 
+  function restorePendingInvocation() {
+    if (!pendingInvocationKey || !storageScope) return null;
+    try {
+      const stored = window.sessionStorage?.getItem(pendingInvocationKey);
+      if (!stored) return null;
+      const pending = JSON.parse(stored);
+      if (!isValidPendingInvocation(pending)) {
+        window.sessionStorage?.removeItem(pendingInvocationKey);
+        return null;
+      }
+      return pending;
+    } catch {
+      try {
+        window.sessionStorage?.removeItem(pendingInvocationKey);
+      } catch {
+        // A corrupt convenience record cannot authorize or identify a replay.
+      }
+      return null;
+    }
+  }
+
+  function persistPendingInvocation(pending) {
+    if (!isValidPendingInvocation(pending)) return false;
+    try {
+      if (!window.sessionStorage || !pendingInvocationKey || !storageScope)
+        return false;
+      window.sessionStorage.setItem(
+        pendingInvocationKey,
+        JSON.stringify(pending),
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function clearPendingInvocation() {
+    try {
+      window.sessionStorage?.removeItem(pendingInvocationKey);
+    } catch {
+      // A failed convenience cleanup cannot restore a cleared in-memory identity.
+    }
+    pendingInvocation = null;
+  }
+
   function restoreSelection() {
     if (!elements.graphId.value && selectionKey) {
       try {
@@ -1701,6 +2034,7 @@ export function createGovernedGraphWorkspace({
     try {
       window.sessionStorage?.removeItem(selectionKeyPrefix);
       window.sessionStorage?.removeItem(pendingMutationKeyPrefix);
+      window.sessionStorage?.removeItem(pendingInvocationKeyPrefix);
     } catch {
       // Legacy schema-1 convenience data is never migrated into a trusted workspace scope.
     }
@@ -1720,11 +2054,124 @@ export function createGovernedGraphWorkspace({
     );
   }
 
-  function invalidateGraphRead() {
+  function invalidateGraphRead({ retainPending = false } = {}) {
     graphReadGeneration++;
+    invalidateInvocation({ retainPending });
     if (activeGraphReadGeneration === null) return;
     activeGraphReadGeneration = null;
     inFlight = false;
+  }
+
+  function invalidateInvocation({ retainPending = false } = {}) {
+    invocationGeneration++;
+    invocationPreparation = null;
+    invocationInFlight = false;
+    invocationOutcome = "";
+    invocationGrantSelection = null;
+    invocationOperationId = null;
+    if (!retainPending) clearPendingInvocation();
+    return invocationGeneration;
+  }
+
+  function normalizedInvocationPrompt() {
+    return elements.invocationPrompt.value.normalize("NFC");
+  }
+
+  function createPendingInvocation(
+    selector,
+    preparation,
+    grantSelection,
+    prompt,
+    operationId,
+  ) {
+    return {
+      schemaVersion: 1,
+      workspaceScope: storageScope,
+      graphId: selector.graphId,
+      revisionId: selector.revisionId,
+      previewHash:
+        preparation.status === "confirmation-required"
+          ? (preparation.preview?.semanticHash ?? null)
+          : null,
+      grantSelection: preparation.status === "ready" ? grantSelection : null,
+      invocationPrompt: prompt,
+      operationId,
+    };
+  }
+
+  function matchesPendingInvocation(
+    pending,
+    selector,
+    preparation,
+    grantSelection,
+    prompt,
+  ) {
+    if (!isValidPendingInvocation(pending)) return false;
+    const candidate = createPendingInvocation(
+      selector,
+      preparation,
+      grantSelection,
+      prompt,
+      pending.operationId,
+    );
+    return (
+      pending.workspaceScope === candidate.workspaceScope &&
+      pending.graphId === candidate.graphId &&
+      pending.revisionId === candidate.revisionId &&
+      pending.previewHash === candidate.previewHash &&
+      sameGrantSelection(pending.grantSelection, candidate.grantSelection) &&
+      pending.invocationPrompt === candidate.invocationPrompt
+    );
+  }
+
+  function isValidPendingInvocation(pending) {
+    return (
+      pending?.schemaVersion === 1 &&
+      pending.workspaceScope === storageScope &&
+      typeof pending.graphId === "string" &&
+      pending.graphId.length > 0 &&
+      typeof pending.revisionId === "string" &&
+      pending.revisionId.length > 0 &&
+      (pending.previewHash === null || isSha256Hash(pending.previewHash)) &&
+      (pending.grantSelection === null ||
+        isVisibleGrantSelection(pending.grantSelection)) &&
+      ((pending.previewHash !== null && pending.grantSelection === null) ||
+        (pending.previewHash === null && pending.grantSelection !== null)) &&
+      typeof pending.invocationPrompt === "string" &&
+      pending.invocationPrompt === pending.invocationPrompt.normalize("NFC") &&
+      typeof pending.operationId === "string" &&
+      isGovernedInvocationOperationId(pending.operationId)
+    );
+  }
+
+  function isVisibleGrantSelection(selection) {
+    return (
+      typeof selection?.grantId === "string" &&
+      selection.grantId.length > 0 &&
+      Number.isSafeInteger(selection.revision) &&
+      selection.revision > 0 &&
+      isSha256Hash(selection.contentHash)
+    );
+  }
+
+  function isSha256Hash(value) {
+    return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value);
+  }
+
+  function isGovernedInvocationOperationId(value) {
+    return (
+      typeof value === "string" &&
+      /^governed-invoke-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        value,
+      )
+    );
+  }
+
+  function hasConclusiveInvocationOutcome(response) {
+    return (
+      (typeof response?.run?.id === "string" && response.run.id.length > 0) ||
+      conclusiveInvocationStatuses.has(response?.status)
+    );
   }
 }
 
@@ -1755,6 +2202,19 @@ function bindElements(document) {
     modelRoutingMode: document.getElementById("governedGraphModelRoutingMode"),
     fallbackProfiles: document.getElementById("governedGraphFallbackProfiles"),
     fallbackOrder: document.getElementById("governedGraphFallbackOrder"),
+    prepareInvokeButton: document.getElementById(
+      "governedGraphPrepareInvokeButton",
+    ),
+    confirmInvokeButton: document.getElementById(
+      "governedGraphConfirmInvokeButton",
+    ),
+    invocationPrompt: document.getElementById("governedGraphInvocationPrompt"),
+    invocationStatus: document.getElementById("governedGraphInvocationStatus"),
+    grantChoices: document.getElementById("governedGraphGrantChoices"),
+    grantSelection: document.getElementById("governedGraphGrantSelection"),
+    grantSelectionField: document.getElementById(
+      "governedGraphGrantSelectionField",
+    ),
     refreshButton: document.getElementById("governedGraphRefreshButton"),
     revisionId: document.getElementById("governedGraphRevisionId"),
     role: document.getElementById("governedGraphRole"),
