@@ -8,4 +8,7 @@ public enum CustomLoopRunPersistenceNativeErrorKind
 
     /// <summary>The code is the low Win32 error code carried by the failing exception.</summary>
     Win32 = 1,
+
+    /// <summary>The code is a POSIX errno value retained from a native filesystem operation.</summary>
+    PosixErrno = 2,
 }

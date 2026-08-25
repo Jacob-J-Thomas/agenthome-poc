@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Diagnostics;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Inference.Models;
@@ -687,6 +688,27 @@ public sealed class CustomLoopAdmissionServiceTests
         Assert.Contains(nameof(IOException), result.Detail, StringComparison.Ordinal);
         AssertAdmissionAudit(audit, "invalid", AuditSchema.Outcomes.Rejected);
         Assert.Equal(0, runs.UpdateCallCount);
+    }
+
+    [Fact]
+    public async Task Post_rename_canonical_directory_barrier_exception_is_unknown_and_never_reaches_provider_dispatch()
+    {
+        var definition = Definition();
+        var exception = new IOException("Canonical run publication durability could not be proved after atomic rename.");
+        exception.Data[CustomLoopRunPersistenceDiagnostic.ExceptionDataKey] = new CustomLoopRunPersistenceDiagnostic(
+            CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier,
+            CustomLoopRunPersistenceNativeErrorKind.None,
+            null);
+        var runs = new FakeRunStore { CreateException = exception };
+        var audit = new RecordingAuditLog();
+
+        var result = await Service(new FakeDefinitionStore(definition), runs, audit).AdmitAsync(Request(definition));
+
+        Assert.Equal(CustomLoopAdmissionStatus.Unknown, result.Status);
+        Assert.Null(result.Run);
+        Assert.Equal(1, runs.CreateCallCount);
+        Assert.Equal(0, runs.UpdateCallCount);
+        AssertAdmissionAudit(audit, "unknown", AuditSchema.Outcomes.Rejected);
     }
 
     [Fact]
