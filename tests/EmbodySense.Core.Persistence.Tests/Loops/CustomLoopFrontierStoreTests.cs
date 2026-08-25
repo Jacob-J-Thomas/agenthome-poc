@@ -96,7 +96,7 @@ public sealed class CustomLoopFrontierStoreTests
         var originalState = Assert.IsType<HumanReviewRunState>(original.HumanReview);
         var substitutedProvenance = HumanReviewContractHash.ApplyProvenance(originalState.Lifecycle.Provenance with { SourceId = "human-review-substitute", ProvenanceHash = string.Empty });
         var substitutedLifecycle = HumanReviewContractHash.ApplyLifecycle(originalState.Lifecycle with { Provenance = substitutedProvenance, LifecycleHash = string.Empty });
-        var substituted = original with { HumanReview = originalState with { Lifecycle = substitutedLifecycle } };
+        var substituted = original with { HumanReview = originalState with { Lifecycle = substitutedLifecycle, LifecycleHistory = [substitutedLifecycle] } };
         var laterSubstituted = substituted with { LifecycleVersion = substituted.LifecycleVersion + 1, UpdatedAtUtc = substituted.UpdatedAtUtc.AddTicks(1) };
 
         Assert.True(CustomLoopRunValidator.Validate(substituted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(substituted).Errors));
@@ -300,6 +300,7 @@ public sealed class CustomLoopFrontierStoreTests
     [InlineData("lifecycle-omitted")]
     [InlineData("evidence-omitted")]
     [InlineData("event-evidence-payload-omitted")]
+    [InlineData("event-admission-marker-all-null")]
     [InlineData("binding-mismatch")]
     [InlineData("event-evidence-mismatch")]
     [InlineData("event-evidence-payload-mismatch")]
@@ -331,6 +332,9 @@ public sealed class CustomLoopFrontierStoreTests
             case "event-evidence-payload-omitted":
                 root["run"]!["events"]!.AsArray()[^1]!.AsObject().Remove("humanReviewEvidence");
                 break;
+            case "event-admission-marker-all-null":
+                AppendNullHumanReviewEventMarker(root, "humanReviewRequestAdmitted", "orphan-human-review-admission");
+                break;
             case "binding-mismatch":
                 humanReview["request"]!["binding"]!["graphId"] = "other-graph";
                 break;
@@ -346,7 +350,8 @@ public sealed class CustomLoopFrontierStoreTests
 
         await File.WriteAllTextAsync(artifactPath, root.ToJsonString() + "\n");
         using var restarted = new CustomLoopRunStore(paths);
-        await Assert.ThrowsAsync<FormatException>(() => restarted.GetAsync(persisted.Id));
+        var exception = await Assert.ThrowsAsync<FormatException>(() => restarted.GetAsync(persisted.Id));
+        if (corruption == "event-admission-marker-all-null") Assert.Contains("Each Human Review event must carry its exact retained evidence", exception.Message);
     }
 
     [Fact]
@@ -938,6 +943,384 @@ public sealed class CustomLoopFrontierStoreTests
         return running;
     }
 
+    [Fact]
+    public async Task Post_admission_decision_state_matrix_round_trips_through_the_real_store_and_restart()
+    {
+        foreach (var scenario in new[]
+        {
+            HumanReviewDecisionScenario.RequestInformation,
+            HumanReviewDecisionScenario.Approve,
+            HumanReviewDecisionScenario.Reject,
+            HumanReviewDecisionScenario.Cancel,
+            HumanReviewDecisionScenario.Denied,
+            HumanReviewDecisionScenario.Conflict,
+            HumanReviewDecisionScenario.Expired,
+        })
+        {
+            using var workspace = new TestWorkspace();
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var admitted = await PersistHumanReviewAdmissionAsync(paths, "decision-" + scenario.ToString().ToLowerInvariant());
+            var candidate = CreateDecisionState(admitted, scenario);
+
+            Assert.True(CustomLoopRunValidator.Validate(candidate).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(candidate).Errors));
+            using (var store = new CustomLoopRunStore(paths))
+            {
+                var stored = await store.UpdateAsync(candidate, admitted.LifecycleVersion);
+                Assert.Equal(CustomLoopRunStoreStatus.Updated, stored.Status);
+            }
+
+            using var restarted = new CustomLoopRunStore(paths);
+            var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(admitted.Id));
+            Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(persisted).Errors));
+            Assert.Equal(CustomLoopRunArtifactSerializer.Serialize(candidate), CustomLoopRunArtifactSerializer.Serialize(persisted));
+            Assert.Equal(scenario == HumanReviewDecisionScenario.Approve, persisted.HumanReview!.ContinuationReservation is not null);
+        }
+    }
+
+    [Fact]
+    public async Task Accepted_approval_retains_a_later_conflict_audit_without_reopening_the_terminal_lifecycle()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await PersistHumanReviewAdmissionAsync(paths, "approval-conflict-audit");
+        var approval = CreateDecisionState(admitted, HumanReviewDecisionScenario.Approve);
+
+        CustomLoopRunRecord approved;
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            var stored = await store.UpdateAsync(approval, admitted.LifecycleVersion);
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, stored.Status);
+            approved = Assert.IsType<CustomLoopRunRecord>(stored.Run);
+        }
+
+        var candidate = CreateDecisionState(approved, HumanReviewDecisionScenario.Conflict);
+        Assert.True(CustomLoopRunValidator.ValidateUpdate(approved, candidate).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.ValidateUpdate(approved, candidate).Errors));
+        Assert.True(CustomLoopRunValidator.HasExactDurableEventPrefix(approved, candidate));
+        Assert.Equal(approved.HumanReview!.Lifecycle.LifecycleHash, candidate.HumanReview!.Lifecycle.LifecycleHash);
+        Assert.Equal(approved.HumanReview.LifecycleHistory.Select(item => item.LifecycleHash), candidate.HumanReview.LifecycleHistory.Select(item => item.LifecycleHash));
+        Assert.Equal(approved.HumanReview.ContinuationReservation!.ReservationHash, candidate.HumanReview.ContinuationReservation!.ReservationHash);
+        Assert.Equal(
+            [HumanReviewDecisionOperationDisposition.Accepted, HumanReviewDecisionOperationDisposition.Conflict],
+            candidate.HumanReview.OperationReceipts.Select(receipt => receipt.Disposition));
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(candidate, approved.LifecycleVersion)).Status);
+        }
+        using var restarted = new CustomLoopRunStore(paths);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(candidate.Id));
+        Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(persisted).Errors));
+        Assert.Equal(HumanReviewLifecycleStatus.Approved, persisted.HumanReview!.Lifecycle.Status);
+        Assert.Equal(HumanReviewDecisionOperationDisposition.Conflict, persisted.HumanReview.OperationReceipts[^1].Disposition);
+    }
+
+    [Fact]
+    public async Task Two_distinct_expired_operations_share_one_expired_lifecycle_across_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await PersistHumanReviewAdmissionAsync(paths, "two-expired-operations");
+        var candidate = CreateDecisionState(admitted, HumanReviewDecisionScenario.Expired, HumanReviewDecisionScenario.Expired);
+
+        Assert.True(CustomLoopRunValidator.Validate(candidate).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(candidate).Errors));
+        Assert.Equal(2, candidate.HumanReview!.OperationReceipts.Length);
+        Assert.Equal(2, candidate.HumanReview.OperationReceipts.Select(receipt => receipt.DecisionOperationId).Distinct(StringComparer.Ordinal).Count());
+        Assert.All(candidate.HumanReview.OperationReceipts, receipt => Assert.Equal(HumanReviewDecisionOperationDisposition.Expired, receipt.Disposition));
+        Assert.Equal(2, candidate.HumanReview.LifecycleHistory.Length);
+        Assert.Equal(HumanReviewLifecycleStatus.Expired, candidate.HumanReview.Lifecycle.Status);
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(candidate, admitted.LifecycleVersion)).Status);
+        }
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(candidate.Id));
+        Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(persisted).Errors));
+        Assert.Equal(2, persisted.HumanReview!.OperationReceipts.Length);
+        Assert.Equal(2, persisted.HumanReview.LifecycleHistory.Length);
+    }
+
+    [Fact]
+    public async Task Lifecycle_history_reserves_the_expiry_slot_after_the_maximum_accepted_information_requests()
+    {
+        using var workspace = new TestWorkspace();
+        var admitted = await PersistHumanReviewAdmissionAsync(new WorkspacePaths(workspace.RootPath), "lifecycle-history-boundary");
+        var atLimit = CreateDecisionState(admitted, [.. Enumerable.Repeat(HumanReviewDecisionScenario.RequestInformation, HumanReviewContractLimits.MaxAcceptedDecisions), HumanReviewDecisionScenario.Expired]);
+        var overLimit = CreateDecisionState(admitted, [.. Enumerable.Repeat(HumanReviewDecisionScenario.RequestInformation, HumanReviewContractLimits.MaxAcceptedDecisions + 1), HumanReviewDecisionScenario.Expired]);
+        var overLimitValidation = CustomLoopRunValidator.Validate(overLimit);
+
+        Assert.Equal(HumanReviewContractLimits.MaxLifecycleHistory, atLimit.HumanReview!.LifecycleHistory.Length);
+        Assert.True(CustomLoopRunValidator.Validate(atLimit).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(atLimit).Errors));
+        Assert.Equal(HumanReviewContractLimits.MaxLifecycleHistory + 1, overLimit.HumanReview!.LifecycleHistory.Length);
+        Assert.Contains(overLimitValidation.Errors, error => error.Code == "human_review_lifecycle_history_limit");
+    }
+
+    [Fact]
+    public async Task Decision_state_rejects_cross_plane_substitution_duplicate_identity_and_terminal_history_rewrites()
+    {
+        using var workspace = new TestWorkspace();
+        var admitted = await PersistHumanReviewAdmissionAsync(new WorkspacePaths(workspace.RootPath), "decision-invalid");
+        var approved = CreateDecisionState(admitted, HumanReviewDecisionScenario.Approve);
+        var approvedState = Assert.IsType<HumanReviewRunState>(approved.HumanReview);
+        var approval = Assert.IsType<HumanReviewDecision>(approvedState.AcceptedTerminalDecision);
+        var receipt = approvedState.OperationReceipts.Single();
+        var copiedRejectAsApproval = HumanReviewContractHash.ApplyDecision(HumanReviewTestDataDecision(approvedState.Request, HumanReviewDecisionKind.Reject, "copied-terminal", "copied-operation", approved.UpdatedAtUtc.AddSeconds(-4))) with
+        {
+            Kind = HumanReviewDecisionKind.Approve,
+            DecisionHash = HumanReviewHash('9'),
+        };
+        var terminalSubstitution = approved with
+        {
+            HumanReview = approvedState with
+            {
+                AcceptedTerminalDecision = copiedRejectAsApproval,
+                ContinuationReservation = approvedState.ContinuationReservation! with { Decision = new HumanReviewDecisionReference(copiedRejectAsApproval.DecisionId, copiedRejectAsApproval.DecisionOperationId, copiedRejectAsApproval.Kind, copiedRejectAsApproval.DecisionHash) },
+            },
+        };
+        var duplicateEvidence = approved with { HumanReview = approvedState with { Evidence = [approvedState.Evidence[0], approvedState.Evidence[0], .. approvedState.Evidence.Skip(2)] } };
+        var duplicateReceipt = approved with { HumanReview = approvedState with { OperationReceipts = [receipt, receipt] } };
+        var orderedLedger = CreateDecisionState(admitted, HumanReviewDecisionScenario.RequestInformation, HumanReviewDecisionScenario.Conflict);
+        var orderedLedgerState = Assert.IsType<HumanReviewRunState>(orderedLedger.HumanReview);
+        var reorderedReceiptLedger = orderedLedger with { HumanReview = orderedLedgerState with { OperationReceipts = [orderedLedgerState.OperationReceipts[1], orderedLedgerState.OperationReceipts[0]] } };
+        var informationAfterTerminal = CreateDecisionState(admitted, HumanReviewDecisionScenario.Reject, HumanReviewDecisionScenario.RequestInformation);
+        var informationAfterApproval = CreateDecisionState(admitted, HumanReviewDecisionScenario.Approve, HumanReviewDecisionScenario.RequestInformation);
+        var mismatchedEvidenceDisposition = approved with
+        {
+            HumanReview = approvedState with
+            {
+                Evidence = [approvedState.Evidence[0], HumanReviewContractHash.ApplyEvidence(approvedState.Evidence[1] with { Kind = HumanReviewEvidenceKind.InformationRequested, EvidenceHash = string.Empty }), .. approvedState.Evidence.Skip(2)],
+            },
+        };
+        var earlyLifecycleAtUtc = approvedState.Evidence[1].RecordedAtUtc.AddTicks(-1);
+        var earlyLifecycle = HumanReviewContractHash.ApplyLifecycle(approvedState.Lifecycle with
+        {
+            UpdatedAtUtc = earlyLifecycleAtUtc,
+            Provenance = HumanReviewContractHash.ApplyProvenance(approvedState.Lifecycle.Provenance with { ObservedAtUtc = earlyLifecycleAtUtc, ProvenanceHash = string.Empty }),
+            LifecycleHash = string.Empty,
+        });
+        var lifecycleBeforeEvidence = approved with { HumanReview = approvedState with { Lifecycle = earlyLifecycle, LifecycleHistory = [approvedState.LifecycleHistory[0], earlyLifecycle] } };
+        var defaultReceiptArray = approved with { HumanReview = approvedState with { OperationReceipts = default } };
+        var defaultEvidenceArray = approved with { HumanReview = approvedState with { Evidence = default } };
+        var combinedMalformedState = approved with
+        {
+            HumanReview = approvedState with
+            {
+                Lifecycle = null!,
+                LifecycleHistory = default,
+                OperationReceipts = default,
+                AcceptedDecisions = default,
+            },
+        };
+        var allDefaultMalformedState = combinedMalformedState with { HumanReview = combinedMalformedState.HumanReview! with { Evidence = default } };
+        var operationOnAdmissionEvidence = approved with
+        {
+            HumanReview = approvedState with
+            {
+                Evidence = [HumanReviewContractHash.ApplyEvidence(approvedState.Evidence[0] with { DecisionOperation = approvedState.Evidence[1].DecisionOperation, EvidenceHash = string.Empty }), .. approvedState.Evidence.Skip(1)],
+            },
+        };
+        var eventWithoutEvidence = approved with { Events = [.. approved.Events, approved.Events[^1] with { Sequence = approved.Events[^1].Sequence + 1, EventId = "orphan-review-reference", HumanReviewEvidence = null }] };
+
+        Assert.True(CustomLoopRunValidator.Validate(approved).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(approved).Errors));
+        Assert.False(CustomLoopRunValidator.Validate(terminalSubstitution).IsValid);
+        Assert.False(CustomLoopRunValidator.Validate(duplicateEvidence).IsValid);
+        Assert.False(CustomLoopRunValidator.Validate(duplicateReceipt).IsValid);
+        Assert.Contains(CustomLoopRunValidator.Validate(reorderedReceiptLedger).Errors, error => error.Code == "human_review_receipt_evidence_order");
+        Assert.False(CustomLoopRunValidator.Validate(informationAfterTerminal).IsValid);
+        Assert.False(CustomLoopRunValidator.Validate(informationAfterApproval).IsValid);
+        Assert.False(CustomLoopRunValidator.Validate(mismatchedEvidenceDisposition).IsValid);
+        Assert.False(CustomLoopRunValidator.Validate(lifecycleBeforeEvidence).IsValid);
+        Assert.False(CustomLoopRunValidator.Validate(defaultReceiptArray).IsValid);
+        Assert.Null(Record.Exception(() => CustomLoopRunValidator.Validate(defaultEvidenceArray)));
+        Assert.False(CustomLoopRunValidator.Validate(defaultEvidenceArray).IsValid);
+        Assert.Null(Record.Exception(() => CustomLoopRunValidator.Validate(combinedMalformedState)));
+        Assert.False(CustomLoopRunValidator.Validate(combinedMalformedState).IsValid);
+        Assert.Null(Record.Exception(() => CustomLoopRunValidator.Validate(allDefaultMalformedState)));
+        Assert.False(CustomLoopRunValidator.Validate(allDefaultMalformedState).IsValid);
+        using (var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)))
+        {
+            await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(combinedMalformedState, admitted.LifecycleVersion));
+        }
+        Assert.False(CustomLoopRunValidator.Validate(operationOnAdmissionEvidence).IsValid);
+        Assert.False(CustomLoopRunValidator.Validate(eventWithoutEvidence).IsValid);
+        Assert.NotEqual(approval.DecisionHash, copiedRejectAsApproval.DecisionHash);
+    }
+
+    [Fact]
+    public async Task Decision_state_requires_exact_durable_versions_and_allows_only_valid_later_prefixes()
+    {
+        using var workspace = new TestWorkspace();
+        var admitted = await PersistHumanReviewAdmissionAsync(new WorkspacePaths(workspace.RootPath), "decision-prefix");
+        var prefix = CreateDecisionState(admitted, HumanReviewDecisionScenario.RequestInformation);
+        var laterBase = CreateDecisionState(admitted, HumanReviewDecisionScenario.RequestInformation, HumanReviewDecisionScenario.Conflict);
+        var later = laterBase with { LifecycleVersion = prefix.LifecycleVersion + 1 };
+        var state = Assert.IsType<HumanReviewRunState>(prefix.HumanReview);
+        var substituted = prefix with
+        {
+            HumanReview = state with
+            {
+                OperationReceipts = [HumanReviewContractHash.ApplyDecisionOperationReceipt(state.OperationReceipts[0] with { ProposalHash = HumanReviewHash('9'), ReceiptHash = string.Empty })],
+            },
+        };
+        var eventSubstitution = prefix with
+        {
+            Events = [.. prefix.Events.Take(prefix.Events.Length - 1), prefix.Events[^1] with { HumanReviewDecisionOperation = new HumanReviewDecisionOperationReference("substituted-operation", HumanReviewHash('a'), HumanReviewDecisionOperationDisposition.InformationRequested, HumanReviewHash('b')) }],
+        };
+
+        Assert.True(CustomLoopRunValidator.Validate(prefix).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(prefix).Errors));
+        Assert.True(CustomLoopRunValidator.Validate(later).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(later).Errors));
+        Assert.True(CustomLoopRunValidator.HasSameDurableVersion(prefix, prefix with { Events = prefix.Events.Select(item => item with { ContextBlocks = [.. item.ContextBlocks] }).ToArray() }));
+        Assert.True(CustomLoopRunValidator.HasExactDurableEventPrefix(prefix, later));
+        Assert.False(CustomLoopRunValidator.HasSameDurableVersion(prefix, substituted));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(prefix, substituted));
+        Assert.False(CustomLoopRunValidator.HasSameDurableVersion(prefix, eventSubstitution));
+    }
+
+    [Theory]
+    [InlineData("lifecycle-history-null")]
+    [InlineData("lifecycle-history-item-null")]
+    [InlineData("receipts-null")]
+    [InlineData("accepted-decisions-null")]
+    [InlineData("evidence-null")]
+    [InlineData("terminal-omitted")]
+    [InlineData("reservation-omitted")]
+    [InlineData("operation-reference-omitted")]
+    [InlineData("reservation-reference-omitted")]
+    [InlineData("event-operation-reference-omitted")]
+    [InlineData("event-reservation-reference-omitted")]
+    [InlineData("event-decision-marker-all-null")]
+    [InlineData("event-reservation-marker-all-null")]
+    [InlineData("unknown-receipt-property")]
+    [InlineData("reordered-receipt")]
+    [InlineData("receipt-hash")]
+    public async Task Restart_rejects_missing_null_corrupt_or_reordered_decision_state_fields(string corruption)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var identity = corruption switch
+        {
+            "event-operation-reference-omitted" => "event-operation-reference",
+            "event-reservation-reference-omitted" => "event-reservation-reference",
+            _ => "decision-codec-" + corruption,
+        };
+        var admitted = await PersistHumanReviewAdmissionAsync(paths, identity);
+        var candidate = CreateDecisionState(admitted, HumanReviewDecisionScenario.Approve);
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(candidate, admitted.LifecycleVersion)).Status);
+        }
+
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, candidate.LoopId, candidate.Id + ".json");
+        var root = JsonNode.Parse(await File.ReadAllTextAsync(artifactPath))!.AsObject();
+        var state = root["run"]!["humanReview"]!.AsObject();
+        switch (corruption)
+        {
+            case "lifecycle-history-null": state["lifecycleHistory"] = null; break;
+            case "lifecycle-history-item-null": state["lifecycleHistory"] = new JsonArray((JsonNode?)null); break;
+            case "receipts-null": state["operationReceipts"] = null; break;
+            case "accepted-decisions-null": state["acceptedDecisions"] = null; break;
+            case "evidence-null": state["evidence"] = null; break;
+            case "terminal-omitted": state.Remove("acceptedTerminalDecision"); break;
+            case "reservation-omitted": state.Remove("continuationReservation"); break;
+            case "operation-reference-omitted": state["evidence"]!.AsArray()[1]!.AsObject().Remove("decisionOperation"); break;
+            case "reservation-reference-omitted": state["evidence"]!.AsArray()[2]!.AsObject().Remove("continuationReservation"); break;
+            case "event-operation-reference-omitted": root["run"]!["events"]!.AsArray().Single(item => item!["humanReviewDecisionOperation"] is not null)!.AsObject().Remove("humanReviewDecisionOperation"); break;
+            case "event-reservation-reference-omitted": root["run"]!["events"]!.AsArray().Single(item => item!["humanReviewContinuationReservation"] is not null)!.AsObject().Remove("humanReviewContinuationReservation"); break;
+            case "event-decision-marker-all-null": AppendNullHumanReviewEventMarker(root, "humanReviewDecisionOperationRecorded", "orphan-human-review-decision"); break;
+            case "event-reservation-marker-all-null": AppendNullHumanReviewEventMarker(root, "humanReviewContinuationReserved", "orphan-human-review-reservation"); break;
+            case "unknown-receipt-property": state["operationReceipts"]!.AsArray()[0]!["unexpected"] = true; break;
+            case "reordered-receipt": state["operationReceipts"]![0] = ReverseProperties(state["operationReceipts"]!.AsArray()[0]!.AsObject()); break;
+            case "receipt-hash": state["operationReceipts"]!.AsArray()[0]!["receiptHash"] = HumanReviewHash('9'); break;
+            default: throw new ArgumentOutOfRangeException(nameof(corruption));
+        }
+
+        await File.WriteAllTextAsync(artifactPath, root.ToJsonString() + "\n");
+        using var restarted = new CustomLoopRunStore(paths);
+        var exception = await Assert.ThrowsAsync<FormatException>(() => restarted.GetAsync(candidate.Id));
+        if (corruption.EndsWith("marker-all-null", StringComparison.Ordinal)) Assert.Contains("Each Human Review event must carry its exact retained evidence", exception.Message);
+    }
+
+    [Fact]
+    public async Task Initial_admission_requires_every_decision_state_property_but_retains_explicit_null_terminal_and_reservation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await PersistHumanReviewAdmissionAsync(paths, "decision-required-properties");
+        var encoded = CustomLoopRunArtifactSerializer.Serialize(admitted);
+        var root = JsonNode.Parse(encoded)!.AsObject();
+        var state = root["run"]!["humanReview"]!.AsObject();
+
+        Assert.NotNull(state["lifecycleHistory"]);
+        Assert.NotNull(state["operationReceipts"]);
+        Assert.NotNull(state["acceptedDecisions"]);
+        Assert.Null(state["acceptedTerminalDecision"]);
+        Assert.Null(state["continuationReservation"]);
+        Assert.Equal(encoded, CustomLoopRunArtifactSerializer.Serialize(CustomLoopRunArtifactSerializer.Deserialize(encoded)));
+
+        foreach (var property in new[] { "evidence", "lifecycleHistory", "operationReceipts", "acceptedDecisions", "acceptedTerminalDecision", "continuationReservation" })
+        {
+            var omitted = JsonNode.Parse(encoded)!.AsObject();
+            Assert.True(omitted["run"]!["humanReview"]!.AsObject().Remove(property));
+            Assert.Throws<FormatException>(() => Deserialize(omitted));
+        }
+
+        foreach (var property in new[] { "evidence", "lifecycleHistory", "operationReceipts", "acceptedDecisions" })
+        {
+            var explicitNull = JsonNode.Parse(encoded)!.AsObject();
+            explicitNull["run"]!["humanReview"]![property] = null;
+            Assert.Throws<FormatException>(() => Deserialize(explicitNull));
+        }
+    }
+
+    [Fact]
+    public async Task Decision_state_snapshots_hostile_immutable_arrays_and_returned_buffers_across_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await PersistHumanReviewAdmissionAsync(paths, "decision-defensive");
+        var candidate = CreateDecisionState(admitted, HumanReviewDecisionScenario.Approve);
+        var state = Assert.IsType<HumanReviewRunState>(candidate.HumanReview);
+        var receiptBacking = state.OperationReceipts.ToArray();
+        var decisionBacking = state.AcceptedDecisions.ToArray();
+        var evidenceBacking = state.Evidence.ToArray();
+        var lifecycleHistoryBacking = state.LifecycleHistory.ToArray();
+        candidate = candidate with
+        {
+            HumanReview = state with
+            {
+                OperationReceipts = ImmutableCollectionsMarshal.AsImmutableArray(receiptBacking),
+                AcceptedDecisions = ImmutableCollectionsMarshal.AsImmutableArray(decisionBacking),
+                Evidence = ImmutableCollectionsMarshal.AsImmutableArray(evidenceBacking),
+                LifecycleHistory = ImmutableCollectionsMarshal.AsImmutableArray(lifecycleHistoryBacking),
+            },
+        };
+        var expectedReceiptHash = candidate.HumanReview.OperationReceipts[0].ReceiptHash;
+        var expectedDecisionHash = candidate.HumanReview.AcceptedDecisions[0].DecisionHash;
+        var expectedEvidenceHash = candidate.HumanReview.Evidence[^1].EvidenceHash;
+        var expectedLifecycleHash = candidate.HumanReview.LifecycleHistory[^1].LifecycleHash;
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            var updated = await store.UpdateAsync(candidate, admitted.LifecycleVersion);
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, updated.Status);
+            var returned = Assert.IsType<CustomLoopRunRecord>(updated.Run);
+            var returnedState = Assert.IsType<HumanReviewRunState>(returned.HumanReview);
+            ImmutableCollectionsMarshal.AsArray(returnedState.OperationReceipts)![0] = returnedState.OperationReceipts[0] with { ReceiptHash = HumanReviewHash('9') };
+            ImmutableCollectionsMarshal.AsArray(returnedState.AcceptedDecisions)![0] = returnedState.AcceptedDecisions[0] with { DecisionHash = HumanReviewHash('9') };
+            ImmutableCollectionsMarshal.AsArray(returnedState.Evidence)![^1] = returnedState.Evidence[^1] with { EvidenceHash = HumanReviewHash('9') };
+            ImmutableCollectionsMarshal.AsArray(returnedState.LifecycleHistory)![^1] = returnedState.LifecycleHistory[^1] with { LifecycleHash = HumanReviewHash('9') };
+        }
+        receiptBacking[0] = receiptBacking[0] with { ReceiptHash = HumanReviewHash('8') };
+        decisionBacking[0] = decisionBacking[0] with { DecisionHash = HumanReviewHash('8') };
+        evidenceBacking[^1] = evidenceBacking[^1] with { EvidenceHash = HumanReviewHash('8') };
+        lifecycleHistoryBacking[^1] = lifecycleHistoryBacking[^1] with { LifecycleHash = HumanReviewHash('8') };
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(candidate.Id));
+        Assert.Equal(expectedReceiptHash, persisted.HumanReview!.OperationReceipts[0].ReceiptHash);
+        Assert.Equal(expectedDecisionHash, persisted.HumanReview.AcceptedDecisions[0].DecisionHash);
+        Assert.Equal(expectedEvidenceHash, persisted.HumanReview.Evidence[^1].EvidenceHash);
+        Assert.Equal(expectedLifecycleHash, persisted.HumanReview.LifecycleHistory[^1].LifecycleHash);
+    }
+
     private static async Task<CustomLoopRunRecord> PersistHumanReviewAdmissionAsync(WorkspacePaths paths, string identity)
     {
         var predecessor = await PersistRealRunningPredecessorAsync(paths);
@@ -948,6 +1331,256 @@ public sealed class CustomLoopFrontierStoreTests
         using var store = new CustomLoopRunStore(paths);
         var result = await new HumanReviewAdmissionService(store).AdmitAsync(new HumanReviewAdmissionCommand(predecessor.Id, predecessor.LifecycleVersion, request, blocked));
         return Assert.IsType<CustomLoopRunRecord>(result.Run);
+    }
+
+    private static CustomLoopRunRecord CreateDecisionState(CustomLoopRunRecord admitted, params HumanReviewDecisionScenario[] scenarios)
+    {
+        var state = Assert.IsType<HumanReviewRunState>(admitted.HumanReview);
+        var request = state.Request;
+        var requestReference = new HumanReviewRequestReference(request.RequestId, request.RequestHash);
+        var evidence = state.Evidence.ToList();
+        var receipts = state.OperationReceipts.ToList();
+        var decisions = state.AcceptedDecisions.ToList();
+        var lifecycleHistory = state.LifecycleHistory.ToList();
+        var events = admitted.Events.ToList();
+        var timestamp = admitted.UpdatedAtUtc;
+        var terminal = state.AcceptedTerminalDecision;
+        var reservation = state.ContinuationReservation;
+
+        for (var index = 0; index < scenarios.Length; index++)
+        {
+            var scenario = scenarios[index];
+            timestamp = scenario == HumanReviewDecisionScenario.Expired && timestamp < request.Timing.ExpiresAtUtc
+                ? request.Timing.ExpiresAtUtc
+                : timestamp.AddMinutes(1);
+            var operationNumber = receipts.Count + 1;
+            var decisionKind = ScenarioDecisionKind(scenario);
+            var decision = decisionKind is null ? null : HumanReviewTestDataDecision(request, decisionKind.Value, "decision-" + operationNumber, "decision-operation-" + operationNumber, timestamp);
+            var proposal = HumanReviewContractHash.ApplyDecisionProposal(new HumanReviewDecisionProposal(
+                HumanReviewDecisionProposal.CurrentSchemaVersion,
+                "decision-operation-" + operationNumber,
+                decisionKind ?? HumanReviewDecisionKind.Approve,
+                decisionKind == HumanReviewDecisionKind.RequestInformation ? "A redacted clarification is required." : null,
+                string.Empty));
+            var disposition = ScenarioDisposition(scenario);
+            var receipt = HumanReviewContractHash.ApplyDecisionOperationReceipt(new HumanReviewDecisionOperationReceipt(
+                HumanReviewDecisionOperationReceipt.CurrentSchemaVersion,
+                proposal.DecisionOperationId,
+                proposal.ProposalHash,
+                requestReference,
+                disposition,
+                decision is null ? null : DecisionReference(decision),
+                timestamp,
+                HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-decision-store", "receipt-" + operationNumber, timestamp, string.Empty)),
+                string.Empty));
+            receipts.Add(receipt);
+            var operation = new HumanReviewDecisionOperationReference(receipt.DecisionOperationId, receipt.ProposalHash, receipt.Disposition, receipt.ReceiptHash);
+            var evidenceKind = ScenarioEvidenceKind(scenario);
+            var decisionEvidence = HumanReviewContractHash.ApplyEvidence(new HumanReviewEvidence(
+                HumanReviewEvidence.CurrentSchemaVersion,
+                "decision-evidence-" + operationNumber,
+                requestReference,
+                evidenceKind,
+                decision is null ? null : DecisionReference(decision),
+                timestamp,
+                HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Coordinator, "human-review-decision-store", "evidence-" + operationNumber, timestamp, string.Empty)),
+                ImmutableArray<HumanReviewRedactedPreview>.Empty,
+                evidence[^1].EvidenceHash,
+                string.Empty)
+            {
+                DecisionOperation = operation,
+            });
+            evidence.Add(decisionEvidence);
+            events.Add(CreateHumanReviewStateEvent(events[^1], decisionEvidence, operation, null));
+
+            if (decision is not null)
+            {
+                decisions.Add(decision);
+                if (decision.Kind != HumanReviewDecisionKind.RequestInformation)
+                {
+                    terminal ??= decision;
+                }
+
+                lifecycleHistory.Add(CreateDecisionLifecycle(requestReference, lifecycleHistory[^1], decision, timestamp));
+            }
+            else if (scenario == HumanReviewDecisionScenario.Expired && terminal is null && lifecycleHistory.All(item => item.Status != HumanReviewLifecycleStatus.Expired))
+            {
+                lifecycleHistory.Add(CreateExpiredLifecycle(requestReference, lifecycleHistory[^1], timestamp));
+            }
+        }
+
+        if (terminal?.Kind == HumanReviewDecisionKind.Approve && reservation is null)
+        {
+            timestamp = timestamp.AddMinutes(1);
+            reservation = HumanReviewContractHash.ApplyContinuationReservation(new HumanReviewContinuationReservation(
+                HumanReviewContinuationReservation.CurrentSchemaVersion,
+                "continuation-reservation-one",
+                requestReference,
+                DecisionReference(terminal),
+                timestamp,
+                HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Coordinator, "human-review-decision-store", "reservation-one", timestamp, string.Empty)),
+                string.Empty));
+            var reservationReference = new HumanReviewContinuationReservationReference(reservation.ReservationId, reservation.ReservationHash);
+            var reservationEvidence = HumanReviewContractHash.ApplyEvidence(new HumanReviewEvidence(
+                HumanReviewEvidence.CurrentSchemaVersion,
+                "reservation-evidence-one",
+                requestReference,
+                HumanReviewEvidenceKind.ContinuationReserved,
+                DecisionReference(terminal),
+                timestamp,
+                HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Coordinator, "human-review-decision-store", "reservation-evidence-one", timestamp, string.Empty)),
+                ImmutableArray<HumanReviewRedactedPreview>.Empty,
+                evidence[^1].EvidenceHash,
+                string.Empty)
+            {
+                ContinuationReservation = reservationReference,
+            });
+            evidence.Add(reservationEvidence);
+            events.Add(CreateHumanReviewStateEvent(events[^1], reservationEvidence, null, reservationReference));
+        }
+
+        foreach (var item in evidence)
+        {
+            Assert.True(HumanReviewContractValidator.ValidateEvidence(request, item).IsValid, item.Kind + ": " + string.Join(Environment.NewLine, HumanReviewContractValidator.ValidateEvidence(request, item).Errors));
+        }
+
+        return admitted with
+        {
+            LifecycleVersion = admitted.LifecycleVersion + 1,
+            UpdatedAtUtc = timestamp,
+            HumanReview = state with
+            {
+                Lifecycle = lifecycleHistory[^1],
+                LifecycleHistory = lifecycleHistory.ToImmutableArray(),
+                OperationReceipts = receipts.ToImmutableArray(),
+                AcceptedDecisions = decisions.ToImmutableArray(),
+                AcceptedTerminalDecision = terminal,
+                ContinuationReservation = reservation,
+                Evidence = evidence.ToImmutableArray(),
+            },
+            Events = events.ToArray(),
+        };
+    }
+
+    private static HumanReviewDecision HumanReviewTestDataDecision(HumanReviewRequest request, HumanReviewDecisionKind kind, string decisionId, string operationId, DateTimeOffset timestamp)
+        => HumanReviewContractHash.ApplyDecision(new HumanReviewDecision(
+            HumanReviewDecision.CurrentSchemaVersion,
+            decisionId,
+            operationId,
+            new HumanReviewRequestReference(request.RequestId, request.RequestHash),
+            kind,
+            "reviewer-one",
+            "reviewer-role-one",
+            ImmutableArray.Create("scope-alpha", "scope-beta"),
+            timestamp,
+            kind == HumanReviewDecisionKind.RequestInformation ? "A redacted clarification is required." : null,
+            HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.AuthenticatedReviewer, "reviewer-one", decisionId, timestamp, string.Empty)),
+            string.Empty));
+
+    private static HumanReviewLifecycle CreateDecisionLifecycle(HumanReviewRequestReference request, HumanReviewLifecycle previous, HumanReviewDecision decision, DateTimeOffset timestamp)
+    {
+        var status = decision.Kind switch
+        {
+            HumanReviewDecisionKind.RequestInformation => HumanReviewLifecycleStatus.AwaitingInformation,
+            HumanReviewDecisionKind.Approve => HumanReviewLifecycleStatus.Approved,
+            HumanReviewDecisionKind.Reject => HumanReviewLifecycleStatus.Rejected,
+            HumanReviewDecisionKind.Cancel => HumanReviewLifecycleStatus.Cancelled,
+            _ => throw new ArgumentOutOfRangeException(nameof(decision)),
+        };
+        return HumanReviewContractHash.ApplyLifecycle(new HumanReviewLifecycle(
+            HumanReviewLifecycle.CurrentSchemaVersion,
+            request,
+            status,
+            previous.LifecycleVersion + 1,
+            timestamp,
+            DecisionReference(decision),
+            HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-decision-store", "lifecycle-" + decision.DecisionId, timestamp, string.Empty)),
+            previous.LifecycleHash,
+            string.Empty));
+    }
+
+    private static HumanReviewLifecycle CreateExpiredLifecycle(HumanReviewRequestReference request, HumanReviewLifecycle previous, DateTimeOffset timestamp)
+        => HumanReviewContractHash.ApplyLifecycle(new HumanReviewLifecycle(
+            HumanReviewLifecycle.CurrentSchemaVersion,
+            request,
+            HumanReviewLifecycleStatus.Expired,
+            previous.LifecycleVersion + 1,
+            timestamp,
+            null,
+            HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-decision-store", "lifecycle-expired", timestamp, string.Empty)),
+            previous.LifecycleHash,
+            string.Empty));
+
+    private static void AppendNullHumanReviewEventMarker(JsonObject root, string kind, string eventId)
+    {
+        var events = root["run"]!["events"]!.AsArray();
+        var marker = events[^1]!.DeepClone().AsObject();
+        marker["sequence"] = marker["sequence"]!.GetValue<long>() + 1;
+        marker["eventId"] = eventId;
+        marker["kind"] = kind;
+        marker["humanReviewEvidence"] = null;
+        marker["humanReviewDecisionOperation"] = null;
+        marker["humanReviewContinuationReservation"] = null;
+        events.Add(marker);
+    }
+
+    private static CustomLoopRunEvent CreateHumanReviewStateEvent(CustomLoopRunEvent previous, HumanReviewEvidence evidence, HumanReviewDecisionOperationReference? operation, HumanReviewContinuationReservationReference? reservation)
+        => previous with
+        {
+            Sequence = previous.Sequence + 1,
+            EventId = operation is null ? "event-" + reservation!.ReservationId : "event-" + operation.DecisionOperationId,
+            TimestampUtc = evidence.RecordedAtUtc,
+            Kind = operation is null ? CustomLoopRunEventKind.HumanReviewContinuationReserved : CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded,
+            Detail = operation is null ? "Human Review continuation was reserved." : "Human Review decision operation was recorded.",
+            HumanReviewEvidence = evidence,
+            HumanReviewDecisionOperation = operation,
+            HumanReviewContinuationReservation = reservation,
+        };
+
+    private static HumanReviewDecisionReference DecisionReference(HumanReviewDecision decision)
+        => new(decision.DecisionId, decision.DecisionOperationId, decision.Kind, decision.DecisionHash);
+
+    private static HumanReviewDecisionKind? ScenarioDecisionKind(HumanReviewDecisionScenario scenario)
+        => scenario switch
+        {
+            HumanReviewDecisionScenario.RequestInformation => HumanReviewDecisionKind.RequestInformation,
+            HumanReviewDecisionScenario.Approve => HumanReviewDecisionKind.Approve,
+            HumanReviewDecisionScenario.Reject => HumanReviewDecisionKind.Reject,
+            HumanReviewDecisionScenario.Cancel => HumanReviewDecisionKind.Cancel,
+            _ => null,
+        };
+
+    private static HumanReviewDecisionOperationDisposition ScenarioDisposition(HumanReviewDecisionScenario scenario)
+        => scenario switch
+        {
+            HumanReviewDecisionScenario.RequestInformation => HumanReviewDecisionOperationDisposition.InformationRequested,
+            HumanReviewDecisionScenario.Approve or HumanReviewDecisionScenario.Reject or HumanReviewDecisionScenario.Cancel => HumanReviewDecisionOperationDisposition.Accepted,
+            HumanReviewDecisionScenario.Denied => HumanReviewDecisionOperationDisposition.Denied,
+            HumanReviewDecisionScenario.Conflict => HumanReviewDecisionOperationDisposition.Conflict,
+            HumanReviewDecisionScenario.Expired => HumanReviewDecisionOperationDisposition.Expired,
+            _ => throw new ArgumentOutOfRangeException(nameof(scenario)),
+        };
+
+    private static HumanReviewEvidenceKind ScenarioEvidenceKind(HumanReviewDecisionScenario scenario)
+        => scenario switch
+        {
+            HumanReviewDecisionScenario.RequestInformation => HumanReviewEvidenceKind.InformationRequested,
+            HumanReviewDecisionScenario.Approve or HumanReviewDecisionScenario.Reject or HumanReviewDecisionScenario.Cancel => HumanReviewEvidenceKind.DecisionAccepted,
+            HumanReviewDecisionScenario.Denied => HumanReviewEvidenceKind.DecisionDenied,
+            HumanReviewDecisionScenario.Conflict => HumanReviewEvidenceKind.DecisionConflict,
+            HumanReviewDecisionScenario.Expired => HumanReviewEvidenceKind.DecisionExpired,
+            _ => throw new ArgumentOutOfRangeException(nameof(scenario)),
+        };
+
+    private enum HumanReviewDecisionScenario
+    {
+        RequestInformation,
+        Approve,
+        Reject,
+        Cancel,
+        Denied,
+        Conflict,
+        Expired,
     }
 
     private static async Task WaitForFileAsync(string path, TimeSpan timeout)

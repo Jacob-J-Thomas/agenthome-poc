@@ -33,4 +33,9 @@ public enum HumanReviewEvidenceKind
     ContinuationCompleted = 13,
     /// <summary>Fresh revalidation blocked release before the irreversible boundary while retaining the exact approved decision reference.</summary>
     PreDispatchBlocked = 14
+    ,
+    /// <summary>A decision operation was denied without accepting a decision.</summary>
+    DecisionDenied = 15,
+    /// <summary>A decision operation arrived after expiry without overloading request-expiry evidence.</summary>
+    DecisionExpired = 16
 }

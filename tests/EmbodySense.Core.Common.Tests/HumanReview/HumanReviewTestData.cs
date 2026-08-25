@@ -116,6 +116,24 @@ internal static class HumanReviewTestData
             ImmutableArray<HumanReviewRedactedPreview>.Empty,
             null,
             string.Empty);
+        if (kind is HumanReviewEvidenceKind.DecisionAccepted or HumanReviewEvidenceKind.InformationRequested or HumanReviewEvidenceKind.DecisionConflict or HumanReviewEvidenceKind.DecisionDenied or HumanReviewEvidenceKind.DecisionExpired)
+        {
+            evidence = evidence with
+            {
+                DecisionOperation = new HumanReviewDecisionOperationReference(decision?.DecisionOperationId ?? "review-decision-operation-one", Hash('f'), kind switch
+                {
+                    HumanReviewEvidenceKind.DecisionAccepted => HumanReviewDecisionOperationDisposition.Accepted,
+                    HumanReviewEvidenceKind.InformationRequested => HumanReviewDecisionOperationDisposition.InformationRequested,
+                    HumanReviewEvidenceKind.DecisionDenied => HumanReviewDecisionOperationDisposition.Denied,
+                    HumanReviewEvidenceKind.DecisionExpired => HumanReviewDecisionOperationDisposition.Expired,
+                    _ => HumanReviewDecisionOperationDisposition.Conflict
+                }, Hash('e'))
+            };
+        }
+        else if (kind == HumanReviewEvidenceKind.ContinuationReserved)
+        {
+            evidence = evidence with { ContinuationReservation = new HumanReviewContinuationReservationReference("review-reservation-one", Hash('d')) };
+        }
         return HumanReviewContractHash.ApplyEvidence(evidence);
     }
 

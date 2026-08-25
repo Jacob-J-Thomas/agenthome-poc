@@ -3198,10 +3198,10 @@ public static class CustomLoopRunValidator
 
     private static void ValidateHumanReview(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
     {
-        var reviewEvents = run.Events?.Where(item => item?.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted).ToArray() ?? [];
+        var reviewEventMarkers = run.Events?.Where(item => item?.Kind is CustomLoopRunEventKind.HumanReviewRequestAdmitted or CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded or CustomLoopRunEventKind.HumanReviewContinuationReserved).ToArray() ?? [];
         if (run.HumanReview is null)
         {
-            if (reviewEvents.Length != 0 || run.Events?.Any(item => item?.HumanReviewEvidence is not null) == true)
+            if (reviewEventMarkers.Length != 0 || run.Events?.Any(item => item is not null && (item.HumanReviewEvidence is not null || item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) == true)
             {
                 Add(errors, "human_review_state_required", "humanReview", "Human Review events require the canonical Human Review state plane.");
             }
@@ -3210,6 +3210,18 @@ public static class CustomLoopRunValidator
         }
 
         var state = run.HumanReview;
+        var statePlaneArraysPresent = !state.OperationReceipts.IsDefault && !state.AcceptedDecisions.IsDefault && !state.LifecycleHistory.IsDefault;
+        var evidencePresent = !state.Evidence.IsDefault;
+        if (!statePlaneArraysPresent)
+        {
+            Add(errors, "human_review_state_plane_required", "humanReview", "Schema-1 Human Review state requires lifecycle history, operation receipts, and accepted decisions even when empty.");
+        }
+
+        if (!evidencePresent)
+        {
+            Add(errors, "human_review_evidence_required", "humanReview.evidence", "Schema-1 Human Review state requires its ordered evidence chain, including the admission artifact.");
+        }
+
         var request = state.Request;
         var lifecycle = state.Lifecycle;
         var requestValid = request is not null && IsValidHumanReviewRequest(request);
@@ -3227,7 +3239,18 @@ public static class CustomLoopRunValidator
         {
             Add(errors, "invalid_human_review_lifecycle", "humanReview.lifecycle", "The canonical Human Review lifecycle is required and must be valid.");
         }
-        else if (lifecycle!.Status != HumanReviewLifecycleStatus.Pending || lifecycle.LifecycleVersion != 1 || lifecycle.LastDecision is not null)
+        else if (!statePlaneArraysPresent || state.LifecycleHistory.Length == 0)
+        {
+            if (statePlaneArraysPresent)
+            {
+                Add(errors, "human_review_state_plane_required", "humanReview", "Schema-1 Human Review state requires lifecycle history, operation receipts, and accepted decisions even when empty.");
+            }
+        }
+        else if (!HasValidHumanReviewLifecycleHistory(request!, state, errors))
+        {
+            // Detailed errors are reported by the history validator.
+        }
+        else if (state.OperationReceipts.Length == 0 && (lifecycle!.Status != HumanReviewLifecycleStatus.Pending || lifecycle.LifecycleVersion != 1 || lifecycle.LastDecision is not null))
         {
             Add(errors, "invalid_human_review_initial_lifecycle", "humanReview.lifecycle", "Atomic admission requires the exact initial pending Human Review lifecycle with no decision.");
         }
@@ -3237,12 +3260,17 @@ public static class CustomLoopRunValidator
             Add(errors, "human_review_frontier_mismatch", "humanReview", "Human Review requires the nonterminal Paused and exact ReviewBlocked frontier posture.");
         }
 
-        if (state.Evidence.IsDefault || state.Evidence.Length != 1)
+        if (!statePlaneArraysPresent || !evidencePresent)
         {
-            Add(errors, "invalid_human_review_evidence_count", "humanReview.evidence", "Atomic admission requires exactly one request-admitted evidence artifact.");
+            return;
         }
 
-        var evidenceValid = !state.Evidence.IsDefault;
+        if (state.Evidence.Length != state.OperationReceipts.Length + (state.ContinuationReservation is null ? 1 : 2))
+        {
+            Add(errors, "invalid_human_review_evidence_count", "humanReview.evidence", "Human Review evidence must retain admission plus one exact evidence artifact per receipt and reservation.");
+        }
+
+        var evidenceValid = true;
         string? previousHash = null;
         for (var index = 0; index < state.Evidence.Length; index++)
         {
@@ -3250,7 +3278,7 @@ public static class CustomLoopRunValidator
             if (evidence is null
                 || !requestValid
                 || !IsValidHumanReviewEvidence(request, evidence)
-                || evidence.Kind != HumanReviewEvidenceKind.RequestAdmitted
+                || (index == 0 && evidence.Kind != HumanReviewEvidenceKind.RequestAdmitted)
                 || !string.Equals(evidence.PreviousEvidenceHash, previousHash, StringComparison.Ordinal))
             {
                 Add(errors, "invalid_human_review_evidence", $"humanReview.evidence[{index}]", "Human Review evidence must be valid and form one exact append-only hash chain.");
@@ -3261,19 +3289,12 @@ public static class CustomLoopRunValidator
             previousHash = evidence.EvidenceHash;
         }
 
-        if (!evidenceValid || reviewEvents.Length != state.Evidence.Length || reviewEvents.Any(item => item!.HumanReviewEvidence is null)
-            || reviewEvents.Any(item => !IsValidHumanReviewEvidence(request, item!.HumanReviewEvidence!))
-            || !reviewEvents.Select(item => item!.HumanReviewEvidence!.EvidenceHash).SequenceEqual(state.Evidence.Select(item => item.EvidenceHash), StringComparer.Ordinal)
-            || reviewEvents.Any(item => item!.TimestampUtc != item.HumanReviewEvidence!.RecordedAtUtc)
-            || reviewEvents.Any(item => item!.HumanReviewEvidence!.Kind != HumanReviewEvidenceKind.RequestAdmitted))
+        if (!evidenceValid || !HasExactHumanReviewEventEvidenceBindings(run, request!, state))
         {
-            Add(errors, "human_review_event_evidence_mismatch", "events", "The Human Review admission event must carry the one retained request-admitted evidence artifact.");
+            Add(errors, "human_review_event_evidence_mismatch", "events", "Each Human Review event must carry its exact retained evidence and typed receipt or reservation reference.");
         }
 
-        if (run.Events?.Any(item => item?.HumanReviewEvidence is not null && item.Kind != CustomLoopRunEventKind.HumanReviewRequestAdmitted) == true)
-        {
-            Add(errors, "unexpected_human_review_evidence", "events", "Only the Human Review request-admission event may carry Human Review evidence in this slice.");
-        }
+        ValidateHumanReviewDecisionState(request!, state, errors);
     }
 
     private static bool MatchesHumanReviewBinding(CustomLoopRunRecord run, HumanReviewRequest request)
@@ -3335,6 +3356,289 @@ public static class CustomLoopRunValidator
         }
     }
 
+    private static bool HasValidHumanReviewLifecycleHistory(HumanReviewRequest request, HumanReviewRunState state, List<CustomLoopValidationError> errors)
+    {
+        var history = state.LifecycleHistory;
+        if (history.Length > HumanReviewContractLimits.MaxLifecycleHistory)
+        {
+            Add(errors, "human_review_lifecycle_history_limit", "humanReview.lifecycleHistory", "Lifecycle history exceeds the bounded schema-1 limit.");
+            return false;
+        }
+        var first = history[0];
+        if (first is null || !IsValidHumanReviewLifecycle(request, first) || first.Status != HumanReviewLifecycleStatus.Pending || first.LifecycleVersion != 1 || first.LastDecision is not null)
+        {
+            Add(errors, "invalid_human_review_initial_lifecycle", "humanReview.lifecycleHistory[0]", "Lifecycle history must begin with the admitted pending lifecycle.");
+            return false;
+        }
+        for (var index = 1; index < history.Length; index++)
+        {
+            var previous = history[index - 1];
+            var current = history[index];
+            if (current is null || previous is null || !IsValidHumanReviewLifecycle(request, current) || current.LifecycleVersion != previous.LifecycleVersion + 1 || current.UpdatedAtUtc < previous.UpdatedAtUtc || !string.Equals(current.PreviousLifecycleHash, previous.LifecycleHash, StringComparison.Ordinal))
+            {
+                Add(errors, "invalid_human_review_lifecycle_history", $"humanReview.lifecycleHistory[{index}]", "Lifecycle history must be contiguous, hash-linked, valid, and time-monotonic.");
+                return false;
+            }
+        }
+        if (!string.Equals(state.Lifecycle.LifecycleHash, history[^1].LifecycleHash, StringComparison.Ordinal))
+        {
+            Add(errors, "human_review_lifecycle_head_mismatch", "humanReview.lifecycle", "The lifecycle head must equal the final append-only lifecycle history item.");
+            return false;
+        }
+        return true;
+    }
+
+    private static void ValidateHumanReviewDecisionState(HumanReviewRequest request, HumanReviewRunState state, List<CustomLoopValidationError> errors)
+    {
+        if (state.OperationReceipts.Length > HumanReviewContractLimits.MaxDecisionOperationReceipts || state.AcceptedDecisions.Length > HumanReviewContractLimits.MaxAcceptedDecisions)
+        {
+            Add(errors, "human_review_decision_cardinality_exceeded", "humanReview", "Decision state exceeds bounded schema-1 receipt or accepted-decision limits.");
+        }
+        var operations = new HashSet<string>(StringComparer.Ordinal);
+        var acceptedOperations = new HashSet<string>(StringComparer.Ordinal);
+        var evidenceIds = new HashSet<string>(StringComparer.Ordinal);
+        var decisionIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var evidence in state.Evidence)
+        {
+            if (evidence is null || !evidenceIds.Add(evidence.EvidenceId)) Add(errors, "duplicate_human_review_evidence_identity", "humanReview.evidence", "Evidence identities must be unique.");
+        }
+        foreach (var receipt in state.OperationReceipts)
+        {
+            if (receipt is null || !IsValidHumanReviewReceipt(request, receipt) || !operations.Add(receipt.DecisionOperationId)) Add(errors, "invalid_human_review_receipt", "humanReview.operationReceipts", "Receipts must be valid, unique, and append-only.");
+        }
+        foreach (var decision in state.AcceptedDecisions)
+        {
+            if (decision is null || !IsValidHumanReviewDecision(request, decision) || !acceptedOperations.Add(decision.DecisionOperationId) || !decisionIds.Add(decision.DecisionId)
+                || state.OperationReceipts.Count(receipt => receipt is not null && string.Equals(receipt.DecisionOperationId, decision.DecisionOperationId, StringComparison.Ordinal) && SameDecisionReference(receipt.Decision, decision)) != 1)
+            {
+                Add(errors, "invalid_human_review_accepted_decision", "humanReview.acceptedDecisions", "Accepted decisions must be valid and have one exact receipt.");
+            }
+        }
+        var terminals = state.AcceptedDecisions.Where(item => item is not null && item.Kind != HumanReviewDecisionKind.RequestInformation).ToArray();
+        if (state.AcceptedTerminalDecision is not null && (!IsValidHumanReviewDecision(request, state.AcceptedTerminalDecision) || !state.AcceptedDecisions.Any(item => SameDecision(item, state.AcceptedTerminalDecision))))
+        {
+            Add(errors, "invalid_human_review_terminal_decision", "humanReview.acceptedTerminalDecision", "The terminal decision must be independently valid and exactly equal to one retained accepted decision.");
+        }
+        if (terminals.Length > 1 || (terminals.Length == 1 && (state.AcceptedTerminalDecision is null || !SameDecision(terminals[0], state.AcceptedTerminalDecision))) || (terminals.Length == 0 && state.AcceptedTerminalDecision is not null))
+        {
+            Add(errors, "invalid_human_review_terminal_decision", "humanReview.acceptedTerminalDecision", "At most one terminal decision may be retained and the optional terminal field must reference it exactly.");
+        }
+        else if (terminals.Length == 1 && !SameDecision(state.AcceptedDecisions[^1], terminals[0]))
+        {
+            Add(errors, "human_review_terminal_not_last", "humanReview.acceptedDecisions", "An accepted terminal decision must be the last accepted decision and cannot be followed by another accepted outcome.");
+        }
+        else if (terminals.Length == 1)
+        {
+            var terminalReceiptIndex = Array.FindIndex(state.OperationReceipts.ToArray(), receipt => receipt is not null && SameDecisionReference(receipt.Decision, terminals[0]));
+            if (terminalReceiptIndex < 0 || state.OperationReceipts.Skip(terminalReceiptIndex + 1).Any(receipt => receipt is not null && receipt.Disposition is (HumanReviewDecisionOperationDisposition.Accepted or HumanReviewDecisionOperationDisposition.InformationRequested)))
+            {
+                Add(errors, "human_review_terminal_receipt_outcome", "humanReview.operationReceipts", "An accepted terminal decision cannot be followed by another accepted or information-requested operation, but later nonaccepted audit receipts remain append-only.");
+            }
+        }
+        if (state.ContinuationReservation is not null && (!IsValidHumanReviewReservation(request, state.ContinuationReservation) || state.AcceptedTerminalDecision?.Kind != HumanReviewDecisionKind.Approve || !string.Equals(state.ContinuationReservation.Decision.DecisionHash, state.AcceptedTerminalDecision.DecisionHash, StringComparison.Ordinal)))
+        {
+            Add(errors, "invalid_human_review_reservation", "humanReview.continuationReservation", "Only the exact accepted approval may have one valid continuation reservation.");
+        }
+        else if (state.ContinuationReservation is not null && !SameDecisionReference(state.ContinuationReservation.Decision, state.AcceptedTerminalDecision!))
+        {
+            Add(errors, "human_review_reservation_decision_substitution", "humanReview.continuationReservation.decision", "Reservation must reference the exact independently validated accepted approval.");
+        }
+        ValidateHumanReviewReceiptEvidenceCausality(state, errors);
+        ValidateHumanReviewLifecycleCausality(state, errors);
+    }
+
+    private static bool HasExactHumanReviewEventEvidenceBindings(CustomLoopRunRecord run, HumanReviewRequest request, HumanReviewRunState state)
+    {
+        if (run.Events.Any(item => item is not null && !HasRequiredHumanReviewEventPayload(item))) return false;
+        var reviewEvents = run.Events.Where(item => item?.HumanReviewEvidence is not null).ToArray();
+        if (reviewEvents.Length != state.Evidence.Length) return false;
+        for (var index = 0; index < state.Evidence.Length; index++)
+        {
+            var evidence = state.Evidence[index]; var item = reviewEvents[index];
+            if (item is null || evidence is null || !IsValidHumanReviewEvidence(request, item.HumanReviewEvidence!) || !string.Equals(item.HumanReviewEvidence?.EvidenceHash, evidence.EvidenceHash, StringComparison.Ordinal) || item.TimestampUtc != evidence.RecordedAtUtc) return false;
+            if (index == 0 && (item.Kind != CustomLoopRunEventKind.HumanReviewRequestAdmitted || item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) return false;
+            if (evidence.DecisionOperation is not null && (item.Kind != CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded || !Equals(item.HumanReviewDecisionOperation, evidence.DecisionOperation) || item.HumanReviewContinuationReservation is not null)) return false;
+            if (evidence.ContinuationReservation is not null && (item.Kind != CustomLoopRunEventKind.HumanReviewContinuationReserved || !Equals(item.HumanReviewContinuationReservation, evidence.ContinuationReservation) || item.HumanReviewDecisionOperation is not null)) return false;
+            if (evidence.DecisionOperation is null && evidence.ContinuationReservation is null && (item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) return false;
+        }
+        return !run.Events.Any(item => item is not null && (item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null) && item.HumanReviewEvidence is null);
+    }
+
+    private static bool HasRequiredHumanReviewEventPayload(CustomLoopRunEvent item)
+        => item.Kind switch
+        {
+            CustomLoopRunEventKind.HumanReviewRequestAdmitted => item.HumanReviewEvidence is not null && item.HumanReviewDecisionOperation is null && item.HumanReviewContinuationReservation is null,
+            CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded => item.HumanReviewEvidence is not null && item.HumanReviewDecisionOperation is not null && item.HumanReviewContinuationReservation is null,
+            CustomLoopRunEventKind.HumanReviewContinuationReserved => item.HumanReviewEvidence is not null && item.HumanReviewDecisionOperation is null && item.HumanReviewContinuationReservation is not null,
+            _ => true,
+        };
+
+    private static void ValidateHumanReviewReceiptEvidenceCausality(HumanReviewRunState state, List<CustomLoopValidationError> errors)
+    {
+        var operationEvidence = state.Evidence.Where(item => item?.DecisionOperation is not null).ToArray();
+        if (operationEvidence.Length != state.OperationReceipts.Length)
+        {
+            Add(errors, "human_review_receipt_evidence_cardinality", "humanReview", "Every receipt must have exactly one typed evidence artifact.");
+            return;
+        }
+        DateTimeOffset? previousReceiptAtUtc = null;
+        for (var index = 0; index < state.OperationReceipts.Length; index++)
+        {
+            var receipt = state.OperationReceipts[index];
+            var evidence = operationEvidence[index];
+            if (receipt is null || evidence is null)
+            {
+                Add(errors, "invalid_human_review_receipt", "humanReview.operationReceipts", "Receipts and their evidence must be present before their causal bindings are evaluated.");
+                return;
+            }
+
+            var matches = operationEvidence.Where(candidate => SameReceiptReference(candidate!.DecisionOperation!, receipt)).ToArray();
+            var decision = AtMostOne(state.AcceptedDecisions.Where(candidate => candidate is not null && SameDecisionReference(receipt.Decision, candidate)));
+            if (previousReceiptAtUtc is { } previous && receipt.RecordedAtUtc < previous)
+            {
+                Add(errors, "human_review_receipt_chronology", "humanReview.operationReceipts", "Decision-operation receipts must be retained in nondecreasing trusted-time order.");
+            }
+            previousReceiptAtUtc = receipt.RecordedAtUtc;
+            if (matches.Length != 1 || !EvidenceMatchesReceipt(matches[0]!, receipt) || matches[0]!.RecordedAtUtc < receipt.RecordedAtUtc)
+            {
+                Add(errors, "human_review_receipt_evidence_mismatch", "humanReview.evidence", "Each receipt must bind exactly one matching evidence disposition and nondecreasing evidence timestamp.");
+            }
+            if (!SameReceiptReference(evidence.DecisionOperation!, receipt))
+            {
+                Add(errors, "human_review_receipt_evidence_order", "humanReview.evidence", "The receipt ledger, operation-evidence ledger, and their exact events must retain the same append-only operation order.");
+            }
+            if (receipt.Decision is not null && (decision is null || decision.DecidedAtUtc > receipt.RecordedAtUtc))
+            {
+                Add(errors, "human_review_receipt_decision_chronology", "humanReview.operationReceipts", "An accepted decision must exactly resolve its receipt and cannot postdate it.");
+            }
+        }
+        if (state.ContinuationReservation is not null)
+        {
+            var reservationEvidence = state.Evidence.Where(item => item?.ContinuationReservation is not null).ToArray();
+            var approvalReceipt = AtMostOne(state.OperationReceipts.Where(receipt => receipt is not null && SameDecisionReference(receipt.Decision, state.ContinuationReservation.Decision)));
+            var approvalLifecycle = AtMostOne(state.LifecycleHistory.Where(lifecycle => lifecycle is not null && SameDecisionReference(lifecycle.LastDecision, state.ContinuationReservation.Decision)));
+            if (reservationEvidence.Length != 1
+                || !string.Equals(reservationEvidence[0]!.ContinuationReservation!.ReservationId, state.ContinuationReservation.ReservationId, StringComparison.Ordinal)
+                || !string.Equals(reservationEvidence[0]!.ContinuationReservation!.ReservationHash, state.ContinuationReservation.ReservationHash, StringComparison.Ordinal)
+                || !SameDecisionReference(reservationEvidence[0]!.Decision, state.ContinuationReservation.Decision)
+                || approvalReceipt is null
+                || approvalLifecycle is null
+                || state.ContinuationReservation.ReservedAtUtc < approvalReceipt.RecordedAtUtc
+                || state.ContinuationReservation.ReservedAtUtc < approvalLifecycle.UpdatedAtUtc
+                || reservationEvidence[0]!.RecordedAtUtc < state.ContinuationReservation.ReservedAtUtc)
+            {
+                Add(errors, "human_review_reservation_evidence_mismatch", "humanReview.evidence", "The reservation must exactly bind approval receipt, lifecycle, evidence, and nondecreasing trusted timestamps.");
+            }
+        }
+    }
+
+    private static void ValidateHumanReviewLifecycleCausality(HumanReviewRunState state, List<CustomLoopValidationError> errors)
+    {
+        var accepted = state.AcceptedDecisions;
+        var expiryReceipts = state.OperationReceipts.Where(item => item is not null && item.Disposition == HumanReviewDecisionOperationDisposition.Expired).ToArray();
+        var terminal = AtMostOne(accepted.Where(item => item is not null && item.Kind != HumanReviewDecisionKind.RequestInformation));
+        var terminalReceiptIndex = terminal is null ? -1 : Array.FindIndex(state.OperationReceipts.ToArray(), item => item is not null && SameDecisionReference(item.Decision, terminal));
+        var expiryLifecycleRequired = expiryReceipts.Length != 0 && terminal is null;
+        var expectedHistoryLength = checked(accepted.Length + 1 + (expiryLifecycleRequired ? 1 : 0));
+        if (state.LifecycleHistory.Length != expectedHistoryLength)
+        {
+            Add(errors, "human_review_lifecycle_history_causality", "humanReview.lifecycleHistory", "Lifecycle history must contain the initial pending entry, one ordered entry per accepted decision, and exactly one expiry entry when expiry closes a nonterminal review.");
+            return;
+        }
+
+        for (var index = 0; index < accepted.Length; index++)
+        {
+            var decision = accepted[index];
+            var lifecycle = state.LifecycleHistory[index + 1];
+            var receipt = AtMostOne(state.OperationReceipts.Where(item => item is not null && SameDecisionReference(item.Decision, decision)));
+            var evidence = AtMostOne(state.Evidence.Where(item => item?.DecisionOperation is not null && receipt is not null && SameReceiptReference(item.DecisionOperation, receipt)));
+            if (decision is null
+                || lifecycle is null
+                || receipt is null
+                || evidence is null
+                || lifecycle.Status != LifecycleStatusFor(decision.Kind)
+                || !SameDecisionReference(lifecycle.LastDecision, decision)
+                || lifecycle.UpdatedAtUtc < decision.DecidedAtUtc
+                || lifecycle.UpdatedAtUtc < evidence.RecordedAtUtc)
+            {
+                Add(errors, "human_review_lifecycle_decision_causality", "humanReview.lifecycleHistory", "Each accepted decision must have one ordered exact lifecycle successor after its receipt evidence.");
+            }
+        }
+
+        var head = state.LifecycleHistory[^1];
+        if (head is null)
+        {
+            Add(errors, "human_review_lifecycle_history_causality", "humanReview.lifecycleHistory", "Lifecycle causality requires a retained non-null lifecycle head.");
+            return;
+        }
+
+        if (expiryLifecycleRequired)
+        {
+            var expiry = expiryReceipts[0];
+            var evidence = AtMostOne(state.Evidence.Where(item => item?.DecisionOperation is not null && SameReceiptReference(item.DecisionOperation, expiry)));
+            if (head.Status != HumanReviewLifecycleStatus.Expired
+                || head.LastDecision is not null
+                || head.UpdatedAtUtc < expiry.RecordedAtUtc
+                || evidence is null
+                || head.UpdatedAtUtc < evidence.RecordedAtUtc
+                || expiryReceipts.Skip(1).Any(receipt => receipt.RecordedAtUtc < head.UpdatedAtUtc))
+            {
+                Add(errors, "human_review_expiry_receipt_required", "humanReview.lifecycle", "Expired lifecycle posture requires the first exact expired receipt and permits only later nondecreasing expired audit receipts.");
+            }
+        }
+        else if (expiryReceipts.Length != 0 && (terminalReceiptIndex < 0 || Array.FindIndex(state.OperationReceipts.ToArray(), item => item is not null && item.Disposition == HumanReviewDecisionOperationDisposition.Expired) < terminalReceiptIndex))
+        {
+            Add(errors, "human_review_expiry_chronology", "humanReview.operationReceipts", "An expired audit receipt may follow an accepted terminal decision without changing its terminal lifecycle, but cannot precede that winner.");
+        }
+        else if (accepted.Length == 0 && head.Status != HumanReviewLifecycleStatus.Pending)
+        {
+            Add(errors, "human_review_lifecycle_without_accepted_decision", "humanReview.lifecycle", "Only the initial pending lifecycle may exist without an accepted decision or exact expiry receipt.");
+        }
+    }
+
+    private static HumanReviewLifecycleStatus LifecycleStatusFor(HumanReviewDecisionKind kind)
+        => kind switch
+        {
+            HumanReviewDecisionKind.RequestInformation => HumanReviewLifecycleStatus.AwaitingInformation,
+            HumanReviewDecisionKind.Approve => HumanReviewLifecycleStatus.Approved,
+            HumanReviewDecisionKind.Reject => HumanReviewLifecycleStatus.Rejected,
+            HumanReviewDecisionKind.Cancel => HumanReviewLifecycleStatus.Cancelled,
+            _ => HumanReviewLifecycleStatus.Unknown,
+        };
+
+    private static T? AtMostOne<T>(IEnumerable<T> values) where T : class
+    {
+        var candidates = values.Take(2).ToArray();
+        return candidates.Length == 1 ? candidates[0] : null;
+    }
+
+    private static bool EvidenceMatchesReceipt(HumanReviewEvidence evidence, HumanReviewDecisionOperationReceipt receipt)
+        => evidence.Kind switch
+        {
+            HumanReviewEvidenceKind.DecisionAccepted => receipt.Disposition == HumanReviewDecisionOperationDisposition.Accepted && SameDecisionReference(evidence.Decision, receipt.Decision),
+            HumanReviewEvidenceKind.InformationRequested => receipt.Disposition == HumanReviewDecisionOperationDisposition.InformationRequested && SameDecisionReference(evidence.Decision, receipt.Decision),
+            HumanReviewEvidenceKind.DecisionConflict => receipt.Disposition == HumanReviewDecisionOperationDisposition.Conflict && evidence.Decision is null,
+            HumanReviewEvidenceKind.DecisionDenied => receipt.Disposition == HumanReviewDecisionOperationDisposition.Denied && evidence.Decision is null,
+            HumanReviewEvidenceKind.DecisionExpired => receipt.Disposition == HumanReviewDecisionOperationDisposition.Expired && evidence.Decision is null,
+            _ => false
+        };
+
+    private static bool SameReceiptReference(HumanReviewDecisionOperationReference reference, HumanReviewDecisionOperationReceipt receipt)
+        => string.Equals(reference.DecisionOperationId, receipt.DecisionOperationId, StringComparison.Ordinal) && string.Equals(reference.ProposalHash, receipt.ProposalHash, StringComparison.Ordinal) && reference.Disposition == receipt.Disposition && string.Equals(reference.ReceiptHash, receipt.ReceiptHash, StringComparison.Ordinal);
+
+    private static bool SameDecision(HumanReviewDecision? left, HumanReviewDecision? right)
+        => left is not null && right is not null && string.Equals(left.DecisionHash, right.DecisionHash, StringComparison.Ordinal) && left.SchemaVersion == right.SchemaVersion && string.Equals(left.DecisionId, right.DecisionId, StringComparison.Ordinal) && string.Equals(left.DecisionOperationId, right.DecisionOperationId, StringComparison.Ordinal) && SameDecisionReference(new HumanReviewDecisionReference(left.DecisionId, left.DecisionOperationId, left.Kind, left.DecisionHash), right);
+
+    private static bool SameDecisionReference(HumanReviewDecisionReference? left, HumanReviewDecision? right)
+        => left is not null && right is not null && string.Equals(left.DecisionId, right.DecisionId, StringComparison.Ordinal) && string.Equals(left.DecisionOperationId, right.DecisionOperationId, StringComparison.Ordinal) && left.Kind == right.Kind && string.Equals(left.DecisionHash, right.DecisionHash, StringComparison.Ordinal);
+
+    private static bool SameDecisionReference(HumanReviewDecisionReference? left, HumanReviewDecisionReference? right)
+        => left is not null && right is not null && string.Equals(left.DecisionId, right.DecisionId, StringComparison.Ordinal) && string.Equals(left.DecisionOperationId, right.DecisionOperationId, StringComparison.Ordinal) && left.Kind == right.Kind && string.Equals(left.DecisionHash, right.DecisionHash, StringComparison.Ordinal);
+
+    private static bool IsValidHumanReviewDecision(HumanReviewRequest request, HumanReviewDecision decision) { try { return HumanReviewContractValidator.ValidateDecision(request, decision).IsValid; } catch { return false; } }
+    private static bool IsValidHumanReviewReceipt(HumanReviewRequest request, HumanReviewDecisionOperationReceipt receipt) { try { return HumanReviewContractValidator.ValidateDecisionOperationReceipt(request, receipt).IsValid; } catch { return false; } }
+    private static bool IsValidHumanReviewReservation(HumanReviewRequest request, HumanReviewContinuationReservation reservation) { try { return HumanReviewContractValidator.ValidateContinuationReservation(request, reservation).IsValid; } catch { return false; } }
+
     private static void ValidateAppendOnlyHumanReview(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
     {
         if (current.HumanReview is null)
@@ -3347,9 +3651,19 @@ public static class CustomLoopRunValidator
             || candidate.HumanReview.Request is null
             || current.HumanReview.Lifecycle is null
             || candidate.HumanReview.Lifecycle is null
+            || current.HumanReview.LifecycleHistory.IsDefault
+            || current.HumanReview.Evidence.IsDefault
+            || current.HumanReview.OperationReceipts.IsDefault
+            || current.HumanReview.AcceptedDecisions.IsDefault
+            || candidate.HumanReview.LifecycleHistory.IsDefault
+            || candidate.HumanReview.Evidence.IsDefault
+            || candidate.HumanReview.OperationReceipts.IsDefault
+            || candidate.HumanReview.AcceptedDecisions.IsDefault
             || !string.Equals(current.HumanReview.Request.RequestHash, candidate.HumanReview.Request.RequestHash, StringComparison.Ordinal)
-            || !string.Equals(current.HumanReview.Lifecycle.LifecycleHash, candidate.HumanReview.Lifecycle.LifecycleHash, StringComparison.Ordinal)
-            || candidate.HumanReview.Evidence.Length != current.HumanReview.Evidence.Length)
+            || candidate.HumanReview.LifecycleHistory.Length < current.HumanReview.LifecycleHistory.Length
+            || candidate.HumanReview.Evidence.Length < current.HumanReview.Evidence.Length
+            || candidate.HumanReview.OperationReceipts.Length < current.HumanReview.OperationReceipts.Length
+            || candidate.HumanReview.AcceptedDecisions.Length < current.HumanReview.AcceptedDecisions.Length)
         {
             Add(errors, "human_review_history_changed", "humanReview", "The admitted Human Review request, initial lifecycle, and evidence cannot be removed, extended, or rewritten in this slice.");
             return;
@@ -3363,6 +3677,15 @@ public static class CustomLoopRunValidator
             {
                 Add(errors, "human_review_evidence_changed", $"humanReview.evidence[{index}]", "Previously retained Human Review evidence is immutable.");
             }
+        }
+
+        if (!current.HumanReview.LifecycleHistory.Select((item, index) => string.Equals(item?.LifecycleHash, candidate.HumanReview.LifecycleHistory[index]?.LifecycleHash, StringComparison.Ordinal)).All(value => value)
+            || !current.HumanReview.OperationReceipts.Select((item, index) => string.Equals(item?.ReceiptHash, candidate.HumanReview.OperationReceipts[index]?.ReceiptHash, StringComparison.Ordinal)).All(value => value)
+            || !current.HumanReview.AcceptedDecisions.Select((item, index) => string.Equals(item?.DecisionHash, candidate.HumanReview.AcceptedDecisions[index]?.DecisionHash, StringComparison.Ordinal)).All(value => value)
+            || (current.HumanReview.AcceptedTerminalDecision is not null && !string.Equals(current.HumanReview.AcceptedTerminalDecision.DecisionHash, candidate.HumanReview.AcceptedTerminalDecision?.DecisionHash, StringComparison.Ordinal))
+            || (current.HumanReview.ContinuationReservation is not null && !string.Equals(current.HumanReview.ContinuationReservation.ReservationHash, candidate.HumanReview.ContinuationReservation?.ReservationHash, StringComparison.Ordinal)))
+        {
+            Add(errors, "human_review_history_changed", "humanReview", "Previously authenticated Human Review state may only be extended.");
         }
 
     }
@@ -3410,7 +3733,9 @@ public static class CustomLoopRunValidator
             && string.Equals(left.ModelExecutionEvidence?.ContentHash, right.ModelExecutionEvidence?.ContentHash, StringComparison.Ordinal)
             && string.Equals(left.FailureEvidence?.ContentHash, right.FailureEvidence?.ContentHash, StringComparison.Ordinal)
             && string.Equals(left.RetryState?.ContentHash, right.RetryState?.ContentHash, StringComparison.Ordinal)
-            && string.Equals(left.HumanReviewEvidence?.EvidenceHash, right.HumanReviewEvidence?.EvidenceHash, StringComparison.Ordinal);
+            && string.Equals(left.HumanReviewEvidence?.EvidenceHash, right.HumanReviewEvidence?.EvidenceHash, StringComparison.Ordinal)
+            && Equals(left.HumanReviewDecisionOperation, right.HumanReviewDecisionOperation)
+            && Equals(left.HumanReviewContinuationReservation, right.HumanReviewContinuationReservation);
     }
 
     private static void ValidateModelExecutionEvidence(
@@ -3534,17 +3859,27 @@ public static class CustomLoopRunValidator
             && !left.Evidence.IsDefault
             && !right.Evidence.IsDefault
             && left.Evidence.Length == right.Evidence.Length
-            && left.Evidence.Select(item => item?.EvidenceHash).SequenceEqual(right.Evidence.Select(item => item?.EvidenceHash), StringComparer.Ordinal);
+            && left.Evidence.Select(item => item?.EvidenceHash).SequenceEqual(right.Evidence.Select(item => item?.EvidenceHash), StringComparer.Ordinal)
+            && left.LifecycleHistory.Select(item => item?.LifecycleHash).SequenceEqual(right.LifecycleHistory.Select(item => item?.LifecycleHash), StringComparer.Ordinal)
+            && left.OperationReceipts.Select(item => item?.ReceiptHash).SequenceEqual(right.OperationReceipts.Select(item => item?.ReceiptHash), StringComparer.Ordinal)
+            && left.AcceptedDecisions.Select(item => item?.DecisionHash).SequenceEqual(right.AcceptedDecisions.Select(item => item?.DecisionHash), StringComparer.Ordinal)
+            && string.Equals(left.AcceptedTerminalDecision?.DecisionHash, right.AcceptedTerminalDecision?.DecisionHash, StringComparison.Ordinal)
+            && string.Equals(left.ContinuationReservation?.ReservationHash, right.ContinuationReservation?.ReservationHash, StringComparison.Ordinal);
 
     private static bool HasHumanReviewPrefix(HumanReviewRunState? expectedPrefix, HumanReviewRunState? actual)
         => expectedPrefix is null
             || actual is not null
             && string.Equals(expectedPrefix.Request?.RequestHash, actual.Request?.RequestHash, StringComparison.Ordinal)
-            && string.Equals(expectedPrefix.Lifecycle?.LifecycleHash, actual.Lifecycle?.LifecycleHash, StringComparison.Ordinal)
+            && expectedPrefix.LifecycleHistory.Length <= actual.LifecycleHistory.Length
             && !expectedPrefix.Evidence.IsDefault
             && !actual.Evidence.IsDefault
             && expectedPrefix.Evidence.Length <= actual.Evidence.Length
-            && expectedPrefix.Evidence.Select((item, index) => string.Equals(item?.EvidenceHash, actual.Evidence[index]?.EvidenceHash, StringComparison.Ordinal)).All(value => value);
+            && expectedPrefix.Evidence.Select((item, index) => string.Equals(item?.EvidenceHash, actual.Evidence[index]?.EvidenceHash, StringComparison.Ordinal)).All(value => value)
+            && expectedPrefix.LifecycleHistory.Select((item, index) => string.Equals(item?.LifecycleHash, actual.LifecycleHistory[index]?.LifecycleHash, StringComparison.Ordinal)).All(value => value)
+            && expectedPrefix.OperationReceipts.Length <= actual.OperationReceipts.Length
+            && expectedPrefix.OperationReceipts.Select((item, index) => string.Equals(item?.ReceiptHash, actual.OperationReceipts[index]?.ReceiptHash, StringComparison.Ordinal)).All(value => value)
+            && expectedPrefix.AcceptedDecisions.Length <= actual.AcceptedDecisions.Length
+            && expectedPrefix.AcceptedDecisions.Select((item, index) => string.Equals(item?.DecisionHash, actual.AcceptedDecisions[index]?.DecisionHash, StringComparison.Ordinal)).All(value => value);
 
     private static bool HasWaitEvidencePrefix(
         IReadOnlyList<GovernedLoopWaitExecutionEvidence>? expectedPrefix,

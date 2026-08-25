@@ -23,6 +23,12 @@ public static class HumanReviewContractLimits
     public const int MaxPreviewDetailCharacters = 1_024;
     /// <summary>The maximum character count of untrusted reviewer decision detail.</summary>
     public const int MaxDecisionDetailCharacters = 1_024;
+    /// <summary>The maximum retained decision-operation receipts for one request.</summary>
+    public const int MaxDecisionOperationReceipts = 64;
+    /// <summary>The maximum retained accepted decisions for one request.</summary>
+    public const int MaxAcceptedDecisions = 16;
+    /// <summary>The maximum retained lifecycle heads: the initial head, every accepted decision, and one expiry closure.</summary>
+    public const int MaxLifecycleHistory = MaxAcceptedDecisions + 2;
     /// <summary>The maximum positive node-attempt number.</summary>
     public const int MaxNodeAttempt = 1_000_000;
     /// <summary>The maximum positive activation or visit ordinal.</summary>

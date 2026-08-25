@@ -220,6 +220,16 @@ public static class HumanReviewContractValidator
 
         ValidateDecisionReference(evidence.Decision, "$.decision", required: false, errors);
         ValidateEvidenceDecision(evidence.Kind, evidence.Decision, errors);
+        ValidateDecisionOperationReference(evidence.DecisionOperation, "$.decisionOperation", required: EvidenceRequiresOperation(evidence.Kind), errors);
+        ValidateContinuationReservationReference(evidence.ContinuationReservation, "$.continuationReservation", required: evidence.Kind == HumanReviewEvidenceKind.ContinuationReserved, errors);
+        if (!EvidenceRequiresOperation(evidence.Kind) && evidence.DecisionOperation is not null)
+        {
+            Add(errors, "unexpected_evidence_operation", "$.decisionOperation", "Only decision-operation evidence may retain an operation receipt reference.");
+        }
+        else if (evidence.Kind != HumanReviewEvidenceKind.ContinuationReserved && evidence.ContinuationReservation is not null)
+        {
+            Add(errors, "unexpected_evidence_reservation", "$.continuationReservation", "Only continuation-reserved evidence may retain a reservation reference.");
+        }
         if (!IsUtc(evidence.RecordedAtUtc) || evidence.RecordedAtUtc < request.Timing.CreatedAtUtc)
         {
             Add(errors, "invalid_evidence_time", "$.recordedAtUtc", "Evidence time must be trusted UTC and cannot predate request creation.");
@@ -239,6 +249,66 @@ public static class HumanReviewContractValidator
             Add(errors, "evidence_hash_mismatch", "$.evidenceHash", "Evidence hash must match the complete canonical append-only evidence contract.");
         }
 
+        return Result(errors);
+    }
+
+    /// <summary>Validates a bounded client proposal after a trusted boundary has applied its canonical hash.</summary>
+    public static HumanReviewContractValidationResult ValidateDecisionProposal(HumanReviewDecisionProposal? proposal)
+    {
+        var errors = new List<HumanReviewContractValidationError>();
+        if (proposal is null) { Add(errors, "proposal_required", "$", "A decision proposal is required."); return Result(errors); }
+        ValidateSchema(proposal.SchemaVersion, "$.schemaVersion", errors);
+        ValidateIdentifier(proposal.DecisionOperationId, "$.decisionOperationId", errors);
+        if (!Enum.IsDefined(proposal.Kind) || proposal.Kind == HumanReviewDecisionKind.Unknown) Add(errors, "unsupported_proposal_kind", "$.kind", "A supported closed decision kind is required.");
+        if (!HumanReviewSafeText.IsValid(proposal.Detail, HumanReviewContractLimits.MaxDecisionDetailCharacters, required: proposal.Kind == HumanReviewDecisionKind.RequestInformation)) Add(errors, "invalid_proposal_detail", "$.detail", "Proposal detail must be bounded redacted display-safe text and is required for RequestInformation.");
+        ValidateHash(proposal.ProposalHash, "$.proposalHash", errors);
+        if (errors.Count == 0 && !HumanReviewContractHash.MatchesDecisionProposal(proposal)) Add(errors, "proposal_hash_mismatch", "$.proposalHash", "Proposal hash must match the canonical proposal.");
+        return Result(errors);
+    }
+
+    /// <summary>Validates one append-only decision-operation receipt against the immutable request.</summary>
+    public static HumanReviewContractValidationResult ValidateDecisionOperationReceipt(HumanReviewRequest? request, HumanReviewDecisionOperationReceipt? receipt)
+    {
+        var requestValidation = ValidateRequest(request);
+        if (!requestValidation.IsValid) return requestValidation;
+        var errors = new List<HumanReviewContractValidationError>();
+        if (receipt is null) { Add(errors, "receipt_required", "$", "A decision-operation receipt is required."); return Result(errors); }
+        ValidateSchema(receipt.SchemaVersion, "$.schemaVersion", errors);
+        ValidateIdentifier(receipt.DecisionOperationId, "$.decisionOperationId", errors);
+        ValidateHash(receipt.ProposalHash, "$.proposalHash", errors);
+        ValidateRequestReference(receipt.Request, "$.request", errors);
+        ValidateExactRequestReference(request!, receipt.Request, "$.request", errors);
+        if (!Enum.IsDefined(receipt.Disposition) || receipt.Disposition == HumanReviewDecisionOperationDisposition.Unknown) Add(errors, "unsupported_receipt_disposition", "$.disposition", "A supported receipt disposition is required.");
+        ValidateDecisionReference(receipt.Decision, "$.decision", required: ReceiptRequiresDecision(receipt.Disposition), errors);
+        if (receipt.Decision is not null && !ReceiptDecisionMatches(receipt.Disposition, receipt.Decision.Kind)) Add(errors, "receipt_decision_mismatch", "$.decision", "Receipt disposition must retain the exact permitted decision kind.");
+        if (ReceiptRequiresDecision(receipt.Disposition) && receipt.Decision is not null && !string.Equals(receipt.Decision.DecisionOperationId, receipt.DecisionOperationId, StringComparison.Ordinal)) Add(errors, "receipt_decision_operation_mismatch", "$.decision.decisionOperationId", "An accepted receipt must retain the exact decision operation identity.");
+        if (!IsUtc(receipt.RecordedAtUtc) || receipt.RecordedAtUtc < request!.Timing.CreatedAtUtc) Add(errors, "invalid_receipt_time", "$.recordedAtUtc", "Receipt time must be trusted UTC and cannot predate request creation.");
+        else if (receipt.Disposition == HumanReviewDecisionOperationDisposition.Expired && receipt.RecordedAtUtc < request.Timing.ExpiresAtUtc) Add(errors, "early_expiry_receipt", "$.recordedAtUtc", "An expired receipt cannot predate the inclusive request expiry boundary.");
+        ValidateProvenance(receipt.Provenance, "$.provenance", HumanReviewProvenanceKind.Server, HumanReviewProvenanceKind.Coordinator, errors);
+        if (receipt.Provenance is not null && receipt.Provenance.ObservedAtUtc != receipt.RecordedAtUtc) Add(errors, "receipt_provenance_time_mismatch", "$.provenance.observedAtUtc", "Receipt provenance time must exactly match receipt recording time.");
+        ValidateHash(receipt.ReceiptHash, "$.receiptHash", errors);
+        if (errors.Count == 0 && !HumanReviewContractHash.MatchesDecisionOperationReceipt(receipt)) Add(errors, "receipt_hash_mismatch", "$.receiptHash", "Receipt hash must match the complete canonical receipt.");
+        return Result(errors);
+    }
+
+    /// <summary>Validates one exact reservation for an already accepted approval without releasing the continuation.</summary>
+    public static HumanReviewContractValidationResult ValidateContinuationReservation(HumanReviewRequest? request, HumanReviewContinuationReservation? reservation)
+    {
+        var requestValidation = ValidateRequest(request);
+        if (!requestValidation.IsValid) return requestValidation;
+        var errors = new List<HumanReviewContractValidationError>();
+        if (reservation is null) { Add(errors, "reservation_required", "$", "An approval continuation reservation is required."); return Result(errors); }
+        ValidateSchema(reservation.SchemaVersion, "$.schemaVersion", errors);
+        ValidateIdentifier(reservation.ReservationId, "$.reservationId", errors);
+        ValidateRequestReference(reservation.Request, "$.request", errors);
+        ValidateExactRequestReference(request!, reservation.Request, "$.request", errors);
+        ValidateDecisionReference(reservation.Decision, "$.decision", required: true, errors);
+        if (reservation.Decision is not null && reservation.Decision.Kind != HumanReviewDecisionKind.Approve) Add(errors, "reservation_decision_mismatch", "$.decision", "Only an accepted approval may reserve a continuation.");
+        if (!IsUtc(reservation.ReservedAtUtc) || reservation.ReservedAtUtc < request!.Timing.CreatedAtUtc) Add(errors, "invalid_reservation_time", "$.reservedAtUtc", "Reservation time must be trusted UTC and cannot predate request creation.");
+        ValidateProvenance(reservation.Provenance, "$.provenance", HumanReviewProvenanceKind.Server, HumanReviewProvenanceKind.Coordinator, errors);
+        if (reservation.Provenance is not null && reservation.Provenance.ObservedAtUtc != reservation.ReservedAtUtc) Add(errors, "reservation_provenance_time_mismatch", "$.provenance.observedAtUtc", "Reservation provenance time must exactly match reservation time.");
+        ValidateHash(reservation.ReservationHash, "$.reservationHash", errors);
+        if (errors.Count == 0 && !HumanReviewContractHash.MatchesContinuationReservation(reservation)) Add(errors, "reservation_hash_mismatch", "$.reservationHash", "Reservation hash must match the exact canonical reservation.");
         return Result(errors);
     }
 
@@ -598,7 +668,7 @@ public static class HumanReviewContractValidator
             HumanReviewEvidenceKind.DecisionAttempted => (HumanReviewDecisionKind?)null,
             HumanReviewEvidenceKind.DecisionAccepted => (HumanReviewDecisionKind?)null,
             HumanReviewEvidenceKind.InformationRequested => HumanReviewDecisionKind.RequestInformation,
-            HumanReviewEvidenceKind.DecisionConflict => (HumanReviewDecisionKind?)null,
+            HumanReviewEvidenceKind.DecisionConflict => HumanReviewDecisionKind.Unknown,
             HumanReviewEvidenceKind.ContinuationReserved => HumanReviewDecisionKind.Approve,
             HumanReviewEvidenceKind.ContinuationCompleted => HumanReviewDecisionKind.Approve,
             HumanReviewEvidenceKind.PreDispatchBlocked => HumanReviewDecisionKind.Approve,
@@ -678,6 +748,36 @@ public static class HumanReviewContractValidator
 
         ValidateHash(reference.DecisionHash, $"{path}.decisionHash", errors);
     }
+
+    private static void ValidateDecisionOperationReference(HumanReviewDecisionOperationReference? reference, string path, bool required, List<HumanReviewContractValidationError> errors)
+    {
+        if (reference is null) { if (required) Add(errors, "operation_reference_required", path, "An exact decision-operation receipt reference is required."); return; }
+        ValidateIdentifier(reference.DecisionOperationId, $"{path}.decisionOperationId", errors);
+        ValidateHash(reference.ProposalHash, $"{path}.proposalHash", errors);
+        if (!Enum.IsDefined(reference.Disposition) || reference.Disposition == HumanReviewDecisionOperationDisposition.Unknown) Add(errors, "unsupported_operation_reference_disposition", $"{path}.disposition", "A supported receipt disposition is required.");
+        ValidateHash(reference.ReceiptHash, $"{path}.receiptHash", errors);
+    }
+
+    private static void ValidateContinuationReservationReference(HumanReviewContinuationReservationReference? reference, string path, bool required, List<HumanReviewContractValidationError> errors)
+    {
+        if (reference is null) { if (required) Add(errors, "reservation_reference_required", path, "An exact continuation reservation reference is required."); return; }
+        ValidateIdentifier(reference.ReservationId, $"{path}.reservationId", errors);
+        ValidateHash(reference.ReservationHash, $"{path}.reservationHash", errors);
+    }
+
+    private static bool EvidenceRequiresOperation(HumanReviewEvidenceKind kind)
+        => kind is HumanReviewEvidenceKind.DecisionAccepted or HumanReviewEvidenceKind.InformationRequested or HumanReviewEvidenceKind.DecisionConflict or HumanReviewEvidenceKind.DecisionDenied or HumanReviewEvidenceKind.DecisionExpired;
+
+    private static bool ReceiptRequiresDecision(HumanReviewDecisionOperationDisposition disposition)
+        => disposition is HumanReviewDecisionOperationDisposition.Accepted or HumanReviewDecisionOperationDisposition.InformationRequested;
+
+    private static bool ReceiptDecisionMatches(HumanReviewDecisionOperationDisposition disposition, HumanReviewDecisionKind kind)
+        => disposition switch
+        {
+            HumanReviewDecisionOperationDisposition.Accepted => kind is HumanReviewDecisionKind.Approve or HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel,
+            HumanReviewDecisionOperationDisposition.InformationRequested => kind == HumanReviewDecisionKind.RequestInformation,
+            _ => false
+        };
 
     private static void ValidateOrderedIdentifiers(ImmutableArray<string> values, string path, List<HumanReviewContractValidationError> errors)
     {

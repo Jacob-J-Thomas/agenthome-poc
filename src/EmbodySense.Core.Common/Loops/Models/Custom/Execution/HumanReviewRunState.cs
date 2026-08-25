@@ -11,4 +11,25 @@ namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 public sealed record HumanReviewRunState(
     [property: JsonRequired] HumanReviewRequest Request,
     [property: JsonRequired] HumanReviewLifecycle Lifecycle,
-    [property: JsonRequired] ImmutableArray<HumanReviewEvidence> Evidence);
+    [property: JsonRequired] ImmutableArray<HumanReviewEvidence> Evidence)
+{
+    /// <summary>Gets the bounded append-only lifecycle chain beginning with the admitted pending head.</summary>
+    [JsonRequired]
+    public ImmutableArray<HumanReviewLifecycle> LifecycleHistory { get; init; } = [Lifecycle];
+
+    /// <summary>Gets the bounded append-only decision-operation receipt ledger.</summary>
+    [JsonRequired]
+    public ImmutableArray<HumanReviewDecisionOperationReceipt> OperationReceipts { get; init; } = ImmutableArray<HumanReviewDecisionOperationReceipt>.Empty;
+
+    /// <summary>Gets the ordered accepted decisions, including zero or more information requests and at most one terminal decision.</summary>
+    [JsonRequired]
+    public ImmutableArray<HumanReviewDecision> AcceptedDecisions { get; init; } = ImmutableArray<HumanReviewDecision>.Empty;
+
+    /// <summary>Gets the one accepted terminal decision, or null while no terminal decision has been accepted.</summary>
+    [JsonRequired]
+    public HumanReviewDecision? AcceptedTerminalDecision { get; init; }
+
+    /// <summary>Gets the one approval continuation reservation, or null unless the accepted terminal decision is an approval.</summary>
+    [JsonRequired]
+    public HumanReviewContinuationReservation? ContinuationReservation { get; init; }
+}
