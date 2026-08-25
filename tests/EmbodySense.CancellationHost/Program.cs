@@ -106,6 +106,16 @@ if (args is ["sequential-evidence-resolve", var evidenceWorkspaceRoot, var evide
     return await CustomLoopSequentialEvidenceCrossProcessHost.ResolveAsync(evidenceWorkspaceRoot, evidenceHash, evidenceResultPath);
 }
 
+if (args is ["pipe-holder", var pipeHolderChildProcessIdPath, var pipeHolderChildLifetimeMilliseconds])
+{
+    return await PipeHoldingChildHost.StartAsync(pipeHolderChildProcessIdPath, pipeHolderChildLifetimeMilliseconds);
+}
+
+if (args is ["pipe-holder-child", var pipeHolderChildLifetimeMillisecondsText])
+{
+    return await PipeHoldingChildHost.HoldAsync(pipeHolderChildLifetimeMillisecondsText);
+}
+
 if (args is ["effect-authority-crash", var effectMode, var effectWorkspaceRoot, var effectTrustRoot, var effectReleaseMarker, var effectReadyMarker, var effectOperationId])
 {
     return await GovernedLoopEffectAuthorityCrashHost.RunAsync(effectMode, effectWorkspaceRoot, effectTrustRoot, effectReleaseMarker, effectReadyMarker, effectOperationId);

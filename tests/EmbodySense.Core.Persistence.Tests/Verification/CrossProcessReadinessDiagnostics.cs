@@ -5,6 +5,8 @@ namespace EmbodySense.Core.Persistence.Tests.Verification;
 
 internal static class CrossProcessReadinessDiagnostics
 {
+    private static readonly TimeSpan _childEvidenceReadTimeout = TimeSpan.FromSeconds(5);
+
     private const int MaximumChildEvidenceCharacters = 8_192;
 
     internal static async Task WaitForChildrenReadyAsync(
@@ -125,11 +127,48 @@ internal static class CrossProcessReadinessDiagnostics
             return $"{operation}/{stage}/{child.Label}: pid={child.Process.Id} state=still-running exit=<unavailable> ready={File.Exists(child.ReadyPath)} result={File.Exists(child.ResultPath)} stdout=<unavailable> stderr=<unavailable>";
         }
 
-        var outputTask = child.Process.StandardOutput.ReadToEndAsync();
-        var errorTask = child.Process.StandardError.ReadToEndAsync();
-        await Task.WhenAll(outputTask, errorTask);
-        return $"{operation}/{stage}/{child.Label}: pid={child.Process.Id} state=exited exit={child.Process.ExitCode} ready={File.Exists(child.ReadyPath)} result={File.Exists(child.ResultPath)} stdout={BoundChildEvidence(outputTask.Result)} stderr={BoundChildEvidence(errorTask.Result)}";
+        var outputReader = child.Process.StandardOutput;
+        var errorReader = child.Process.StandardError;
+        using var cancellation = new CancellationTokenSource();
+        var outputTask = ReadChildStreamAsync(outputReader, cancellation.Token);
+        var errorTask = ReadChildStreamAsync(errorReader, cancellation.Token);
+        var drainTask = Task.WhenAll(outputTask, errorTask);
+        try
+        {
+            await drainTask.WaitAsync(_childEvidenceReadTimeout);
+        }
+        catch (TimeoutException)
+        {
+            cancellation.Cancel();
+            outputReader.Dispose();
+            errorReader.Dispose();
+        }
+
+        return $"{operation}/{stage}/{child.Label}: pid={child.Process.Id} state=exited exit={child.Process.ExitCode} ready={File.Exists(child.ReadyPath)} result={File.Exists(child.ResultPath)} stdout={GetChildStreamEvidence(outputTask)} stderr={GetChildStreamEvidence(errorTask)}";
     }
+
+    private static async Task<string> ReadChildStreamAsync(StreamReader reader, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await reader.ReadToEndAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return "<timed-out>";
+        }
+        catch (IOException)
+        {
+            return "<unavailable>";
+        }
+        catch (ObjectDisposedException)
+        {
+            return "<unavailable>";
+        }
+    }
+
+    private static string GetChildStreamEvidence(Task<string> streamTask)
+        => streamTask.IsCompletedSuccessfully ? BoundChildEvidence(streamTask.Result) : "<unavailable>";
 
     private static string BoundChildEvidence(string evidence)
     {
