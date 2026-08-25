@@ -72,6 +72,107 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Scheduled_admission_recovers_a_canonical_run_without_derived_evidence_and_replays_after_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var scheduled = CreateScheduledRun(1, ScheduleOverlapPolicy.Skip);
+        await WriteDirectAsync(paths, scheduled.Run);
+
+        var recovered = await new CustomLoopRunStore(paths).CreateScheduledAsync(scheduled.Run, scheduled.Envelope);
+
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.Replayed, recovered.Status);
+        AssertRun(scheduled.Run, recovered.Run);
+        Assert.NotNull(recovered.Evidence);
+        Assert.Equal(ScheduleRunAdmissionDisposition.RunCreated, recovered.Evidence.Attempts[^1].Disposition);
+        AssertRun(scheduled.Run, await new CustomLoopRunStore(paths).GetAsync(scheduled.Run.Id));
+        var replay = await new CustomLoopRunStore(paths).CreateScheduledAsync(scheduled.Run, scheduled.Envelope);
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.Replayed, replay.Status);
+        AssertRun(scheduled.Run, replay.Run);
+        Assert.Single(Directory.EnumerateFiles(Path.Combine(paths.CustomLoopRunsPath, scheduled.Run.LoopId), "*.json"));
+    }
+
+    [Fact]
+    public async Task Scheduled_admission_fails_closed_when_multiple_canonical_runs_claim_one_delivery()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var scheduled = CreateScheduledRun(1, ScheduleOverlapPolicy.Skip);
+        var duplicate = CustomLoopSequentialEvidenceStoreTests.CreateContext(scheduled.Run.SequentialInvocationSnapshot!.TriggerOrigin, "schedule-duplicate", scheduleTrigger: true).Run;
+        await WriteDirectAsync(paths, scheduled.Run);
+        await WriteDirectAsync(paths, duplicate);
+
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).CreateScheduledAsync(scheduled.Run, scheduled.Envelope));
+        Assert.Null(await new CustomLoopRunStore(paths).GetScheduleAdmissionAsync(scheduled.Envelope.DeliveryId));
+        Assert.Equal(2, Directory.EnumerateFiles(Path.Combine(paths.CustomLoopRunsPath, scheduled.Run.LoopId), "*.json").Count());
+    }
+
+    [Fact]
+    public async Task Scheduled_admission_rejects_a_conflicting_definition_before_creating_another_canonical_run()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = CreateScheduledRun(1, ScheduleOverlapPolicy.Skip);
+        var conflicting = CreateScheduledRun(2, ScheduleOverlapPolicy.Skip, "payload/conflicting-definition");
+        using var store = new CustomLoopRunStore(paths);
+
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.Created, (await store.CreateScheduledAsync(admitted.Run, admitted.Envelope)).Status);
+        var rejected = await store.CreateScheduledAsync(conflicting.Run, conflicting.Envelope);
+
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.Conflict, rejected.Status);
+        Assert.Null(rejected.Run);
+        Assert.NotNull(rejected.Evidence);
+        Assert.Single(Directory.EnumerateFiles(Path.Combine(paths.CustomLoopRunsPath, admitted.Run.LoopId), "*.json"));
+    }
+
+    [Fact]
+    public async Task Scheduled_admission_fails_closed_when_run_created_evidence_loses_its_canonical_artifact()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var scheduled = CreateScheduledRun(1, ScheduleOverlapPolicy.Skip);
+        using var store = new CustomLoopRunStore(paths);
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.Created, (await store.CreateScheduledAsync(scheduled.Run, scheduled.Envelope)).Status);
+        File.Delete(Path.Combine(paths.CustomLoopRunsPath, scheduled.Run.LoopId, scheduled.Run.Id + ".json"));
+
+        await Assert.ThrowsAsync<FormatException>(() => store.CreateScheduledAsync(scheduled.Run, scheduled.Envelope));
+        Assert.NotNull(await store.GetScheduleAdmissionAsync(scheduled.Envelope.DeliveryId));
+    }
+
+    [Fact]
+    public async Task Scheduled_defer_one_admissions_retain_one_deferred_occurrence_and_replay_each_outcome()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(CreateRun("sequential-loop", "run-active", "invoke-active"))).Status);
+        var first = CreateScheduledRun(1, ScheduleOverlapPolicy.DeferOne);
+        var second = CreateScheduledRun(2, ScheduleOverlapPolicy.DeferOne);
+
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.OverlapDeferred, (await store.CreateScheduledAsync(first.Run, first.Envelope)).Status);
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.DeferredOneSuppressed, (await store.CreateScheduledAsync(second.Run, second.Envelope)).Status);
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.OverlapDeferred, (await store.CreateScheduledAsync(first.Run, first.Envelope)).Status);
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.DeferredOneSuppressed, (await store.CreateScheduledAsync(second.Run, second.Envelope)).Status);
+        Assert.Single(await store.ListPendingScheduleAdmissionsAsync(null, 10));
+    }
+
+    [Fact]
+    public async Task Scheduled_allow_admission_serializes_against_an_active_canonical_run_and_replays_its_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(CreateRun("sequential-loop", "run-active", "invoke-active"))).Status);
+        var scheduled = CreateScheduledRun(1, ScheduleOverlapPolicy.Allow);
+
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.OverlapSerialized, (await store.CreateScheduledAsync(scheduled.Run, scheduled.Envelope)).Status);
+        Assert.Equal(ScheduleRunAdmissionStoreStatus.OverlapSerialized, (await store.CreateScheduledAsync(scheduled.Run, scheduled.Envelope)).Status);
+        var evidence = Assert.IsType<ScheduleRunAdmissionEvidence>(await store.GetScheduleAdmissionAsync(scheduled.Envelope.DeliveryId));
+        Assert.Equal(ScheduleRunAdmissionDisposition.OverlapSerialized, evidence.Attempts[^1].Disposition);
+        Assert.Equal("run-active", evidence.Attempts[^1].BlockingRunId);
+    }
+
+    [Fact]
     public async Task Terminal_schedule_admissions_compact_to_authenticated_watermarks_and_old_redelivery_cannot_redispatch()
     {
         using var workspace = new TestWorkspace();
@@ -3096,6 +3197,42 @@ public sealed class CustomLoopRunStoreTests
         var updated = Advance(run, CustomLoopRunStatus.Running);
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(updated, run.LifecycleVersion)).Status);
         AssertRun(updated, await store.GetAsync(updated.Id));
+    }
+
+    [Fact]
+    public async Task Create_reuses_a_preexisting_empty_canonical_loop_directory_and_remains_idempotent_after_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-preexisting-directory", "run-preexisting-directory", "invoke-preexisting-directory");
+        var loopDirectory = Path.Combine(paths.CustomLoopRunsPath, run.LoopId);
+        Directory.CreateDirectory(loopDirectory);
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await new CustomLoopRunStore(paths).CreateAsync(run)).Status);
+        AssertRun(run, await new CustomLoopRunStore(paths).GetAsync(run.Id));
+        Assert.Equal(CustomLoopRunStoreStatus.AlreadyCreated, (await new CustomLoopRunStore(paths).CreateAsync(run)).Status);
+        Assert.Single(Directory.EnumerateFiles(loopDirectory, "*.json"));
+    }
+
+    [Fact]
+    public async Task Create_fails_closed_when_new_canonical_run_ancestry_is_a_reparse_point()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var outside = workspace.File("outside-canonical-runs");
+        Directory.CreateDirectory(outside);
+        Directory.CreateDirectory(Path.GetDirectoryName(paths.CustomLoopRunsPath)!);
+        try
+        {
+            Directory.CreateSymbolicLink(paths.CustomLoopRunsPath, outside);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        await Assert.ThrowsAsync<IOException>(() => new CustomLoopRunStore(paths).CreateAsync(CreateRun("loop-reparse-ancestry", "run-reparse-ancestry", "invoke-reparse-ancestry")));
+        Assert.Empty(Directory.EnumerateFiles(outside, "*.json"));
     }
 
     [Fact]
