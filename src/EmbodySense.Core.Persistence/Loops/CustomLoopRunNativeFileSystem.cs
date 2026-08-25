@@ -27,6 +27,8 @@ internal static class CustomLoopRunNativeFileSystem
     private const uint ObjectCaseInsensitive = 0x00000040;
     private const uint NtFileOpen = 1;
     private const uint NtFileCreate = 2;
+    private const uint NtFileOpenIf = 3;
+    private const uint NtFileDirectory = 0x00000001;
     private const uint NtFileNonDirectory = 0x00000040;
     private const uint NtFileSynchronousIoNonAlert = 0x00000020;
     private const uint NtFileOpenReparsePoint = 0x00200000;
@@ -41,6 +43,8 @@ internal static class CustomLoopRunNativeFileSystem
     private const int ErrorSharingViolation = 32;
     private const int ErrorLockViolation = 33;
     private const int ErrorUnableToRemoveReplaced = 1175;
+    private const int UnixAlreadyExists = 17;
+    private const long NtFileCreated = 2;
     private const int AtEmptyPath = 0x1000;
     private const uint StatxBasicStats = 0x7ff;
     private const ushort UnixFileTypeMask = 0xF000;
@@ -93,7 +97,7 @@ internal static class CustomLoopRunNativeFileSystem
         EnsureSimpleName(name);
         if (OperatingSystem.IsWindows())
         {
-            var handle = OpenWindowsRelative(parent, name, GenericRead | DeleteAccess | FileReadAttributes | SynchronizeAccess, FileShareRead | FileShareWrite | FileShareDelete, NtFileOpen, NtFileNonDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint, returnNullWhenMissing: false) ?? throw new IOException("Canonical run artifact is unavailable for retained-parent publication.");
+            var handle = OpenWindowsRelative(parent, name, GenericRead | DeleteAccess | FileReadAttributes | SynchronizeAccess, FileShareRead | FileShareWrite | FileShareDelete, NtFileOpen, NtFileNonDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint, returnNullWhenMissing: false, out _) ?? throw new IOException("Canonical run artifact is unavailable for retained-parent publication.");
             try
             {
                 RequireWindowsRegularFile(handle);
@@ -131,7 +135,7 @@ internal static class CustomLoopRunNativeFileSystem
         EnsureSimpleName(name);
         if (OperatingSystem.IsWindows())
         {
-            var handle = OpenWindowsRelative(parent, name, GenericRead | GenericWrite | DeleteAccess | FileReadAttributes | SynchronizeAccess, 0, NtFileCreate, NtFileNonDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint | NtFileWriteThrough, returnNullWhenMissing: false) ?? throw new IOException("Canonical run staging artifact could not be created relative to its retained parent.");
+            var handle = OpenWindowsRelative(parent, name, GenericRead | GenericWrite | DeleteAccess | FileReadAttributes | SynchronizeAccess, 0, NtFileCreate, NtFileNonDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint | NtFileWriteThrough, returnNullWhenMissing: false, out _) ?? throw new IOException("Canonical run staging artifact could not be created relative to its retained parent.");
             try
             {
                 RequireWindowsRegularFile(handle);
@@ -178,6 +182,80 @@ internal static class CustomLoopRunNativeFileSystem
         }
 
         if (fsync(staging) != 0)
+        {
+            throw PosixError(Marshal.GetLastPInvokeError());
+        }
+    }
+
+    public static SafeFileHandle OpenOrCreateChildDirectory(SafeFileHandle parent, string name, out bool created)
+    {
+        ArgumentNullException.ThrowIfNull(parent);
+        EnsureSimpleName(name);
+        if (OperatingSystem.IsWindows())
+        {
+            var handle = OpenWindowsRelative(parent, name, GenericRead | GenericWrite | DeleteAccess | FileReadAttributes | SynchronizeAccess, FileShareRead | FileShareWrite | FileShareDelete, NtFileOpenIf, NtFileDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint | NtFileWriteThrough, returnNullWhenMissing: false, out var information) ?? throw new IOException("Canonical run directory could not be opened relative to its retained parent.");
+            try
+            {
+                RequireWindowsDirectory(handle);
+                created = information == NtFileCreated;
+                return handle;
+            }
+            catch
+            {
+                handle.Dispose();
+                throw;
+            }
+        }
+
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            throw new PlatformNotSupportedException("Canonical custom-loop publication requires Windows, Linux, or macOS directory durability support.");
+        }
+
+        if (mkdirat(parent, name, 0x1ff) == 0)
+        {
+            created = true;
+        }
+        else
+        {
+            var error = Marshal.GetLastPInvokeError();
+            if (error != UnixAlreadyExists)
+            {
+                throw PosixError(error);
+            }
+
+            created = false;
+        }
+
+        var descriptor = openat(parent, name, UnixOpenReadOnly | UnixOpenDirectory | UnixOpenNoFollow | UnixOpenCloseOnExec, 0);
+        if (descriptor < 0)
+        {
+            throw PosixError(Marshal.GetLastPInvokeError());
+        }
+
+        var unixHandle = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+        try
+        {
+            _ = GetDirectoryIdentity(unixHandle);
+            return unixHandle;
+        }
+        catch
+        {
+            unixHandle.Dispose();
+            throw;
+        }
+    }
+
+    public static void FlushDirectory(SafeFileHandle directory)
+    {
+        ArgumentNullException.ThrowIfNull(directory);
+        if (OperatingSystem.IsWindows())
+        {
+            // Windows creates the exact retained-parent directory with NT_FILE_WRITE_THROUGH. NTFS does not expose a portable directory FlushFileBuffers barrier; canonical files are instead reopened and flushed after publication.
+            return;
+        }
+
+        if (fsync(directory) != 0)
         {
             throw PosixError(Marshal.GetLastPInvokeError());
         }
@@ -360,7 +438,7 @@ internal static class CustomLoopRunNativeFileSystem
         ArgumentNullException.ThrowIfNull(parent);
         if (OperatingSystem.IsWindows())
         {
-            using var target = OpenWindowsRelative(parent, destinationName, GenericRead | GenericWrite | FileReadAttributes | SynchronizeAccess, FileShareRead | FileShareWrite | FileShareDelete, NtFileOpen, NtFileNonDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint | NtFileWriteThrough, returnNullWhenMissing: false) ?? throw new IOException("Canonical run artifact is unavailable for its durability barrier.");
+            using var target = OpenWindowsRelative(parent, destinationName, GenericRead | GenericWrite | FileReadAttributes | SynchronizeAccess, FileShareRead | FileShareWrite | FileShareDelete, NtFileOpen, NtFileNonDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint | NtFileWriteThrough, returnNullWhenMissing: false, out _) ?? throw new IOException("Canonical run artifact is unavailable for its durability barrier.");
             RequireWindowsRegularFile(target);
             if (!FlushFileBuffers(target))
             {
@@ -457,8 +535,9 @@ internal static class CustomLoopRunNativeFileSystem
         }
     }
 
-    private static SafeFileHandle? OpenWindowsRelative(SafeFileHandle parent, string name, uint desiredAccess, uint shareMode, uint disposition, uint options, bool returnNullWhenMissing)
+    private static SafeFileHandle? OpenWindowsRelative(SafeFileHandle parent, string name, uint desiredAccess, uint shareMode, uint disposition, uint options, bool returnNullWhenMissing, out long information)
     {
+        information = 0;
         var nameBuffer = Marshal.StringToHGlobalUni(name);
         var unicodeBuffer = IntPtr.Zero;
         try
@@ -468,10 +547,11 @@ internal static class CustomLoopRunNativeFileSystem
             unicodeBuffer = Marshal.AllocHGlobal(Marshal.SizeOf<CustomLoopRunWindowsUnicodeString>());
             Marshal.StructureToPtr(unicode, unicodeBuffer, fDeleteOld: false);
             var attributes = new CustomLoopRunWindowsObjectAttributes { Length = Marshal.SizeOf<CustomLoopRunWindowsObjectAttributes>(), RootDirectory = parent.DangerousGetHandle(), ObjectName = unicodeBuffer, Attributes = ObjectCaseInsensitive };
-            var status = NtCreateFile(out var rawHandle, desiredAccess, ref attributes, out _, IntPtr.Zero, FileAttributeNormal, shareMode, disposition, options, IntPtr.Zero, 0);
+            var status = NtCreateFile(out var rawHandle, desiredAccess, ref attributes, out var ioStatus, IntPtr.Zero, FileAttributeNormal, shareMode, disposition, options, IntPtr.Zero, 0);
             GC.KeepAlive(parent);
             if (status >= 0)
             {
+                information = ioStatus.Information.ToInt64();
                 return new SafeFileHandle(rawHandle, ownsHandle: true);
             }
 
@@ -597,6 +677,9 @@ internal static class CustomLoopRunNativeFileSystem
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int openat(SafeFileHandle directory, string path, int flags, int mode);
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int mkdirat(SafeFileHandle directory, string path, int mode);
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int renameat(SafeFileHandle oldDirectory, string oldPath, SafeFileHandle newDirectory, string newPath);

@@ -3098,6 +3098,45 @@ public sealed class CustomLoopRunStoreTests
         AssertRun(updated, await store.GetAsync(updated.Id));
     }
 
+    [Fact]
+    public async Task Separate_process_loss_after_staged_flush_on_first_run_preserves_the_canonical_directory_and_allows_one_retry()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var expected = CreateRun("loop-process-loss", "run-process-loss", "invoke-process-loss");
+        using var process = CancellationHostProcess.Start("custom-loop-run-process-loss", workspace.RootPath, CustomLoopRunPublicationBoundary.StagedFileFlushed.ToString());
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+
+        var output = await outputTask;
+        var error = await errorTask;
+        Assert.True(process.ExitCode != 0, $"Process-loss worker unexpectedly completed normally. stdout: {output} stderr: {error}");
+        Assert.Contains("test host process crashed", error, StringComparison.OrdinalIgnoreCase);
+        var loopDirectory = Path.Combine(paths.CustomLoopRunsPath, expected.LoopId);
+        Assert.True(Directory.Exists(loopDirectory));
+        Assert.Empty(Directory.EnumerateFiles(loopDirectory, "*.json"));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+
+        using var restarted = new CustomLoopRunStore(paths);
+        Assert.Null(await restarted.GetAsync(expected.Id));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await restarted.CreateAsync(expected)).Status);
+        AssertRun(expected, await restarted.GetAsync(expected.Id));
+        Assert.Single(Directory.EnumerateFiles(loopDirectory, "*.json"));
+    }
+
     [Theory]
     [InlineData(CustomLoopRunPublicationBoundary.CanonicalRenamed)]
     [InlineData(CustomLoopRunPublicationBoundary.TargetProven)]

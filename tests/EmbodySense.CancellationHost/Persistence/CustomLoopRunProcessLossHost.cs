@@ -17,7 +17,7 @@ internal static class CustomLoopRunProcessLossHost
     internal static async Task<int> RunAsync(string workspaceRoot, string boundaryText)
     {
         if (!Enum.TryParse<CustomLoopRunPublicationBoundary>(boundaryText, out var boundary)
-            || boundary is not CustomLoopRunPublicationBoundary.CanonicalRenamed and not CustomLoopRunPublicationBoundary.TargetProven)
+            || boundary is not CustomLoopRunPublicationBoundary.StagedFileFlushed and not CustomLoopRunPublicationBoundary.CanonicalRenamed and not CustomLoopRunPublicationBoundary.TargetProven)
         {
             return 2;
         }

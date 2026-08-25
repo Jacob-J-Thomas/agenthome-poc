@@ -9,6 +9,7 @@ using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Win32.SafeHandles;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
@@ -276,8 +277,6 @@ public sealed class CustomLoopRunStore :
         }
 
         var path = GetRunPath(run.LoopId, run.Id);
-        EnsureSafeDirectory(Path.GetDirectoryName(path)!, create: true);
-        EnsureSafeArtifactPath(path, mustExist: false);
         await WriteArtifactAsync(path, serialized, ToSummary(run), overwrite: false, cancellationToken);
         return CustomLoopRunStoreResult.Created(run);
     }
@@ -490,8 +489,6 @@ public sealed class CustomLoopRunStore :
         }
 
         var path = GetRunPath(run.LoopId, run.Id);
-        EnsureSafeDirectory(Path.GetDirectoryName(path)!, create: true);
-        EnsureSafeArtifactPath(path, mustExist: false);
         await WriteArtifactAsync(path, serialized, ToSummary(run), overwrite: false, cancellationToken);
         var evidence = await AppendScheduleAdmissionAsync(
             existingEvidence,
@@ -3975,9 +3972,9 @@ public sealed class CustomLoopRunStore :
 
     private async Task<CustomLoopRunCanonicalPublicationResult> WriteArtifactContentAsync(string path, byte[] content, bool overwrite, CancellationToken cancellationToken)
     {
-        EnsureSafeArtifactPath(path, mustExist: overwrite);
         var directory = Path.GetDirectoryName(path)!;
-        EnsureSafeDirectory(directory, create: true);
+        EnsureCanonicalPublicationDirectory(directory);
+        EnsureSafeArtifactPath(path, mustExist: overwrite);
         return await _canonicalPublisher.PublishAsync(directory, Path.GetFileName(path), content, overwrite, _canonicalAtomicMoveContentionTimeout, _atomicMoveRetryDelay, cancellationToken);
     }
 
@@ -4075,7 +4072,7 @@ public sealed class CustomLoopRunStore :
         await _processMutationGate.WaitAsync(cancellationToken);
         try
         {
-            EnsureSafeDirectory(_runsRoot, create: true);
+            EnsureCanonicalPublicationDirectory(_runsRoot);
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -4108,6 +4105,58 @@ public sealed class CustomLoopRunStore :
         {
             _processMutationGate.Release();
             throw;
+        }
+    }
+
+    private void EnsureCanonicalPublicationDirectory(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        EnsureContained(_workspaceRoot, fullPath);
+        var relative = Path.GetRelativePath(_workspaceRoot, fullPath);
+        SafeFileHandle? current = CustomLoopRunNativeFileSystem.OpenParentDirectory(_workspaceRoot);
+        var currentPath = _workspaceRoot;
+        try
+        {
+            foreach (var segment in relative.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+            {
+                var parentIdentity = CustomLoopRunNativeFileSystem.GetDirectoryIdentity(current);
+                var childPath = Path.Combine(currentPath, segment);
+                SafeFileHandle? child = null;
+                var created = false;
+                try
+                {
+                    try
+                    {
+                        child = CustomLoopRunNativeFileSystem.OpenOrCreateChildDirectory(current, segment, out created);
+                    }
+                    catch (CustomLoopRunNativeIOException exception)
+                    {
+                        throw new IOException("Canonical custom-loop directory could not be retained safely.", exception);
+                    }
+
+                    var childIdentity = CustomLoopRunNativeFileSystem.GetDirectoryIdentity(child);
+                    if (created)
+                    {
+                        CustomLoopRunNativeFileSystem.FlushDirectory(child);
+                        CustomLoopRunNativeFileSystem.FlushDirectory(current);
+                        CustomLoopRunNativeFileSystem.RevalidateCanonicalParentDirectory(currentPath, parentIdentity);
+                        CustomLoopRunNativeFileSystem.RevalidateCanonicalParentDirectory(childPath, childIdentity);
+                    }
+
+                    current.Dispose();
+                    current = child;
+                    child = null;
+                    currentPath = childPath;
+                }
+                finally
+                {
+                    child?.Dispose();
+                }
+            }
+        }
+        finally
+        {
+            current?.Dispose();
         }
     }
 
