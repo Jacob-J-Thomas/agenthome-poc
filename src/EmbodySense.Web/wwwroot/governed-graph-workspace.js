@@ -77,6 +77,7 @@ export function createGovernedGraphWorkspace({
   let invocationPreparation = null;
   let invocationInFlight = false;
   let invocationOutcome = "";
+  let invocationGrantSelection = null;
 
   bindEvents();
 
@@ -112,6 +113,7 @@ export function createGovernedGraphWorkspace({
       invocationPreparation = null;
       invocationInFlight = false;
       invocationOutcome = "";
+      invocationGrantSelection = null;
       pendingMutation = restorePendingMutation();
       elements.graphId.value = "";
       restoreSelection();
@@ -168,6 +170,14 @@ export function createGovernedGraphWorkspace({
     elements.archiveButton.addEventListener("click", archivePublication);
     elements.prepareInvokeButton.addEventListener("click", prepareInvocation);
     elements.confirmInvokeButton.addEventListener("click", confirmAndInvoke);
+    elements.grantSelection.addEventListener("change", () => {
+      const choice =
+        invocationPreparation?.eligibleGrants?.[
+          Number(elements.grantSelection.value)
+        ];
+      invocationGrantSelection = visibleGrantSelection(choice);
+      renderInvocation();
+    });
     elements.graphId.addEventListener("input", () => {
       invalidateGraphRead();
       render();
@@ -333,11 +343,15 @@ export function createGovernedGraphWorkspace({
     invocationInFlight = true;
     invocationPreparation = null;
     invocationOutcome = "";
+    invocationGrantSelection = null;
     renderInvocation();
     try {
       invocationPreparation = await requestJson(
         "/api/governed-graphs/invocation-preparation",
         { method: "POST", body: JSON.stringify(selector) },
+      );
+      invocationGrantSelection = visibleGrantSelection(
+        invocationPreparation?.eligibleGrants?.[0],
       );
     } catch (error) {
       invocationPreparation = {
@@ -356,11 +370,7 @@ export function createGovernedGraphWorkspace({
     if (!selector || !preparation || invocationInFlight) return;
     const confirmationRequired = preparation.status === "confirmationRequired";
     const ready = preparation.status === "ready";
-    if (
-      !confirmationRequired &&
-      !(ready && preparation.eligibleGrants?.length === 1)
-    )
-      return;
+    if (!confirmationRequired && !(ready && invocationGrantSelection)) return;
     const previewHash = confirmationRequired
       ? preparation.preview?.semanticHash
       : null;
@@ -373,6 +383,7 @@ export function createGovernedGraphWorkspace({
         graphId: selector.graphId,
         revisionId: selector.revisionId,
         previewHash,
+        grantSelection: confirmationRequired ? null : invocationGrantSelection,
         operationId: operationId("governed-invoke"),
         invocationPrompt: elements.invocationPrompt.value.normalize("NFC"),
       });
@@ -844,7 +855,7 @@ export function createGovernedGraphWorkspace({
       !inFlight &&
       ((preparation?.status === "confirmationRequired" &&
         preparation.preview?.semanticHash) ||
-        (preparation?.status === "ready" && choices.length === 1));
+        (preparation?.status === "ready" && invocationGrantSelection));
     elements.invocationPrompt.disabled =
       !selector || invocationInFlight || inFlight;
     elements.prepareInvokeButton.disabled = !canPrepare;
@@ -858,6 +869,8 @@ export function createGovernedGraphWorkspace({
         ? "Confirm authority and invoke"
         : "Invoke with exact grant";
     elements.grantChoices.replaceChildren();
+    elements.grantSelection.replaceChildren();
+    elements.grantSelectionField.hidden = true;
     if (!selector) {
       elements.invocationStatus.textContent =
         "Publish the exact current draft with no unsaved changes before preparing a Manual Trigger invocation.";
@@ -866,7 +879,7 @@ export function createGovernedGraphWorkspace({
     if (!preparation) {
       elements.invocationStatus.textContent =
         invocationOutcome ||
-        "Prepare current server authority before invoking. The browser cannot submit actor, workspace, role, profile, publication, or grant data.";
+        "Prepare current server authority before invoking. The browser cannot submit actor, workspace, role, profile, publication, eligibility, or effective-authority data.";
       return;
     }
     elements.invocationStatus.textContent =
@@ -877,18 +890,66 @@ export function createGovernedGraphWorkspace({
         "Explicit confirmation creates only the server-derived least-authority grant for this exact publication.";
       elements.grantChoices.append(preview);
     } else if (preparation.status === "ready") {
+      const selections = choices.map(visibleGrantSelection);
+      const selectedIndex = selections.findIndex((candidate) =>
+        sameGrantSelection(candidate, invocationGrantSelection),
+      );
+      if (selectedIndex < 0) invocationGrantSelection = selections[0] ?? null;
       for (const [index, choice] of choices.entries()) {
         const choiceElement = document.createElement("p");
-        choiceElement.textContent = `Eligible exact grant ${index + 1} · ${choice.grant?.grantId ?? "unavailable"}${choice.expiresAtUtc ? ` · expires ${choice.expiresAtUtc}` : ""}`;
+        choiceElement.textContent = `Eligible exact grant ${index + 1} · ${choice.grant?.grantId ?? "unavailable"} r${choice.grant?.revision ?? "unavailable"}${choice.expiresAtUtc ? ` · expires ${choice.expiresAtUtc}` : ""}`;
         elements.grantChoices.append(choiceElement);
       }
-      if (choices.length > 1) {
-        const blocked = document.createElement("p");
-        blocked.textContent =
-          "Multiple exact grants are visible. This bounded surface will not choose among them implicitly; refresh after resolving the authority choice.";
-        elements.grantChoices.append(blocked);
+      for (const [index, choice] of choices.entries()) {
+        const selection = selections[index];
+        if (!selection) continue;
+        const option = document.createElement("option");
+        option.value = String(index);
+        option.textContent = `${selection.grantId} r${selection.revision}${choice.expiresAtUtc ? ` · expires ${choice.expiresAtUtc}` : ""}`;
+        elements.grantSelection.append(option);
       }
+      elements.grantSelectionField.hidden =
+        !elements.grantSelection.options.length;
+      elements.grantSelection.disabled =
+        invocationInFlight ||
+        inFlight ||
+        !elements.grantSelection.options.length;
+      if (elements.grantSelection.options.length)
+        elements.grantSelection.value = String(
+          Math.max(
+            0,
+            selections.findIndex((candidate) =>
+              sameGrantSelection(candidate, invocationGrantSelection),
+            ),
+          ),
+        );
     }
+  }
+
+  function visibleGrantSelection(choice) {
+    const grant = choice?.grant;
+    if (
+      typeof grant?.grantId !== "string" ||
+      !grant.grantId ||
+      !Number.isSafeInteger(grant.revision) ||
+      grant.revision < 1 ||
+      typeof grant.contentHash !== "string" ||
+      !grant.contentHash
+    )
+      return null;
+    return {
+      grantId: grant.grantId,
+      revision: grant.revision,
+      contentHash: grant.contentHash,
+    };
+  }
+
+  function sameGrantSelection(left, right) {
+    return (
+      left?.grantId === right?.grantId &&
+      left?.revision === right?.revision &&
+      left?.contentHash === right?.contentHash
+    );
   }
 
   function renderRoles() {
@@ -1901,6 +1962,10 @@ function bindElements(document) {
     invocationPrompt: document.getElementById("governedGraphInvocationPrompt"),
     invocationStatus: document.getElementById("governedGraphInvocationStatus"),
     grantChoices: document.getElementById("governedGraphGrantChoices"),
+    grantSelection: document.getElementById("governedGraphGrantSelection"),
+    grantSelectionField: document.getElementById(
+      "governedGraphGrantSelectionField",
+    ),
     refreshButton: document.getElementById("governedGraphRefreshButton"),
     revisionId: document.getElementById("governedGraphRevisionId"),
     role: document.getElementById("governedGraphRole"),

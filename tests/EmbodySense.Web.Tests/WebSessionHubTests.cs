@@ -372,8 +372,11 @@ public sealed class WebSessionHubTests
         var request = Assert.Single(method!.GetParameters());
         Assert.Equal(typeof(GovernedLoopVisibleInvocationRequest), request.ParameterType);
         Assert.Equal(
-            ["GraphId", "RevisionId", "PreviewHash", "OperationId", "InvocationPrompt"],
+            ["GraphId", "RevisionId", "PreviewHash", "GrantSelection", "OperationId", "InvocationPrompt"],
             typeof(GovernedLoopVisibleInvocationRequest).GetProperties().Select(property => property.Name));
+        Assert.Equal(
+            ["GrantId", "Revision", "ContentHash"],
+            typeof(GovernedLoopVisibleInvocationGrantSelection).GetProperties().Select(property => property.Name));
     }
 
     [Fact]
@@ -389,6 +392,7 @@ public sealed class WebSessionHubTests
         var rejected = await hub.ConfirmAndInvokeGovernedLoop(new GovernedLoopVisibleInvocationRequest(
             "missing-graph",
             "missing-revision",
+            null,
             null,
             "visible-governed-invocation",
             "prompt"));

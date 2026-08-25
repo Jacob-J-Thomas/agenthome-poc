@@ -677,6 +677,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             var preparation = await runtime.PrepareGovernedLoopInvocationAsync(preparationRequest, executionCancellation.Token);
             if (preparation.Status == GovernedLoopInvocationPreparationStatus.ConfirmationRequired)
             {
+                if (request.GrantSelection is not null)
+                {
+                    return VisibleInvocationRejected("Invalid", "A server confirmation creates the exact least-authority grant and cannot accept an existing grant selection.");
+                }
                 if (string.IsNullOrWhiteSpace(request.PreviewHash))
                 {
                     return VisibleInvocationRejected("ConfirmationRequired", "Explicit confirmation of the current server preview is required before this graph can run.");
@@ -691,14 +695,14 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 }
 
                 preparation = await runtime.PrepareGovernedLoopInvocationAsync(preparationRequest, executionCancellation.Token);
-                if (preparation.Status != GovernedLoopInvocationPreparationStatus.Ready || preparation.Publication is null
-                    || !preparation.EligibleGrants.Any(choice => choice.Grant.Equals(confirmation.Grant)))
+                var confirmedChoice = preparation.EligibleGrants.SingleOrDefault(choice => choice.Grant.Equals(confirmation.Grant));
+                if (preparation.Status != GovernedLoopInvocationPreparationStatus.Ready || preparation.Publication is null || confirmedChoice is null)
                 {
                     return VisibleInvocationRejected("Stale", "The confirmed authority no longer matches the current exact publication. Prepare and confirm again before invoking.");
                 }
 
                 return await runtime.InvokeGovernedLoopAsync(
-                    new GovernedLoopRunInvocationInput(request.OperationId, preparation.Publication, confirmation.Grant, request.InvocationPrompt),
+                    new GovernedLoopRunInvocationInput(request.OperationId, preparation.Publication, confirmedChoice.Grant, request.InvocationPrompt),
                     executionCancellation.Token);
             }
 
@@ -706,13 +710,22 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             {
                 return VisibleInvocationRejected(preparation.Status.ToString(), preparation.Detail);
             }
-            if (preparation.EligibleGrants.Count != 1)
+            if (request.GrantSelection is null)
             {
-                return VisibleInvocationRejected("GrantChoiceRequired", "Multiple current exact authority grants are available. Refresh the visible grant choice before invoking.");
+                return VisibleInvocationRejected("GrantChoiceRequired", "Select one current exact authority grant before invoking.");
+            }
+            var selectedChoices = preparation.EligibleGrants
+                .Where(choice => string.Equals(choice.Grant.GrantId.Value, request.GrantSelection.GrantId, StringComparison.Ordinal)
+                    && choice.Grant.Revision.Value == request.GrantSelection.Revision
+                    && string.Equals(choice.Grant.ContentHash, request.GrantSelection.ContentHash, StringComparison.Ordinal))
+                .ToArray();
+            if (selectedChoices.Length != 1)
+            {
+                return VisibleInvocationRejected("Stale", "The selected exact authority grant is no longer eligible for the current publication. Prepare again before invoking.");
             }
 
             return await runtime.InvokeGovernedLoopAsync(
-                new GovernedLoopRunInvocationInput(request.OperationId, preparation.Publication, preparation.EligibleGrants[0].Grant, request.InvocationPrompt),
+                new GovernedLoopRunInvocationInput(request.OperationId, preparation.Publication, selectedChoices[0].Grant, request.InvocationPrompt),
                 executionCancellation.Token);
         }
         finally

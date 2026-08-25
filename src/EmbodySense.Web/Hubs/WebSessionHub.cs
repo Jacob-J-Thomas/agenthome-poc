@@ -267,7 +267,7 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     }
 
     /// <summary>Confirms a visible server preview and invokes a published graph with no browser-supplied authority coordinates.</summary>
-    /// <param name="input">The selected graph revision, preview hash, operation identity, and Manual Trigger prompt.</param>
+    /// <param name="input">The selected graph revision, preview hash, non-authoritative displayed grant selector, operation identity, and Manual Trigger prompt.</param>
     /// <returns>The bounded admission, execution, replay, or fail-closed projection.</returns>
     /// <exception cref="HubException">The request is cancelled or cannot be processed safely.</exception>
     public async Task<GovernedLoopRunInvocationTransportResponse> ConfirmAndInvokeGovernedLoop(GovernedLoopVisibleInvocationRequest input)
