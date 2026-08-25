@@ -181,12 +181,23 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
                 throw LastWin32Exception("The suspended cross-process child could not be assigned to its cleanup job.");
             }
 
-            standardOutput = CreateReader(outputRead, startInfo.StandardOutputEncoding);
-            outputRead = null;
-            standardError = CreateReader(errorRead, startInfo.StandardErrorEncoding);
-            errorRead = null;
-            standardInput = CreateWriter(inputWrite, startInfo.StandardInputEncoding);
-            inputWrite = null;
+            if (startInfo.RedirectStandardOutput)
+            {
+                standardOutput = CreateReader(outputRead, startInfo.StandardOutputEncoding);
+                outputRead = null;
+            }
+
+            if (startInfo.RedirectStandardError)
+            {
+                standardError = CreateReader(errorRead, startInfo.StandardErrorEncoding);
+                errorRead = null;
+            }
+
+            if (startInfo.RedirectStandardInput)
+            {
+                standardInput = CreateWriter(inputWrite, startInfo.StandardInputEncoding);
+                inputWrite = null;
+            }
 
             if (ResumeThread(processInformation.ThreadHandle) == Infinite)
             {
