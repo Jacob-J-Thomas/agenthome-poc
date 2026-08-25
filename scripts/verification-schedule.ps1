@@ -8,6 +8,7 @@ $script:VerificationRequiredGateScheduleProfiles = @(
     # removes repeated deployment, discovery, instrumentation, and report-write overhead.
     # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422: reserve the complete four-core runner for the two dominant assemblies so a third process cannot starve both coverage lanes.
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 300; Weight = 6; ResourceClass = "ProcessHeavy" }
+    # TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/536): Reconcile this retained estimate/profile with the measured coverage-instrumented hosted critical path.
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-all"; EstimatedDurationSeconds = 240; Weight = 6; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy" }

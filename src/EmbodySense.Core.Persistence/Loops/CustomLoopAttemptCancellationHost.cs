@@ -57,6 +57,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         _secret = RandomNumberGenerator.GetBytes(32);
         _encodedSecret = Convert.ToBase64String(_secret);
         _pipeName = "es-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(workspaceKey + "\n" + _ownerId))).ToLowerInvariant()[..16];
+        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/535): Publish this descriptor only after the exact named-pipe generation reaches a bounded listener-ready boundary.
         WriteOwnerDescriptor();
         _server = Task.Run(RunServerAsync);
     }
