@@ -91,4 +91,12 @@ public sealed record CustomLoopRunEvent(
     [JsonRequired]
     public HumanReviewEvidence? HumanReviewEvidence { get; init; }
 
+    /// <summary>Gets the exact operation receipt correlated with Human Review decision evidence, or null for other events.</summary>
+    [JsonRequired]
+    public HumanReviewDecisionOperationReference? HumanReviewDecisionOperation { get; init; }
+
+    /// <summary>Gets the exact continuation reservation correlated with Human Review reservation evidence, or null for other events.</summary>
+    [JsonRequired]
+    public HumanReviewContinuationReservationReference? HumanReviewContinuationReservation { get; init; }
+
 }

@@ -90,5 +90,9 @@ public enum CustomLoopRunEventKind
     /// </summary>
     RetryStateChanged = 20,
     /// <summary>Identifies an atomically admitted Human Review request and exact parked frontier.</summary>
-    HumanReviewRequestAdmitted = 21
+    HumanReviewRequestAdmitted = 21,
+    /// <summary>Identifies an append-only Human Review decision-operation receipt and its exact evidence artifact.</summary>
+    HumanReviewDecisionOperationRecorded = 22,
+    /// <summary>Identifies the one exact approval continuation reservation and its exact evidence artifact.</summary>
+    HumanReviewContinuationReserved = 23
 }

@@ -1,11 +1,26 @@
 using System.Collections.Immutable;
 using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.HumanReview.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Common.Tests.HumanReview;
 
 public sealed class HumanReviewLifecycleEvidenceContractTests
 {
+    [Fact]
+    public void Run_state_defaults_lifecycle_history_to_its_admitted_lifecycle()
+    {
+        var request = HumanReviewTestData.Request();
+        var lifecycle = HumanReviewTestData.Lifecycle(request);
+        var evidence = HumanReviewTestData.Evidence(request);
+
+        var state = new HumanReviewRunState(request, lifecycle, ImmutableArray.Create(evidence));
+
+        Assert.False(state.LifecycleHistory.IsDefault);
+        var retained = Assert.Single(state.LifecycleHistory);
+        Assert.Equal(lifecycle.LifecycleHash, retained.LifecycleHash);
+    }
+
     [Fact]
     public void Lifecycle_statuses_require_their_exact_decision_kind_and_stable_expiry_boundary()
     {
@@ -48,6 +63,7 @@ public sealed class HumanReviewLifecycleEvidenceContractTests
             HumanReviewTestData.Evidence(request, HumanReviewEvidenceKind.DecisionAccepted),
             HumanReviewTestData.Evidence(request, HumanReviewEvidenceKind.InformationRequested, approve),
             HumanReviewTestData.Evidence(request, HumanReviewEvidenceKind.RequestAdmitted, approve),
+            HumanReviewContractHash.ApplyEvidence(admitted with { DecisionOperation = accepted.DecisionOperation, EvidenceHash = string.Empty }),
             admitted with { RecordedAtUtc = request.Timing.CreatedAtUtc.AddTicks(-1) },
             HumanReviewContractHash.ApplyEvidence(admitted with { Previews = [HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Evidence, "Evidence", "credential=private", string.Empty))], EvidenceHash = string.Empty }),
             HumanReviewContractHash.ApplyEvidence(admitted with { Previews = default, EvidenceHash = string.Empty }),
@@ -69,7 +85,6 @@ public sealed class HumanReviewLifecycleEvidenceContractTests
     {
         var request = HumanReviewTestData.Request();
         var approve = HumanReviewTestData.Decision(request, HumanReviewDecisionKind.Approve);
-        var reject = HumanReviewTestData.Decision(request, HumanReviewDecisionKind.Reject);
         var information = HumanReviewTestData.Decision(request, HumanReviewDecisionKind.RequestInformation);
         var noDecisionKinds = new[]
         {
@@ -79,14 +94,16 @@ public sealed class HumanReviewLifecycleEvidenceContractTests
             HumanReviewEvidenceKind.EscalationRecorded,
             HumanReviewEvidenceKind.RequestConflict,
             HumanReviewEvidenceKind.RequestExpired,
-            HumanReviewEvidenceKind.RequestSuperseded
+            HumanReviewEvidenceKind.RequestSuperseded,
+            HumanReviewEvidenceKind.DecisionConflict,
+            HumanReviewEvidenceKind.DecisionDenied,
+            HumanReviewEvidenceKind.DecisionExpired,
         };
         var decisionKinds = new[]
         {
             (HumanReviewEvidenceKind.DecisionAttempted, information),
             (HumanReviewEvidenceKind.DecisionAccepted, approve),
             (HumanReviewEvidenceKind.InformationRequested, information),
-            (HumanReviewEvidenceKind.DecisionConflict, reject),
             (HumanReviewEvidenceKind.ContinuationReserved, approve),
             (HumanReviewEvidenceKind.ContinuationCompleted, approve),
             (HumanReviewEvidenceKind.PreDispatchBlocked, approve)

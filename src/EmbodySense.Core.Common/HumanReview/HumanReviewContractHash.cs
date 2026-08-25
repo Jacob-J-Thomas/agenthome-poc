@@ -256,6 +256,58 @@ public static class HumanReviewContractHash
             && evidence.Previews.All(MatchesPreview)
             && FixedEquals(ComputeEvidence(evidence), evidence.EvidenceHash);
 
+    /// <summary>Computes the canonical hash of a bounded decision proposal.</summary>
+    public static string ComputeDecisionProposal(HumanReviewDecisionProposal proposal)
+    {
+        ArgumentNullException.ThrowIfNull(proposal);
+        return Compute("human-review-decision-proposal-v1", canonical => AppendDecisionProposal(canonical, proposal, includeHash: false));
+    }
+
+    /// <summary>Returns a proposal with its server-derived canonical hash applied.</summary>
+    public static HumanReviewDecisionProposal ApplyDecisionProposal(HumanReviewDecisionProposal proposal) => proposal with { ProposalHash = ComputeDecisionProposal(proposal) };
+
+    /// <summary>Gets whether a proposal retains its exact canonical hash.</summary>
+    public static bool MatchesDecisionProposal(HumanReviewDecisionProposal? proposal)
+        => proposal is not null && IsSha256(proposal.ProposalHash) && FixedEquals(ComputeDecisionProposal(proposal), proposal.ProposalHash);
+
+    /// <summary>Computes the canonical hash of one decision-operation receipt.</summary>
+    public static string ComputeDecisionOperationReceipt(HumanReviewDecisionOperationReceipt receipt)
+    {
+        ArgumentNullException.ThrowIfNull(receipt);
+        return Compute("human-review-decision-operation-receipt-v1", canonical => AppendDecisionOperationReceipt(canonical, receipt, includeHash: false));
+    }
+
+    /// <summary>Returns a receipt with nested provenance and its canonical hash applied.</summary>
+    public static HumanReviewDecisionOperationReceipt ApplyDecisionOperationReceipt(HumanReviewDecisionOperationReceipt receipt)
+    {
+        ArgumentNullException.ThrowIfNull(receipt);
+        var prepared = receipt with { Provenance = ApplyProvenance(receipt.Provenance) };
+        return prepared with { ReceiptHash = ComputeDecisionOperationReceipt(prepared) };
+    }
+
+    /// <summary>Gets whether a receipt retains its exact canonical hash.</summary>
+    public static bool MatchesDecisionOperationReceipt(HumanReviewDecisionOperationReceipt? receipt)
+        => receipt is not null && IsSha256(receipt.ReceiptHash) && MatchesProvenance(receipt.Provenance) && FixedEquals(ComputeDecisionOperationReceipt(receipt), receipt.ReceiptHash);
+
+    /// <summary>Computes the canonical hash of one approval continuation reservation.</summary>
+    public static string ComputeContinuationReservation(HumanReviewContinuationReservation reservation)
+    {
+        ArgumentNullException.ThrowIfNull(reservation);
+        return Compute("human-review-continuation-reservation-v1", canonical => AppendContinuationReservation(canonical, reservation, includeHash: false));
+    }
+
+    /// <summary>Returns a reservation with nested provenance and its canonical hash applied.</summary>
+    public static HumanReviewContinuationReservation ApplyContinuationReservation(HumanReviewContinuationReservation reservation)
+    {
+        ArgumentNullException.ThrowIfNull(reservation);
+        var prepared = reservation with { Provenance = ApplyProvenance(reservation.Provenance) };
+        return prepared with { ReservationHash = ComputeContinuationReservation(prepared) };
+    }
+
+    /// <summary>Gets whether a reservation retains its exact canonical hash.</summary>
+    public static bool MatchesContinuationReservation(HumanReviewContinuationReservation? reservation)
+        => reservation is not null && IsSha256(reservation.ReservationHash) && MatchesProvenance(reservation.Provenance) && FixedEquals(ComputeContinuationReservation(reservation), reservation.ReservationHash);
+
     /// <summary>Determines whether a string is a canonical lowercase SHA-256 digest.</summary>
     /// <param name="value">The candidate digest.</param>
     /// <returns><see langword="true"/> when <paramref name="value"/> is exactly 64 lowercase hexadecimal characters.</returns>
@@ -336,10 +388,50 @@ public static class HumanReviewContractHash
         AppendProvenance(canonical, evidence.Provenance, includeHash: true);
         AppendPreviews(canonical, evidence.Previews);
         Append(canonical, evidence.PreviousEvidenceHash);
+        // Preserve the exact #544 admission-evidence hash domain when both later state-plane references are absent.
+        // Decision/reservation evidence is unambiguous because validation requires its applicable typed reference.
+        if (evidence.DecisionOperation is not null || evidence.ContinuationReservation is not null)
+        {
+            AppendDecisionOperationReference(canonical, evidence.DecisionOperation);
+            AppendContinuationReservationReference(canonical, evidence.ContinuationReservation);
+        }
         if (includeHash)
         {
             Append(canonical, evidence.EvidenceHash);
         }
+    }
+
+    private static void AppendDecisionProposal(StringBuilder canonical, HumanReviewDecisionProposal proposal, bool includeHash)
+    {
+        Append(canonical, proposal.SchemaVersion);
+        Append(canonical, proposal.DecisionOperationId);
+        Append(canonical, (int)proposal.Kind);
+        Append(canonical, proposal.Detail);
+        if (includeHash) Append(canonical, proposal.ProposalHash);
+    }
+
+    private static void AppendDecisionOperationReceipt(StringBuilder canonical, HumanReviewDecisionOperationReceipt receipt, bool includeHash)
+    {
+        Append(canonical, receipt.SchemaVersion);
+        Append(canonical, receipt.DecisionOperationId);
+        Append(canonical, receipt.ProposalHash);
+        AppendRequestReference(canonical, receipt.Request);
+        Append(canonical, (int)receipt.Disposition);
+        AppendDecisionReference(canonical, receipt.Decision);
+        Append(canonical, receipt.RecordedAtUtc);
+        AppendProvenance(canonical, receipt.Provenance, includeHash: true);
+        if (includeHash) Append(canonical, receipt.ReceiptHash);
+    }
+
+    private static void AppendContinuationReservation(StringBuilder canonical, HumanReviewContinuationReservation reservation, bool includeHash)
+    {
+        Append(canonical, reservation.SchemaVersion);
+        Append(canonical, reservation.ReservationId);
+        AppendRequestReference(canonical, reservation.Request);
+        AppendDecisionReference(canonical, reservation.Decision);
+        Append(canonical, reservation.ReservedAtUtc);
+        AppendProvenance(canonical, reservation.Provenance, includeHash: true);
+        if (includeHash) Append(canonical, reservation.ReservationHash);
     }
 
     private static void AppendBinding(StringBuilder canonical, HumanReviewBinding binding, bool includeHash)
@@ -477,6 +569,22 @@ public static class HumanReviewContractHash
         Append(canonical, reference.DecisionOperationId);
         Append(canonical, (int)reference.Kind);
         Append(canonical, reference.DecisionHash);
+    }
+
+    private static void AppendDecisionOperationReference(StringBuilder canonical, HumanReviewDecisionOperationReference? reference)
+    {
+        if (reference is null) { Append(canonical, null); return; }
+        Append(canonical, reference.DecisionOperationId);
+        Append(canonical, reference.ProposalHash);
+        Append(canonical, (int)reference.Disposition);
+        Append(canonical, reference.ReceiptHash);
+    }
+
+    private static void AppendContinuationReservationReference(StringBuilder canonical, HumanReviewContinuationReservationReference? reference)
+    {
+        if (reference is null) { Append(canonical, null); return; }
+        Append(canonical, reference.ReservationId);
+        Append(canonical, reference.ReservationHash);
     }
 
     private static void AppendDecisionKinds(StringBuilder canonical, ImmutableArray<HumanReviewDecisionKind> values)

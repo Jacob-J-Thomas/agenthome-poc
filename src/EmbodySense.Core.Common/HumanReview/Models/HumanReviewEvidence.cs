@@ -28,4 +28,12 @@ public sealed partial record HumanReviewEvidence(
     /// <summary>Gets the only supported evidence schema version.</summary>
     public const int CurrentSchemaVersion = HumanReviewContractLimits.CurrentSchemaVersion;
 
+    /// <summary>Gets the exact operation receipt referenced by decision evidence, or null for non-operation evidence.</summary>
+    [System.Text.Json.Serialization.JsonRequired]
+    public HumanReviewDecisionOperationReference? DecisionOperation { get; init; }
+
+    /// <summary>Gets the exact approval reservation referenced by reservation evidence, or null otherwise.</summary>
+    [System.Text.Json.Serialization.JsonRequired]
+    public HumanReviewContinuationReservationReference? ContinuationReservation { get; init; }
+
 }
