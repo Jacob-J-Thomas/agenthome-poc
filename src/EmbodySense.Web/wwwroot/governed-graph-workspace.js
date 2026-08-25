@@ -908,13 +908,11 @@ export function createGovernedGraphWorkspace({
         option.textContent = `${selection.grantId} r${selection.revision}${choice.expiresAtUtc ? ` · expires ${choice.expiresAtUtc}` : ""}`;
         elements.grantSelection.append(option);
       }
-      elements.grantSelectionField.hidden =
-        !elements.grantSelection.options.length;
+      const grantOptionCount = elements.grantSelection.children.length;
+      elements.grantSelectionField.hidden = !grantOptionCount;
       elements.grantSelection.disabled =
-        invocationInFlight ||
-        inFlight ||
-        !elements.grantSelection.options.length;
-      if (elements.grantSelection.options.length)
+        invocationInFlight || inFlight || !grantOptionCount;
+      if (grantOptionCount)
         elements.grantSelection.value = String(
           Math.max(
             0,
