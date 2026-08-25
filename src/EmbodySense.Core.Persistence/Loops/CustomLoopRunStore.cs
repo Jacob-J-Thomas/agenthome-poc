@@ -4138,10 +4138,14 @@ public sealed class CustomLoopRunStore :
                     if (created)
                     {
                         CustomLoopRunNativeFileSystem.FlushDirectory(child);
-                        CustomLoopRunNativeFileSystem.FlushDirectory(current);
-                        CustomLoopRunNativeFileSystem.RevalidateCanonicalParentDirectory(currentPath, parentIdentity);
                         CustomLoopRunNativeFileSystem.RevalidateCanonicalParentDirectory(childPath, childIdentity);
                     }
+
+                    // Another actor may have won mkdirat/NtCreateFile immediately before this retained open. Flush and
+                    // revalidate the exact parent in both cases, so its child-directory entry is durable before a
+                    // canonical run inside that child can be acknowledged.
+                    CustomLoopRunNativeFileSystem.FlushDirectory(current);
+                    CustomLoopRunNativeFileSystem.RevalidateCanonicalParentDirectory(currentPath, parentIdentity);
 
                     current.Dispose();
                     current = child;

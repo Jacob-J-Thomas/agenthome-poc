@@ -3280,6 +3280,35 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task MacOS_canonical_publication_uses_full_native_durability_barriers_for_run_and_tombstone()
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun("loop-macos-full-sync", "run-macos-full-sync", "invoke-macos-full-sync");
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, admitted.LifecycleVersion)).Status);
+        var completed = Advance(running, CustomLoopRunStatus.Completed);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, running.LifecycleVersion)).Status);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(completed.Id));
+        var request = new CustomLoopTraceDeletionRequest(completed.Id, inspection.PersistedArtifactHash, "delete-macos-full-sync", "actor-user", "web");
+        var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp.AddMinutes(3));
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(mutation)).Status);
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var tombstone = Assert.IsType<CustomLoopTraceInspection>(await restarted.InspectTraceAsync(completed.Id));
+        Assert.Equal(CustomLoopTraceArtifactKind.Tombstone, tombstone.Kind);
+        Assert.Null(await restarted.GetAsync(completed.Id));
+    }
+
+    [Fact]
     public async Task Create_reuses_a_preexisting_empty_canonical_loop_directory_and_remains_idempotent_after_restart()
     {
         using var workspace = new TestWorkspace();
@@ -3342,6 +3371,46 @@ public sealed class CustomLoopRunStoreTests
         Assert.True(process.ExitCode != 0, $"Process-loss worker unexpectedly completed normally. stdout: {output} stderr: {error}");
         Assert.Contains("test host process crashed", error, StringComparison.OrdinalIgnoreCase);
         var loopDirectory = Path.Combine(paths.CustomLoopRunsPath, expected.LoopId);
+        Assert.True(Directory.Exists(loopDirectory));
+        Assert.Empty(Directory.EnumerateFiles(loopDirectory, "*.json"));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+
+        using var restarted = new CustomLoopRunStore(paths);
+        Assert.Null(await restarted.GetAsync(expected.Id));
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await restarted.CreateAsync(expected)).Status);
+        AssertRun(expected, await restarted.GetAsync(expected.Id));
+        Assert.Single(Directory.EnumerateFiles(loopDirectory, "*.json"));
+    }
+
+    [Fact]
+    public async Task Separate_process_loss_after_staged_flush_reuses_a_preexisting_loop_directory_and_allows_one_retry()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var expected = CreateRun("loop-process-loss", "run-process-loss", "invoke-process-loss");
+        var loopDirectory = Path.Combine(paths.CustomLoopRunsPath, expected.LoopId);
+        Directory.CreateDirectory(loopDirectory);
+        using var process = CancellationHostProcess.Start("custom-loop-run-process-loss", workspace.RootPath, CustomLoopRunPublicationBoundary.StagedFileFlushed.ToString());
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+
+        var output = await outputTask;
+        var error = await errorTask;
+        Assert.True(process.ExitCode != 0, $"Process-loss worker unexpectedly completed normally. stdout: {output} stderr: {error}");
+        Assert.Contains("test host process crashed", error, StringComparison.OrdinalIgnoreCase);
         Assert.True(Directory.Exists(loopDirectory));
         Assert.Empty(Directory.EnumerateFiles(loopDirectory, "*.json"));
         Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));

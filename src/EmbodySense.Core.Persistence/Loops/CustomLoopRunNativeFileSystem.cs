@@ -43,6 +43,7 @@ internal static class CustomLoopRunNativeFileSystem
     private const int ErrorSharingViolation = 32;
     private const int ErrorLockViolation = 33;
     private const int ErrorUnableToRemoveReplaced = 1175;
+    private const int MacFullFsync = 51;
     private const int UnixAlreadyExists = 17;
     private const long NtFileCreated = 2;
     private const int AtEmptyPath = 0x1000;
@@ -181,10 +182,7 @@ internal static class CustomLoopRunNativeFileSystem
             return;
         }
 
-        if (fsync(staging) != 0)
-        {
-            throw PosixError(Marshal.GetLastPInvokeError());
-        }
+        FlushPosixDurably(staging);
     }
 
     public static SafeFileHandle OpenOrCreateChildDirectory(SafeFileHandle parent, string name, out bool created)
@@ -255,10 +253,7 @@ internal static class CustomLoopRunNativeFileSystem
             return;
         }
 
-        if (fsync(directory) != 0)
-        {
-            throw PosixError(Marshal.GetLastPInvokeError());
-        }
+        FlushPosixDurably(directory);
     }
 
     public static CustomLoopRunNativeIdentity GetRegularFileIdentity(SafeFileHandle handle)
@@ -448,10 +443,7 @@ internal static class CustomLoopRunNativeFileSystem
             return;
         }
 
-        if (fsync(parent) != 0)
-        {
-            throw PosixError(Marshal.GetLastPInvokeError());
-        }
+        FlushPosixDurably(parent);
     }
 
     public static void DeleteUnpublishedStagingFile(SafeFileHandle parent, string name, SafeFileHandle expected)
@@ -627,6 +619,26 @@ internal static class CustomLoopRunNativeFileSystem
         }
     }
 
+    private static void FlushPosixDurably(SafeFileHandle handle)
+    {
+        if (OperatingSystem.IsMacOS())
+        {
+            // Apple defines F_FULLFSYNC as fsync plus a request that the drive flush its volatile cache to media.
+            // Canonical publication treats an unsupported or failed request as a failed durability barrier.
+            if (fcntl(handle.DangerousGetHandle().ToInt32(), MacFullFsync) != 0)
+            {
+                throw PosixError(Marshal.GetLastPInvokeError());
+            }
+
+            return;
+        }
+
+        if (fsync(handle) != 0)
+        {
+            throw PosixError(Marshal.GetLastPInvokeError());
+        }
+    }
+
     private static int UnixOpenReadOnly => 0;
 
     private static int UnixOpenReadWrite => 2;
@@ -695,6 +707,9 @@ internal static class CustomLoopRunNativeFileSystem
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fsync(SafeFileHandle file);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(int file, int command);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fchmod(SafeFileHandle file, int mode);
