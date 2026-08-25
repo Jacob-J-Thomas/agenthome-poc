@@ -2905,6 +2905,39 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Replaced_canonical_parent_after_target_proof_is_unknown_and_preserves_the_displaced_possible_winner()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-parent-replacement", "run-parent-replacement", "invoke-parent-replacement");
+        var canonicalDirectory = Path.Combine(paths.CustomLoopRunsPath, run.LoopId);
+        var displacedDirectory = workspace.File("displaced-loop-parent");
+        using var store = new CustomLoopRunStore(paths, null, (boundary, _) =>
+        {
+            if (boundary == CustomLoopRunPublicationBoundary.TargetProven)
+            {
+                Directory.Move(canonicalDirectory, displacedDirectory);
+                Directory.CreateDirectory(canonicalDirectory);
+            }
+
+            return ValueTask.CompletedTask;
+        });
+
+        var exception = await Assert.ThrowsAnyAsync<IOException>(() => store.CreateAsync(run));
+        var diagnostic = Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception));
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, diagnostic.Stage);
+        Assert.DoesNotContain(workspace.RootPath, exception.ToString(), StringComparison.Ordinal);
+        Assert.True(File.Exists(Path.Combine(displacedDirectory, run.Id + ".json")));
+        Assert.False(File.Exists(Path.Combine(canonicalDirectory, run.Id + ".json")));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+
+        using var restarted = new CustomLoopRunStore(paths);
+        Assert.Null(await restarted.GetAsync(run.Id));
+        Assert.Single(Directory.EnumerateFiles(displacedDirectory, "*.json"));
+    }
+
+    [Fact]
     public async Task Post_rename_directory_barrier_failure_preserves_the_possible_winner_leaves_index_pending_and_restarts_idempotently()
     {
         using var workspace = new TestWorkspace();

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using EmbodySense.Core.Application.Loops.Diagnostics;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Persistence.Loops.Models;
 using Microsoft.Win32.SafeHandles;
 
 namespace EmbodySense.Core.Persistence.Loops;
@@ -35,6 +36,7 @@ internal sealed class CustomLoopRunCanonicalPublisher
         try
         {
             parent = CustomLoopRunNativeFileSystem.OpenParentDirectory(directory);
+            var parentIdentity = CustomLoopRunNativeFileSystem.GetDirectoryIdentity(parent);
             staged = CustomLoopRunNativeFileSystem.CreateStagingFile(parent, stagingName);
             await RandomAccess.WriteAsync(staged, content, 0, cancellationToken).ConfigureAwait(false);
             CustomLoopRunNativeFileSystem.FlushStagingFile(staged);
@@ -52,6 +54,7 @@ internal sealed class CustomLoopRunCanonicalPublisher
                 await ObserveAsync(CustomLoopRunPublicationBoundary.ParentDirectoryFlushed, CancellationToken.None).ConfigureAwait(false);
                 await ProveTargetAsync(parent, destinationName, stagedIdentity, content).ConfigureAwait(false);
                 await ObserveAsync(CustomLoopRunPublicationBoundary.TargetProven, CancellationToken.None).ConfigureAwait(false);
+                CustomLoopRunNativeFileSystem.RevalidateCanonicalParentDirectory(directory, parentIdentity);
                 return CustomLoopRunCanonicalPublicationResult.Committed();
             }
             catch (Exception exception)

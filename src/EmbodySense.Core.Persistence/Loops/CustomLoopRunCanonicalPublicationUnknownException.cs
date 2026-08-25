@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Loops.Diagnostics;
+using EmbodySense.Core.Persistence.Loops.Models;
 
 namespace EmbodySense.Core.Persistence.Loops;
 

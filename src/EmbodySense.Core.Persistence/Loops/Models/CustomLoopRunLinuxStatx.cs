@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace EmbodySense.Core.Persistence.Loops;
+namespace EmbodySense.Core.Persistence.Loops.Models;
 
 [StructLayout(LayoutKind.Explicit, Size = 256)]
 internal struct CustomLoopRunLinuxStatx

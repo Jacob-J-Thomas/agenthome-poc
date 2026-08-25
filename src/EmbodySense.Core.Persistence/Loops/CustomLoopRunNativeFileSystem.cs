@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Persistence.Loops.Models;
 using Microsoft.Win32.SafeHandles;
 
 namespace EmbodySense.Core.Persistence.Loops;
@@ -40,6 +41,7 @@ internal static class CustomLoopRunNativeFileSystem
     private const int AtEmptyPath = 0x1000;
     private const uint StatxBasicStats = 0x7ff;
     private const ushort UnixFileTypeMask = 0xF000;
+    private const ushort UnixDirectory = 0x4000;
     private const ushort UnixRegularFile = 0x8000;
 
     public static SafeFileHandle OpenParentDirectory(string directory)
@@ -244,6 +246,84 @@ internal static class CustomLoopRunNativeFileSystem
         finally
         {
             Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    public static CustomLoopRunNativeIdentity GetDirectoryIdentity(SafeFileHandle handle)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        if (OperatingSystem.IsWindows())
+        {
+            if (!GetFileInformationByHandle(handle, out var information))
+            {
+                throw WindowsError(Marshal.GetLastPInvokeError());
+            }
+
+            if ((information.FileAttributes & FileAttributeDirectory) == 0 || (information.FileAttributes & FileAttributeReparsePoint) != 0)
+            {
+                throw new IOException("Canonical run publication requires a non-reparse parent directory.");
+            }
+
+            return new CustomLoopRunNativeIdentity(information.VolumeSerialNumber, ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow);
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            if (statx(handle, string.Empty, AtEmptyPath, StatxBasicStats, out var information) != 0)
+            {
+                throw PosixError(Marshal.GetLastPInvokeError());
+            }
+
+            if ((information.Mode & UnixFileTypeMask) != UnixDirectory)
+            {
+                throw new IOException("Canonical run publication requires a parent directory.");
+            }
+
+            return new CustomLoopRunNativeIdentity(((ulong)information.DeviceMajor << 32) | information.DeviceMinor, information.Inode);
+        }
+
+        if (!OperatingSystem.IsMacOS())
+        {
+            throw new PlatformNotSupportedException("Canonical custom-loop publication requires Windows, Linux, or macOS identity support.");
+        }
+
+        const int MacStatBufferBytes = 256;
+        var buffer = Marshal.AllocHGlobal(MacStatBufferBytes);
+        try
+        {
+            for (var index = 0; index < MacStatBufferBytes; index++)
+            {
+                Marshal.WriteByte(buffer, index, 0);
+            }
+
+            if (fstat(handle, buffer) != 0)
+            {
+                throw PosixError(Marshal.GetLastPInvokeError());
+            }
+
+            var device = unchecked((uint)Marshal.ReadInt32(buffer, 0));
+            var mode = unchecked((ushort)Marshal.ReadInt16(buffer, 4));
+            var file = unchecked((ulong)Marshal.ReadInt64(buffer, 8));
+            if ((mode & UnixFileTypeMask) != UnixDirectory)
+            {
+                throw new IOException("Canonical run publication requires a parent directory.");
+            }
+
+            return new CustomLoopRunNativeIdentity(device, file);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    public static void RevalidateCanonicalParentDirectory(string directory, CustomLoopRunNativeIdentity expectedIdentity)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        using var current = OpenParentDirectory(directory);
+        if (GetDirectoryIdentity(current) != expectedIdentity)
+        {
+            throw new IOException("Canonical run parent directory identity could not be revalidated.");
         }
     }
 
