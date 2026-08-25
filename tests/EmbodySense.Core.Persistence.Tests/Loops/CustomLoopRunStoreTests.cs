@@ -186,6 +186,30 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Trace_deletion_reservation_fails_before_canonical_mutation_when_its_operation_directory_is_occupied_by_a_file()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun("loop-deletion-directory", "run-deletion-directory", "invoke-deletion-directory");
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, admitted.LifecycleVersion)).Status);
+        var completed = Advance(running, CustomLoopRunStatus.Completed);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, running.LifecycleVersion)).Status);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(completed.Id));
+        Directory.CreateDirectory(Path.GetDirectoryName(paths.CustomLoopTraceDeletionOperationsPath)!);
+        await File.WriteAllTextAsync(paths.CustomLoopTraceDeletionOperationsPath, "occupied");
+        var request = new CustomLoopTraceDeletionRequest(completed.Id, inspection.PersistedArtifactHash, "delete-occupied-directory", "actor-user", "web");
+        var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp.AddMinutes(9));
+
+        await Assert.ThrowsAsync<IOException>(() => store.ReserveTraceDeletionOperationAsync(mutation));
+
+        Assert.Equal(CustomLoopTraceArtifactKind.LiveTrace, Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(completed.Id)).Kind);
+        Assert.True(File.Exists(paths.CustomLoopTraceDeletionOperationsPath));
+    }
+
+    [Fact]
     public async Task Scheduled_admission_rejects_invalid_or_substituted_delivery_evidence_before_canonical_publication()
     {
         using (var workspace = new TestWorkspace())
@@ -284,6 +308,17 @@ public sealed class CustomLoopRunStoreTests
         Assert.Equal(ScheduleRunAdmissionStoreStatus.LimitExceeded, result.Status);
         Assert.Null(result.Run);
         Assert.Equal(ScheduleRunAdmissionEvidenceLimits.MaxAttempts, result.Evidence!.Attempts.Count);
+    }
+
+    [Fact]
+    public async Task Pending_schedule_admission_page_rejects_an_out_of_range_candidate_limit_before_reading_storage()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => new CustomLoopRunStore(paths).ListPendingScheduleAdmissionsAsync(null, 0));
+
+        Assert.False(Directory.Exists(paths.CustomLoopScheduleAdmissionsPath));
     }
 
     [Fact]
@@ -2963,6 +2998,22 @@ public sealed class CustomLoopRunStoreTests
             Events = [run.Events[0] with { TimestampUtc = timestamp }]
         };
         return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    [Fact]
+    public async Task Terminal_integrity_warning_refuses_an_ambiguous_canonical_run_identity()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var first = CreateRun("loop-warning-alpha", "run-warning-duplicate", "invoke-warning-alpha");
+        var second = CreateRun("loop-warning-beta", "run-warning-duplicate", "invoke-warning-beta");
+        await WriteDirectAsync(paths, first);
+        await WriteDirectAsync(paths, second);
+        var warning = Event(2, "warning-duplicate", CustomLoopRunEventKind.IntegrityWarning, _timestamp.AddMinutes(1));
+
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).AppendTerminalIntegrityWarningAsync(first.Id, first.LifecycleVersion, warning));
+
+        Assert.Equal(2, Directory.EnumerateFiles(paths.CustomLoopRunsPath, "*.json", SearchOption.AllDirectories).Count());
     }
 
     private static CustomLoopRunRecord Advance(CustomLoopRunRecord run, CustomLoopRunStatus status, string? eventId = null)
