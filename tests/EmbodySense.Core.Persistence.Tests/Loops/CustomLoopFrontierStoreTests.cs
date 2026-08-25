@@ -333,7 +333,7 @@ public sealed class CustomLoopFrontierStoreTests
                 root["run"]!["events"]!.AsArray()[^1]!.AsObject().Remove("humanReviewEvidence");
                 break;
             case "event-admission-marker-all-null":
-                AppendEmptyHumanReviewEventMarker(root, "humanReviewRequestAdmitted", "orphan-human-review-admission");
+                AppendNullHumanReviewEventMarker(root, "humanReviewRequestAdmitted", "orphan-human-review-admission");
                 break;
             case "binding-mismatch":
                 humanReview["request"]!["binding"]!["graphId"] = "other-graph";
@@ -350,7 +350,8 @@ public sealed class CustomLoopFrontierStoreTests
 
         await File.WriteAllTextAsync(artifactPath, root.ToJsonString() + "\n");
         using var restarted = new CustomLoopRunStore(paths);
-        await Assert.ThrowsAsync<FormatException>(() => restarted.GetAsync(persisted.Id));
+        var exception = await Assert.ThrowsAsync<FormatException>(() => restarted.GetAsync(persisted.Id));
+        if (corruption == "event-admission-marker-all-null") Assert.Contains("Each Human Review event must carry its exact retained evidence", exception.Message);
     }
 
     [Fact]
@@ -1224,8 +1225,8 @@ public sealed class CustomLoopFrontierStoreTests
             case "reservation-reference-omitted": state["evidence"]!.AsArray()[2]!.AsObject().Remove("continuationReservation"); break;
             case "event-operation-reference-omitted": root["run"]!["events"]!.AsArray().Single(item => item!["humanReviewDecisionOperation"] is not null)!.AsObject().Remove("humanReviewDecisionOperation"); break;
             case "event-reservation-reference-omitted": root["run"]!["events"]!.AsArray().Single(item => item!["humanReviewContinuationReservation"] is not null)!.AsObject().Remove("humanReviewContinuationReservation"); break;
-            case "event-decision-marker-all-null": AppendEmptyHumanReviewEventMarker(root, "humanReviewDecisionOperationRecorded", "orphan-human-review-decision"); break;
-            case "event-reservation-marker-all-null": AppendEmptyHumanReviewEventMarker(root, "humanReviewContinuationReserved", "orphan-human-review-reservation"); break;
+            case "event-decision-marker-all-null": AppendNullHumanReviewEventMarker(root, "humanReviewDecisionOperationRecorded", "orphan-human-review-decision"); break;
+            case "event-reservation-marker-all-null": AppendNullHumanReviewEventMarker(root, "humanReviewContinuationReserved", "orphan-human-review-reservation"); break;
             case "unknown-receipt-property": state["operationReceipts"]!.AsArray()[0]!["unexpected"] = true; break;
             case "reordered-receipt": state["operationReceipts"]![0] = ReverseProperties(state["operationReceipts"]!.AsArray()[0]!.AsObject()); break;
             case "receipt-hash": state["operationReceipts"]!.AsArray()[0]!["receiptHash"] = HumanReviewHash('9'); break;
@@ -1234,7 +1235,8 @@ public sealed class CustomLoopFrontierStoreTests
 
         await File.WriteAllTextAsync(artifactPath, root.ToJsonString() + "\n");
         using var restarted = new CustomLoopRunStore(paths);
-        await Assert.ThrowsAsync<FormatException>(() => restarted.GetAsync(candidate.Id));
+        var exception = await Assert.ThrowsAsync<FormatException>(() => restarted.GetAsync(candidate.Id));
+        if (corruption.EndsWith("marker-all-null", StringComparison.Ordinal)) Assert.Contains("Each Human Review event must carry its exact retained evidence", exception.Message);
     }
 
     [Fact]
@@ -1509,16 +1511,16 @@ public sealed class CustomLoopFrontierStoreTests
             previous.LifecycleHash,
             string.Empty));
 
-    private static void AppendEmptyHumanReviewEventMarker(JsonObject root, string kind, string eventId)
+    private static void AppendNullHumanReviewEventMarker(JsonObject root, string kind, string eventId)
     {
         var events = root["run"]!["events"]!.AsArray();
         var marker = events[^1]!.DeepClone().AsObject();
         marker["sequence"] = marker["sequence"]!.GetValue<long>() + 1;
         marker["eventId"] = eventId;
         marker["kind"] = kind;
-        marker.Remove("humanReviewEvidence");
-        marker.Remove("humanReviewDecisionOperation");
-        marker.Remove("humanReviewContinuationReservation");
+        marker["humanReviewEvidence"] = null;
+        marker["humanReviewDecisionOperation"] = null;
+        marker["humanReviewContinuationReservation"] = null;
         events.Add(marker);
     }
 
