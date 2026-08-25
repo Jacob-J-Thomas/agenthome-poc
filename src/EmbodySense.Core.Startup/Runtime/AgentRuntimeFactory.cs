@@ -731,6 +731,7 @@ public sealed class AgentRuntimeFactory
                 governedRoleSource,
                 governedAuthorityStore,
                 governedGrantResolver,
+                governedEffectAuthorityEvidence,
                 governedAuthorityStore,
                 governedAuthorityStore,
                 capabilityAdmission,

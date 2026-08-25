@@ -39,6 +39,8 @@ using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
+using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Memory;
@@ -53,6 +55,7 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Common.Runtime;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
+using EmbodySense.Core.Persistence.Loops.Execution.Authority;
 using EmbodySense.Core.Persistence.Authority;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Capabilities;
@@ -481,6 +484,119 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(currentProfile.IssuedAtUtc, currentGrant.Boundary.EffectiveAtUtc);
         Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, unavailablePreparation.Status);
         Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Unavailable, unavailableConfirmation.Status);
+    }
+
+    [Fact]
+    public async Task CreateAsync_excludes_consumed_one_shot_invocation_grants_and_fails_closed_when_completion_evidence_is_pending_or_corrupt()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+
+        var catalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        var role = Assert.Single(catalog.Roles.Roles, item => item.IsAdmissionReady);
+        var candidate = BrowserGraphCandidate(new ContextualRoleRevisionPin(
+            new ContextualRoleRevisionIdentity(role.RoleId, role.Revision),
+            role.ContentHash));
+        var created = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "create-consumed-browser-governed-graph",
+            GovernedLoopGraphMutationKind.CreateDraft,
+            candidate.GraphId!,
+            GovernedLoopRevisionLifecycleStatus.Unknown,
+            0,
+            null,
+            null,
+            candidate));
+        var draftHead = Assert.IsType<GovernedLoopRevisionLifecycleHead>(created.Current?.Lifecycle);
+        var published = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "publish-consumed-browser-governed-graph",
+            GovernedLoopGraphMutationKind.Publish,
+            candidate.GraphId!,
+            draftHead.Status,
+            draftHead.LifecycleVersion,
+            draftHead.DraftRevision,
+            draftHead.PublishedRevision,
+            null));
+        var initial = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var initialPreview = Assert.IsType<GovernedLoopInvocationAuthorityPreview>(initial.Preview);
+        var firstConfirmation = new GovernedLoopInvocationAuthorityConfirmation(
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            initialPreview.SemanticHash,
+            "confirm-consumed-browser-governed-graph");
+        var firstConfirmed = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(firstConfirmation);
+        var firstGrant = Assert.IsType<AuthorityGrantReference>(firstConfirmed.Grant);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var effectAuthorityRootPath = Path.Combine(paths.AgentPath, "loops", "effect-authority");
+        var effectAuthorityPaths = new[]
+        {
+            effectAuthorityRootPath,
+            Path.Combine(effectAuthorityRootPath, "decisions.json"),
+            Path.Combine(effectAuthorityRootPath, "decisions.proved.json"),
+            Path.Combine(effectAuthorityRootPath, ".mutations.lock"),
+        };
+        var effectAuthorityPathStateBeforePrepare = effectAuthorityPaths.Select(Path.Exists).ToArray();
+        var unconsumed = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var effectAuthorityPathStateAfterPrepare = effectAuthorityPaths.Select(Path.Exists).ToArray();
+
+        var usageStore = new GovernedLoopEffectAuthorityEvidenceStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var firstCompletion = CompletionUsage(firstGrant, "first-visible-run", "complete-first-visible-run");
+        var completionPending = await usageStore.BeginCompletionAsync(firstCompletion);
+        var completionCompleted = await usageStore.CompleteCompletionAsync(firstCompletion);
+        var consumed = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var replacementPreview = Assert.IsType<GovernedLoopInvocationAuthorityPreview>(consumed.Preview);
+        var staleReplay = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(firstConfirmation);
+        var replacementConfirmation = new GovernedLoopInvocationAuthorityConfirmation(
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            replacementPreview.SemanticHash,
+            "confirm-replacement-consumed-browser-governed-graph");
+        var replacementConfirmed = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(replacementConfirmation);
+        var replacementGrant = Assert.IsType<AuthorityGrantReference>(replacementConfirmed.Grant);
+        var replacementReady = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+
+        var replacementCompletion = CompletionUsage(replacementGrant, "replacement-visible-run", "complete-replacement-visible-run");
+        var pendingReplacement = await usageStore.BeginCompletionAsync(replacementCompletion);
+        var authorityBeforeUnavailableRead = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(paths.AuthorityProfilesDocumentPath)));
+        var pendingEvidence = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var pendingConfirmation = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(replacementConfirmation);
+        var effectAuthorityPrimaryPath = Path.Combine(paths.AgentPath, "loops", "effect-authority", "decisions.json");
+        File.WriteAllText(effectAuthorityPrimaryPath, "{");
+        var corruptEvidence = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var corruptConfirmation = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(replacementConfirmation);
+        var authorityAfterUnavailableRead = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(paths.AuthorityProfilesDocumentPath)));
+
+        Assert.Equal("committed", created.Status);
+        Assert.Equal("committed", published.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.ConfirmationRequired, initial.Status);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Confirmed, firstConfirmed.Status);
+        Assert.All(effectAuthorityPathStateBeforePrepare, Assert.False);
+        Assert.Equal(effectAuthorityPathStateBeforePrepare, effectAuthorityPathStateAfterPrepare);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Ready, unconsumed.Status);
+        Assert.Equal(firstGrant, Assert.Single(unconsumed.EligibleGrants).Grant);
+        Assert.Equal(GovernedLoopEffectAuthorityUsageStoreStatus.CompletionPending, completionPending.Status);
+        Assert.Equal(GovernedLoopEffectAuthorityUsageStoreStatus.CompletionCompleted, completionCompleted.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.ConfirmationRequired, consumed.Status);
+        Assert.Empty(consumed.EligibleGrants);
+        Assert.Equal(initialPreview.SemanticHash, replacementPreview.SemanticHash);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Stale, staleReplay.Status);
+        Assert.Null(staleReplay.Grant);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Confirmed, replacementConfirmed.Status);
+        Assert.NotEqual(firstGrant, replacementGrant);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Ready, replacementReady.Status);
+        Assert.Equal(replacementGrant, Assert.Single(replacementReady.EligibleGrants).Grant);
+        Assert.Equal(GovernedLoopEffectAuthorityUsageStoreStatus.CompletionPending, pendingReplacement.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, pendingEvidence.Status);
+        Assert.Empty(pendingEvidence.EligibleGrants);
+        Assert.Null(pendingEvidence.Preview);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Unavailable, pendingConfirmation.Status);
+        Assert.Null(pendingConfirmation.Grant);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, corruptEvidence.Status);
+        Assert.Empty(corruptEvidence.EligibleGrants);
+        Assert.Null(corruptEvidence.Preview);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Unavailable, corruptConfirmation.Status);
+        Assert.Null(corruptConfirmation.Grant);
+        Assert.Equal(authorityBeforeUnavailableRead, authorityAfterUnavailableRead);
     }
 
     [Fact]
@@ -2253,6 +2369,19 @@ public sealed class AgentRuntimeFactoryTests
             new AuthorityCeiling([identity!], [], 0, CapabilitySideEffectClass.None, false, false, false),
             []);
     }
+
+    private static GovernedLoopEffectAuthorityCompletionUsageRequest CompletionUsage(
+        AuthorityGrantReference grant,
+        string runId,
+        string operationId)
+        => new(
+            GovernedLoopEffectAuthorityCompletionUsageRequest.CurrentSchemaVersion,
+            grant,
+            new string('a', 64),
+            runId,
+            1,
+            operationId,
+            DateTimeOffset.UtcNow);
 
     private static string HashInvocationTestValue(string value)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();

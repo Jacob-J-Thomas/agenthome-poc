@@ -11,6 +11,8 @@ using EmbodySense.Core.Application.Inference.Profiles.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
+using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
@@ -45,6 +47,7 @@ public sealed class GovernedLoopInvocationPreparationFacade
     private readonly IAuthorityGrantRoleSource _roleSource;
     private readonly IAuthorityGrantCatalogSource _grantCatalog;
     private readonly IAuthorityGrantResolver _grantResolver;
+    private readonly IGovernedLoopEffectAuthorityUsageReader _usageReader;
     private readonly IAuthorityProfileStore _profileStore;
     private readonly IAuthorityGrantStore _grantStore;
     private readonly ICapabilityAdmissionService _capabilityAdmission;
@@ -62,6 +65,7 @@ public sealed class GovernedLoopInvocationPreparationFacade
     /// <param name="roleSource">The exact current role source.</param>
     /// <param name="grantCatalog">The bounded current grant catalog source.</param>
     /// <param name="grantResolver">The exact current grant resolver.</param>
+    /// <param name="usageReader">The canonical first-bound-run completion evidence reader.</param>
     /// <param name="profileStore">The authority-profile lifecycle store.</param>
     /// <param name="grantStore">The authority-grant lifecycle store.</param>
     /// <param name="capabilityAdmission">The current implemented-capability admission service.</param>
@@ -80,6 +84,7 @@ public sealed class GovernedLoopInvocationPreparationFacade
         IAuthorityGrantRoleSource roleSource,
         IAuthorityGrantCatalogSource grantCatalog,
         IAuthorityGrantResolver grantResolver,
+        IGovernedLoopEffectAuthorityUsageReader usageReader,
         IAuthorityProfileStore profileStore,
         IAuthorityGrantStore grantStore,
         ICapabilityAdmissionService capabilityAdmission,
@@ -106,6 +111,7 @@ public sealed class GovernedLoopInvocationPreparationFacade
         _roleSource = roleSource ?? throw new ArgumentNullException(nameof(roleSource));
         _grantCatalog = grantCatalog ?? throw new ArgumentNullException(nameof(grantCatalog));
         _grantResolver = grantResolver ?? throw new ArgumentNullException(nameof(grantResolver));
+        _usageReader = usageReader ?? throw new ArgumentNullException(nameof(usageReader));
         _profileStore = profileStore ?? throw new ArgumentNullException(nameof(profileStore));
         _grantStore = grantStore ?? throw new ArgumentNullException(nameof(grantStore));
         _capabilityAdmission = capabilityAdmission ?? throw new ArgumentNullException(nameof(capabilityAdmission));
@@ -408,11 +414,69 @@ public sealed class GovernedLoopInvocationPreparationFacade
                 && SameGrant(reference, resolution.Grant)
                 && IsExactBoundGrant(resolution.Grant, terms))
             {
+                var usageEligible = await IsUsageEligibleAsync(reference, resolution.Grant, cancellationToken).ConfigureAwait(false);
+                if (usageEligible is null)
+                {
+                    return null;
+                }
+
+                if (!usageEligible.Value)
+                {
+                    continue;
+                }
+
                 choices.Add(new GovernedLoopInvocationGrantChoice(reference, resolution.Grant.Boundary.ExpiresAtUtc));
             }
         }
 
         return choices.OrderBy(value => value.Grant.GrantId.Value, StringComparer.Ordinal).ToArray();
+    }
+
+    private async Task<bool?> IsUsageEligibleAsync(
+        AuthorityGrantReference reference,
+        AuthorityGrant grant,
+        CancellationToken cancellationToken)
+    {
+        if (!Enum.IsDefined(grant.Boundary.CompletionConstraint))
+        {
+            return null;
+        }
+
+        if (grant.Boundary.CompletionConstraint == AuthorityGrantCompletionConstraintKind.None)
+        {
+            return true;
+        }
+
+        if (grant.Boundary.CompletionConstraint != AuthorityGrantCompletionConstraintKind.FirstBoundRunCompletion)
+        {
+            return null;
+        }
+
+        GovernedLoopEffectAuthorityGrantUsageReadResult usage;
+        try
+        {
+            usage = await _usageReader.ReadCompletionUsageAsync(reference, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+
+        if (usage is null || !Enum.IsDefined(usage.Status))
+        {
+            return null;
+        }
+
+        return usage.Status switch
+        {
+            GovernedLoopEffectAuthorityGrantUsageReadStatus.Unconsumed => true,
+            GovernedLoopEffectAuthorityGrantUsageReadStatus.Consumed => false,
+            _ => null,
+        };
     }
 
     private async Task<InvocationPreparationTerms> ReadTermsAsync(string? graphId, string? revisionId, DateTimeOffset asOfUtc, CancellationToken cancellationToken)
