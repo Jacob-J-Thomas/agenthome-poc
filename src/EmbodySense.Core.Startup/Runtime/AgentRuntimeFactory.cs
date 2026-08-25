@@ -735,8 +735,8 @@ public sealed class AgentRuntimeFactory
                 governedAuthorityStore,
                 governedAuthorityStore,
                 capabilityAdmission,
-                modelProfileRegistry,
                 modelProfileMetadata,
+                modelProfileAdapters,
                 capabilityAuthority,
                 operationalClock);
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);

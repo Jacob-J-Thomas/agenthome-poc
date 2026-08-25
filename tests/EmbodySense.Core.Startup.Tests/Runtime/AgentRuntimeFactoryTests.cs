@@ -22,8 +22,10 @@ using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Governance;
+using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.Governance.Authority.Models;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
@@ -662,10 +664,12 @@ public sealed class AgentRuntimeFactoryTests
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
-        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
-
         var paths = new WorkspacePaths(workspace.RootPath);
-        var role = BrowserInvocationAcceptanceRole(paths);
+        var profile = InvocationPreparationReadyModelProfile.Create();
+        await InstallModelProfileAsync(paths, workspace.ServerStatePath, profile.Descriptor);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web, additionalModelProfileProviders: [profile.Provider]);
+
+        var role = BrowserInvocationAcceptanceRole(paths, profile.Descriptor.Id.Value);
         var roleRequest = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(
             "create-browser-invocation-acceptance-role",
             string.Empty,
@@ -680,7 +684,7 @@ public sealed class AgentRuntimeFactoryTests
             Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await roleStore.MutateAsync(roleRequest)).Status);
         }
 
-        var candidate = BrowserInvocationAcceptanceGraphCandidate(new ContextualRoleRevisionPin(role.Identity, role.ContentHash));
+        var candidate = BrowserInvocationAcceptanceGraphCandidate(new ContextualRoleRevisionPin(role.Identity, role.ContentHash), profile.Descriptor.Id.Value);
         var created = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
             "create-browser-invocation-acceptance-shape",
             GovernedLoopGraphMutationKind.CreateDraft,
@@ -708,6 +712,130 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(GovernedLoopInvocationPreparationStatus.ConfirmationRequired, prepared.Status);
         Assert.NotNull(prepared.Preview);
         Assert.Empty(prepared.EligibleGrants);
+    }
+
+    [Fact]
+    public async Task CreateAsync_rejects_an_unavailable_or_missing_graph_selected_model_profile_before_authority_effects()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var profile = InvocationPreparationReadyModelProfile.Create();
+        await InstallModelProfileAsync(paths, workspace.ServerStatePath, profile.Descriptor);
+        GovernedLoopGraphCandidate candidate;
+
+        await using (var readyRuntime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web, additionalModelProfileProviders: [profile.Provider]))
+        {
+            var role = BrowserInvocationAcceptanceRole(paths, profile.Descriptor.Id.Value);
+            using var roleStore = new ContextualRoleRevisionStore(paths, CapabilityWorkspaceScopeId.Create(paths.RootPath));
+            var roleRequest = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(
+                "create-missing-profile-browser-invocation-role",
+                string.Empty,
+                ContextualRoleRevisionMutationKind.Create,
+                role.Identity.RoleId,
+                "test-author",
+                role,
+                null,
+                DateTimeOffset.UtcNow));
+            Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await roleStore.MutateAsync(roleRequest)).Status);
+
+            candidate = BrowserInvocationAcceptanceGraphCandidate(new ContextualRoleRevisionPin(role.Identity, role.ContentHash), profile.Descriptor.Id.Value) with
+            {
+                GraphId = "browser-invocation-missing-profile-graph",
+            };
+            var created = await readyRuntime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+                "create-missing-profile-browser-invocation-graph",
+                GovernedLoopGraphMutationKind.CreateDraft,
+                candidate.GraphId!,
+                GovernedLoopRevisionLifecycleStatus.Unknown,
+                0,
+                null,
+                null,
+                candidate));
+            var draft = Assert.IsType<GovernedLoopGraphReadResponse>(created.Current);
+            var head = Assert.IsType<GovernedLoopRevisionLifecycleHead>(draft.Lifecycle);
+            var published = await readyRuntime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+                "publish-missing-profile-browser-invocation-graph",
+                GovernedLoopGraphMutationKind.Publish,
+                candidate.GraphId!,
+                head.Status,
+                head.LifecycleVersion,
+                head.DraftRevision,
+                head.PublishedRevision,
+                null));
+            var prepared = await readyRuntime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+
+            Assert.Equal("committed", created.Status);
+            Assert.Equal("committed", published.Status);
+            Assert.Equal(GovernedLoopInvocationPreparationStatus.ConfirmationRequired, prepared.Status);
+        }
+
+        await using var missingRuntime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+        var missing = await missingRuntime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var confirmation = await missingRuntime.ConfirmGovernedLoopInvocationAuthorityAsync(new GovernedLoopInvocationAuthorityConfirmation(
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            new string('a', 64),
+            "confirm-missing-profile-browser-invocation-graph"));
+
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, missing.Status);
+        Assert.Empty(missing.EligibleGrants);
+        Assert.Null(missing.Preview);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Unavailable, confirmation.Status);
+        Assert.Null(confirmation.Grant);
+    }
+
+    [Fact]
+    public async Task CreateAsync_rejects_the_unavailable_configured_model_profile_before_authority_effects()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var role = BrowserInvocationAcceptanceRole(paths);
+        using var roleStore = new ContextualRoleRevisionStore(paths, CapabilityWorkspaceScopeId.Create(paths.RootPath));
+        var roleRequest = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(
+            "create-unavailable-configured-profile-browser-invocation-role",
+            string.Empty,
+            ContextualRoleRevisionMutationKind.Create,
+            role.Identity.RoleId,
+            "test-author",
+            role,
+            null,
+            DateTimeOffset.UtcNow));
+        Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await roleStore.MutateAsync(roleRequest)).Status);
+
+        var candidate = BrowserInvocationAcceptanceGraphCandidate(new ContextualRoleRevisionPin(role.Identity, role.ContentHash)) with
+        {
+            GraphId = "browser-invocation-unavailable-configured-profile-graph",
+        };
+        var created = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "create-unavailable-configured-profile-browser-invocation-graph",
+            GovernedLoopGraphMutationKind.CreateDraft,
+            candidate.GraphId!,
+            GovernedLoopRevisionLifecycleStatus.Unknown,
+            0,
+            null,
+            null,
+            candidate));
+        var draft = Assert.IsType<GovernedLoopGraphReadResponse>(created.Current);
+        var head = Assert.IsType<GovernedLoopRevisionLifecycleHead>(draft.Lifecycle);
+        var published = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "publish-unavailable-configured-profile-browser-invocation-graph",
+            GovernedLoopGraphMutationKind.Publish,
+            candidate.GraphId!,
+            head.Status,
+            head.LifecycleVersion,
+            head.DraftRevision,
+            head.PublishedRevision,
+            null));
+        var prepared = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+
+        Assert.Equal("committed", created.Status);
+        Assert.Equal("committed", published.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, prepared.Status);
+        Assert.Empty(prepared.EligibleGrants);
+        Assert.Null(prepared.Preview);
     }
 
     [Fact]
@@ -2321,7 +2449,8 @@ public sealed class AgentRuntimeFactoryTests
         AgentRuntimeSurface? runtimeSurface = null,
         string? codexPath = null,
         IAgentRuntimeAuthenticatedWakeVerifier? verifier = null,
-        CommandActionRuntimeProvider? commandActionRuntimeProvider = null)
+        CommandActionRuntimeProvider? commandActionRuntimeProvider = null,
+        IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null)
     {
         var executablePath = codexPath ?? await CreateFakeCodexExecutableAsync(workspace);
         var status = CreateCompatibleRuntimeStatus(executablePath);
@@ -2329,6 +2458,7 @@ public sealed class AgentRuntimeFactoryTests
             new RejectingApprovalPrompt(),
             workspace.ServerStatePath,
             status,
+            additionalModelProfileProviders: additionalModelProfileProviders,
             commandActionRuntimeProvider: commandActionRuntimeProvider);
         if (verifier is not null)
         {
@@ -2341,6 +2471,25 @@ public sealed class AgentRuntimeFactoryTests
             executablePath,
             "read-only",
             runtimeSurface ?? AgentRuntimeSurface.Cli);
+    }
+
+    private static async Task InstallModelProfileAsync(WorkspacePaths paths, string trustRootPath, CapabilityDescriptor descriptor)
+    {
+        var service = new CapabilityCatalogService(new CapabilityCatalogStore(paths, new FileCapabilityCatalogTrustProvider(trustRootPath)));
+        var read = await service.ReadAsync(null, 1);
+        Assert.Equal(CapabilityCatalogReadStatus.Available, read.Status);
+        var revision = Assert.IsType<long>(read.Page?.CatalogRevision);
+        revision = RequireApplied(await service.DeclareAsync(descriptor, revision, "declare-invocation-preparation-ready-profile"));
+        revision = RequireApplied(await service.InstallAsync(descriptor.Id, revision, "install-invocation-preparation-ready-profile"));
+        revision = RequireApplied(await service.VerifyAsync(descriptor.Id, revision, "verify-invocation-preparation-ready-profile"));
+        revision = RequireApplied(await service.EnableAsync(descriptor.Id, revision, "enable-invocation-preparation-ready-profile"));
+        _ = RequireApplied(await service.MarkHealthyAsync(descriptor.Id, revision, "healthy-invocation-preparation-ready-profile"));
+
+        static long RequireApplied(CapabilityCatalogMutationResult result)
+        {
+            Assert.Equal(CapabilityCatalogMutationStatus.Applied, result.Status);
+            return Assert.IsType<long>(result.CatalogRevision);
+        }
     }
 
     private static GovernedLoopGraphCandidate BrowserGraphCandidate(ContextualRoleRevisionPin role)
@@ -2429,7 +2578,7 @@ public sealed class AgentRuntimeFactoryTests
         };
     }
 
-    private static ContextualRoleRevision BrowserInvocationAcceptanceRole(WorkspacePaths paths)
+    private static ContextualRoleRevision BrowserInvocationAcceptanceRole(WorkspacePaths paths, string modelProfileCapabilityId = BuiltInCapabilityCatalog.CodexModelProfileCapabilityId)
     {
         var revision = new ContextualRoleRevision(
             1,
@@ -2447,12 +2596,12 @@ public sealed class AgentRuntimeFactoryTests
             new ContextualRolePolicyMaxima([
                 "org.embodysense/conversation-turn",
                 "org.embodysense/model-inference",
-                BuiltInCapabilityCatalog.CodexModelProfileCapabilityId,
+                modelProfileCapabilityId,
             ]));
         return ContextualRoleRevisionContentHash.Apply(revision);
     }
 
-    private static GovernedLoopGraphCandidate BrowserInvocationAcceptanceGraphCandidate(ContextualRoleRevisionPin role)
+    private static GovernedLoopGraphCandidate BrowserInvocationAcceptanceGraphCandidate(ContextualRoleRevisionPin role, string modelProfileCapabilityId = BuiltInCapabilityCatalog.CodexModelProfileCapabilityId)
     {
         const string ConversationTurnCapability = "org.embodysense/conversation-turn";
         const string ModelInferenceCapability = "org.embodysense/model-inference";
@@ -2473,7 +2622,7 @@ public sealed class AgentRuntimeFactoryTests
                 new GovernedLoopPortDefinition("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context, "text", true),
                 new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
             ],
-            GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, BuiltInCapabilityCatalog.CodexModelProfileCapabilityId]),
+            GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, modelProfileCapabilityId]),
             new Dictionary<string, string>
             {
                 ["instruction"] = "Answer the bounded visible invocation.",
@@ -2544,7 +2693,7 @@ public sealed class AgentRuntimeFactoryTests
             role,
             trigger.Id,
             [exit.Id, fail.Id],
-            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapability, ModelInferenceCapability, BuiltInCapabilityCatalog.CodexModelProfileCapabilityId]),
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapability, ModelInferenceCapability, modelProfileCapabilityId]),
             [
                 new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, false),
                 new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
@@ -2577,7 +2726,7 @@ public sealed class AgentRuntimeFactoryTests
                     new GovernedLoopNodeDisplayMetadata(exit.Id, "Exit", "Publish.", 400, 0),
                     new GovernedLoopNodeDisplayMetadata(fail.Id, "Fail", "Stop safely.", 400, 100),
                 ]),
-            EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
+            EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy(modelProfileCapabilityId));
     }
 
     private static AuthorityProfile CreateProfileOnlyRecoveryRecord(

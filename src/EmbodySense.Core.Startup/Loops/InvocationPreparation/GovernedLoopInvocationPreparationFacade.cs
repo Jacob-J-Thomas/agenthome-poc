@@ -51,8 +51,8 @@ public sealed class GovernedLoopInvocationPreparationFacade
     private readonly IAuthorityProfileStore _profileStore;
     private readonly IAuthorityGrantStore _grantStore;
     private readonly ICapabilityAdmissionService _capabilityAdmission;
-    private readonly IModelProfileDefaultSource _modelDefaultSource;
     private readonly IModelProfileMetadataSource _modelMetadataSource;
+    private readonly IModelProfileAdapterRegistry _modelAdapterRegistry;
     private readonly ICapabilityAuthorityTransaction _authorityTransaction;
     private readonly TimeProvider _timeProvider;
 
@@ -69,8 +69,8 @@ public sealed class GovernedLoopInvocationPreparationFacade
     /// <param name="profileStore">The authority-profile lifecycle store.</param>
     /// <param name="grantStore">The authority-grant lifecycle store.</param>
     /// <param name="capabilityAdmission">The current implemented-capability admission service.</param>
-    /// <param name="modelDefaultSource">The server-owned current model default source.</param>
     /// <param name="modelMetadataSource">The server-owned exact model metadata source.</param>
+    /// <param name="modelAdapterRegistry">The composed server-owned exact model adapter posture registry.</param>
     /// <param name="authorityTransaction">The shared workspace authority fence.</param>
     /// <param name="timeProvider">The trusted server clock.</param>
     /// <exception cref="ArgumentException">Thrown when the composed actor or workspace is not canonical.</exception>
@@ -88,8 +88,8 @@ public sealed class GovernedLoopInvocationPreparationFacade
         IAuthorityProfileStore profileStore,
         IAuthorityGrantStore grantStore,
         ICapabilityAdmissionService capabilityAdmission,
-        IModelProfileDefaultSource modelDefaultSource,
         IModelProfileMetadataSource modelMetadataSource,
+        IModelProfileAdapterRegistry modelAdapterRegistry,
         ICapabilityAuthorityTransaction authorityTransaction,
         TimeProvider? timeProvider = null)
     {
@@ -115,8 +115,8 @@ public sealed class GovernedLoopInvocationPreparationFacade
         _profileStore = profileStore ?? throw new ArgumentNullException(nameof(profileStore));
         _grantStore = grantStore ?? throw new ArgumentNullException(nameof(grantStore));
         _capabilityAdmission = capabilityAdmission ?? throw new ArgumentNullException(nameof(capabilityAdmission));
-        _modelDefaultSource = modelDefaultSource ?? throw new ArgumentNullException(nameof(modelDefaultSource));
         _modelMetadataSource = modelMetadataSource ?? throw new ArgumentNullException(nameof(modelMetadataSource));
+        _modelAdapterRegistry = modelAdapterRegistry ?? throw new ArgumentNullException(nameof(modelAdapterRegistry));
         _authorityTransaction = authorityTransaction ?? throw new ArgumentNullException(nameof(authorityTransaction));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -614,6 +614,11 @@ public sealed class GovernedLoopInvocationPreparationFacade
             return InvocationPreparationTerms.Failure(GovernedLoopInvocationPreparationStatus.Ineligible, publication, "The selected graph's exact implemented capabilities are not currently eligible.");
         }
 
+        if (!IsExactAdmittedModelProfile(model, admission.Snapshot))
+        {
+            return InvocationPreparationTerms.Failure(GovernedLoopInvocationPreparationStatus.Ineligible, publication, "The selected graph's exact model profile is not currently admitted.");
+        }
+
         var ceiling = new AuthorityCeiling(
             admission.Snapshot.Pins.Select(pin => pin.DescriptorIdentity).OrderBy(identity => identity.Id.Value, StringComparer.Ordinal).ToArray(),
             binding.Artifact.Graph.Nodes.SelectMany(node => node.AuthoredInputDataClasses ?? []).Distinct().OrderBy(value => value.Value, StringComparer.Ordinal).ToArray(),
@@ -633,29 +638,36 @@ public sealed class GovernedLoopInvocationPreparationFacade
 
     private async Task<InvocationPreparationModelTerms> ReadCurrentModelAsync(GovernedLoopGraphDefinition graph, ContextualRoleRevision role, CancellationToken cancellationToken)
     {
-        ModelProfileDefaultReadResult defaultRead;
-        try
+        var inferenceNodes = graph.Nodes.Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference).ToArray();
+        if (inferenceNodes.Length == 0)
         {
-            defaultRead = await _modelDefaultSource.ReadAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception)
-        {
-            return InvocationPreparationModelTerms.Unavailable("The current configured model is unavailable.");
+            return InvocationPreparationModelTerms.Eligible(null, null, null, null);
         }
 
-        if (defaultRead is null || defaultRead.Status != ModelProfileDefaultReadStatus.Found || defaultRead.ProfileId is null || !IsSha256(defaultRead.SourceRevisionHash))
+        var selectedProfileIds = new List<CapabilityId>(inferenceNodes.Length);
+        foreach (var node in inferenceNodes)
         {
-            return InvocationPreparationModelTerms.Unavailable("The current configured model is unavailable.");
+            var policy = node.ModelRoutingPolicy ?? graph.DefaultModelRoutingPolicy;
+            if (policy.Selector.Kind != GovernedModelSelectorKind.Exact || policy.Selector.ExactProfileId is null || policy.FallbackProfileIds.Count != 0)
+            {
+                return InvocationPreparationModelTerms.Ineligible("The selected graph must pin one exact model profile without fallback for visible invocation.");
+            }
+
+            selectedProfileIds.Add(policy.Selector.ExactProfileId);
         }
+
+        var distinctProfileIds = selectedProfileIds.Distinct().ToArray();
+        if (distinctProfileIds.Length != 1)
+        {
+            return InvocationPreparationModelTerms.Ineligible("The selected graph's inference nodes do not pin one exact common model profile.");
+        }
+
+        var profileId = distinctProfileIds[0];
 
         ModelProfileSourceReadResult metadataRead;
         try
         {
-            metadataRead = await _modelMetadataSource.ReadAsync(defaultRead.ProfileId, cancellationToken).ConfigureAwait(false);
+            metadataRead = await _modelMetadataSource.ReadAsync(profileId, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -666,34 +678,75 @@ public sealed class GovernedLoopInvocationPreparationFacade
             return InvocationPreparationModelTerms.Unavailable("The current configured model metadata is unavailable.");
         }
 
-        if (metadataRead is null || metadataRead.Status != ModelProfileSourceReadStatus.Found || metadataRead.Metadata is null || !string.Equals(metadataRead.SourceRevisionHash, defaultRead.SourceRevisionHash, StringComparison.Ordinal))
+        if (metadataRead is null || metadataRead.Status != ModelProfileSourceReadStatus.Found || metadataRead.Metadata is null || !IsSha256(metadataRead.SourceRevisionHash))
         {
             return InvocationPreparationModelTerms.Unavailable("The current configured model metadata is unavailable.");
         }
 
         var metadata = metadataRead.Metadata;
-        if (metadata.PermittedRoleIds.Count > 0 && !metadata.PermittedRoleIds.Contains(role.Identity.RoleId, StringComparer.Ordinal))
+        ModelProfileAdapterPosture posture;
+        try
         {
-            return InvocationPreparationModelTerms.Ineligible("The current configured model does not permit the exact owning role.");
+            posture = await _modelAdapterRegistry.ReadPostureAsync(metadata, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return InvocationPreparationModelTerms.Unavailable("The current configured model adapter posture is unavailable.");
         }
 
-        foreach (var node in graph.Nodes.Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference))
+        if (!IsExactAdapterPosture(posture, metadata.ContentHash))
+        {
+            return InvocationPreparationModelTerms.Unavailable("The current configured model adapter posture is unavailable.");
+        }
+
+        if (posture.Status != ModelProfileAdapterPostureStatus.Ready)
+        {
+            return posture.Status == ModelProfileAdapterPostureStatus.Unavailable
+                ? InvocationPreparationModelTerms.Unavailable("The current configured model adapter is unavailable.")
+                : InvocationPreparationModelTerms.Ineligible("The current configured model adapter is not eligible.");
+        }
+
+        foreach (var node in inferenceNodes)
         {
             var policy = node.ModelRoutingPolicy ?? graph.DefaultModelRoutingPolicy;
-            if (!Selects(policy, defaultRead.ProfileId)
-                || metadata.PermittedNodeTypeIds.Count > 0 && !metadata.PermittedNodeTypeIds.Contains(node.Descriptor.TypeId, StringComparer.Ordinal))
+            if (!policy.Requirements.StaticallySatisfiedBy(metadata, role.Identity.RoleId, node.Descriptor.TypeId)
+                || node.AuthoredInputDataClasses is not null && !policy.Requirements.SatisfiedBy(metadata, node.AuthoredInputDataClasses, role.Identity.RoleId, node.Descriptor.TypeId))
             {
-                return InvocationPreparationModelTerms.Ineligible("The current configured model does not permit the selected graph's exact inference routing.");
+                return InvocationPreparationModelTerms.Ineligible("The selected graph's exact inference routing is not eligible for the current model profile.");
             }
         }
 
-        return InvocationPreparationModelTerms.Eligible(defaultRead.ProfileId, defaultRead.SourceRevisionHash!, metadata);
+        return InvocationPreparationModelTerms.Eligible(profileId, metadataRead.SourceRevisionHash, metadata, posture.RegistryRevisionHash);
     }
 
-    private static bool Selects(GovernedModelRoutingPolicy policy, CapabilityId profileId)
-        => policy.Selector.Kind == GovernedModelSelectorKind.Exact
-            ? Equals(policy.Selector.ExactProfileId, profileId)
-            : policy.Selector.PermittedInheritedProfileIds.Contains(profileId);
+    private static bool IsExactAdapterPosture(ModelProfileAdapterPosture? posture, string metadataHash)
+        => posture is not null
+            && Enum.IsDefined(posture.Status)
+            && posture.Status != 0
+            && string.Equals(posture.ProfileMetadataHash, metadataHash, StringComparison.Ordinal)
+            && IsSha256(posture.RegistryRevisionHash);
+
+    private static bool IsExactAdmittedModelProfile(InvocationPreparationModelTerms model, CapabilityAdmissionSnapshot admission)
+    {
+        if (model.ProfileId is null)
+        {
+            return model.SourceRevisionHash is null && model.Metadata is null && model.AdapterRegistryRevisionHash is null;
+        }
+
+        if (model.SourceRevisionHash is null || model.Metadata is null || model.AdapterRegistryRevisionHash is null)
+        {
+            return false;
+        }
+
+        var pins = admission.Pins.Where(pin => pin.DescriptorIdentity.Id.Equals(model.ProfileId)).ToArray();
+        return pins.Length == 1
+            && pins[0].Kind == CapabilityKind.ModelProfile
+            && Equals(pins[0].DescriptorIdentity, model.Metadata.DescriptorIdentity);
+    }
 
     private static bool SupportsLeastAuthorityProjection(GovernedLoopGraphDefinition graph)
         => graph.Nodes.All(IsSupportedLeastAuthorityNode);
@@ -831,9 +884,6 @@ public sealed class GovernedLoopInvocationPreparationFacade
             role.RequestedPin.Identity.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture),
             role.RequestedPin.ContentHash,
             role.EvidenceHash,
-            model.ProfileId!.Value,
-            model.SourceRevisionHash!,
-            model.Metadata!.ContentHash,
             admission.RequirementsHash,
             ceiling.MaxTargetCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
             ((int)ceiling.MaxSideEffectClass).ToString(System.Globalization.CultureInfo.InvariantCulture),
@@ -841,6 +891,19 @@ public sealed class GovernedLoopInvocationPreparationFacade
             ceiling.AllowsExternalPublication ? "1" : "0",
             ceiling.AllowsIrreversibleAction ? "1" : "0",
         };
+        if (model.ProfileId is null || model.SourceRevisionHash is null || model.Metadata is null || model.AdapterRegistryRevisionHash is null)
+        {
+            values.Add("model:none");
+        }
+        else
+        {
+            values.AddRange([
+                model.ProfileId.Value,
+                model.SourceRevisionHash,
+                model.Metadata.ContentHash,
+                model.AdapterRegistryRevisionHash,
+            ]);
+        }
         values.AddRange(binding.CapabilityIds.OrderBy(value => value, StringComparer.Ordinal).Select(value => "required:" + value));
         values.AddRange(admission.Pins.OrderBy(pin => pin.DescriptorIdentity.Id.Value, StringComparer.Ordinal).Select(pin => string.Join("|", pin.DescriptorIdentity.Id.Value, pin.DescriptorIdentity.Version.Value, pin.DescriptorIdentity.Hash.Value)));
         values.AddRange(ceiling.DataClasses.OrderBy(value => value.Value, StringComparer.Ordinal).Select(value => "data:" + value.Value));
