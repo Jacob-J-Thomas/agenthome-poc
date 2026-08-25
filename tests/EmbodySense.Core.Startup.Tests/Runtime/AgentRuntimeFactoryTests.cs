@@ -65,6 +65,7 @@ using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Startup.Loops.InvocationPreparation;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
 using EmbodySense.Core.Startup.Loops.Posture.Models;
 using EmbodySense.Core.Startup.Capabilities;
@@ -484,6 +485,63 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(currentProfile.IssuedAtUtc, currentGrant.Boundary.EffectiveAtUtc);
         Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, unavailablePreparation.Status);
         Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Unavailable, unavailableConfirmation.Status);
+    }
+
+    [Fact]
+    public async Task CreateAsync_rejects_a_published_graph_with_an_unsupported_deterministic_projection_node()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+        var catalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        var role = Assert.Single(catalog.Roles.Roles, item => item.IsAdmissionReady);
+        var candidate = BrowserUnsupportedInvocationProjectionGraphCandidate(new ContextualRoleRevisionPin(
+            new ContextualRoleRevisionIdentity(role.RoleId, role.Revision),
+            role.ContentHash));
+        var created = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "create-unsupported-invocation-projection-graph",
+            GovernedLoopGraphMutationKind.CreateDraft,
+            candidate.GraphId!,
+            GovernedLoopRevisionLifecycleStatus.Unknown,
+            0,
+            null,
+            null,
+            candidate));
+        var draft = Assert.IsType<GovernedLoopGraphReadResponse>(created.Current);
+        var draftHead = Assert.IsType<GovernedLoopRevisionLifecycleHead>(draft.Lifecycle);
+        var published = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "publish-unsupported-invocation-projection-graph",
+            GovernedLoopGraphMutationKind.Publish,
+            candidate.GraphId!,
+            draftHead.Status,
+            draftHead.LifecycleVersion,
+            draftHead.DraftRevision,
+            draftHead.PublishedRevision,
+            null));
+
+        var preparation = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var confirmation = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(new GovernedLoopInvocationAuthorityConfirmation(
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            new string('a', 64),
+            "confirm-unsupported-invocation-projection-graph"));
+
+        Assert.Equal("committed", created.Status);
+        Assert.Equal("committed", published.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Ineligible, preparation.Status);
+        Assert.Null(preparation.Preview);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Ineligible, confirmation.Status);
+        Assert.Null(confirmation.Grant);
+
+        File.WriteAllText(Path.Combine(new WorkspacePaths(workspace.RootPath).GovernedLoopRevisionsPath, "lifecycle.json"), "{");
+        var unavailableConfirmation = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(new GovernedLoopInvocationAuthorityConfirmation(
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            new string('a', 64),
+            "confirm-corrupt-unsupported-invocation-projection-graph"));
+
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Unavailable, unavailableConfirmation.Status);
+        Assert.Null(unavailableConfirmation.Grant);
     }
 
     [Fact]
@@ -1285,6 +1343,23 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task RunTurnAsync_projects_empty_and_unknown_default_conversation_review_requests()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+
+        var empty = await runtime.RunTurnAsync("/review");
+        var unknown = await runtime.RunTurnAsync("/review resolve missing-review-turn");
+
+        Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, empty.Status);
+        Assert.Equal("No unresolved default-conversation reviews were found.", empty.Output);
+        Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, unknown.Status);
+        Assert.Contains("missing-review-turn", unknown.Output, StringComparison.Ordinal);
+        Assert.Contains("was not found", unknown.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task CreateAsync_keeps_ordinary_chat_available_when_another_process_owns_custom_loop_hosting()
     {
         if (!OperatingSystem.IsWindows())
@@ -1438,6 +1513,98 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task Command_action_provider_configuration_is_immutable_and_composes_only_the_server_derived_surface_actor()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace);
+        var provider = new CommandActionRuntimeProvider(
+            [GovernedCommandActionFactoryTests.TypedRegistration()],
+            DenyingCapabilityExecutableArtifactResolver.Instance,
+            AvailableCommandActionProcessIsolationBoundary.Instance);
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+            new RejectingApprovalPrompt(),
+            workspace.ServerStatePath,
+            CreateCompatibleRuntimeStatus(executablePath));
+
+        var configured = factory.WithCommandActionRuntimeProvider(provider);
+
+        Assert.NotSame(factory, configured);
+        Assert.Throws<ArgumentNullException>(() => factory.WithCommandActionRuntimeProvider(null!));
+        await using var runtime = await configured.CreateAsync(
+            "test-model",
+            workspace.RootPath,
+            executablePath,
+            "read-only",
+            AgentRuntimeSurface.Create("automation"));
+        var catalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        var preparation = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest("missing-graph", "revision-1"));
+
+        Assert.Contains(catalog.NodeDescriptors, node => node.CommandAction is not null);
+        Assert.NotNull(runtime.GovernedLoopInvocationPreparation);
+        Assert.NotNull(runtime.ModelProfiles);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, preparation.Status);
+    }
+
+    [Fact]
+    public void Public_factory_constructors_validate_pre_resolved_runtime_statuses()
+    {
+        using var workspace = new TestWorkspace();
+        var prompt = new RejectingApprovalPrompt();
+        var observer = new NoopConversationPublicationObserver();
+        var compatible = CreateCompatibleRuntimeStatus(workspace.File("compatible-codex.cmd"));
+        var incompatible = compatible with { Compatibility = CodexRuntimeCompatibility.ExecutableNotFound };
+        var missingExecutable = compatible with { ResolvedExecutablePath = " " };
+
+        Assert.NotNull(new AgentRuntimeFactory(prompt, compatible));
+        Assert.NotNull(new AgentRuntimeFactory(prompt, observer));
+        Assert.NotNull(new AgentRuntimeFactory(prompt, observer, compatible));
+        Assert.Throws<ArgumentException>(() => new AgentRuntimeFactory(prompt, incompatible));
+        Assert.Throws<ArgumentException>(() => new AgentRuntimeFactory(prompt, missingExecutable));
+        Assert.Throws<ArgumentException>(() => AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+            prompt,
+            workspace.ServerStatePath,
+            additionalModelProfileProviders: [null!]));
+    }
+
+    [Fact]
+    public void Invocation_preparation_facade_rejects_noncanonical_server_derived_workspace_and_actor_inputs()
+    {
+        Assert.Throws<ArgumentException>(() => new GovernedLoopInvocationPreparationFacade(
+            "workspace-not-canonical",
+            "embodysense.web",
+            true,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!));
+        Assert.Throws<ArgumentException>(() => new GovernedLoopInvocationPreparationFacade(
+            "workspace-sha256:" + new string('a', 64),
+            "not canonical",
+            true,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!,
+            null!));
+    }
+
+    [Fact]
     public async Task Authenticated_event_delivery_flows_through_the_configured_surface_verifier()
     {
         using var workspace = new TestWorkspace();
@@ -1463,6 +1630,32 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(checkpoint.CheckpointId, verifier.LastRequest!.CheckpointId);
         Assert.Equal(checkpoint.AuthenticatedEventReference, verifier.LastRequest.AuthenticatedEventReference);
         Assert.Equal(authenticationEvidenceHash, verifier.LastRequest.AuthenticationEvidenceHash);
+    }
+
+    [Theory]
+    [InlineData(AgentRuntimeAuthenticatedWakeVerificationStatus.Rejected, AgentRuntimeAuthenticatedWakeDeliveryStatus.Invalid)]
+    [InlineData(AgentRuntimeAuthenticatedWakeVerificationStatus.Conflict, AgentRuntimeAuthenticatedWakeDeliveryStatus.Conflict)]
+    [InlineData(AgentRuntimeAuthenticatedWakeVerificationStatus.Unavailable, AgentRuntimeAuthenticatedWakeDeliveryStatus.Unavailable)]
+    public async Task Authenticated_event_delivery_projects_terminal_verification_posture(
+        AgentRuntimeAuthenticatedWakeVerificationStatus verificationStatus,
+        AgentRuntimeAuthenticatedWakeDeliveryStatus expectedStatus)
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var checkpoint = AuthenticatedEventCheckpoint(DateTimeOffset.Parse("2026-08-20T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture));
+        await new GovernedLoopSleepStore(paths).PublishAndReleaseAsync(checkpoint, new string('4', 64));
+        var verifier = new RecordingAuthenticatedWakeVerifier(verificationStatus);
+        await using var runtime = await CreateRuntimeAsync(workspace, verifier: verifier);
+
+        var result = await runtime.DeliverAuthenticatedWakeAsync(new AgentRuntimeAuthenticatedWakeDeliveryInput(
+            checkpoint.CheckpointId,
+            checkpoint.ContentHash,
+            new string('5', 64)));
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Equal(1, verifier.VerifyCount);
+        Assert.False(result.ContinuationInvoked);
     }
 
     [Fact]
@@ -2197,6 +2390,45 @@ public sealed class AgentRuntimeFactoryTests
             EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
     }
 
+    private static GovernedLoopGraphCandidate BrowserUnsupportedInvocationProjectionGraphCandidate(ContextualRoleRevisionPin role)
+    {
+        var source = BrowserGraphCandidate(role);
+        var trigger = source.Nodes![0]!;
+        var exit = source.Nodes[1]!;
+        var transform = new GovernedLoopNodeDefinition(
+            "identity",
+            GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+            [
+                new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        return source with
+        {
+            GraphId = "browser-unsupported-invocation-projection-graph",
+            Nodes = [trigger, transform, exit],
+            ControlEdges =
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-identity", trigger.Id, transform.Id, GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("identity-to-exit", transform.Id, exit.Id, GovernedLoopControlCondition.Success),
+            ],
+            Bindings =
+            [
+                new GovernedLoopBindingDefinition("request-to-identity", GovernedLoopBindingKind.Data, trigger.Id, "request", transform.Id, GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("identity-to-result", GovernedLoopBindingKind.Data, transform.Id, GovernedLoopPureNodeVocabulary.OutputPort, exit.Id, "result"),
+            ],
+            DisplayMetadata = new GovernedLoopDisplayMetadata(
+                "Unsupported invocation projection graph",
+                "A valid deterministic transform that this least-authority invocation slice deliberately excludes.",
+                [
+                    new GovernedLoopNodeDisplayMetadata(trigger.Id, "Trigger", "Start.", 0, 0),
+                    new GovernedLoopNodeDisplayMetadata(transform.Id, "Transform", "Identity.", 100, 0),
+                    new GovernedLoopNodeDisplayMetadata(exit.Id, "Exit", "Publish.", 200, 0),
+                ]),
+        };
+    }
+
     private static ContextualRoleRevision BrowserInvocationAcceptanceRole(WorkspacePaths paths)
     {
         var revision = new ContextualRoleRevision(
@@ -2463,8 +2695,21 @@ public sealed class AgentRuntimeFactoryTests
         }
     }
 
-    private sealed class RecordingAuthenticatedWakeVerifier : IAgentRuntimeAuthenticatedWakeVerifier
+    private sealed class NoopConversationPublicationObserver : IAgentRuntimeConversationPublicationObserver
     {
+        public Task PublicationCommittedAsync(AgentRuntimeConversationPublication publication, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(publication);
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingAuthenticatedWakeVerifier(
+        AgentRuntimeAuthenticatedWakeVerificationStatus status = AgentRuntimeAuthenticatedWakeVerificationStatus.NotFound) : IAgentRuntimeAuthenticatedWakeVerifier
+    {
+        private readonly AgentRuntimeAuthenticatedWakeVerificationStatus _status = status;
+
         internal int VerifyCount { get; private set; }
 
         internal AgentRuntimeAuthenticatedWakeVerificationRequest? LastRequest { get; private set; }
@@ -2478,7 +2723,7 @@ public sealed class AgentRuntimeFactoryTests
             LastRequest = request;
             return Task.FromResult<AgentRuntimeAuthenticatedWakeVerificationResult?>(
                 new AgentRuntimeAuthenticatedWakeVerificationResult(
-                    AgentRuntimeAuthenticatedWakeVerificationStatus.NotFound));
+                    _status));
         }
     }
 
