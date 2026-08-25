@@ -42,11 +42,11 @@ internal static class CustomLoopRunProcessLossHost
 
     private static CustomLoopRunRecord CreateRun()
     {
-        const string loopId = "loop-process-loss";
-        var definition = CustomLoopDefinition.CreateSeed(loopId, "default-role", "step-1", "create-loop", _timestamp);
+        const string LoopId = "loop-process-loss";
+        var definition = CustomLoopDefinition.CreateSeed(LoopId, "default-role", "step-1", "create-loop", _timestamp);
         var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
         var admitted = new CustomLoopRunEvent(1, "event-1", _timestamp, CustomLoopRunEventKind.Admitted, null, null, null, CustomLoopRunEventKind.Admitted.ToString(), [], null, null, null, null, null, null, null, null, null, null);
-        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-process-loss", loopId, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-process-loss", "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null)
+        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-process-loss", LoopId, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-process-loss", "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null)
         {
             CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp)
         };
