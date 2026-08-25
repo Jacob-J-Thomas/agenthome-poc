@@ -458,6 +458,12 @@ public static class GovernedLoopSequentialPlanBuilder
             iterationParameterId = descriptor.CycleIterationBudgetParameterId;
             durationParameterId = descriptor.CycleTimeBudgetMillisecondsParameterId;
         }
+        else if (GovernedLoopPureNodeCatalogContract.TryResolve(node.Descriptor, out descriptor)
+            && descriptor is { AllowsCycle: true })
+        {
+            iterationParameterId = descriptor.CycleIterationBudgetParameterId;
+            durationParameterId = descriptor.CycleTimeBudgetMillisecondsParameterId;
+        }
         else if (Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference))
         {
             iterationParameterId = GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter;
@@ -867,16 +873,7 @@ public static class GovernedLoopSequentialPlanBuilder
     private static bool HasExactPureParameters(
         GovernedLoopNodeDefinition node,
         GovernedLoopNodeCatalogDescriptor contract)
-    {
-        if (node.Parameters.Count != contract.Parameters.Count)
-        {
-            return false;
-        }
-
-        var parameters = contract.Parameters.ToDictionary(parameter => parameter.Id, StringComparer.Ordinal);
-        return node.Parameters.All(parameter => parameters.TryGetValue(parameter.Key, out var expected)
-            && IsCompatibleParameter(parameter.Value, expected));
-    }
+        => HasExactCatalogParameters(node, contract);
 
     private static bool HasExactCatalogParameters(
         GovernedLoopNodeDefinition node,

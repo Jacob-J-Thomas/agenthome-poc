@@ -63,6 +63,7 @@ using EmbodySense.Core.Startup.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Loops.Posture;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring;
+using EmbodySense.Core.Startup.Loops.InvocationPreparation;
 using EmbodySense.Core.Startup.ContextualRoles;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
@@ -721,6 +722,23 @@ public sealed class AgentRuntimeFactory
                 new ContextualRoleCatalogFacade(paths.RootPath),
                 modelProfileCatalogFacade,
                 governedCommandActionRegistrations);
+            var governedLoopInvocationPreparation = new GovernedLoopInvocationPreparationFacade(
+                workspaceId,
+                actor,
+                runtimeSurface == AgentRuntimeSurface.Web,
+                governedRevisionStore,
+                governedBindingSource,
+                governedRoleSource,
+                governedAuthorityStore,
+                governedGrantResolver,
+                governedEffectAuthorityEvidence,
+                governedAuthorityStore,
+                governedAuthorityStore,
+                capabilityAdmission,
+                modelProfileMetadata,
+                modelProfileAdapters,
+                capabilityAuthority,
+                operationalClock);
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);
             var customLoops = new CustomLoopRuntimeFacade(
                 customDefinitionStore,
@@ -774,6 +792,7 @@ public sealed class AgentRuntimeFactory
                 scheduleDeliveryProvenance,
                 operationalFacade,
                 graphAuthoringFacade,
+                governedLoopInvocationPreparation,
                 modelProfileCatalogFacade,
                 defaultConversationReviews,
                 codexRuntimeStatus,

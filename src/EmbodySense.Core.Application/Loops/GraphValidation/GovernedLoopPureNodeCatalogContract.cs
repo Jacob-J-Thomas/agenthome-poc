@@ -97,7 +97,8 @@ public static class GovernedLoopPureNodeCatalogContract
                 GovernedLoopNodeKind.Validate,
                 GovernedLoopPureNodeVocabulary.SchemaConformance,
                 [Input(GovernedLoopPureNodeVocabulary.InputPort, _pureKinds), Output(GovernedLoopPureNodeVocabulary.ResultPort, _booleanKind)],
-                []),
+                [],
+                allowsCycle: true),
             Descriptor(
                 GovernedLoopNodeKind.Validate,
                 GovernedLoopPureNodeVocabulary.CanonicalEquality,
@@ -131,7 +132,8 @@ public static class GovernedLoopPureNodeCatalogContract
         GovernedLoopNodeKind kind,
         string typeId,
         GovernedLoopCatalogPortContract[] ports,
-        GovernedLoopCatalogParameterContract[] parameters)
+        GovernedLoopCatalogParameterContract[] parameters,
+        bool allowsCycle = false)
         => new(
             new GovernedLoopNodeDescriptor(kind, typeId, GovernedLoopPureNodeVocabulary.DescriptorVersion),
             IsAdvertised: true,
@@ -142,17 +144,24 @@ public static class GovernedLoopPureNodeCatalogContract
             _success,
             GovernedLoopJoinPolicy.None,
             MinimumIncomingControlEdges: 1,
-            AllowsCycle: false,
-            CycleIterationBudgetParameterId: null,
-            CycleTimeBudgetMillisecondsParameterId: null,
+            AllowsCycle: allowsCycle,
+            CycleIterationBudgetParameterId: allowsCycle ? GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter : null,
+            CycleTimeBudgetMillisecondsParameterId: allowsCycle ? GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter : null,
             Array.AsReadOnly(ports),
-            Array.AsReadOnly(parameters),
+            Array.AsReadOnly(allowsCycle ? parameters.Concat(CycleBudgetParameters()).OrderBy(parameter => parameter.Id, StringComparer.Ordinal).ToArray() : parameters),
             _noCapabilities,
             new GovernedLoopNodeResourceBudget(
                 Attempts: 1,
                 PayloadCharacters: CustomLoopLimits.MaxGraphNodePayloadCharacters,
                 EvidenceItems: CustomLoopLimits.MaxGraphSequentialEvidenceItemsPerActivation,
                 ResourceUnits: 0));
+
+    private static GovernedLoopCatalogParameterContract[] CycleBudgetParameters()
+        =>
+        [
+            new GovernedLoopCatalogParameterContract(GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter, GovernedLoopParameterValueKind.Integer, Required: false, 1, 5, 1, CustomLoopLimits.MaxGraphCycleIterations, Array.Empty<string>()),
+            new GovernedLoopCatalogParameterContract(GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter, GovernedLoopParameterValueKind.Integer, Required: false, 1, 8, 1, CustomLoopLimits.MaxGraphCycleMilliseconds, Array.Empty<string>()),
+        ];
 
     private static GovernedLoopCatalogPortContract Input(string id, GovernedLoopValueKindSet kinds)
         => new(id, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, kinds, Required: true);

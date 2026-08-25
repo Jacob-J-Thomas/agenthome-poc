@@ -7,6 +7,7 @@ using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
+using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Execution.Authority;
@@ -29,7 +30,7 @@ namespace EmbodySense.Core.Persistence.Loops.Execution.Authority;
 /// replays never append twice and identity reuse with any different immutable content fails closed as a conflict.
 /// Historical evidence is never rewritten or evicted automatically.
 /// </remarks>
-public sealed class GovernedLoopEffectAuthorityEvidenceStore : IGovernedLoopEffectAuthorityEvidenceStore, IGovernedLoopEffectAuthorityUsageStore
+public sealed class GovernedLoopEffectAuthorityEvidenceStore : IGovernedLoopEffectAuthorityEvidenceStore, IGovernedLoopEffectAuthorityUsageStore, IGovernedLoopEffectAuthorityUsageReader
 {
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions(writeIndented: true);
     private static readonly JsonSerializerOptions _hashOptions = CreateJsonOptions(writeIndented: false);
@@ -39,6 +40,8 @@ public sealed class GovernedLoopEffectAuthorityEvidenceStore : IGovernedLoopEffe
     private readonly ICapabilityCatalogTrustProvider _trustProvider;
     private readonly ICapabilityAuthorityTransaction _authorityTransaction;
     private readonly GovernedLoopEffectAuthorityEvidenceStoreOptions _options;
+    private readonly string _workspaceRootPath;
+    private readonly StringComparison _workspacePathComparison;
 
     /// <summary>Creates an evidence store with the default server-owned trust provider.</summary>
     /// <param name="paths">The initialized workspace paths.</param>
@@ -78,6 +81,8 @@ public sealed class GovernedLoopEffectAuthorityEvidenceStore : IGovernedLoopEffe
 
         trustProvider.RequireDisjointWorkspace(paths.RootPath);
         _paths = new GovernedLoopEffectAuthorityEvidenceStorePaths(paths);
+        _workspaceRootPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(paths.RootPath));
+        _workspacePathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         _pathGuard = new CapabilityCatalogPathGuard(
             paths.RootPath,
             durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance,
@@ -249,6 +254,92 @@ public sealed class GovernedLoopEffectAuthorityEvidenceStore : IGovernedLoopEffe
         GovernedLoopEffectAuthorityCompletionUsageRequest request,
         CancellationToken cancellationToken = default)
         => await ExecuteUsageAsync(null, request, GovernedLoopEffectAuthorityUsageOperation.CompleteCompletion, cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<GovernedLoopEffectAuthorityGrantUsageReadResult> ReadCompletionUsageAsync(
+        AuthorityGrantReference? grant,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsValidGrantReference(grant))
+        {
+            return UsageReadResult(GovernedLoopEffectAuthorityGrantUsageReadStatus.Unavailable);
+        }
+
+        var callbackEntered = false;
+        GovernedLoopEffectAuthorityGrantUsageReadResult? callbackResult = null;
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(
+                async token =>
+                {
+                    callbackEntered = true;
+                    callbackResult = await ReadCompletionUsageCoreAsync(grant!, token, cancellationToken);
+                    return callbackResult;
+                },
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && callbackResult is null)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception) || exception is OperationCanceledException)
+        {
+            return callbackResult ?? UsageReadResult(callbackEntered
+                ? GovernedLoopEffectAuthorityGrantUsageReadStatus.Ambiguous
+                : GovernedLoopEffectAuthorityGrantUsageReadStatus.Unavailable);
+        }
+    }
+
+    private async Task<GovernedLoopEffectAuthorityGrantUsageReadResult> ReadCompletionUsageCoreAsync(
+        AuthorityGrantReference grant,
+        CancellationToken cancellationToken,
+        CancellationToken callerCancellationToken)
+    {
+        try
+        {
+            await using var session = OpenReadSession() ?? throw new IOException("The effect-authority evidence workspace is unavailable.");
+            if (HasUnsafeExistingEvidenceTopology(session))
+            {
+                return UsageReadResult(GovernedLoopEffectAuthorityGrantUsageReadStatus.Unavailable);
+            }
+
+            var workspaceIdentity = WorkspaceIdentity(session);
+            var trust = await _trustProvider.ReadAsync(workspaceIdentity, cancellationToken);
+            var loaded = await LoadAsync(session, workspaceIdentity, trust, cancellationToken);
+            if (loaded.Disposition == GovernedLoopEffectAuthorityEvidenceStoreLoadDisposition.Pending)
+            {
+                return UsageReadResult(GovernedLoopEffectAuthorityGrantUsageReadStatus.Ambiguous);
+            }
+
+            if (loaded.Disposition == GovernedLoopEffectAuthorityEvidenceStoreLoadDisposition.Recovered)
+            {
+                return UsageReadResult(GovernedLoopEffectAuthorityGrantUsageReadStatus.Ambiguous);
+            }
+
+            if (loaded.Document is null)
+            {
+                return UsageReadResult(GovernedLoopEffectAuthorityGrantUsageReadStatus.Unavailable);
+            }
+
+            var claims = loaded.Document.CompletionClaims.Where(claim => SameGrant(claim.Grant, grant)).ToArray();
+            if (claims.Any(claim => claim.Status == GovernedLoopEffectAuthorityCompletionClaimStatus.Completed))
+            {
+                return UsageReadResult(GovernedLoopEffectAuthorityGrantUsageReadStatus.Consumed);
+            }
+
+            return UsageReadResult(claims.Any(claim => claim.Status == GovernedLoopEffectAuthorityCompletionClaimStatus.Pending)
+                ? GovernedLoopEffectAuthorityGrantUsageReadStatus.Pending
+                : GovernedLoopEffectAuthorityGrantUsageReadStatus.Unconsumed);
+        }
+        catch (OperationCanceledException) when (callerCancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception) || exception is OperationCanceledException)
+        {
+            return UsageReadResult(GovernedLoopEffectAuthorityGrantUsageReadStatus.Unavailable);
+        }
+    }
 
     private async Task<GovernedLoopEffectAuthorityUsageStoreResult> ExecuteUsageAsync(
         GovernedLoopEffectAuthorityUsageRequest? usageRequest,
@@ -962,6 +1053,55 @@ public sealed class GovernedLoopEffectAuthorityEvidenceStore : IGovernedLoopEffe
         => await _pathGuard.TryAcquireExclusiveSessionAsync(_paths.LockPath, createRoot: false, cancellationToken)
             ?? throw new IOException("The effect-authority evidence workspace is unavailable.");
 
+    private CapabilityCatalogPathSession? OpenReadSession()
+        => CapabilityCatalogPathSession.Open(
+            _workspaceRootPath,
+            _workspacePathComparison,
+            createRoot: false,
+            NativeCapabilityCatalogDurabilityBarrier.Instance,
+            _options.PathObserver);
+
+    private bool HasUnsafeExistingEvidenceTopology(CapabilityCatalogPathSession session)
+    {
+        var candidate = _paths.RootPath;
+        while (!string.Equals(candidate, _workspaceRootPath, _workspacePathComparison))
+        {
+            if (!session.DirectoryExists(candidate) && ExistsOrCannotInspect(candidate))
+            {
+                return true;
+            }
+
+            candidate = Path.GetDirectoryName(candidate) ?? throw new IOException("The effect-authority evidence path escaped the workspace root.");
+        }
+
+        return false;
+    }
+
+    private static bool ExistsOrCannotInspect(string path)
+    {
+        try
+        {
+            _ = File.GetAttributes(path);
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
     private static string WorkspaceIdentity(CapabilityCatalogPathSession session)
         => CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(
             "embodysense-governed-loop-effect-authority-evidence-v1\n" + session.PhysicalIdentityMaterial);
@@ -1083,6 +1223,24 @@ public sealed class GovernedLoopEffectAuthorityEvidenceStore : IGovernedLoopEffe
     private static GovernedLoopEffectAuthorityUsageStoreResult UsageResult(
         GovernedLoopEffectAuthorityUsageStoreStatus status)
         => new(status);
+
+    private static GovernedLoopEffectAuthorityGrantUsageReadResult UsageReadResult(
+        GovernedLoopEffectAuthorityGrantUsageReadStatus status)
+        => new(status);
+
+    private static bool IsValidGrantReference(AuthorityGrantReference? reference)
+    {
+        if (reference is not { GrantId: { } grantId, Revision: { } revision, ContentHash: { } contentHash })
+        {
+            return false;
+        }
+
+        return AuthorityGrantId.TryParse(grantId.Value, out _, out _)
+            && AuthorityGrantRevision.TryParse(revision.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), out _, out _)
+            && contentHash.Length == 71
+            && contentHash.StartsWith("sha256:", StringComparison.Ordinal)
+            && contentHash[7..].All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+    }
 
     private static bool IsAvailabilityFailure(Exception exception)
         => exception is IOException

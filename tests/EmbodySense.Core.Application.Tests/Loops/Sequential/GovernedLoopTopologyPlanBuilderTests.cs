@@ -130,6 +130,22 @@ public sealed class GovernedLoopTopologyPlanBuilderTests
     }
 
     [Fact]
+    public void Bounded_schema_conformance_cycle_is_admitted_but_missing_its_own_budgets_fails_closed()
+    {
+        var admitted = GovernedLoopTopologyPlanBuilder.Build(SchemaConformanceCycleArtifact(includeValidationBudgets: true));
+        var unboundedValidation = GovernedLoopTopologyPlanBuilder.Build(SchemaConformanceCycleArtifact(includeValidationBudgets: false));
+
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.Ready, admitted.Status);
+        var plan = Assert.IsType<GovernedLoopSequentialPlan>(admitted.Plan);
+        var cycle = Assert.Single(plan.Components, component => component.IsCyclic);
+        Assert.Equal(["infer", "validate", "condition"], cycle.NodeIds);
+        Assert.Equal(2, cycle.MaximumIterations);
+        Assert.Equal(5000, cycle.MaximumDurationMilliseconds);
+        Assert.Equal(GovernedLoopSequentialPlanBuildStatus.UnsupportedTopology, unboundedValidation.Status);
+        Assert.Null(unboundedValidation.Plan);
+    }
+
+    [Fact]
     public void Same_iteration_forward_bindings_are_admitted_but_loop_carried_and_post_exit_sources_are_rejected()
     {
         var valid = GovernedLoopTopologyPlanBuilder.Build(ThreeNodeCycleArtifact(reverseRequestBinding: false, ambiguousExitBinding: false));
@@ -381,6 +397,70 @@ public sealed class GovernedLoopTopologyPlanBuilderTests
         return Artifact(nodes, edges, StandardBindings(includeCondition: true, includeBranches: false));
     }
 
+    private static GovernedLoopGraphRevisionArtifact SchemaConformanceCycleArtifact(bool includeValidationBudgets)
+    {
+        var inference = BoundedInference("infer", "Produce a candidate for deterministic validation.") with
+        {
+            Parameters = new Dictionary<string, string>
+            {
+                ["instruction"] = "Produce a candidate for deterministic validation.",
+                [GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter] = "2",
+                [GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter] = "5000",
+            },
+        };
+        var validate = new GovernedLoopNodeDefinition(
+            "validate",
+            GovernedLoopSequentialNodeDescriptors.SchemaConformance,
+            [
+                GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.ResultPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "boolean"),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            includeValidationBudgets
+                ? new Dictionary<string, string>
+                {
+                    [GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter] = "2",
+                    [GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter] = "5000",
+                }
+                : new Dictionary<string, string>());
+        var condition = new GovernedLoopNodeDefinition(
+            "condition",
+            GovernedLoopSequentialNodeDescriptors.BooleanCondition,
+            [GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopTopologyNodeVocabulary.ValuePort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "boolean")],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>
+            {
+                [GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter] = "2",
+                [GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter] = "5000",
+            });
+        return Artifact(
+            [
+                GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+                inference,
+                validate,
+                condition,
+                GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+            ],
+            [
+                Edge("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                Edge("infer-to-validate", "infer", "validate", GovernedLoopControlCondition.Success),
+                Edge("validate-to-condition", "validate", "condition", GovernedLoopControlCondition.Success),
+                Edge("condition-true-to-exit", "condition", "exit", GovernedLoopControlCondition.True),
+                Edge("condition-false-to-infer", "condition", "infer", GovernedLoopControlCondition.False),
+            ],
+            [
+                new GovernedLoopBindingDefinition("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new GovernedLoopBindingDefinition("result-to-validate", GovernedLoopBindingKind.Data, "infer", "result", "validate", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("validation-to-condition", GovernedLoopBindingKind.Data, "validate", GovernedLoopPureNodeVocabulary.ResultPort, "condition", GovernedLoopTopologyNodeVocabulary.ValuePort),
+                new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ],
+            [
+                new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, false),
+                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
+            ]);
+    }
+
     private static GovernedLoopGraphRevisionArtifact SelectedJoinAfterCycleArtifact()
     {
         var loopInference = BoundedInference("loop-infer", "Continue the bounded admitted cycle.");
@@ -595,8 +675,9 @@ public sealed class GovernedLoopTopologyPlanBuilderTests
     private static GovernedLoopGraphRevisionArtifact Artifact(
         IReadOnlyList<GovernedLoopNodeDefinition> nodes,
         IReadOnlyList<GovernedLoopControlEdgeDefinition> edges,
-        IReadOnlyList<GovernedLoopBindingDefinition> bindings)
-        => GovernedLoopSequentialApplicationTestFixture.Artifact(nodes, edges, ["exit"], bindings: bindings);
+        IReadOnlyList<GovernedLoopBindingDefinition> bindings,
+        IReadOnlyList<GovernedLoopValueSchemaDefinition>? valueSchemas = null)
+        => GovernedLoopSequentialApplicationTestFixture.Artifact(nodes, edges, ["exit"], bindings: bindings, valueSchemas: valueSchemas);
 
     private static GovernedLoopNodeDefinition Condition(
         string id,

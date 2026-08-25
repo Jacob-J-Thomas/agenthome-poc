@@ -590,6 +590,38 @@ public sealed class GovernedLoopGraphValidationServiceTests
     }
 
     [Fact]
+    public async Task ValidateAcceptsOnlySchemaConformanceWithinTheExactBoundedValidationCycle()
+    {
+        var candidate = BoundedSchemaConformanceCycleCandidate(includeValidationBudgets: true);
+        var authority = BoundedSchemaConformanceCycleAuthority();
+        var valid = await Service(ExactSchemaConformanceCycleCatalog(candidate), authority).ValidateAsync(candidate);
+        var unbounded = BoundedSchemaConformanceCycleCandidate(includeValidationBudgets: false);
+        var unboundedResult = await Service(ExactSchemaConformanceCycleCatalog(unbounded), authority).ValidateAsync(unbounded);
+        var unsafeValidator = candidate with
+        {
+            Nodes = candidate.Nodes!.Select(node => node!.Id == "validate"
+                ? node with { Descriptor = new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Validate, "unsafe-validator", 1) }
+                : node).ToArray(),
+        };
+        var unsafeCatalog = ExactSchemaConformanceCycleCatalog(unsafeValidator)
+            .Select(descriptor => descriptor.Descriptor.TypeId == "unsafe-validator"
+                ? descriptor with
+                {
+                    AllowsCycle = true,
+                    CycleIterationBudgetParameterId = GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter,
+                    CycleTimeBudgetMillisecondsParameterId = GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter,
+                }
+                : descriptor)
+            .ToArray();
+        var unsafeResult = await Service(unsafeCatalog, authority).ValidateAsync(unsafeValidator);
+
+        Assert.True(valid.IsValid, string.Join(Environment.NewLine, valid.Errors.Select(error => $"{error.Code}: {error.Message}")));
+        Assert.Contains(unboundedResult.Errors, error => error.Code == "node.cycle.iteration-budget" && error.Element.Id == "validate");
+        Assert.Contains(unboundedResult.Errors, error => error.Code == "node.cycle.time-budget" && error.Element.Id == "validate");
+        Assert.Contains(unsafeResult.Errors, error => error.Code == "node.cycle.not-allowed" && error.Element.Id == "validate");
+    }
+
+    [Fact]
     public async Task ValidateRejectsCycleExitThatSharesTheLoopContinuationOutcome()
     {
         var nodes = Nodes();
@@ -1378,6 +1410,14 @@ public sealed class GovernedLoopGraphValidationServiceTests
         return descriptor with { AllowsCycle = true, CycleIterationBudgetParameterId = "max-iterations", CycleTimeBudgetMillisecondsParameterId = "max-milliseconds" };
     }
 
+    private static GovernedLoopNodeCatalogDescriptor EnableTopologyCycle(GovernedLoopNodeCatalogDescriptor descriptor)
+        => descriptor with
+        {
+            AllowsCycle = true,
+            CycleIterationBudgetParameterId = GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter,
+            CycleTimeBudgetMillisecondsParameterId = GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter,
+        };
+
     private static GovernedLoopAuthoritySnapshot Authority(
         string roleId = "researcher",
         IReadOnlyList<string>? capabilityIds = null)
@@ -1411,9 +1451,9 @@ public sealed class GovernedLoopGraphValidationServiceTests
             capabilityIds: capabilityIds ?? [ModelInferenceCapability, ModelProfileCapability, WorkspaceReadCapability],
             roleId: roleId);
 
-    private static ContextualRoleRevisionPin RolePin(string roleId = "researcher")
+    private static ContextualRoleRevisionPin RolePin(string roleId = "researcher", IReadOnlyList<string>? capabilityIds = null)
     {
-        var revision = RoleRevision(roleId);
+        var revision = RoleRevision(roleId, capabilityIds);
         return new ContextualRoleRevisionPin(revision.Identity, revision.ContentHash);
     }
 
@@ -1459,6 +1499,19 @@ public sealed class GovernedLoopGraphValidationServiceTests
                 .Where(descriptor => !GovernedLoopTopologyNodeCatalogContract.TryResolve(descriptor.Descriptor, out _))
                 .DistinctBy(descriptor => descriptor.Descriptor),
             .. GovernedLoopTopologyNodeCatalogContract.Descriptors,
+        ];
+
+    private static GovernedLoopNodeCatalogDescriptor[] ExactSchemaConformanceCycleCatalog(GovernedLoopGraphCandidate candidate)
+        =>
+        [
+            .. Descriptors(candidate)
+                .Where(descriptor => !GovernedLoopPureNodeCatalogContract.TryResolve(descriptor.Descriptor, out _)
+                    && !GovernedLoopTopologyNodeCatalogContract.TryResolve(descriptor.Descriptor, out _)
+                    && !GovernedLoopFailNodeCatalogContract.TryResolve(descriptor.Descriptor, out _))
+                .Select(descriptor => Equals(descriptor.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference) ? EnableTopologyCycle(descriptor) : descriptor),
+            .. GovernedLoopPureNodeCatalogContract.Descriptors,
+            .. GovernedLoopTopologyNodeCatalogContract.Descriptors,
+            .. GovernedLoopFailNodeCatalogContract.Descriptors,
         ];
 
     private static IReadOnlyList<(string Name, string NodeId, GovernedLoopGraphCandidate Candidate)> InvalidPureSemanticCandidates()
@@ -1813,6 +1866,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
         {
             "max-iterations" => IntegerParameter(parameter.Key, 1, CustomLoopLimits.MaxGraphCycleIterations, required: false),
             "max-milliseconds" => IntegerParameter(parameter.Key, 1, CustomLoopLimits.MaxGraphCycleMilliseconds, required: false),
+            GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter => IntegerParameter(parameter.Key, 1, CustomLoopLimits.MaxGraphCycleMilliseconds, required: false),
             _ => new GovernedLoopCatalogParameterContract(parameter.Key, GovernedLoopParameterValueKind.Text, true, 1, CustomLoopLimits.MaxGraphParameterValueCharacters, null, null, [])
         }).ToArray();
     }
@@ -1821,6 +1875,109 @@ public sealed class GovernedLoopGraphValidationServiceTests
     {
         return new GovernedLoopCatalogParameterContract(id, GovernedLoopParameterValueKind.Integer, required, 1, 20, minimum, maximum, []);
     }
+
+    private static GovernedLoopGraphCandidate BoundedSchemaConformanceCycleCandidate(bool includeValidationBudgets)
+    {
+        var inference = GovernedLoopSequentialApplicationTestFixture.Inference("infer") with { Parameters = TopologyCycleParameters("2") };
+        var validate = new GovernedLoopNodeDefinition(
+            "validate",
+            GovernedLoopSequentialNodeDescriptors.SchemaConformance,
+            [
+                GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data),
+                GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopPureNodeVocabulary.ResultPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "boolean"),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            includeValidationBudgets ? TopologyCycleParameters("2") : new Dictionary<string, string>());
+        var condition = new GovernedLoopNodeDefinition(
+            "condition",
+            GovernedLoopSequentialNodeDescriptors.BooleanCondition,
+            [new GovernedLoopPortDefinition(GovernedLoopTopologyNodeVocabulary.ValuePort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "boolean", true)],
+            GovernedLoopAuthorityCeiling.Create([]),
+            TopologyCycleParameters("2"));
+        var fail = new GovernedLoopNodeDefinition(
+            "fail",
+            GovernedLoopSequentialNodeDescriptors.FailTerminal,
+            [],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>
+            {
+                [EmbodySense.Core.Common.Loops.Failures.GovernedLoopFailNodeVocabulary.CodeParameter] = "validation-rejected",
+                [EmbodySense.Core.Common.Loops.Failures.GovernedLoopFailNodeVocabulary.ExplanationParameter] = "The bounded validation rejected the result.",
+            });
+        return new GovernedLoopGraphCandidate(
+            1,
+            "bounded-schema-conformance-cycle",
+            "revision-1",
+            "Validate a bounded inference result before deciding whether to retry.",
+            RolePin(capabilityIds: BoundedSchemaConformanceCycleCapabilities()),
+            "trigger",
+            ["exit", "fail"],
+            GovernedLoopAuthorityCeiling.Create(BoundedSchemaConformanceCycleCapabilities()),
+            [
+                new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, false),
+                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
+            ],
+            [
+                GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+                inference,
+                validate,
+                condition,
+                GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+                fail,
+            ],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-inference", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("inference-to-validation", "infer", "validate", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("inference-failure-to-fail", "infer", "fail", GovernedLoopControlCondition.Failure),
+                new GovernedLoopControlEdgeDefinition("validation-to-condition", "validate", "condition", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("condition-true-to-exit", "condition", "exit", GovernedLoopControlCondition.True),
+                new GovernedLoopControlEdgeDefinition("condition-false-to-inference", "condition", "infer", GovernedLoopControlCondition.False),
+            ],
+            [
+                new GovernedLoopBindingDefinition("request-to-inference", GovernedLoopBindingKind.Data, "trigger", "request", "infer", "request"),
+                new GovernedLoopBindingDefinition("context-to-inference", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new GovernedLoopBindingDefinition("inference-to-validation", GovernedLoopBindingKind.Data, "infer", "result", "validate", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("validation-to-condition", GovernedLoopBindingKind.Data, "validate", GovernedLoopPureNodeVocabulary.ResultPort, "condition", GovernedLoopTopologyNodeVocabulary.ValuePort),
+                new GovernedLoopBindingDefinition("inference-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            ],
+            new GovernedLoopOutputContract("Return the validated inference result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
+            new GovernedLoopDisplayMetadata(
+                "Bounded schema-conformance cycle",
+                "Manual inference, schema conformance, condition, bounded retry, and explicit terminals.",
+                [
+                    new GovernedLoopNodeDisplayMetadata("trigger", "Trigger", "Start.", 0, 0),
+                    new GovernedLoopNodeDisplayMetadata("infer", "Inference", "Infer.", 100, 0),
+                    new GovernedLoopNodeDisplayMetadata("validate", "Validate", "Validate.", 200, 0),
+                    new GovernedLoopNodeDisplayMetadata("condition", "Condition", "Decide.", 300, 0),
+                    new GovernedLoopNodeDisplayMetadata("exit", "Exit", "Publish.", 400, 0),
+                    new GovernedLoopNodeDisplayMetadata("fail", "Fail", "Stop safely.", 400, 100),
+                ]),
+            GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
+    }
+
+    private static IReadOnlyList<string> BoundedSchemaConformanceCycleCapabilities()
+        =>
+        [
+            GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId,
+            ModelInferenceCapability,
+            ModelProfileCapability,
+        ];
+
+    private static GovernedLoopAuthoritySnapshot BoundedSchemaConformanceCycleAuthority()
+        => Authority(capabilityIds: BoundedSchemaConformanceCycleCapabilities()) with
+        {
+            MaxAttempts = CustomLoopLimits.MaxGraphAggregateAttempts,
+            MaxPayloadCharacters = CustomLoopLimits.MaxGraphAggregatePayloadCharacters,
+            MaxEvidenceItems = CustomLoopLimits.MaxGraphAggregateEvidenceItems,
+            MaxResourceUnits = CustomLoopLimits.MaxGraphAggregateResourceUnits,
+        };
+
+    private static Dictionary<string, string> TopologyCycleParameters(string iterations)
+        => new()
+        {
+            [GovernedLoopTopologyNodeVocabulary.MaximumIterationsParameter] = iterations,
+            [GovernedLoopTopologyNodeVocabulary.MaximumDurationMillisecondsParameter] = "5000",
+        };
 
     private static GovernedLoopGraphCandidate Candidate(IReadOnlyList<GovernedLoopNodeDefinition?>? nodes = null, IReadOnlyList<GovernedLoopControlEdgeDefinition?>? edges = null)
     {

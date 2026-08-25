@@ -17,7 +17,7 @@ using EmbodySense.Core.Common.Loops.PureNodes;
 namespace EmbodySense.Core.Application.Loops.GraphValidation;
 
 /// <summary>Validates canonical governed graph candidates against exact current catalog semantics and non-widening role authority.</summary>
-/// <remarks>The service performs no persistence, provider dispatch, graph traversal execution, frontier management, migration, or layout interpretation. A catalog entry must explicitly advertise executable support; mere availability never makes a node executable. Cyclic components are admitted only when every node has one effective internal successor edge because no runtime-enforceable SCC-wide activation contract exists.</remarks>
+/// <remarks>The service performs no persistence, provider dispatch, graph traversal execution, frontier management, migration, or layout interpretation. A catalog entry must explicitly advertise executable support; mere availability never makes a node executable. Cyclic components are admitted only when every node has one effective internal successor edge because no runtime-enforceable SCC-wide activation contract exists. Schema-1 permits a <see cref="GovernedLoopNodeKind.Validate"/> node in a cycle only when it is the exact canonical pure validator that declares bounded-cycle semantics.</remarks>
 public sealed class GovernedLoopGraphValidationService
 {
     private readonly IGovernedLoopNodeCatalog _catalog;
@@ -767,7 +767,7 @@ public sealed class GovernedLoopGraphValidationService
                 }
 
                 var node = graph.Nodes.Single(value => string.Equals(value.Id, nodeId, StringComparison.Ordinal));
-                if (!semantics.TryGetValue(nodeId, out var descriptor) || !descriptor.AllowsCycle)
+                if (!semantics.TryGetValue(nodeId, out var descriptor) || !AllowsBoundedCycle(node, descriptor))
                 {
                     Add(errors, "node.cycle.not-allowed", GovernedLoopGraphElementKind.Node, nodeId, $"graph.nodes[{nodeId}]", "Every node participating in a cycle must explicitly advertise bounded-cycle semantics.");
                     continue;
@@ -778,6 +778,12 @@ public sealed class GovernedLoopGraphValidationService
             }
         }
     }
+
+    private static bool AllowsBoundedCycle(GovernedLoopNodeDefinition node, GovernedLoopNodeCatalogDescriptor descriptor)
+        => descriptor.AllowsCycle
+            && (node.Descriptor.Kind != GovernedLoopNodeKind.Validate
+                || GovernedLoopPureNodeCatalogContract.TryResolve(node.Descriptor, out var pureDescriptor)
+                && pureDescriptor is { AllowsCycle: true });
 
     private static void ValidateCycleBudget(GovernedLoopNodeDefinition node, string parameterId, long maximum, string code, List<GovernedLoopGraphValidationError> errors)
     {

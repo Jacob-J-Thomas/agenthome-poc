@@ -25,6 +25,8 @@ using EmbodySense.Core.Startup.Triggers;
 using EmbodySense.Core.Startup.Loops.Posture;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring;
 using EmbodySense.Core.Startup.Inference.Profiles;
+using EmbodySense.Core.Startup.Loops.InvocationPreparation;
+using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
 
 namespace EmbodySense.Core.Startup.Runtime;
 
@@ -50,6 +52,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly IScheduleDeliveryProvenancePort _scheduleDeliveryProvenance;
     private readonly GovernedLoopOperationalFacade _governedLoopOperations;
     private readonly GovernedLoopGraphAuthoringFacade _governedLoopGraphAuthoring;
+    private readonly GovernedLoopInvocationPreparationFacade _governedLoopInvocationPreparation;
     private readonly IModelProfileCatalogFacade _modelProfiles;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
     private readonly GovernedLoopWaitRuntimeHost? _governedWaitRuntimeHost;
@@ -68,6 +71,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         IScheduleDeliveryProvenancePort scheduleDeliveryProvenance,
         GovernedLoopOperationalFacade governedLoopOperations,
         GovernedLoopGraphAuthoringFacade governedLoopGraphAuthoring,
+        GovernedLoopInvocationPreparationFacade governedLoopInvocationPreparation,
         IModelProfileCatalogFacade modelProfiles,
         DefaultConversationTurnReviewService defaultConversationReviews,
         CodexRuntimeStatus codexRuntimeStatus,
@@ -85,6 +89,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(governedLoops);
         ArgumentNullException.ThrowIfNull(governedLoopOperations);
         ArgumentNullException.ThrowIfNull(governedLoopGraphAuthoring);
+        ArgumentNullException.ThrowIfNull(governedLoopInvocationPreparation);
         ArgumentNullException.ThrowIfNull(modelProfiles);
         ArgumentNullException.ThrowIfNull(defaultConversationReviews);
         ArgumentNullException.ThrowIfNull(codexRuntimeStatus);
@@ -101,6 +106,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _scheduleDeliveryProvenance = scheduleDeliveryProvenance ?? throw new ArgumentNullException(nameof(scheduleDeliveryProvenance));
         _governedLoopOperations = governedLoopOperations ?? throw new ArgumentNullException(nameof(governedLoopOperations));
         _governedLoopGraphAuthoring = governedLoopGraphAuthoring;
+        _governedLoopInvocationPreparation = governedLoopInvocationPreparation;
         _modelProfiles = modelProfiles;
         _defaultConversationReviews = defaultConversationReviews;
         _governedWaitRuntimeHost = governedWaitRuntimeHost;
@@ -131,6 +137,9 @@ public sealed class AgentRuntime : IAsyncDisposable
 
     /// <summary>Gets the shared catalog, immutable graph history, and role-bound lifecycle authoring facade.</summary>
     public GovernedLoopGraphAuthoringFacade GovernedLoopGraphAuthoring => _governedLoopGraphAuthoring;
+
+    /// <summary>Gets the server-derived current-publication preparation and confirmation facade for visible governed invocation.</summary>
+    public GovernedLoopInvocationPreparationFacade GovernedLoopInvocationPreparation => _governedLoopInvocationPreparation;
 
     /// <summary>Gets the shared safe model-profile catalog and exact configured default.</summary>
     public IModelProfileCatalogFacade ModelProfiles => _modelProfiles;
@@ -295,6 +304,28 @@ public sealed class AgentRuntime : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         return _governedLoops.InvokeAsync(input, cancellationToken);
+    }
+
+    /// <summary>Prepares server-authorized exact grant choices or a non-persisted least-authority confirmation preview.</summary>
+    /// <param name="request">The Builder-selected graph and revision identifiers.</param>
+    /// <param name="cancellationToken">The token used before a durable authority operation begins.</param>
+    /// <returns>Only server-derived eligibility and exact grant-reference projections.</returns>
+    public Task<GovernedLoopInvocationPreparationResponse> PrepareGovernedLoopInvocationAsync(
+        GovernedLoopInvocationPreparationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        return _governedLoopInvocationPreparation.PrepareAsync(request, cancellationToken);
+    }
+
+    /// <summary>Confirms one exact server-derived least-authority preview and returns its durable exact grant reference.</summary>
+    /// <param name="confirmation">The selected graph revision, expected server preview hash, and durable operation identity.</param>
+    /// <param name="cancellationToken">The token used until a durable profile or grant boundary is reached.</param>
+    /// <returns>The exact confirmed grant reference or a fail-closed result.</returns>
+    public Task<GovernedLoopInvocationAuthorityConfirmationResult> ConfirmGovernedLoopInvocationAuthorityAsync(
+        GovernedLoopInvocationAuthorityConfirmation confirmation,
+        CancellationToken cancellationToken = default)
+    {
+        return _governedLoopInvocationPreparation.ConfirmAsync(confirmation, cancellationToken);
     }
 
     /// <summary>Delivers one already-authenticated event to an exact governed Wait checkpoint.</summary>
