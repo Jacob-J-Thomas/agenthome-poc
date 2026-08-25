@@ -7,7 +7,7 @@ using EmbodySense.Core.Persistence.Triggers.Schedules;
 namespace EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 
 /// <summary>Projects stable bounded schedule and sleeping-checkpoint catalog pages through the shared background-work port.</summary>
-/// <remarks>Each family advances independently by the last emitted key and wraps to canonical order after the tail.</remarks>
+/// <remarks>Schedule pages wrap to canonical order after the tail; sleep pages advance monotonically by the last emitted key and stop at the tail.</remarks>
 public sealed class GovernedLoopBackgroundWorkSource : IGovernedLoopBackgroundWorkSource
 {
     private readonly SemaphoreSlim _pageGate = new(1, 1);

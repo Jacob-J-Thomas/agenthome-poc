@@ -452,15 +452,20 @@ public sealed class GovernedLoopSleepStore : IGovernedLoopSleepStore, IGovernedL
             return Background(GovernedLoopBackgroundWorkReadStatus.Empty);
         }
 
-        var page = SelectCandidatePage(candidates, item => item.CheckpointId, afterCheckpointId, maximumCandidates);
+        var selection = SelectCandidatePage(candidates, item => item.CheckpointId, afterCheckpointId, maximumCandidates);
+        if (selection.Page.Count == 0)
+        {
+            return Background(GovernedLoopBackgroundWorkReadStatus.Empty);
+        }
+
         return GovernedLoopBackgroundWorkReadResultFactory.CreateDetached(
             GovernedLoopBackgroundWorkReadStatus.Empty,
             [],
             GovernedLoopBackgroundWorkReadStatus.Found,
-            page,
+            selection.Page,
             GovernedLoopBackgroundWorkReadStatus.Empty,
             [],
-            wakePageTruncated: candidates.Count > page.Count);
+            wakePageTruncated: selection.PageTruncated);
     }
 
     private static GovernedLoopBackgroundWorkReadResult ReconciliationPage(
@@ -473,18 +478,23 @@ public sealed class GovernedLoopSleepStore : IGovernedLoopSleepStore, IGovernedL
             return Background(GovernedLoopBackgroundWorkReadStatus.Empty);
         }
 
-        var page = SelectCandidatePage(candidates, item => item.CheckpointId, afterCheckpointId, maximumCandidates);
+        var selection = SelectCandidatePage(candidates, item => item.CheckpointId, afterCheckpointId, maximumCandidates);
+        if (selection.Page.Count == 0)
+        {
+            return Background(GovernedLoopBackgroundWorkReadStatus.Empty);
+        }
+
         return GovernedLoopBackgroundWorkReadResultFactory.CreateDetached(
             GovernedLoopBackgroundWorkReadStatus.Empty,
             [],
             GovernedLoopBackgroundWorkReadStatus.Empty,
             [],
             GovernedLoopBackgroundWorkReadStatus.Found,
-            page,
-            wakeReconciliationPageTruncated: candidates.Count > page.Count);
+            selection.Page,
+            wakeReconciliationPageTruncated: selection.PageTruncated);
     }
 
-    private static IReadOnlyList<T> SelectCandidatePage<T>(
+    private static (IReadOnlyList<T> Page, bool PageTruncated) SelectCandidatePage<T>(
         IReadOnlyList<T> candidates,
         Func<T, string> key,
         string? afterCheckpointId,
@@ -497,15 +507,18 @@ public sealed class GovernedLoopSleepStore : IGovernedLoopSleepStore, IGovernedL
                 candidate => string.Compare(key(candidate), afterCheckpointId, StringComparison.Ordinal) > 0);
             if (start < 0)
             {
-                start = 0;
+                return (Array.AsReadOnly(Array.Empty<T>()), false);
             }
         }
 
-        var count = Math.Min(maximumCandidates, candidates.Count);
-        return Array.AsReadOnly(
-            Enumerable.Range(0, count)
-                .Select(offset => candidates[(start + offset) % candidates.Count])
-                .ToArray());
+        var remaining = candidates.Count - start;
+        var count = Math.Min(maximumCandidates, remaining);
+        return (
+            Array.AsReadOnly(
+                Enumerable.Range(0, count)
+                    .Select(offset => candidates[start + offset])
+                    .ToArray()),
+            remaining > count);
     }
 
     private async Task<(GovernedLoopSleepStoreCatalog Catalog, TriggerQueueReadResult Identity)> LoadAsync(
