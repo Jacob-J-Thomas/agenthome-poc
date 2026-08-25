@@ -27,6 +27,8 @@ import {
 const selectionKeyPrefix = "embodysense.governed-graph-selection.v1";
 const pendingMutationKeyPrefix =
   "embodysense.governed-graph-pending-mutation.v1";
+const pendingInvocationKeyPrefix =
+  "embodysense.governed-graph-pending-invocation.v1";
 const retryableMutationKinds = new Set([
   "create-draft",
   "replace-draft",
@@ -44,6 +46,13 @@ const conclusiveMutationStatuses = new Set([
   "conflict",
   "publication-rejected",
   "unauthorized",
+]);
+const conclusiveInvocationStatuses = new Set([
+  "Rejected",
+  "Invalid",
+  "Conflict",
+  "NotFound",
+  "LimitExceeded",
 ]);
 
 export function createGovernedGraphWorkspace({
@@ -67,7 +76,9 @@ export function createGovernedGraphWorkspace({
   let storageScope = null;
   let selectionKey = null;
   let pendingMutationKey = null;
+  let pendingInvocationKey = null;
   let pendingMutation = null;
+  let pendingInvocation = null;
   let graphReadGeneration = 0;
   let activeGraphReadGeneration = null;
   let routingPreview = null;
@@ -101,6 +112,7 @@ export function createGovernedGraphWorkspace({
       storageScope = nextScope;
       selectionKey = `${selectionKeyPrefix}.${storageScope}`;
       pendingMutationKey = `${pendingMutationKeyPrefix}.${storageScope}`;
+      pendingInvocationKey = `${pendingInvocationKeyPrefix}.${storageScope}`;
       aggregate = null;
       catalog = null;
       graph = null;
@@ -113,6 +125,7 @@ export function createGovernedGraphWorkspace({
       retryPolicyPreview = null;
       graphFallbackOrder = [];
       pendingMutation = restorePendingMutation();
+      pendingInvocation = restorePendingInvocation();
       elements.graphId.value = "";
       restoreSelection();
       if (active && pendingMutation) restorePendingCandidate();
@@ -175,14 +188,25 @@ export function createGovernedGraphWorkspace({
         ];
       invocationGrantSelection = visibleGrantSelection(choice);
       invocationOperationId = null;
+      clearPendingInvocation();
       renderInvocation();
     });
     elements.graphId.addEventListener("input", () => {
-      invalidateGraphRead();
+      invalidateGraphRead({
+        retainPending:
+          pendingInvocation?.graphId === elements.graphId.value.trim(),
+      });
       render();
     });
     elements.invocationPrompt.addEventListener("input", () => {
+      if (
+        !invocationPreparation &&
+        !invocationOperationId &&
+        pendingInvocation?.invocationPrompt === normalizedInvocationPrompt()
+      )
+        return;
       invocationOperationId = null;
+      clearPendingInvocation();
     });
     elements.revisionId.addEventListener("input", updateIdentity);
     elements.displayName.addEventListener("input", updateIdentity);
@@ -286,7 +310,9 @@ export function createGovernedGraphWorkspace({
       )
     )
       return;
-    invalidateInvocation();
+    invalidateInvocation({
+      retainPending: pendingInvocation?.graphId === graphId,
+    });
     const readGeneration = beginGraphRead();
     if (!silent) outcome = "Reading immutable graph history…";
     render();
@@ -349,7 +375,8 @@ export function createGovernedGraphWorkspace({
   async function prepareInvocation() {
     const selector = publishedInvocationSelector();
     if (!selector || invocationInFlight) return;
-    const preparationGeneration = invalidateInvocation();
+    const retainedInvocation = pendingInvocation;
+    const preparationGeneration = invalidateInvocation({ retainPending: true });
     invocationInFlight = true;
     renderInvocation();
     try {
@@ -362,6 +389,17 @@ export function createGovernedGraphWorkspace({
       invocationGrantSelection = visibleGrantSelection(
         invocationPreparation?.eligibleGrants?.[0],
       );
+      if (
+        !matchesPendingInvocation(
+          retainedInvocation,
+          selector,
+          invocationPreparation,
+          invocationGrantSelection,
+          normalizedInvocationPrompt(),
+        )
+      )
+        clearPendingInvocation();
+      else invocationOperationId = retainedInvocation.operationId;
     } catch (error) {
       if (preparationGeneration !== invocationGeneration) return;
       invocationPreparation = {
@@ -388,8 +426,36 @@ export function createGovernedGraphWorkspace({
       : null;
     if (confirmationRequired && !previewHash) return;
 
-    const invocationGenerationAtDispatch = invocationGeneration;
+    const prompt = normalizedInvocationPrompt();
+    if (
+      !matchesPendingInvocation(
+        pendingInvocation,
+        selector,
+        preparation,
+        invocationGrantSelection,
+        prompt,
+      )
+    ) {
+      clearPendingInvocation();
+      invocationOperationId = null;
+    }
     invocationOperationId ??= operationId("governed-invoke");
+    const pending = createPendingInvocation(
+      selector,
+      preparation,
+      invocationGrantSelection,
+      prompt,
+      invocationOperationId,
+    );
+    if (!persistPendingInvocation(pending)) {
+      invocationOperationId = null;
+      invocationOutcome =
+        "Invocation was not sent because this browser could not retain its exact retry identity.";
+      renderInvocation();
+      return;
+    }
+    pendingInvocation = pending;
+    const invocationGenerationAtDispatch = invocationGeneration;
     invocationInFlight = true;
     renderInvocation();
     try {
@@ -399,12 +465,15 @@ export function createGovernedGraphWorkspace({
         previewHash,
         grantSelection: confirmationRequired ? null : invocationGrantSelection,
         operationId: invocationOperationId,
-        invocationPrompt: elements.invocationPrompt.value.normalize("NFC"),
+        invocationPrompt: prompt,
       });
       if (invocationGenerationAtDispatch !== invocationGeneration) return;
-      invocationPreparation = null;
-      invocationOperationId = null;
       const runId = response?.run?.id;
+      if (hasConclusiveInvocationOutcome(response)) {
+        invocationPreparation = null;
+        invocationOperationId = null;
+        clearPendingInvocation();
+      }
       invocationOutcome = runId
         ? `${humanize(response.status)} · exact run ${runId} is open in Runs.`
         : `${humanize(response?.status)} · ${response?.detail ?? "The server did not admit this invocation."}`;
@@ -901,8 +970,12 @@ export function createGovernedGraphWorkspace({
         "Prepare current server authority before invoking. The browser cannot submit actor, workspace, role, profile, publication, eligibility, or effective-authority data.";
       return;
     }
-    elements.invocationStatus.textContent =
-      preparation.detail ?? "Server preparation completed.";
+    elements.invocationStatus.textContent = [
+      preparation.detail ?? "Server preparation completed.",
+      invocationOutcome,
+    ]
+      .filter(Boolean)
+      .join(" ");
     if (preparation.status === "confirmation-required") {
       const preview = document.createElement("p");
       preview.textContent =
@@ -1888,6 +1961,51 @@ export function createGovernedGraphWorkspace({
     pendingMutation = null;
   }
 
+  function restorePendingInvocation() {
+    if (!pendingInvocationKey || !storageScope) return null;
+    try {
+      const stored = window.sessionStorage?.getItem(pendingInvocationKey);
+      if (!stored) return null;
+      const pending = JSON.parse(stored);
+      if (!isValidPendingInvocation(pending)) {
+        window.sessionStorage?.removeItem(pendingInvocationKey);
+        return null;
+      }
+      return pending;
+    } catch {
+      try {
+        window.sessionStorage?.removeItem(pendingInvocationKey);
+      } catch {
+        // A corrupt convenience record cannot authorize or identify a replay.
+      }
+      return null;
+    }
+  }
+
+  function persistPendingInvocation(pending) {
+    if (!isValidPendingInvocation(pending)) return false;
+    try {
+      if (!window.sessionStorage || !pendingInvocationKey || !storageScope)
+        return false;
+      window.sessionStorage.setItem(
+        pendingInvocationKey,
+        JSON.stringify(pending),
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function clearPendingInvocation() {
+    try {
+      window.sessionStorage?.removeItem(pendingInvocationKey);
+    } catch {
+      // A failed convenience cleanup cannot restore a cleared in-memory identity.
+    }
+    pendingInvocation = null;
+  }
+
   function restoreSelection() {
     if (!elements.graphId.value && selectionKey) {
       try {
@@ -1916,6 +2034,7 @@ export function createGovernedGraphWorkspace({
     try {
       window.sessionStorage?.removeItem(selectionKeyPrefix);
       window.sessionStorage?.removeItem(pendingMutationKeyPrefix);
+      window.sessionStorage?.removeItem(pendingInvocationKeyPrefix);
     } catch {
       // Legacy schema-1 convenience data is never migrated into a trusted workspace scope.
     }
@@ -1935,22 +2054,124 @@ export function createGovernedGraphWorkspace({
     );
   }
 
-  function invalidateGraphRead() {
+  function invalidateGraphRead({ retainPending = false } = {}) {
     graphReadGeneration++;
-    invalidateInvocation();
+    invalidateInvocation({ retainPending });
     if (activeGraphReadGeneration === null) return;
     activeGraphReadGeneration = null;
     inFlight = false;
   }
 
-  function invalidateInvocation() {
+  function invalidateInvocation({ retainPending = false } = {}) {
     invocationGeneration++;
     invocationPreparation = null;
     invocationInFlight = false;
     invocationOutcome = "";
     invocationGrantSelection = null;
     invocationOperationId = null;
+    if (!retainPending) clearPendingInvocation();
     return invocationGeneration;
+  }
+
+  function normalizedInvocationPrompt() {
+    return elements.invocationPrompt.value.normalize("NFC");
+  }
+
+  function createPendingInvocation(
+    selector,
+    preparation,
+    grantSelection,
+    prompt,
+    operationId,
+  ) {
+    return {
+      schemaVersion: 1,
+      workspaceScope: storageScope,
+      graphId: selector.graphId,
+      revisionId: selector.revisionId,
+      previewHash:
+        preparation.status === "confirmation-required"
+          ? (preparation.preview?.semanticHash ?? null)
+          : null,
+      grantSelection: preparation.status === "ready" ? grantSelection : null,
+      invocationPrompt: prompt,
+      operationId,
+    };
+  }
+
+  function matchesPendingInvocation(
+    pending,
+    selector,
+    preparation,
+    grantSelection,
+    prompt,
+  ) {
+    if (!isValidPendingInvocation(pending)) return false;
+    const candidate = createPendingInvocation(
+      selector,
+      preparation,
+      grantSelection,
+      prompt,
+      pending.operationId,
+    );
+    return (
+      pending.workspaceScope === candidate.workspaceScope &&
+      pending.graphId === candidate.graphId &&
+      pending.revisionId === candidate.revisionId &&
+      pending.previewHash === candidate.previewHash &&
+      sameGrantSelection(pending.grantSelection, candidate.grantSelection) &&
+      pending.invocationPrompt === candidate.invocationPrompt
+    );
+  }
+
+  function isValidPendingInvocation(pending) {
+    return (
+      pending?.schemaVersion === 1 &&
+      pending.workspaceScope === storageScope &&
+      typeof pending.graphId === "string" &&
+      pending.graphId.length > 0 &&
+      typeof pending.revisionId === "string" &&
+      pending.revisionId.length > 0 &&
+      (pending.previewHash === null || isSha256Hash(pending.previewHash)) &&
+      (pending.grantSelection === null ||
+        isVisibleGrantSelection(pending.grantSelection)) &&
+      ((pending.previewHash !== null && pending.grantSelection === null) ||
+        (pending.previewHash === null && pending.grantSelection !== null)) &&
+      typeof pending.invocationPrompt === "string" &&
+      pending.invocationPrompt === pending.invocationPrompt.normalize("NFC") &&
+      typeof pending.operationId === "string" &&
+      isGovernedInvocationOperationId(pending.operationId)
+    );
+  }
+
+  function isVisibleGrantSelection(selection) {
+    return (
+      typeof selection?.grantId === "string" &&
+      selection.grantId.length > 0 &&
+      Number.isSafeInteger(selection.revision) &&
+      selection.revision > 0 &&
+      isSha256Hash(selection.contentHash)
+    );
+  }
+
+  function isSha256Hash(value) {
+    return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value);
+  }
+
+  function isGovernedInvocationOperationId(value) {
+    return (
+      typeof value === "string" &&
+      /^governed-invoke-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        value,
+      )
+    );
+  }
+
+  function hasConclusiveInvocationOutcome(response) {
+    return (
+      (typeof response?.run?.id === "string" && response.run.id.length > 0) ||
+      conclusiveInvocationStatuses.has(response?.status)
+    );
   }
 }
 
