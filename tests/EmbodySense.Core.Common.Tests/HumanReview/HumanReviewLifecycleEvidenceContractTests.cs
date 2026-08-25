@@ -27,6 +27,7 @@ public sealed class HumanReviewLifecycleEvidenceContractTests
         Assert.False(HumanReviewContractValidator.ValidateLifecycle(request, approved with { Status = HumanReviewLifecycleStatus.Rejected }).IsValid);
         Assert.False(HumanReviewContractValidator.ValidateLifecycle(request, expiryAtBoundary with { UpdatedAtUtc = request.Timing.ExpiresAtUtc.AddTicks(-1) }).IsValid);
         Assert.False(HumanReviewContractValidator.ValidateLifecycle(request, HumanReviewTestData.Lifecycle(request, status: HumanReviewLifecycleStatus.Pending) with { LastDecision = new HumanReviewDecisionReference(approve.DecisionId, approve.DecisionOperationId, approve.Kind, approve.DecisionHash) }).IsValid);
+        Assert.False(HumanReviewContractValidator.ValidateLifecycle(request, HumanReviewContractHash.ApplyLifecycle(approved with { Provenance = HumanReviewContractHash.ApplyProvenance(approved.Provenance with { ObservedAtUtc = approved.UpdatedAtUtc.AddTicks(1), ProvenanceHash = string.Empty }), LifecycleHash = string.Empty })).IsValid);
     }
 
     [Fact]
@@ -50,7 +51,8 @@ public sealed class HumanReviewLifecycleEvidenceContractTests
             admitted with { RecordedAtUtc = request.Timing.CreatedAtUtc.AddTicks(-1) },
             HumanReviewContractHash.ApplyEvidence(admitted with { Previews = [HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Evidence, "Evidence", "credential=private", string.Empty))], EvidenceHash = string.Empty }),
             HumanReviewContractHash.ApplyEvidence(admitted with { Previews = default, EvidenceHash = string.Empty }),
-            HumanReviewContractHash.ApplyEvidence(admitted with { Provenance = HumanReviewContractHash.ApplyProvenance(admitted.Provenance with { Kind = HumanReviewProvenanceKind.AuthenticatedReviewer, ProvenanceHash = string.Empty }), EvidenceHash = string.Empty })
+            HumanReviewContractHash.ApplyEvidence(admitted with { Provenance = HumanReviewContractHash.ApplyProvenance(admitted.Provenance with { Kind = HumanReviewProvenanceKind.AuthenticatedReviewer, ProvenanceHash = string.Empty }), EvidenceHash = string.Empty }),
+            HumanReviewContractHash.ApplyEvidence(admitted with { Provenance = HumanReviewContractHash.ApplyProvenance(admitted.Provenance with { ObservedAtUtc = admitted.RecordedAtUtc.AddTicks(1), ProvenanceHash = string.Empty }), EvidenceHash = string.Empty })
         };
 
         var admittedValidation = HumanReviewContractValidator.ValidateEvidence(request, admitted);

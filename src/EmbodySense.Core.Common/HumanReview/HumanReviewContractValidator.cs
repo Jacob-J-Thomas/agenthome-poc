@@ -38,6 +38,11 @@ public static class HumanReviewContractValidator
         ValidatePreviews(request.Previews, "$.previews", requireCompleteReviewPreview: true, errors);
         ValidateTiming(request.Timing, errors);
         ValidateProvenance(request.Provenance, "$.provenance", HumanReviewProvenanceKind.Server, errors);
+        if (request.Timing is not null && request.Provenance is not null && request.Provenance.ObservedAtUtc != request.Timing.CreatedAtUtc)
+        {
+            Add(errors, "request_provenance_time_mismatch", "$.provenance.observedAtUtc", "Request provenance observation time must exactly match request creation time.");
+        }
+
         ValidateHash(request.RequestHash, "$.requestHash", errors);
         if (errors.Count == 0 && !HumanReviewContractHash.MatchesRequest(request))
         {
@@ -164,6 +169,11 @@ public static class HumanReviewContractValidator
         ValidateDecisionReference(lifecycle.LastDecision, "$.lastDecision", required: false, errors);
         ValidateLifecycleDecision(lifecycle.Status, lifecycle.LastDecision, errors);
         ValidateProvenance(lifecycle.Provenance, "$.provenance", HumanReviewProvenanceKind.Server, HumanReviewProvenanceKind.Coordinator, errors);
+        if (lifecycle.Provenance is not null && lifecycle.Provenance.ObservedAtUtc != lifecycle.UpdatedAtUtc)
+        {
+            Add(errors, "lifecycle_provenance_time_mismatch", "$.provenance.observedAtUtc", "Lifecycle provenance observation time must exactly match lifecycle update time.");
+        }
+
         ValidateOptionalHash(lifecycle.PreviousLifecycleHash, "$.previousLifecycleHash", errors);
         ValidateHash(lifecycle.LifecycleHash, "$.lifecycleHash", errors);
         if (errors.Count == 0 && !HumanReviewContractHash.MatchesLifecycle(lifecycle))
@@ -215,6 +225,11 @@ public static class HumanReviewContractValidator
         }
 
         ValidateProvenance(evidence.Provenance, "$.provenance", HumanReviewProvenanceKind.Server, HumanReviewProvenanceKind.Coordinator, errors);
+        if (evidence.Provenance is not null && evidence.Provenance.ObservedAtUtc != evidence.RecordedAtUtc)
+        {
+            Add(errors, "evidence_provenance_time_mismatch", "$.provenance.observedAtUtc", "Evidence provenance observation time must exactly match evidence recording time.");
+        }
+
         ValidatePreviews(evidence.Previews, "$.previews", requireCompleteReviewPreview: false, errors);
         ValidateOptionalHash(evidence.PreviousEvidenceHash, "$.previousEvidenceHash", errors);
         ValidateHash(evidence.EvidenceHash, "$.evidenceHash", errors);
