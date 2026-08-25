@@ -628,7 +628,7 @@ public sealed class GovernedLoopInvocationPreparationFacade
 
         var ceiling = new AuthorityCeiling(
             admission.Snapshot.Pins.Select(pin => pin.DescriptorIdentity).OrderBy(identity => identity.Id.Value, StringComparer.Ordinal).ToArray(),
-            binding.Artifact.Graph.Nodes.SelectMany(node => node.AuthoredInputDataClasses ?? []).Distinct().OrderBy(value => value.Value, StringComparer.Ordinal).ToArray(),
+            LeastAuthorityDataClasses(binding.Artifact.Graph),
             0,
             CapabilitySideEffectClass.None,
             false,
@@ -721,7 +721,9 @@ public sealed class GovernedLoopInvocationPreparationFacade
         {
             var policy = node.ModelRoutingPolicy ?? graph.DefaultModelRoutingPolicy;
             if (!policy.Requirements.StaticallySatisfiedBy(metadata, role.Identity.RoleId, node.Descriptor.TypeId)
-                || node.AuthoredInputDataClasses is not null && !policy.Requirements.SatisfiedBy(metadata, node.AuthoredInputDataClasses, role.Identity.RoleId, node.Descriptor.TypeId))
+                || (Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference)
+                    ? !policy.Requirements.SatisfiedBy(metadata, ProviderInferenceDataClasses(node), role.Identity.RoleId, node.Descriptor.TypeId)
+                    : node.AuthoredInputDataClasses is not null && !policy.Requirements.SatisfiedBy(metadata, node.AuthoredInputDataClasses, role.Identity.RoleId, node.Descriptor.TypeId)))
             {
                 return InvocationPreparationModelTerms.Ineligible("The selected graph's exact inference routing is not eligible for the current model profile.");
             }
@@ -729,6 +731,24 @@ public sealed class GovernedLoopInvocationPreparationFacade
 
         return InvocationPreparationModelTerms.Eligible(profileId, metadataRead.SourceRevisionHash, metadata, posture.RegistryRevisionHash);
     }
+
+    private static IReadOnlyList<CapabilityDataClass> LeastAuthorityDataClasses(GovernedLoopGraphDefinition graph)
+    {
+        var dataClasses = graph.Nodes.SelectMany(node => node.AuthoredInputDataClasses ?? []);
+        if (graph.Nodes.Any(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference)))
+        {
+            dataClasses = dataClasses.Append(ConservativeModelInferenceDataPostureSource.SensitiveDataClass);
+        }
+
+        return dataClasses.Distinct().OrderBy(value => value.Value, StringComparer.Ordinal).ToArray();
+    }
+
+    private static IReadOnlyList<CapabilityDataClass> ProviderInferenceDataClasses(GovernedLoopNodeDefinition node)
+        => (node.AuthoredInputDataClasses ?? [])
+            .Append(ConservativeModelInferenceDataPostureSource.SensitiveDataClass)
+            .Distinct()
+            .OrderBy(value => value.Value, StringComparer.Ordinal)
+            .ToArray();
 
     private static bool IsExactAdapterPosture(ModelProfileAdapterPosture? posture, string metadataHash)
         => posture is not null
