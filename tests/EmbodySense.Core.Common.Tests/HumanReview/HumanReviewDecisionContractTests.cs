@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.InteropServices;
 using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.HumanReview.Models;
 
@@ -95,5 +96,23 @@ public sealed class HumanReviewDecisionContractTests
         Assert.Equal("scope-alpha", snapshot.ReviewerScopeIds[0]);
         Assert.True(HumanReviewContractValidator.ValidateDecision(request, snapshot).IsValid);
         Assert.Equal(decision.DecisionHash, HumanReviewContractHash.ComputeDecision(decision));
+    }
+
+    [Fact]
+    public void Decision_snapshot_allocates_new_backing_storage_for_hostile_immutable_scope_array()
+    {
+        var request = HumanReviewTestData.Request();
+        var valid = HumanReviewTestData.Decision(request);
+        var mutableScopes = valid.ReviewerScopeIds.ToArray();
+        var decision = HumanReviewContractHash.ApplyDecision(valid with { ReviewerScopeIds = ImmutableCollectionsMarshal.AsImmutableArray(mutableScopes), DecisionHash = string.Empty });
+
+        Assert.True(HumanReviewContractSnapshot.TryCaptureDecision(request, decision, out var snapshot, out var validation));
+        Assert.True(validation.IsValid);
+        Assert.NotNull(snapshot);
+
+        mutableScopes[0] = "scope-mutated";
+
+        Assert.Equal("scope-alpha", snapshot.ReviewerScopeIds[0]);
+        Assert.True(HumanReviewContractValidator.ValidateDecision(request, snapshot).IsValid);
     }
 }

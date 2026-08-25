@@ -168,6 +168,7 @@ public static class HumanReviewContractHash
             && MatchesApprovalScope(request.ApprovalScope)
             && !request.Previews.IsDefault
             && request.Previews.All(MatchesPreview)
+            && request.Timing is not null
             && MatchesProvenance(request.Provenance)
             && FixedEquals(ComputeRequest(request), request.RequestHash);
 

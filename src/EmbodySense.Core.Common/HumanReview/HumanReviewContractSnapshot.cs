@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.InteropServices;
 using EmbodySense.Core.Common.HumanReview.Models;
 
 namespace EmbodySense.Core.Common.HumanReview;
@@ -206,13 +207,16 @@ public static class HumanReviewContractSnapshot
 
     private static HumanReviewRedactedPreview Copy(HumanReviewRedactedPreview preview) => preview with { };
 
-    private static ImmutableArray<HumanReviewDecisionKind> Copy(ImmutableArray<HumanReviewDecisionKind> values) => values.IsDefault ? default : values.ToImmutableArray();
+    private static ImmutableArray<HumanReviewDecisionKind> Copy(ImmutableArray<HumanReviewDecisionKind> values) => CopyValues(values);
 
     private static ImmutableArray<HumanReviewReviewerScope> Copy(ImmutableArray<HumanReviewReviewerScope> values) => values.IsDefault ? default : values.Select(Copy).ToImmutableArray();
 
     private static ImmutableArray<HumanReviewRedactedPreview> Copy(ImmutableArray<HumanReviewRedactedPreview> values) => values.IsDefault ? default : values.Select(Copy).ToImmutableArray();
 
-    private static ImmutableArray<string> Copy(ImmutableArray<string> values) => values.IsDefault ? default : values.ToImmutableArray();
+    private static ImmutableArray<string> Copy(ImmutableArray<string> values) => CopyValues(values);
+
+    private static ImmutableArray<T> CopyValues<T>(ImmutableArray<T> values)
+        => values.IsDefault ? default : ImmutableCollectionsMarshal.AsImmutableArray(values.ToArray());
 
     private static HumanReviewContractValidationResult Invalid(string code, string message)
         => new([new HumanReviewContractValidationError(code, "$", message)]);
