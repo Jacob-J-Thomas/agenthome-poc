@@ -52,6 +52,7 @@ export function createGovernedGraphWorkspace({
   requestJson,
   operationId,
   runtimeCatalog,
+  invokePublishedGraph,
 }) {
   const elements = bindElements(document);
   let catalog = null;
@@ -73,6 +74,9 @@ export function createGovernedGraphWorkspace({
   let routingPreviewGeneration = 0;
   let retryPolicyPreview = null;
   let graphFallbackOrder = [];
+  let invocationPreparation = null;
+  let invocationInFlight = false;
+  let invocationOutcome = "";
 
   bindEvents();
 
@@ -105,6 +109,9 @@ export function createGovernedGraphWorkspace({
       routingPreviewGeneration++;
       retryPolicyPreview = null;
       graphFallbackOrder = [];
+      invocationPreparation = null;
+      invocationInFlight = false;
+      invocationOutcome = "";
       pendingMutation = restorePendingMutation();
       elements.graphId.value = "";
       restoreSelection();
@@ -159,6 +166,8 @@ export function createGovernedGraphWorkspace({
     elements.publishButton.addEventListener("click", publishDraft);
     elements.disableButton.addEventListener("click", disablePublication);
     elements.archiveButton.addEventListener("click", archivePublication);
+    elements.prepareInvokeButton.addEventListener("click", prepareInvocation);
+    elements.confirmInvokeButton.addEventListener("click", confirmAndInvoke);
     elements.graphId.addEventListener("input", () => {
       invalidateGraphRead();
       render();
@@ -309,6 +318,75 @@ export function createGovernedGraphWorkspace({
         "The catalog was refreshed, but the exact unresolved mutation must be retried before a durable graph reload.";
       render();
     } else if (elements.graphId.value.trim()) await readGraph(false);
+  }
+
+  function publishedInvocationSelector() {
+    const revision = aggregate?.lifecycle?.publishedRevision?.revision;
+    if (!revision?.graphId || !revision?.revisionId || dirty || pendingMutation)
+      return null;
+    return { graphId: revision.graphId, revisionId: revision.revisionId };
+  }
+
+  async function prepareInvocation() {
+    const selector = publishedInvocationSelector();
+    if (!selector || invocationInFlight) return;
+    invocationInFlight = true;
+    invocationPreparation = null;
+    invocationOutcome = "";
+    renderInvocation();
+    try {
+      invocationPreparation = await requestJson(
+        "/api/governed-graphs/invocation-preparation",
+        { method: "POST", body: JSON.stringify(selector) },
+      );
+    } catch (error) {
+      invocationPreparation = {
+        status: "unavailable",
+        detail: `Preparation unavailable: ${error.message}`,
+      };
+    } finally {
+      invocationInFlight = false;
+      renderInvocation();
+    }
+  }
+
+  async function confirmAndInvoke() {
+    const selector = publishedInvocationSelector();
+    const preparation = invocationPreparation;
+    if (!selector || !preparation || invocationInFlight) return;
+    const confirmationRequired = preparation.status === "confirmationRequired";
+    const ready = preparation.status === "ready";
+    if (
+      !confirmationRequired &&
+      !(ready && preparation.eligibleGrants?.length === 1)
+    )
+      return;
+    const previewHash = confirmationRequired
+      ? preparation.preview?.semanticHash
+      : null;
+    if (confirmationRequired && !previewHash) return;
+
+    invocationInFlight = true;
+    renderInvocation();
+    try {
+      const response = await invokePublishedGraph({
+        graphId: selector.graphId,
+        revisionId: selector.revisionId,
+        previewHash,
+        operationId: operationId("governed-invoke"),
+        invocationPrompt: elements.invocationPrompt.value.normalize("NFC"),
+      });
+      invocationPreparation = null;
+      const runId = response?.run?.id;
+      invocationOutcome = runId
+        ? `${humanize(response.status)} · exact run ${runId} is open in Runs.`
+        : `${humanize(response?.status)} · ${response?.detail ?? "The server did not admit this invocation."}`;
+    } catch (error) {
+      invocationOutcome = `Invocation unavailable: ${error.message}`;
+    } finally {
+      invocationInFlight = false;
+      renderInvocation();
+    }
   }
 
   async function saveDraft() {
@@ -687,6 +765,7 @@ export function createGovernedGraphWorkspace({
     renderInspector();
     renderErrors();
     renderStatusOnly();
+    renderInvocation();
   }
 
   function renderStatusOnly() {
@@ -752,6 +831,64 @@ export function createGovernedGraphWorkspace({
       : graph
         ? "Local draft · not durable"
         : "No graph loaded";
+  }
+
+  function renderInvocation() {
+    const selector = publishedInvocationSelector();
+    const preparation = invocationPreparation;
+    const choices = preparation?.eligibleGrants ?? [];
+    const canPrepare = Boolean(selector) && !invocationInFlight && !inFlight;
+    const canConfirm =
+      Boolean(selector) &&
+      !invocationInFlight &&
+      !inFlight &&
+      ((preparation?.status === "confirmationRequired" &&
+        preparation.preview?.semanticHash) ||
+        (preparation?.status === "ready" && choices.length === 1));
+    elements.invocationPrompt.disabled =
+      !selector || invocationInFlight || inFlight;
+    elements.prepareInvokeButton.disabled = !canPrepare;
+    elements.prepareInvokeButton.textContent = invocationInFlight
+      ? "Preparing invocation"
+      : "Prepare invocation";
+    elements.confirmInvokeButton.hidden = !preparation || !canConfirm;
+    elements.confirmInvokeButton.disabled = !canConfirm;
+    elements.confirmInvokeButton.textContent =
+      preparation?.status === "confirmationRequired"
+        ? "Confirm authority and invoke"
+        : "Invoke with exact grant";
+    elements.grantChoices.replaceChildren();
+    if (!selector) {
+      elements.invocationStatus.textContent =
+        "Publish the exact current draft with no unsaved changes before preparing a Manual Trigger invocation.";
+      return;
+    }
+    if (!preparation) {
+      elements.invocationStatus.textContent =
+        invocationOutcome ||
+        "Prepare current server authority before invoking. The browser cannot submit actor, workspace, role, profile, publication, or grant data.";
+      return;
+    }
+    elements.invocationStatus.textContent =
+      preparation.detail ?? "Server preparation completed.";
+    if (preparation.status === "confirmationRequired") {
+      const preview = document.createElement("p");
+      preview.textContent =
+        "Explicit confirmation creates only the server-derived least-authority grant for this exact publication.";
+      elements.grantChoices.append(preview);
+    } else if (preparation.status === "ready") {
+      for (const [index, choice] of choices.entries()) {
+        const choiceElement = document.createElement("p");
+        choiceElement.textContent = `Eligible exact grant ${index + 1} · ${choice.grant?.grantId ?? "unavailable"}${choice.expiresAtUtc ? ` · expires ${choice.expiresAtUtc}` : ""}`;
+        elements.grantChoices.append(choiceElement);
+      }
+      if (choices.length > 1) {
+        const blocked = document.createElement("p");
+        blocked.textContent =
+          "Multiple exact grants are visible. This bounded surface will not choose among them implicitly; refresh after resolving the authority choice.";
+        elements.grantChoices.append(blocked);
+      }
+    }
   }
 
   function renderRoles() {
@@ -1755,6 +1892,15 @@ function bindElements(document) {
     modelRoutingMode: document.getElementById("governedGraphModelRoutingMode"),
     fallbackProfiles: document.getElementById("governedGraphFallbackProfiles"),
     fallbackOrder: document.getElementById("governedGraphFallbackOrder"),
+    prepareInvokeButton: document.getElementById(
+      "governedGraphPrepareInvokeButton",
+    ),
+    confirmInvokeButton: document.getElementById(
+      "governedGraphConfirmInvokeButton",
+    ),
+    invocationPrompt: document.getElementById("governedGraphInvocationPrompt"),
+    invocationStatus: document.getElementById("governedGraphInvocationStatus"),
+    grantChoices: document.getElementById("governedGraphGrantChoices"),
     refreshButton: document.getElementById("governedGraphRefreshButton"),
     revisionId: document.getElementById("governedGraphRevisionId"),
     role: document.getElementById("governedGraphRole"),

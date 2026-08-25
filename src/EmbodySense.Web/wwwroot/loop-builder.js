@@ -238,7 +238,24 @@ const governedGraphWorkspace = createGovernedGraphWorkspace({
   requestJson,
   operationId: (prefix) => `${prefix}-${newOperationId()}`,
   runtimeCatalog: () => catalog,
+  invokePublishedGraph: invokePublishedGovernedGraph,
 });
+
+async function invokePublishedGovernedGraph(request) {
+  const response = await (
+    await getHub()
+  ).invoke("ConfirmAndInvokeGovernedLoop", request);
+  if (!response?.run?.id) return response;
+
+  currentView = "runs";
+  selectedRunId = response.run.id;
+  selectedRun = null;
+  selectedTrace = null;
+  renderAll();
+  await loadRuns({ silent: true, preferredRunId: response.run.id });
+  await selectRun(response.run.id);
+  return response;
+}
 
 function activate() {
   loopBuilderSurfaceActive = true;
@@ -1698,7 +1715,16 @@ async function switchView(view) {
 
 function runsForCurrentLoop() {
   const loopId = selectedLoopId();
-  return loopId ? recentRuns.filter((run) => run.loopId === loopId) : [];
+  const matching = loopId
+    ? recentRuns.filter((run) => run.loopId === loopId)
+    : [];
+  const selectedGovernedRun = recentRuns.find(
+    (run) => run.id === selectedRunId,
+  );
+  return selectedGovernedRun &&
+    !matching.some((run) => run.id === selectedGovernedRun.id)
+    ? [selectedGovernedRun, ...matching]
+    : matching;
 }
 
 function selectedLoopId() {

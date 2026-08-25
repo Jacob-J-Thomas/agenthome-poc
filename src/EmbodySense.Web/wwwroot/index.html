@@ -653,6 +653,55 @@
                         role="status"
                         aria-live="polite"
                       ></div>
+                      <section
+                        id="governedGraphInvocation"
+                        class="governed-graph-invocation"
+                        aria-labelledby="governedGraphInvocationTitle"
+                      >
+                        <div>
+                          <p class="eyebrow">Visible governed execution</p>
+                          <h3 id="governedGraphInvocationTitle">
+                            Invoke published graph
+                          </h3>
+                          <p
+                            id="governedGraphInvocationStatus"
+                            role="status"
+                            aria-live="polite"
+                          >
+                            Publish one exact revision before preparing a Manual
+                            Trigger invocation.
+                          </p>
+                        </div>
+                        <label
+                          ><span>Manual Trigger prompt</span
+                          ><textarea
+                            id="governedGraphInvocationPrompt"
+                            maxlength="24000"
+                            placeholder="What should this governed graph work on?"
+                          ></textarea>
+                        </label>
+                        <div
+                          id="governedGraphGrantChoices"
+                          class="governed-graph-grant-choices"
+                        ></div>
+                        <div class="governed-graph-actions">
+                          <button
+                            id="governedGraphPrepareInvokeButton"
+                            class="secondary-button"
+                            type="button"
+                          >
+                            Prepare invocation
+                          </button>
+                          <button
+                            id="governedGraphConfirmInvokeButton"
+                            class="primary-button"
+                            type="button"
+                            hidden
+                          >
+                            Confirm authority and invoke
+                          </button>
+                        </div>
+                      </section>
                       <div class="governed-graph-workspace">
                         <aside class="governed-node-palette">
                           <strong>Executable server catalog</strong>

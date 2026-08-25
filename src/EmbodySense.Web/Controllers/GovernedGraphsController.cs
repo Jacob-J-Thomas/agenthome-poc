@@ -1,4 +1,5 @@
 using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -95,6 +96,27 @@ public sealed class GovernedGraphsController : ControllerBase
             "conflict" or "publication-rejected" or "ambiguous" or "unauthorized" => Conflict(response),
             _ => StatusCode(StatusCodes.Status503ServiceUnavailable, response),
         };
+    }
+
+    /// <summary>Prepares server-owned current-publication authority choices for one published graph revision.</summary>
+    /// <param name="request">Only the Builder-selected graph and revision identifiers.</param>
+    /// <param name="cancellationToken">The token used before a durable confirmation begins.</param>
+    /// <returns>A safe current grant-choice projection or an explicit least-authority confirmation preview.</returns>
+    [HttpPost("invocation-preparation")]
+    public async Task<ActionResult<GovernedLoopInvocationPreparationResponse>> PrepareInvocation(
+        [FromBody] GovernedLoopInvocationPreparationRequest? request,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsWorkspaceInitialized())
+        {
+            return WorkspaceNotInitialized();
+        }
+        if (request is null)
+        {
+            return BadRequest(new { error = "governed_loop_invocation_preparation_required", detail = "Select one exact graph revision before preparing invocation." });
+        }
+
+        return Ok(await _host.PrepareGovernedLoopInvocationAsync(request, cancellationToken));
     }
 
     private ActionResult<GovernedLoopGraphReadResponse> Project(GovernedLoopGraphReadResponse response)

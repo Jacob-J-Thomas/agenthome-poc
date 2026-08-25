@@ -55,6 +55,7 @@ public static class FakeCodexExecutable
             let threadNumber = 0;
             let turnNumber = 0;
             let pendingToolTurn = null;
+            let visibleCycleExhaustionAttempts = 0;
 
             function write(value) {
               process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -158,6 +159,19 @@ public static class FakeCodexExecutable
                   if (inputText.includes("browser-explicit-fail")) {
                     completeTurn(threadId, turnId, "select-fail");
                     break;
+                  }
+
+                  if (inputText.includes("visible-cycle-marker")) {
+                    if (inputText.includes("visible-cycle-success")) {
+                      completeTurn(threadId, turnId, "terminal");
+                      break;
+                    }
+
+                    if (inputText.includes("visible-cycle-exhaustion")) {
+                      visibleCycleExhaustionAttempts += 1;
+                      completeTurn(threadId, turnId, visibleCycleExhaustionAttempts < 3 ? "retry" : "terminal");
+                      break;
+                    }
                   }
 
                   if (inputText.includes("browser-provider-failure")) {

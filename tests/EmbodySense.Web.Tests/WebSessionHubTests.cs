@@ -363,49 +363,39 @@ public sealed class WebSessionHubTests
     }
 
     [Fact]
-    public async Task Invoke_governed_loop_binds_approval_ownership_only_to_the_authenticated_hub_connection()
+    public void Visible_governed_invocation_hub_contract_exposes_only_the_browser_safe_request_shape()
     {
-        using var workspace = new TestWorkspace();
-        var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace, approvals);
-        var invoker = new RecordingLoopRuntimeInvoker();
-        var hub = CreateHub(host, approvals, new RecordingHubClients(), invoker);
-        var invocation = CreateGovernedInvocationInput();
+        var method = typeof(WebSessionHub).GetMethod(nameof(WebSessionHub.ConfirmAndInvokeGovernedLoop));
 
-        var response = await hub.InvokeGovernedLoop(invocation);
-
-        Assert.Equal("Completed", response.Status);
-        Assert.Equal("connection-1", invoker.GovernedInvocationOwner);
-        Assert.Equal(invocation.OperationId, invoker.GovernedInvocationInput?.OperationId);
-        Assert.Equal(invocation.Publication.GraphId, invoker.GovernedInvocationInput?.Publication.Revision.GraphId);
-        Assert.Equal(invocation.AuthorityGrant.GrantId, invoker.GovernedInvocationInput?.AuthorityGrant.GrantId.Value);
+        Assert.NotNull(method);
+        Assert.Null(typeof(WebSessionHub).GetMethod("InvokeGovernedLoop"));
+        var request = Assert.Single(method!.GetParameters());
+        Assert.Equal(typeof(GovernedLoopVisibleInvocationRequest), request.ParameterType);
+        Assert.Equal(
+            ["GraphId", "RevisionId", "PreviewHash", "OperationId", "InvocationPrompt"],
+            typeof(GovernedLoopVisibleInvocationRequest).GetProperties().Select(property => property.Name));
     }
 
     [Fact]
-    public async Task Invoke_governed_loop_translates_malformed_and_runtime_failures_without_leaking_details()
+    public async Task Confirm_and_invoke_governed_loop_translates_runtime_failures_without_leaking_details()
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace, approvals);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var host = CreateHost(workspace, approvals, codexPath);
+        await host.InitializeWorkspaceAsync();
+        var hub = CreateHub(host, approvals, new RecordingHubClients());
 
-        var malformedHub = CreateHub(host, approvals, new RecordingHubClients(), new RecordingLoopRuntimeInvoker());
-        var malformed = await Assert.ThrowsAsync<HubException>(() => malformedHub.InvokeGovernedLoop(null!));
-        Assert.Contains("coordinates are malformed", malformed.Message, StringComparison.Ordinal);
+        var rejected = await hub.ConfirmAndInvokeGovernedLoop(new GovernedLoopVisibleInvocationRequest(
+            "missing-graph",
+            "missing-revision",
+            null,
+            "visible-governed-invocation",
+            "prompt"));
 
-        var cancelledHub = CreateHub(host, approvals, new RecordingHubClients(), new ThrowingLoopRuntimeInvoker(cancelled: true));
-        var cancelled = await Assert.ThrowsAsync<HubException>(() => cancelledHub.InvokeGovernedLoop(CreateGovernedInvocationInput()));
-        Assert.Equal("The governed-loop invocation was cancelled.", cancelled.Message);
-
-        const string Guidance = "Delete `.custom-loop-run-index.json` and retry the operation.";
-        var unsupportedHub = CreateHub(host, approvals, new RecordingHubClients(), new UnsupportedSchemaLoopRuntimeInvoker(Guidance));
-        var unsupported = await Assert.ThrowsAsync<HubException>(() => unsupportedHub.InvokeGovernedLoop(CreateGovernedInvocationInput()));
-        Assert.Contains("unsupported_loop_persistence_schema", unsupported.Message, StringComparison.Ordinal);
-        Assert.Contains(Guidance, unsupported.Message, StringComparison.Ordinal);
-
-        var failedHub = CreateHub(host, approvals, new RecordingHubClients(), new ThrowingLoopRuntimeInvoker(cancelled: false));
-        var failed = await Assert.ThrowsAsync<HubException>(() => failedHub.InvokeGovernedLoop(CreateGovernedInvocationInput()));
-        Assert.Contains("governed-loop invocation could not be processed safely", failed.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("sensitive runtime detail", failed.Message, StringComparison.Ordinal);
+        Assert.Equal("Rejected", rejected.Status);
+        Assert.Equal("Unavailable", rejected.AdmissionFailureCode);
+        Assert.DoesNotContain("workspace", rejected.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -610,15 +600,6 @@ public sealed class WebSessionHubTests
             "read",
             "shared/**",
             "Needs approval.");
-    }
-
-    private static GovernedLoopRunInvocationTransportInput CreateGovernedInvocationInput()
-    {
-        return new GovernedLoopRunInvocationTransportInput(
-            "governed-one",
-            new GovernedLoopRevisionPublicationInput(1, 1, "graph-one", "revision-one", new string('a', 64), "publish-one", new string('b', 64)),
-            new GovernedLoopAuthorityGrantInput("grant-one", 1, "sha256:" + new string('c', 64)),
-            "prompt");
     }
 
     private static async Task<IReadOnlyList<WebPendingApproval>> WaitForPendingAsync(WebApprovalCoordinator coordinator, string ownerConnectionId)
