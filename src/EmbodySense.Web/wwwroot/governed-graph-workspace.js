@@ -78,6 +78,8 @@ export function createGovernedGraphWorkspace({
   let invocationInFlight = false;
   let invocationOutcome = "";
   let invocationGrantSelection = null;
+  let invocationOperationId = null;
+  let invocationGeneration = 0;
 
   bindEvents();
 
@@ -110,10 +112,6 @@ export function createGovernedGraphWorkspace({
       routingPreviewGeneration++;
       retryPolicyPreview = null;
       graphFallbackOrder = [];
-      invocationPreparation = null;
-      invocationInFlight = false;
-      invocationOutcome = "";
-      invocationGrantSelection = null;
       pendingMutation = restorePendingMutation();
       elements.graphId.value = "";
       restoreSelection();
@@ -176,11 +174,15 @@ export function createGovernedGraphWorkspace({
           Number(elements.grantSelection.value)
         ];
       invocationGrantSelection = visibleGrantSelection(choice);
+      invocationOperationId = null;
       renderInvocation();
     });
     elements.graphId.addEventListener("input", () => {
       invalidateGraphRead();
       render();
+    });
+    elements.invocationPrompt.addEventListener("input", () => {
+      invocationOperationId = null;
     });
     elements.revisionId.addEventListener("input", updateIdentity);
     elements.displayName.addEventListener("input", updateIdentity);
@@ -284,6 +286,7 @@ export function createGovernedGraphWorkspace({
       )
     )
       return;
+    invalidateInvocation();
     const readGeneration = beginGraphRead();
     if (!silent) outcome = "Reading immutable graph history…";
     render();
@@ -332,7 +335,13 @@ export function createGovernedGraphWorkspace({
 
   function publishedInvocationSelector() {
     const revision = aggregate?.lifecycle?.publishedRevision?.revision;
-    if (!revision?.graphId || !revision?.revisionId || dirty || pendingMutation)
+    if (
+      !revision?.graphId ||
+      !revision?.revisionId ||
+      elements.graphId.value.trim() !== revision.graphId ||
+      dirty ||
+      pendingMutation
+    )
       return null;
     return { graphId: revision.graphId, revisionId: revision.revisionId };
   }
@@ -340,27 +349,30 @@ export function createGovernedGraphWorkspace({
   async function prepareInvocation() {
     const selector = publishedInvocationSelector();
     if (!selector || invocationInFlight) return;
+    const preparationGeneration = invalidateInvocation();
     invocationInFlight = true;
-    invocationPreparation = null;
-    invocationOutcome = "";
-    invocationGrantSelection = null;
     renderInvocation();
     try {
-      invocationPreparation = await requestJson(
+      const preparation = await requestJson(
         "/api/governed-graphs/invocation-preparation",
         { method: "POST", body: JSON.stringify(selector) },
       );
+      if (preparationGeneration !== invocationGeneration) return;
+      invocationPreparation = preparation;
       invocationGrantSelection = visibleGrantSelection(
         invocationPreparation?.eligibleGrants?.[0],
       );
     } catch (error) {
+      if (preparationGeneration !== invocationGeneration) return;
       invocationPreparation = {
         status: "unavailable",
         detail: `Preparation unavailable: ${error.message}`,
       };
     } finally {
-      invocationInFlight = false;
-      renderInvocation();
+      if (preparationGeneration === invocationGeneration) {
+        invocationInFlight = false;
+        renderInvocation();
+      }
     }
   }
 
@@ -376,6 +388,8 @@ export function createGovernedGraphWorkspace({
       : null;
     if (confirmationRequired && !previewHash) return;
 
+    const invocationGenerationAtDispatch = invocationGeneration;
+    invocationOperationId ??= operationId("governed-invoke");
     invocationInFlight = true;
     renderInvocation();
     try {
@@ -384,19 +398,24 @@ export function createGovernedGraphWorkspace({
         revisionId: selector.revisionId,
         previewHash,
         grantSelection: confirmationRequired ? null : invocationGrantSelection,
-        operationId: operationId("governed-invoke"),
+        operationId: invocationOperationId,
         invocationPrompt: elements.invocationPrompt.value.normalize("NFC"),
       });
+      if (invocationGenerationAtDispatch !== invocationGeneration) return;
       invocationPreparation = null;
+      invocationOperationId = null;
       const runId = response?.run?.id;
       invocationOutcome = runId
         ? `${humanize(response.status)} · exact run ${runId} is open in Runs.`
         : `${humanize(response?.status)} · ${response?.detail ?? "The server did not admit this invocation."}`;
     } catch (error) {
+      if (invocationGenerationAtDispatch !== invocationGeneration) return;
       invocationOutcome = `Invocation unavailable: ${error.message}`;
     } finally {
-      invocationInFlight = false;
-      renderInvocation();
+      if (invocationGenerationAtDispatch === invocationGeneration) {
+        invocationInFlight = false;
+        renderInvocation();
+      }
     }
   }
 
@@ -1918,9 +1937,20 @@ export function createGovernedGraphWorkspace({
 
   function invalidateGraphRead() {
     graphReadGeneration++;
+    invalidateInvocation();
     if (activeGraphReadGeneration === null) return;
     activeGraphReadGeneration = null;
     inFlight = false;
+  }
+
+  function invalidateInvocation() {
+    invocationGeneration++;
+    invocationPreparation = null;
+    invocationInFlight = false;
+    invocationOutcome = "";
+    invocationGrantSelection = null;
+    invocationOperationId = null;
+    return invocationGeneration;
   }
 }
 
