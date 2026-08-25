@@ -5,6 +5,7 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Posture.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -1246,6 +1247,41 @@ public sealed class CustomLoopRunStoreTests
         Assert.Contains(repaired.Items, item => item.LoopId == "loop-alpha" && item.Id == "run-alpha");
         Assert.Contains(repaired.Items, item => item.LoopId == "loop-derived-index" && item.Id == "run-derived-index");
         Assert.False(File.Exists(pendingPath));
+    }
+
+    [Fact]
+    public async Task Windows_restrictive_trace_operation_reader_exhausts_the_auxiliary_replace_budget_and_retry_repairs_the_ledger()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun("loop-operation-contention", "run-operation-contention", "invoke-operation-contention");
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        var completed = Advance(running, CustomLoopRunStatus.Completed);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, admitted.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, running.LifecycleVersion)).Status);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(completed.Id));
+        var request = new CustomLoopTraceDeletionRequest(completed.Id, inspection.PersistedArtifactHash, "delete-operation-contention", "actor-user", "web");
+        var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp.AddMinutes(6));
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(mutation)).Status);
+        var operationPath = Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, mutation.Request.OperationId + ".json");
+
+        using (var restrictiveReader = WindowsFileLock.OpenRestrictiveReader(operationPath, workspace.RootPath))
+        {
+            var replacementWindow = Stopwatch.StartNew();
+            await Assert.ThrowsAnyAsync<IOException>(() => store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted).WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(replacementWindow.Elapsed >= TimeSpan.FromMilliseconds(1500), "The trace-deletion operation replacement did not consume its bounded auxiliary contention budget.");
+        }
+
+        Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
+        var operation = Assert.IsType<CustomLoopTraceDeletionOperation>((await store.GetTraceDeletionOperationAsync(mutation.Request.OperationId)).Operation);
+        Assert.Equal(CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted, operation.Integrity);
     }
 
     [Fact]
@@ -2940,6 +2976,185 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Missing_canonical_parent_after_target_proof_is_unknown_and_preserves_the_displaced_possible_winner()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-parent-missing", "run-parent-missing", "invoke-parent-missing");
+        var canonicalDirectory = Path.Combine(paths.CustomLoopRunsPath, run.LoopId);
+        var displacedDirectory = workspace.File("missing-loop-parent");
+        var parentRemoved = false;
+        using var store = new CustomLoopRunStore(paths, null, (boundary, _) =>
+        {
+            if (boundary == CustomLoopRunPublicationBoundary.TargetProven)
+            {
+                Directory.Move(canonicalDirectory, displacedDirectory);
+                parentRemoved = true;
+            }
+
+            return ValueTask.CompletedTask;
+        });
+
+        var exception = await Assert.ThrowsAnyAsync<IOException>(() => store.CreateAsync(run));
+
+        Assert.True(parentRemoved);
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+        Assert.True(File.Exists(Path.Combine(displacedDirectory, run.Id + ".json")));
+        Assert.False(Directory.Exists(canonicalDirectory));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+    }
+
+    [Fact]
+    public async Task Reparse_canonical_parent_after_target_proof_is_unknown_without_acknowledging_discovery()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-parent-reparse", "run-parent-reparse", "invoke-parent-reparse");
+        var canonicalDirectory = Path.Combine(paths.CustomLoopRunsPath, run.LoopId);
+        var displacedDirectory = workspace.File("reparse-loop-parent");
+        var reparseCreated = false;
+        using var store = new CustomLoopRunStore(paths, null, (boundary, _) =>
+        {
+            if (boundary == CustomLoopRunPublicationBoundary.TargetProven)
+            {
+                Directory.Move(canonicalDirectory, displacedDirectory);
+                Directory.CreateSymbolicLink(canonicalDirectory, displacedDirectory);
+                reparseCreated = true;
+            }
+
+            return ValueTask.CompletedTask;
+        });
+
+        var exception = await Assert.ThrowsAnyAsync<IOException>(() => store.CreateAsync(run));
+
+        Assert.True(reparseCreated);
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+        Assert.True(File.Exists(Path.Combine(displacedDirectory, run.Id + ".json")));
+        Assert.True(File.GetAttributes(canonicalDirectory).HasFlag(FileAttributes.ReparsePoint));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+    }
+
+    [Fact]
+    public async Task Directory_substitution_after_canonical_rename_is_unknown_and_never_acknowledges_discovery()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-target-directory", "run-target-directory", "invoke-target-directory");
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
+        var directorySubstituted = false;
+        using var store = new CustomLoopRunStore(paths, null, (boundary, _) =>
+        {
+            if (boundary == CustomLoopRunPublicationBoundary.CanonicalRenamed)
+            {
+                File.Delete(artifactPath);
+                Directory.CreateDirectory(artifactPath);
+                directorySubstituted = true;
+            }
+
+            return ValueTask.CompletedTask;
+        });
+
+        var exception = await Assert.ThrowsAnyAsync<IOException>(() => store.CreateAsync(run));
+
+        Assert.True(directorySubstituted);
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+        Assert.True(Directory.Exists(artifactPath));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+    }
+
+    [Fact]
+    public async Task Reparse_target_substitution_after_directory_barrier_is_unknown_and_never_acknowledges_discovery()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-target-reparse", "run-target-reparse", "invoke-target-reparse");
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
+        var target = workspace.File("reparse-target");
+        await File.WriteAllTextAsync(target, "outside");
+        var reparseCreated = false;
+        using var store = new CustomLoopRunStore(paths, null, (boundary, _) =>
+        {
+            if (boundary == CustomLoopRunPublicationBoundary.ParentDirectoryFlushed)
+            {
+                File.Delete(artifactPath);
+                File.CreateSymbolicLink(artifactPath, target);
+                reparseCreated = true;
+            }
+
+            return ValueTask.CompletedTask;
+        });
+
+        var exception = await Assert.ThrowsAnyAsync<IOException>(() => store.CreateAsync(run));
+
+        Assert.True(reparseCreated);
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+        Assert.True(File.GetAttributes(artifactPath).HasFlag(FileAttributes.ReparsePoint));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+    }
+
+    [Fact]
+    public async Task Hard_linked_target_after_directory_barrier_is_unknown_and_never_acknowledges_discovery()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-target-hard-link", "run-target-hard-link", "invoke-target-hard-link");
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
+        var aliasPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, ".target-link");
+        var hardLinkCreated = false;
+        using var store = new CustomLoopRunStore(paths, null, (boundary, _) =>
+        {
+            if (boundary == CustomLoopRunPublicationBoundary.ParentDirectoryFlushed)
+            {
+                CreateHardLink(aliasPath, artifactPath);
+                hardLinkCreated = true;
+            }
+
+            return ValueTask.CompletedTask;
+        });
+
+        var exception = await Assert.ThrowsAnyAsync<IOException>(() => store.CreateAsync(run));
+
+        Assert.True(hardLinkCreated);
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+        Assert.True(File.Exists(aliasPath));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+    }
+
+    [Fact]
+    public async Task Discovery_index_directory_after_canonical_proof_leaves_pending_evidence_for_restart_repair()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-index-directory", "run-index-directory", "invoke-index-directory");
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var indexDirectoryCreated = false;
+        using var store = new CustomLoopRunStore(paths, null, (boundary, _) =>
+        {
+            if (boundary == CustomLoopRunPublicationBoundary.TargetProven)
+            {
+                Directory.CreateDirectory(indexPath);
+                indexDirectoryCreated = true;
+            }
+
+            return ValueTask.CompletedTask;
+        });
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(run)).Status);
+
+        Assert.True(indexDirectoryCreated);
+        Assert.True(Directory.Exists(indexPath));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Directory.Delete(indexPath);
+        Assert.Equal(run.Id, Assert.Single((await new CustomLoopRunStore(paths).ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+    }
+
+    [Fact]
     public async Task Post_rename_directory_barrier_failure_preserves_the_possible_winner_leaves_index_pending_and_restarts_idempotently()
     {
         using var workspace = new TestWorkspace();
@@ -3112,11 +3327,29 @@ public sealed class CustomLoopRunStoreTests
         await File.WriteAllBytesAsync(Path.Combine(directory, run.Id + ".json"), content);
     }
 
+    private static void CreateHardLink(string linkPath, string existingPath)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.True(CreateWindowsHardLink(linkPath, existingPath, IntPtr.Zero));
+            return;
+        }
+
+        Assert.Equal(0, CreateUnixHardLink(existingPath, linkPath));
+    }
+
     private static IOException CreateRecognizedTransientIOException()
     {
         var errorCode = OperatingSystem.IsWindows() ? 32 : 11;
         return new IOException("Injected recognized run-evidence contention.", unchecked((int)(0x80070000U | (uint)errorCode)));
     }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateHardLinkW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateWindowsHardLink(string fileName, string existingFileName, IntPtr securityAttributes);
+
+    [DllImport("libc", SetLastError = true, EntryPoint = "link")]
+    private static extern int CreateUnixHardLink(string existingPath, string linkPath);
 
     private static async Task WriteDirectBatchAsync(WorkspacePaths paths, IEnumerable<CustomLoopRunRecord> runs)
     {
