@@ -15,6 +15,7 @@ public sealed class HumanReviewRequestContractTests
         var validation = HumanReviewContractValidator.ValidateRequest(request);
 
         Assert.True(validation.IsValid);
+        Assert.Equal(HumanReviewTestData.WorkspaceId, request.Binding.WorkspaceId);
         Assert.Equal(HumanReviewPurpose.Continuation, request.Purpose);
         Assert.Equal(HumanReviewApprovalScopeKind.Continuation, request.ApprovalScope.Kind);
         Assert.Null(request.Binding.EffectAttempt);
@@ -35,6 +36,39 @@ public sealed class HumanReviewRequestContractTests
         Assert.Equal(HumanReviewEffectDispatchCertainty.NotDispatched, request.Binding.EffectAttempt!.DispatchCertainty);
         Assert.Equal(HumanReviewApprovalScopeKind.PreDispatchEffect, request.ApprovalScope.Kind);
         Assert.Equal(request.Binding.EffectAttempt.EffectAttemptId, request.ApprovalScope.EffectAttemptId);
+    }
+
+    [Theory]
+    [InlineData("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    [InlineData("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    [InlineData("workspace-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")]
+    [InlineData("workspace-sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    [InlineData("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag")]
+    public void Request_validation_requires_the_exact_canonical_workspace_scope(string workspaceId)
+    {
+        var valid = HumanReviewTestData.Request();
+        var binding = HumanReviewContractHash.ApplyBinding(valid.Binding with { WorkspaceId = workspaceId, BindingHash = string.Empty });
+        var scope = HumanReviewContractHash.ApplyApprovalScope(valid.ApprovalScope with { BindingHash = binding.BindingHash, ScopeHash = string.Empty });
+        var request = HumanReviewContractHash.ApplyRequest(valid with { Binding = binding, ApprovalScope = scope, RequestHash = string.Empty });
+
+        var validation = HumanReviewContractValidator.ValidateRequest(request);
+
+        Assert.False(validation.IsValid);
+        Assert.Contains(validation.Errors, error => error.Code == "invalid_workspace_id" && error.Path == "$.binding.workspaceId");
+    }
+
+    [Fact]
+    public void Request_validation_keeps_generic_identifiers_strict_when_a_workspace_scope_uses_a_colon()
+    {
+        var valid = HumanReviewTestData.Request();
+        var binding = HumanReviewContractHash.ApplyBinding(valid.Binding with { GraphId = "graph:one", BindingHash = string.Empty });
+        var scope = HumanReviewContractHash.ApplyApprovalScope(valid.ApprovalScope with { BindingHash = binding.BindingHash, ScopeHash = string.Empty });
+        var request = HumanReviewContractHash.ApplyRequest(valid with { Binding = binding, ApprovalScope = scope, RequestHash = string.Empty });
+
+        var validation = HumanReviewContractValidator.ValidateRequest(request);
+
+        Assert.False(validation.IsValid);
+        Assert.Contains(validation.Errors, error => error.Code == "invalid_identifier" && error.Path == "$.binding.graphId");
     }
 
     [Fact]

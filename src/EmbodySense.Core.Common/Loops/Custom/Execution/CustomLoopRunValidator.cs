@@ -22,6 +22,8 @@ using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.Loops.Failures;
 using EmbodySense.Core.Common.Loops.Failures.Models;
+using EmbodySense.Core.Common.HumanReview;
+using EmbodySense.Core.Common.HumanReview.Models;
 using System.Text;
 using System.Text.Json;
 
@@ -84,6 +86,7 @@ public static class CustomLoopRunValidator
         ValidateContextSnapshot(run.ContextSnapshot, run.UpdatedAtUtc, errors);
         ValidateExecutionClock(run, errors);
         ValidateEvents(run, errors);
+        ValidateHumanReview(run, errors);
         ValidateWaitEvidence(run, errors);
         ValidateCheckpoint(run, errors);
         ValidateOutcome(run, errors);
@@ -158,6 +161,7 @@ public static class CustomLoopRunValidator
         ValidateExecutionFrontierUpdate(current, candidate, errors);
         ValidateLifecycleTransition(current, candidate, errors);
         ValidateAppendOnlyEvents(current, candidate, errors);
+        ValidateAppendOnlyHumanReview(current, candidate, errors);
         ValidateAppendOnlyWaitEvidence(current, candidate, errors);
         ValidateAppendedControlOwnership(current, candidate, errors);
         ValidateSequentialCheckpointAdvance(current, candidate, errors);
@@ -3190,6 +3194,177 @@ public static class CustomLoopRunValidator
         }
     }
 
+    private static void ValidateHumanReview(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
+    {
+        var reviewEvents = run.Events?.Where(item => item?.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted).ToArray() ?? [];
+        if (run.HumanReview is null)
+        {
+            if (reviewEvents.Length != 0 || run.Events?.Any(item => item?.HumanReviewEvidence is not null) == true)
+            {
+                Add(errors, "human_review_state_required", "humanReview", "Human Review events require the canonical Human Review state plane.");
+            }
+
+            return;
+        }
+
+        var state = run.HumanReview;
+        var request = state.Request;
+        var lifecycle = state.Lifecycle;
+        var requestValid = request is not null && IsValidHumanReviewRequest(request);
+        if (!requestValid)
+        {
+            Add(errors, "invalid_human_review_request", "humanReview.request", "The canonical Human Review request is required and must be valid.");
+        }
+        else if (!MatchesHumanReviewBinding(run, request!))
+        {
+            Add(errors, "human_review_request_frontier_mismatch", "humanReview.request.binding", "The Human Review request must bind the retained run and exact current ReviewBlocked frontier.");
+        }
+
+        var lifecycleValid = lifecycle is not null && requestValid && IsValidHumanReviewLifecycle(request, lifecycle);
+        if (!lifecycleValid)
+        {
+            Add(errors, "invalid_human_review_lifecycle", "humanReview.lifecycle", "The canonical Human Review lifecycle is required and must be valid.");
+        }
+        else if (lifecycle!.Status != HumanReviewLifecycleStatus.Pending || lifecycle.LifecycleVersion != 1 || lifecycle.LastDecision is not null)
+        {
+            Add(errors, "invalid_human_review_initial_lifecycle", "humanReview.lifecycle", "Atomic admission requires the exact initial pending Human Review lifecycle with no decision.");
+        }
+
+        if (run.Status != CustomLoopRunStatus.Paused || run.Frontier?.Payload.Status != GovernedLoopFrontierStatus.ReviewBlocked)
+        {
+            Add(errors, "human_review_frontier_mismatch", "humanReview", "Human Review requires the nonterminal Paused and exact ReviewBlocked frontier posture.");
+        }
+
+        if (state.Evidence.IsDefault || state.Evidence.Length != 1)
+        {
+            Add(errors, "invalid_human_review_evidence_count", "humanReview.evidence", "Atomic admission requires exactly one request-admitted evidence artifact.");
+        }
+
+        var evidenceValid = !state.Evidence.IsDefault;
+        string? previousHash = null;
+        for (var index = 0; index < state.Evidence.Length; index++)
+        {
+            var evidence = state.Evidence[index];
+            if (evidence is null
+                || !requestValid
+                || !IsValidHumanReviewEvidence(request, evidence)
+                || evidence.Kind != HumanReviewEvidenceKind.RequestAdmitted
+                || !string.Equals(evidence.PreviousEvidenceHash, previousHash, StringComparison.Ordinal))
+            {
+                Add(errors, "invalid_human_review_evidence", $"humanReview.evidence[{index}]", "Human Review evidence must be valid and form one exact append-only hash chain.");
+                evidenceValid = false;
+                continue;
+            }
+
+            previousHash = evidence.EvidenceHash;
+        }
+
+        if (!evidenceValid || reviewEvents.Length != state.Evidence.Length || reviewEvents.Any(item => item!.HumanReviewEvidence is null)
+            || reviewEvents.Any(item => !IsValidHumanReviewEvidence(request, item!.HumanReviewEvidence!))
+            || !reviewEvents.Select(item => item!.HumanReviewEvidence!.EvidenceHash).SequenceEqual(state.Evidence.Select(item => item.EvidenceHash), StringComparer.Ordinal)
+            || reviewEvents.Any(item => item!.TimestampUtc != item.HumanReviewEvidence!.RecordedAtUtc)
+            || reviewEvents.Any(item => item!.HumanReviewEvidence!.Kind != HumanReviewEvidenceKind.RequestAdmitted))
+        {
+            Add(errors, "human_review_event_evidence_mismatch", "events", "The Human Review admission event must carry the one retained request-admitted evidence artifact.");
+        }
+
+        if (run.Events?.Any(item => item?.HumanReviewEvidence is not null && item.Kind != CustomLoopRunEventKind.HumanReviewRequestAdmitted) == true)
+        {
+            Add(errors, "unexpected_human_review_evidence", "events", "Only the Human Review request-admission event may carry Human Review evidence in this slice.");
+        }
+    }
+
+    private static bool MatchesHumanReviewBinding(CustomLoopRunRecord run, HumanReviewRequest request)
+    {
+        if (run.Frontier is not { } frontier || frontier.Payload.Status != GovernedLoopFrontierStatus.ReviewBlocked)
+        {
+            return false;
+        }
+
+        var blockedNodes = frontier.Payload.Nodes.Where(node => node.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked).Take(2).ToArray();
+        var blockedNode = blockedNodes.Length == 1 ? blockedNodes[0] : null;
+        return blockedNode is not null
+            && string.Equals(request.Binding.WorkspaceId, frontier.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(request.Binding.RunId, run.Id, StringComparison.Ordinal)
+            && string.Equals(request.Binding.GraphId, frontier.Binding.Revision.GraphId, StringComparison.Ordinal)
+            && string.Equals(request.Binding.RevisionId, frontier.Binding.Revision.RevisionId, StringComparison.Ordinal)
+            && string.Equals(request.Binding.RevisionHash, frontier.Binding.Revision.ExecutableHash, StringComparison.Ordinal)
+            && request.Binding.FrontierVersion == frontier.Payload.FrontierVersion
+            && string.Equals(request.Binding.FrontierHash, frontier.Payload.ContentHash, StringComparison.Ordinal)
+            && string.Equals(request.Binding.NodeId, blockedNode.NodeId, StringComparison.Ordinal)
+            && request.Binding.Attempt == blockedNode.Attempt
+            && (request.Binding.ActivationOrdinal is null || request.Binding.ActivationOrdinal == blockedNode.ActivationOrdinal)
+            && (request.Binding.VisitOrdinal is null || request.Binding.VisitOrdinal == blockedNode.VisitOrdinal);
+    }
+
+    private static bool IsValidHumanReviewRequest(HumanReviewRequest request)
+    {
+        try
+        {
+            return HumanReviewContractValidator.ValidateRequest(request).IsValid;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsValidHumanReviewLifecycle(HumanReviewRequest? request, HumanReviewLifecycle lifecycle)
+    {
+        try
+        {
+            return HumanReviewContractValidator.ValidateLifecycle(request, lifecycle).IsValid;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsValidHumanReviewEvidence(HumanReviewRequest? request, HumanReviewEvidence evidence)
+    {
+        try
+        {
+            return HumanReviewContractValidator.ValidateEvidence(request, evidence).IsValid;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void ValidateAppendOnlyHumanReview(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
+    {
+        if (current.HumanReview is null)
+        {
+            return;
+        }
+
+        if (candidate.HumanReview is null
+            || current.HumanReview.Request is null
+            || candidate.HumanReview.Request is null
+            || current.HumanReview.Lifecycle is null
+            || candidate.HumanReview.Lifecycle is null
+            || !string.Equals(current.HumanReview.Request.RequestHash, candidate.HumanReview.Request.RequestHash, StringComparison.Ordinal)
+            || !string.Equals(current.HumanReview.Lifecycle.LifecycleHash, candidate.HumanReview.Lifecycle.LifecycleHash, StringComparison.Ordinal)
+            || candidate.HumanReview.Evidence.Length != current.HumanReview.Evidence.Length)
+        {
+            Add(errors, "human_review_history_changed", "humanReview", "The admitted Human Review request, initial lifecycle, and evidence cannot be removed, extended, or rewritten in this slice.");
+            return;
+        }
+
+        for (var index = 0; index < current.HumanReview.Evidence.Length; index++)
+        {
+            var currentEvidence = current.HumanReview.Evidence[index];
+            var candidateEvidence = candidate.HumanReview.Evidence[index];
+            if (currentEvidence is null || candidateEvidence is null || !string.Equals(currentEvidence.EvidenceHash, candidateEvidence.EvidenceHash, StringComparison.Ordinal))
+            {
+                Add(errors, "human_review_evidence_changed", $"humanReview.evidence[{index}]", "Previously retained Human Review evidence is immutable.");
+            }
+        }
+
+    }
+
     private static bool EventsEqual(CustomLoopRunEvent? left, CustomLoopRunEvent? right)
     {
         if (ReferenceEquals(left, right))
@@ -3232,7 +3407,8 @@ public static class CustomLoopRunValidator
             && string.Equals(left.WaitContinuationEvidenceHash, right.WaitContinuationEvidenceHash, StringComparison.Ordinal)
             && string.Equals(left.ModelExecutionEvidence?.ContentHash, right.ModelExecutionEvidence?.ContentHash, StringComparison.Ordinal)
             && string.Equals(left.FailureEvidence?.ContentHash, right.FailureEvidence?.ContentHash, StringComparison.Ordinal)
-            && string.Equals(left.RetryState?.ContentHash, right.RetryState?.ContentHash, StringComparison.Ordinal);
+            && string.Equals(left.RetryState?.ContentHash, right.RetryState?.ContentHash, StringComparison.Ordinal)
+            && string.Equals(left.HumanReviewEvidence?.EvidenceHash, right.HumanReviewEvidence?.EvidenceHash, StringComparison.Ordinal);
     }
 
     private static void ValidateModelExecutionEvidence(

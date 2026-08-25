@@ -88,5 +88,7 @@ public enum CustomLoopRunEventKind
     /// <summary>
     /// Identifies one append-only authenticated retry-series state transition.
     /// </summary>
-    RetryStateChanged = 20
+    RetryStateChanged = 20,
+    /// <summary>Identifies an atomically admitted Human Review request and exact parked frontier.</summary>
+    HumanReviewRequestAdmitted = 21
 }

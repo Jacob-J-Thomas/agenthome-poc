@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.HumanReview.Models;
 
 namespace EmbodySense.Core.Common.HumanReview;
@@ -250,7 +251,7 @@ public static class HumanReviewContractValidator
         }
 
         ValidateSchema(binding.SchemaVersion, $"{path}.schemaVersion", errors);
-        ValidateIdentifier(binding.WorkspaceId, $"{path}.workspaceId", errors);
+        ValidateWorkspaceId(binding.WorkspaceId, $"{path}.workspaceId", errors);
         ValidateIdentifier(binding.RunId, $"{path}.runId", errors);
         ValidateIdentifier(binding.GraphId, $"{path}.graphId", errors);
         ValidateIdentifier(binding.RevisionId, $"{path}.revisionId", errors);
@@ -295,6 +296,14 @@ public static class HumanReviewContractValidator
         if (errors.Count == 0 && !HumanReviewContractHash.MatchesBinding(binding))
         {
             Add(errors, "binding_hash_mismatch", $"{path}.bindingHash", "Binding hash must match the complete canonical binding contract.");
+        }
+    }
+
+    private static void ValidateWorkspaceId(string? value, string path, List<HumanReviewContractValidationError> errors)
+    {
+        if (!ContextualRoleWorkspaceId.IsValid(value))
+        {
+            Add(errors, "invalid_workspace_id", path, "Workspace identifiers must use the canonical workspace-sha256 scope form.");
         }
     }
 

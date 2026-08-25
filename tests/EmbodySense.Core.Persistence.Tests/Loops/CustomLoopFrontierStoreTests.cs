@@ -1,8 +1,15 @@
 using System.Diagnostics;
+using System.Collections.Immutable;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
+using EmbodySense.Core.Application.HumanReview;
+using EmbodySense.Core.Application.HumanReview.Models;
+using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Common.HumanReview;
+using EmbodySense.Core.Common.HumanReview.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
@@ -16,6 +23,7 @@ using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Tests.Loops.Admission;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Tests.Verification;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
@@ -27,6 +35,300 @@ public sealed class CustomLoopFrontierStoreTests
     private const string CrashProbeReadyPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_FRONTIER_CRASH_READY";
     private const string CrashProbeReleasePathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_FRONTIER_CRASH_RELEASE";
     private const string CrashProbeStagingPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_FRONTIER_CRASH_STAGING";
+
+    [Fact]
+    public async Task Human_review_admission_commits_a_real_running_predecessor_to_its_exact_blocked_frontier_and_round_trips_after_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var context = CustomLoopSequentialEvidenceStoreTests.CreateContext();
+        var admittedDefinition = CustomLoopDefinition.CreateSeed("legacy-custom-loop", "default-role", "step-1", "create-loop", context.Run.CreatedAtUtc);
+        var admitted = CustomLoopAdmissionRequestHash.Apply(context.Run with { LoopId = admittedDefinition.Id, AdmittedDefinition = admittedDefinition });
+        using var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        var active = TransitionToRunning(admitted, "review-admission-running");
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(active, admitted.LifecycleVersion)).Status);
+        var running = StartInference(active, context, "review-admission-start");
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, active.LifecycleVersion)).Status);
+        var commitAtUtc = running.UpdatedAtUtc.AddMinutes(1);
+        var transition = GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(running.Frontier, context.Binding, null, null, commitAtUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, transition.Status);
+        var blocked = Assert.IsType<GovernedLoopFrontierPosture>(transition.Frontier);
+        var request = CreateHumanReviewRequest(running, blocked, running.UpdatedAtUtc);
+        var service = new HumanReviewAdmissionService(store);
+        var quotaBeforeAdmission = await store.GetTraceQuotaAsync();
+
+        var result = await service.AdmitAsync(new HumanReviewAdmissionCommand(running.Id, running.LifecycleVersion, request, blocked));
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+        var quotaAfterAdmission = await store.GetTraceQuotaAsync();
+        Assert.Equal(1, quotaAfterAdmission.RetainedTraceCount);
+        Assert.True(quotaAfterAdmission.ActualTraceUtf8Bytes > quotaBeforeAdmission.ActualTraceUtf8Bytes);
+        Assert.True(quotaAfterAdmission.AccountedTraceUtf8Bytes <= quotaAfterAdmission.MaximumWorkspaceUtf8Bytes);
+        Assert.False(quotaAfterAdmission.IsOverLimit);
+        using var restarted = new CustomLoopRunStore(paths);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(running.Id));
+        Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(persisted).Errors));
+        Assert.Equal(CustomLoopRunStatus.Paused, persisted.Status);
+        Assert.Equal(blocked.Payload.ContentHash, persisted.Frontier!.Payload.ContentHash);
+        Assert.Equal(blocked.Binding.Revision.GraphId, persisted.HumanReview!.Request.Binding.GraphId);
+        Assert.NotEqual(persisted.AdmittedDefinition.Id, persisted.HumanReview.Request.Binding.GraphId);
+        Assert.Equal(request.RequestHash, persisted.HumanReview.Request.RequestHash);
+        Assert.Equal(120_000, persisted.ExecutionClock.AccumulatedRunningMilliseconds);
+        Assert.Null(persisted.ExecutionClock.ActiveSinceUtc);
+        Assert.Equal(CustomLoopRunEventKind.LifecycleChanged, persisted.Events[^2].Kind);
+        Assert.Equal(CustomLoopRunEventKind.HumanReviewRequestAdmitted, persisted.Events[^1].Kind);
+        Assert.Equal(persisted.HumanReview.Evidence.Single().EvidenceHash, persisted.Events[^1].HumanReviewEvidence?.EvidenceHash);
+        Assert.NotSame(request, persisted.HumanReview.Request);
+        Assert.NotSame(request.Binding, persisted.HumanReview.Request.Binding);
+        Assert.NotSame(blocked, persisted.Frontier);
+        Assert.NotSame(blocked.Payload, persisted.Frontier.Payload);
+        var replay = await new HumanReviewAdmissionService(restarted).AdmitAsync(new HumanReviewAdmissionCommand(persisted.Id, persisted.LifecycleVersion, request, blocked));
+        Assert.Equal(CustomLoopRunStoreStatus.AlreadyCreated, replay.Status);
+    }
+
+    [Theory]
+    [InlineData(CustomLoopRunPublicationBoundary.StagedFileFlushed)]
+    [InlineData(CustomLoopRunPublicationBoundary.CanonicalRenamed)]
+    [InlineData(CustomLoopRunPublicationBoundary.ParentDirectoryFlushed)]
+    [InlineData(CustomLoopRunPublicationBoundary.TargetProven)]
+    public async Task External_process_loss_during_real_human_review_admission_leaves_only_the_intact_predecessor_or_complete_atomic_successor(CustomLoopRunPublicationBoundary boundary)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var predecessor = await PersistRealRunningPredecessorAsync(paths);
+        var predecessorBytes = CustomLoopRunArtifactSerializer.Serialize(predecessor);
+        using var process = CancellationHostProcess.Start("human-review-admission-process-loss", workspace.RootPath, predecessor.Id, boundary.ToString());
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+
+        var output = await outputTask;
+        var error = await errorTask;
+        Assert.NotEqual(0, process.ExitCode);
+        Assert.Contains("test host process crashed", error, StringComparison.OrdinalIgnoreCase);
+        using var restarted = new CustomLoopRunStore(paths);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(predecessor.Id));
+        Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(persisted).Errors));
+        if (persisted.HumanReview is null)
+        {
+            Assert.Equal(predecessorBytes, CustomLoopRunArtifactSerializer.Serialize(persisted));
+            return;
+        }
+
+        Assert.Equal(CustomLoopRunStatus.Paused, persisted.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, persisted.Frontier!.Payload.Status);
+        Assert.Equal("review-request-process-loss", persisted.HumanReview.Request.RequestId);
+        Assert.Equal(2, persisted.Events.Length - predecessor.Events.Length);
+        Assert.Equal(CustomLoopRunEventKind.LifecycleChanged, persisted.Events[^2].Kind);
+        Assert.Equal(CustomLoopRunEventKind.HumanReviewRequestAdmitted, persisted.Events[^1].Kind);
+        Assert.Equal(persisted.HumanReview.Evidence.Single().EvidenceHash, persisted.Events[^1].HumanReviewEvidence?.EvidenceHash);
+    }
+
+    [Fact]
+    public async Task Two_external_processes_with_distinct_valid_human_review_requests_reach_cas_and_persist_exactly_one_winner()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var predecessor = await PersistRealRunningPredecessorAsync(paths);
+        var releasePath = workspace.File("human-review-race-release");
+        var firstReadyPath = workspace.File("human-review-race-first-ready");
+        var secondReadyPath = workspace.File("human-review-race-second-ready");
+        var firstResultPath = workspace.File("human-review-race-first-result");
+        var secondResultPath = workspace.File("human-review-race-second-result");
+        using var first = CancellationHostProcess.Start("human-review-admission-race", workspace.RootPath, predecessor.Id, "race-first", firstReadyPath, releasePath, firstResultPath);
+        using var second = CancellationHostProcess.Start("human-review-admission-race", workspace.RootPath, predecessor.Id, "race-second", secondReadyPath, releasePath, secondResultPath);
+        var firstOutput = first.StandardOutput.ReadToEndAsync();
+        var firstError = first.StandardError.ReadToEndAsync();
+        var secondOutput = second.StandardOutput.ReadToEndAsync();
+        var secondError = second.StandardError.ReadToEndAsync();
+        try
+        {
+            await WaitForFileAsync(firstReadyPath, TimeSpan.FromSeconds(30));
+            await WaitForFileAsync(secondReadyPath, TimeSpan.FromSeconds(30));
+            await File.WriteAllTextAsync(releasePath, "release");
+            await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            if (!first.HasExited)
+            {
+                first.Kill(entireProcessTree: true);
+                await first.WaitForExitAsync();
+            }
+
+            if (!second.HasExited)
+            {
+                second.Kill(entireProcessTree: true);
+                await second.WaitForExitAsync();
+            }
+        }
+
+        Assert.Equal(0, first.ExitCode);
+        Assert.Equal(0, second.ExitCode);
+        Assert.Equal([CustomLoopRunStoreStatus.Conflict.ToString(), CustomLoopRunStoreStatus.Updated.ToString()], new[] { await File.ReadAllTextAsync(firstResultPath), await File.ReadAllTextAsync(secondResultPath) }.Order(StringComparer.Ordinal));
+        _ = await firstOutput;
+        _ = await firstError;
+        _ = await secondOutput;
+        _ = await secondError;
+        using var restarted = new CustomLoopRunStore(paths);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(predecessor.Id));
+        Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(persisted).Errors));
+        Assert.Contains(persisted.HumanReview?.Request.RequestId, new[] { "review-request-race-first", "review-request-race-second" });
+        Assert.Equal(2, persisted.Events.Length - predecessor.Events.Length);
+    }
+
+    [Fact]
+    public async Task Human_review_admission_rejects_a_valid_request_that_exceeds_reserved_trace_capacity_without_partial_state()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var current = await PersistRealRunningPredecessorAsync(paths);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, current.LoopId, current.Id + ".json");
+        var predecessorBytes = await File.ReadAllBytesAsync(artifactPath);
+        var transition = GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(current.Frontier, current.SequentialAdapterBinding!, null, null, current.UpdatedAtUtc.AddMinutes(1));
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, transition.Status);
+        var blocked = Assert.IsType<GovernedLoopFrontierPosture>(transition.Frontier);
+        var request = CreateHumanReviewRequest(current, blocked, current.UpdatedAtUtc, "quota-overflow") with
+        {
+            EligibleReviewers = Enumerable.Range(0, HumanReviewContractLimits.MaxEligibleReviewers)
+                .Select(reviewer => new HumanReviewReviewerScope(
+                    ("reviewer-" + reviewer.ToString("D2") + "-").PadRight(HumanReviewContractLimits.MaxIdentifierCharacters, 'a'),
+                    Enumerable.Range(0, HumanReviewContractLimits.MaxScopesPerReviewer)
+                        .Select(scope => ("scope-" + scope.ToString("D2") + "-").PadRight(HumanReviewContractLimits.MaxIdentifierCharacters, (char)('a' + reviewer)))
+                        .ToImmutableArray()))
+                .ToImmutableArray(),
+            RequestHash = string.Empty
+        };
+        request = HumanReviewContractHash.ApplyRequest(request);
+        Assert.True(HumanReviewContractValidator.ValidateRequest(request).IsValid);
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => new HumanReviewAdmissionService(store).AdmitAsync(new HumanReviewAdmissionCommand(current.Id, current.LifecycleVersion, request, blocked)));
+
+        Assert.Contains("lifecycle control event exceeded its permanent reserved serialized footprint", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(predecessorBytes, await File.ReadAllBytesAsync(artifactPath));
+        using var restarted = new CustomLoopRunStore(paths);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(current.Id));
+        Assert.Equal(current.LifecycleVersion, persisted.LifecycleVersion);
+        Assert.Null(persisted.HumanReview);
+        Assert.Equal(current.Frontier!.Payload.ContentHash, persisted.Frontier!.Payload.ContentHash);
+    }
+
+    [Fact]
+    public async Task Human_review_admission_snapshots_caller_arrays_and_fresh_reads_ignore_mutated_returned_objects()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var predecessor = await PersistRealRunningPredecessorAsync(paths);
+        var transition = GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(predecessor.Frontier, predecessor.SequentialAdapterBinding!, null, null, predecessor.UpdatedAtUtc.AddMinutes(1));
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, transition.Status);
+        var blocked = Assert.IsType<GovernedLoopFrontierPosture>(transition.Frontier);
+        var request = CreateHumanReviewRequest(predecessor, blocked, predecessor.UpdatedAtUtc, "defensive-copy");
+        var decisionBacking = request.RequestedDecisions.ToArray();
+        var reviewerScopeBacking = request.EligibleReviewers[0].ScopeIds.ToArray();
+        var reviewerBacking = request.EligibleReviewers.ToArray();
+        reviewerBacking[0] = reviewerBacking[0] with { ScopeIds = ImmutableCollectionsMarshal.AsImmutableArray(reviewerScopeBacking) };
+        var previewBacking = request.Previews.ToArray();
+        request = HumanReviewContractHash.ApplyRequest(request with
+        {
+            RequestedDecisions = ImmutableCollectionsMarshal.AsImmutableArray(decisionBacking),
+            EligibleReviewers = ImmutableCollectionsMarshal.AsImmutableArray(reviewerBacking),
+            Previews = ImmutableCollectionsMarshal.AsImmutableArray(previewBacking),
+            RequestHash = string.Empty
+        });
+        var expectedRequestHash = request.RequestHash;
+
+        var result = await new HumanReviewAdmissionService(store).AdmitAsync(new HumanReviewAdmissionCommand(predecessor.Id, predecessor.LifecycleVersion, request, blocked));
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+        decisionBacking[0] = HumanReviewDecisionKind.Unknown;
+        reviewerScopeBacking[0] = "mutated-scope";
+        reviewerBacking[0] = new HumanReviewReviewerScope("mutated-role", ImmutableArray<string>.Empty);
+        previewBacking[0] = previewBacking[0] with { Detail = "mutated", DetailHash = string.Empty };
+        var returned = Assert.IsType<CustomLoopRunRecord>(result.Run);
+        Assert.Equal(expectedRequestHash, returned.HumanReview!.Request.RequestHash);
+        Assert.True(HumanReviewContractValidator.ValidateRequest(returned.HumanReview.Request).IsValid);
+        var expectedEvidenceHash = returned.HumanReview.Evidence.Single().EvidenceHash;
+        returned.Events[^1] = returned.Events[^1] with { Detail = "mutated returned event" };
+        var returnedEvidence = ImmutableCollectionsMarshal.AsArray(returned.HumanReview.Evidence)!;
+        returnedEvidence[0] = returnedEvidence[0] with { EvidenceHash = HumanReviewHash('9') };
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(predecessor.Id));
+        Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(persisted).Errors));
+        Assert.Equal(expectedRequestHash, persisted.HumanReview!.Request.RequestHash);
+        Assert.Equal(expectedEvidenceHash, persisted.HumanReview.Evidence.Single().EvidenceHash);
+        Assert.NotEqual("mutated returned event", persisted.Events[^1].Detail);
+    }
+
+    [Theory]
+    [InlineData("request")]
+    [InlineData("evidence")]
+    [InlineData("human-review-plane-omitted")]
+    [InlineData("lifecycle-omitted")]
+    [InlineData("evidence-omitted")]
+    [InlineData("event-evidence-payload-omitted")]
+    [InlineData("binding-mismatch")]
+    [InlineData("event-evidence-mismatch")]
+    [InlineData("event-evidence-payload-mismatch")]
+    public async Task Restart_rejects_incomplete_or_mismatched_human_review_admission_without_normalizing_it(string corruption)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var persisted = await PersistHumanReviewAdmissionAsync(paths, "corruption-" + corruption);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, persisted.LoopId, persisted.Id + ".json");
+        var root = JsonNode.Parse(await File.ReadAllTextAsync(artifactPath))!.AsObject();
+        var humanReview = root["run"]!["humanReview"]!.AsObject();
+        switch (corruption)
+        {
+            case "request":
+                humanReview["request"] = null;
+                break;
+            case "evidence":
+                humanReview["evidence"]!.AsArray()[0] = null;
+                break;
+            case "human-review-plane-omitted":
+                root["run"]!.AsObject().Remove("humanReview");
+                break;
+            case "lifecycle-omitted":
+                humanReview.Remove("lifecycle");
+                break;
+            case "evidence-omitted":
+                humanReview.Remove("evidence");
+                break;
+            case "event-evidence-payload-omitted":
+                root["run"]!["events"]!.AsArray()[^1]!.AsObject().Remove("humanReviewEvidence");
+                break;
+            case "binding-mismatch":
+                humanReview["request"]!["binding"]!["graphId"] = "other-graph";
+                break;
+            case "event-evidence-mismatch":
+                root["run"]!["events"]!.AsArray()[^1]!.AsObject()["timestampUtc"] = persisted.UpdatedAtUtc.AddSeconds(-1).ToString("O");
+                break;
+            case "event-evidence-payload-mismatch":
+                root["run"]!["events"]!.AsArray()[^1]!["humanReviewEvidence"]!["provenance"]!["sourceId"] = "mutated-source";
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(corruption));
+        }
+
+        await File.WriteAllTextAsync(artifactPath, root.ToJsonString() + "\n");
+        using var restarted = new CustomLoopRunStore(paths);
+        await Assert.ThrowsAsync<FormatException>(() => restarted.GetAsync(persisted.Id));
+    }
 
     [Fact]
     public void Canonical_codec_round_trips_exact_frontier_and_explicit_legacy_null()
@@ -604,6 +906,91 @@ public sealed class CustomLoopFrontierStoreTests
             await Task.Delay(TimeSpan.FromMilliseconds(15), timeout.Token);
         }
     }
+
+    private static async Task<CustomLoopRunRecord> PersistRealRunningPredecessorAsync(WorkspacePaths paths)
+    {
+        var context = CustomLoopSequentialEvidenceStoreTests.CreateContext(identity: "human-review-process-loss");
+        using var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+        var active = TransitionToRunning(context.Run, "human-review-process-loss-running");
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(active, context.Run.LifecycleVersion)).Status);
+        var running = StartInference(active, context, "human-review-process-loss-start");
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, active.LifecycleVersion)).Status);
+        return running;
+    }
+
+    private static async Task<CustomLoopRunRecord> PersistHumanReviewAdmissionAsync(WorkspacePaths paths, string identity)
+    {
+        var predecessor = await PersistRealRunningPredecessorAsync(paths);
+        var transition = GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(predecessor.Frontier, predecessor.SequentialAdapterBinding, null, null, predecessor.UpdatedAtUtc.AddMinutes(1));
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, transition.Status);
+        var blocked = Assert.IsType<GovernedLoopFrontierPosture>(transition.Frontier);
+        var request = CreateHumanReviewRequest(predecessor, blocked, predecessor.UpdatedAtUtc, identity);
+        using var store = new CustomLoopRunStore(paths);
+        var result = await new HumanReviewAdmissionService(store).AdmitAsync(new HumanReviewAdmissionCommand(predecessor.Id, predecessor.LifecycleVersion, request, blocked));
+        return Assert.IsType<CustomLoopRunRecord>(result.Run);
+    }
+
+    private static async Task WaitForFileAsync(string path, TimeSpan timeout)
+    {
+        using var cancellation = new CancellationTokenSource(timeout);
+        while (!File.Exists(path))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(10), cancellation.Token);
+        }
+    }
+
+    private static HumanReviewRequest CreateHumanReviewRequest(
+        CustomLoopRunRecord predecessor,
+        GovernedLoopFrontierPosture blocked,
+        DateTimeOffset createdAtUtc,
+        string identity = "one")
+    {
+        var blockedNode = Assert.Single(blocked.Payload.Nodes, node => node.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked);
+        var binding = HumanReviewContractHash.ApplyBinding(new HumanReviewBinding(
+            1,
+            blocked.WorkspaceId,
+            predecessor.Id,
+            blocked.Binding.Revision.GraphId,
+            blocked.Binding.Revision.RevisionId,
+            blocked.Binding.Revision.ExecutableHash,
+            blockedNode.NodeId,
+            blockedNode.ActivationOrdinal,
+            null,
+            blockedNode.Attempt!.Value,
+            "frontier-review-" + identity,
+            blocked.Payload.FrontierVersion,
+            blocked.Payload.ContentHash,
+            HumanReviewHash('a'),
+            HumanReviewHash('b'),
+            HumanReviewHash('c'),
+            HumanReviewHash('d'),
+            HumanReviewHash('e'),
+            HumanReviewHash('f'),
+            HumanReviewHash('1'),
+            null,
+            string.Empty));
+        var scope = HumanReviewContractHash.ApplyApprovalScope(new HumanReviewApprovalScope(HumanReviewApprovalScopeKind.Continuation, binding.BindingHash, null, string.Empty));
+        var timing = new HumanReviewTiming(createdAtUtc, createdAtUtc.AddMinutes(10), createdAtUtc.AddHours(1));
+        return HumanReviewContractHash.ApplyRequest(new HumanReviewRequest(
+            1,
+            "review-request-" + identity,
+            "review-request-operation-" + identity,
+            binding,
+            HumanReviewPurpose.Continuation,
+            ImmutableArray.Create(HumanReviewDecisionKind.Approve, HumanReviewDecisionKind.Reject, HumanReviewDecisionKind.Cancel, HumanReviewDecisionKind.RequestInformation),
+            ImmutableArray.Create(new HumanReviewReviewerScope("reviewer-role-one", ImmutableArray.Create("scope-alpha", "scope-beta"))),
+            scope,
+            ImmutableArray.Create(
+                HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Action, "Action", "Redacted action.", string.Empty)),
+                HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Result, "Result", "Redacted result.", string.Empty)),
+                HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Evidence, "Evidence", "Redacted evidence.", string.Empty))),
+            timing,
+            HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-store", "request-correlation-" + identity, createdAtUtc, string.Empty)),
+            string.Empty));
+    }
+
+    private static string HumanReviewHash(char character) => new(character, HumanReviewContractLimits.Sha256HexCharacters);
 
     private static CustomLoopRunRecord StartInference(
         CustomLoopRunRecord run,

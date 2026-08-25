@@ -365,6 +365,7 @@ $currentCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 Assert-True -Condition ($LASTEXITCODE -eq 0 -and $currentCommit -match '^[0-9a-f]{40}$') -Message "The test-class consumer contract must bind one exact repository commit."
 $sharedDirectTestConsumers = @(Get-QualificationExternalTestClassConsumerPaths -RepositoryRoot $repoRoot -Commit $currentCommit -Path $sharedDirectTestPath -TestClass $sharedDirectTestClass)
 $expectedSharedDirectTestConsumers = @(
+    "tests/EmbodySense.Core.Application.Tests/HumanReview/HumanReviewAdmissionServiceTests.cs",
     "tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialBindingResolverTests.cs",
     "tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialFrontierMachineTests.cs",
     "tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialInvocationCoordinatorTests.cs"

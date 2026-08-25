@@ -94,6 +94,11 @@ public sealed record CustomLoopRunRecord(
             : Array.AsReadOnly(value.Select(GovernedLoopWaitContractCopy.Copy).ToArray());
     }
 
+    /// <summary>Gets the required schema-1 Human Review state plane, or null when this run is not controlled by Human Review.</summary>
+    /// <remarks>The JSON property is required even when null; omission is an unsupported schema-1 artifact rather than a compatibility path.</remarks>
+    [JsonRequired]
+    public HumanReviewRunState? HumanReview { get; init; }
+
     /// <summary>
     /// Gets a value indicating whether the lifecycle has reached a terminal status.
     /// </summary>
