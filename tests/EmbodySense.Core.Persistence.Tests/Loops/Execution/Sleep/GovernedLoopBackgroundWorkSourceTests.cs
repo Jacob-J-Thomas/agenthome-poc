@@ -149,7 +149,7 @@ public sealed class GovernedLoopBackgroundWorkSourceTests
             1);
         Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Found, boundedWakes!.Status);
         Assert.True(boundedWakes.WakePageTruncated);
-        Assert.True(boundedWakesNext!.WakePageTruncated);
+        Assert.False(boundedWakesNext!.WakePageTruncated);
         Assert.NotEqual(boundedWakes.WakeCandidates[0].CheckpointId, boundedWakesNext.WakeCandidates[0].CheckpointId);
 
         var byteBoundedWakes = await new GovernedLoopBackgroundWorkSource(
@@ -249,7 +249,266 @@ public sealed class GovernedLoopBackgroundWorkSourceTests
     }
 
     [Fact]
-    public async Task Page_limit_two_advances_every_family_in_stable_order_before_deterministic_wrap()
+    public async Task Sleep_pages_use_monotonic_keysets_for_exact_tail_stale_anchors_and_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var sleep = new GovernedLoopSleepStore(paths);
+        var postureHash = GovernedLoopSleepContractTestFixture.Hash('9');
+        var observedAtUtc = GovernedLoopSleepContractTestFixture.PublishedAtUtc.AddHours(2);
+        var wakes = new[]
+        {
+            GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
+                GovernedLoopSleepContractTestFixture.Binding(runId: "cursor-wake-a")),
+            GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
+                GovernedLoopSleepContractTestFixture.Binding(runId: "cursor-wake-b")),
+            GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
+                GovernedLoopSleepContractTestFixture.Binding(runId: "cursor-wake-c")),
+            GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
+                GovernedLoopSleepContractTestFixture.Binding(runId: "cursor-wake-d"))
+        };
+        var reconciliations = new[]
+        {
+            GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
+                GovernedLoopSleepContractTestFixture.Binding(runId: "cursor-reconciliation-a")),
+            GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
+                GovernedLoopSleepContractTestFixture.Binding(runId: "cursor-reconciliation-b")),
+            GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
+                GovernedLoopSleepContractTestFixture.Binding(runId: "cursor-reconciliation-c")),
+            GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
+                GovernedLoopSleepContractTestFixture.Binding(runId: "cursor-reconciliation-d"))
+        };
+        var reconciliationEvidence = new List<(GovernedLoopSleepCheckpoint Checkpoint, GovernedLoopWakeEvidence Evidence)>();
+        foreach (var checkpoint in wakes)
+        {
+            Assert.Equal(
+                GovernedLoopSleepCheckpointMutationStatus.Committed,
+                (await sleep.PublishAndReleaseAsync(checkpoint, postureHash))!.Status);
+        }
+
+        foreach (var checkpoint in reconciliations)
+        {
+            Assert.Equal(
+                GovernedLoopSleepCheckpointMutationStatus.Committed,
+                (await sleep.PublishAndReleaseAsync(checkpoint, postureHash))!.Status);
+            var prepared = GovernedLoopSleepContractTestFixture.WakeEvidence(
+                identity: GovernedLoopSleepContractTestFixture.WakeIdentity(checkpoint));
+            Assert.Equal(
+                GovernedLoopWakeEvidenceMutationStatus.Committed,
+                (await sleep.CreateWakeAsync(checkpoint, prepared, postureHash))!.Status);
+            reconciliationEvidence.Add((checkpoint, prepared));
+        }
+
+        var orderedWakes = wakes.OrderBy(item => item.CheckpointId, StringComparer.Ordinal).ToArray();
+        var orderedReconciliations = reconciliations.OrderBy(item => item.CheckpointId, StringComparer.Ordinal).ToArray();
+
+        async Task AssertCursorContractAsync(
+            GovernedLoopBackgroundWorkFamily family,
+            IReadOnlyList<GovernedLoopSleepCheckpoint> ordered)
+        {
+            var source = new GovernedLoopBackgroundWorkSource(new ScheduleStore(paths), sleep);
+            var first = await source.ReadAsync(family, observedAtUtc, 1);
+            Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Found, FamilyStatus(first!, family));
+            Assert.Equal(ordered[0].CheckpointId, FamilyIds(first!, family).Single());
+            Assert.True(FamilyTruncated(first!, family));
+
+            var middle = await source.ReadAsync(family, observedAtUtc, 1);
+            Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Found, FamilyStatus(middle!, family));
+            Assert.Equal(ordered[1].CheckpointId, FamilyIds(middle!, family).Single());
+            Assert.True(FamilyTruncated(middle!, family));
+
+            var last = await source.ReadAsync(family, observedAtUtc, 2);
+            Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Found, FamilyStatus(last!, family));
+            Assert.Equal(ordered.Skip(2).Select(item => item.CheckpointId), FamilyIds(last!, family));
+            Assert.False(FamilyTruncated(last!, family));
+
+            var afterTail = await source.ReadAsync(family, observedAtUtc, 1);
+            Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Empty, FamilyStatus(afterTail!, family));
+            Assert.Empty(FamilyIds(afterTail!, family));
+            Assert.False(FamilyTruncated(afterTail!, family));
+
+            var restarted = new GovernedLoopBackgroundWorkSource(new ScheduleStore(paths), sleep);
+            var restartPage = await restarted.ReadAsync(family, observedAtUtc, 2);
+            Assert.Equal(ordered.Take(2).Select(item => item.CheckpointId), FamilyIds(restartPage!, family));
+            Assert.True(FamilyTruncated(restartPage!, family));
+        }
+
+        await AssertCursorContractAsync(
+            GovernedLoopBackgroundWorkFamily.Wake,
+            orderedWakes);
+        await AssertCursorContractAsync(
+            GovernedLoopBackgroundWorkFamily.WakeReconciliation,
+            orderedReconciliations);
+
+        var staleReconciliationSource = new GovernedLoopBackgroundWorkSource(new ScheduleStore(paths), sleep);
+        var staleReconciliationPrefix = await staleReconciliationSource.ReadAsync(
+            GovernedLoopBackgroundWorkFamily.WakeReconciliation,
+            observedAtUtc,
+            4);
+        Assert.Equal(
+            orderedReconciliations.Select(item => item.CheckpointId),
+            staleReconciliationPrefix!.WakeReconciliationCandidates.Select(item => item.CheckpointId));
+        Assert.False(staleReconciliationPrefix.WakeReconciliationPageTruncated);
+        var staleReconciliation = orderedReconciliations[^1];
+        var staleReconciliationEvidence = reconciliationEvidence.Single(
+            item => item.Checkpoint.CheckpointId == staleReconciliation.CheckpointId).Evidence;
+        var committed = GovernedLoopSleepContractTestFixture.WakeEvidence(
+            GovernedLoopWakeDisposition.Committed,
+            evidenceVersion: staleReconciliationEvidence.EvidenceVersion + 1,
+            identity: staleReconciliationEvidence.Identity);
+        Assert.Equal(
+            GovernedLoopWakeEvidenceMutationStatus.Committed,
+            (await sleep.AdvanceWakeAsync(staleReconciliationEvidence, committed))!.Status);
+        var staleReconciliationPage = await staleReconciliationSource.ReadAsync(
+            GovernedLoopBackgroundWorkFamily.WakeReconciliation,
+            observedAtUtc,
+            1);
+        Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Empty, staleReconciliationPage!.WakeReconciliationStatus);
+        Assert.Empty(staleReconciliationPage.WakeReconciliationCandidates);
+        Assert.False(staleReconciliationPage.WakeReconciliationPageTruncated);
+
+        var staleWake = orderedWakes[^1];
+        var staleWakeSource = new GovernedLoopBackgroundWorkSource(new ScheduleStore(paths), sleep);
+        var staleWakePrefix = await staleWakeSource.ReadAsync(GovernedLoopBackgroundWorkFamily.Wake, observedAtUtc, 4);
+        Assert.Equal(orderedWakes.Select(item => item.CheckpointId), staleWakePrefix!.WakeCandidates.Select(item => item.CheckpointId));
+        Assert.False(staleWakePrefix.WakePageTruncated);
+        var staleWakeEvidence = GovernedLoopSleepContractTestFixture.WakeEvidence(
+            identity: GovernedLoopSleepContractTestFixture.WakeIdentity(staleWake));
+        Assert.Equal(
+            GovernedLoopWakeEvidenceMutationStatus.Committed,
+            (await sleep.CreateWakeAsync(staleWake, staleWakeEvidence, postureHash))!.Status);
+        var staleWakePage = await staleWakeSource.ReadAsync(GovernedLoopBackgroundWorkFamily.Wake, observedAtUtc, 1);
+        Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Empty, staleWakePage!.WakeStatus);
+        Assert.Empty(staleWakePage.WakeCandidates);
+        Assert.False(staleWakePage.WakePageTruncated);
+    }
+
+    [Fact]
+    public async Task Sleep_source_rescans_after_one_tail_boundary_without_repeating_completed_work()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var sleep = new GovernedLoopSleepStore(paths);
+        var schedules = new ScheduleStore(paths);
+        var postureHash = GovernedLoopSleepContractTestFixture.Hash('9');
+        var observedAtUtc = GovernedLoopSleepContractTestFixture.PublishedAtUtc.AddHours(2);
+        var wakes = Enumerable.Range(0, 3)
+            .Select(index => GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
+                GovernedLoopSleepContractTestFixture.Binding(runId: $"rescan-wake-{index}")))
+            .ToArray();
+        var reconciliations = Enumerable.Range(0, 3)
+            .Select(index => GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
+                GovernedLoopSleepContractTestFixture.Binding(runId: $"rescan-reconciliation-{index}")))
+            .ToArray();
+        var reconciliationEvidence = new Dictionary<string, GovernedLoopWakeEvidence>(StringComparer.Ordinal);
+        foreach (var checkpoint in wakes)
+        {
+            await sleep.PublishAndReleaseAsync(checkpoint, postureHash);
+        }
+
+        foreach (var checkpoint in reconciliations)
+        {
+            await sleep.PublishAndReleaseAsync(checkpoint, postureHash);
+            var evidence = GovernedLoopSleepContractTestFixture.WakeEvidence(
+                identity: GovernedLoopSleepContractTestFixture.WakeIdentity(checkpoint));
+            await sleep.CreateWakeAsync(checkpoint, evidence, postureHash);
+            reconciliationEvidence.Add(checkpoint.CheckpointId, evidence);
+        }
+
+        var source = new GovernedLoopBackgroundWorkSource(schedules, sleep);
+
+        async Task AssertRescanAsync(
+            GovernedLoopBackgroundWorkFamily family,
+            IReadOnlyList<GovernedLoopSleepCheckpoint> initialCandidates,
+            Func<GovernedLoopSleepCheckpoint, Task> complete,
+            Func<GovernedLoopSleepCheckpoint, Task> publish)
+        {
+            var ordered = initialCandidates.OrderBy(item => item.CheckpointId, StringComparer.Ordinal).ToArray();
+            var first = await source.ReadAsync(family, observedAtUtc, 2);
+            var final = await source.ReadAsync(family, observedAtUtc, 2);
+            Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Found, FamilyStatus(first!, family));
+            Assert.True(FamilyTruncated(first!, family));
+            Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Found, FamilyStatus(final!, family));
+            Assert.False(FamilyTruncated(final!, family));
+            Assert.Equal(
+                ordered.Select(item => item.CheckpointId),
+                FamilyIds(first!, family).Concat(FamilyIds(final!, family)));
+            Assert.Equal(
+                ordered.Length,
+                FamilyIds(first!, family).Concat(FamilyIds(final!, family)).Distinct(StringComparer.Ordinal).Count());
+
+            var boundary = await source.ReadAsync(family, observedAtUtc, 2);
+            Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Empty, FamilyStatus(boundary!, family));
+            Assert.Empty(FamilyIds(boundary!, family));
+            Assert.False(FamilyTruncated(boundary!, family));
+
+            await complete(ordered[0]);
+            var newlyEligible = Enumerable.Range(0, 128)
+                .Select(index => GovernedLoopSleepContractTestFixture.TimestampCheckpoint(
+                    GovernedLoopSleepContractTestFixture.Binding(runId: $"rescan-new-{family.ToString().ToLowerInvariant()}-{index}")))
+                .First(candidate => StringComparer.Ordinal.Compare(candidate.CheckpointId, ordered[^1].CheckpointId) <= 0);
+            Assert.True(StringComparer.Ordinal.Compare(newlyEligible.CheckpointId, ordered[^1].CheckpointId) <= 0);
+            await publish(newlyEligible);
+
+            var rescan = await source.ReadAsync(family, observedAtUtc, 16);
+            var expected = ordered.Skip(1)
+                .Append(newlyEligible)
+                .OrderBy(item => item.CheckpointId, StringComparer.Ordinal)
+                .Select(item => item.CheckpointId)
+                .ToArray();
+            Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Found, FamilyStatus(rescan!, family));
+            Assert.False(FamilyTruncated(rescan!, family));
+            Assert.Equal(expected, FamilyIds(rescan!, family));
+            Assert.DoesNotContain(ordered[0].CheckpointId, FamilyIds(rescan!, family));
+        }
+
+        await AssertRescanAsync(
+            GovernedLoopBackgroundWorkFamily.WakeReconciliation,
+            reconciliations,
+            async checkpoint =>
+            {
+                var evidence = reconciliationEvidence[checkpoint.CheckpointId];
+                var committed = GovernedLoopSleepContractTestFixture.WakeEvidence(
+                    GovernedLoopWakeDisposition.Committed,
+                    evidenceVersion: evidence.EvidenceVersion + 1,
+                    identity: evidence.Identity);
+                Assert.Equal(
+                    GovernedLoopWakeEvidenceMutationStatus.Committed,
+                    (await sleep.AdvanceWakeAsync(evidence, committed))!.Status);
+            },
+            async checkpoint =>
+            {
+                Assert.Equal(
+                    GovernedLoopSleepCheckpointMutationStatus.Committed,
+                    (await sleep.PublishAndReleaseAsync(checkpoint, postureHash))!.Status);
+                var evidence = GovernedLoopSleepContractTestFixture.WakeEvidence(
+                    identity: GovernedLoopSleepContractTestFixture.WakeIdentity(checkpoint));
+                Assert.Equal(
+                    GovernedLoopWakeEvidenceMutationStatus.Committed,
+                    (await sleep.CreateWakeAsync(checkpoint, evidence, postureHash))!.Status);
+            });
+
+        await AssertRescanAsync(
+            GovernedLoopBackgroundWorkFamily.Wake,
+            wakes,
+            async checkpoint =>
+            {
+                var evidence = GovernedLoopSleepContractTestFixture.WakeEvidence(
+                    identity: GovernedLoopSleepContractTestFixture.WakeIdentity(checkpoint));
+                Assert.Equal(
+                    GovernedLoopWakeEvidenceMutationStatus.Committed,
+                    (await sleep.CreateWakeAsync(checkpoint, evidence, postureHash))!.Status);
+            },
+            async checkpoint =>
+            {
+                Assert.Equal(
+                    GovernedLoopSleepCheckpointMutationStatus.Committed,
+                    (await sleep.PublishAndReleaseAsync(checkpoint, postureHash))!.Status);
+            });
+    }
+
+    [Fact]
+    public async Task Page_limit_two_advances_schedule_by_wrapping_but_sleep_by_monotonic_keyset()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -304,17 +563,58 @@ public sealed class GovernedLoopBackgroundWorkSourceTests
             schedulePages.SelectMany(page => page!.ScheduleCandidates.Select(item => item.Value)).ToArray());
         var orderedWakeIds = wakes.Select(item => item.CheckpointId).Order(StringComparer.Ordinal).ToArray();
         Assert.Equal(
-            [.. orderedWakeIds, .. orderedWakeIds[..2]],
+            orderedWakeIds,
             wakePages.SelectMany(page => page!.WakeCandidates.Select(item => item.CheckpointId)).ToArray());
         var orderedReconciliationIds = reconciliations
             .Select(item => item.Checkpoint.CheckpointId)
             .Order(StringComparer.Ordinal)
             .ToArray();
         Assert.Equal(
-            [.. orderedReconciliationIds, .. orderedReconciliationIds[..2]],
+            orderedReconciliationIds,
             reconciliationPages.SelectMany(page => page!.WakeReconciliationCandidates.Select(item => item.CheckpointId)).ToArray());
         Assert.All(schedulePages, page => Assert.True(page!.SchedulePageTruncated));
-        Assert.All(wakePages, page => Assert.True(page!.WakePageTruncated));
-        Assert.All(reconciliationPages, page => Assert.True(page!.WakeReconciliationPageTruncated));
+        Assert.True(wakePages[0]!.WakePageTruncated);
+        Assert.False(wakePages[1]!.WakePageTruncated);
+        Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Empty, wakePages[2]!.WakeStatus);
+        Assert.False(wakePages[2]!.WakePageTruncated);
+        Assert.True(reconciliationPages[0]!.WakeReconciliationPageTruncated);
+        Assert.False(reconciliationPages[1]!.WakeReconciliationPageTruncated);
+        Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Empty, reconciliationPages[2]!.WakeReconciliationStatus);
+        Assert.False(reconciliationPages[2]!.WakeReconciliationPageTruncated);
+
+        var restarted = await new GovernedLoopBackgroundWorkSource(schedules, sleep)
+            .ReadAsync(GovernedLoopBackgroundWorkFamily.Wake, observedAtUtc, 2);
+        Assert.Equal(orderedWakeIds[..2], restarted!.WakeCandidates.Select(item => item.CheckpointId).ToArray());
     }
+
+    private static GovernedLoopBackgroundWorkReadStatus FamilyStatus(
+        GovernedLoopBackgroundWorkReadResult result,
+        GovernedLoopBackgroundWorkFamily family)
+        => family switch
+        {
+            GovernedLoopBackgroundWorkFamily.Wake => result.WakeStatus,
+            GovernedLoopBackgroundWorkFamily.WakeReconciliation => result.WakeReconciliationStatus,
+            _ => throw new ArgumentOutOfRangeException(nameof(family), family, null)
+        };
+
+    private static IReadOnlyList<string> FamilyIds(
+        GovernedLoopBackgroundWorkReadResult result,
+        GovernedLoopBackgroundWorkFamily family)
+        => family switch
+        {
+            GovernedLoopBackgroundWorkFamily.Wake => result.WakeCandidates.Select(item => item.CheckpointId).ToArray(),
+            GovernedLoopBackgroundWorkFamily.WakeReconciliation => result.WakeReconciliationCandidates.Select(item => item.CheckpointId).ToArray(),
+            _ => throw new ArgumentOutOfRangeException(nameof(family), family, null)
+        };
+
+    private static bool FamilyTruncated(
+        GovernedLoopBackgroundWorkReadResult result,
+        GovernedLoopBackgroundWorkFamily family)
+        => family switch
+        {
+            GovernedLoopBackgroundWorkFamily.Wake => result.WakePageTruncated,
+            GovernedLoopBackgroundWorkFamily.WakeReconciliation => result.WakeReconciliationPageTruncated,
+            _ => throw new ArgumentOutOfRangeException(nameof(family), family, null)
+        };
+
 }

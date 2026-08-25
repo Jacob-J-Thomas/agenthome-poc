@@ -7,7 +7,7 @@ using EmbodySense.Core.Persistence.Triggers.Schedules;
 namespace EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 
 /// <summary>Projects stable bounded schedule and sleeping-checkpoint catalog pages through the shared background-work port.</summary>
-/// <remarks>Each family advances independently by the last emitted key and wraps to canonical order after the tail.</remarks>
+/// <remarks>Schedule pages wrap to canonical order after the tail; sleep pages advance monotonically by the last emitted key, expose one empty tail boundary, and begin a fresh scan on the next poll.</remarks>
 public sealed class GovernedLoopBackgroundWorkSource : IGovernedLoopBackgroundWorkSource
 {
     private readonly SemaphoreSlim _pageGate = new(1, 1);
@@ -16,6 +16,8 @@ public sealed class GovernedLoopBackgroundWorkSource : IGovernedLoopBackgroundWo
     private ScheduleId? _scheduleCursor;
     private string? _wakeCursor;
     private string? _wakeReconciliationCursor;
+    private bool _wakeScanRestartPending;
+    private bool _wakeReconciliationScanRestartPending;
 
     /// <summary>Creates a durable background-work source over exact schedule and sleep stores.</summary>
     public GovernedLoopBackgroundWorkSource(ScheduleStore scheduleStore, GovernedLoopSleepStore sleepStore)
@@ -43,8 +45,8 @@ public sealed class GovernedLoopBackgroundWorkSource : IGovernedLoopBackgroundWo
             return family switch
             {
                 GovernedLoopBackgroundWorkFamily.Schedule => await ReadSchedulePageAsync(observedAtUtc, pageMax, cancellationToken).ConfigureAwait(false),
-                GovernedLoopBackgroundWorkFamily.Wake => await ReadWakePageAsync(family, observedAtUtc, pageMax, _wakeCursor, cancellationToken).ConfigureAwait(false),
-                GovernedLoopBackgroundWorkFamily.WakeReconciliation => await ReadWakePageAsync(family, observedAtUtc, pageMax, _wakeReconciliationCursor, cancellationToken).ConfigureAwait(false),
+                GovernedLoopBackgroundWorkFamily.Wake => await ReadWakePageAsync(family, observedAtUtc, pageMax, cancellationToken).ConfigureAwait(false),
+                GovernedLoopBackgroundWorkFamily.WakeReconciliation => await ReadWakePageAsync(family, observedAtUtc, pageMax, cancellationToken).ConfigureAwait(false),
                 _ => Empty(GovernedLoopBackgroundWorkReadStatus.Corrupt)
             };
         }
@@ -83,23 +85,45 @@ public sealed class GovernedLoopBackgroundWorkSource : IGovernedLoopBackgroundWo
         GovernedLoopBackgroundWorkFamily family,
         DateTimeOffset observedAtUtc,
         int pageMax,
-        string? cursor,
         CancellationToken cancellationToken)
     {
+        var isReconciliation = family == GovernedLoopBackgroundWorkFamily.WakeReconciliation;
+        var cursor = isReconciliation ? _wakeReconciliationCursor : _wakeCursor;
+        var restartPending = isReconciliation ? _wakeReconciliationScanRestartPending : _wakeScanRestartPending;
         var result = await _sleepStore.ReadCandidatesAsync(
             family,
             observedAtUtc,
             pageMax,
-            cursor,
+            restartPending ? null : cursor,
             cancellationToken).ConfigureAwait(false);
-        if (family == GovernedLoopBackgroundWorkFamily.Wake && result.WakeCandidates.Count > 0)
+
+        var status = isReconciliation ? result.WakeReconciliationStatus : result.WakeStatus;
+        var scanSucceeded = status is GovernedLoopBackgroundWorkReadStatus.Found or GovernedLoopBackgroundWorkReadStatus.Empty;
+        if (!isReconciliation && result.WakeCandidates.Count > 0)
         {
             _wakeCursor = result.WakeCandidates[^1].CheckpointId;
         }
-        else if (family == GovernedLoopBackgroundWorkFamily.WakeReconciliation
-            && result.WakeReconciliationCandidates.Count > 0)
+        else if (isReconciliation && result.WakeReconciliationCandidates.Count > 0)
         {
             _wakeReconciliationCursor = result.WakeReconciliationCandidates[^1].CheckpointId;
+        }
+
+        var restartNextPoll = !restartPending && cursor is not null && status == GovernedLoopBackgroundWorkReadStatus.Empty;
+        if (isReconciliation)
+        {
+            _wakeReconciliationScanRestartPending = restartPending && !scanSucceeded || restartNextPoll;
+            if (restartPending && status == GovernedLoopBackgroundWorkReadStatus.Empty)
+            {
+                _wakeReconciliationCursor = null;
+            }
+        }
+        else
+        {
+            _wakeScanRestartPending = restartPending && !scanSucceeded || restartNextPoll;
+            if (restartPending && status == GovernedLoopBackgroundWorkReadStatus.Empty)
+            {
+                _wakeCursor = null;
+            }
         }
 
         return result;
