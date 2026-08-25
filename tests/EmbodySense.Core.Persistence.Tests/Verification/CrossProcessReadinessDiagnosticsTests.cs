@@ -9,35 +9,36 @@ public sealed class CrossProcessReadinessDiagnosticsTests
     [Fact]
     public async Task Readiness_failure_does_not_hang_when_descendant_holds_redirected_pipes()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var workspace = new TestWorkspace();
         var childProcessIdPath = workspace.File("pipe-holder-child.pid");
         using var process = CancellationHostProcess.Start("pipe-holder", childProcessIdPath, "30000");
+        using var ownership = CrossProcessProcessOwnership.Attach(process);
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
         var child = new CrossProcessReadinessChild(
             "pipe-holder",
             process,
             workspace.File("missing-ready"),
-            workspace.File("missing-result"));
+            workspace.File("missing-result"),
+            ownership);
 
-        try
-        {
-            var wait = CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
-                "verification/pipe-holder",
-                [child],
-                TimeSpan.FromMilliseconds(100));
-            var failure = await Assert.ThrowsAsync<FailException>(() => wait.WaitAsync(TimeSpan.FromSeconds(10)));
+        var wait = CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
+            "verification/pipe-holder",
+            [child],
+            TimeSpan.FromMilliseconds(100));
+        var failure = await Assert.ThrowsAsync<FailException>(() => wait.WaitAsync(TimeSpan.FromSeconds(10)));
 
-            Assert.Contains("verification/pipe-holder/readiness-exit/pipe-holder", failure.Message, StringComparison.Ordinal);
-            Assert.Contains("stdout=", failure.Message, StringComparison.Ordinal);
-            Assert.Contains("stderr=", failure.Message, StringComparison.Ordinal);
-        }
-        finally
-        {
-            await TerminateProcessAsync(childProcessIdPath);
-        }
+        Assert.Contains("verification/pipe-holder/readiness-exit/pipe-holder", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("stdout=", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("stderr=", failure.Message, StringComparison.Ordinal);
+        Assert.True(await WaitForProcessExitAsync(childProcessIdPath), "The diagnostic helper did not terminate the retained descendant.");
     }
 
-    private static async Task TerminateProcessAsync(string childProcessIdPath)
+    private static async Task<bool> WaitForProcessExitAsync(string childProcessIdPath)
     {
         var wait = Stopwatch.StartNew();
         while (!File.Exists(childProcessIdPath) && wait.Elapsed < TimeSpan.FromSeconds(5))
@@ -48,20 +49,27 @@ public sealed class CrossProcessReadinessDiagnosticsTests
         if (!File.Exists(childProcessIdPath)
             || !int.TryParse(await File.ReadAllTextAsync(childProcessIdPath), out var processId))
         {
-            return;
+            return false;
         }
 
-        try
+        while (wait.Elapsed < TimeSpan.FromSeconds(10))
         {
-            using var child = Process.GetProcessById(processId);
-            if (!child.HasExited)
+            try
             {
-                child.Kill(entireProcessTree: true);
-                await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                using var child = Process.GetProcessById(processId);
+                if (child.HasExited)
+                {
+                    return true;
+                }
             }
+            catch (ArgumentException)
+            {
+                return true;
+            }
+
+            await Task.Delay(10);
         }
-        catch (ArgumentException)
-        {
-        }
+
+        return false;
     }
 }

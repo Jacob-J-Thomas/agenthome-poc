@@ -1239,11 +1239,13 @@ public sealed class ScheduleStoreTests
         var firstOutput = Path.Combine(workspace, "first-schedule-output");
         var secondOutput = Path.Combine(workspace, "second-schedule-output");
         using var first = StartCrossProcessHost(workspace, gate, firstReady, firstOutput, firstSchedule, operation: operation, variant: 1);
+        using var firstOwnership = Verification.CrossProcessProcessOwnership.Attach(first);
         using var second = StartCrossProcessHost(workspace, gate, secondReady, secondOutput, secondSchedule, operation: operation, variant: 2);
+        using var secondOwnership = Verification.CrossProcessProcessOwnership.Attach(second);
         var children = new[]
         {
-            new Verification.CrossProcessReadinessChild("first", first, firstReady, firstOutput),
-            new Verification.CrossProcessReadinessChild("second", second, secondReady, secondOutput)
+            new Verification.CrossProcessReadinessChild("first", first, firstReady, firstOutput, firstOwnership),
+            new Verification.CrossProcessReadinessChild("second", second, secondReady, secondOutput, secondOwnership)
         };
         await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
             $"schedule-store/{operation}",

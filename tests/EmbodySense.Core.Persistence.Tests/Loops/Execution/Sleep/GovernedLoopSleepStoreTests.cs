@@ -1155,11 +1155,13 @@ public sealed class GovernedLoopSleepStoreTests
         var firstOutput = workspace.File("first-sleep-output");
         var secondOutput = workspace.File("second-sleep-output");
         using var first = StartCrossProcessHost(workspace.RootPath, gate, firstReady, firstOutput);
+        using var firstOwnership = Verification.CrossProcessProcessOwnership.Attach(first);
         using var second = StartCrossProcessHost(workspace.RootPath, gate, secondReady, secondOutput);
+        using var secondOwnership = Verification.CrossProcessProcessOwnership.Attach(second);
         var children = new[]
         {
-            new Verification.CrossProcessReadinessChild("first", first, firstReady, firstOutput),
-            new Verification.CrossProcessReadinessChild("second", second, secondReady, secondOutput)
+            new Verification.CrossProcessReadinessChild("first", first, firstReady, firstOutput, firstOwnership),
+            new Verification.CrossProcessReadinessChild("second", second, secondReady, secondOutput, secondOwnership)
         };
         await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
             "sleep-store/publication",

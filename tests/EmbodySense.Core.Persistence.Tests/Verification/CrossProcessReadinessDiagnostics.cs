@@ -90,27 +90,24 @@ internal static class CrossProcessReadinessDiagnostics
         string stage,
         IReadOnlyList<CrossProcessReadinessChild> children)
     {
-        await Task.WhenAll(children.Select(child => StopChildProcessAsync(child.Process)));
+        await Task.WhenAll(children.Select(StopChildProcessAsync));
         var evidence = await Task.WhenAll(children.Select(child => ReadChildEvidenceAsync(operation, stage, child)));
         return string.Join(Environment.NewLine, evidence);
     }
 
-    private static async Task StopChildProcessAsync(Process process)
+    private static async Task StopChildProcessAsync(CrossProcessReadinessChild child)
     {
-        if (!process.HasExited)
+        try
         {
-            try
-            {
-                process.Kill(entireProcessTree: true);
-            }
-            catch (InvalidOperationException) when (process.HasExited)
-            {
-            }
+            child.Ownership.TerminateProcessTree();
+        }
+        catch (InvalidOperationException) when (child.Process.HasExited)
+        {
         }
 
         try
         {
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await child.Process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
         }
         catch (TimeoutException)
         {
