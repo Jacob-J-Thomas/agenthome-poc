@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Text;
 
 namespace EmbodySense.Core.Persistence.Loops;
@@ -12,7 +13,9 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// </remarks>
 internal sealed class CustomLoopArtifactPathGuard
 {
+    private const int ArtifactReadMaximumAttempts = 9;
     private const int ReadLockMaximumAttempts = 9;
+    private static readonly TimeSpan _artifactReadRetryDelay = TimeSpan.FromMilliseconds(25);
     private static readonly TimeSpan _readLockRetryDelay = TimeSpan.FromMilliseconds(25);
     private readonly string _workspaceRoot;
     private readonly StringComparison _pathComparison;
@@ -149,6 +152,47 @@ internal sealed class CustomLoopArtifactPathGuard
     {
         EnsureContained(ValidateRoot(root), Path.GetFullPath(path), "Artifact path escaped its configured root.");
         EnsureNoReparsePoints(path);
+        Exception? firstContention = null;
+        for (var attempt = 1; attempt <= ArtifactReadMaximumAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return await ReadAllBytesCoreAsync(path, maximumBytes, artifactName, cancellationToken);
+            }
+            catch (Exception exception) when (IsTransientArtifactReadContention(exception))
+            {
+                firstContention ??= exception;
+                if (attempt < ArtifactReadMaximumAttempts)
+                {
+                    await Task.Delay(_artifactReadRetryDelay, cancellationToken);
+                }
+            }
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        ExceptionDispatchInfo.Capture(firstContention!).Throw();
+        throw new InvalidOperationException("The bounded custom-loop artifact read did not retain its original contention exception.");
+    }
+
+    private static bool IsTransientArtifactReadContention(Exception exception)
+    {
+        if (OperatingSystem.IsWindows() && exception is UnauthorizedAccessException { InnerException: IOException })
+        {
+            return true;
+        }
+
+        if (exception is not IOException)
+        {
+            return false;
+        }
+
+        var nativeError = exception.HResult & 0xFFFF;
+        return OperatingSystem.IsWindows() ? nativeError is 32 or 33 : nativeError is 11 or 35;
+    }
+
+    private async Task<byte[]> ReadAllBytesCoreAsync(string path, long maximumBytes, string artifactName, CancellationToken cancellationToken)
+    {
         await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
         if (stream.Length > maximumBytes)
         {

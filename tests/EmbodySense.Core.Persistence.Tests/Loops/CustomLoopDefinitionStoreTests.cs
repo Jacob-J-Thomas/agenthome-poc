@@ -838,6 +838,82 @@ public sealed class CustomLoopDefinitionStoreTests
     }
 
     [Fact]
+    public async Task Definition_and_receipt_read_tolerates_bounded_short_lived_artifact_sharing_contention()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var definition = CreateDefinition("loop-artifact-contention");
+        await CreateCommittedAsync(store, definition);
+        var definitionPath = Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json");
+        await using var externalLock = new FileStream(definitionPath, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        var pendingRead = store.GetMutationOperationAsync(definition.LastMutationOperationId);
+
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        Assert.False(pendingRead.IsCompleted);
+        await externalLock.DisposeAsync();
+
+        var receipt = await pendingRead.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.OutcomeCommitted, receipt.Status);
+        Assert.Equal(definition.LastMutationOperationId, receipt.Operation!.OperationId);
+    }
+
+    [Fact]
+    public async Task Artifact_sharing_contention_exhaustion_preserves_the_original_exception_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var definition = CreateDefinition("loop-artifact-exhaustion");
+        await CreateCommittedAsync(store, definition);
+        var definitionPath = Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json");
+        await using var externalLock = new FileStream(definitionPath, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        var exception = await Record.ExceptionAsync(() => store.GetMutationOperationAsync(definition.LastMutationOperationId).WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.NotNull(exception);
+        Assert.True(exception is IOException or UnauthorizedAccessException { InnerException: IOException });
+        Assert.Contains(definitionPath, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Artifact_read_retry_observes_cancellation_and_releases_the_in_process_gate()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var definition = CreateDefinition("loop-artifact-cancellation");
+        await CreateCommittedAsync(store, definition);
+        var definitionPath = Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json");
+        await using var externalLock = new FileStream(definitionPath, FileMode.Open, FileAccess.Read, FileShare.None);
+        using var cancellation = new CancellationTokenSource();
+
+        var pendingRead = store.GetMutationOperationAsync(definition.LastMutationOperationId, cancellation.Token);
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pendingRead);
+        await externalLock.DisposeAsync();
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.OutcomeCommitted, (await store.GetMutationOperationAsync(definition.LastMutationOperationId).WaitAsync(TimeSpan.FromSeconds(5))).Status);
+    }
+
+    [Fact]
+    public async Task Non_contention_definition_read_failure_remains_immediate()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var definition = CreateDefinition("loop-artifact-non-contention");
+        await CreateCommittedAsync(store, definition);
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json"), "{");
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.GetMutationOperationAsync(definition.LastMutationOperationId).WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.Contains("contains invalid JSON", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Mutation_lock_contention_does_not_use_the_read_retry_budget()
     {
         using var workspace = new TestWorkspace();
