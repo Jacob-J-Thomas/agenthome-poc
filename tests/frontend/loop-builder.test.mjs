@@ -187,7 +187,7 @@ test("visible governed invocation confirms a no-grant preparation with only the 
   server.on("POST", "/api/governed-graphs/invocation-preparation", () => ({
     status: 200,
     body: {
-      status: "confirmationRequired",
+      status: "confirmation-required",
       eligibleGrants: [],
       preview: { semanticHash: previewHash },
       detail: "Explicit confirmation is required.",

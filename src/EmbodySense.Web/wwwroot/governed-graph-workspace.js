@@ -368,7 +368,7 @@ export function createGovernedGraphWorkspace({
     const selector = publishedInvocationSelector();
     const preparation = invocationPreparation;
     if (!selector || !preparation || invocationInFlight) return;
-    const confirmationRequired = preparation.status === "confirmationRequired";
+    const confirmationRequired = preparation.status === "confirmation-required";
     const ready = preparation.status === "ready";
     if (!confirmationRequired && !(ready && invocationGrantSelection)) return;
     const previewHash = confirmationRequired
@@ -853,7 +853,7 @@ export function createGovernedGraphWorkspace({
       Boolean(selector) &&
       !invocationInFlight &&
       !inFlight &&
-      ((preparation?.status === "confirmationRequired" &&
+      ((preparation?.status === "confirmation-required" &&
         preparation.preview?.semanticHash) ||
         (preparation?.status === "ready" && invocationGrantSelection));
     elements.invocationPrompt.disabled =
@@ -865,7 +865,7 @@ export function createGovernedGraphWorkspace({
     elements.confirmInvokeButton.hidden = !preparation || !canConfirm;
     elements.confirmInvokeButton.disabled = !canConfirm;
     elements.confirmInvokeButton.textContent =
-      preparation?.status === "confirmationRequired"
+      preparation?.status === "confirmation-required"
         ? "Confirm authority and invoke"
         : "Invoke with exact grant";
     elements.grantChoices.replaceChildren();
@@ -884,7 +884,7 @@ export function createGovernedGraphWorkspace({
     }
     elements.invocationStatus.textContent =
       preparation.detail ?? "Server preparation completed.";
-    if (preparation.status === "confirmationRequired") {
+    if (preparation.status === "confirmation-required") {
       const preview = document.createElement("p");
       preview.textContent =
         "Explicit confirmation creates only the server-derived least-authority grant for this exact publication.";

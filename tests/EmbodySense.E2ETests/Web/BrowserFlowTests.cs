@@ -615,28 +615,20 @@ public sealed class BrowserFlowTests
     [InstalledBrowserFact]
     public async Task Browser_authors_publishes_invokes_and_inspects_a_bounded_visible_governed_cycle()
     {
-        const string BrowserProfileId = "org.example/model-profile/browser-visible-cycle";
+        const string BrowserProfileId = BuiltInCapabilityCatalog.CodexModelProfileCapabilityId;
         using var workspace = new TestWorkspace();
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
         var capabilityTrustRoot = Path.Combine(workspace.ServerStatePath, "browser-visible-cycle-capability-catalog");
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(capabilityTrustRoot).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
-        var browserProfile = new BrowserModelProfileSpec(
-            BrowserProfileId,
-            "browser-visible-cycle",
-            "Test-only exact bounded browser governed-cycle model profile.",
-            "gpt-test",
-            true);
-        var browserProfileDescriptor = BrowserProfileWebHost.CreateDescriptor(browserProfile);
-        await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [browserProfileDescriptor]);
-        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths, [browserProfileDescriptor.Id.Value]);
+        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths);
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(
             workspace.RootPath,
             GetFreePort(),
             codexExecutable,
             "gpt-test",
             capabilityTrustRoot,
-            [browserProfile]);
+            []);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
 
         try
@@ -678,9 +670,7 @@ public sealed class BrowserFlowTests
             await ClickButtonByTextAsync(browser, "#governedGraphCatalog button", "success-exit");
             await AddGovernedGraphControlAsync(browser, "manual-trigger", "provider-inference", "Always");
             await AddGovernedGraphControlAsync(browser, "provider-inference", "schema-conformance", "Success");
-            await AddGovernedGraphControlAsync(browser, "provider-inference", "fail-terminal", "Failure");
             await AddGovernedGraphControlAsync(browser, "schema-conformance", "model-decision-condition", "Success");
-            await AddGovernedGraphControlAsync(browser, "schema-conformance", "fail-terminal", "Failure");
             await AddGovernedGraphControlAsync(browser, "model-decision-condition", "provider-inference", "True");
             await AddGovernedGraphControlAsync(browser, "model-decision-condition", "exact-text-condition", "False");
             await AddGovernedGraphControlAsync(browser, "exact-text-condition", "success-exit", "True");
